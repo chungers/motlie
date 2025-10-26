@@ -3,7 +3,6 @@ members = [
     "libs/core",
     "libs/db",
     "libs/mcp",
-    "bins/motlie",
 ]
 resolver = "2"
 
@@ -21,3 +20,26 @@ serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"] }
 anyhow = "1.0"
 thiserror = "1.0"
+csv = "1.3"
+env_logger = "0.10"
+
+# Root package for examples
+[package]
+name = "motlie"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Motlie workspace with examples"
+
+[dependencies]
+motlie-db = { path = "libs/db" }
+csv.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true
+
+[[example]]
+name = "store"
+path = "examples/store/main.rs"

@@ -1,0 +1,5 @@
+Alice,Alice is a software engineer who loves Rust programming
+Bob,Bob is a data scientist specializing in machine learning
+Charlie,Charlie is a DevOps engineer managing cloud infrastructure
+Alice,Bob,mentors,Alice mentors Bob in Rust programming and system design
+Bob,Charlie,collaborates_with,Bob and Charlie collaborate on ML infrastructure projects

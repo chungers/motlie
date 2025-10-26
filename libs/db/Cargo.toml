@@ -8,3 +8,8 @@ repository.workspace = true
 description = "Database library for motlie"
 
 [dependencies]
+uuid = { version = "1.0", features = ["v4", "serde"] }
+anyhow.workspace = true
+tokio.workspace = true
+log = "0.4"
+async-trait = "0.1"
