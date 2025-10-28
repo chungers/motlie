@@ -1,0 +1,1258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Graph Visualization - Interactive Viewer</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network@9.1.2/dist/vis-network.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #1e1e1e;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        #topbar {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            padding: 15px 20px;
+            background: #1a1a1a;
+            border-bottom: 2px solid #333;
+            height: 80px;
+        }
+
+        #header {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            min-width: 180px;
+        }
+
+        h1 {
+            font-size: 18px;
+            margin: 0;
+            color: #fff;
+            white-space: nowrap;
+        }
+
+        .stats {
+            font-size: 11px;
+            color: #888;
+            margin-top: 3px;
+        }
+
+        #container {
+            display: flex;
+            height: calc(100vh - 80px);
+            width: 100vw;
+        }
+
+        #mynetwork {
+            flex: 1;
+            border: 1px solid #333;
+            background: #2d2d2d;
+        }
+
+        #sidebar {
+            width: 350px;
+            background: #252525;
+            border-left: 1px solid #333;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        #info {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .info-section {
+            margin-bottom: 20px;
+        }
+
+        .info-section h3 {
+            font-size: 14px;
+            color: #3498db;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .info-content {
+            font-size: 13px;
+            line-height: 1.6;
+            color: #ccc;
+            background: #1a1a1a;
+            padding: 12px;
+            border-radius: 4px;
+            border-left: 3px solid #3498db;
+        }
+
+        .edge-list {
+            margin-top: 10px;
+        }
+
+        .edge-item {
+            background: #1a1a1a;
+            padding: 8px 12px;
+            margin: 5px 0;
+            border-radius: 4px;
+            font-size: 12px;
+            border-left: 3px solid #2ecc71;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .edge-item:hover {
+            background: #2a2a2a;
+        }
+
+        .edge-type {
+            color: #2ecc71;
+            font-weight: bold;
+            margin-right: 5px;
+        }
+
+        .edge-target {
+            color: #3498db;
+        }
+
+        .clickable-node {
+            color: #3498db;
+            cursor: pointer;
+            text-decoration: underline;
+            text-decoration-style: dotted;
+            transition: color 0.2s;
+        }
+
+        .clickable-node:hover {
+            color: #5dade2;
+            text-decoration-style: solid;
+        }
+
+        .node-section {
+            background: #1a1a1a;
+            padding: 10px 12px;
+            margin: 5px 0;
+            border-radius: 4px;
+            border-left: 3px solid #3498db;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .node-section:hover {
+            background: #2a2a2a;
+        }
+
+        #legend {
+            padding: 15px 20px;
+            background: #1a1a1a;
+            border-top: 1px solid #333;
+            font-size: 11px;
+        }
+
+        .legend-title {
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #fff;
+        }
+
+        .legend-item {
+            display: inline-flex;
+            align-items: center;
+            margin-right: 15px;
+            margin-bottom: 5px;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+            justify-content: flex-end;
+        }
+
+        .control-group {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .search-input-wrapper {
+            position: relative;
+            min-width: 200px;
+        }
+
+        .search-type-toggle {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            padding: 0 10px;
+            border-left: 1px solid #444;
+            padding-left: 12px;
+        }
+
+        .radio-option {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            cursor: pointer;
+        }
+
+        .radio-option input[type="radio"] {
+            cursor: pointer;
+            margin: 0;
+        }
+
+        .radio-option label {
+            font-size: 11px;
+            color: #999;
+            cursor: pointer;
+            user-select: none;
+            margin: 0;
+            white-space: nowrap;
+        }
+
+        .radio-option input[type="radio"]:checked + label {
+            color: #3498db;
+            font-weight: bold;
+        }
+
+        .control-group input[type="text"] {
+            width: 100%;
+            padding: 8px 12px;
+            background: #2d2d2d;
+            border: 1px solid #444;
+            border-radius: 4px;
+            color: #e0e0e0;
+            font-size: 12px;
+        }
+
+        .control-group input[type="text"]:focus {
+            outline: none;
+            border-color: #3498db;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .divider {
+            width: 1px;
+            height: 30px;
+            background: #444;
+            margin: 0 5px;
+        }
+
+        button {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: background 0.2s;
+            white-space: nowrap;
+        }
+
+        button:hover {
+            background: #2980b9;
+        }
+
+        button:active {
+            background: #21618c;
+        }
+
+        .button-secondary {
+            background: #555;
+        }
+
+        .button-secondary:hover {
+            background: #666;
+        }
+
+        .button-danger {
+            background: #c0392b;
+        }
+
+        .button-danger:hover {
+            background: #e74c3c;
+        }
+
+        #searchResults {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            max-height: 300px;
+            overflow-y: auto;
+            background: #1a1a1a;
+            margin-top: 5px;
+            border-radius: 4px;
+            border: 1px solid #444;
+            z-index: 1000;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .search-result-item {
+            padding: 8px;
+            cursor: pointer;
+            border-bottom: 1px solid #333;
+            font-size: 11px;
+        }
+
+        .search-result-item:hover {
+            background: #2d2d2d;
+        }
+
+        .search-result-item:last-child {
+            border-bottom: none;
+        }
+
+        .empty-state {
+            color: #666;
+            font-style: italic;
+            font-size: 13px;
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1a1a1a;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #444;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        /* File upload styles */
+        #uploadSection {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+            max-width: 400px;
+        }
+
+        .upload-area {
+            border: 2px dashed #444;
+            border-radius: 6px;
+            padding: 10px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: #2d2d2d;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+        }
+
+        .upload-area:hover {
+            border-color: #3498db;
+            background: #333;
+        }
+
+        .upload-area.drag-over {
+            border-color: #2ecc71;
+            background: #2a3a2a;
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        .upload-icon {
+            font-size: 24px;
+        }
+
+        .upload-text {
+            font-size: 12px;
+            color: #888;
+            white-space: nowrap;
+        }
+
+        .upload-hint {
+            font-size: 10px;
+            color: #666;
+            display: none;
+        }
+
+        .file-info {
+            padding: 8px 12px;
+            background: #2d2d2d;
+            border-radius: 4px;
+            font-size: 11px;
+            border: 1px solid #444;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 250px;
+        }
+
+        .file-name {
+            color: #3498db;
+            font-weight: bold;
+        }
+
+        .loading {
+            display: none;
+            align-items: center;
+            color: #3498db;
+            margin-left: auto;
+        }
+
+        .loading.active {
+            display: flex;
+        }
+
+        .spinner {
+            border: 2px solid #333;
+            border-top: 2px solid #3498db;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            position: fixed;
+            top: 90px;
+            right: 20px;
+            background: #c0392b;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 4px;
+            font-size: 12px;
+            display: none;
+            z-index: 2000;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .error.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div id="topbar">
+        <div id="header">
+            <h1>Graph Visualization</h1>
+            <div class="stats" id="stats">
+                <div>No data loaded</div>
+            </div>
+        </div>
+
+        <div id="uploadSection">
+            <div class="upload-area" id="uploadArea" onclick="document.getElementById('fileInput').click()">
+                <div class="upload-icon">📊</div>
+                <div class="upload-text">Upload CSV</div>
+                <input type="file" id="fileInput" accept=".csv">
+            </div>
+            <div class="file-info" id="fileInfo" style="display: none;"></div>
+        </div>
+
+        <div class="controls" id="controlsSection">
+            <div class="control-group">
+                <div class="search-input-wrapper">
+                    <input type="text" id="searchInput" placeholder="Search...">
+                    <div id="searchResults"></div>
+                </div>
+                <div class="search-type-toggle">
+                    <div class="radio-option">
+                        <input type="radio" id="searchNodes" name="searchType" value="nodes" checked>
+                        <label for="searchNodes">Nodes</label>
+                    </div>
+                    <div class="radio-option">
+                        <input type="radio" id="searchEdges" name="searchType" value="edges">
+                        <label for="searchEdges">Edges</label>
+                    </div>
+                </div>
+            </div>
+            <div class="button-group">
+                <button onclick="resetView()">Reset View</button>
+                <button onclick="fitNetwork()" class="button-secondary">Fit All</button>
+                <div class="divider"></div>
+                <button onclick="clearData()" class="button-danger">Clear Data</button>
+            </div>
+        </div>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+        </div>
+        <div class="error" id="error"></div>
+    </div>
+
+    <div id="container">
+        <div id="mynetwork"></div>
+        <div id="sidebar">
+            <div id="info">
+                <div class="empty-state">
+                    Upload a CSV file to visualize the graph
+                </div>
+            </div>
+
+            <div id="legend" style="display: none;">
+                <div class="legend-title">Node Types</div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #3498db;"></span>
+                    <span>Professional</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #2ecc71;"></span>
+                    <span>Social</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #9b59b6;"></span>
+                    <span>Company</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #e74c3c;"></span>
+                    <span>Project</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #f39c12;"></span>
+                    <span>Home</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #1abc9c;"></span>
+                    <span>Vehicle</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #e67e22;"></span>
+                    <span>Trip</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #34495e;"></span>
+                    <span>Conference</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #16a085;"></span>
+                    <span>Event</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #27ae60;"></span>
+                    <span>Group</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        let network = null;
+        let nodesData = [];
+        let edgesData = [];
+        let dataNodes = null;
+        let dataEdges = null;
+
+        // Parse CSV content
+        function parseCSV(text) {
+            const lines = text.split('\n');
+            const nodes = {};
+            const edges = [];
+
+            for (let line of lines) {
+                if (!line.trim()) continue;
+
+                // Simple CSV parsing (handles quoted fields)
+                const fields = [];
+                let current = '';
+                let inQuotes = false;
+
+                for (let i = 0; i < line.length; i++) {
+                    const char = line[i];
+                    const nextChar = line[i + 1];
+
+                    if (char === '"') {
+                        if (inQuotes && nextChar === '"') {
+                            current += '"';
+                            i++;
+                        } else {
+                            inQuotes = !inQuotes;
+                        }
+                    } else if (char === ',' && !inQuotes) {
+                        fields.push(current);
+                        current = '';
+                    } else {
+                        current += char;
+                    }
+                }
+                fields.push(current);
+
+                if (fields.length === 2) {
+                    // Node: name, fragment
+                    const [name, fragment] = fields;
+                    nodes[name] = {
+                        fragment: fragment,
+                        label: name,
+                    };
+                } else if (fields.length === 4) {
+                    // Edge: source, target, type, fragment
+                    const [source, target, edgeType, fragment] = fields;
+
+                    // Ensure nodes exist
+                    if (!nodes[source]) {
+                        nodes[source] = { fragment: `Node: ${source}`, label: source };
+                    }
+                    if (!nodes[target]) {
+                        nodes[target] = { fragment: `Node: ${target}`, label: target };
+                    }
+
+                    edges.push({
+                        source: source,
+                        target: target,
+                        type: edgeType,
+                        fragment: fragment,
+                    });
+                }
+            }
+
+            return { nodes, edges };
+        }
+
+        // Infer node type
+        function inferNodeType(name, fragment) {
+            const fragmentLower = fragment.toLowerCase();
+
+            if (fragmentLower.includes('is a') &&
+                (fragmentLower.includes('engineer') || fragmentLower.includes('manager') ||
+                 fragmentLower.includes('scientist') || fragmentLower.includes('analyst') ||
+                 fragmentLower.includes('director'))) {
+                return 'ProfessionalPerson';
+            } else if (fragmentLower.includes('is a') &&
+                      (fragmentLower.includes('volunteer') || fragmentLower.includes('enthusiast') ||
+                       fragmentLower.includes('lover') || fragmentLower.includes('foodie') ||
+                       fragmentLower.includes('blogger'))) {
+                return 'SocialPerson';
+            } else if (fragmentLower.includes('company') || fragmentLower.includes('corporation') ||
+                      fragmentLower.includes('firm')) {
+                return 'Company';
+            } else if (fragmentLower.includes('project') &&
+                      (fragmentLower.includes('initiative') || fragmentLower.includes('focused on'))) {
+                return 'Project';
+            } else if (fragmentLower.includes('home') || fragmentLower.includes('apartment') ||
+                      fragmentLower.includes('house') || fragmentLower.includes('condo')) {
+                return 'Home';
+            } else if (fragmentLower.includes('vehicle') ||
+                      ['tesla', 'toyota', 'jeep', 'honda', 'subaru', 'bmw'].some(car => fragmentLower.includes(car))) {
+                return 'Vehicle';
+            } else if (fragmentLower.includes('trip') || fragmentLower.includes('journey')) {
+                return 'Trip';
+            } else if (fragmentLower.includes('conference') || fragmentLower.includes('summit')) {
+                return 'Conference';
+            } else if (fragmentLower.includes('party') || fragmentLower.includes('wedding') ||
+                      fragmentLower.includes('reunion') || fragmentLower.includes('gathering')) {
+                return 'SocialEvent';
+            } else if (fragmentLower.includes('club') ||
+                      (fragmentLower.includes('group') && fragmentLower.includes('community'))) {
+                return 'HobbyGroup';
+            }
+            return 'Unknown';
+        }
+
+        // Get node color
+        function getNodeColor(nodeType) {
+            const colors = {
+                'ProfessionalPerson': '#3498db',
+                'SocialPerson': '#2ecc71',
+                'Company': '#9b59b6',
+                'Project': '#e74c3c',
+                'Home': '#f39c12',
+                'Vehicle': '#1abc9c',
+                'Trip': '#e67e22',
+                'Conference': '#34495e',
+                'SocialEvent': '#16a085',
+                'HobbyGroup': '#27ae60',
+                'Unknown': '#95a5a6',
+            };
+            return colors[nodeType] || '#95a5a6';
+        }
+
+        // Process and visualize data
+        function visualizeData(nodes, edges) {
+            // Count connections
+            const nodeConnections = {};
+            edges.forEach(edge => {
+                nodeConnections[edge.source] = (nodeConnections[edge.source] || 0) + 1;
+                nodeConnections[edge.target] = (nodeConnections[edge.target] || 0) + 1;
+            });
+
+            // Prepare vis.js nodes
+            nodesData = [];
+            for (const [name, data] of Object.entries(nodes)) {
+                const nodeType = inferNodeType(name, data.fragment);
+                const connectionCount = nodeConnections[name] || 0;
+                const size = Math.min(40, Math.max(10, 10 + connectionCount * 2));
+
+                nodesData.push({
+                    id: name,
+                    label: name.length > 30 ? name.substring(0, 30) + '...' : name,
+                    title: data.fragment.length > 200 ? data.fragment.substring(0, 200) + '...' : data.fragment,
+                    color: getNodeColor(nodeType),
+                    size: size,
+                    type: nodeType,
+                    fragment: data.fragment,
+                });
+            }
+
+            // Prepare vis.js edges
+            edgesData = [];
+            edges.forEach((edge, i) => {
+                edgesData.push({
+                    id: i,
+                    from: edge.source,
+                    to: edge.target,
+                    label: edge.type,
+                    title: edge.fragment.length > 200 ? edge.fragment.substring(0, 200) + '...' : edge.fragment,
+                    type: edge.type,
+                    fragment: edge.fragment,
+                    arrows: 'to',
+                });
+            });
+
+            // Create network
+            const container = document.getElementById('mynetwork');
+            const data = {
+                nodes: new vis.DataSet(nodesData),
+                edges: new vis.DataSet(edgesData)
+            };
+
+            dataNodes = data.nodes;
+            dataEdges = data.edges;
+
+            const options = {
+                nodes: {
+                    shape: 'dot',
+                    font: {
+                        size: 12,
+                        color: '#ffffff',
+                        face: 'monospace'
+                    },
+                    borderWidth: 2,
+                    borderWidthSelected: 4,
+                    shadow: true
+                },
+                edges: {
+                    width: 1,
+                    color: {
+                        color: '#666666',
+                        highlight: '#3498db',
+                        hover: '#3498db'
+                    },
+                    smooth: {
+                        type: 'continuous',
+                        roundness: 0.5
+                    },
+                    arrows: {
+                        to: {
+                            enabled: true,
+                            scaleFactor: 0.5
+                        }
+                    },
+                    font: {
+                        size: 10,
+                        color: '#999',
+                        strokeWidth: 0,
+                        align: 'middle'
+                    },
+                    shadow: true
+                },
+                physics: {
+                    stabilization: {
+                        enabled: true,
+                        iterations: 200
+                    },
+                    barnesHut: {
+                        gravitationalConstant: -8000,
+                        centralGravity: 0.3,
+                        springLength: 150,
+                        springConstant: 0.04,
+                        damping: 0.09,
+                        avoidOverlap: 0.1
+                    }
+                },
+                interaction: {
+                    hover: true,
+                    tooltipDelay: 100,
+                    zoomView: true,
+                    dragView: true,
+                    navigationButtons: true,
+                    keyboard: true
+                }
+            };
+
+            if (network) {
+                network.destroy();
+            }
+
+            network = new vis.Network(container, data, options);
+
+            // Set up event handlers
+            setupEventHandlers();
+
+            // Update UI
+            document.getElementById('stats').innerHTML = `
+                <div>Nodes: ${nodesData.length} | Edges: ${edgesData.length}</div>
+                <div>Average Connections: ${(edgesData.length / nodesData.length).toFixed(2)}</div>
+            `;
+
+            document.getElementById('legend').style.display = 'block';
+            document.getElementById('info').innerHTML = '<div class="empty-state">Click on a node or edge to see details</div>';
+
+            // Fit network after stabilization
+            network.once('stabilized', function() {
+                network.fit();
+            });
+
+            console.log('Graph loaded: ' + nodesData.length + ' nodes, ' + edgesData.length + ' edges');
+        }
+
+        // Set up event handlers
+        function setupEventHandlers() {
+            network.on("click", function(params) {
+                const infoDiv = document.getElementById('info');
+
+                if (params.nodes.length > 0) {
+                    // Node clicked
+                    const nodeId = params.nodes[0];
+                    const node = dataNodes.get(nodeId);
+
+                    // Get connected edges
+                    const connectedEdges = network.getConnectedEdges(nodeId);
+                    const edgeInfo = connectedEdges.map(edgeId => {
+                        const edge = dataEdges.get(edgeId);
+                        const otherNodeId = edge.from === nodeId ? edge.to : edge.from;
+                        const direction = edge.from === nodeId ? 'to' : 'from';
+                        return {
+                            edge: edge,
+                            otherNode: dataNodes.get(otherNodeId),
+                            direction: direction
+                        };
+                    });
+
+                    // Display node information
+                    infoDiv.innerHTML = `
+                        <div class="info-section">
+                            <h3>Node: ${node.type}</h3>
+                            <div class="info-content">
+                                <strong>${node.id}</strong>
+                            </div>
+                        </div>
+
+                        <div class="info-section">
+                            <h3>Fragment</h3>
+                            <div class="info-content">
+                                ${node.fragment}
+                            </div>
+                        </div>
+
+                        <div class="info-section">
+                            <h3>Connections (${edgeInfo.length})</h3>
+                            <div class="edge-list">
+                                ${edgeInfo.map(info => `
+                                    <div class="edge-item" onclick="selectEdgeFromNode(${info.edge.id})">
+                                        <span class="edge-type">${info.edge.type}</span>
+                                        <span class="edge-target">${info.direction} ${info.otherNode.id}</span>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `;
+
+                    network.selectNodes([nodeId]);
+
+                } else if (params.edges.length > 0) {
+                    // Edge clicked
+                    const edgeId = params.edges[0];
+                    const edge = dataEdges.get(edgeId);
+                    const fromNode = dataNodes.get(edge.from);
+                    const toNode = dataNodes.get(edge.to);
+
+                    infoDiv.innerHTML = `
+                        <div class="info-section">
+                            <h3>Edge: ${edge.type}</h3>
+                            <div class="info-content">
+                                <span class="clickable-node" onclick="selectNodeFromEdge('${fromNode.id.replace(/'/g, "\\'")}')">
+                                    <strong>${fromNode.id}</strong>
+                                </span>
+                                →
+                                <span class="clickable-node" onclick="selectNodeFromEdge('${toNode.id.replace(/'/g, "\\'")}')">
+                                    <strong>${toNode.id}</strong>
+                                </span>
+                            </div>
+                        </div>
+
+                        <div class="info-section">
+                            <h3>Fragment</h3>
+                            <div class="info-content">
+                                ${edge.fragment}
+                            </div>
+                        </div>
+
+                        <div class="info-section">
+                            <h3>Source Node</h3>
+                            <div class="node-section" onclick="selectNodeFromEdge('${fromNode.id.replace(/'/g, "\\'")}')">
+                                <strong>${fromNode.type}:</strong> ${fromNode.id}<br>
+                                <small>${fromNode.fragment.substring(0, 100)}...</small>
+                            </div>
+                        </div>
+
+                        <div class="info-section">
+                            <h3>Target Node</h3>
+                            <div class="node-section" onclick="selectNodeFromEdge('${toNode.id.replace(/'/g, "\\'")}')">
+                                <strong>${toNode.type}:</strong> ${toNode.id}<br>
+                                <small>${toNode.fragment.substring(0, 100)}...</small>
+                            </div>
+                        </div>
+                    `;
+
+                    network.selectEdges([edgeId]);
+                } else {
+                    // Clicked on empty space
+                    infoDiv.innerHTML = '<div class="empty-state">Click on a node or edge to see details</div>';
+                }
+            });
+        }
+
+        // File upload handling
+        const fileInput = document.getElementById('fileInput');
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInfo = document.getElementById('fileInfo');
+        const loading = document.getElementById('loading');
+        const errorDiv = document.getElementById('error');
+
+        fileInput.addEventListener('change', handleFileSelect);
+
+        // Drag and drop
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('drag-over');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('drag-over');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('drag-over');
+
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        function handleFileSelect(e) {
+            const file = e.target.files[0];
+            if (file) {
+                handleFile(file);
+            }
+        }
+
+        function handleFile(file) {
+            if (!file.name.endsWith('.csv')) {
+                showError('Please select a CSV file');
+                return;
+            }
+
+            loading.classList.add('active');
+            errorDiv.classList.remove('active');
+
+            const reader = new FileReader();
+
+            reader.onload = function(e) {
+                try {
+                    const text = e.target.result;
+                    const { nodes, edges } = parseCSV(text);
+
+                    if (Object.keys(nodes).length === 0) {
+                        throw new Error('No nodes found in CSV file');
+                    }
+
+                    fileInfo.style.display = 'block';
+                    fileInfo.innerHTML = `
+                        <div class="file-name">${file.name}</div>
+                        <div style="color: #666; font-size: 11px; margin-top: 5px;">
+                            ${file.size} bytes | ${Object.keys(nodes).length} nodes | ${edges.length} edges
+                        </div>
+                    `;
+
+                    visualizeData(nodes, edges);
+                    loading.classList.remove('active');
+
+                } catch (error) {
+                    loading.classList.remove('active');
+                    showError('Error parsing CSV: ' + error.message);
+                    console.error('Parse error:', error);
+                }
+            };
+
+            reader.onerror = function() {
+                loading.classList.remove('active');
+                showError('Error reading file');
+            };
+
+            reader.readAsText(file);
+        }
+
+        function showError(message) {
+            errorDiv.textContent = message;
+            errorDiv.classList.add('active');
+            setTimeout(() => {
+                errorDiv.classList.remove('active');
+            }, 5000);
+        }
+
+        // Search functionality
+        const searchInput = document.getElementById('searchInput');
+        const searchResults = document.getElementById('searchResults');
+
+        function performSearch() {
+            const query = searchInput.value.toLowerCase();
+
+            if (query.length < 2) {
+                searchResults.innerHTML = '';
+                return;
+            }
+
+            const searchType = document.querySelector('input[name="searchType"]:checked').value;
+
+            if (searchType === 'nodes') {
+                // Search nodes
+                const matches = nodesData.filter(node =>
+                    node.id.toLowerCase().includes(query) ||
+                    node.fragment.toLowerCase().includes(query)
+                ).slice(0, 10);
+
+                if (matches.length > 0) {
+                    searchResults.innerHTML = matches.map(node => `
+                        <div class="search-result-item" onclick="selectNode('${node.id.replace(/'/g, "\\'")}')">
+                            <div style="color: ${node.color}; font-weight: bold;">${node.type}</div>
+                            <div style="font-size: 11px; margin-top: 2px;">${node.id}</div>
+                        </div>
+                    `).join('');
+                } else {
+                    searchResults.innerHTML = '<div class="search-result-item">No nodes found</div>';
+                }
+            } else {
+                // Search edges
+                const matches = edgesData.filter(edge =>
+                    edge.type.toLowerCase().includes(query) ||
+                    edge.fragment.toLowerCase().includes(query) ||
+                    edge.from.toLowerCase().includes(query) ||
+                    edge.to.toLowerCase().includes(query)
+                ).slice(0, 10);
+
+                if (matches.length > 0) {
+                    searchResults.innerHTML = matches.map(edge => `
+                        <div class="search-result-item" onclick="selectEdge(${edge.id})">
+                            <div style="color: #2ecc71; font-weight: bold;">${edge.type}</div>
+                            <div style="font-size: 10px; color: #666; margin-top: 2px;">
+                                ${edge.from} → ${edge.to}
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    searchResults.innerHTML = '<div class="search-result-item">No edges found</div>';
+                }
+            }
+        }
+
+        searchInput.addEventListener('input', performSearch);
+
+        // Re-search when radio button changes
+        document.querySelectorAll('input[name="searchType"]').forEach(radio => {
+            radio.addEventListener('change', function() {
+                if (searchInput.value.length >= 2) {
+                    performSearch();
+                }
+            });
+        });
+
+        function selectNode(nodeId) {
+            if (!network) return;
+
+            network.selectNodes([nodeId]);
+            network.focus(nodeId, {
+                scale: 1.5,
+                animation: true
+            });
+
+            network.emit('click', {nodes: [nodeId], edges: []});
+
+            searchInput.value = '';
+            searchResults.innerHTML = '';
+        }
+
+        function selectEdge(edgeId) {
+            if (!network) return;
+
+            const edge = dataEdges.get(edgeId);
+            if (!edge) return;
+
+            network.selectEdges([edgeId]);
+
+            // Focus on the edge by positioning view between the two nodes
+            const fromPos = network.getPositions([edge.from])[edge.from];
+            const toPos = network.getPositions([edge.to])[edge.to];
+
+            if (fromPos && toPos) {
+                const centerX = (fromPos.x + toPos.x) / 2;
+                const centerY = (fromPos.y + toPos.y) / 2;
+
+                network.moveTo({
+                    position: {x: centerX, y: centerY},
+                    scale: 1.2,
+                    animation: true
+                });
+            }
+
+            network.emit('click', {nodes: [], edges: [edgeId]});
+
+            searchInput.value = '';
+            searchResults.innerHTML = '';
+        }
+
+        function highlightEdge(edgeId) {
+            if (!network) return;
+            network.selectEdges([edgeId]);
+            network.emit('click', {nodes: [], edges: [edgeId]});
+        }
+
+        function selectNodeFromEdge(nodeId) {
+            if (!network) return;
+
+            network.selectNodes([nodeId]);
+            network.focus(nodeId, {
+                scale: 1.5,
+                animation: true
+            });
+
+            // Trigger the click event to update the info panel
+            network.emit('click', {nodes: [nodeId], edges: []});
+        }
+
+        function selectEdgeFromNode(edgeId) {
+            if (!network) return;
+
+            const edge = dataEdges.get(edgeId);
+            if (!edge) return;
+
+            network.selectEdges([edgeId]);
+
+            // Focus on the edge by positioning view between the two nodes
+            const fromPos = network.getPositions([edge.from])[edge.from];
+            const toPos = network.getPositions([edge.to])[edge.to];
+
+            if (fromPos && toPos) {
+                const centerX = (fromPos.x + toPos.x) / 2;
+                const centerY = (fromPos.y + toPos.y) / 2;
+
+                network.moveTo({
+                    position: {x: centerX, y: centerY},
+                    scale: 1.2,
+                    animation: true
+                });
+            }
+
+            // Trigger the click event to update the info panel
+            network.emit('click', {nodes: [], edges: [edgeId]});
+        }
+
+        function resetView() {
+            if (!network) return;
+            network.fit({
+                animation: {
+                    duration: 1000,
+                    easingFunction: 'easeInOutQuad'
+                }
+            });
+        }
+
+        function fitNetwork() {
+            if (!network) return;
+            network.fit();
+        }
+
+        function clearData() {
+            // Confirm before clearing
+            if (!confirm('Are you sure you want to clear the current graph data?')) {
+                return;
+            }
+
+            // Destroy the network
+            if (network) {
+                network.destroy();
+                network = null;
+            }
+
+            // Clear data
+            nodesData = [];
+            edgesData = [];
+            dataNodes = null;
+            dataEdges = null;
+
+            // Reset file input
+            document.getElementById('fileInput').value = '';
+
+            // Hide legend
+            document.getElementById('legend').style.display = 'none';
+
+            // Reset file info
+            document.getElementById('fileInfo').style.display = 'none';
+            document.getElementById('fileInfo').innerHTML = '';
+
+            // Reset stats
+            document.getElementById('stats').innerHTML = '<div>No data loaded</div>';
+
+            // Reset info section
+            document.getElementById('info').innerHTML = '<div class="empty-state">Upload a CSV file to visualize the graph</div>';
+
+            // Clear search
+            document.getElementById('searchInput').value = '';
+            document.getElementById('searchResults').innerHTML = '';
+
+            // Show upload section (it's already visible, but ensure it's clear)
+            document.getElementById('uploadArea').classList.remove('drag-over');
+
+            console.log('Graph data cleared');
+        }
+    </script>
+</body>
+</html>
