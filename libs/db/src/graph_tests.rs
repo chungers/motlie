@@ -124,21 +124,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_graph_to_bm25_chaining() {
+    async fn test_graph_to_fulltext_chaining() {
         let config = WriterConfig {
             channel_buffer_size: 100,
         };
 
-        // Create the BM25 consumer (end of chain)
-        let (bm25_sender, bm25_receiver) = mpsc::channel(config.channel_buffer_size);
-        let bm25_handle = crate::spawn_bm25_consumer(bm25_receiver, config.clone());
+        // Create the FullText consumer (end of chain)
+        let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
+        let fulltext_handle = crate::spawn_fulltext_consumer(fulltext_receiver, config.clone());
 
-        // Create the Graph consumer that forwards to BM25
+        // Create the Graph consumer that forwards to FullText
         let (writer, graph_receiver) = create_mutation_writer(config.clone());
         let graph_handle =
-            spawn_graph_consumer_with_next(graph_receiver, config.clone(), bm25_sender);
+            spawn_graph_consumer_with_next(graph_receiver, config.clone(), fulltext_sender);
 
-        // Send mutations - they should flow through Graph -> BM25
+        // Send mutations - they should flow through Graph -> FullText
         for i in 0..3 {
             let vertex_args = AddVertexArgs {
                 id: Id::new(),
@@ -148,7 +148,10 @@ mod tests {
             let fragment_args = AddFragmentArgs {
                 id: Id::new(),
                 ts_millis: 1234567890 + i,
-                body: format!("Chained fragment {} processed by both Graph and BM25", i),
+                body: format!(
+                    "Chained fragment {} processed by both Graph and FullText",
+                    i
+                ),
             };
 
             writer.add_vertex(vertex_args).await.unwrap();
@@ -161,10 +164,10 @@ mod tests {
         // Shutdown the chain from the beginning
         drop(writer);
 
-        // Wait for Graph consumer to complete (which will close BM25's channel)
+        // Wait for Graph consumer to complete (which will close FullText's channel)
         graph_handle.await.unwrap().unwrap();
 
-        // Wait for BM25 consumer to complete
-        bm25_handle.await.unwrap().unwrap();
+        // Wait for FullText consumer to complete
+        fulltext_handle.await.unwrap().unwrap();
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use motlie_db::{
-    create_mutation_writer, spawn_bm25_consumer, spawn_graph_consumer_with_next, AddEdgeArgs,
+    create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdgeArgs,
     AddFragmentArgs, AddVertexArgs, Id, WriterConfig,
 };
 use std::collections::HashMap;
@@ -14,10 +14,10 @@ async fn main() -> Result<()> {
     // Initialize logging to see the mutation processing order
     env_logger::init();
 
-    println!("Motlie CSV Processor - Demonstrating Graph → BM25 Chaining");
-    println!("=============================================================");
-    println!("Mutations will flow: Writer → Graph → BM25");
-    println!("Watch the logs to see Graph processing happens before BM25");
+    println!("Motlie CSV Processor - Demonstrating Graph → FullText Chaining");
+    println!("===================================================================");
+    println!("Mutations will flow: Writer → Graph → FullText");
+    println!("Watch the logs to see Graph processing happens before FullText");
     println!();
     println!("Reading CSV from stdin...");
     println!("Format:");
@@ -31,18 +31,18 @@ async fn main() -> Result<()> {
         channel_buffer_size: 1000,
     };
 
-    // Create the BM25 consumer (end of chain)
+    // Create the FullText consumer (end of chain)
     println!("Setting up consumer chain:");
-    println!("  1. Creating BM25 consumer (end of chain)");
-    let (bm25_sender, bm25_receiver) = mpsc::channel(config.channel_buffer_size);
-    let bm25_handle = spawn_bm25_consumer(bm25_receiver, config.clone());
+    println!("  1. Creating FullText consumer (end of chain)");
+    let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
+    let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone());
 
-    // Create the Graph consumer that forwards to BM25
-    println!("  2. Creating Graph consumer (forwards to BM25)");
+    // Create the Graph consumer that forwards to FullText
+    println!("  2. Creating Graph consumer (forwards to FullText)");
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_handle = spawn_graph_consumer_with_next(graph_receiver, config, bm25_sender);
+    let graph_handle = spawn_graph_consumer_with_next(graph_receiver, config, fulltext_sender);
 
-    println!("  3. Consumer chain ready: Writer → Graph → BM25");
+    println!("  3. Consumer chain ready: Writer → Graph → FullText");
     println!();
 
     // Keep track of node name to ID mapping for edges
@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
                     body: fragment_text.to_string(),
                 };
 
-                // Send to Graph consumer (which will forward to BM25)
+                // Send to Graph consumer (which will forward to FullText)
                 writer
                     .add_vertex(vertex_args)
                     .await
@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
                     body: edge_fragment.to_string(),
                 };
 
-                // Send to Graph consumer (which will forward to BM25)
+                // Send to Graph consumer (which will forward to FullText)
                 writer
                     .add_edge(edge_args)
                     .await
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
     // Close writer to signal shutdown (this will cascade through the chain)
     drop(writer);
 
-    // Wait for Graph consumer to finish (which will close BM25's channel)
+    // Wait for Graph consumer to finish (which will close FullText's channel)
     println!("  1. Waiting for Graph consumer to finish...");
     graph_handle
         .await
@@ -203,16 +203,16 @@ async fn main() -> Result<()> {
         .context("Graph consumer failed")?;
     println!("  2. Graph consumer finished");
 
-    // Wait for BM25 consumer to finish
-    println!("  3. Waiting for BM25 consumer to finish...");
-    bm25_handle
+    // Wait for FullText consumer to finish
+    println!("  3. Waiting for FullText consumer to finish...");
+    fulltext_handle
         .await
-        .context("BM25 consumer task failed")?
-        .context("BM25 consumer failed")?;
-    println!("  4. BM25 consumer finished");
+        .context("FullText consumer task failed")?
+        .context("FullText consumer failed")?;
+    println!("  4. FullText consumer finished");
 
     println!("\nAll consumers shut down successfully");
-    println!("Check the logs above - you should see [Graph] messages before [BM25] messages");
+    println!("Check the logs above - you should see [Graph] messages before [FullText] messages");
 
     Ok(())
 }

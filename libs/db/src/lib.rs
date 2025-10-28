@@ -11,8 +11,8 @@ pub use mutation::*;
 mod graph;
 pub use graph::*;
 
-mod bm25;
-pub use bm25::*;
+mod fulltext;
+pub use fulltext::*;
 
 /// A typesafe wrapper for UUID version 4
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -159,8 +159,8 @@ mod tests {
     use tokio::time::Duration;
 
     #[tokio::test]
-    async fn test_graph_and_bm25_consumers_integration() {
-        // Test that both Graph and BM25 consumers can process mutations from the same writer
+    async fn test_graph_and_fulltext_consumers_integration() {
+        // Test that both Graph and FullText consumers can process mutations from the same writer
         let config = WriterConfig {
             channel_buffer_size: 100,
         };
@@ -171,7 +171,7 @@ mod tests {
 
         // Spawn both consumer types
         let graph_handle = spawn_graph_consumer(receiver1, config.clone());
-        let bm25_handle = spawn_bm25_consumer(receiver2, config.clone());
+        let fulltext_handle = spawn_fulltext_consumer(receiver2, config.clone());
 
         // Send mutations to both writers (simulating fanout)
         for i in 0..3 {
@@ -184,7 +184,7 @@ mod tests {
             let fragment_args = AddFragmentArgs {
                 id: Id::new(),
                 ts_millis: 1234567890 + i,
-                body: format!("Integration test fragment {} with searchable content for both Graph storage and BM25 indexing", i),
+                body: format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i),
             };
 
             // Send to both consumers
@@ -204,7 +204,7 @@ mod tests {
 
         // Wait for both consumers to complete
         graph_handle.await.unwrap().unwrap();
-        bm25_handle.await.unwrap().unwrap();
+        fulltext_handle.await.unwrap().unwrap();
     }
 
     #[test]

@@ -4,12 +4,12 @@ This example demonstrates the mutation consumer chaining feature where mutations
 
 ## Architecture
 
-The example sets up a chain: **Writer → Graph → BM25**
+The example sets up a chain: **Writer → Graph → FullText**
 
 - Mutations are sent to the Graph consumer
 - Graph processes each mutation (simulates graph storage)
-- Graph forwards the mutation to BM25
-- BM25 processes the mutation (simulates search indexing)
+- Graph forwards the mutation to FullText
+- FullText processes the mutation (simulates full-text search indexing)
 
 ## Running the Example
 
@@ -37,38 +37,38 @@ The example accepts two formats:
 
 ## Expected Log Output
 
-When you run the example, you should see logs showing that Graph processes mutations **before** BM25:
+When you run the example, you should see logs showing that Graph processes mutations **before** FullText:
 
 ```
 [Graph] Would insert vertex: AddVertexArgs { id: ..., name: "Alice" }
 [Graph] Would insert fragment: AddFragmentArgs { id: ..., body: "Alice is..." }
-[BM25] Would index vertex for search: id=..., name='Alice', k1=1.2, b=0.75
-[BM25] Would index fragment content: id=..., body_len=55, k1=1.2, b=0.75
+[FullText] Would index vertex for search: id=..., name='Alice', k1=1.2, b=0.75
+[FullText] Would index fragment content: id=..., body_len=55, k1=1.2, b=0.75
 ```
 
 Notice how:
 - `[Graph]` logs appear first for each mutation
-- `[BM25]` logs appear second for the same mutation
-- This demonstrates the chaining: Graph → BM25
+- `[FullText]` logs appear second for the same mutation
+- This demonstrates the chaining: Graph → FullText
 
 ## Key Code Sections
 
 ### Setting up the chain:
 
 ```rust
-// Create BM25 consumer (end of chain)
-let (bm25_sender, bm25_receiver) = mpsc::channel(config.channel_buffer_size);
-let bm25_handle = spawn_bm25_consumer(bm25_receiver, config.clone());
+// Create FullText consumer (end of chain)
+let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
+let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone());
 
-// Create Graph consumer that forwards to BM25
+// Create Graph consumer that forwards to FullText
 let (writer, graph_receiver) = create_mutation_writer(config.clone());
-let graph_handle = spawn_graph_consumer_with_next(graph_receiver, config, bm25_sender);
+let graph_handle = spawn_graph_consumer_with_next(graph_receiver, config, fulltext_sender);
 ```
 
 ### Sending mutations (they flow through the chain automatically):
 
 ```rust
-// Send to the writer - goes to Graph, then forwarded to BM25
+// Send to the writer - goes to Graph, then forwarded to FullText
 writer.add_vertex(vertex_args).await?;
 writer.add_fragment(fragment_args).await?;
 ```
@@ -76,6 +76,6 @@ writer.add_fragment(fragment_args).await?;
 ## Benefits of Chaining
 
 1. **Single send point**: Write mutations once, they flow through multiple processors
-2. **Ordered processing**: Graph storage happens before BM25 indexing
+2. **Ordered processing**: Graph storage happens before full-text indexing
 3. **Automatic forwarding**: No need to manually send to multiple consumers
-4. **Easy to extend**: Can add more processors to the chain (e.g., → Graph → BM25 → Logger → Analytics)
+4. **Easy to extend**: Can add more processors to the chain (e.g., → Graph → FullText → Logger → Analytics)

@@ -1,13 +1,15 @@
 #[cfg(test)]
 mod tests {
-    use crate::bm25::{spawn_bm25_consumer, spawn_bm25_consumer_with_params, Bm25Processor};
+    use crate::fulltext::{
+        spawn_fulltext_consumer, spawn_fulltext_consumer_with_params, FullTextProcessor,
+    };
     use crate::{
         create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddVertexArgs, Id, WriterConfig,
     };
     use tokio::time::Duration;
 
     #[tokio::test]
-    async fn test_bm25_consumer_basic_processing() {
+    async fn test_fulltext_consumer_basic_processing() {
         let config = WriterConfig {
             channel_buffer_size: 10,
         };
@@ -15,7 +17,7 @@ mod tests {
         let (writer, receiver) = create_mutation_writer(config.clone());
 
         // Spawn consumer
-        let consumer_handle = spawn_bm25_consumer(receiver, config);
+        let consumer_handle = spawn_fulltext_consumer(receiver, config);
 
         // Send some mutations
         let vertex_args = AddVertexArgs {
@@ -43,7 +45,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bm25_consumer_with_custom_params() {
+    async fn test_fulltext_consumer_with_custom_params() {
         let config = WriterConfig {
             channel_buffer_size: 10,
         };
@@ -52,7 +54,7 @@ mod tests {
         let b = 0.8;
 
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_bm25_consumer_with_params(receiver, config, k1, b);
+        let consumer_handle = spawn_fulltext_consumer_with_params(receiver, config, k1, b);
 
         // Send a fragment with substantial content
         let fragment_args = AddFragmentArgs {
@@ -71,10 +73,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bm25_consumer_all_mutation_types() {
+    async fn test_fulltext_consumer_all_mutation_types() {
         let config = WriterConfig::default();
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_bm25_consumer(receiver, config);
+        let consumer_handle = spawn_fulltext_consumer(receiver, config);
 
         // Test all mutation types with search-relevant content
         writer
@@ -123,38 +125,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bm25_processor_creation() {
+    async fn test_fulltext_processor_creation() {
         // Test default processor
-        let processor = Bm25Processor::new();
+        let processor = FullTextProcessor::new();
         assert_eq!(processor.k1, 1.2);
         assert_eq!(processor.b, 0.75);
 
         // Test processor with custom params
-        let processor = Bm25Processor::with_params(2.0, 0.5);
+        let processor = FullTextProcessor::with_params(2.0, 0.5);
         assert_eq!(processor.k1, 2.0);
         assert_eq!(processor.b, 0.5);
 
         // Test default trait
-        let processor: Bm25Processor = Default::default();
+        let processor: FullTextProcessor = Default::default();
         assert_eq!(processor.k1, 1.2);
         assert_eq!(processor.b, 0.75);
     }
 
     #[tokio::test]
-    async fn test_bm25_multiple_mutations() {
+    async fn test_fulltext_multiple_mutations() {
         let config = WriterConfig {
             channel_buffer_size: 100,
         };
 
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_bm25_consumer(receiver, config);
+        let consumer_handle = spawn_fulltext_consumer(receiver, config);
 
         // Send 5 fragments rapidly
         for i in 0..5 {
             let fragment_args = AddFragmentArgs {
                 id: Id::new(),
                 ts_millis: 1234567890 + i,
-                body: format!("Fragment {} with searchable content for BM25 indexing", i),
+                body: format!(
+                    "Fragment {} with searchable content for full-text indexing",
+                    i
+                ),
             };
             writer.add_fragment(fragment_args).await.unwrap();
         }
