@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::rocks::{spawn_rocks_consumer, spawn_rocks_consumer_with_next};
+    use crate::graph::{spawn_graph_consumer, spawn_graph_consumer_with_next};
     use crate::{
         create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddVertexArgs, Id, WriterConfig,
     };
@@ -8,7 +8,7 @@ mod tests {
     use tokio::time::Duration;
 
     #[tokio::test]
-    async fn test_rocks_consumer_basic_processing() {
+    async fn test_graph_consumer_basic_processing() {
         let config = WriterConfig {
             channel_buffer_size: 10,
         };
@@ -16,7 +16,7 @@ mod tests {
         let (writer, receiver) = create_mutation_writer(config.clone());
 
         // Spawn consumer
-        let consumer_handle = spawn_rocks_consumer(receiver, config);
+        let consumer_handle = spawn_graph_consumer(receiver, config);
 
         // Send some mutations
         let vertex_args = AddVertexArgs {
@@ -45,13 +45,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rocks_consumer_multiple_mutations() {
+    async fn test_rocks_consumer_multiple_mutationstest_graph_consumer_multiple_mutations() {
         let config = WriterConfig {
             channel_buffer_size: 100,
         };
 
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_rocks_consumer(receiver, config);
+        let consumer_handle = spawn_graph_consumer(receiver, config);
 
         // Send 5 mutations rapidly
         for i in 0..5 {
@@ -72,10 +72,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rocks_consumer_all_mutation_types() {
+    async fn test_graph_consumer_all_mutation_types() {
         let config = WriterConfig::default();
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_rocks_consumer(receiver, config);
+        let consumer_handle = spawn_graph_consumer(receiver, config);
 
         // Test all mutation types
         writer
@@ -124,7 +124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rocks_to_bm25_chaining() {
+    async fn test_graph_to_bm25_chaining() {
         let config = WriterConfig {
             channel_buffer_size: 100,
         };
@@ -133,12 +133,12 @@ mod tests {
         let (bm25_sender, bm25_receiver) = mpsc::channel(config.channel_buffer_size);
         let bm25_handle = crate::spawn_bm25_consumer(bm25_receiver, config.clone());
 
-        // Create the RocksDB consumer that forwards to BM25
-        let (writer, rocks_receiver) = create_mutation_writer(config.clone());
-        let rocks_handle =
-            spawn_rocks_consumer_with_next(rocks_receiver, config.clone(), bm25_sender);
+        // Create the Graph consumer that forwards to BM25
+        let (writer, graph_receiver) = create_mutation_writer(config.clone());
+        let graph_handle =
+            spawn_graph_consumer_with_next(graph_receiver, config.clone(), bm25_sender);
 
-        // Send mutations - they should flow through RocksDB -> BM25
+        // Send mutations - they should flow through Graph -> BM25
         for i in 0..3 {
             let vertex_args = AddVertexArgs {
                 id: Id::new(),
@@ -148,7 +148,7 @@ mod tests {
             let fragment_args = AddFragmentArgs {
                 id: Id::new(),
                 ts_millis: 1234567890 + i,
-                body: format!("Chained fragment {} processed by both RocksDB and BM25", i),
+                body: format!("Chained fragment {} processed by both Graph and BM25", i),
             };
 
             writer.add_vertex(vertex_args).await.unwrap();
@@ -161,8 +161,8 @@ mod tests {
         // Shutdown the chain from the beginning
         drop(writer);
 
-        // Wait for RocksDB consumer to complete (which will close BM25's channel)
-        rocks_handle.await.unwrap().unwrap();
+        // Wait for Graph consumer to complete (which will close BM25's channel)
+        graph_handle.await.unwrap().unwrap();
 
         // Wait for BM25 consumer to complete
         bm25_handle.await.unwrap().unwrap();

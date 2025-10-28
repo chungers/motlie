@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use motlie_db::{
-    create_mutation_writer, spawn_bm25_consumer, spawn_rocks_consumer_with_next, AddEdgeArgs,
+    create_mutation_writer, spawn_bm25_consumer, spawn_graph_consumer_with_next, AddEdgeArgs,
     AddFragmentArgs, AddVertexArgs, Id, WriterConfig,
 };
 use std::collections::HashMap;
@@ -14,10 +14,10 @@ async fn main() -> Result<()> {
     // Initialize logging to see the mutation processing order
     env_logger::init();
 
-    println!("Motlie CSV Processor - Demonstrating RocksDB → BM25 Chaining");
+    println!("Motlie CSV Processor - Demonstrating Graph → BM25 Chaining");
     println!("=============================================================");
-    println!("Mutations will flow: Writer → RocksDB → BM25");
-    println!("Watch the logs to see RocksDB processing happens before BM25");
+    println!("Mutations will flow: Writer → Graph → BM25");
+    println!("Watch the logs to see Graph processing happens before BM25");
     println!();
     println!("Reading CSV from stdin...");
     println!("Format:");
@@ -37,12 +37,12 @@ async fn main() -> Result<()> {
     let (bm25_sender, bm25_receiver) = mpsc::channel(config.channel_buffer_size);
     let bm25_handle = spawn_bm25_consumer(bm25_receiver, config.clone());
 
-    // Create the RocksDB consumer that forwards to BM25
-    println!("  2. Creating RocksDB consumer (forwards to BM25)");
-    let (writer, rocks_receiver) = create_mutation_writer(config.clone());
-    let rocks_handle = spawn_rocks_consumer_with_next(rocks_receiver, config, bm25_sender);
+    // Create the Graph consumer that forwards to BM25
+    println!("  2. Creating Graph consumer (forwards to BM25)");
+    let (writer, graph_receiver) = create_mutation_writer(config.clone());
+    let graph_handle = spawn_graph_consumer_with_next(graph_receiver, config, bm25_sender);
 
-    println!("  3. Consumer chain ready: Writer → RocksDB → BM25");
+    println!("  3. Consumer chain ready: Writer → Graph → BM25");
     println!();
 
     // Keep track of node name to ID mapping for edges
@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
                     body: fragment_text.to_string(),
                 };
 
-                // Send to RocksDB consumer (which will forward to BM25)
+                // Send to Graph consumer (which will forward to BM25)
                 writer
                     .add_vertex(vertex_args)
                     .await
@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
                     body: edge_fragment.to_string(),
                 };
 
-                // Send to RocksDB consumer (which will forward to BM25)
+                // Send to Graph consumer (which will forward to BM25)
                 writer
                     .add_edge(edge_args)
                     .await
@@ -195,13 +195,13 @@ async fn main() -> Result<()> {
     // Close writer to signal shutdown (this will cascade through the chain)
     drop(writer);
 
-    // Wait for RocksDB consumer to finish (which will close BM25's channel)
-    println!("  1. Waiting for RocksDB consumer to finish...");
-    rocks_handle
+    // Wait for Graph consumer to finish (which will close BM25's channel)
+    println!("  1. Waiting for Graph consumer to finish...");
+    graph_handle
         .await
-        .context("RocksDB consumer task failed")?
-        .context("RocksDB consumer failed")?;
-    println!("  2. RocksDB consumer finished");
+        .context("Graph consumer task failed")?
+        .context("Graph consumer failed")?;
+    println!("  2. Graph consumer finished");
 
     // Wait for BM25 consumer to finish
     println!("  3. Waiting for BM25 consumer to finish...");
@@ -212,7 +212,7 @@ async fn main() -> Result<()> {
     println!("  4. BM25 consumer finished");
 
     println!("\nAll consumers shut down successfully");
-    println!("Check the logs above - you should see [Rocks] messages before [BM25] messages");
+    println!("Check the logs above - you should see [Graph] messages before [BM25] messages");
 
     Ok(())
 }

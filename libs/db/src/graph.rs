@@ -1,5 +1,5 @@
-//! Provides the RocksDB-specific implementation for processing mutations from the MPSC queue
-//! and writing them to RocksDB.
+//! Provides the graph-specific implementation for processing mutations from the MPSC queue
+//! and writing them to the graph store.
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -10,22 +10,22 @@ use crate::{
     AddEdgeArgs, AddFragmentArgs, AddVertexArgs, InvalidateArgs, WriterConfig,
 };
 
-/// RocksDB-specific mutation processor
-pub struct RocksDbProcessor;
+/// Graph-specific mutation processor
+pub struct GraphProcessor;
 
-impl RocksDbProcessor {
-    /// Create a new RocksDbProcessor
+impl GraphProcessor {
+    /// Create a new GraphProcessor
     pub fn new() -> Self {
         Self
     }
 }
 
 #[async_trait::async_trait]
-impl Processor for RocksDbProcessor {
+impl Processor for GraphProcessor {
     /// Process an AddVertex mutation
     async fn process_add_vertex(&self, args: &AddVertexArgs) -> Result<()> {
-        // TODO: Implement actual vertex insertion into RocksDB
-        log::info!("[Rocks] Would insert vertex: {:?}", args);
+        // TODO: Implement actual vertex insertion into graph store
+        log::info!("[Graph] Would insert vertex: {:?}", args);
         // Simulate some async work
         tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         Ok(())
@@ -33,8 +33,8 @@ impl Processor for RocksDbProcessor {
 
     /// Process an AddEdge mutation
     async fn process_add_edge(&self, args: &AddEdgeArgs) -> Result<()> {
-        // TODO: Implement actual edge insertion into RocksDB
-        log::info!("[Rocks] Would insert edge: {:?}", args);
+        // TODO: Implement actual edge insertion into graph store
+        log::info!("[Graph] Would insert edge: {:?}", args);
         // Simulate some async work
         tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         Ok(())
@@ -42,8 +42,8 @@ impl Processor for RocksDbProcessor {
 
     /// Process an AddFragment mutation
     async fn process_add_fragment(&self, args: &AddFragmentArgs) -> Result<()> {
-        // TODO: Implement actual fragment insertion into RocksDB
-        log::info!("[Rocks] Would insert fragment: {:?}", args);
+        // TODO: Implement actual fragment insertion into graph store
+        log::info!("[Graph] Would insert fragment: {:?}", args);
         // Simulate some async work
         tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         Ok(())
@@ -51,52 +51,52 @@ impl Processor for RocksDbProcessor {
 
     /// Process an Invalidate mutation
     async fn process_invalidate(&self, args: &InvalidateArgs) -> Result<()> {
-        // TODO: Implement actual invalidation in RocksDB
-        log::info!("[Rocks] Would invalidate: {:?}", args);
+        // TODO: Implement actual invalidation in graph store
+        log::info!("[Graph] Would invalidate: {:?}", args);
         // Simulate some async work
         tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         Ok(())
     }
 }
 
-/// Create a new RocksDB mutation consumer
-pub fn create_rocks_consumer(
+/// Create a new graph mutation consumer
+pub fn create_graph_consumer(
     receiver: mpsc::Receiver<crate::Mutation>,
     config: WriterConfig,
-) -> Consumer<RocksDbProcessor> {
-    let processor = RocksDbProcessor::new();
+) -> Consumer<GraphProcessor> {
+    let processor = GraphProcessor::new();
     Consumer::new(receiver, config, processor)
 }
 
-/// Create a new RocksDB mutation consumer that chains to another processor
-pub fn create_rocks_consumer_with_next(
+/// Create a new graph mutation consumer that chains to another processor
+pub fn create_graph_consumer_with_next(
     receiver: mpsc::Receiver<crate::Mutation>,
     config: WriterConfig,
     next: mpsc::Sender<crate::Mutation>,
-) -> Consumer<RocksDbProcessor> {
-    let processor = RocksDbProcessor::new();
+) -> Consumer<GraphProcessor> {
+    let processor = GraphProcessor::new();
     Consumer::with_next(receiver, config, processor, next)
 }
 
-/// Spawn the RocksDB mutation consumer as a background task
-pub fn spawn_rocks_consumer(
+/// Spawn the graph mutation consumer as a background task
+pub fn spawn_graph_consumer(
     receiver: mpsc::Receiver<crate::Mutation>,
     config: WriterConfig,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_rocks_consumer(receiver, config);
+    let consumer = create_graph_consumer(receiver, config);
     crate::mutation::spawn_consumer(consumer)
 }
 
-/// Spawn the RocksDB mutation consumer as a background task with chaining to next processor
-pub fn spawn_rocks_consumer_with_next(
+/// Spawn the graph mutation consumer as a background task with chaining to next processor
+pub fn spawn_graph_consumer_with_next(
     receiver: mpsc::Receiver<crate::Mutation>,
     config: WriterConfig,
     next: mpsc::Sender<crate::Mutation>,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_rocks_consumer_with_next(receiver, config, next);
+    let consumer = create_graph_consumer_with_next(receiver, config, next);
     crate::mutation::spawn_consumer(consumer)
 }
 
 #[cfg(test)]
-#[path = "rocks_tests.rs"]
-mod rocks_tests;
+#[path = "graph_tests.rs"]
+mod graph_tests;

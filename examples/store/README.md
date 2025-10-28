@@ -4,12 +4,12 @@ This example demonstrates the mutation consumer chaining feature where mutations
 
 ## Architecture
 
-The example sets up a chain: **Writer → RocksDB → BM25**
+The example sets up a chain: **Writer → Graph → BM25**
 
-- Mutations are sent to the RocksDB consumer
-- RocksDB processes each mutation (simulates storage)
-- RocksDB forwards the mutation to BM25
-- BM25 processes the mutation (simulates indexing)
+- Mutations are sent to the Graph consumer
+- Graph processes each mutation (simulates graph storage)
+- Graph forwards the mutation to BM25
+- BM25 processes the mutation (simulates search indexing)
 
 ## Running the Example
 
@@ -37,19 +37,19 @@ The example accepts two formats:
 
 ## Expected Log Output
 
-When you run the example, you should see logs showing that RocksDB processes mutations **before** BM25:
+When you run the example, you should see logs showing that Graph processes mutations **before** BM25:
 
 ```
-[Rocks] Would insert vertex: AddVertexArgs { id: ..., name: "Alice" }
-[Rocks] Would insert fragment: AddFragmentArgs { id: ..., body: "Alice is..." }
+[Graph] Would insert vertex: AddVertexArgs { id: ..., name: "Alice" }
+[Graph] Would insert fragment: AddFragmentArgs { id: ..., body: "Alice is..." }
 [BM25] Would index vertex for search: id=..., name='Alice', k1=1.2, b=0.75
 [BM25] Would index fragment content: id=..., body_len=55, k1=1.2, b=0.75
 ```
 
 Notice how:
-- `[Rocks]` logs appear first for each mutation
+- `[Graph]` logs appear first for each mutation
 - `[BM25]` logs appear second for the same mutation
-- This demonstrates the chaining: RocksDB → BM25
+- This demonstrates the chaining: Graph → BM25
 
 ## Key Code Sections
 
@@ -60,15 +60,15 @@ Notice how:
 let (bm25_sender, bm25_receiver) = mpsc::channel(config.channel_buffer_size);
 let bm25_handle = spawn_bm25_consumer(bm25_receiver, config.clone());
 
-// Create RocksDB consumer that forwards to BM25
-let (writer, rocks_receiver) = create_mutation_writer(config.clone());
-let rocks_handle = spawn_rocks_consumer_with_next(rocks_receiver, config, bm25_sender);
+// Create Graph consumer that forwards to BM25
+let (writer, graph_receiver) = create_mutation_writer(config.clone());
+let graph_handle = spawn_graph_consumer_with_next(graph_receiver, config, bm25_sender);
 ```
 
 ### Sending mutations (they flow through the chain automatically):
 
 ```rust
-// Send to the writer - goes to RocksDB, then forwarded to BM25
+// Send to the writer - goes to Graph, then forwarded to BM25
 writer.add_vertex(vertex_args).await?;
 writer.add_fragment(fragment_args).await?;
 ```
@@ -76,6 +76,6 @@ writer.add_fragment(fragment_args).await?;
 ## Benefits of Chaining
 
 1. **Single send point**: Write mutations once, they flow through multiple processors
-2. **Ordered processing**: RocksDB durability happens before BM25 indexing
+2. **Ordered processing**: Graph storage happens before BM25 indexing
 3. **Automatic forwarding**: No need to manually send to multiple consumers
-4. **Easy to extend**: Can add more processors to the chain (e.g., → RocksDB → BM25 → Logger → Analytics)
+4. **Easy to extend**: Can add more processors to the chain (e.g., → Graph → BM25 → Logger → Analytics)
