@@ -8,18 +8,12 @@ use crate::{AddEdgeArgs, AddFragmentArgs, AddVertexArgs, InvalidateArgs, Mutatio
 pub struct WriterConfig {
     /// Size of the MPSC channel buffer
     pub channel_buffer_size: usize,
-    /// Maximum batch size for processing mutations
-    pub max_batch_size: usize,
-    /// Timeout for batch processing in milliseconds
-    pub batch_timeout_ms: u64,
 }
 
 impl Default for WriterConfig {
     fn default() -> Self {
         Self {
             channel_buffer_size: 1000,
-            max_batch_size: 100,
-            batch_timeout_ms: 100,
         }
     }
 }

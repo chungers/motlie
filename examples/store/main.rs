@@ -29,8 +29,6 @@ async fn main() -> Result<()> {
     // Configuration for the consumer chain
     let config = WriterConfig {
         channel_buffer_size: 1000,
-        max_batch_size: 50,
-        batch_timeout_ms: 100,
     };
 
     // Create the BM25 consumer (end of chain)

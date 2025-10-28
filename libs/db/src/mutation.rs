@@ -54,78 +54,26 @@ impl<P: Processor> Consumer<P> {
         }
     }
 
-    /// Process mutations in a loop until the channel is closed
+    /// Process mutations continuously until the channel is closed
     pub async fn run(mut self) -> Result<()> {
         log::info!("Starting mutation consumer with config: {:?}", self.config);
 
-        let mut batch = Vec::with_capacity(self.config.max_batch_size);
-        let batch_timeout = tokio::time::Duration::from_millis(self.config.batch_timeout_ms);
-
         loop {
-            // Wait for mutations with timeout for batching
-            let timeout_result = tokio::time::timeout(batch_timeout, self.receiver.recv()).await;
-
-            match timeout_result {
-                // Received a mutation within timeout
-                Ok(Some(mutation)) => {
-                    batch.push(mutation);
-
-                    // Continue collecting mutations until batch is full or channel is empty
-                    while batch.len() < self.config.max_batch_size {
-                        match self.receiver.try_recv() {
-                            Ok(mutation) => batch.push(mutation),
-                            Err(mpsc::error::TryRecvError::Empty) => break,
-                            Err(mpsc::error::TryRecvError::Disconnected) => {
-                                // Process final batch and exit
-                                if !batch.is_empty() {
-                                    self.process_batch(&batch).await?;
-                                }
-                                log::info!(
-                                    "Mutation consumer shutting down - channel disconnected"
-                                );
-                                return Ok(());
-                            }
-                        }
-                    }
-
-                    // Process the batch
-                    if !batch.is_empty() {
-                        self.process_batch(&batch).await?;
-                        batch.clear();
-                    }
+            // Wait for the next mutation
+            match self.receiver.recv().await {
+                Some(mutation) => {
+                    // Process the mutation immediately
+                    self.process_mutation(&mutation)
+                        .await
+                        .with_context(|| format!("Failed to process mutation: {:?}", mutation))?;
                 }
-                // Channel closed
-                Ok(None) => {
-                    // Process any remaining mutations
-                    if !batch.is_empty() {
-                        self.process_batch(&batch).await?;
-                    }
+                None => {
+                    // Channel closed
                     log::info!("Mutation consumer shutting down - channel closed");
                     return Ok(());
                 }
-                // Timeout - process accumulated batch if any
-                Err(_) => {
-                    if !batch.is_empty() {
-                        self.process_batch(&batch).await?;
-                        batch.clear();
-                    }
-                }
             }
         }
-    }
-
-    /// Process a batch of mutations
-    async fn process_batch(&self, batch: &[Mutation]) -> Result<()> {
-        log::debug!("Processing batch of {} mutations", batch.len());
-
-        for mutation in batch {
-            self.process_mutation(mutation)
-                .await
-                .with_context(|| format!("Failed to process mutation: {:?}", mutation))?;
-        }
-
-        log::debug!("Successfully processed batch of {} mutations", batch.len());
-        Ok(())
     }
 
     /// Process a single mutation
@@ -217,8 +165,6 @@ mod tests {
     async fn test_generic_consumer_basic() {
         let config = crate::WriterConfig {
             channel_buffer_size: 10,
-            max_batch_size: 2,
-            batch_timeout_ms: 50,
         };
 
         let (writer, receiver) = {

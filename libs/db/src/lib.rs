@@ -163,8 +163,6 @@ mod tests {
         // Test that both RocksDB and BM25 consumers can process mutations from the same writer
         let config = WriterConfig {
             channel_buffer_size: 100,
-            max_batch_size: 5,
-            batch_timeout_ms: 100,
         };
 
         // Create writer and two separate receivers for each consumer type
