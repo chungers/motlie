@@ -815,11 +815,12 @@
                         }
                     },
                     font: {
-                        size: 10,
-                        color: '#999',
+                        size: 9,
+                        color: '#aaa',
                         strokeWidth: 0,
                         align: 'middle',
-                        background: 'none'
+                        background: 'rgba(0, 0, 0, 0.6)',
+                        face: 'arial'  // Different font from nodes (monospace)
                     },
                     shadow: {
                         enabled: false  // Disable shadows for performance
@@ -827,8 +828,8 @@
                     scaling: {
                         label: {
                             enabled: true,
-                            min: 10,
-                            max: 10,
+                            min: 9,
+                            max: 9,
                             maxVisible: 30,
                             drawThreshold: 1  // Always show labels (we control via font color)
                         }
@@ -986,11 +987,12 @@
                         hover: 'rgba(52, 152, 219, 0.3)'
                     },
                     font: {
-                        size: isHighlighted ? 10 : 8,
-                        color: isHighlighted ? '#999' : 'rgba(153, 153, 153, 0.2)',
+                        size: 9,
+                        color: isHighlighted ? '#ffffff' : 'rgba(255, 255, 255, 0.15)',
                         strokeWidth: 0,
                         align: 'middle',
-                        background: 'none'
+                        background: isHighlighted ? 'rgba(0, 0, 0, 0.7)' : 'none',
+                        face: 'arial'
                     }
                 });
             });
@@ -1024,11 +1026,12 @@
                     hover: '#3498db'
                 },
                 font: {
-                    size: 10,
-                    color: '#999',
+                    size: 9,
+                    color: '#aaa',
                     strokeWidth: 0,
                     align: 'middle',
-                    background: 'none'
+                    background: 'rgba(0, 0, 0, 0.6)',
+                    face: 'arial'
                 }
             }));
 
