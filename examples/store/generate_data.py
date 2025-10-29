@@ -9,7 +9,7 @@ import argparse
 import csv
 import random
 import sys
-from typing import List, Tuple, Dict, Any
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
 
@@ -76,6 +76,7 @@ validate_distribution(EVENTS_DISTRIBUTION, "EVENTS_DISTRIBUTION")
 def compute_node_counts(total_nodes: int) -> Dict[str, int]:
     """
     Compute the number of each node type based on total_nodes and distribution percentages.
+    Ensures minimum counts for all node types to prevent empty lists.
 
     Args:
         total_nodes: Total number of nodes to generate
@@ -83,31 +84,34 @@ def compute_node_counts(total_nodes: int) -> Dict[str, int]:
     Returns:
         Dictionary with computed counts for each node type
     """
-    # Calculate category totals
-    total_professional = int(total_nodes * CATEGORY_DISTRIBUTION['PROFESSIONAL'])
-    total_social = int(total_nodes * CATEGORY_DISTRIBUTION['SOCIAL'])
-    total_things = int(total_nodes * CATEGORY_DISTRIBUTION['THINGS'])
-    total_events = int(total_nodes * CATEGORY_DISTRIBUTION['EVENTS'])
+    # For very small datasets, ensure we have at least one of each type
+    min_nodes_per_type = 1 if total_nodes >= 10 else 0
 
-    # Calculate specific node type counts
+    # Calculate category totals with minimum guarantees
+    total_professional = max(min_nodes_per_type * 3, int(total_nodes * CATEGORY_DISTRIBUTION['PROFESSIONAL']))
+    total_social = max(min_nodes_per_type * 3, int(total_nodes * CATEGORY_DISTRIBUTION['SOCIAL']))
+    total_things = max(min_nodes_per_type * 2, int(total_nodes * CATEGORY_DISTRIBUTION['THINGS']))
+    total_events = max(min_nodes_per_type * 2, int(total_nodes * CATEGORY_DISTRIBUTION['EVENTS']))
+
+    # Calculate specific node type counts with minimum guarantees
     counts = {
         # Professional
-        'NUM_PROFESSIONAL_PEOPLE': round(total_professional * PROFESSIONAL_DISTRIBUTION['PEOPLE']),
-        'NUM_COMPANIES': round(total_professional * PROFESSIONAL_DISTRIBUTION['COMPANIES']),
-        'NUM_PROFESSIONAL_PROJECTS': round(total_professional * PROFESSIONAL_DISTRIBUTION['PROJECTS']),
+        'NUM_PROFESSIONAL_PEOPLE': max(min_nodes_per_type, round(total_professional * PROFESSIONAL_DISTRIBUTION['PEOPLE'])),
+        'NUM_COMPANIES': max(min_nodes_per_type, round(total_professional * PROFESSIONAL_DISTRIBUTION['COMPANIES'])),
+        'NUM_PROFESSIONAL_PROJECTS': max(min_nodes_per_type, round(total_professional * PROFESSIONAL_DISTRIBUTION['PROJECTS'])),
 
         # Social
-        'NUM_SOCIAL_PEOPLE': round(total_social * SOCIAL_DISTRIBUTION['PEOPLE']),
-        'NUM_SOCIAL_EVENTS': round(total_social * SOCIAL_DISTRIBUTION['EVENTS']),
-        'NUM_HOBBY_GROUPS': round(total_social * SOCIAL_DISTRIBUTION['HOBBY_GROUPS']),
+        'NUM_SOCIAL_PEOPLE': max(min_nodes_per_type, round(total_social * SOCIAL_DISTRIBUTION['PEOPLE'])),
+        'NUM_SOCIAL_EVENTS': max(min_nodes_per_type, round(total_social * SOCIAL_DISTRIBUTION['EVENTS'])),
+        'NUM_HOBBY_GROUPS': max(min_nodes_per_type, round(total_social * SOCIAL_DISTRIBUTION['HOBBY_GROUPS'])),
 
         # Things
-        'NUM_HOMES': round(total_things * THINGS_DISTRIBUTION['HOMES']),
-        'NUM_VEHICLES': round(total_things * THINGS_DISTRIBUTION['VEHICLES']),
+        'NUM_HOMES': max(min_nodes_per_type, round(total_things * THINGS_DISTRIBUTION['HOMES'])),
+        'NUM_VEHICLES': max(min_nodes_per_type, round(total_things * THINGS_DISTRIBUTION['VEHICLES'])),
 
         # Events
-        'NUM_TRIPS': round(total_events * EVENTS_DISTRIBUTION['TRIPS']),
-        'NUM_CONFERENCES': round(total_events * EVENTS_DISTRIBUTION['CONFERENCES']),
+        'NUM_TRIPS': max(min_nodes_per_type, round(total_events * EVENTS_DISTRIBUTION['TRIPS'])),
+        'NUM_CONFERENCES': max(min_nodes_per_type, round(total_events * EVENTS_DISTRIBUTION['CONFERENCES'])),
 
         # Totals (for reference)
         'TOTAL_PROFESSIONAL': total_professional,
@@ -629,20 +633,21 @@ class DataGenerator:
                 self.add_edge(person, company, "works_at", fragment)
 
         # Professional people manage/contribute to projects
-        # First half manage projects
-        num_managers = len(self.professional_people) // 2
-        for person in self.professional_people[:num_managers]:
-            project = random.choice(self.projects)
-            fragment = (f"{person.metadata['first']} {person.metadata['last']} leads the "
-                      f"{project.metadata['type']} project, overseeing strategic direction and team coordination.")
-            self.add_edge(person, project, "manages", fragment)
+        # First half manage projects (only if projects exist)
+        if self.projects:
+            num_managers = len(self.professional_people) // 2
+            for person in self.professional_people[:num_managers]:
+                project = random.choice(self.projects)
+                fragment = (f"{person.metadata['first']} {person.metadata['last']} leads the "
+                          f"{project.metadata['type']} project, overseeing strategic direction and team coordination.")
+                self.add_edge(person, project, "manages", fragment)
 
-        # Second half contribute to projects
-        for person in self.professional_people[num_managers:]:
-            project = random.choice(self.projects)
-            fragment = (f"{person.metadata['first']} {person.metadata['last']} contributes to the "
-                      f"{project.metadata['type']} project with their expertise in {person.metadata['dept']}.")
-            self.add_edge(person, project, "contributes_to", fragment)
+            # Second half contribute to projects
+            for person in self.professional_people[num_managers:]:
+                project = random.choice(self.projects)
+                fragment = (f"{person.metadata['first']} {person.metadata['last']} contributes to the "
+                          f"{project.metadata['type']} project with their expertise in {person.metadata['dept']}.")
+                self.add_edge(person, project, "contributes_to", fragment)
 
         # Professional collaborations
         for person in self.professional_people:
@@ -654,20 +659,22 @@ class DataGenerator:
                               f"{collaborator.metadata['first']} {collaborator.metadata['last']} on cross-functional initiatives.")
                     self.add_edge(person, collaborator, "collaborates_with", fragment)
 
-        # Companies fund projects
-        for project in self.projects:
-            company = random.choice(self.companies)
-            fragment = (f"{company.metadata['company_name']} provides funding and resources for the "
-                      f"{project.metadata['type']} project to drive business value.")
-            self.add_edge(company, project, "funds", fragment)
+        # Companies fund projects (only if both exist)
+        if self.projects and self.companies:
+            for project in self.projects:
+                company = random.choice(self.companies)
+                fragment = (f"{company.metadata['company_name']} provides funding and resources for the "
+                          f"{project.metadata['type']} project, enabling innovation and growth.")
+                self.add_edge(company, project, "funds", fragment)
 
-        # Professional people attend conferences
-        for person in self.professional_people:
-            if random.random() < PROB_PERSON_ATTENDS_CONFERENCE:
-                conf = random.choice(self.conferences)
-                fragment = (f"{person.metadata['first']} {person.metadata['last']} attended "
-                          f"{conf.metadata['name']} in {conf.metadata['city']} to stay current with industry trends.")
-                self.add_edge(person, conf, "attended", fragment)
+        # Professional people attend conferences (only if conferences exist)
+        if self.conferences:
+            for person in self.professional_people:
+                if random.random() < PROB_PERSON_ATTENDS_CONFERENCE:
+                    conf = random.choice(self.conferences)
+                    fragment = (f"{person.metadata['first']} {person.metadata['last']} attended "
+                              f"{conf.metadata['name']} in {conf.metadata['city']} to stay current with industry trends.")
+                    self.add_edge(person, conf, "attended", fragment)
 
     def generate_social_edges(self):
         """Generate edges for social relationships."""
@@ -684,30 +691,33 @@ class DataGenerator:
                               f"{person.metadata['hobby']} and spending quality time together.")
                     self.add_edge(person, friend, "friends_with", fragment)
 
-        # Social people attend events
-        for event in self.social_events:
-            num_attendees = random.randint(NUM_EVENT_ATTENDEES_MIN, NUM_EVENT_ATTENDEES_MAX)
-            attendees = random.sample(self.social_people, num_attendees)
-            for person in attendees:
-                fragment = (f"{person.metadata['first']} {person.metadata['last']} attended the "
-                          f"{event.metadata['type']} in {event.metadata['month']}, enjoying the celebration with loved ones.")
-                self.add_edge(person, event, "attended", fragment)
+        # Social people attend events (only if both exist)
+        if self.social_events and self.social_people:
+            for event in self.social_events:
+                num_attendees = random.randint(NUM_EVENT_ATTENDEES_MIN, NUM_EVENT_ATTENDEES_MAX)
+                attendees = random.sample(self.social_people, min(num_attendees, len(self.social_people)))
+                for person in attendees:
+                    fragment = (f"{person.metadata['first']} {person.metadata['last']} attended the "
+                              f"{event.metadata['type']} in {event.metadata['month']}, enjoying the celebration with loved ones.")
+                    self.add_edge(person, event, "attended", fragment)
 
-        # Social people join hobby groups
-        for person in self.social_people:
-            if random.random() < PROB_PERSON_JOINS_HOBBY_GROUP:
-                group = random.choice(self.hobby_groups)
-                fragment = (f"{person.metadata['first']} {person.metadata['last']} is an active member of "
-                          f"{group.metadata['name']}, participating in group activities and building community connections.")
-                self.add_edge(person, group, "member_of", fragment)
+        # Social people join hobby groups (only if hobby groups exist)
+        if self.hobby_groups:
+            for person in self.social_people:
+                if random.random() < PROB_PERSON_JOINS_HOBBY_GROUP:
+                    group = random.choice(self.hobby_groups)
+                    fragment = (f"{person.metadata['first']} {person.metadata['last']} is an active member of "
+                              f"{group.metadata['name']}, participating in group activities and building community connections.")
+                    self.add_edge(person, group, "member_of", fragment)
 
-        # Social people go on trips
-        for person in self.social_people:
-            if random.random() < PROB_PERSON_TAKES_TRIP:
-                trip = random.choice(self.trips)
-                fragment = (f"{person.metadata['first']} {person.metadata['last']} embarked on a trip to "
-                          f"{trip.metadata['destination']}, creating unforgettable memories and experiences.")
-                self.add_edge(person, trip, "traveled_on", fragment)
+        # Social people go on trips (only if trips exist)
+        if self.trips:
+            for person in self.social_people:
+                if random.random() < PROB_PERSON_TAKES_TRIP:
+                    trip = random.choice(self.trips)
+                    fragment = (f"{person.metadata['first']} {person.metadata['last']} embarked on a trip to "
+                              f"{trip.metadata['destination']}, creating unforgettable memories and experiences.")
+                    self.add_edge(person, trip, "traveled_on", fragment)
 
     def generate_ownership_edges(self):
         """Generate edges for ownership of things."""
@@ -716,155 +726,177 @@ class DataGenerator:
         # Combine all people (both professional and social can own things)
         all_people = self.professional_people + self.social_people
 
-        # People own homes
-        for home in self.homes:
-            owner = random.choice(all_people)
-            fragment = (f"{owner.metadata['first']} {owner.metadata['last']} owns and resides in "
-                      f"this {home.metadata['type']} in {home.metadata['city']}, enjoying the comfort and convenience of the location.")
-            self.add_edge(owner, home, "owns", fragment)
+        # People own homes (only if both homes and people exist)
+        if self.homes and all_people:
+            for home in self.homes:
+                owner = random.choice(all_people)
+                fragment = (f"{owner.metadata['first']} {owner.metadata['last']} owns and resides in "
+                          f"this {home.metadata['type']} in {home.metadata['city']}, enjoying the comfort and convenience of the location.")
+                self.add_edge(owner, home, "owns", fragment)
 
-        # People own vehicles
-        for vehicle in self.vehicles:
-            owner = random.choice(all_people)
-            fragment = (f"{owner.metadata['first']} {owner.metadata['last']} owns this "
-                      f"{vehicle.metadata['year']} {vehicle.metadata['model']}, which serves their transportation needs.")
-            self.add_edge(owner, vehicle, "owns", fragment)
+        # People own vehicles (only if both vehicles and people exist)
+        if self.vehicles and all_people:
+            for vehicle in self.vehicles:
+                owner = random.choice(all_people)
+                fragment = (f"{owner.metadata['first']} {owner.metadata['last']} owns this "
+                          f"{vehicle.metadata['year']} {vehicle.metadata['model']}, which serves their transportation needs.")
+                self.add_edge(owner, vehicle, "owns", fragment)
 
-        # Some people have multiple vehicles
-        for person in random.sample(all_people, self.edge_counts['NUM_PEOPLE_WITH_MULTIPLE_VEHICLES']):
-            vehicle = random.choice(self.vehicles)
-            fragment = (f"{person.metadata['first']} {person.metadata['last']} also owns this vehicle "
-                      f"for specific purposes and occasions.")
-            self.add_edge(person, vehicle, "owns", fragment)
+            # Some people have multiple vehicles
+            if len(all_people) >= self.edge_counts['NUM_PEOPLE_WITH_MULTIPLE_VEHICLES']:
+                for person in random.sample(all_people, self.edge_counts['NUM_PEOPLE_WITH_MULTIPLE_VEHICLES']):
+                    vehicle = random.choice(self.vehicles)
+                    fragment = (f"{person.metadata['first']} {person.metadata['last']} also owns this vehicle "
+                              f"for specific purposes and occasions.")
+                    self.add_edge(person, vehicle, "owns", fragment)
 
     def generate_cross_domain_edges(self):
         """Generate edges that cross between professional and social domains."""
         print("Generating cross-domain edges...", file=sys.stderr)
 
-        # Some professional people also have social connections
-        for _ in range(self.edge_counts['NUM_CROSS_DOMAIN_CONNECTIONS']):
-            prof_person = random.choice(self.professional_people)
-            social_person = random.choice(self.social_people)
-            fragment = (f"{prof_person.metadata['first']} {prof_person.metadata['last']} and "
-                      f"{social_person.metadata['first']} {social_person.metadata['last']} know each other "
-                      f"through mutual acquaintances and occasionally meet for social gatherings.")
-            self.add_edge(prof_person, social_person, "knows", fragment)
+        # Some professional people also have social connections (only if both exist)
+        if self.professional_people and self.social_people:
+            for _ in range(self.edge_counts['NUM_CROSS_DOMAIN_CONNECTIONS']):
+                prof_person = random.choice(self.professional_people)
+                social_person = random.choice(self.social_people)
+                fragment = (f"{prof_person.metadata['first']} {prof_person.metadata['last']} and "
+                          f"{social_person.metadata['first']} {social_person.metadata['last']} know each other "
+                          f"through mutual acquaintances and occasionally meet for social gatherings.")
+                self.add_edge(prof_person, social_person, "knows", fragment)
 
-        # Some social people attend professional conferences
-        for person in random.sample(self.social_people, self.edge_counts['NUM_SOCIAL_AT_CONFERENCES']):
-            conf = random.choice(self.conferences)
-            fragment = (f"{person.metadata['first']} {person.metadata['last']} attended "
-                      f"{conf.metadata['name']} in {conf.metadata['city']} to explore professional opportunities.")
-            self.add_edge(person, conf, "attended", fragment)
+        # Some social people attend professional conferences (only if both exist)
+        if self.social_people and self.conferences and len(self.social_people) >= self.edge_counts['NUM_SOCIAL_AT_CONFERENCES']:
+            for person in random.sample(self.social_people, self.edge_counts['NUM_SOCIAL_AT_CONFERENCES']):
+                conf = random.choice(self.conferences)
+                fragment = (f"{person.metadata['first']} {person.metadata['last']} attended "
+                          f"{conf.metadata['name']} in {conf.metadata['city']} to explore professional opportunities.")
+                self.add_edge(person, conf, "attended", fragment)
 
-        # Professional people join hobby groups for work-life balance
-        for person in random.sample(self.professional_people, self.edge_counts['NUM_PROFESSIONAL_IN_HOBBY_GROUPS']):
-            group = random.choice(self.hobby_groups)
-            fragment = (f"{person.metadata['first']} {person.metadata['last']} is a member of "
-                      f"{group.metadata['name']} to maintain work-life balance and pursue personal interests.")
-            self.add_edge(person, group, "member_of", fragment)
+        # Professional people join hobby groups for work-life balance (only if both exist)
+        if self.professional_people and self.hobby_groups and len(self.professional_people) >= self.edge_counts['NUM_PROFESSIONAL_IN_HOBBY_GROUPS']:
+            for person in random.sample(self.professional_people, self.edge_counts['NUM_PROFESSIONAL_IN_HOBBY_GROUPS']):
+                group = random.choice(self.hobby_groups)
+                fragment = (f"{person.metadata['first']} {person.metadata['last']} is a member of "
+                          f"{group.metadata['name']} to maintain work-life balance and pursue personal interests.")
+                self.add_edge(person, group, "member_of", fragment)
 
-        # Companies sponsor hobby groups and social events
-        for _ in range(self.edge_counts["NUM_COMPANY_SPONSORSHIPS"]):
-            company = random.choice(self.companies)
-            group = random.choice(self.hobby_groups)
-            fragment = (f"{company.metadata['company_name']} sponsors {group.metadata['name']} "
-                      f"as part of their community engagement and corporate social responsibility initiatives.")
-            self.add_edge(company, group, "sponsors", fragment)
+        # Companies sponsor hobby groups and social events (only if both exist)
+        if self.companies and self.hobby_groups:
+            for _ in range(self.edge_counts["NUM_COMPANY_SPONSORSHIPS"]):
+                company = random.choice(self.companies)
+                group = random.choice(self.hobby_groups)
+                fragment = (f"{company.metadata['company_name']} sponsors {group.metadata['name']} "
+                          f"as part of their community engagement and corporate social responsibility initiatives.")
+                self.add_edge(company, group, "sponsors", fragment)
 
-        # Organizations host social events
-        for _ in range(self.edge_counts["NUM_COMPANIES_HOSTING_EVENTS"]):
-            company = random.choice(self.companies)
-            event = random.choice(self.social_events)
-            fragment = (f"{company.metadata['company_name']} hosted this {event.metadata['type']} "
-                      f"as a team-building activity and to celebrate company milestones.")
-            self.add_edge(company, event, "hosts", fragment)
+        # Organizations host social events (only if both exist)
+        if self.companies and self.social_events:
+            for _ in range(self.edge_counts["NUM_COMPANIES_HOSTING_EVENTS"]):
+                company = random.choice(self.companies)
+                event = random.choice(self.social_events)
+                fragment = (f"{company.metadata['company_name']} hosted this {event.metadata['type']} "
+                          f"as a team-building activity and to celebrate company milestones.")
+                self.add_edge(company, event, "hosts", fragment)
 
-        # Projects utilize vehicles for field work
-        for _ in range(self.edge_counts["NUM_PROJECTS_USING_VEHICLES"]):
-            project = random.choice(self.projects)
-            vehicle = random.choice(self.vehicles)
-            fragment = (f"The {project.metadata['type']} project utilizes this vehicle "
-                      f"for field operations, client visits, and team logistics.")
-            self.add_edge(project, vehicle, "uses", fragment)
+        # Projects utilize vehicles for field work (only if both exist)
+        if self.projects and self.vehicles:
+            for _ in range(self.edge_counts["NUM_PROJECTS_USING_VEHICLES"]):
+                project = random.choice(self.projects)
+                vehicle = random.choice(self.vehicles)
+                fragment = (f"The {project.metadata['type']} project utilizes this vehicle "
+                          f"for field operations, client visits, and team logistics.")
+                self.add_edge(project, vehicle, "uses", fragment)
 
-        # Social events happen at homes
-        for _ in range(self.edge_counts["NUM_EVENTS_AT_HOMES"]):
-            event = random.choice(self.social_events)
-            home = random.choice(self.homes)
-            fragment = (f"This {event.metadata['type']} took place at this {home.metadata['type']} "
-                      f"in {home.metadata['city']}, providing a comfortable venue for the gathering.")
-            self.add_edge(event, home, "held_at", fragment)
+        # Social events happen at homes (only if both exist)
+        if self.social_events and self.homes:
+            for _ in range(self.edge_counts["NUM_EVENTS_AT_HOMES"]):
+                event = random.choice(self.social_events)
+                home = random.choice(self.homes)
+                fragment = (f"This {event.metadata['type']} took place at this {home.metadata['type']} "
+                          f"in {home.metadata['city']}, providing a comfortable venue for the gathering.")
+                self.add_edge(event, home, "held_at", fragment)
 
-        # Trips start from homes
-        for _ in range(self.edge_counts["NUM_TRIPS_FROM_HOMES"]):
-            trip = random.choice(self.trips)
-            home = random.choice(self.homes)
-            fragment = (f"This trip to {trip.metadata['destination']} departed from this home, "
-                      f"marking the beginning of an exciting journey.")
-            self.add_edge(trip, home, "departed_from", fragment)
+        # Trips start from homes (only if both exist)
+        if self.trips and self.homes:
+            for _ in range(self.edge_counts["NUM_TRIPS_FROM_HOMES"]):
+                trip = random.choice(self.trips)
+                home = random.choice(self.homes)
+                fragment = (f"This trip to {trip.metadata['destination']} departed from this home, "
+                          f"marking the beginning of an exciting journey.")
+                self.add_edge(trip, home, "departed_from", fragment)
 
         # Professional and social people both attend social events with mixed relationships
-        for event in random.sample(self.social_events, self.edge_counts["NUM_MIXED_SOCIAL_EVENTS"]):
-            # Add some professional people to social events
-            num_prof = random.randint(NUM_PROFESSIONALS_AT_SOCIAL_MIN, NUM_PROFESSIONALS_AT_SOCIAL_MAX)
-            professionals = random.sample(self.professional_people, num_prof)
-            for person in professionals:
-                fragment = (f"{person.metadata['first']} {person.metadata['last']} attended this "
-                          f"{event.metadata['type']} to network and build relationships outside of work.")
-                self.add_edge(person, event, "attended", fragment)
+        if self.social_events and len(self.social_events) >= self.edge_counts["NUM_MIXED_SOCIAL_EVENTS"]:
+            for event in random.sample(self.social_events, self.edge_counts["NUM_MIXED_SOCIAL_EVENTS"]):
+                # Add some professional people to social events (only if they exist)
+                if self.professional_people:
+                    num_prof = random.randint(NUM_PROFESSIONALS_AT_SOCIAL_MIN, NUM_PROFESSIONALS_AT_SOCIAL_MAX)
+                    max_prof = min(num_prof, len(self.professional_people))
+                    if max_prof > 0:
+                        professionals = random.sample(self.professional_people, max_prof)
+                        for person in professionals:
+                            fragment = (f"{person.metadata['first']} {person.metadata['last']} attended this "
+                                      f"{event.metadata['type']} to network and build relationships outside of work.")
+                            self.add_edge(person, event, "attended", fragment)
 
-        # Hobby groups organize trips
-        for _ in range(self.edge_counts["NUM_HOBBY_GROUPS_ORGANIZING_TRIPS"]):
-            group = random.choice(self.hobby_groups)
-            trip = random.choice(self.trips)
-            fragment = (f"{group.metadata['name']} organized this group trip to "
-                      f"{trip.metadata['destination']} for members to bond and pursue shared interests.")
-            self.add_edge(group, trip, "organized", fragment)
+        # Hobby groups organize trips (only if both exist)
+        if self.hobby_groups and self.trips:
+            for _ in range(self.edge_counts["NUM_HOBBY_GROUPS_ORGANIZING_TRIPS"]):
+                group = random.choice(self.hobby_groups)
+                trip = random.choice(self.trips)
+                fragment = (f"{group.metadata['name']} organized this group trip to "
+                          f"{trip.metadata['destination']} for members to bond and pursue shared interests.")
+                self.add_edge(group, trip, "organized", fragment)
 
-        # Professional people mentor social people for career development
-        for _ in range(self.edge_counts["NUM_MENTORSHIP_RELATIONSHIPS"]):
-            prof_person = random.choice(self.professional_people)
-            social_person = random.choice(self.social_people)
-            fragment = (f"{prof_person.metadata['first']} {prof_person.metadata['last']} mentors "
-                      f"{social_person.metadata['first']} {social_person.metadata['last']} in "
-                      f"career development, offering guidance and professional advice.")
-            self.add_edge(prof_person, social_person, "mentors", fragment)
+        # Professional people mentor social people for career development (only if both exist)
+        if self.professional_people and self.social_people:
+            for _ in range(self.edge_counts["NUM_MENTORSHIP_RELATIONSHIPS"]):
+                prof_person = random.choice(self.professional_people)
+                social_person = random.choice(self.social_people)
+                fragment = (f"{prof_person.metadata['first']} {prof_person.metadata['last']} mentors "
+                          f"{social_person.metadata['first']} {social_person.metadata['last']} in "
+                          f"career development, offering guidance and professional advice.")
+                self.add_edge(prof_person, social_person, "mentors", fragment)
 
-        # Companies partner with other companies
-        for _ in range(self.edge_counts["NUM_COMPANY_PARTNERSHIPS"]):
-            company1 = random.choice(self.companies)
-            company2 = random.choice(self.companies)
-            if company1 != company2:
-                fragment = (f"{company1.metadata['company_name']} partners with {company2.metadata['company_name']} "
-                          f"to collaborate on {company1.metadata['industry']} and {company2.metadata['industry']} initiatives.")
-                self.add_edge(company1, company2, "partners_with", fragment)
+        # Companies partner with other companies (only if companies exist)
+        if self.companies and len(self.companies) >= 2:
+            for _ in range(self.edge_counts["NUM_COMPANY_PARTNERSHIPS"]):
+                company1 = random.choice(self.companies)
+                company2 = random.choice(self.companies)
+                if company1 != company2:
+                    fragment = (f"{company1.metadata['company_name']} partners with {company2.metadata['company_name']} "
+                              f"to collaborate on {company1.metadata['industry']} and {company2.metadata['industry']} initiatives.")
+                    self.add_edge(company1, company2, "partners_with", fragment)
 
-        # Projects produce reports/deliverables linked to locations
-        for _ in range(self.edge_counts["NUM_PROJECT_COLLABORATIONS"]):
-            project = random.choice(self.projects)
-            city = random.choice(CITIES)
-            # Create an ad-hoc "report" edge fragment
-            fragment = (f"The {project.metadata['type']} project conducted work in {city}, "
-                      f"contributing to regional development and establishing local partnerships.")
-            # We'll just use location as metadata here, not a separate node
-            self.add_edge(project, random.choice(self.companies), "collaborates_on", fragment)
+        # Projects produce reports/deliverables linked to locations (only if projects exist)
+        if self.projects:
+            for _ in range(self.edge_counts["NUM_PROJECT_COLLABORATIONS"]):
+                project = random.choice(self.projects)
+                city = random.choice(CITIES)
+                # Create an ad-hoc "report" edge fragment
+                fragment = (f"The {project.metadata['type']} project conducted work in {city}, "
+                          f"contributing to regional development and establishing local partnerships.")
+                # We'll just use location as metadata here, not a separate node
+                if self.companies:
+                    self.add_edge(project, random.choice(self.companies), "collaborates_on", fragment)
 
-        # Hobby groups meet at homes
-        for _ in range(self.edge_counts["NUM_HOBBY_GROUPS_AT_HOMES"]):
-            group = random.choice(self.hobby_groups)
-            home = random.choice(self.homes)
-            fragment = (f"{group.metadata['name']} regularly meets at this {home.metadata['type']}, "
-                      f"where members gather for activities and social connection.")
-            self.add_edge(group, home, "meets_at", fragment)
+        # Hobby groups meet at homes (only if both exist)
+        if self.hobby_groups and self.homes:
+            for _ in range(self.edge_counts["NUM_HOBBY_GROUPS_AT_HOMES"]):
+                group = random.choice(self.hobby_groups)
+                home = random.choice(self.homes)
+                fragment = (f"{group.metadata['name']} regularly meets at this {home.metadata['type']}, "
+                          f"where members gather for activities and social connection.")
+                self.add_edge(group, home, "meets_at", fragment)
 
-        # Vehicles are used for trips
-        for _ in range(self.edge_counts["NUM_VEHICLES_FOR_TRIPS"]):
-            vehicle = random.choice(self.vehicles)
-            trip = random.choice(self.trips)
-            fragment = (f"This {vehicle.metadata['model']} was used for the trip to {trip.metadata['destination']}, "
-                      f"providing reliable transportation throughout the journey.")
-            self.add_edge(vehicle, trip, "used_for", fragment)
+        # Vehicles are used for trips (only if both exist)
+        if self.vehicles and self.trips:
+            for _ in range(self.edge_counts["NUM_VEHICLES_FOR_TRIPS"]):
+                vehicle = random.choice(self.vehicles)
+                trip = random.choice(self.trips)
+                fragment = (f"This {vehicle.metadata['model']} was used for the trip to {trip.metadata['destination']}, "
+                          f"providing reliable transportation for the journey.")
+                self.add_edge(vehicle, trip, "used_for", fragment)
 
         # Social people connect with each other through events
         for _ in range(self.edge_counts["NUM_SOCIAL_ACQUAINTANCES"]):
@@ -902,58 +934,38 @@ class DataGenerator:
         self.generate_cross_domain_edges()
 
         print(f"Generated {len(self.edges)} edges", file=sys.stderr)
-        print(f"Average edges per node: {len(self.edges) / len(self.nodes):.2f}", file=sys.stderr)
+        avg_edges = len(self.edges) / len(self.nodes) if self.nodes else 0
+        print(f"Average edges per node: {avg_edges:.2f}", file=sys.stderr)
 
-    def write_csv(self, filename: str = None):
+    def write_csv(self):
         """
-        Write nodes and edges to CSV file or stdout.
-
-        Args:
-            filename: Output filename. If None, writes to stdout.
+        Write nodes and edges to stdout as CSV.
         """
-        if filename:
-            print(f"\nWriting to {filename}...", file=sys.stderr)
-            with open(filename, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
+        # Write to stdout
+        print("\nWriting to stdout...", file=sys.stderr)
+        writer = csv.writer(sys.stdout)
 
-                # Write nodes (replace underscores with spaces in names)
-                for node in self.nodes:
-                    display_name = node.name.replace('_', ' ')
-                    writer.writerow([display_name, node.fragment])
+        # Write nodes (replace underscores with spaces in names)
+        for node in self.nodes:
+            display_name = node.name.replace('_', ' ')
+            writer.writerow([display_name, node.fragment])
 
-                # Write edges (replace underscores with spaces in source/target names)
-                for edge in self.edges:
-                    source_display = edge.source.replace('_', ' ')
-                    target_display = edge.target.replace('_', ' ')
-                    edge_type_display = edge.edge_type.replace('_', ' ')
-                    writer.writerow([source_display, target_display, edge_type_display, edge.fragment])
+        # Write edges (replace underscores with spaces in source/target names)
+        for edge in self.edges:
+            source_display = edge.source.replace('_', ' ')
+            target_display = edge.target.replace('_', ' ')
+            edge_type_display = edge.edge_type.replace('_', ' ')
+            writer.writerow([source_display, target_display, edge_type_display, edge.fragment])
 
-            print(f"Done! Written {len(self.nodes)} nodes and {len(self.edges)} edges", file=sys.stderr)
-        else:
-            # Write to stdout
-            print("\nWriting to stdout...", file=sys.stderr)
-            writer = csv.writer(sys.stdout)
-
-            # Write nodes (replace underscores with spaces in names)
-            for node in self.nodes:
-                display_name = node.name.replace('_', ' ')
-                writer.writerow([display_name, node.fragment])
-
-            # Write edges (replace underscores with spaces in source/target names)
-            for edge in self.edges:
-                source_display = edge.source.replace('_', ' ')
-                target_display = edge.target.replace('_', ' ')
-                edge_type_display = edge.edge_type.replace('_', ' ')
-                writer.writerow([source_display, target_display, edge_type_display, edge.fragment])
-
-            print(f"Done! Written {len(self.nodes)} nodes and {len(self.edges)} edges to stdout", file=sys.stderr)
+        print(f"Done! Written {len(self.nodes)} nodes and {len(self.edges)} edges to stdout", file=sys.stderr)
 
     def print_statistics(self):
         """Print statistics about the generated data."""
         print("\n=== Dataset Statistics ===", file=sys.stderr)
         print(f"Total nodes: {len(self.nodes)}", file=sys.stderr)
         print(f"Total edges: {len(self.edges)}", file=sys.stderr)
-        print(f"Average edges per node: {len(self.edges) / len(self.nodes):.2f}", file=sys.stderr)
+        avg_edges = len(self.edges) / len(self.nodes) if self.nodes else 0
+        print(f"Average edges per node: {avg_edges:.2f}", file=sys.stderr)
 
         print("\nNode distribution:", file=sys.stderr)
         node_counts = {}
@@ -987,9 +999,6 @@ Examples:
   # Generate 5000 nodes to stdout, redirect to file
   python3 generate_data.py --total-nodes 5000 > data.csv
 
-  # Generate 500 nodes to a specific file
-  python3 generate_data.py -n 500 -o small_data.csv
-
   # Pipe stdout to another command
   python3 generate_data.py -n 100 | head -20
         '''
@@ -1000,12 +1009,7 @@ Examples:
         default=1000,
         help='Total number of nodes to generate (default: 1000)'
     )
-    parser.add_argument(
-        '-o', '--output',
-        type=str,
-        default=None,
-        help='Output CSV filename (default: stdout)'
-    )
+
     parser.add_argument(
         '--seed',
         type=int,
@@ -1034,7 +1038,7 @@ Examples:
 
     generator.generate_all_nodes()
     generator.generate_all_edges()
-    generator.write_csv(args.output)
+    generator.write_csv()
     generator.print_statistics()
 
 
