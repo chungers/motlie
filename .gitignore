@@ -11,3 +11,6 @@ target/
 
 # Claude Code local settings
 .claude/
+
+# MacOS
+.DS_Store
