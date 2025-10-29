@@ -1,17 +1,211 @@
 #!/usr/bin/env python3
 """
 Generate a diverse CSV dataset for testing the Motlie graph processor.
-Creates 1000 nodes (45% professional, 45% social, 7% things, 3% events) with ~5 edges per node.
+Creates nodes (45% professional, 45% social, 7% things, 3% events) with ~5 edges per node.
 Ensures referential consistency and descriptive contexts.
 """
 
+import argparse
 import csv
 import random
+import sys
 from typing import List, Tuple, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 
-random.seed(42)  # For reproducibility
+# ============================================================================
+# CONFIGURATION CONSTANTS
+# ============================================================================
+# These constants control the distribution and scale of the generated dataset.
+# Adjust these values to create different dataset sizes and compositions.
+
+# Random seed for reproducible data generation
+RANDOM_SEED = 42
+
+# --- High-Level Category Distribution (must sum to 1.0) ---
+CATEGORY_DISTRIBUTION = {
+    'PROFESSIONAL': 0.45,  # 45% - Work-related entities
+    'SOCIAL': 0.45,        # 45% - Social and personal entities
+    'THINGS': 0.07,        # 7%  - Physical possessions
+    'EVENTS': 0.03,        # 3%  - Travel and conferences
+}
+
+# --- Sub-Category Distribution Within Each Category (each must sum to 1.0) ---
+# Professional breakdown
+PROFESSIONAL_DISTRIBUTION = {
+    'PEOPLE': 0.445,    # 44.5% of professional = individual workers
+    'COMPANIES': 0.333,  # 33.3% of professional = organizations
+    'PROJECTS': 0.222,   # 22.2% of professional = work initiatives
+}
+
+# Social breakdown
+SOCIAL_DISTRIBUTION = {
+    'PEOPLE': 0.445,        # 44.5% of social = individuals with social focus
+    'EVENTS': 0.333,        # 33.3% of social = parties, weddings, gatherings
+    'HOBBY_GROUPS': 0.222,  # 22.2% of social = clubs and community groups
+}
+
+# Things breakdown
+THINGS_DISTRIBUTION = {
+    'HOMES': 0.572,     # 57.2% of things = houses, apartments
+    'VEHICLES': 0.428,  # 42.8% of things = cars, transportation
+}
+
+# Events breakdown
+EVENTS_DISTRIBUTION = {
+    'TRIPS': 0.667,        # 66.7% of events = vacations, travel
+    'CONFERENCES': 0.333,  # 33.3% of events = professional conferences
+}
+
+# --- Validation ---
+def validate_distribution(distribution: Dict[str, float], name: str, tolerance: float = 0.001):
+    """Validate that distribution percentages sum to 1.0 within tolerance."""
+    total = sum(distribution.values())
+    if abs(total - 1.0) > tolerance:
+        raise ValueError(f"{name} percentages sum to {total:.4f}, expected 1.0 (tolerance: {tolerance})")
+
+# Validate all distributions
+validate_distribution(CATEGORY_DISTRIBUTION, "CATEGORY_DISTRIBUTION")
+validate_distribution(PROFESSIONAL_DISTRIBUTION, "PROFESSIONAL_DISTRIBUTION")
+validate_distribution(SOCIAL_DISTRIBUTION, "SOCIAL_DISTRIBUTION")
+validate_distribution(THINGS_DISTRIBUTION, "THINGS_DISTRIBUTION")
+validate_distribution(EVENTS_DISTRIBUTION, "EVENTS_DISTRIBUTION")
+
+
+# --- Function to Compute Node Counts Based on Total ---
+def compute_node_counts(total_nodes: int) -> Dict[str, int]:
+    """
+    Compute the number of each node type based on total_nodes and distribution percentages.
+
+    Args:
+        total_nodes: Total number of nodes to generate
+
+    Returns:
+        Dictionary with computed counts for each node type
+    """
+    # Calculate category totals
+    total_professional = int(total_nodes * CATEGORY_DISTRIBUTION['PROFESSIONAL'])
+    total_social = int(total_nodes * CATEGORY_DISTRIBUTION['SOCIAL'])
+    total_things = int(total_nodes * CATEGORY_DISTRIBUTION['THINGS'])
+    total_events = int(total_nodes * CATEGORY_DISTRIBUTION['EVENTS'])
+
+    # Calculate specific node type counts
+    counts = {
+        # Professional
+        'NUM_PROFESSIONAL_PEOPLE': round(total_professional * PROFESSIONAL_DISTRIBUTION['PEOPLE']),
+        'NUM_COMPANIES': round(total_professional * PROFESSIONAL_DISTRIBUTION['COMPANIES']),
+        'NUM_PROFESSIONAL_PROJECTS': round(total_professional * PROFESSIONAL_DISTRIBUTION['PROJECTS']),
+
+        # Social
+        'NUM_SOCIAL_PEOPLE': round(total_social * SOCIAL_DISTRIBUTION['PEOPLE']),
+        'NUM_SOCIAL_EVENTS': round(total_social * SOCIAL_DISTRIBUTION['EVENTS']),
+        'NUM_HOBBY_GROUPS': round(total_social * SOCIAL_DISTRIBUTION['HOBBY_GROUPS']),
+
+        # Things
+        'NUM_HOMES': round(total_things * THINGS_DISTRIBUTION['HOMES']),
+        'NUM_VEHICLES': round(total_things * THINGS_DISTRIBUTION['VEHICLES']),
+
+        # Events
+        'NUM_TRIPS': round(total_events * EVENTS_DISTRIBUTION['TRIPS']),
+        'NUM_CONFERENCES': round(total_events * EVENTS_DISTRIBUTION['CONFERENCES']),
+
+        # Totals (for reference)
+        'TOTAL_PROFESSIONAL': total_professional,
+        'TOTAL_SOCIAL': total_social,
+        'TOTAL_THINGS': total_things,
+        'TOTAL_EVENTS': total_events,
+    }
+
+    return counts
+
+# --- Edge Generation Probabilities and Counts ---
+# Professional relationships
+PROB_PERSON_HAS_COMPANY = 0.85          # 85% of professional people work at a company
+NUM_COLLABORATORS_MIN = 3               # Minimum coworkers each person collaborates with
+NUM_COLLABORATORS_MAX = 6               # Maximum coworkers each person collaborates with
+PROB_PERSON_ATTENDS_CONFERENCE = 0.30   # 30% of professional people attend conferences
+
+# Social relationships
+NUM_FRIENDS_MIN = 4                     # Minimum friends per social person
+NUM_FRIENDS_MAX = 7                     # Maximum friends per social person
+NUM_EVENT_ATTENDEES_MIN = 4             # Minimum attendees per social event
+NUM_EVENT_ATTENDEES_MAX = 8             # Maximum attendees per social event
+PROB_PERSON_JOINS_HOBBY_GROUP = 0.60    # 60% of social people join a hobby group
+PROB_PERSON_TAKES_TRIP = 0.25           # 25% of social people take trips
+
+# Ownership
+PERCENT_PEOPLE_WITH_MULTIPLE_VEHICLES = 0.05  # 5% of all people own multiple vehicles
+
+# Cross-domain edges (connecting professional and social domains)
+PERCENT_CROSS_DOMAIN_CONNECTIONS = 0.625      # 62.5% of one group (250/400)
+PERCENT_SOCIAL_AT_CONFERENCES = 0.15          # 15% of social people attend conferences
+PERCENT_PROFESSIONAL_IN_HOBBY_GROUPS = 0.60   # 60% of professional people join hobby groups
+PERCENT_COMPANY_SPONSORSHIPS = 0.50           # 50% of hobby groups get corporate sponsors
+PERCENT_COMPANIES_HOSTING_EVENTS = 0.267      # 26.7% of social events hosted by companies
+PERCENT_PROJECTS_USING_VEHICLES = 0.40        # 40% of projects use vehicles
+PERCENT_EVENTS_AT_HOMES = 0.333               # 33.3% of social events at homes
+PERCENT_TRIPS_FROM_HOMES = 1.50               # 150% of trips (some homes = multiple trips)
+PERCENT_MIXED_SOCIAL_EVENTS = 0.533           # 53.3% of social events have professional attendees
+NUM_PROFESSIONALS_AT_SOCIAL_MIN = 1           # Min professional people at mixed events
+NUM_PROFESSIONALS_AT_SOCIAL_MAX = 2           # Max professional people at mixed events
+PERCENT_HOBBY_GROUPS_ORGANIZING_TRIPS = 1.75  # 175% of trips (more trips than organizers)
+PERCENT_MENTORSHIP_RELATIONSHIPS = 0.50       # 50% of social people get professional mentors
+PERCENT_COMPANY_PARTNERSHIPS = 0.667          # 66.7% of companies partner with another
+PERCENT_PROJECT_COLLABORATIONS = 0.50         # 50% of projects collaborate with companies
+PERCENT_HOBBY_GROUPS_AT_HOMES = 0.60          # 60% of hobby groups meet at homes
+PERCENT_VEHICLES_FOR_TRIPS = 2.50             # 250% of trips (multiple vehicles per trip)
+PERCENT_SOCIAL_ACQUAINTANCES = 0.75           # 75% of social people have additional connections
+NUM_BUSINESS_TRIP_TRAVELERS_MIN = 1           # Min travelers on business trips
+NUM_BUSINESS_TRIP_TRAVELERS_MAX = 3           # Max travelers on business trips
+NUM_FAMILY_TRIP_TRAVELERS_MIN = 2             # Min travelers on family trips
+NUM_FAMILY_TRIP_TRAVELERS_MAX = 4             # Max travelers on family trips
+
+# --- Function to Compute Edge Counts Based on Node Counts ---
+def compute_edge_counts(node_counts: Dict[str, int]) -> Dict[str, int]:
+    """
+    Compute the number of each edge type based on node counts and distribution percentages.
+
+    Args:
+        node_counts: Dictionary of computed node counts
+
+    Returns:
+        Dictionary with computed counts for each edge type
+    """
+    num_professional_people = node_counts['NUM_PROFESSIONAL_PEOPLE']
+    num_social_people = node_counts['NUM_SOCIAL_PEOPLE']
+    num_companies = node_counts['NUM_COMPANIES']
+    num_projects = node_counts['NUM_PROFESSIONAL_PROJECTS']
+    num_social_events = node_counts['NUM_SOCIAL_EVENTS']
+    num_hobby_groups = node_counts['NUM_HOBBY_GROUPS']
+    num_trips = node_counts['NUM_TRIPS']
+
+    total_people = num_professional_people + num_social_people
+
+    edge_counts = {
+        'NUM_PEOPLE_WITH_MULTIPLE_VEHICLES': int(total_people * PERCENT_PEOPLE_WITH_MULTIPLE_VEHICLES),
+        'NUM_CROSS_DOMAIN_CONNECTIONS': int(num_social_people * PERCENT_CROSS_DOMAIN_CONNECTIONS),
+        'NUM_SOCIAL_AT_CONFERENCES': int(num_social_people * PERCENT_SOCIAL_AT_CONFERENCES),
+        'NUM_PROFESSIONAL_IN_HOBBY_GROUPS': int(num_professional_people * PERCENT_PROFESSIONAL_IN_HOBBY_GROUPS),
+        'NUM_COMPANY_SPONSORSHIPS': int(num_hobby_groups * PERCENT_COMPANY_SPONSORSHIPS),
+        'NUM_COMPANIES_HOSTING_EVENTS': int(num_social_events * PERCENT_COMPANIES_HOSTING_EVENTS),
+        'NUM_PROJECTS_USING_VEHICLES': int(num_projects * PERCENT_PROJECTS_USING_VEHICLES),
+        'NUM_EVENTS_AT_HOMES': int(num_social_events * PERCENT_EVENTS_AT_HOMES),
+        'NUM_TRIPS_FROM_HOMES': int(num_trips * PERCENT_TRIPS_FROM_HOMES),
+        'NUM_MIXED_SOCIAL_EVENTS': int(num_social_events * PERCENT_MIXED_SOCIAL_EVENTS),
+        'NUM_HOBBY_GROUPS_ORGANIZING_TRIPS': int(num_trips * PERCENT_HOBBY_GROUPS_ORGANIZING_TRIPS),
+        'NUM_MENTORSHIP_RELATIONSHIPS': int(num_social_people * PERCENT_MENTORSHIP_RELATIONSHIPS),
+        'NUM_COMPANY_PARTNERSHIPS': int(num_companies * PERCENT_COMPANY_PARTNERSHIPS),
+        'NUM_PROJECT_COLLABORATIONS': int(num_projects * PERCENT_PROJECT_COLLABORATIONS),
+        'NUM_HOBBY_GROUPS_AT_HOMES': int(num_hobby_groups * PERCENT_HOBBY_GROUPS_AT_HOMES),
+        'NUM_VEHICLES_FOR_TRIPS': int(num_trips * PERCENT_VEHICLES_FOR_TRIPS),
+        'NUM_SOCIAL_ACQUAINTANCES': int(num_social_people * PERCENT_SOCIAL_ACQUAINTANCES),
+    }
+
+    return edge_counts
+
+# ============================================================================
+
+random.seed(RANDOM_SEED)
 
 
 class NodeType(Enum):
@@ -179,10 +373,14 @@ STREETS = [
 
 
 class DataGenerator:
-    def __init__(self):
+    def __init__(self, node_counts: Dict[str, int], edge_counts: Dict[str, int]):
         self.nodes: List[Node] = []
         self.edges: List[Edge] = []
         self.used_names = set()
+
+        # Store computed counts
+        self.node_counts = node_counts
+        self.edge_counts = edge_counts
 
         # Track entities for referential consistency
         self.professional_people = []
@@ -379,42 +577,38 @@ class DataGenerator:
         return node
 
     def generate_all_nodes(self):
-        """Generate all 1000 nodes with specified distribution."""
-        print("Generating nodes...")
+        """Generate all nodes with specified distribution."""
+        print("Generating nodes...", file=sys.stderr)
 
-        # Professional: 450 (45%)
-        # 200 professional people, 150 companies, 100 projects
-        for i in range(200):
+        # Professional nodes
+        for i in range(self.node_counts['NUM_PROFESSIONAL_PEOPLE']):
             self.nodes.append(self.generate_professional_person(i))
-        for i in range(150):
+        for i in range(self.node_counts['NUM_COMPANIES']):
             self.nodes.append(self.generate_company(i))
-        for i in range(100):
+        for i in range(self.node_counts['NUM_PROFESSIONAL_PROJECTS']):
             self.nodes.append(self.generate_project(i))
 
-        # Social: 450 (45%)
-        # 200 social people, 150 social events, 100 hobby groups
-        for i in range(200):
+        # Social nodes
+        for i in range(self.node_counts['NUM_SOCIAL_PEOPLE']):
             self.nodes.append(self.generate_social_person(i))
-        for i in range(150):
+        for i in range(self.node_counts['NUM_SOCIAL_EVENTS']):
             self.nodes.append(self.generate_social_event(i))
-        for i in range(100):
+        for i in range(self.node_counts['NUM_HOBBY_GROUPS']):
             self.nodes.append(self.generate_hobby_group(i))
 
-        # Things: 70 (7%)
-        # 40 homes, 30 vehicles
-        for i in range(40):
+        # Things
+        for i in range(self.node_counts['NUM_HOMES']):
             self.nodes.append(self.generate_home(i))
-        for i in range(30):
+        for i in range(self.node_counts['NUM_VEHICLES']):
             self.nodes.append(self.generate_vehicle(i))
 
-        # Events: 30 (3%)
-        # 20 trips, 10 conferences
-        for i in range(20):
+        # Events
+        for i in range(self.node_counts['NUM_TRIPS']):
             self.nodes.append(self.generate_trip(i))
-        for i in range(10):
+        for i in range(self.node_counts['NUM_CONFERENCES']):
             self.nodes.append(self.generate_conference(i))
 
-        print(f"Generated {len(self.nodes)} nodes")
+        print(f"Generated {len(self.nodes)} nodes", file=sys.stderr)
 
     def add_edge(self, source: Node, target: Node, edge_type: str, fragment: str):
         """Add an edge with validation."""
@@ -423,11 +617,11 @@ class DataGenerator:
 
     def generate_professional_edges(self):
         """Generate edges for professional relationships."""
-        print("Generating professional edges...")
+        print("Generating professional edges...", file=sys.stderr)
 
         # Professional people work at companies
         for person in self.professional_people:
-            if random.random() < 0.85:  # 85% have a company
+            if random.random() < PROB_PERSON_HAS_COMPANY:
                 company = random.choice(self.companies)
                 fragment = (f"{person.metadata['first']} {person.metadata['last']} works at "
                           f"{company.metadata['company_name']} as a {person.metadata['role']}, "
@@ -435,13 +629,16 @@ class DataGenerator:
                 self.add_edge(person, company, "works_at", fragment)
 
         # Professional people manage/contribute to projects
-        for person in self.professional_people[:150]:  # 150 people manage projects
+        # First half manage projects
+        num_managers = len(self.professional_people) // 2
+        for person in self.professional_people[:num_managers]:
             project = random.choice(self.projects)
             fragment = (f"{person.metadata['first']} {person.metadata['last']} leads the "
                       f"{project.metadata['type']} project, overseeing strategic direction and team coordination.")
             self.add_edge(person, project, "manages", fragment)
 
-        for person in self.professional_people[150:]:  # Others contribute
+        # Second half contribute to projects
+        for person in self.professional_people[num_managers:]:
             project = random.choice(self.projects)
             fragment = (f"{person.metadata['first']} {person.metadata['last']} contributes to the "
                       f"{project.metadata['type']} project with their expertise in {person.metadata['dept']}.")
@@ -449,7 +646,7 @@ class DataGenerator:
 
         # Professional collaborations
         for person in self.professional_people:
-            num_collaborators = random.randint(3, 6)
+            num_collaborators = random.randint(NUM_COLLABORATORS_MIN, NUM_COLLABORATORS_MAX)
             collaborators = random.sample(self.professional_people, min(num_collaborators, len(self.professional_people) - 1))
             for collaborator in collaborators:
                 if person != collaborator:
@@ -466,7 +663,7 @@ class DataGenerator:
 
         # Professional people attend conferences
         for person in self.professional_people:
-            if random.random() < 0.3:  # 30% attend conferences
+            if random.random() < PROB_PERSON_ATTENDS_CONFERENCE:
                 conf = random.choice(self.conferences)
                 fragment = (f"{person.metadata['first']} {person.metadata['last']} attended "
                           f"{conf.metadata['name']} in {conf.metadata['city']} to stay current with industry trends.")
@@ -474,11 +671,11 @@ class DataGenerator:
 
     def generate_social_edges(self):
         """Generate edges for social relationships."""
-        print("Generating social edges...")
+        print("Generating social edges...", file=sys.stderr)
 
         # Social friendships
         for person in self.social_people:
-            num_friends = random.randint(4, 7)
+            num_friends = random.randint(NUM_FRIENDS_MIN, NUM_FRIENDS_MAX)
             friends = random.sample(self.social_people, min(num_friends, len(self.social_people) - 1))
             for friend in friends:
                 if person != friend:
@@ -489,7 +686,7 @@ class DataGenerator:
 
         # Social people attend events
         for event in self.social_events:
-            num_attendees = random.randint(4, 8)
+            num_attendees = random.randint(NUM_EVENT_ATTENDEES_MIN, NUM_EVENT_ATTENDEES_MAX)
             attendees = random.sample(self.social_people, num_attendees)
             for person in attendees:
                 fragment = (f"{person.metadata['first']} {person.metadata['last']} attended the "
@@ -498,7 +695,7 @@ class DataGenerator:
 
         # Social people join hobby groups
         for person in self.social_people:
-            if random.random() < 0.6:  # 60% join a hobby group
+            if random.random() < PROB_PERSON_JOINS_HOBBY_GROUP:
                 group = random.choice(self.hobby_groups)
                 fragment = (f"{person.metadata['first']} {person.metadata['last']} is an active member of "
                           f"{group.metadata['name']}, participating in group activities and building community connections.")
@@ -506,7 +703,7 @@ class DataGenerator:
 
         # Social people go on trips
         for person in self.social_people:
-            if random.random() < 0.25:  # 25% take trips
+            if random.random() < PROB_PERSON_TAKES_TRIP:
                 trip = random.choice(self.trips)
                 fragment = (f"{person.metadata['first']} {person.metadata['last']} embarked on a trip to "
                           f"{trip.metadata['destination']}, creating unforgettable memories and experiences.")
@@ -514,7 +711,7 @@ class DataGenerator:
 
     def generate_ownership_edges(self):
         """Generate edges for ownership of things."""
-        print("Generating ownership edges...")
+        print("Generating ownership edges...", file=sys.stderr)
 
         # Combine all people (both professional and social can own things)
         all_people = self.professional_people + self.social_people
@@ -534,7 +731,7 @@ class DataGenerator:
             self.add_edge(owner, vehicle, "owns", fragment)
 
         # Some people have multiple vehicles
-        for person in random.sample(all_people, 20):
+        for person in random.sample(all_people, self.edge_counts['NUM_PEOPLE_WITH_MULTIPLE_VEHICLES']):
             vehicle = random.choice(self.vehicles)
             fragment = (f"{person.metadata['first']} {person.metadata['last']} also owns this vehicle "
                       f"for specific purposes and occasions.")
@@ -542,10 +739,10 @@ class DataGenerator:
 
     def generate_cross_domain_edges(self):
         """Generate edges that cross between professional and social domains."""
-        print("Generating cross-domain edges...")
+        print("Generating cross-domain edges...", file=sys.stderr)
 
         # Some professional people also have social connections
-        for _ in range(250):
+        for _ in range(self.edge_counts['NUM_CROSS_DOMAIN_CONNECTIONS']):
             prof_person = random.choice(self.professional_people)
             social_person = random.choice(self.social_people)
             fragment = (f"{prof_person.metadata['first']} {prof_person.metadata['last']} and "
@@ -554,21 +751,21 @@ class DataGenerator:
             self.add_edge(prof_person, social_person, "knows", fragment)
 
         # Some social people attend professional conferences
-        for person in random.sample(self.social_people, 30):
+        for person in random.sample(self.social_people, self.edge_counts['NUM_SOCIAL_AT_CONFERENCES']):
             conf = random.choice(self.conferences)
             fragment = (f"{person.metadata['first']} {person.metadata['last']} attended "
                       f"{conf.metadata['name']} in {conf.metadata['city']} to explore professional opportunities.")
             self.add_edge(person, conf, "attended", fragment)
 
         # Professional people join hobby groups for work-life balance
-        for person in random.sample(self.professional_people, 120):
+        for person in random.sample(self.professional_people, self.edge_counts['NUM_PROFESSIONAL_IN_HOBBY_GROUPS']):
             group = random.choice(self.hobby_groups)
             fragment = (f"{person.metadata['first']} {person.metadata['last']} is a member of "
                       f"{group.metadata['name']} to maintain work-life balance and pursue personal interests.")
             self.add_edge(person, group, "member_of", fragment)
 
         # Companies sponsor hobby groups and social events
-        for _ in range(50):
+        for _ in range(self.edge_counts["NUM_COMPANY_SPONSORSHIPS"]):
             company = random.choice(self.companies)
             group = random.choice(self.hobby_groups)
             fragment = (f"{company.metadata['company_name']} sponsors {group.metadata['name']} "
@@ -576,7 +773,7 @@ class DataGenerator:
             self.add_edge(company, group, "sponsors", fragment)
 
         # Organizations host social events
-        for _ in range(40):
+        for _ in range(self.edge_counts["NUM_COMPANIES_HOSTING_EVENTS"]):
             company = random.choice(self.companies)
             event = random.choice(self.social_events)
             fragment = (f"{company.metadata['company_name']} hosted this {event.metadata['type']} "
@@ -584,7 +781,7 @@ class DataGenerator:
             self.add_edge(company, event, "hosts", fragment)
 
         # Projects utilize vehicles for field work
-        for _ in range(40):
+        for _ in range(self.edge_counts["NUM_PROJECTS_USING_VEHICLES"]):
             project = random.choice(self.projects)
             vehicle = random.choice(self.vehicles)
             fragment = (f"The {project.metadata['type']} project utilizes this vehicle "
@@ -592,7 +789,7 @@ class DataGenerator:
             self.add_edge(project, vehicle, "uses", fragment)
 
         # Social events happen at homes
-        for _ in range(50):
+        for _ in range(self.edge_counts["NUM_EVENTS_AT_HOMES"]):
             event = random.choice(self.social_events)
             home = random.choice(self.homes)
             fragment = (f"This {event.metadata['type']} took place at this {home.metadata['type']} "
@@ -600,7 +797,7 @@ class DataGenerator:
             self.add_edge(event, home, "held_at", fragment)
 
         # Trips start from homes
-        for _ in range(30):
+        for _ in range(self.edge_counts["NUM_TRIPS_FROM_HOMES"]):
             trip = random.choice(self.trips)
             home = random.choice(self.homes)
             fragment = (f"This trip to {trip.metadata['destination']} departed from this home, "
@@ -608,9 +805,9 @@ class DataGenerator:
             self.add_edge(trip, home, "departed_from", fragment)
 
         # Professional and social people both attend social events with mixed relationships
-        for event in random.sample(self.social_events, 80):
+        for event in random.sample(self.social_events, self.edge_counts["NUM_MIXED_SOCIAL_EVENTS"]):
             # Add some professional people to social events
-            num_prof = random.randint(1, 2)
+            num_prof = random.randint(NUM_PROFESSIONALS_AT_SOCIAL_MIN, NUM_PROFESSIONALS_AT_SOCIAL_MAX)
             professionals = random.sample(self.professional_people, num_prof)
             for person in professionals:
                 fragment = (f"{person.metadata['first']} {person.metadata['last']} attended this "
@@ -618,7 +815,7 @@ class DataGenerator:
                 self.add_edge(person, event, "attended", fragment)
 
         # Hobby groups organize trips
-        for _ in range(35):
+        for _ in range(self.edge_counts["NUM_HOBBY_GROUPS_ORGANIZING_TRIPS"]):
             group = random.choice(self.hobby_groups)
             trip = random.choice(self.trips)
             fragment = (f"{group.metadata['name']} organized this group trip to "
@@ -626,7 +823,7 @@ class DataGenerator:
             self.add_edge(group, trip, "organized", fragment)
 
         # Professional people mentor social people for career development
-        for _ in range(100):
+        for _ in range(self.edge_counts["NUM_MENTORSHIP_RELATIONSHIPS"]):
             prof_person = random.choice(self.professional_people)
             social_person = random.choice(self.social_people)
             fragment = (f"{prof_person.metadata['first']} {prof_person.metadata['last']} mentors "
@@ -635,7 +832,7 @@ class DataGenerator:
             self.add_edge(prof_person, social_person, "mentors", fragment)
 
         # Companies partner with other companies
-        for _ in range(100):
+        for _ in range(self.edge_counts["NUM_COMPANY_PARTNERSHIPS"]):
             company1 = random.choice(self.companies)
             company2 = random.choice(self.companies)
             if company1 != company2:
@@ -644,7 +841,7 @@ class DataGenerator:
                 self.add_edge(company1, company2, "partners_with", fragment)
 
         # Projects produce reports/deliverables linked to locations
-        for _ in range(50):
+        for _ in range(self.edge_counts["NUM_PROJECT_COLLABORATIONS"]):
             project = random.choice(self.projects)
             city = random.choice(CITIES)
             # Create an ad-hoc "report" edge fragment
@@ -654,7 +851,7 @@ class DataGenerator:
             self.add_edge(project, random.choice(self.companies), "collaborates_on", fragment)
 
         # Hobby groups meet at homes
-        for _ in range(60):
+        for _ in range(self.edge_counts["NUM_HOBBY_GROUPS_AT_HOMES"]):
             group = random.choice(self.hobby_groups)
             home = random.choice(self.homes)
             fragment = (f"{group.metadata['name']} regularly meets at this {home.metadata['type']}, "
@@ -662,7 +859,7 @@ class DataGenerator:
             self.add_edge(group, home, "meets_at", fragment)
 
         # Vehicles are used for trips
-        for _ in range(50):
+        for _ in range(self.edge_counts["NUM_VEHICLES_FOR_TRIPS"]):
             vehicle = random.choice(self.vehicles)
             trip = random.choice(self.trips)
             fragment = (f"This {vehicle.metadata['model']} was used for the trip to {trip.metadata['destination']}, "
@@ -670,7 +867,7 @@ class DataGenerator:
             self.add_edge(vehicle, trip, "used_for", fragment)
 
         # Social people connect with each other through events
-        for _ in range(150):
+        for _ in range(self.edge_counts["NUM_SOCIAL_ACQUAINTANCES"]):
             person1 = random.choice(self.social_people)
             person2 = random.choice(self.social_people)
             if person1 != person2:
@@ -682,7 +879,7 @@ class DataGenerator:
         # Business trips involve professional people
         for trip in self.trips:
             if trip.metadata['type'] == "Business Trip":
-                num_travelers = random.randint(1, 3)
+                num_travelers = random.randint(NUM_BUSINESS_TRIP_TRAVELERS_MIN, NUM_BUSINESS_TRIP_TRAVELERS_MAX)
                 travelers = random.sample(self.professional_people, num_travelers)
                 for person in travelers:
                     fragment = (f"{person.metadata['first']} {person.metadata['last']} took this business trip to "
@@ -690,7 +887,7 @@ class DataGenerator:
                     self.add_edge(person, trip, "traveled_on", fragment)
             else:
                 # Family trips involve social people
-                num_travelers = random.randint(2, 4)
+                num_travelers = random.randint(NUM_FAMILY_TRIP_TRAVELERS_MIN, NUM_FAMILY_TRIP_TRAVELERS_MAX)
                 travelers = random.sample(self.social_people, num_travelers)
                 for person in travelers:
                     fragment = (f"{person.metadata['first']} {person.metadata['last']} enjoyed this trip to "
@@ -704,14 +901,38 @@ class DataGenerator:
         self.generate_ownership_edges()
         self.generate_cross_domain_edges()
 
-        print(f"Generated {len(self.edges)} edges")
-        print(f"Average edges per node: {len(self.edges) / len(self.nodes):.2f}")
+        print(f"Generated {len(self.edges)} edges", file=sys.stderr)
+        print(f"Average edges per node: {len(self.edges) / len(self.nodes):.2f}", file=sys.stderr)
 
-    def write_csv(self, filename: str):
-        """Write nodes and edges to CSV file."""
-        print(f"\nWriting to {filename}...")
-        with open(filename, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
+    def write_csv(self, filename: str = None):
+        """
+        Write nodes and edges to CSV file or stdout.
+
+        Args:
+            filename: Output filename. If None, writes to stdout.
+        """
+        if filename:
+            print(f"\nWriting to {filename}...", file=sys.stderr)
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+
+                # Write nodes (replace underscores with spaces in names)
+                for node in self.nodes:
+                    display_name = node.name.replace('_', ' ')
+                    writer.writerow([display_name, node.fragment])
+
+                # Write edges (replace underscores with spaces in source/target names)
+                for edge in self.edges:
+                    source_display = edge.source.replace('_', ' ')
+                    target_display = edge.target.replace('_', ' ')
+                    edge_type_display = edge.edge_type.replace('_', ' ')
+                    writer.writerow([source_display, target_display, edge_type_display, edge.fragment])
+
+            print(f"Done! Written {len(self.nodes)} nodes and {len(self.edges)} edges", file=sys.stderr)
+        else:
+            # Write to stdout
+            print("\nWriting to stdout...", file=sys.stderr)
+            writer = csv.writer(sys.stdout)
 
             # Write nodes (replace underscores with spaces in names)
             for node in self.nodes:
@@ -725,16 +946,16 @@ class DataGenerator:
                 edge_type_display = edge.edge_type.replace('_', ' ')
                 writer.writerow([source_display, target_display, edge_type_display, edge.fragment])
 
-        print(f"Done! Written {len(self.nodes)} nodes and {len(self.edges)} edges")
+            print(f"Done! Written {len(self.nodes)} nodes and {len(self.edges)} edges to stdout", file=sys.stderr)
 
     def print_statistics(self):
         """Print statistics about the generated data."""
-        print("\n=== Dataset Statistics ===")
-        print(f"Total nodes: {len(self.nodes)}")
-        print(f"Total edges: {len(self.edges)}")
-        print(f"Average edges per node: {len(self.edges) / len(self.nodes):.2f}")
+        print("\n=== Dataset Statistics ===", file=sys.stderr)
+        print(f"Total nodes: {len(self.nodes)}", file=sys.stderr)
+        print(f"Total edges: {len(self.edges)}", file=sys.stderr)
+        print(f"Average edges per node: {len(self.edges) / len(self.nodes):.2f}", file=sys.stderr)
 
-        print("\nNode distribution:")
+        print("\nNode distribution:", file=sys.stderr)
         node_counts = {}
         for node in self.nodes:
             node_type = node.node_type.value
@@ -742,23 +963,78 @@ class DataGenerator:
 
         for node_type, count in sorted(node_counts.items()):
             percentage = (count / len(self.nodes)) * 100
-            print(f"  {node_type}: {count} ({percentage:.1f}%)")
+            print(f"  {node_type}: {count} ({percentage:.1f}%)", file=sys.stderr)
 
-        print("\nEdge type distribution:")
+        print("\nEdge type distribution:", file=sys.stderr)
         edge_counts = {}
         for edge in self.edges:
             edge_counts[edge.edge_type] = edge_counts.get(edge.edge_type, 0) + 1
 
         for edge_type, count in sorted(edge_counts.items(), key=lambda x: x[1], reverse=True):
-            print(f"  {edge_type}: {count}")
+            print(f"  {edge_type}: {count}", file=sys.stderr)
 
 
 def main():
-    generator = DataGenerator()
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='Generate a diverse CSV dataset for testing the Motlie graph processor.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  # Generate 1000 nodes to stdout (default)
+  python3 generate_data.py
+
+  # Generate 5000 nodes to stdout, redirect to file
+  python3 generate_data.py --total-nodes 5000 > data.csv
+
+  # Generate 500 nodes to a specific file
+  python3 generate_data.py -n 500 -o small_data.csv
+
+  # Pipe stdout to another command
+  python3 generate_data.py -n 100 | head -20
+        '''
+    )
+    parser.add_argument(
+        '-n', '--total-nodes',
+        type=int,
+        default=1000,
+        help='Total number of nodes to generate (default: 1000)'
+    )
+    parser.add_argument(
+        '-o', '--output',
+        type=str,
+        default=None,
+        help='Output CSV filename (default: stdout)'
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=RANDOM_SEED,
+        help=f'Random seed for reproducibility (default: {RANDOM_SEED})'
+    )
+
+    args = parser.parse_args()
+
+    # Set random seed
+    random.seed(args.seed)
+
+    # Compute node and edge counts based on total_nodes
+    node_counts = compute_node_counts(args.total_nodes)
+    edge_counts = compute_edge_counts(node_counts)
+
+    print(f"Generating dataset with {args.total_nodes} nodes...", file=sys.stderr)
+    print(f"Distribution: {int(CATEGORY_DISTRIBUTION['PROFESSIONAL']*100)}% professional, "
+          f"{int(CATEGORY_DISTRIBUTION['SOCIAL']*100)}% social, "
+          f"{int(CATEGORY_DISTRIBUTION['THINGS']*100)}% things, "
+          f"{int(CATEGORY_DISTRIBUTION['EVENTS']*100)}% events", file=sys.stderr)
+    print(file=sys.stderr)
+
+    # Create generator with computed counts
+    generator = DataGenerator(node_counts, edge_counts)
 
     generator.generate_all_nodes()
     generator.generate_all_edges()
-    generator.write_csv("sample_data.csv")
+    generator.write_csv(args.output)
     generator.print_statistics()
 
 
