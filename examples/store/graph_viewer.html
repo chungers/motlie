@@ -579,6 +579,7 @@
         let edgesData = [];
         let dataNodes = null;
         let dataEdges = null;
+        let adjacencyMap = {};  // Maps nodeId -> {edges: [], neighbors: []}
 
         // Parse CSV content
         function parseCSV(text) {
@@ -730,8 +731,15 @@
                 });
             }
 
-            // Prepare vis.js edges
+            // Prepare vis.js edges and build adjacency map
             edgesData = [];
+            adjacencyMap = {};
+
+            // Initialize adjacency map for all nodes
+            for (const name of Object.keys(nodes)) {
+                adjacencyMap[name] = { edges: [], neighbors: [] };
+            }
+
             edges.forEach((edge, i) => {
                 edgesData.push({
                     id: i,
@@ -743,6 +751,16 @@
                     fragment: edge.fragment,
                     arrows: 'to',
                 });
+
+                // Build adjacency map
+                if (adjacencyMap[edge.source]) {
+                    adjacencyMap[edge.source].edges.push(i);
+                    adjacencyMap[edge.source].neighbors.push(edge.target);
+                }
+                if (adjacencyMap[edge.target]) {
+                    adjacencyMap[edge.target].edges.push(i);
+                    adjacencyMap[edge.target].neighbors.push(edge.source);
+                }
             });
 
             // Create network
@@ -765,7 +783,20 @@
                     },
                     borderWidth: 2,
                     borderWidthSelected: 4,
-                    shadow: true
+                    shadow: {
+                        enabled: false  // Disable shadows for performance
+                    },
+                    scaling: {
+                        min: 10,
+                        max: 40,
+                        label: {
+                            enabled: true,
+                            min: 12,
+                            max: 12,
+                            maxVisible: 30,
+                            drawThreshold: 1  // Always show labels (we control via font color)
+                        }
+                    }
                 },
                 edges: {
                     width: 1,
@@ -775,8 +806,7 @@
                         hover: '#3498db'
                     },
                     smooth: {
-                        type: 'continuous',
-                        roundness: 0.5
+                        enabled: false  // Straight lines are faster to render
                     },
                     arrows: {
                         to: {
@@ -788,14 +818,30 @@
                         size: 10,
                         color: '#999',
                         strokeWidth: 0,
-                        align: 'middle'
+                        align: 'middle',
+                        background: 'none'
                     },
-                    shadow: true
+                    shadow: {
+                        enabled: false  // Disable shadows for performance
+                    },
+                    scaling: {
+                        label: {
+                            enabled: true,
+                            min: 10,
+                            max: 10,
+                            maxVisible: 30,
+                            drawThreshold: 1  // Always show labels (we control via font color)
+                        }
+                    },
+                    hoverWidth: 0  // Don't change width on hover
                 },
                 physics: {
+                    enabled: true,
                     stabilization: {
                         enabled: true,
-                        iterations: 200
+                        iterations: 100,  // Reduced from 200
+                        updateInterval: 25,
+                        fit: true
                     },
                     barnesHut: {
                         gravitationalConstant: -8000,
@@ -804,15 +850,18 @@
                         springConstant: 0.04,
                         damping: 0.09,
                         avoidOverlap: 0.1
-                    }
+                    },
+                    adaptiveTimestep: true  // Optimize physics calculations
                 },
                 interaction: {
-                    hover: true,
-                    tooltipDelay: 100,
+                    hover: false,  // Disable hover for performance
+                    tooltipDelay: 200,
                     zoomView: true,
                     dragView: true,
                     navigationButtons: true,
-                    keyboard: true
+                    keyboard: true,
+                    hideEdgesOnDrag: true,  // Hide edges while dragging
+                    hideEdgesOnZoom: true   // Hide edges while zooming
                 }
             };
 
@@ -821,6 +870,22 @@
             }
 
             network = new vis.Network(container, data, options);
+
+            // Show stabilization progress
+            network.on('stabilizationProgress', function(params) {
+                const progress = Math.round((params.iterations / params.total) * 100);
+                document.getElementById('info').innerHTML =
+                    `<div class="empty-state">Laying out graph... ${progress}%</div>`;
+            });
+
+            // Disable physics after stabilization for better performance
+            network.once('stabilizationIterationsDone', function() {
+                network.setOptions({ physics: false });
+                console.log('Physics disabled after stabilization - performance optimized');
+
+                document.getElementById('info').innerHTML =
+                    '<div class="empty-state">Click on a node or edge to see details</div>';
+            });
 
             // Set up event handlers
             setupEventHandlers();
@@ -832,7 +897,6 @@
             `;
 
             document.getElementById('legend').style.display = 'block';
-            document.getElementById('info').innerHTML = '<div class="empty-state">Click on a node or edge to see details</div>';
 
             // Fit network after stabilization
             network.once('stabilized', function() {
@@ -840,6 +904,136 @@
             });
 
             console.log('Graph loaded: ' + nodesData.length + ' nodes, ' + edgesData.length + ' edges');
+        }
+
+        // Update visual highlighting based on selection
+        function updateHighlighting(selectedNodeIds, selectedEdgeIds) {
+            if (!dataNodes || !dataEdges) return;
+
+            // Determine which elements to highlight
+            let highlightedNodes = new Set();
+            let highlightedEdges = new Set();
+
+            if (selectedNodeIds.length > 0) {
+                // Node selected: highlight node, its neighbors, and connecting edges
+                selectedNodeIds.forEach(nodeId => {
+                    highlightedNodes.add(nodeId);
+
+                    if (adjacencyMap[nodeId]) {
+                        // Add all neighbors (1 degree away)
+                        adjacencyMap[nodeId].neighbors.forEach(neighbor => {
+                            highlightedNodes.add(neighbor);
+                        });
+
+                        // Add all connecting edges
+                        adjacencyMap[nodeId].edges.forEach(edgeId => {
+                            highlightedEdges.add(edgeId);
+                        });
+                    }
+                });
+            } else if (selectedEdgeIds.length > 0) {
+                // Edge selected: highlight edge and its endpoints
+                selectedEdgeIds.forEach(edgeId => {
+                    highlightedEdges.add(edgeId);
+                    const edge = dataEdges.get(edgeId);
+                    if (edge) {
+                        highlightedNodes.add(edge.from);
+                        highlightedNodes.add(edge.to);
+                    }
+                });
+            } else {
+                // Nothing selected: reset all to full opacity
+                resetHighlighting();
+                return;
+            }
+
+            // Batch update: prepare arrays of updates
+            const nodeUpdates = [];
+            const edgeUpdates = [];
+
+            // Update all nodes
+            nodesData.forEach(node => {
+                const isHighlighted = highlightedNodes.has(node.id);
+                nodeUpdates.push({
+                    id: node.id,
+                    opacity: isHighlighted ? 1.0 : 0.15,
+                    color: isHighlighted ? node.color : {
+                        background: node.color,
+                        border: node.color,
+                        highlight: { background: node.color, border: node.color }
+                    },
+                    font: {
+                        size: 12,
+                        color: isHighlighted ? '#ffffff' : 'rgba(255, 255, 255, 0.2)',
+                        face: 'monospace'
+                    },
+                    label: node.id.length > 30 ? node.id.substring(0, 30) + '...' : node.id
+                });
+            });
+
+            // Update all edges
+            edgesData.forEach(edge => {
+                const isHighlighted = highlightedEdges.has(edge.id);
+                edgeUpdates.push({
+                    id: edge.id,
+                    color: isHighlighted ? {
+                        color: '#666666',
+                        highlight: '#3498db',
+                        hover: '#3498db'
+                    } : {
+                        color: 'rgba(102, 102, 102, 0.15)',
+                        highlight: 'rgba(52, 152, 219, 0.3)',
+                        hover: 'rgba(52, 152, 219, 0.3)'
+                    },
+                    font: {
+                        size: isHighlighted ? 10 : 8,
+                        color: isHighlighted ? '#999' : 'rgba(153, 153, 153, 0.2)',
+                        strokeWidth: 0,
+                        align: 'middle',
+                        background: 'none'
+                    }
+                });
+            });
+
+            // Apply batch updates
+            dataNodes.update(nodeUpdates);
+            dataEdges.update(edgeUpdates);
+        }
+
+        // Reset all nodes and edges to full opacity
+        function resetHighlighting() {
+            if (!dataNodes || !dataEdges) return;
+
+            const nodeUpdates = nodesData.map(node => ({
+                id: node.id,
+                opacity: 1.0,
+                color: node.color,
+                font: {
+                    size: 12,
+                    color: '#ffffff',
+                    face: 'monospace'
+                },
+                label: node.id.length > 30 ? node.id.substring(0, 30) + '...' : node.id
+            }));
+
+            const edgeUpdates = edgesData.map(edge => ({
+                id: edge.id,
+                color: {
+                    color: '#666666',
+                    highlight: '#3498db',
+                    hover: '#3498db'
+                },
+                font: {
+                    size: 10,
+                    color: '#999',
+                    strokeWidth: 0,
+                    align: 'middle',
+                    background: 'none'
+                }
+            }));
+
+            dataNodes.update(nodeUpdates);
+            dataEdges.update(edgeUpdates);
         }
 
         // Set up event handlers
@@ -851,6 +1045,9 @@
                     // Node clicked
                     const nodeId = params.nodes[0];
                     const node = dataNodes.get(nodeId);
+
+                    // Update highlighting
+                    updateHighlighting([nodeId], []);
 
                     // Get connected edges
                     const connectedEdges = network.getConnectedEdges(nodeId);
@@ -903,6 +1100,9 @@
                     const fromNode = dataNodes.get(edge.from);
                     const toNode = dataNodes.get(edge.to);
 
+                    // Update highlighting
+                    updateHighlighting([], [edgeId]);
+
                     infoDiv.innerHTML = `
                         <div class="info-section">
                             <h3>Edge: ${edge.type}</h3>
@@ -943,7 +1143,8 @@
 
                     network.selectEdges([edgeId]);
                 } else {
-                    // Clicked on empty space
+                    // Clicked on empty space - reset highlighting
+                    resetHighlighting();
                     infoDiv.innerHTML = '<div class="empty-state">Click on a node or edge to see details</div>';
                 }
             });
@@ -1114,6 +1315,7 @@
                 animation: true
             });
 
+            // Trigger the click event to update the info panel and highlighting
             network.emit('click', {nodes: [nodeId], edges: []});
 
             searchInput.value = '';
@@ -1143,16 +1345,11 @@
                 });
             }
 
+            // Trigger the click event to update the info panel and highlighting
             network.emit('click', {nodes: [], edges: [edgeId]});
 
             searchInput.value = '';
             searchResults.innerHTML = '';
-        }
-
-        function highlightEdge(edgeId) {
-            if (!network) return;
-            network.selectEdges([edgeId]);
-            network.emit('click', {nodes: [], edges: [edgeId]});
         }
 
         function selectNodeFromEdge(nodeId) {
@@ -1164,7 +1361,7 @@
                 animation: true
             });
 
-            // Trigger the click event to update the info panel
+            // Trigger the click event to update the info panel and highlighting
             network.emit('click', {nodes: [nodeId], edges: []});
         }
 
@@ -1191,7 +1388,7 @@
                 });
             }
 
-            // Trigger the click event to update the info panel
+            // Trigger the click event to update the info panel and highlighting
             network.emit('click', {nodes: [], edges: [edgeId]});
         }
 
@@ -1227,6 +1424,7 @@
             edgesData = [];
             dataNodes = null;
             dataEdges = null;
+            adjacencyMap = {};
 
             // Reset file input
             document.getElementById('fileInput').value = '';
