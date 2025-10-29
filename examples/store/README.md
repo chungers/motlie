@@ -157,3 +157,188 @@ This creates a self-contained HTML file with the data embedded.
   - Reset View: Return to default zoom
   - Fit All: Adjust view to show entire graph
   - Navigation buttons: Built-in zoom controls
+
+## Design Documentation
+
+### generate_data.py Design
+
+The data generator creates realistic, referentially-consistent graph data with configurable distributions.
+
+#### Architecture
+
+**Configuration System:**
+- Dictionary-based distribution configuration (`CATEGORY_DISTRIBUTION`, `PROFESSIONAL_DISTRIBUTION`, etc.)
+- Automatic validation ensures all distributions sum to 1.0 within tolerance
+- Percentage-based calculations allow easy dataset scaling
+
+**Key Components:**
+
+1. **Distribution Dictionaries** (Lines 27-59):
+   ```python
+   CATEGORY_DISTRIBUTION = {
+       'PROFESSIONAL': 0.45,  # 45% - Work-related entities
+       'SOCIAL': 0.45,        # 45% - Social and personal entities
+       'THINGS': 0.07,        # 7%  - Physical possessions
+       'EVENTS': 0.03,        # 3%  - Travel and conferences
+   }
+   ```
+
+2. **Validation Function** (Lines 62-73):
+   - Ensures distributions sum to 1.0
+   - Configurable tolerance (default: 0.001)
+   - Fails fast on module import if invalid
+
+3. **Runtime Computation** (Lines 75-203):
+   - `compute_node_counts(total_nodes)` - Calculates node counts from percentages
+   - `compute_edge_counts(node_counts)` - Calculates edge counts from node counts
+   - All counts scale proportionally with `total_nodes`
+
+4. **DataGenerator Class** (Lines 374+):
+   - Takes computed counts in `__init__`
+   - Generates nodes and edges based on counts
+   - Maintains referential integrity (all edges reference valid nodes)
+
+#### Command-Line Interface
+
+```bash
+# Generate to stdout (default)
+python3 generate_data.py -n 1000
+
+# Redirect to file
+python3 generate_data.py -n 5000 > data.csv
+
+# Write directly to file
+python3 generate_data.py -n 500 -o small_data.csv
+
+# Custom random seed
+python3 generate_data.py --seed 123
+```
+
+**Key Design Decisions:**
+- **Stdout by default**: Follows Unix philosophy, enables piping
+- **Stderr for logs**: All diagnostics go to stderr, keeping stdout clean
+- **Scalable**: Change `TOTAL_NODES` and all proportions maintain
+
+#### Data Model
+
+**Node Types:**
+- Professional: People, Companies, Projects
+- Social: People, Events, Hobby Groups
+- Things: Homes, Vehicles
+- Events: Trips, Conferences
+
+**Edge Types:**
+- Professional: works_at, manages, collaborates_with, funds
+- Social: friends_with, attended, member_of, traveled_on
+- Ownership: owns
+- Cross-domain: knows, mentors, sponsors, hosts
+
+#### Customization
+
+To modify distributions, edit the dictionaries at the top:
+
+```python
+# Change category mix
+CATEGORY_DISTRIBUTION = {
+    'PROFESSIONAL': 0.60,  # 60% professional
+    'SOCIAL': 0.30,        # 30% social
+    'THINGS': 0.05,        # 5% things
+    'EVENTS': 0.05,        # 5% events
+}
+
+# Change professional breakdown
+PROFESSIONAL_DISTRIBUTION = {
+    'PEOPLE': 0.50,     # More people
+    'COMPANIES': 0.25,  # Fewer companies
+    'PROJECTS': 0.25,
+}
+```
+
+Validation will fail if distributions don't sum to 1.0.
+
+### graph_viewer.html Design
+
+A standalone, client-side graph visualization tool built with vis.js.
+
+#### Architecture
+
+**Single-File Design:**
+- No external dependencies (vis.js embedded)
+- Works entirely in browser
+- No server required
+
+**Key Components:**
+
+1. **File Upload System** (Lines 150-250):
+   - Drag & drop support
+   - CSV parsing with quoted field handling
+   - Automatic detection of node vs edge rows (2 vs 4 fields)
+
+2. **Graph Rendering** (vis.js Network):
+   - Force-directed layout using Barnes-Hut simulation
+   - Physics disabled after initial stabilization (performance)
+   - Adaptive rendering based on zoom level
+
+3. **Search System** (Lines 450-550):
+   - Type-ahead search for nodes and edges
+   - Toggle between node/edge search modes
+   - Click results to focus and highlight
+
+4. **Interactive Features**:
+   - Click nodes/edges to view details
+   - Clickable references for navigation
+   - Context highlighting (dims non-related elements)
+
+#### Performance Optimizations
+
+**For Large Graphs (1000+ nodes):**
+
+1. **Physics Optimization** (Lines 820-837):
+   - Reduced stabilization iterations (100 vs 200)
+   - Physics disabled after layout completes
+   - Adaptive timestep enabled
+
+2. **Rendering Optimization** (Lines 768-818):
+   - Shadows disabled (expensive with many nodes)
+   - Straight edges (faster than curved)
+   - Level-of-detail labels (appear when zoomed in)
+   - Edges hidden during drag/zoom operations
+
+3. **Context Highlighting** (Lines 909-1032):
+   - Batch updates using arrays (not individual)
+   - Selected node + 1 degree neighbors at full opacity
+   - Other elements at 15% opacity for visual focus
+   - Efficient adjacency map for O(1) neighbor lookup
+
+#### Visual Design
+
+**Color Coding:**
+- Each node type gets a distinct color
+- Highlighted elements: Full color and opacity
+- Background elements: 85% transparent
+- Edge labels: Smaller font (Arial 9pt) vs node labels (monospace 12pt)
+
+**Layout:**
+- Top bar: Title, file upload, controls
+- Main canvas: Interactive graph visualization
+- Right panel: Details for selected node/edge
+- Search: Integrated with toggle for nodes/edges
+
+#### Key Files
+
+```
+examples/store/
+├── generate_data.py        # Data generator with configurable distributions
+├── graph_viewer.html        # Standalone interactive viewer (~45KB)
+├── sample_data.csv          # Generated sample dataset (1000 nodes)
+└── README.md               # This file
+```
+
+#### Browser Compatibility
+
+- Chrome: Full support, best performance
+- Safari: Full support
+- Firefox: Full support
+- Edge: Full support
+
+**Note:** For datasets >10,000 nodes, consider using dedicated graph visualization tools like Gephi or Cytoscape.
