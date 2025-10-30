@@ -33,9 +33,12 @@ CATEGORY_DISTRIBUTION = {
 # --- Sub-Category Distribution Within Each Category (each must sum to 1.0) ---
 # Professional breakdown
 PROFESSIONAL_DISTRIBUTION = {
-    'PEOPLE': 0.445,    # 44.5% of professional = individual workers
-    'COMPANIES': 0.333,  # 33.3% of professional = organizations
-    'PROJECTS': 0.222,   # 22.2% of professional = work initiatives
+    'PEOPLE': 0.17,        # 17.0% of professional = individual workers
+    'COMPANIES': 0.10,     # 10.0% of professional = organizations
+    'PROJECTS': 0.05,      # 5.0% of professional = work initiatives
+    'ARTIFACTS': 0.40,     # 40.0% of professional = project artifacts (5-20 per project)
+    'DELIVERABLES': 0.10,  # 10.0% of professional = project deliverables (2-5 per project)
+    'MILESTONES': 0.18,    # 18.0% of professional = project milestones (4-8 per project)
 }
 
 # Social breakdown
@@ -88,7 +91,7 @@ def compute_node_counts(total_nodes: int) -> Dict[str, int]:
     min_nodes_per_type = 1 if total_nodes >= 10 else 0
 
     # Calculate category totals with minimum guarantees
-    total_professional = max(min_nodes_per_type * 3, int(total_nodes * CATEGORY_DISTRIBUTION['PROFESSIONAL']))
+    total_professional = max(min_nodes_per_type * 6, int(total_nodes * CATEGORY_DISTRIBUTION['PROFESSIONAL']))
     total_social = max(min_nodes_per_type * 3, int(total_nodes * CATEGORY_DISTRIBUTION['SOCIAL']))
     total_things = max(min_nodes_per_type * 2, int(total_nodes * CATEGORY_DISTRIBUTION['THINGS']))
     total_events = max(min_nodes_per_type * 2, int(total_nodes * CATEGORY_DISTRIBUTION['EVENTS']))
@@ -99,6 +102,9 @@ def compute_node_counts(total_nodes: int) -> Dict[str, int]:
         'NUM_PROFESSIONAL_PEOPLE': max(min_nodes_per_type, round(total_professional * PROFESSIONAL_DISTRIBUTION['PEOPLE'])),
         'NUM_COMPANIES': max(min_nodes_per_type, round(total_professional * PROFESSIONAL_DISTRIBUTION['COMPANIES'])),
         'NUM_PROFESSIONAL_PROJECTS': max(min_nodes_per_type, round(total_professional * PROFESSIONAL_DISTRIBUTION['PROJECTS'])),
+        'NUM_ARTIFACTS': max(min_nodes_per_type, round(total_professional * PROFESSIONAL_DISTRIBUTION['ARTIFACTS'])),
+        'NUM_DELIVERABLES': max(min_nodes_per_type, round(total_professional * PROFESSIONAL_DISTRIBUTION['DELIVERABLES'])),
+        'NUM_MILESTONES': max(min_nodes_per_type, round(total_professional * PROFESSIONAL_DISTRIBUTION['MILESTONES'])),
 
         # Social
         'NUM_SOCIAL_PEOPLE': max(min_nodes_per_type, round(total_social * SOCIAL_DISTRIBUTION['PEOPLE'])),
@@ -124,45 +130,65 @@ def compute_node_counts(total_nodes: int) -> Dict[str, int]:
 
 # --- Edge Generation Probabilities and Counts ---
 # Professional relationships
-PROB_PERSON_HAS_COMPANY = 0.85          # 85% of professional people work at a company
-NUM_COLLABORATORS_MIN = 3               # Minimum coworkers each person collaborates with
-NUM_COLLABORATORS_MAX = 6               # Maximum coworkers each person collaborates with
-PROB_PERSON_ATTENDS_CONFERENCE = 0.30   # 30% of professional people attend conferences
+PROB_PERSON_HAS_COMPANY = 0.90          # 90% of professional people work at a company
+NUM_COLLABORATORS_MIN = 8               # Minimum coworkers each person collaborates with
+NUM_COLLABORATORS_MAX = 14              # Maximum coworkers each person collaborates with
+PROB_PERSON_ATTENDS_CONFERENCE = 0.70   # 70% of professional people attend conferences
 
 # Social relationships
-NUM_FRIENDS_MIN = 4                     # Minimum friends per social person
-NUM_FRIENDS_MAX = 7                     # Maximum friends per social person
-NUM_EVENT_ATTENDEES_MIN = 4             # Minimum attendees per social event
-NUM_EVENT_ATTENDEES_MAX = 8             # Maximum attendees per social event
-PROB_PERSON_JOINS_HOBBY_GROUP = 0.60    # 60% of social people join a hobby group
-PROB_PERSON_TAKES_TRIP = 0.25           # 25% of social people take trips
+NUM_FRIENDS_MIN = 11                    # Minimum friends per social person
+NUM_FRIENDS_MAX = 20                    # Maximum friends per social person
+NUM_EVENT_ATTENDEES_MIN = 10            # Minimum attendees per social event
+NUM_EVENT_ATTENDEES_MAX = 18            # Maximum attendees per social event
+PROB_PERSON_JOINS_HOBBY_GROUP = 0.90    # 90% of social people join a hobby group
+PROB_PERSON_TAKES_TRIP = 0.55           # 55% of social people take trips
 
 # Ownership
 PERCENT_PEOPLE_WITH_MULTIPLE_VEHICLES = 0.05  # 5% of all people own multiple vehicles
 
 # Cross-domain edges (connecting professional and social domains)
-PERCENT_CROSS_DOMAIN_CONNECTIONS = 0.625      # 62.5% of one group (250/400)
-PERCENT_SOCIAL_AT_CONFERENCES = 0.15          # 15% of social people attend conferences
-PERCENT_PROFESSIONAL_IN_HOBBY_GROUPS = 0.60   # 60% of professional people join hobby groups
-PERCENT_COMPANY_SPONSORSHIPS = 0.50           # 50% of hobby groups get corporate sponsors
-PERCENT_COMPANIES_HOSTING_EVENTS = 0.267      # 26.7% of social events hosted by companies
-PERCENT_PROJECTS_USING_VEHICLES = 0.40        # 40% of projects use vehicles
-PERCENT_EVENTS_AT_HOMES = 0.333               # 33.3% of social events at homes
-PERCENT_TRIPS_FROM_HOMES = 1.50               # 150% of trips (some homes = multiple trips)
-PERCENT_MIXED_SOCIAL_EVENTS = 0.533           # 53.3% of social events have professional attendees
-NUM_PROFESSIONALS_AT_SOCIAL_MIN = 1           # Min professional people at mixed events
-NUM_PROFESSIONALS_AT_SOCIAL_MAX = 2           # Max professional people at mixed events
-PERCENT_HOBBY_GROUPS_ORGANIZING_TRIPS = 1.75  # 175% of trips (more trips than organizers)
-PERCENT_MENTORSHIP_RELATIONSHIPS = 0.50       # 50% of social people get professional mentors
-PERCENT_COMPANY_PARTNERSHIPS = 0.667          # 66.7% of companies partner with another
-PERCENT_PROJECT_COLLABORATIONS = 0.50         # 50% of projects collaborate with companies
-PERCENT_HOBBY_GROUPS_AT_HOMES = 0.60          # 60% of hobby groups meet at homes
-PERCENT_VEHICLES_FOR_TRIPS = 2.50             # 250% of trips (multiple vehicles per trip)
-PERCENT_SOCIAL_ACQUAINTANCES = 0.75           # 75% of social people have additional connections
+PERCENT_CROSS_DOMAIN_CONNECTIONS = 1.00       # 100% of social people know professional people
+PERCENT_SOCIAL_AT_CONFERENCES = 0.30          # 30% of social people attend conferences
+PERCENT_PROFESSIONAL_IN_HOBBY_GROUPS = 0.85   # 85% of professional people join hobby groups
+PERCENT_COMPANY_SPONSORSHIPS = 0.80           # 80% of hobby groups get corporate sponsors
+PERCENT_COMPANIES_HOSTING_EVENTS = 0.50       # 50% of social events hosted by companies
+PERCENT_PROJECTS_USING_VEHICLES = 0.70        # 70% of projects use vehicles
+PERCENT_EVENTS_AT_HOMES = 0.60                # 60% of social events at homes
+PERCENT_TRIPS_FROM_HOMES = 2.50               # 250% of trips (some homes = multiple trips)
+PERCENT_MIXED_SOCIAL_EVENTS = 0.80            # 80% of social events have professional attendees
+NUM_PROFESSIONALS_AT_SOCIAL_MIN = 2           # Min professional people at mixed events
+NUM_PROFESSIONALS_AT_SOCIAL_MAX = 5           # Max professional people at mixed events
+PERCENT_HOBBY_GROUPS_ORGANIZING_TRIPS = 2.50  # 250% of trips (more trips than organizers)
+PERCENT_MENTORSHIP_RELATIONSHIPS = 0.80       # 80% of social people get professional mentors
+PERCENT_COMPANY_PARTNERSHIPS = 1.00           # 100% of companies partner with another
+PERCENT_PROJECT_COLLABORATIONS = 0.80         # 80% of projects collaborate with companies
+PERCENT_HOBBY_GROUPS_AT_HOMES = 1.00          # 100% of hobby groups meet at homes
+PERCENT_VEHICLES_FOR_TRIPS = 3.50             # 350% of trips (multiple vehicles per trip)
+PERCENT_SOCIAL_ACQUAINTANCES = 1.30           # 130% of social people have additional connections
 NUM_BUSINESS_TRIP_TRAVELERS_MIN = 1           # Min travelers on business trips
 NUM_BUSINESS_TRIP_TRAVELERS_MAX = 3           # Max travelers on business trips
 NUM_FAMILY_TRIP_TRAVELERS_MIN = 2             # Min travelers on family trips
 NUM_FAMILY_TRIP_TRAVELERS_MAX = 4             # Max travelers on family trips
+
+# Project artifact relationships
+NUM_ARTIFACTS_PER_PROJECT_MIN = 5             # Minimum artifacts per project
+NUM_ARTIFACTS_PER_PROJECT_MAX = 20            # Maximum artifacts per project
+NUM_DELIVERABLES_PER_PROJECT_MIN = 2          # Minimum deliverables per project
+NUM_DELIVERABLES_PER_PROJECT_MAX = 5          # Maximum deliverables per project
+NUM_MILESTONES_PER_PROJECT_MIN = 4            # Minimum milestones per project
+NUM_MILESTONES_PER_PROJECT_MAX = 8            # Maximum milestones per project
+PROB_ARTIFACT_DEPENDENCY = 0.80               # 80% of artifacts depend on other artifacts
+NUM_ARTIFACT_DEPENDENCIES_MIN = 1             # Minimum dependencies per artifact
+NUM_ARTIFACT_DEPENDENCIES_MAX = 3             # Maximum dependencies per artifact
+PROB_DELIVERABLE_DEPENDENCY = 0.90            # 90% of deliverables depend on artifacts
+NUM_DELIVERABLE_DEPENDENCIES_MIN = 1          # Minimum artifact dependencies per deliverable
+NUM_DELIVERABLE_DEPENDENCIES_MAX = 3          # Maximum artifact dependencies per deliverable
+PROB_PERSON_ASSIGNED_TO_ARTIFACT = 0.90       # 90% of artifacts have person assignments
+PROB_PERSON_ASSIGNED_TO_DELIVERABLE = 0.95    # 95% of deliverables have person assignments
+NUM_PEOPLE_PER_ARTIFACT_MIN = 2               # Minimum people assigned per artifact
+NUM_PEOPLE_PER_ARTIFACT_MAX = 4               # Maximum people assigned per artifact
+NUM_PEOPLE_PER_DELIVERABLE_MIN = 2            # Minimum people assigned per deliverable
+NUM_PEOPLE_PER_DELIVERABLE_MAX = 5            # Maximum people assigned per deliverable
 
 # --- Function to Compute Edge Counts Based on Node Counts ---
 def compute_edge_counts(node_counts: Dict[str, int]) -> Dict[str, int]:
@@ -217,6 +243,9 @@ class NodeType(Enum):
     PROFESSIONAL_PERSON = "ProfessionalPerson"
     COMPANY = "Company"
     PROFESSIONAL_PROJECT = "ProfessionalProject"
+    ARTIFACT = "Artifact"
+    DELIVERABLE = "Deliverable"
+    MILESTONE = "Milestone"
 
     # Social (450 total)
     SOCIAL_PERSON = "SocialPerson"
@@ -298,6 +327,40 @@ PROJECT_TYPES = [
     ("Market Expansion", "entering new geographic markets"),
     ("Platform Migration", "moving infrastructure to cloud services"),
     ("Customer Experience", "improving customer satisfaction and retention"),
+]
+
+ARTIFACT_TYPES = [
+    ("Technical Specification", "detailed technical requirements and architecture"),
+    ("Design Document", "system design and component specifications"),
+    ("Code Repository", "source code and version control"),
+    ("Test Suite", "automated tests and quality assurance scripts"),
+    ("API Documentation", "interface specifications and usage examples"),
+    ("Database Schema", "data model and entity relationships"),
+    ("Configuration Files", "deployment and environment settings"),
+    ("Build Scripts", "compilation and packaging automation"),
+]
+
+DELIVERABLE_TYPES = [
+    ("Requirements Document", "comprehensive project requirements and acceptance criteria"),
+    ("Implementation Plan", "detailed execution strategy and timeline"),
+    ("System Architecture", "high-level design and technology stack"),
+    ("User Documentation", "end-user guides and tutorials"),
+    ("Training Materials", "educational content for stakeholders"),
+    ("Deployment Package", "production-ready release bundle"),
+    ("Performance Report", "system metrics and optimization analysis"),
+    ("Security Audit", "vulnerability assessment and compliance review"),
+]
+
+MILESTONE_TYPES = [
+    ("Project Kickoff", "initial planning and team alignment"),
+    ("Requirements Freeze", "finalized scope and specifications"),
+    ("Design Review", "architecture approval and technical validation"),
+    ("Alpha Release", "initial internal testing version"),
+    ("Beta Release", "external testing and feedback collection"),
+    ("Code Complete", "all development work finished"),
+    ("Quality Assurance", "final testing and bug resolution"),
+    ("Production Deployment", "live release to production environment"),
+    ("Project Closure", "final review and documentation handoff"),
 ]
 
 # Social data
@@ -391,6 +454,9 @@ class DataGenerator:
         self.social_people = []
         self.companies = []
         self.projects = []
+        self.artifacts = []
+        self.deliverables = []
+        self.milestones = []
         self.homes = []
         self.vehicles = []
         self.trips = []
@@ -477,6 +543,60 @@ class DataGenerator:
             "type": proj_type, "year": year
         })
         self.projects.append(node)
+        return node
+
+    def generate_artifact(self, idx: int) -> Node:
+        """Generate a project artifact."""
+        artifact_type, description = random.choice(ARTIFACT_TYPES)
+        status = random.choice(["in progress", "completed", "under review"])
+        version = f"v{random.randint(1, 3)}.{random.randint(0, 9)}"
+
+        name = self.generate_unique_name(f"{artifact_type.replace(' ', '_')}_{idx}")
+
+        fragment = (f"{artifact_type} ({version}) containing {description}. "
+                   f"This artifact is currently {status} and serves as a key component of the project.")
+
+        node = Node(name, fragment, NodeType.ARTIFACT, {
+            "type": artifact_type, "status": status, "version": version
+        })
+        self.artifacts.append(node)
+        return node
+
+    def generate_deliverable(self, idx: int) -> Node:
+        """Generate a project deliverable."""
+        deliverable_type, description = random.choice(DELIVERABLE_TYPES)
+        status = random.choice(["draft", "final", "approved"])
+
+        name = self.generate_unique_name(f"{deliverable_type.replace(' ', '_')}_{idx}")
+
+        fragment = (f"{deliverable_type} providing {description}. "
+                   f"This deliverable is in {status} state and represents a formal project output.")
+
+        node = Node(name, fragment, NodeType.DELIVERABLE, {
+            "type": deliverable_type, "status": status
+        })
+        self.deliverables.append(node)
+        return node
+
+    def generate_milestone(self, idx: int) -> Node:
+        """Generate a project milestone with expected date."""
+        milestone_type, description = random.choice(MILESTONE_TYPES)
+        year = random.choice([2024, 2025])
+        month = random.choice(["January", "February", "March", "April", "May", "June",
+                              "July", "August", "September", "October", "November", "December"])
+        day = random.randint(1, 28)
+        expected_date = f"{month} {day}, {year}"
+        status = random.choice(["upcoming", "achieved", "in progress"])
+
+        name = self.generate_unique_name(f"{milestone_type.replace(' ', '_')}_{idx}")
+
+        fragment = (f"{milestone_type} checkpoint focused on {description}. "
+                   f"Expected completion date: {expected_date}. Status: {status}.")
+
+        node = Node(name, fragment, NodeType.MILESTONE, {
+            "type": milestone_type, "expected_date": expected_date, "status": status
+        })
+        self.milestones.append(node)
         return node
 
     def generate_home(self, idx: int) -> Node:
@@ -591,6 +711,12 @@ class DataGenerator:
             self.nodes.append(self.generate_company(i))
         for i in range(self.node_counts['NUM_PROFESSIONAL_PROJECTS']):
             self.nodes.append(self.generate_project(i))
+        for i in range(self.node_counts['NUM_ARTIFACTS']):
+            self.nodes.append(self.generate_artifact(i))
+        for i in range(self.node_counts['NUM_DELIVERABLES']):
+            self.nodes.append(self.generate_deliverable(i))
+        for i in range(self.node_counts['NUM_MILESTONES']):
+            self.nodes.append(self.generate_milestone(i))
 
         # Social nodes
         for i in range(self.node_counts['NUM_SOCIAL_PEOPLE']):
@@ -926,12 +1052,118 @@ class DataGenerator:
                               f"{trip.metadata['destination']} with family and friends.")
                     self.add_edge(person, trip, "traveled_on", fragment)
 
+    def generate_project_artifact_edges(self):
+        """Generate edges for project artifacts, deliverables, and milestones."""
+        print("Generating project artifact edges...", file=sys.stderr)
+
+        if not self.projects:
+            return
+
+        # Distribute artifacts, deliverables, and milestones across projects
+        artifact_idx = 0
+        deliverable_idx = 0
+        milestone_idx = 0
+
+        for project in self.projects:
+            # Assign artifacts to project
+            if self.artifacts and artifact_idx < len(self.artifacts):
+                num_artifacts = random.randint(NUM_ARTIFACTS_PER_PROJECT_MIN, NUM_ARTIFACTS_PER_PROJECT_MAX)
+                project_artifacts = []
+                for _ in range(min(num_artifacts, len(self.artifacts) - artifact_idx)):
+                    artifact = self.artifacts[artifact_idx]
+                    project_artifacts.append(artifact)
+                    fragment = (f"The {project.metadata['type']} project includes {artifact.metadata['type']} "
+                              f"as a critical component for achieving project objectives.")
+                    self.add_edge(project, artifact, "has_artifact", fragment)
+                    artifact_idx += 1
+
+                # Create dependencies between artifacts in the same project
+                if len(project_artifacts) > 1:
+                    for artifact in project_artifacts:
+                        if random.random() < PROB_ARTIFACT_DEPENDENCY:
+                            num_deps = random.randint(NUM_ARTIFACT_DEPENDENCIES_MIN,
+                                                     min(NUM_ARTIFACT_DEPENDENCIES_MAX, len(project_artifacts) - 1))
+                            other_artifacts = random.sample([a for a in project_artifacts if a != artifact],
+                                                           min(num_deps, len(project_artifacts) - 1))
+                            for other_artifact in other_artifacts:
+                                fragment = (f"{artifact.metadata['type']} depends on {other_artifact.metadata['type']} "
+                                          f"for data, specifications, or foundational components.")
+                                self.add_edge(artifact, other_artifact, "depends_on", fragment)
+
+            # Assign deliverables to project
+            if self.deliverables and deliverable_idx < len(self.deliverables):
+                num_deliverables = random.randint(NUM_DELIVERABLES_PER_PROJECT_MIN, NUM_DELIVERABLES_PER_PROJECT_MAX)
+                project_deliverables = []
+                for _ in range(min(num_deliverables, len(self.deliverables) - deliverable_idx)):
+                    deliverable = self.deliverables[deliverable_idx]
+                    project_deliverables.append(deliverable)
+                    fragment = (f"The {project.metadata['type']} project produces {deliverable.metadata['type']} "
+                              f"as a key deliverable for stakeholders.")
+                    self.add_edge(project, deliverable, "has_deliverable", fragment)
+                    deliverable_idx += 1
+
+                # Create dependencies from deliverables to artifacts
+                if project_artifacts:
+                    for deliverable in project_deliverables:
+                        if random.random() < PROB_DELIVERABLE_DEPENDENCY:
+                            num_deps = random.randint(NUM_DELIVERABLE_DEPENDENCIES_MIN,
+                                                     min(NUM_DELIVERABLE_DEPENDENCIES_MAX, len(project_artifacts)))
+                            required_artifacts = random.sample(project_artifacts, min(num_deps, len(project_artifacts)))
+                            for artifact in required_artifacts:
+                                fragment = (f"{deliverable.metadata['type']} requires {artifact.metadata['type']} "
+                                          f"as input or supporting documentation.")
+                                self.add_edge(deliverable, artifact, "requires", fragment)
+
+            # Assign milestones to project
+            if self.milestones and milestone_idx < len(self.milestones):
+                num_milestones = random.randint(NUM_MILESTONES_PER_PROJECT_MIN, NUM_MILESTONES_PER_PROJECT_MAX)
+                project_milestones = []
+                for _ in range(min(num_milestones, len(self.milestones) - milestone_idx)):
+                    milestone = self.milestones[milestone_idx]
+                    project_milestones.append(milestone)
+                    fragment = (f"The {project.metadata['type']} project tracks {milestone.metadata['type']} "
+                              f"as a major checkpoint, expected on {milestone.metadata['expected_date']}.")
+                    self.add_edge(project, milestone, "has_milestone", fragment)
+                    milestone_idx += 1
+
+                # Create sequential dependencies between milestones
+                if len(project_milestones) > 1:
+                    for i in range(len(project_milestones) - 1):
+                        milestone = project_milestones[i]
+                        next_milestone = project_milestones[i + 1]
+                        fragment = (f"{milestone.metadata['type']} must be completed before {next_milestone.metadata['type']} "
+                                  f"can begin, ensuring proper project sequencing.")
+                        self.add_edge(milestone, next_milestone, "precedes", fragment)
+
+        # Assign professional people to artifacts
+        if self.artifacts and self.professional_people:
+            for artifact in self.artifacts:
+                if random.random() < PROB_PERSON_ASSIGNED_TO_ARTIFACT:
+                    num_people = random.randint(NUM_PEOPLE_PER_ARTIFACT_MIN, NUM_PEOPLE_PER_ARTIFACT_MAX)
+                    assigned_people = random.sample(self.professional_people, min(num_people, len(self.professional_people)))
+                    for person in assigned_people:
+                        fragment = (f"{person.metadata['first']} {person.metadata['last']} is assigned to work on "
+                                  f"{artifact.metadata['type']}, contributing their expertise in {person.metadata['dept']}.")
+                        self.add_edge(person, artifact, "assigned_to", fragment)
+
+        # Assign professional people to deliverables
+        if self.deliverables and self.professional_people:
+            for deliverable in self.deliverables:
+                if random.random() < PROB_PERSON_ASSIGNED_TO_DELIVERABLE:
+                    num_people = random.randint(NUM_PEOPLE_PER_DELIVERABLE_MIN, NUM_PEOPLE_PER_DELIVERABLE_MAX)
+                    assigned_people = random.sample(self.professional_people, min(num_people, len(self.professional_people)))
+                    for person in assigned_people:
+                        fragment = (f"{person.metadata['first']} {person.metadata['last']} is responsible for "
+                                  f"{deliverable.metadata['type']}, ensuring quality and timely completion.")
+                        self.add_edge(person, deliverable, "assigned_to", fragment)
+
     def generate_all_edges(self):
         """Generate all edges ensuring ~5 edges per node."""
         self.generate_professional_edges()
         self.generate_social_edges()
         self.generate_ownership_edges()
         self.generate_cross_domain_edges()
+        self.generate_project_artifact_edges()
 
         print(f"Generated {len(self.edges)} edges", file=sys.stderr)
         avg_edges = len(self.edges) / len(self.nodes) if self.nodes else 0

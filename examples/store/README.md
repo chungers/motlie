@@ -84,23 +84,37 @@ writer.add_fragment(fragment_args).await?;
 
 ### Generate Sample Data
 
-Use `generate_data.py` to create a diverse dataset with 1,000 nodes and ~5,000 edges:
+Use `generate_data.py` to create a diverse, realistic dataset:
 
 ```bash
+# Generate 1000 nodes (default) to stdout
 python3 generate_data.py
+
+# Generate custom number of nodes
+python3 generate_data.py --total-nodes 5000
+
+# Redirect to file
+python3 generate_data.py -n 1000 > my_data.csv
+
+# Use custom random seed for reproducibility
+python3 generate_data.py --seed 42
 ```
 
-This generates `sample_data.csv` with:
-- **45% Professional nodes/edges**: People, Companies, Projects with work relationships
-- **45% Social nodes/edges**: People, Events, Hobby Groups with social connections
+This generates a CSV dataset with:
+- **45% Professional nodes**: People, Companies, Projects, Artifacts, Deliverables, Milestones
+- **45% Social nodes**: People, Events, Hobby Groups with social connections
 - **7% Things**: Homes, Vehicles with ownership relationships
 - **3% Events**: Trips, Conferences with attendance relationships
+- **~10 edges per node**: Rich interconnected graph structure
 
 Features:
-- Referentially consistent data (all edges reference valid nodes)
-- Descriptive fragments providing rich context for each node and edge
-- Equal distribution across categories
-- Cross-domain relationships (e.g., professional people attending social events)
+- **Project Management Structure**: Each project has 5-20 artifacts, 2-5 deliverables, and 4-8 milestones with expected dates
+- **Dependency Graphs**: Artifacts depend on other artifacts (1-3 dependencies each), deliverables require artifacts
+- **Sequential Milestones**: Project checkpoints in temporal order (precedes relationships)
+- **Work Assignments**: Professional people assigned to artifacts (2-4 per artifact) and deliverables (2-5 per deliverable)
+- **Referentially consistent**: All edges reference valid nodes
+- **Descriptive fragments**: Rich context for each node and edge
+- **Cross-domain relationships**: Professional people in hobby groups, social people at conferences, etc.
 
 ### Visualize the Graph
 
@@ -162,7 +176,7 @@ This creates a self-contained HTML file with the data embedded.
 
 ### generate_data.py Design
 
-The data generator creates realistic, referentially-consistent graph data with configurable distributions.
+The data generator creates realistic, referentially-consistent graph data with rich project management structures and configurable distributions.
 
 #### Architecture
 
@@ -170,10 +184,11 @@ The data generator creates realistic, referentially-consistent graph data with c
 - Dictionary-based distribution configuration (`CATEGORY_DISTRIBUTION`, `PROFESSIONAL_DISTRIBUTION`, etc.)
 - Automatic validation ensures all distributions sum to 1.0 within tolerance
 - Percentage-based calculations allow easy dataset scaling
+- Edge density configured to achieve ~10 edges per node
 
 **Key Components:**
 
-1. **Distribution Dictionaries** (Lines 27-59):
+1. **Distribution Dictionaries** (Lines 26-72):
    ```python
    CATEGORY_DISTRIBUTION = {
        'PROFESSIONAL': 0.45,  # 45% - Work-related entities
@@ -181,57 +196,130 @@ The data generator creates realistic, referentially-consistent graph data with c
        'THINGS': 0.07,        # 7%  - Physical possessions
        'EVENTS': 0.03,        # 3%  - Travel and conferences
    }
+
+   PROFESSIONAL_DISTRIBUTION = {
+       'PEOPLE': 0.17,        # 17% - Individual workers
+       'COMPANIES': 0.10,     # 10% - Organizations
+       'PROJECTS': 0.05,      # 5% - Work initiatives
+       'ARTIFACTS': 0.40,     # 40% - Project artifacts (5-20 per project)
+       'DELIVERABLES': 0.10,  # 10% - Project deliverables (2-5 per project)
+       'MILESTONES': 0.18,    # 18% - Project milestones (4-8 per project)
+   }
    ```
 
-2. **Validation Function** (Lines 62-73):
+2. **Validation Function** (Lines 61-72):
    - Ensures distributions sum to 1.0
    - Configurable tolerance (default: 0.001)
    - Fails fast on module import if invalid
 
-3. **Runtime Computation** (Lines 75-203):
+3. **Runtime Computation** (Lines 76-230):
    - `compute_node_counts(total_nodes)` - Calculates node counts from percentages
    - `compute_edge_counts(node_counts)` - Calculates edge counts from node counts
    - All counts scale proportionally with `total_nodes`
 
-4. **DataGenerator Class** (Lines 374+):
+4. **DataGenerator Class** (Lines 437+):
    - Takes computed counts in `__init__`
    - Generates nodes and edges based on counts
    - Maintains referential integrity (all edges reference valid nodes)
+   - Creates rich project structures with dependency graphs
 
 #### Command-Line Interface
 
 ```bash
-# Generate to stdout (default)
-python3 generate_data.py -n 1000
+# Generate to stdout (default, 1000 nodes)
+python3 generate_data.py
+
+# Generate custom number of nodes
+python3 generate_data.py --total-nodes 5000
 
 # Redirect to file
-python3 generate_data.py -n 5000 > data.csv
+python3 generate_data.py -n 500 > small_data.csv
 
-# Write directly to file
-python3 generate_data.py -n 500 -o small_data.csv
-
-# Custom random seed
+# Custom random seed for reproducibility
 python3 generate_data.py --seed 123
+
+# Check statistics
+python3 generate_data.py -n 100 2>&1 | grep "Dataset Statistics" -A 30
 ```
 
 **Key Design Decisions:**
 - **Stdout by default**: Follows Unix philosophy, enables piping
 - **Stderr for logs**: All diagnostics go to stderr, keeping stdout clean
-- **Scalable**: Change `TOTAL_NODES` and all proportions maintain
+- **Scalable**: Change `--total-nodes` and all proportions maintain
+- **Statistics**: Always prints detailed stats to stderr after generation
 
 #### Data Model
 
 **Node Types:**
-- Professional: People, Companies, Projects
-- Social: People, Events, Hobby Groups
-- Things: Homes, Vehicles
-- Events: Trips, Conferences
+- **Professional**:
+  - `ProfessionalPerson` - Workers with roles and skills
+  - `Company` - Organizations with industries
+  - `ProfessionalProject` - Work initiatives
+  - `Artifact` - Project artifacts (Technical Specs, Code Repos, APIs, Tests, etc.)
+  - `Deliverable` - Project deliverables (Requirements Docs, Deployment Packages, Reports, etc.)
+  - `Milestone` - Project checkpoints with expected dates (Kickoff, Design Review, Alpha/Beta Releases, etc.)
+- **Social**: `SocialPerson`, `SocialEvent`, `HobbyGroup`
+- **Things**: `Home`, `Vehicle`
+- **Events**: `Trip`, `Conference`
 
 **Edge Types:**
-- Professional: works_at, manages, collaborates_with, funds
-- Social: friends_with, attended, member_of, traveled_on
-- Ownership: owns
-- Cross-domain: knows, mentors, sponsors, hosts
+- **Professional**: `works_at`, `manages`, `contributes_to`, `collaborates_with`, `funds`
+- **Project Structure**:
+  - `has_artifact` - Project → Artifact (5-20 per project)
+  - `has_deliverable` - Project → Deliverable (2-5 per project)
+  - `has_milestone` - Project → Milestone (4-8 per project)
+- **Dependencies**:
+  - `depends_on` - Artifact → Artifact (creates dependency graph)
+  - `requires` - Deliverable → Artifact (deliverables require artifacts)
+  - `precedes` - Milestone → Milestone (temporal ordering)
+- **Assignments**: `assigned_to` - Person → Artifact/Deliverable
+- **Social**: `friends_with`, `attended`, `member_of`, `traveled_on`
+- **Ownership**: `owns`
+- **Cross-domain**: `knows`, `mentors`, `sponsors`, `hosts`, `meets_at`, `uses`, etc.
+
+#### Project Management Features
+
+**Artifact Generation** (Lines 544-559):
+- Each project gets 5-20 artifacts
+- Types: Technical Specifications, Design Documents, Code Repositories, Test Suites, API Documentation, Database Schemas, Configuration Files, Build Scripts
+- Artifacts include version numbers (e.g., v1.2, v2.8)
+- Status tracking: "in progress", "completed", "under review"
+
+**Deliverable Generation** (Lines 561-575):
+- Each project gets 2-5 deliverables
+- Types: Requirements Documents, Implementation Plans, System Architecture, User Documentation, Training Materials, Deployment Packages, Performance Reports, Security Audits
+- Status tracking: "draft", "final", "approved"
+
+**Milestone Generation** (Lines 577-596):
+- Each project gets 4-8 milestones
+- Types: Project Kickoff, Requirements Freeze, Design Review, Alpha Release, Beta Release, Code Complete, Quality Assurance, Production Deployment, Project Closure
+- **Expected dates included in fragments**: "Expected completion date: June 27, 2024"
+- Status tracking: "upcoming", "achieved", "in progress"
+
+**Dependency Graph Construction** (Lines 1051-1148):
+1. Artifacts within same project depend on each other (80% probability, 1-3 dependencies each)
+2. Deliverables require artifacts (90% probability, 1-3 artifacts each)
+3. Milestones precede next milestone in sequence (linear temporal chain)
+4. Professional people assigned to artifacts (90% probability, 2-4 people each)
+5. Professional people assigned to deliverables (95% probability, 2-5 people each)
+
+#### Edge Density Configuration
+
+**Target: ~10 edges per node**
+
+Achieved through:
+- **Collaborations**: 8-14 coworkers per professional person
+- **Friendships**: 11-20 friends per social person
+- **Event Attendance**: 10-18 attendees per social event
+- **Artifact Dependencies**: 80% probability with 1-3 dependencies each
+- **Deliverable Requirements**: 90% probability with 1-3 artifacts each
+- **Work Assignments**: 90-95% of artifacts/deliverables have 2-5 people assigned
+- **Cross-domain Connections**: High percentages (70-100%) for inter-domain relationships
+
+Test results show consistent edge density:
+- 100 nodes: ~9.8 edges per node
+- 500 nodes: ~9.8 edges per node
+- 1000 nodes: ~9.8 edges per node
 
 #### Customization
 
@@ -246,15 +334,62 @@ CATEGORY_DISTRIBUTION = {
     'EVENTS': 0.05,        # 5% events
 }
 
-# Change professional breakdown
+# Change professional breakdown (must sum to 1.0)
 PROFESSIONAL_DISTRIBUTION = {
-    'PEOPLE': 0.50,     # More people
-    'COMPANIES': 0.25,  # Fewer companies
-    'PROJECTS': 0.25,
+    'PEOPLE': 0.20,
+    'COMPANIES': 0.15,
+    'PROJECTS': 0.10,
+    'ARTIFACTS': 0.35,
+    'DELIVERABLES': 0.10,
+    'MILESTONES': 0.10,
 }
+
+# Adjust project artifact counts (Lines 174-179)
+NUM_ARTIFACTS_PER_PROJECT_MIN = 5
+NUM_ARTIFACTS_PER_PROJECT_MAX = 20
+NUM_MILESTONES_PER_PROJECT_MIN = 4
+NUM_MILESTONES_PER_PROJECT_MAX = 8
+
+# Adjust edge density (Lines 134-144)
+NUM_COLLABORATORS_MIN = 8
+NUM_COLLABORATORS_MAX = 14
+NUM_FRIENDS_MIN = 11
+NUM_FRIENDS_MAX = 20
 ```
 
 Validation will fail if distributions don't sum to 1.0.
+
+#### Output Statistics
+
+The generator prints comprehensive statistics to stderr:
+
+```
+=== Dataset Statistics ===
+Total nodes: 500
+Total edges: 4915
+Average edges per node: 9.83
+
+Node distribution:
+  Artifact: 90 (18.0%)
+  Deliverable: 45 (9.0%)
+  Milestone: 40 (8.0%)
+  ProfessionalPerson: 38 (7.6%)
+  Company: 22 (4.4%)
+  ProfessionalProject: 11 (2.2%)
+  ...
+
+Edge type distribution:
+  friends_with: 1527
+  attended: 1312
+  assigned_to: 343
+  depends_on: 169
+  has_artifact: 90
+  has_deliverable: 45
+  has_milestone: 40
+  precedes: 36
+  requires: 32
+  ...
+```
 
 ### graph_viewer.html Design
 
