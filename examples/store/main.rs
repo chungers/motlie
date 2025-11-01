@@ -6,6 +6,7 @@ use motlie_db::{
 };
 use std::collections::HashMap;
 use std::io;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
@@ -40,7 +41,12 @@ async fn main() -> Result<()> {
     // Create the Graph consumer that forwards to FullText
     println!("  2. Creating Graph consumer (forwards to FullText)");
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_handle = spawn_graph_consumer_with_next(graph_receiver, config, fulltext_sender);
+    let graph_handle = spawn_graph_consumer_with_next(
+        graph_receiver,
+        config,
+        Path::new("/tmp/motlie_graph_db"),
+        fulltext_sender,
+    );
 
     println!("  3. Consumer chain ready: Writer → Graph → FullText");
     println!();
@@ -146,6 +152,7 @@ async fn main() -> Result<()> {
                     .as_millis() as u64;
 
                 let edge_args = AddEdgeArgs {
+                    id: edge_id.clone(),
                     source_vertex_id: source_id,
                     target_vertex_id: target_id,
                     ts_millis: current_time,

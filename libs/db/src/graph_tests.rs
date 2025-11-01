@@ -4,6 +4,7 @@ mod tests {
     use crate::{
         create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddVertexArgs, Id, WriterConfig,
     };
+    use std::path::Path;
     use tokio::sync::mpsc;
     use tokio::time::Duration;
 
@@ -16,7 +17,8 @@ mod tests {
         let (writer, receiver) = create_mutation_writer(config.clone());
 
         // Spawn consumer
-        let consumer_handle = spawn_graph_consumer(receiver, config);
+        let consumer_handle =
+            spawn_graph_consumer(receiver, config, Path::new("/tmp/test_graph_db"));
 
         // Send some mutations
         let vertex_args = AddVertexArgs {
@@ -27,6 +29,7 @@ mod tests {
         writer.add_vertex(vertex_args).await.unwrap();
 
         let edge_args = AddEdgeArgs {
+            id: Id::new(),
             source_vertex_id: Id::new(),
             target_vertex_id: Id::new(),
             ts_millis: 1234567890,
@@ -45,13 +48,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rocks_consumer_multiple_mutationstest_graph_consumer_multiple_mutations() {
+    async fn test_graph_consumer_multiple_mutations() {
         let config = WriterConfig {
             channel_buffer_size: 100,
         };
 
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_graph_consumer(receiver, config);
+        let consumer_handle =
+            spawn_graph_consumer(receiver, config, Path::new("/tmp/test_graph_db"));
 
         // Send 5 mutations rapidly
         for i in 0..5 {
@@ -75,7 +79,8 @@ mod tests {
     async fn test_graph_consumer_all_mutation_types() {
         let config = WriterConfig::default();
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_graph_consumer(receiver, config);
+        let consumer_handle =
+            spawn_graph_consumer(receiver, config, Path::new("/tmp/test_graph_db"));
 
         // Test all mutation types
         writer
@@ -89,6 +94,7 @@ mod tests {
 
         writer
             .add_edge(AddEdgeArgs {
+                id: Id::new(),
                 source_vertex_id: Id::new(),
                 target_vertex_id: Id::new(),
                 ts_millis: 1234567890,
@@ -135,8 +141,12 @@ mod tests {
 
         // Create the Graph consumer that forwards to FullText
         let (writer, graph_receiver) = create_mutation_writer(config.clone());
-        let graph_handle =
-            spawn_graph_consumer_with_next(graph_receiver, config.clone(), fulltext_sender);
+        let graph_handle = spawn_graph_consumer_with_next(
+            graph_receiver,
+            config.clone(),
+            Path::new("/tmp/test_graph_db"),
+            fulltext_sender,
+        );
 
         // Send mutations - they should flow through Graph -> FullText
         for i in 0..3 {

@@ -14,6 +14,9 @@ pub use graph::*;
 mod fulltext;
 pub use fulltext::*;
 
+mod index;
+pub use index::*;
+
 /// A typesafe wrapper for UUID version 4
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Id(Uuid);
@@ -94,69 +97,12 @@ impl From<Id> for String {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum Mutation {
-    AddVertex(AddVertexArgs),
-    AddEdge(AddEdgeArgs),
-    AddFragment(AddFragmentArgs),
-    Invalidate(InvalidateArgs),
-}
-
-#[derive(Debug, Clone)]
-pub struct AddVertexArgs {
-    /// The UUID of the Vertex
-    pub id: Id,
-
-    /// The timestamp as number of milliseconds since the Unix epoch
-    pub ts_millis: u64,
-
-    /// The name of the Vertex
-    pub name: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct AddEdgeArgs {
-    /// The UUID of the source Vertex
-    pub source_vertex_id: Id,
-
-    /// The UUID of the target Vertex
-    pub target_vertex_id: Id,
-
-    /// The timestamp as number of milliseconds since the Unix epoch
-    pub ts_millis: u64,
-
-    /// The name of the Edge
-    pub name: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct AddFragmentArgs {
-    /// The UUID of the Vertex, Edge, or Fragment
-    pub id: Id,
-
-    /// The timestamp as number of milliseconds since the Unix epoch
-    pub ts_millis: u64,
-
-    /// The body of the Fragment
-    pub body: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct InvalidateArgs {
-    /// The UUID of the Vertex, Edge, or Fragment
-    pub id: Id,
-
-    /// The timestamp as number of milliseconds since the Unix epoch
-    pub ts_millis: u64,
-
-    /// The reason for invalidation
-    pub reason: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::time::Duration;
+
+    use std::path::Path;
 
     #[tokio::test]
     async fn test_graph_and_fulltext_consumers_integration() {
@@ -170,7 +116,8 @@ mod tests {
         let (writer2, receiver2) = create_mutation_writer(config.clone());
 
         // Spawn both consumer types
-        let graph_handle = spawn_graph_consumer(receiver1, config.clone());
+        let graph_handle =
+            spawn_graph_consumer(receiver1, config.clone(), Path::new("/tmp/test_graph_db"));
         let fulltext_handle = spawn_fulltext_consumer(receiver2, config.clone());
 
         // Send mutations to both writers (simulating fanout)
@@ -308,6 +255,7 @@ mod tests {
         };
 
         let edge = AddEdgeArgs {
+            id: Id::new(),
             source_vertex_id: Id::new(),
             target_vertex_id: Id::new(),
             ts_millis: 1234567890,

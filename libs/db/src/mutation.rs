@@ -1,7 +1,69 @@
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::{AddEdgeArgs, AddFragmentArgs, AddVertexArgs, InvalidateArgs, Mutation, WriterConfig};
+use crate::{Id, WriterConfig};
+
+#[derive(Debug, Clone)]
+pub enum Mutation {
+    AddVertex(AddVertexArgs),
+    AddEdge(AddEdgeArgs),
+    AddFragment(AddFragmentArgs),
+    Invalidate(InvalidateArgs),
+}
+
+#[derive(Debug, Clone)]
+pub struct AddVertexArgs {
+    /// The UUID of the Vertex
+    pub id: Id,
+
+    /// The timestamp as number of milliseconds since the Unix epoch
+    pub ts_millis: u64,
+
+    /// The name of the Vertex
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddEdgeArgs {
+    /// The UUID of the Vertex, Edge, or Fragment
+    pub id: Id,
+
+    /// The UUID of the source Vertex
+    pub source_vertex_id: Id,
+
+    /// The UUID of the target Vertex
+    pub target_vertex_id: Id,
+
+    /// The timestamp as number of milliseconds since the Unix epoch
+    pub ts_millis: u64,
+
+    /// The name of the Edge
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddFragmentArgs {
+    /// The UUID of the Vertex, Edge, or Fragment
+    pub id: Id,
+
+    /// The timestamp as number of milliseconds since the Unix epoch
+    pub ts_millis: u64,
+
+    /// The body of the Fragment
+    pub body: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct InvalidateArgs {
+    /// The UUID of the Vertex, Edge, or Fragment
+    pub id: Id,
+
+    /// The timestamp as number of milliseconds since the Unix epoch
+    pub ts_millis: u64,
+
+    /// The reason for invalidation
+    pub reason: String,
+}
 
 /// Trait for processing different types of mutations
 #[async_trait::async_trait]

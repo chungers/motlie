@@ -90,6 +90,7 @@ mod tests {
 
         writer
             .add_edge(AddEdgeArgs {
+                id: Id::new(),
                 source_vertex_id: Id::new(),
                 target_vertex_id: Id::new(),
                 ts_millis: 1234567890,
