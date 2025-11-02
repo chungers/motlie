@@ -1,110 +1,11 @@
-use crate::{AddEdgeArgs, AddFragmentArgs, AddVertexArgs};
-
-pub trait Index {
-    fn cf_name() -> &'static str;
-}
-
-/// Nodes column family.
-/// Source of truth for nodes; optimized for key lookup and updates.
-/// Normal case
-/// Key = uuid + (invalidation timestamp)
-/// Value = string summary of the node that contains the name and summarization of the fragments associated with the node.
-/// Invalidating a node is done by
-/// 1. Setting the value keyed by uuid to an empty string.
-/// 2. Inserting the current summary (current value) with a new key (uuid + (invalidation timestamp))
-#[derive(Debug, Clone, PartialEq)]
-pub struct Nodes;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Edges;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Fragments;
-
-impl Index for Nodes {
-    fn cf_name() -> &'static str {
-        "nodes(uuid + (invalidation timestamp)) -> summary"
-    }
-}
-
-impl Index for Edges {
-    fn cf_name() -> &'static str {
-        "edges(src_uuid, dst_uuid, ts [,invalid_ts]) -> name"
-    }
-}
-
-impl Index for Fragments {
-    fn cf_name() -> &'static str {
-        "fragments(node_or_edge_uuid, ts [,invalid_ts]) -> fragment"
-    }
-}
-
-pub struct RowsToWrite(pub Vec<(Vec<u8>, Vec<u8>)>);
-
-impl Nodes {
-    pub fn plan(args: &AddVertexArgs) -> RowsToWrite {
-        let key = Vec::from(args.id.into_bytes());
-        let value = format!(
-            // Markdown summary
-            r#"[comment]:\#(id={})
-# {}"#,
-            args.id, args.name
-        )
-        .into_bytes();
-
-        RowsToWrite(vec![(key, value)])
-    }
-}
-
-impl Edges {
-    pub fn plan(args: &AddEdgeArgs) -> RowsToWrite {
-        let mut row1 = (Vec::new(), Vec::new());
-        row1.0
-            .extend_from_slice(&args.source_vertex_id.into_bytes());
-        row1.0
-            .extend_from_slice(&args.target_vertex_id.into_bytes());
-        row1.0.extend_from_slice(args.name.as_bytes());
-        row1.1.extend_from_slice(&args.id.into_bytes());
-
-        let mut row2 = (Vec::new(), Vec::new());
-        row2.0.extend_from_slice(&args.id.into_bytes());
-        row2.1.extend_from_slice(
-            format!(
-                // Markdown summary
-                r#"[comment]:\#(id={})
-#{}"#,
-                args.id, args.name
-            )
-            .as_bytes(),
-        );
-
-        RowsToWrite(vec![row1, row2])
-    }
-}
-
-impl Fragments {
-    pub fn plan(args: &AddFragmentArgs) -> RowsToWrite {
-        let mut key = Vec::from(args.id.into_bytes());
-        key.extend_from_slice(&args.ts_millis.to_be_bytes());
-        let value = format!(
-            // Markdown summary
-            r#"[comment]:\#(id={})
-# {}"#,
-            args.id, args.body
-        )
-        .into_bytes();
-
-        RowsToWrite(vec![(key, value)])
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::index::{Edges, Fragments, Nodes, RowsToWrite};
+    use crate::{AddEdgeArgs, AddFragmentArgs, AddVertexArgs, Id};
 
     #[test]
     fn test_nodes_plan_creates_single_row() {
-        let id = crate::Id::new();
+        let id = Id::new();
         let args = AddVertexArgs {
             id,
             ts_millis: 1234567890,
@@ -123,7 +24,7 @@ mod tests {
         let value = String::from_utf8(rows.0[0].1.clone()).unwrap();
         assert!(value.contains(&format!("id={}", id)));
         assert!(value.contains("TestVertex"));
-        assert!(value.starts_with("[comment]:"));
+        assert!(value.starts_with("[comment]:#"));
     }
 
     #[test]
@@ -137,7 +38,7 @@ mod tests {
 
         for name in test_cases {
             let args = AddVertexArgs {
-                id: crate::Id::new(),
+                id: Id::new(),
                 ts_millis: 1234567890,
                 name: name.to_string(),
             };
@@ -156,9 +57,9 @@ mod tests {
 
     #[test]
     fn test_edges_plan_creates_two_rows() {
-        let edge_id = crate::Id::new();
-        let source_id = crate::Id::new();
-        let target_id = crate::Id::new();
+        let edge_id = Id::new();
+        let source_id = Id::new();
+        let target_id = Id::new();
 
         let args = AddEdgeArgs {
             id: edge_id,
@@ -176,9 +77,9 @@ mod tests {
 
     #[test]
     fn test_edges_plan_first_row_format() {
-        let edge_id = crate::Id::new();
-        let source_id = crate::Id::new();
-        let target_id = crate::Id::new();
+        let edge_id = Id::new();
+        let source_id = Id::new();
+        let target_id = Id::new();
         let edge_name = "TestEdge";
 
         let args = AddEdgeArgs {
@@ -208,9 +109,9 @@ mod tests {
 
     #[test]
     fn test_edges_plan_second_row_format() {
-        let edge_id = crate::Id::new();
-        let source_id = crate::Id::new();
-        let target_id = crate::Id::new();
+        let edge_id = Id::new();
+        let source_id = Id::new();
+        let target_id = Id::new();
         let edge_name = "TestEdge";
 
         let args = AddEdgeArgs {
@@ -233,7 +134,7 @@ mod tests {
         let value = String::from_utf8(row2.1.clone()).unwrap();
         assert!(value.contains(&format!("id={}", edge_id)));
         assert!(value.contains(edge_name));
-        assert!(value.starts_with("[comment]:"));
+        assert!(value.starts_with("[comment]:#"));
     }
 
     #[test]
@@ -242,9 +143,9 @@ mod tests {
 
         for name in test_names {
             let args = AddEdgeArgs {
-                id: crate::Id::new(),
-                source_vertex_id: crate::Id::new(),
-                target_vertex_id: crate::Id::new(),
+                id: Id::new(),
+                source_vertex_id: Id::new(),
+                target_vertex_id: Id::new(),
                 ts_millis: 1234567890,
                 name: name.to_string(),
             };
@@ -262,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_fragments_plan_creates_single_row() {
-        let fragment_id = crate::Id::new();
+        let fragment_id = Id::new();
         let timestamp: u64 = 1234567890;
 
         let args = AddFragmentArgs {
@@ -286,14 +187,14 @@ mod tests {
         let value = String::from_utf8(rows.0[0].1.clone()).unwrap();
         assert!(value.contains("Test fragment body"));
         assert!(value.contains(&format!("id={}", fragment_id)));
-        assert!(value.starts_with("[comment]:"));
+        assert!(value.starts_with("[comment]:#"));
     }
 
     #[test]
     fn test_fragments_plan_preserves_body_content() {
         let test_bodies = vec![
             "Simple text",
-            "Text with\nnewlines\nand\ttabs",
+            "Text with\nnewlines\nand\ntabs\t",
             "Special chars: @#$%^&*()",
             "Unicode: 日本語 🎉",
             "",
@@ -301,7 +202,7 @@ mod tests {
 
         for body in test_bodies {
             let args = AddFragmentArgs {
-                id: crate::Id::new(),
+                id: Id::new(),
                 ts_millis: 1234567890,
                 body: body.to_string(),
             };
@@ -320,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_fragments_plan_timestamp_ordering() {
-        let fragment_id = crate::Id::new();
+        let fragment_id = Id::new();
         let timestamps = vec![1000u64, 2000, 3000, 4000, 5000];
 
         let mut keys = Vec::new();
@@ -363,8 +264,8 @@ mod tests {
     #[test]
     fn test_nodes_plan_with_multiple_ids() {
         // Verify that different IDs produce different keys
-        let id1 = crate::Id::new();
-        let id2 = crate::Id::new();
+        let id1 = Id::new();
+        let id2 = Id::new();
 
         let args1 = AddVertexArgs {
             id: id1,
@@ -392,10 +293,10 @@ mod tests {
     #[test]
     fn test_edges_plan_symmetry() {
         // Test edge from A->B vs B->A
-        let id_a = crate::Id::new();
-        let id_b = crate::Id::new();
-        let edge_id1 = crate::Id::new();
-        let edge_id2 = crate::Id::new();
+        let id_a = Id::new();
+        let id_b = Id::new();
+        let edge_id1 = Id::new();
+        let edge_id2 = Id::new();
 
         let args1 = AddEdgeArgs {
             id: edge_id1,
@@ -426,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_fragments_plan_same_id_different_timestamps() {
-        let fragment_id = crate::Id::new();
+        let fragment_id = Id::new();
 
         let args1 = AddFragmentArgs {
             id: fragment_id,
