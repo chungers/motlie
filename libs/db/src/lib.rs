@@ -1,87 +1,111 @@
-// Database library for motlie
-
-use uuid::Uuid;
+use ferroid::base32::Base32UlidExt;
+use ferroid::id::ULID;
 
 mod writer;
 pub use writer::*;
-
 mod mutation;
 pub use mutation::*;
-
 mod graph;
 pub use graph::*;
-
 mod fulltext;
 pub use fulltext::*;
-
 mod index;
 pub use index::*;
 
-/// A typesafe wrapper for UUID version 4
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Id(Uuid);
+/// Custom error type for Id parsing
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdError(String);
+
+impl std::fmt::Display for IdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Invalid ID: {}", self.0)
+    }
+}
+
+impl std::error::Error for IdError {}
+
+/// A typesafe wrapper for ULID with 128-bit internal representation as 16 bytes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Id([u8; 16]);
 
 impl Id {
-    /// Generate a new random UUID v4
+    /// Generate a new ULID with 128-bit internal representation
     pub fn new() -> Self {
-        Id(Uuid::new_v4())
+        let ulid = ULID::from_timestamp(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        );
+        Id(ulid.to_raw().to_be_bytes())
     }
 
-    /// Create from an existing Uuid
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Id(uuid)
+    /// Create from a byte slice
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Id(bytes)
     }
 
     /// Parse from a string, returning an error if invalid
-    pub fn from_str(s: &str) -> Result<Self, uuid::Error> {
-        Ok(Id(Uuid::parse_str(s)?))
+    pub fn from_str(s: &str) -> Result<Self, IdError> {
+        // Try to decode as ULID string first
+        if let Ok(ulid) = ULID::decode(s) {
+            return Ok(Id(ulid.to_raw().to_be_bytes()));
+        }
+
+        Err(IdError(format!("Could not parse '{}' as ULID", s)))
     }
 
-    /// Get the string representation
+    /// Get the string representation as ULID
     pub fn as_str(&self) -> String {
-        self.0.to_string()
+        let ulid = ULID::from_raw(u128::from_be_bytes(self.0));
+        format!("{}", ulid.encode())
     }
 
     /// Convert to String
     pub fn into_string(self) -> String {
-        self.0.to_string()
+        self.as_str()
     }
 
-    /// Get the underlying Uuid
-    pub fn as_uuid(&self) -> &Uuid {
+    /// Get the underlying byte array
+    pub fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }
 
-    /// Convert to the underlying Uuid
-    pub fn into_uuid(self) -> Uuid {
+    /// Convert to the underlying byte array
+    pub fn into_bytes(self) -> [u8; 16] {
         self.0
     }
 
-    /// Check if this is a nil UUID (all zeros)
+    /// Check if this is a nil ID (all zeros)
     pub fn is_nil(&self) -> bool {
-        self.0.is_nil()
+        self.0.iter().all(|&b| b == 0)
+    }
+
+    /// Create a nil ID (all zeros)
+    pub fn nil() -> Self {
+        Id([0u8; 16])
     }
 }
 
 impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.as_str())
     }
 }
 
 impl TryFrom<String> for Id {
-    type Error = uuid::Error;
+    type Error = IdError;
 
-    fn try_from(uuid: String) -> Result<Self, Self::Error> {
-        Id::from_str(&uuid)
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Id::from_str(&s)
     }
 }
 
 impl TryFrom<&str> for Id {
-    type Error = uuid::Error;
+    type Error = IdError;
 
-    fn try_from(uuid: &str) -> Result<Self, Self::Error> {
-        Id::from_str(uuid)
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Id::from_str(s)
     }
 }
 
@@ -92,17 +116,28 @@ impl Default for Id {
 }
 
 impl From<Id> for String {
-    fn from(uuid: Id) -> Self {
-        uuid.into_string()
+    fn from(id: Id) -> Self {
+        id.into_string()
+    }
+}
+
+impl From<[u8; 16]> for Id {
+    fn from(bytes: [u8; 16]) -> Self {
+        Id(bytes)
+    }
+}
+
+impl From<Id> for [u8; 16] {
+    fn from(id: Id) -> Self {
+        id.0
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::Duration;
-
     use std::path::Path;
+    use tokio::time::Duration;
 
     #[tokio::test]
     async fn test_graph_and_fulltext_consumers_integration() {
@@ -155,99 +190,217 @@ mod tests {
     }
 
     #[test]
-    fn test_uuid_new() {
-        let uuid1 = Id::new();
-        let uuid2 = Id::new();
-
-        // UUIDs should be different
-        assert_ne!(uuid1, uuid2);
-
+    fn test_id_new() {
+        let id1 = Id::new();
+        let id2 = Id::new();
         // Should not be nil
-        assert!(!uuid1.is_nil());
-        assert!(!uuid2.is_nil());
+        assert!(!id1.is_nil());
+        assert!(!id2.is_nil());
     }
 
     #[test]
-    fn test_uuid_from_str_valid() {
-        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
-        let uuid = Id::from_str(uuid_str).unwrap();
-
-        assert_eq!(uuid.as_str(), uuid_str);
+    fn test_id_from_bytes() {
+        let bytes = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let id = Id::from_bytes(bytes);
+        assert_eq!(id.as_bytes(), &bytes);
+        assert_eq!(id.into_bytes(), bytes);
     }
 
     #[test]
-    fn test_uuid_from_str_invalid() {
-        let invalid_str = "not-a-uuid";
+    fn test_id_from_str_ulid() {
+        let ulid = ULID::from_timestamp(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        );
+        let ulid_str = format!("{}", ulid.encode());
+        let id = Id::from_str(&ulid_str).unwrap();
+        let expected_bytes = ulid.to_raw().to_be_bytes();
+        assert_eq!(id.as_bytes(), &expected_bytes);
+    }
+
+    #[test]
+    fn test_id_from_str_invalid() {
+        let invalid_str = "not-a-valid-id";
         assert!(Id::from_str(invalid_str).is_err());
     }
 
     #[test]
-    fn test_uuid_display() {
-        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
-        let uuid = Id::from_str(uuid_str).unwrap();
-
-        assert_eq!(format!("{}", uuid), uuid_str);
+    fn test_id_display() {
+        let bytes = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let id = Id::from_bytes(bytes);
+        let display_str = format!("{}", id);
+        // Should be able to parse it back
+        let parsed_id = Id::from_str(&display_str).unwrap();
+        assert_eq!(id, parsed_id);
     }
 
     #[test]
-    fn test_uuid_try_from_string() {
-        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
-        let uuid = Id::try_from(uuid_str.to_string()).unwrap();
+    fn test_id_try_from_string() {
+        let ulid = ULID::from_timestamp(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        );
+        let ulid_str = format!("{}", ulid.encode());
 
-        assert_eq!(uuid.as_str(), uuid_str);
+        let id = Id::try_from(ulid_str.clone()).unwrap();
+        assert_eq!(id.as_bytes(), &ulid.to_raw().to_be_bytes());
 
         let invalid = Id::try_from("invalid".to_string());
         assert!(invalid.is_err());
     }
 
     #[test]
-    fn test_uuid_try_from_str() {
-        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
-        let uuid = Id::try_from(uuid_str).unwrap();
+    fn test_id_try_from_str() {
+        let ulid = ULID::from_timestamp(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        );
+        let ulid_str = format!("{}", ulid.encode());
 
-        assert_eq!(uuid.as_str(), uuid_str);
+        let id = Id::try_from(ulid_str.as_str()).unwrap();
+        assert_eq!(id.as_bytes(), &ulid.to_raw().to_be_bytes());
 
         let invalid = Id::try_from("invalid");
         assert!(invalid.is_err());
     }
 
     #[test]
-    fn test_uuid_conversions() {
-        let original_uuid = Uuid::new_v4();
-        let uuid_v4 = Id::from_uuid(original_uuid);
+    fn test_id_conversions() {
+        let bytes = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let id = Id::from_bytes(bytes);
+        assert_eq!(id.as_bytes(), &bytes);
+        assert_eq!(id.into_bytes(), bytes);
 
-        assert_eq!(uuid_v4.as_uuid(), &original_uuid);
-        assert_eq!(uuid_v4.clone().into_uuid(), original_uuid);
-        assert_eq!(uuid_v4.as_str(), original_uuid.to_string());
-        assert_eq!(uuid_v4.into_string(), original_uuid.to_string());
+        // Test From trait
+        let id2: Id = bytes.into();
+        assert_eq!(id2.as_bytes(), &bytes);
+
+        let bytes2: [u8; 16] = id2.into();
+        assert_eq!(bytes2, bytes);
     }
 
     #[test]
-    fn test_uuid_default() {
-        let uuid = Id::default();
-        assert!(!uuid.is_nil());
+    fn test_id_default() {
+        let id = Id::default();
+        assert!(!id.is_nil());
     }
 
     #[test]
-    fn test_uuid_nil() {
-        let nil_uuid = Id::from_uuid(Uuid::nil());
-        assert!(nil_uuid.is_nil());
+    fn test_id_nil() {
+        let nil_id = Id::nil();
+        assert!(nil_id.is_nil());
+        assert_eq!(nil_id.as_bytes(), &[0u8; 16]);
 
-        let normal_uuid = Id::new();
-        assert!(!normal_uuid.is_nil());
+        let normal_id = Id::new();
+        assert!(!normal_id.is_nil());
     }
 
     #[test]
-    fn test_uuid_string_conversion() {
-        let uuid = Id::new();
-        let uuid_string: String = uuid.clone().into();
+    fn test_id_string_conversion() {
+        let id = Id::new();
+        let id_string: String = id.into();
+        assert!(!id_string.is_empty());
+    }
 
-        assert_eq!(uuid_string, uuid.as_str());
+    #[test]
+    fn test_id_ordering() {
+        let bytes1 = [0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let bytes2 = [0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let id1 = Id::from_bytes(bytes1);
+        let id2 = Id::from_bytes(bytes2);
+        assert!(id1 < id2);
+        assert!(id2 > id1);
+    }
+
+    #[test]
+    fn test_id_lexicographic_sorting() {
+        // Generate multiple IDs with small delays to ensure different timestamps
+        let mut ids = Vec::new();
+        for _ in 0..10 {
+            ids.push(Id::new());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // Store the original order
+        let original_ids = ids.clone();
+
+        // Sort the IDs
+        ids.sort();
+
+        // The sorted order should be the same as the generated order
+        // because ULIDs are lexicographically sortable by timestamp
+        assert_eq!(
+            ids, original_ids,
+            "IDs should be lexicographically sorted in generation order"
+        );
+
+        // Verify each ID is less than or equal to the next
+        for i in 0..ids.len() - 1 {
+            assert!(
+                ids[i] <= ids[i + 1],
+                "ID at index {} should be <= ID at index {}",
+                i,
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn test_id_sequential_generation() {
+        // Generate IDs sequentially and verify they are in order
+        let id1 = Id::new();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let id2 = Id::new();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let id3 = Id::new();
+
+        // Each subsequent ID should be greater than the previous
+        assert!(id1 < id2, "id1 should be less than id2");
+        assert!(id2 < id3, "id2 should be less than id3");
+        assert!(id1 < id3, "id1 should be less than id3");
+
+        // Verify the byte-level ordering
+        assert!(id1.as_bytes() < id2.as_bytes());
+        assert!(id2.as_bytes() < id3.as_bytes());
+    }
+
+    #[test]
+    fn test_id_byte_slice_lexicographic_order() {
+        // Test that byte slice comparison matches Id comparison
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            ids.push(Id::new());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // Compare using Id's Ord implementation
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+
+        // Compare using byte slice comparison
+        let mut byte_sorted: Vec<_> = ids.iter().map(|id| id.as_bytes().clone()).collect();
+        byte_sorted.sort();
+
+        // The orderings should match
+        for (i, id) in sorted_ids.iter().enumerate() {
+            assert_eq!(
+                id.as_bytes(),
+                &byte_sorted[i],
+                "Byte ordering should match Id ordering at index {}",
+                i
+            );
+        }
     }
 
     #[test]
     fn test_struct_usage() {
-        // Test that our structs work with the new UuidV4 type
+        // Test that our structs work with the new Id type
         let vertex = AddVertexArgs {
             id: Id::new(),
             ts_millis: 1234567890,
