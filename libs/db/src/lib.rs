@@ -12,6 +12,13 @@ pub use fulltext::*;
 mod index;
 pub use index::*;
 
+#[cfg(test)]
+mod index_tests;
+#[cfg(test)]
+mod graph_tests;
+#[cfg(test)]
+mod fulltext_tests;
+
 /// Custom error type for Id parsing
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdError(String);

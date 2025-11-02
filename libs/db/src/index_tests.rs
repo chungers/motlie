@@ -24,7 +24,7 @@ mod tests {
         let value = String::from_utf8(rows.0[0].1.clone()).unwrap();
         assert!(value.contains(&format!("id={}", id)));
         assert!(value.contains("TestVertex"));
-        assert!(value.starts_with("[comment]:#"));
+        assert!(value.starts_with("[comment]:\\#"));
     }
 
     #[test]
@@ -134,7 +134,7 @@ mod tests {
         let value = String::from_utf8(row2.1.clone()).unwrap();
         assert!(value.contains(&format!("id={}", edge_id)));
         assert!(value.contains(edge_name));
-        assert!(value.starts_with("[comment]:#"));
+        assert!(value.starts_with("[comment]:\\#"));
     }
 
     #[test]
@@ -187,7 +187,7 @@ mod tests {
         let value = String::from_utf8(rows.0[0].1.clone()).unwrap();
         assert!(value.contains("Test fragment body"));
         assert!(value.contains(&format!("id={}", fragment_id)));
-        assert!(value.starts_with("[comment]:#"));
+        assert!(value.starts_with("[comment]:\\#"));
     }
 
     #[test]

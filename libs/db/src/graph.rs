@@ -83,6 +83,16 @@ impl Storage {
         }
     }
 
+    /// Create a new Storage instance in readwrite mode with custom options
+    pub fn readwrite_with_options(db_path: &Path, db_options: rocksdb::Options) -> Self {
+        Self {
+            db_path: PathBuf::from(db_path),
+            db_options,
+            db: None,
+            mode: StorageMode::ReadWrite,
+        }
+    }
+
     /// Close the database
     pub fn close(&mut self) -> Result<()> {
         if self.db.is_none() {

@@ -508,8 +508,7 @@ mod tests {
         options.set_error_if_exists(true);
         options.create_if_missing(false);
 
-        let mut storage2 = Storage::readwrite(&db_path);
-        storage2.db_options = options;
+        let mut storage2 = Storage::readwrite_with_options(&db_path, options);
 
         let result = storage2.ready();
         assert!(
@@ -537,8 +536,7 @@ mod tests {
         let mut options = rocksdb::Options::default();
         options.create_missing_column_families(false); // Don't create missing CFs
 
-        let mut storage = Storage::readwrite(&db_path);
-        storage.db_options = options;
+        let mut storage = Storage::readwrite_with_options(&db_path, options);
 
         let result = storage.ready();
         assert!(
@@ -1124,5 +1122,4 @@ mod tests {
             "Test completed: ReadWrite closed first, all ReadOnly instances remained functional"
         );
     }
-
 }
