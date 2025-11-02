@@ -2,6 +2,7 @@
 //! and writing them to the graph store.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -15,20 +16,27 @@ use crate::{
     AddEdgeArgs, AddFragmentArgs, AddVertexArgs, InvalidateArgs, WriterConfig,
 };
 
-/// Graph-specific mutation processor
-pub struct GraphProcessor {
+pub enum StorageMode {
+    ReadOnly,
+    ReadWrite,
+}
+
+/// Graph-specific storage
+pub struct Storage {
     db_path: PathBuf,
     db_options: Options,
     db: Option<DB>,
+    mode: StorageMode,
 }
 
-impl GraphProcessor {
-    /// Create a new GraphProcessor
-    pub fn new(db_path: &Path) -> Self {
+impl Storage {
+    /// Create a new Storage instance
+    pub fn new(db_path: &Path, mode: StorageMode) -> Self {
         Self {
             db_path: PathBuf::from(db_path),
             db_options: Options::default(),
             db: None,
+            mode: mode,
         }
     }
 
@@ -50,12 +58,50 @@ impl GraphProcessor {
         self
     }
 
-    fn all_column_families(&self) -> Vec<&str> {
-        vec![Nodes::cf_name(), Edges::cf_name()]
+    /// Default options for the GraphProcessor
+    /// For RocksDB, the default settings are:
+    /// - error_if_exists: false
+    /// - create_if_missing: false
+    /// - create_missing_column_families: false
+    pub fn default_readonly_options(mut self) -> Self {
+        let mut options = Options::default();
+        options.set_error_if_exists(false);
+        options.create_if_missing(false);
+        options.create_missing_column_families(false);
+        self.db_options = options;
+        self.mode = StorageMode::ReadOnly;
+        self
     }
 
-    /// Readies the graph processor for use
+    /// Close the database
+    pub fn close(&mut self) -> Result<()> {
+        if self.db.is_none() {
+            return Err(anyhow::anyhow!("[Storage] Storage is not ready. "));
+        }
+        if let Some(db) = self.db.take() {
+            // Only flush if in ReadWrite mode (flush not supported in ReadOnly)
+            match self.mode {
+                StorageMode::ReadWrite => {
+                    db.flush()?;
+                }
+                StorageMode::ReadOnly => {
+                    // Skip flush for ReadOnly mode
+                }
+            }
+            drop(db); // drop the reference for automatic closing the database.
+        }
+        Ok(())
+    }
+
+    fn all_column_families(&self) -> Vec<&str> {
+        vec![Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()]
+    }
+
+    /// Readies for writes
     pub fn ready(&mut self) -> Result<()> {
+        if self.db.is_some() {
+            return Ok(());
+        }
         // The path should be a directory and it should exist.
         match self.db_path.try_exists() {
             Err(e) => return Err(e.into()),
@@ -76,14 +122,38 @@ impl GraphProcessor {
             Ok(false) => {}
         }
 
-        self.db = Some(DB::open_cf(
-            &self.db_options,
-            &self.db_path,
-            self.all_column_families(),
-        )?);
+        match self.mode {
+            StorageMode::ReadOnly => {
+                self.db = Some(DB::open_cf_for_read_only(
+                    &self.db_options,
+                    &self.db_path,
+                    self.all_column_families(),
+                    false,
+                )?);
+            }
+            StorageMode::ReadWrite => {
+                self.db = Some(DB::open_cf(
+                    &self.db_options,
+                    &self.db_path,
+                    self.all_column_families(),
+                )?);
+            }
+        }
 
-        log::info!("[Graph] Ready");
+        log::info!("[Storage] Ready");
         Ok(())
+    }
+}
+
+/// Graph-specific mutation processor
+pub struct GraphProcessor {
+    storage: Arc<Storage>,
+}
+
+impl GraphProcessor {
+    /// Create a new GraphProcessor
+    pub fn new(storage: Arc<Storage>) -> Self {
+        Self { storage }
     }
 }
 
@@ -132,7 +202,8 @@ pub fn create_graph_consumer(
     config: WriterConfig,
     db_path: &Path,
 ) -> Consumer<GraphProcessor> {
-    let processor = GraphProcessor::new(db_path);
+    let storage = Arc::new(Storage::new(db_path, StorageMode::ReadWrite).default_options());
+    let processor = GraphProcessor::new(storage);
     Consumer::new(receiver, config, processor)
 }
 
@@ -143,7 +214,8 @@ pub fn create_graph_consumer_with_next(
     db_path: &Path,
     next: mpsc::Sender<crate::Mutation>,
 ) -> Consumer<GraphProcessor> {
-    let processor = GraphProcessor::new(db_path);
+    let storage = Arc::new(Storage::new(db_path, StorageMode::ReadWrite).default_options());
+    let processor = GraphProcessor::new(storage);
     Consumer::with_next(receiver, config, processor, next)
 }
 

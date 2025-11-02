@@ -231,7 +231,7 @@ mod tests {
 
         let (writer, receiver) = {
             let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
-            let writer = crate::MutationWriter::new(sender);
+            let writer = crate::Writer::new(sender);
             (writer, receiver)
         };
 

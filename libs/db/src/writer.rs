@@ -20,14 +20,14 @@ impl Default for WriterConfig {
 
 /// Handle for sending mutations to the writer
 #[derive(Debug, Clone)]
-pub struct MutationWriter {
+pub struct Writer {
     sender: mpsc::Sender<Mutation>,
 }
 
-impl MutationWriter {
+impl Writer {
     /// Create a new MutationWriter with the given sender
     pub fn new(sender: mpsc::Sender<Mutation>) -> Self {
-        MutationWriter { sender }
+        Writer { sender }
     }
 
     /// Send a mutation to be processed
@@ -65,9 +65,9 @@ impl MutationWriter {
 }
 
 /// Create a new mutation writer and receiver pair
-pub fn create_mutation_writer(config: WriterConfig) -> (MutationWriter, mpsc::Receiver<Mutation>) {
+pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Mutation>) {
     let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
-    let writer = MutationWriter::new(sender);
+    let writer = Writer::new(sender);
     (writer, receiver)
 }
 
