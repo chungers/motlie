@@ -1,8 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::graph::{
-        spawn_graph_consumer, spawn_graph_consumer_with_next, Storage, StorageMode,
-    };
+    use crate::graph::{spawn_graph_consumer, spawn_graph_consumer_with_next, Storage};
     use crate::index::{Edges, Fragments, Index, Nodes};
     use crate::{
         create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddVertexArgs, Id, WriterConfig,
@@ -191,7 +189,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // Ready should succeed for a new database
         let result = storage.ready();
@@ -207,12 +205,12 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         // Create and close a database
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
         storage.close().unwrap();
 
         // Open it again - should succeed
-        let mut storage2 = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage2 = Storage::readwrite(&db_path);
         let result = storage2.ready();
         assert!(
             result.is_ok(),
@@ -236,7 +234,7 @@ mod tests {
         assert!(file_path.is_file(), "path should be a file");
         assert!(!file_path.is_dir(), "path should not be a directory");
 
-        let mut storage = Storage::new(&file_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&file_path);
 
         // Ready should fail because path is a file
         let result = storage.ready();
@@ -270,7 +268,7 @@ mod tests {
             assert!(symlink_path.exists(), "symlink should exist");
             assert!(symlink_path.is_symlink(), "path should be a symlink");
 
-            let mut storage = Storage::new(&symlink_path, StorageMode::ReadWrite).default_options();
+            let mut storage = Storage::readwrite(&symlink_path);
 
             // Ready should fail because path is a symlink
             let result = storage.ready();
@@ -294,7 +292,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
 
         // Close should succeed
@@ -307,7 +305,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
 
         // First close should succeed
@@ -333,7 +331,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // Close without ready should fail
         let result = storage.close();
@@ -356,7 +354,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // Attempting to close before ready should return an error
         let result = storage.close();
@@ -388,7 +386,7 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         // Create storage
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // Ready the database
         assert!(storage.ready().is_ok(), "ready() should succeed");
@@ -420,7 +418,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
         storage.close().unwrap();
 
@@ -468,7 +466,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // Database directory should not exist before ready()
         assert!(!db_path.exists(), "DB should not exist before ready()");
@@ -501,7 +499,7 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         // First create a database
-        let mut storage1 = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage1 = Storage::readwrite(&db_path);
         storage1.ready().unwrap();
         storage1.close().unwrap();
 
@@ -510,7 +508,7 @@ mod tests {
         options.set_error_if_exists(true);
         options.create_if_missing(false);
 
-        let mut storage2 = Storage::new(&db_path, StorageMode::ReadWrite);
+        let mut storage2 = Storage::readwrite(&db_path);
         storage2.db_options = options;
 
         let result = storage2.ready();
@@ -539,7 +537,7 @@ mod tests {
         let mut options = rocksdb::Options::default();
         options.create_missing_column_families(false); // Don't create missing CFs
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite);
+        let mut storage = Storage::readwrite(&db_path);
         storage.db_options = options;
 
         let result = storage.ready();
@@ -565,7 +563,7 @@ mod tests {
         // Create a file instead of directory to cause RocksDB error
         std::fs::write(&db_path, "not a database").unwrap();
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // This should fail at the DB::open_cf call, not our file check
         // because RocksDB will try to open it
@@ -583,7 +581,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // First ready should succeed
         assert!(storage.ready().is_ok(), "First ready() should succeed");
@@ -603,7 +601,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // Call ready() the first time
         let result1 = storage.ready();
@@ -642,7 +640,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // First ready
         storage.ready().unwrap();
@@ -679,7 +677,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // First cycle: ready -> close
         println!("First cycle: ready()");
@@ -745,7 +743,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        let mut storage = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage = Storage::readwrite(&db_path);
 
         // Initial state: DB doesn't exist
         assert!(!db_path.exists(), "DB should not exist initially");
@@ -814,12 +812,12 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         // First create a database with ReadWrite
-        let mut storage_rw = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage_rw = Storage::readwrite(&db_path);
         storage_rw.ready().unwrap();
         storage_rw.close().unwrap();
 
         // Now open it in ReadOnly mode
-        let mut storage_ro = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
+        let mut storage_ro = Storage::readonly(&db_path);
         let result = storage_ro.ready();
         assert!(
             result.is_ok(),
@@ -836,12 +834,12 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         // First create a database with ReadWrite
-        let mut storage_rw1 = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage_rw1 = Storage::readwrite(&db_path);
         storage_rw1.ready().unwrap();
         storage_rw1.close().unwrap();
 
         // Open in ReadWrite mode
-        let mut storage_rw = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage_rw = Storage::readwrite(&db_path);
         let result_rw = storage_rw.ready();
         assert!(
             result_rw.is_ok(),
@@ -850,7 +848,7 @@ mod tests {
         );
 
         // Open same database in ReadOnly mode - should work simultaneously
-        let mut storage_ro = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
+        let mut storage_ro = Storage::readonly(&db_path);
         let result_ro = storage_ro.ready();
         assert!(
             result_ro.is_ok(),
@@ -879,15 +877,15 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         // Create database
-        let mut storage_rw1 = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage_rw1 = Storage::readwrite(&db_path);
         storage_rw1.ready().unwrap();
         storage_rw1.close().unwrap();
 
         // Open two ReadOnly instances
-        let mut storage_ro1 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
+        let mut storage_ro1 = Storage::readonly(&db_path);
         storage_ro1.ready().unwrap();
 
-        let mut storage_ro2 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
+        let mut storage_ro2 = Storage::readonly(&db_path);
         storage_ro2.ready().unwrap();
 
         println!("Two ReadOnly storage instances are open");
@@ -910,14 +908,14 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         // Create database
-        let mut storage_rw = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage_rw = Storage::readwrite(&db_path);
         storage_rw.ready().unwrap();
         storage_rw.close().unwrap();
 
         // Open multiple ReadOnly instances simultaneously
-        let mut storage_ro1 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
-        let mut storage_ro2 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
-        let mut storage_ro3 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
+        let mut storage_ro1 = Storage::readonly(&db_path);
+        let mut storage_ro2 = Storage::readonly(&db_path);
+        let mut storage_ro3 = Storage::readonly(&db_path);
 
         assert!(
             storage_ro1.ready().is_ok(),
@@ -958,17 +956,17 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         // Create database
-        let mut storage_init = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage_init = Storage::readwrite(&db_path);
         storage_init.ready().unwrap();
         storage_init.close().unwrap();
 
         // Open ReadWrite
-        let mut storage_rw = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage_rw = Storage::readwrite(&db_path);
         storage_rw.ready().unwrap();
 
         // Open multiple ReadOnly instances while ReadWrite is open
-        let mut storage_ro1 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
-        let mut storage_ro2 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
+        let mut storage_ro1 = Storage::readonly(&db_path);
+        let mut storage_ro2 = Storage::readonly(&db_path);
 
         assert!(
             storage_ro1.ready().is_ok(),
@@ -1004,7 +1002,7 @@ mod tests {
         assert!(!db_path.exists(), "Database should not exist");
 
         // Try to open non-existent database in ReadOnly mode
-        let mut storage_ro = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
+        let mut storage_ro = Storage::readonly(&db_path);
         let result = storage_ro.ready();
 
         // This should fail because ReadOnly can't create a database
@@ -1022,13 +1020,13 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         // Create and initialize the database
-        let mut storage_init = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage_init = Storage::readwrite(&db_path);
         storage_init.ready().unwrap();
         storage_init.close().unwrap();
         println!("Database created and initialized");
 
         // Open one ReadWrite instance
-        let mut storage_rw = Storage::new(&db_path, StorageMode::ReadWrite).default_options();
+        let mut storage_rw = Storage::readwrite(&db_path);
         assert!(
             storage_rw.ready().is_ok(),
             "ReadWrite storage should open successfully"
@@ -1036,10 +1034,10 @@ mod tests {
         println!("ReadWrite storage opened");
 
         // Open multiple ReadOnly instances (4 instances to test > 1)
-        let mut storage_ro1 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
-        let mut storage_ro2 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
-        let mut storage_ro3 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
-        let mut storage_ro4 = Storage::new(&db_path, StorageMode::ReadOnly).default_options();
+        let mut storage_ro1 = Storage::readonly(&db_path);
+        let mut storage_ro2 = Storage::readonly(&db_path);
+        let mut storage_ro3 = Storage::readonly(&db_path);
+        let mut storage_ro4 = Storage::readonly(&db_path);
 
         assert!(
             storage_ro1.ready().is_ok(),
@@ -1126,4 +1124,5 @@ mod tests {
             "Test completed: ReadWrite closed first, all ReadOnly instances remained functional"
         );
     }
+
 }

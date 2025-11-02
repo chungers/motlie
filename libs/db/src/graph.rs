@@ -16,9 +16,42 @@ use crate::{
     AddEdgeArgs, AddFragmentArgs, AddVertexArgs, InvalidateArgs, WriterConfig,
 };
 
-pub enum StorageMode {
+enum StorageMode {
     ReadOnly,
     ReadWrite,
+}
+
+struct StorageOptions {}
+impl StorageOptions {
+    /// Default options for Storage in Readwrite mode
+    /// For RocksDB, the default settings are:
+    /// - error_if_exists: false
+    /// - create_if_missing: true
+    /// - create_missing_column_families: true
+    /// This will allow existing databases to be opened, but can
+    /// potentially cause corruption if the schema change is incompatible.
+    /// The graph processor is the only writer that can modify the graph store.
+    /// Readers are expected to be able to open and read the database.
+    pub fn default_for_readwrite() -> Options {
+        let mut options = Options::default();
+        options.set_error_if_exists(false);
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        options
+    }
+
+    /// Default options for Storage in Readonly mode
+    /// For RocksDB, the default settings are:
+    /// - error_if_exists: false
+    /// - create_if_missing: false
+    /// - create_missing_column_families: false
+    pub fn default_for_readonly() -> Options {
+        let mut options = Options::default();
+        options.set_error_if_exists(false);
+        options.create_if_missing(false);
+        options.create_missing_column_families(false);
+        options
+    }
 }
 
 /// Graph-specific storage
@@ -30,47 +63,24 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Create a new Storage instance
-    pub fn new(db_path: &Path, mode: StorageMode) -> Self {
+    /// Create a new Storage instance in readonly mode
+    pub fn readonly(db_path: &Path) -> Self {
         Self {
             db_path: PathBuf::from(db_path),
-            db_options: Options::default(),
+            db_options: StorageOptions::default_for_readonly(),
             db: None,
-            mode: mode,
+            mode: StorageMode::ReadOnly,
         }
     }
 
-    /// Default options for the GraphProcessor
-    /// For RocksDB, the default settings are:
-    /// - error_if_exists: false
-    /// - create_if_missing: true
-    /// - create_missing_column_families: true
-    /// This will allow existing databases to be opened, but can
-    /// potentially cause corruption if the schema change is incompatible.
-    /// The graph processor is the only writer that can modify the graph store.
-    /// Readers are expected to be able to open and read the database.
-    pub fn default_options(mut self) -> Self {
-        let mut options = Options::default();
-        options.set_error_if_exists(false);
-        options.create_if_missing(true);
-        options.create_missing_column_families(true);
-        self.db_options = options;
-        self
-    }
-
-    /// Default options for the GraphProcessor
-    /// For RocksDB, the default settings are:
-    /// - error_if_exists: false
-    /// - create_if_missing: false
-    /// - create_missing_column_families: false
-    pub fn default_readonly_options(mut self) -> Self {
-        let mut options = Options::default();
-        options.set_error_if_exists(false);
-        options.create_if_missing(false);
-        options.create_missing_column_families(false);
-        self.db_options = options;
-        self.mode = StorageMode::ReadOnly;
-        self
+    /// Create a new Storage instance in readwrite mode
+    pub fn readwrite(db_path: &Path) -> Self {
+        Self {
+            db_path: PathBuf::from(db_path),
+            db_options: StorageOptions::default_for_readwrite(),
+            db: None,
+            mode: StorageMode::ReadWrite,
+        }
     }
 
     /// Close the database
@@ -97,7 +107,10 @@ impl Storage {
         vec![Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()]
     }
 
-    /// Readies for writes
+    /// Readies by opening the database and column families.
+    /// Errors:
+    /// - If the database path is not a directory or does not exist.
+    /// - If the database path is a file or a symlink.
     pub fn ready(&mut self) -> Result<()> {
         if self.db.is_some() {
             return Ok(());
@@ -146,11 +159,11 @@ impl Storage {
 }
 
 /// Graph-specific mutation processor
-pub struct GraphProcessor {
+pub struct Graph {
     storage: Arc<Storage>,
 }
 
-impl GraphProcessor {
+impl Graph {
     /// Create a new GraphProcessor
     pub fn new(storage: Arc<Storage>) -> Self {
         Self { storage }
@@ -158,7 +171,7 @@ impl GraphProcessor {
 }
 
 #[async_trait::async_trait]
-impl Processor for GraphProcessor {
+impl Processor for Graph {
     /// Process an AddVertex mutation
     async fn process_add_vertex(&self, args: &AddVertexArgs) -> Result<()> {
         // TODO: Implement actual vertex insertion into graph store
@@ -201,9 +214,9 @@ pub fn create_graph_consumer(
     receiver: mpsc::Receiver<crate::Mutation>,
     config: WriterConfig,
     db_path: &Path,
-) -> Consumer<GraphProcessor> {
-    let storage = Arc::new(Storage::new(db_path, StorageMode::ReadWrite).default_options());
-    let processor = GraphProcessor::new(storage);
+) -> Consumer<Graph> {
+    let storage = Arc::new(Storage::readwrite(db_path));
+    let processor = Graph::new(storage);
     Consumer::new(receiver, config, processor)
 }
 
@@ -213,9 +226,9 @@ pub fn create_graph_consumer_with_next(
     config: WriterConfig,
     db_path: &Path,
     next: mpsc::Sender<crate::Mutation>,
-) -> Consumer<GraphProcessor> {
-    let storage = Arc::new(Storage::new(db_path, StorageMode::ReadWrite).default_options());
-    let processor = GraphProcessor::new(storage);
+) -> Consumer<Graph> {
+    let storage = Arc::new(Storage::readwrite(db_path));
+    let processor = Graph::new(storage);
     Consumer::with_next(receiver, config, processor, next)
 }
 
