@@ -50,7 +50,7 @@ pub struct AddFragmentArgs {
     pub ts_millis: u64,
 
     /// The body of the Fragment
-    pub body: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone)]
@@ -159,7 +159,7 @@ impl<P: Processor> Consumer<P> {
                 log::debug!(
                     "Processing AddFragment: id={}, body_len={}",
                     args.id,
-                    args.body.len()
+                    args.content.len()
                 );
                 self.processor.process_add_fragment(args).await?;
             }

@@ -30,7 +30,7 @@ mod tests {
         let fragment_args = AddFragmentArgs {
             id: Id::new(),
             ts_millis: 1234567890,
-            body: "This is a test fragment with some searchable content".to_string(),
+            content: "This is a test fragment with some searchable content".to_string(),
         };
         writer.add_fragment(fragment_args).await.unwrap();
 
@@ -60,7 +60,7 @@ mod tests {
         let fragment_args = AddFragmentArgs {
             id: Id::new(),
             ts_millis: 1234567890,
-            body: "The quick brown fox jumps over the lazy dog. This is a longer text fragment that would benefit from BM25 scoring with custom parameters.".to_string(),
+            content: "The quick brown fox jumps over the lazy dog. This is a longer text fragment that would benefit from BM25 scoring with custom parameters.".to_string(),
         };
         writer.add_fragment(fragment_args).await.unwrap();
 
@@ -103,7 +103,7 @@ mod tests {
             .add_fragment(AddFragmentArgs {
                 id: Id::new(),
                 ts_millis: 1234567890,
-                body: "This fragment contains searchable text that should be indexed using BM25 algorithm for effective information retrieval.".to_string(),
+                content: "This fragment contains searchable text that should be indexed using BM25 algorithm for effective information retrieval.".to_string(),
             })
             .await
             .unwrap();
@@ -157,7 +157,7 @@ mod tests {
             let fragment_args = AddFragmentArgs {
                 id: Id::new(),
                 ts_millis: 1234567890 + i,
-                body: format!(
+                content: format!(
                     "Fragment {} with searchable content for full-text indexing",
                     i
                 ),

@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
                 let fragment_args = AddFragmentArgs {
                     id: node_id,
                     ts_millis: current_time,
-                    body: fragment_text.to_string(),
+                    content: fragment_text.to_string(),
                 };
 
                 // Send to Graph consumer (which will forward to FullText)
@@ -163,7 +163,7 @@ async fn main() -> Result<()> {
                 let fragment_args = AddFragmentArgs {
                     id: edge_id,
                     ts_millis: current_time,
-                    body: edge_fragment.to_string(),
+                    content: edge_fragment.to_string(),
                 };
 
                 // Send to Graph consumer (which will forward to FullText)

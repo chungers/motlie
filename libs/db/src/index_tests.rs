@@ -169,7 +169,7 @@ mod tests {
         let args = AddFragmentArgs {
             id: fragment_id,
             ts_millis: timestamp,
-            body: "Test fragment body".to_string(),
+            content: "Test fragment body".to_string(),
         };
 
         let rows = Fragments::plan(&args);
@@ -204,7 +204,7 @@ mod tests {
             let args = AddFragmentArgs {
                 id: Id::new(),
                 ts_millis: 1234567890,
-                body: body.to_string(),
+                content: body.to_string(),
             };
 
             let rows = Fragments::plan(&args);
@@ -230,7 +230,7 @@ mod tests {
             let args = AddFragmentArgs {
                 id: fragment_id,
                 ts_millis: ts,
-                body: "Test".to_string(),
+                content: "Test".to_string(),
             };
 
             let rows = Fragments::plan(&args);
@@ -332,13 +332,13 @@ mod tests {
         let args1 = AddFragmentArgs {
             id: fragment_id,
             ts_millis: 1000,
-            body: "First fragment".to_string(),
+            content: "First fragment".to_string(),
         };
 
         let args2 = AddFragmentArgs {
             id: fragment_id,
             ts_millis: 2000,
-            body: "Second fragment".to_string(),
+            content: "Second fragment".to_string(),
         };
 
         let rows1 = Fragments::plan(&args1);

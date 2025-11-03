@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use rocksdb::{Options, DB};
 
 use crate::{
-    index::{Edges, Fragments, Index, Nodes},
+    index::{Edges, ForwardEdges, Fragments, IsColumnFamily, Nodes, ReverseEdges},
     mutation::{Consumer, Processor},
     AddEdgeArgs, AddFragmentArgs, AddVertexArgs, InvalidateArgs, WriterConfig,
 };
@@ -114,7 +114,13 @@ impl Storage {
     }
 
     fn all_column_families(&self) -> Vec<&str> {
-        vec![Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()]
+        vec![
+            Nodes::CF_NAME,
+            Edges::CF_NAME,
+            Fragments::CF_NAME,
+            ForwardEdges::CF_NAME,
+            ReverseEdges::CF_NAME,
+        ]
     }
 
     /// Readies by opening the database and column families.

@@ -115,7 +115,7 @@ mod tests {
         let fragment_args = AddFragmentArgs {
             id: Id::new(),
             ts_millis: 1234567890,
-            body: "test fragment".to_string(),
+            content: "test fragment".to_string(),
         };
 
         let invalidate_args = InvalidateArgs {

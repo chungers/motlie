@@ -1,9 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::graph::{spawn_graph_consumer, spawn_graph_consumer_with_next, Storage};
-    use crate::index::{Edges, Fragments, Index, Nodes};
+    use crate::index::{Edges, Fragments, Nodes};
     use crate::{
-        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddVertexArgs, Id, WriterConfig,
+        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddVertexArgs, Id, IsColumnFamily,
+        WriterConfig,
     };
     use rocksdb::DB;
     use std::path::Path;
@@ -110,7 +111,7 @@ mod tests {
             .add_fragment(AddFragmentArgs {
                 id: Id::new(),
                 ts_millis: 1234567890,
-                body: "fragment body".to_string(),
+                content: "fragment body".to_string(),
             })
             .await
             .unwrap();
@@ -161,7 +162,7 @@ mod tests {
             let fragment_args = AddFragmentArgs {
                 id: Id::new(),
                 ts_millis: 1234567890 + i,
-                body: format!(
+                content: format!(
                     "Chained fragment {} processed by both Graph and FullText",
                     i
                 ),
@@ -426,7 +427,7 @@ mod tests {
         let db = DB::open_cf(
             &rocksdb::Options::default(),
             &db_path,
-            &[Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()],
+            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
         );
 
         assert!(
@@ -437,25 +438,25 @@ mod tests {
         let db = db.unwrap();
 
         // Verify each column family handle exists
-        let nodes_cf = db.cf_handle(Nodes::cf_name());
+        let nodes_cf = db.cf_handle(Nodes::CF_NAME);
         assert!(
             nodes_cf.is_some(),
             "Nodes column family should exist: {}",
-            Nodes::cf_name()
+            Nodes::CF_NAME
         );
 
-        let edges_cf = db.cf_handle(Edges::cf_name());
+        let edges_cf = db.cf_handle(Edges::CF_NAME);
         assert!(
             edges_cf.is_some(),
             "Edges column family should exist: {}",
-            Edges::cf_name()
+            Edges::CF_NAME
         );
 
-        let fragments_cf = db.cf_handle(Fragments::cf_name());
+        let fragments_cf = db.cf_handle(Fragments::CF_NAME);
         assert!(
             fragments_cf.is_some(),
             "Fragments column family should exist: {}",
-            Fragments::cf_name()
+            Fragments::CF_NAME
         );
 
         drop(db);
@@ -483,7 +484,7 @@ mod tests {
         let db = DB::open_cf(
             &rocksdb::Options::default(),
             &db_path,
-            &[Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()],
+            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
         );
 
         assert!(
@@ -660,7 +661,7 @@ mod tests {
         let db = DB::open_cf(
             &rocksdb::Options::default(),
             &db_path,
-            &[Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()],
+            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
         );
 
         assert!(
@@ -726,7 +727,7 @@ mod tests {
         let db = DB::open_cf(
             &rocksdb::Options::default(),
             &db_path,
-            &[Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()],
+            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
         );
 
         assert!(
@@ -761,7 +762,7 @@ mod tests {
         let db_after_close = DB::open_cf(
             &rocksdb::Options::default(),
             &db_path,
-            &[Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()],
+            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
         );
         assert!(
             db_after_close.is_ok(),
@@ -782,7 +783,7 @@ mod tests {
         let db_final = DB::open_cf(
             &rocksdb::Options::default(),
             &db_path,
-            &[Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()],
+            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
         );
         assert!(
             db_final.is_ok(),
@@ -791,15 +792,15 @@ mod tests {
 
         let db_final = db_final.unwrap();
         assert!(
-            db_final.cf_handle(Nodes::cf_name()).is_some(),
+            db_final.cf_handle(Nodes::CF_NAME).is_some(),
             "Nodes CF should exist"
         );
         assert!(
-            db_final.cf_handle(Edges::cf_name()).is_some(),
+            db_final.cf_handle(Edges::CF_NAME).is_some(),
             "Edges CF should exist"
         );
         assert!(
-            db_final.cf_handle(Fragments::cf_name()).is_some(),
+            db_final.cf_handle(Fragments::CF_NAME).is_some(),
             "Fragments CF should exist"
         );
     }
@@ -934,7 +935,7 @@ mod tests {
         let db_verify = DB::open_cf(
             &rocksdb::Options::default(),
             &db_path,
-            &[Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()],
+            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
         );
         assert!(
             db_verify.is_ok(),
@@ -1110,7 +1111,7 @@ mod tests {
         let db_verify = DB::open_cf(
             &rocksdb::Options::default(),
             &db_path,
-            &[Nodes::cf_name(), Edges::cf_name(), Fragments::cf_name()],
+            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
         );
         assert!(
             db_verify.is_ok(),

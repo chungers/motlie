@@ -85,7 +85,7 @@ impl Processor for FullTextProcessor {
         log::info!(
             "[FullText] Would index fragment content: id={}, body_len={}, k1={}, b={}",
             args.id,
-            args.body.len(),
+            args.content.len(),
             self.k1,
             self.b
         );

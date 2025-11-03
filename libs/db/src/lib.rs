@@ -2,6 +2,7 @@ use ferroid::base32::Base32UlidExt;
 use ferroid::id::ULID;
 
 mod writer;
+use serde::{Deserialize, Serialize};
 pub use writer::*;
 mod mutation;
 pub use mutation::*;
@@ -13,11 +14,11 @@ mod index;
 pub use index::*;
 
 #[cfg(test)]
-mod index_tests;
+mod fulltext_tests;
 #[cfg(test)]
 mod graph_tests;
 #[cfg(test)]
-mod fulltext_tests;
+mod index_tests;
 
 /// Custom error type for Id parsing
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +33,7 @@ impl std::fmt::Display for IdError {
 impl std::error::Error for IdError {}
 
 /// A typesafe wrapper for ULID with 128-bit internal representation as 16 bytes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Id([u8; 16]);
 
 impl Id {
@@ -173,7 +174,7 @@ mod tests {
             let fragment_args = AddFragmentArgs {
                 id: Id::new(),
                 ts_millis: 1234567890 + i,
-                body: format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i),
+                content: format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i),
             };
 
             // Send to both consumers
@@ -425,12 +426,75 @@ mod tests {
         let fragment = AddFragmentArgs {
             id: Id::new(),
             ts_millis: 1234567890,
-            body: "test fragment body".to_string(),
+            content: "test fragment body".to_string(),
         };
 
         // Ensure they can be created and debugged
         println!("{:?}", vertex);
         println!("{:?}", edge);
         println!("{:?}", fragment);
+    }
+
+    #[test]
+    fn test_id_serde_matches_into_bytes() {
+        // Create an Id with known bytes
+        let bytes = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let id = Id::from_bytes(bytes);
+
+        // Serialize using MessagePack
+        let serialized = rmp_serde::to_vec(&id).expect("Failed to serialize Id");
+
+        // Get the bytes using into_bytes()
+        let id_bytes = id.into_bytes();
+
+        // The serialized version should match the raw bytes
+        // MessagePack encodes a 16-byte array as: 0xC4 (fixext type) + 0x10 (length 16) + 16 bytes
+        // or as 0xDC (array16) + length + elements if it's an array
+        // Since Id is defined as Id([u8; 16]), serde will serialize it as a byte array
+        // MessagePack byte arrays are encoded as binary format: 0xC4 + len + data (for small arrays)
+
+        // Let's verify by deserializing back
+        let deserialized: Id =
+            rmp_serde::from_slice(&serialized).expect("Failed to deserialize Id");
+        assert_eq!(
+            deserialized.into_bytes(),
+            id_bytes,
+            "Deserialized Id should match original bytes"
+        );
+
+        // Now verify that the serialized format contains our bytes
+        // For a [u8; 16], MessagePack will encode as binary data
+        // The format should be: [type byte(s), length info, actual 16 bytes]
+        assert!(
+            serialized.len() >= 16,
+            "Serialized data should contain at least the 16 bytes"
+        );
+
+        // Extract the actual data bytes from the MessagePack format
+        // and verify they match id_bytes
+        assert!(
+            serialized.ends_with(&id_bytes) || serialized[serialized.len() - 16..] == id_bytes,
+            "Serialized data should end with the same bytes as into_bytes()"
+        );
+    }
+
+    #[test]
+    fn test_id_serde_roundtrip() {
+        // Test serialization and deserialization roundtrip
+        let original_id = Id::new();
+        let original_bytes = original_id.into_bytes();
+
+        // Serialize
+        let serialized = rmp_serde::to_vec(&original_id).expect("Failed to serialize");
+
+        // Deserialize
+        let deserialized: Id = rmp_serde::from_slice(&serialized).expect("Failed to deserialize");
+        let deserialized_bytes = deserialized.into_bytes();
+
+        // Both methods should produce the same bytes
+        assert_eq!(
+            original_bytes, deserialized_bytes,
+            "Roundtrip should preserve bytes"
+        );
     }
 }
