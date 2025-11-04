@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::{AddEdgeArgs, AddFragmentArgs, AddVertexArgs, InvalidateArgs, Mutation};
+use crate::{AddEdgeArgs, AddFragmentArgs, AddNodeArgs, InvalidateArgs, Mutation};
 
 /// Configuration for the mutation writer
 #[derive(Debug, Clone)]
@@ -39,7 +39,7 @@ impl Writer {
     }
 
     /// Send an AddVertex mutation
-    pub async fn add_vertex(&self, args: AddVertexArgs) -> Result<()> {
+    pub async fn add_vertex(&self, args: AddNodeArgs) -> Result<()> {
         self.send(Mutation::AddVertex(args)).await
     }
 
@@ -98,7 +98,7 @@ mod tests {
         let (writer, _receiver) = create_mutation_writer(config);
 
         // Test that all send operations work
-        let vertex_args = AddVertexArgs {
+        let vertex_args = AddNodeArgs {
             id: Id::new(),
             ts_millis: 1234567890,
             name: "test_vertex".to_string(),

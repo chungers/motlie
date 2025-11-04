@@ -11,9 +11,9 @@ use tokio::task::JoinHandle;
 use rocksdb::{Options, DB};
 
 use crate::{
-    index::{Edges, ForwardEdges, Fragments, IsColumnFamily, Nodes, ReverseEdges},
     mutation::{Consumer, Processor},
-    AddEdgeArgs, AddFragmentArgs, AddVertexArgs, InvalidateArgs, WriterConfig,
+    schema::ALL_COLUMN_FAMILIES,
+    AddEdgeArgs, AddFragmentArgs, AddNodeArgs, InvalidateArgs, WriterConfig,
 };
 
 enum StorageMode {
@@ -113,14 +113,8 @@ impl Storage {
         Ok(())
     }
 
-    fn all_column_families(&self) -> Vec<&str> {
-        vec![
-            Nodes::CF_NAME,
-            Edges::CF_NAME,
-            Fragments::CF_NAME,
-            ForwardEdges::CF_NAME,
-            ReverseEdges::CF_NAME,
-        ]
+    fn all_column_families(&self) -> &[&str] {
+        ALL_COLUMN_FAMILIES
     }
 
     /// Readies by opening the database and column families.
@@ -189,7 +183,7 @@ impl Graph {
 #[async_trait::async_trait]
 impl Processor for Graph {
     /// Process an AddVertex mutation
-    async fn process_add_vertex(&self, args: &AddVertexArgs) -> Result<()> {
+    async fn process_add_vertex(&self, args: &AddNodeArgs) -> Result<()> {
         // TODO: Implement actual vertex insertion into graph store
         log::info!("[Graph] Would insert vertex: {:?}", args);
         // Simulate some async work

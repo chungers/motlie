@@ -1,10 +1,9 @@
 #[cfg(test)]
 mod tests {
     use crate::graph::{spawn_graph_consumer, spawn_graph_consumer_with_next, Storage};
-    use crate::index::{Edges, Fragments, Nodes};
+    use crate::schema::{Edges, Fragments, Nodes, ALL_COLUMN_FAMILIES};
     use crate::{
-        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddVertexArgs, Id, IsColumnFamily,
-        WriterConfig,
+        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id, WriterConfig,
     };
     use rocksdb::DB;
     use std::path::Path;
@@ -25,7 +24,7 @@ mod tests {
             spawn_graph_consumer(receiver, config, Path::new("/tmp/test_graph_db"));
 
         // Send some mutations
-        let vertex_args = AddVertexArgs {
+        let vertex_args = AddNodeArgs {
             id: Id::new(),
             ts_millis: 1234567890,
             name: "test_vertex".to_string(),
@@ -63,7 +62,7 @@ mod tests {
 
         // Send 5 mutations rapidly
         for i in 0..5 {
-            let vertex_args = AddVertexArgs {
+            let vertex_args = AddNodeArgs {
                 id: Id::new(),
                 ts_millis: 1234567890 + i,
                 name: format!("test_vertex_{}", i),
@@ -88,7 +87,7 @@ mod tests {
 
         // Test all mutation types
         writer
-            .add_vertex(AddVertexArgs {
+            .add_vertex(AddNodeArgs {
                 id: Id::new(),
                 ts_millis: 1234567890,
                 name: "vertex".to_string(),
@@ -154,7 +153,7 @@ mod tests {
 
         // Send mutations - they should flow through Graph -> FullText
         for i in 0..3 {
-            let vertex_args = AddVertexArgs {
+            let vertex_args = AddNodeArgs {
                 id: Id::new(),
                 ts_millis: 1234567890 + i,
                 name: format!("chained_vertex_{}", i),
@@ -424,11 +423,7 @@ mod tests {
         storage.close().unwrap();
 
         // Reopen the database directly with RocksDB to verify column families exist
-        let db = DB::open_cf(
-            &rocksdb::Options::default(),
-            &db_path,
-            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
-        );
+        let db = DB::open_cf(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES);
 
         assert!(
             db.is_ok(),
@@ -481,11 +476,7 @@ mod tests {
         storage.close().unwrap();
 
         // Verify we can open the database independently
-        let db = DB::open_cf(
-            &rocksdb::Options::default(),
-            &db_path,
-            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
-        );
+        let db = DB::open_cf(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES);
 
         assert!(
             db.is_ok(),
@@ -658,11 +649,7 @@ mod tests {
         );
 
         // Verify database can be reopened with RocksDB directly
-        let db = DB::open_cf(
-            &rocksdb::Options::default(),
-            &db_path,
-            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
-        );
+        let db = DB::open_cf(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES);
 
         assert!(
             db.is_ok(),
@@ -724,11 +711,7 @@ mod tests {
         );
 
         // Verify database integrity by opening with RocksDB directly
-        let db = DB::open_cf(
-            &rocksdb::Options::default(),
-            &db_path,
-            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
-        );
+        let db = DB::open_cf(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES);
 
         assert!(
             db.is_ok(),
@@ -759,11 +742,8 @@ mod tests {
         assert!(db_path.exists(), "DB should still exist after close()");
 
         // Verify we can independently open the database after close
-        let db_after_close = DB::open_cf(
-            &rocksdb::Options::default(),
-            &db_path,
-            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
-        );
+        let db_after_close =
+            DB::open_cf(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES);
         assert!(
             db_after_close.is_ok(),
             "Should be able to open DB independently after close()"
@@ -780,11 +760,7 @@ mod tests {
 
         // Verify column families still exist after reopening
         storage.close().unwrap();
-        let db_final = DB::open_cf(
-            &rocksdb::Options::default(),
-            &db_path,
-            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
-        );
+        let db_final = DB::open_cf(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES);
         assert!(
             db_final.is_ok(),
             "Column families should still exist after ready-close-ready cycle"
@@ -932,11 +908,7 @@ mod tests {
         println!("Three ReadOnly storage instances are open simultaneously");
 
         // Verify all column families are accessible
-        let db_verify = DB::open_cf(
-            &rocksdb::Options::default(),
-            &db_path,
-            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
-        );
+        let db_verify = DB::open_cf(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES);
         assert!(
             db_verify.is_ok(),
             "Should be able to verify database structure"
@@ -1108,11 +1080,7 @@ mod tests {
         println!("ReadOnly storage 4 closed successfully");
 
         // Verify database integrity after all closes
-        let db_verify = DB::open_cf(
-            &rocksdb::Options::default(),
-            &db_path,
-            &[Nodes::CF_NAME, Edges::CF_NAME, Fragments::CF_NAME],
-        );
+        let db_verify = DB::open_cf(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES);
         assert!(
             db_verify.is_ok(),
             "Database should be intact after all storage instances closed"

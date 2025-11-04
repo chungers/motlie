@@ -4,7 +4,7 @@ mod tests {
         spawn_fulltext_consumer, spawn_fulltext_consumer_with_params, FullTextProcessor,
     };
     use crate::{
-        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddVertexArgs, Id, WriterConfig,
+        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id, WriterConfig,
     };
     use tokio::time::Duration;
 
@@ -20,7 +20,7 @@ mod tests {
         let consumer_handle = spawn_fulltext_consumer(receiver, config);
 
         // Send some mutations
-        let vertex_args = AddVertexArgs {
+        let vertex_args = AddNodeArgs {
             id: Id::new(),
             ts_millis: 1234567890,
             name: "test_vertex".to_string(),
@@ -80,7 +80,7 @@ mod tests {
 
         // Test all mutation types with search-relevant content
         writer
-            .add_vertex(AddVertexArgs {
+            .add_vertex(AddNodeArgs {
                 id: Id::new(),
                 ts_millis: 1234567890,
                 name: "search vertex".to_string(),

@@ -5,14 +5,14 @@ use crate::{Id, WriterConfig};
 
 #[derive(Debug, Clone)]
 pub enum Mutation {
-    AddVertex(AddVertexArgs),
+    AddVertex(AddNodeArgs),
     AddEdge(AddEdgeArgs),
     AddFragment(AddFragmentArgs),
     Invalidate(InvalidateArgs),
 }
 
 #[derive(Debug, Clone)]
-pub struct AddVertexArgs {
+pub struct AddNodeArgs {
     /// The UUID of the Vertex
     pub id: Id,
 
@@ -69,7 +69,7 @@ pub struct InvalidateArgs {
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
     /// Process an AddVertex mutation
-    async fn process_add_vertex(&self, args: &AddVertexArgs) -> Result<()>;
+    async fn process_add_vertex(&self, args: &AddNodeArgs) -> Result<()>;
 
     /// Process an AddEdge mutation
     async fn process_add_edge(&self, args: &AddEdgeArgs) -> Result<()>;
@@ -202,7 +202,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Processor for TestProcessor {
-        async fn process_add_vertex(&self, _args: &AddVertexArgs) -> Result<()> {
+        async fn process_add_vertex(&self, _args: &AddNodeArgs) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(1)).await;
             Ok(())
         }
@@ -242,7 +242,7 @@ mod tests {
         let consumer_handle = spawn_consumer(consumer);
 
         // Send a mutation
-        let vertex_args = AddVertexArgs {
+        let vertex_args = AddNodeArgs {
             id: Id::new(),
             ts_millis: 1234567890,
             name: "test_vertex".to_string(),

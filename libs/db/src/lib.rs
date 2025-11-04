@@ -10,15 +10,13 @@ mod graph;
 pub use graph::*;
 mod fulltext;
 pub use fulltext::*;
-mod index;
-pub use index::*;
+mod schema;
+pub use schema::*;
 
 #[cfg(test)]
 mod fulltext_tests;
 #[cfg(test)]
 mod graph_tests;
-#[cfg(test)]
-mod index_tests;
 
 /// Custom error type for Id parsing
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +163,7 @@ mod tests {
 
         // Send mutations to both writers (simulating fanout)
         for i in 0..3 {
-            let vertex_args = AddVertexArgs {
+            let vertex_args = AddNodeArgs {
                 id: Id::new(),
                 ts_millis: 1234567890 + i,
                 name: format!("integration_test_vertex_{}", i),
@@ -409,7 +407,7 @@ mod tests {
     #[test]
     fn test_struct_usage() {
         // Test that our structs work with the new Id type
-        let vertex = AddVertexArgs {
+        let vertex = AddNodeArgs {
             id: Id::new(),
             ts_millis: 1234567890,
             name: "test_vertex".to_string(),

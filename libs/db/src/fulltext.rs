@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 
 use crate::{
     mutation::{Consumer, Processor},
-    AddEdgeArgs, AddFragmentArgs, AddVertexArgs, InvalidateArgs, WriterConfig,
+    AddEdgeArgs, AddFragmentArgs, AddNodeArgs, InvalidateArgs, WriterConfig,
 };
 
 /// Full-text search mutation processor for search indexing
@@ -41,7 +41,7 @@ impl Default for FullTextProcessor {
 #[async_trait::async_trait]
 impl Processor for FullTextProcessor {
     /// Process an AddVertex mutation - index vertex for search
-    async fn process_add_vertex(&self, args: &AddVertexArgs) -> Result<()> {
+    async fn process_add_vertex(&self, args: &AddNodeArgs) -> Result<()> {
         // TODO: Implement actual vertex indexing in full-text search index
         log::info!(
             "[FullText] Would index vertex for search: id={}, name='{}', k1={}, b={}",

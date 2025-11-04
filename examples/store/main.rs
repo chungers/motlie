@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use motlie_db::{
     create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdgeArgs,
-    AddFragmentArgs, AddVertexArgs, Id, WriterConfig,
+    AddFragmentArgs, AddNodeArgs, Id, WriterConfig,
 };
 use std::collections::HashMap;
 use std::io;
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
                     .as_millis() as u64;
 
                 // Create vertex
-                let vertex_args = AddVertexArgs {
+                let vertex_args = AddNodeArgs {
                     id: node_id.clone(),
                     ts_millis: current_time,
                     name: node_name.to_string(),
