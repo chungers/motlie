@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::graph::{spawn_graph_consumer, spawn_graph_consumer_with_next, Storage};
-    use crate::schema::{Edges, Fragments, Nodes, ALL_COLUMN_FAMILIES};
+    use crate::schema::{ColumnFamilyRecord, Edges, Fragments, Nodes, ALL_COLUMN_FAMILIES};
     use crate::{
         create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id, WriterConfig,
     };

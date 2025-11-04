@@ -60,6 +60,7 @@ pub struct Storage {
     db_options: Options,
     db: Option<DB>,
     mode: StorageMode,
+    column_families: &'static [&'static str],
 }
 
 impl Storage {
@@ -70,6 +71,7 @@ impl Storage {
             db_options: StorageOptions::default_for_readonly(),
             db: None,
             mode: StorageMode::ReadOnly,
+            column_families: ALL_COLUMN_FAMILIES,
         }
     }
 
@@ -80,6 +82,7 @@ impl Storage {
             db_options: StorageOptions::default_for_readwrite(),
             db: None,
             mode: StorageMode::ReadWrite,
+            column_families: ALL_COLUMN_FAMILIES,
         }
     }
 
@@ -90,6 +93,7 @@ impl Storage {
             db_options,
             db: None,
             mode: StorageMode::ReadWrite,
+            column_families: ALL_COLUMN_FAMILIES,
         }
     }
 
@@ -111,10 +115,6 @@ impl Storage {
             drop(db); // drop the reference for automatic closing the database.
         }
         Ok(())
-    }
-
-    fn all_column_families(&self) -> &[&str] {
-        ALL_COLUMN_FAMILIES
     }
 
     /// Readies by opening the database and column families.
@@ -150,7 +150,7 @@ impl Storage {
                 self.db = Some(DB::open_cf_for_read_only(
                     &self.db_options,
                     &self.db_path,
-                    self.all_column_families(),
+                    self.column_families,
                     false,
                 )?);
             }
@@ -158,7 +158,7 @@ impl Storage {
                 self.db = Some(DB::open_cf(
                     &self.db_options,
                     &self.db_path,
-                    self.all_column_families(),
+                    self.column_families,
                 )?);
             }
         }

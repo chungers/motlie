@@ -11,7 +11,6 @@ pub use graph::*;
 mod fulltext;
 pub use fulltext::*;
 mod schema;
-pub use schema::*;
 
 #[cfg(test)]
 mod fulltext_tests;
