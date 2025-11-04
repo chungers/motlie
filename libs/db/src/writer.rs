@@ -40,7 +40,7 @@ impl Writer {
 
     /// Send an AddVertex mutation
     pub async fn add_vertex(&self, args: AddNodeArgs) -> Result<()> {
-        self.send(Mutation::AddVertex(args)).await
+        self.send(Mutation::AddNode(args)).await
     }
 
     /// Send an AddEdge mutation
@@ -106,8 +106,8 @@ mod tests {
 
         let edge_args = AddEdgeArgs {
             id: Id::new(),
-            source_vertex_id: Id::new(),
-            target_vertex_id: Id::new(),
+            source_node_id: Id::new(),
+            target_node_id: Id::new(),
             ts_millis: 1234567890,
             name: "test_edge".to_string(),
         };

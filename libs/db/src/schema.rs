@@ -160,8 +160,8 @@ impl ColumnFamilyRecord for ForwardEdges {
 
     fn record_from(args: &AddEdgeArgs) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let key = ForwardEdgeCfKey(
-            EdgeSourceId(args.source_vertex_id),
-            EdgeDestinationId(args.target_vertex_id),
+            EdgeSourceId(args.source_node_id),
+            EdgeDestinationId(args.target_node_id),
             EdgeName(args.name.clone()),
         );
         let summary = format!(
@@ -193,8 +193,8 @@ impl ColumnFamilyRecord for ReverseEdges {
 
     fn record_from(args: &AddEdgeArgs) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
         let key = ReverseEdgeCfKey(
-            EdgeDestinationId(args.source_vertex_id),
-            EdgeSourceId(args.target_vertex_id),
+            EdgeDestinationId(args.source_node_id),
+            EdgeSourceId(args.target_node_id),
             EdgeName(args.name.clone()),
         );
         let summary = format!(
@@ -215,3 +215,95 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AddEdgeArgs, Id};
+
+    #[test]
+    fn test_forward_edges_keys_lexicographically_sortable() {
+        // Create multiple edge arguments with different source/destination combinations
+        let edges = vec![
+            AddEdgeArgs {
+                id: Id::new(),
+                source_node_id: Id::from_bytes([0u8; 16]),
+                target_node_id: Id::from_bytes([0u8; 16]),
+                ts_millis: 1000,
+                name: "edge_a".to_string(),
+            },
+            AddEdgeArgs {
+                id: Id::new(),
+                source_node_id: Id::from_bytes([0u8; 16]),
+                target_node_id: Id::from_bytes([1u8; 16]),
+                ts_millis: 2000,
+                name: "edge_b".to_string(),
+            },
+            AddEdgeArgs {
+                id: Id::new(),
+                source_node_id: Id::from_bytes([1u8; 16]),
+                target_node_id: Id::from_bytes([0u8; 16]),
+                ts_millis: 3000,
+                name: "edge_c".to_string(),
+            },
+            AddEdgeArgs {
+                id: Id::new(),
+                source_node_id: Id::from_bytes([1u8; 16]),
+                target_node_id: Id::from_bytes([1u8; 16]),
+                ts_millis: 4000,
+                name: "edge_d".to_string(),
+            },
+            // Add edge with same source and target but different name
+            AddEdgeArgs {
+                id: Id::new(),
+                source_node_id: Id::from_bytes([0u8; 16]),
+                target_node_id: Id::from_bytes([0u8; 16]),
+                ts_millis: 5000,
+                name: "edge_z".to_string(),
+            },
+        ];
+
+        // Generate key-value pairs and serialize the keys
+        let serialized_keys: Vec<(Vec<u8>, String)> = edges
+            .iter()
+            .map(|args| {
+                let (key, _value) = ForwardEdges::record_from(args);
+                let key_bytes = ForwardEdges::key_to_bytes(&key).unwrap();
+                (key_bytes, args.name.clone())
+            })
+            .collect();
+
+        // Clone for comparison
+        let mut sorted_keys = serialized_keys.clone();
+
+        // Sort by the serialized byte representation (lexicographic order)
+        sorted_keys.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Verify that sorting by bytes doesn't change the order we expect:
+        // - Keys should be ordered by (source_id, destination_id, name)
+        // - MessagePack serialization should preserve this ordering
+
+        // Expected order based on key structure (source, dest, name):
+        // 1. ([0..], [0..], "edge_a")
+        // 2. ([0..], [0..], "edge_z")
+        // 3. ([0..], [1..], "edge_b")
+        // 4. ([1..], [0..], "edge_c")
+        // 5. ([1..], [1..], "edge_d")
+
+        assert_eq!(sorted_keys[0].1, "edge_a");
+        assert_eq!(sorted_keys[1].1, "edge_z");
+        assert_eq!(sorted_keys[2].1, "edge_b");
+        assert_eq!(sorted_keys[3].1, "edge_c");
+        assert_eq!(sorted_keys[4].1, "edge_d");
+
+        // Verify that the serialized keys are actually in lexicographic order
+        for i in 0..sorted_keys.len() - 1 {
+            assert!(
+                sorted_keys[i].0 <= sorted_keys[i + 1].0,
+                "Keys should be in lexicographic order: {:?} should be <= {:?}",
+                sorted_keys[i].0,
+                sorted_keys[i + 1].0
+            );
+        }
+    }
+}

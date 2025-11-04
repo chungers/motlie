@@ -153,8 +153,8 @@ async fn main() -> Result<()> {
 
                 let edge_args = AddEdgeArgs {
                     id: edge_id.clone(),
-                    source_vertex_id: source_id,
-                    target_vertex_id: target_id,
+                    source_node_id: source_id,
+                    target_node_id: target_id,
                     ts_millis: current_time,
                     name: edge_name.to_string(),
                 };

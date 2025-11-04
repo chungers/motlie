@@ -91,8 +91,8 @@ mod tests {
         writer
             .add_edge(AddEdgeArgs {
                 id: Id::new(),
-                source_vertex_id: Id::new(),
-                target_vertex_id: Id::new(),
+                source_node_id: Id::new(),
+                target_node_id: Id::new(),
                 ts_millis: 1234567890,
                 name: "connects to".to_string(),
             })

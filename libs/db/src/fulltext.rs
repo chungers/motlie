@@ -64,8 +64,8 @@ impl Processor for FullTextProcessor {
         // TODO: Implement actual edge relationship indexing in full-text search index
         log::info!(
             "[FullText] Would index edge relationship: source={}, target={}, name='{}', k1={}, b={}",
-            args.source_vertex_id,
-            args.target_vertex_id,
+            args.source_node_id,
+            args.target_node_id,
             args.name,
             self.k1,
             self.b

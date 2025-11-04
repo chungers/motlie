@@ -5,7 +5,7 @@ use crate::{Id, WriterConfig};
 
 #[derive(Debug, Clone)]
 pub enum Mutation {
-    AddVertex(AddNodeArgs),
+    AddNode(AddNodeArgs),
     AddEdge(AddEdgeArgs),
     AddFragment(AddFragmentArgs),
     Invalidate(InvalidateArgs),
@@ -28,11 +28,11 @@ pub struct AddEdgeArgs {
     /// The UUID of the Vertex, Edge, or Fragment
     pub id: Id,
 
-    /// The UUID of the source Vertex
-    pub source_vertex_id: Id,
+    /// The UUID of the source Node
+    pub source_node_id: Id,
 
-    /// The UUID of the target Vertex
-    pub target_vertex_id: Id,
+    /// The UUID of the target Node
+    pub target_node_id: Id,
 
     /// The timestamp as number of milliseconds since the Unix epoch
     pub ts_millis: u64,
@@ -142,15 +142,15 @@ impl<P: Processor> Consumer<P> {
     async fn process_mutation(&self, mutation: &Mutation) -> Result<()> {
         // Process the mutation with the processor
         match mutation {
-            Mutation::AddVertex(args) => {
+            Mutation::AddNode(args) => {
                 log::debug!("Processing AddVertex: id={}, name={}", args.id, args.name);
                 self.processor.process_add_vertex(args).await?;
             }
             Mutation::AddEdge(args) => {
                 log::debug!(
                     "Processing AddEdge: source={}, target={}, name={}",
-                    args.source_vertex_id,
-                    args.target_vertex_id,
+                    args.source_node_id,
+                    args.target_node_id,
                     args.name
                 );
                 self.processor.process_add_edge(args).await?;
