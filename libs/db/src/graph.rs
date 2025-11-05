@@ -8,13 +8,42 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use rocksdb::{Options, DB};
+use rocksdb::{Options, TransactionDB, TransactionDBOptions, DB};
 
 use crate::{
     mutation::{Consumer, Processor},
     schema::ALL_COLUMN_FAMILIES,
     AddEdgeArgs, AddFragmentArgs, AddNodeArgs, InvalidateArgs, WriterConfig,
 };
+
+/// Handle for either a read-only DB or read-write TransactionDB
+enum DatabaseHandle {
+    ReadOnly(DB),
+    ReadWrite(TransactionDB),
+}
+
+impl DatabaseHandle {
+    /// Get TransactionDB if in ReadWrite mode, otherwise None
+    fn as_transaction_db(&self) -> Option<&TransactionDB> {
+        match self {
+            DatabaseHandle::ReadWrite(txn_db) => Some(txn_db),
+            DatabaseHandle::ReadOnly(_) => None,
+        }
+    }
+
+    /// Get DB if in ReadOnly mode, otherwise None
+    fn as_db(&self) -> Option<&DB> {
+        match self {
+            DatabaseHandle::ReadOnly(db) => Some(db),
+            DatabaseHandle::ReadWrite(_) => None,
+        }
+    }
+
+    /// Check if this is a read-write handle
+    fn is_read_write(&self) -> bool {
+        matches!(self, DatabaseHandle::ReadWrite(_))
+    }
+}
 
 enum StorageMode {
     ReadOnly,
@@ -58,7 +87,8 @@ impl StorageOptions {
 pub struct Storage {
     db_path: PathBuf,
     db_options: Options,
-    db: Option<DB>,
+    txn_db_options: TransactionDBOptions,
+    db: Option<DatabaseHandle>,
     mode: StorageMode,
     column_families: &'static [&'static str],
 }
@@ -69,6 +99,7 @@ impl Storage {
         Self {
             db_path: PathBuf::from(db_path),
             db_options: StorageOptions::default_for_readonly(),
+            txn_db_options: TransactionDBOptions::default(),
             db: None,
             mode: StorageMode::ReadOnly,
             column_families: ALL_COLUMN_FAMILIES,
@@ -80,6 +111,7 @@ impl Storage {
         Self {
             db_path: PathBuf::from(db_path),
             db_options: StorageOptions::default_for_readwrite(),
+            txn_db_options: TransactionDBOptions::default(),
             db: None,
             mode: StorageMode::ReadWrite,
             column_families: ALL_COLUMN_FAMILIES,
@@ -87,10 +119,15 @@ impl Storage {
     }
 
     /// Create a new Storage instance in readwrite mode with custom options
-    pub fn readwrite_with_options(db_path: &Path, db_options: rocksdb::Options) -> Self {
+    pub fn readwrite_with_options(
+        db_path: &Path,
+        db_options: rocksdb::Options,
+        txn_db_options: TransactionDBOptions,
+    ) -> Self {
         Self {
             db_path: PathBuf::from(db_path),
             db_options,
+            txn_db_options,
             db: None,
             mode: StorageMode::ReadWrite,
             column_families: ALL_COLUMN_FAMILIES,
@@ -102,17 +139,10 @@ impl Storage {
         if self.db.is_none() {
             return Err(anyhow::anyhow!("[Storage] Storage is not ready. "));
         }
-        if let Some(db) = self.db.take() {
-            // Only flush if in ReadWrite mode (flush not supported in ReadOnly)
-            match self.mode {
-                StorageMode::ReadWrite => {
-                    db.flush()?;
-                }
-                StorageMode::ReadOnly => {
-                    // Skip flush for ReadOnly mode
-                }
-            }
-            drop(db); // drop the reference for automatic closing the database.
+        if let Some(db_handle) = self.db.take() {
+            // TransactionDB manages persistence automatically through WAL
+            // Regular DB in readonly mode doesn't need flushing
+            drop(db_handle); // drop the reference for automatic closing the database.
         }
         Ok(())
     }
@@ -147,24 +177,51 @@ impl Storage {
 
         match self.mode {
             StorageMode::ReadOnly => {
-                self.db = Some(DB::open_cf_for_read_only(
+                let db = DB::open_cf_for_read_only(
                     &self.db_options,
                     &self.db_path,
                     self.column_families,
                     false,
-                )?);
+                )?;
+                self.db = Some(DatabaseHandle::ReadOnly(db));
             }
             StorageMode::ReadWrite => {
-                self.db = Some(DB::open_cf(
+                let txn_db = TransactionDB::open_cf(
                     &self.db_options,
+                    &self.txn_db_options,
                     &self.db_path,
                     self.column_families,
-                )?);
+                )?;
+                self.db = Some(DatabaseHandle::ReadWrite(txn_db));
             }
         }
 
         log::info!("[Storage] Ready");
         Ok(())
+    }
+
+    /// Get a reference to the underlying DB (only works in readonly mode)
+    pub fn db(&self) -> Result<&DB> {
+        self.db
+            .as_ref()
+            .and_then(|handle| handle.as_db())
+            .ok_or_else(|| anyhow::anyhow!("[Storage] Not in readonly mode or not ready"))
+    }
+
+    /// Get a reference to the TransactionDB (only works in readwrite mode)
+    pub fn transaction_db(&self) -> Result<&TransactionDB> {
+        self.db
+            .as_ref()
+            .and_then(|handle| handle.as_transaction_db())
+            .ok_or_else(|| anyhow::anyhow!("[Storage] Not in readwrite mode or not ready"))
+    }
+
+    /// Check if storage is in readwrite mode with TransactionDB
+    pub fn is_transactional(&self) -> bool {
+        self.db
+            .as_ref()
+            .map(|handle| handle.is_read_write())
+            .unwrap_or(false)
     }
 }
 
@@ -184,37 +241,69 @@ impl Graph {
 impl Processor for Graph {
     /// Process an AddVertex mutation
     async fn process_add_vertex(&self, args: &AddNodeArgs) -> Result<()> {
-        // TODO: Implement actual vertex insertion into graph store
+        let txn_db = self.storage.transaction_db()?;
+
+        // Create a transaction
+        let txn = txn_db.transaction();
+
+        // TODO: Implement actual vertex insertion
+        // Example: txn.put_cf(cf_handle, key, value)?;
         log::info!("[Graph] Would insert vertex: {:?}", args);
-        // Simulate some async work
-        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+        // Commit the transaction
+        txn.commit()?;
+
         Ok(())
     }
 
     /// Process an AddEdge mutation
     async fn process_add_edge(&self, args: &AddEdgeArgs) -> Result<()> {
-        // TODO: Implement actual edge insertion into graph store
+        let txn_db = self.storage.transaction_db()?;
+
+        // Create a transaction
+        let txn = txn_db.transaction();
+
+        // TODO: Implement actual edge insertion
+        // Example: txn.put_cf(cf_handle, key, value)?;
         log::info!("[Graph] Would insert edge: {:?}", args);
-        // Simulate some async work
-        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+        // Commit the transaction
+        txn.commit()?;
+
         Ok(())
     }
 
     /// Process an AddFragment mutation
     async fn process_add_fragment(&self, args: &AddFragmentArgs) -> Result<()> {
-        // TODO: Implement actual fragment insertion into graph store
+        let txn_db = self.storage.transaction_db()?;
+
+        // Create a transaction
+        let txn = txn_db.transaction();
+
+        // TODO: Implement actual fragment insertion
+        // Example: txn.put_cf(cf_handle, key, value)?;
         log::info!("[Graph] Would insert fragment: {:?}", args);
-        // Simulate some async work
-        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+        // Commit the transaction
+        txn.commit()?;
+
         Ok(())
     }
 
     /// Process an Invalidate mutation
     async fn process_invalidate(&self, args: &InvalidateArgs) -> Result<()> {
-        // TODO: Implement actual invalidation in graph store
+        let txn_db = self.storage.transaction_db()?;
+
+        // Create a transaction
+        let txn = txn_db.transaction();
+
+        // TODO: Implement actual invalidation
+        // Example: txn.delete_cf(cf_handle, key)?;
         log::info!("[Graph] Would invalidate: {:?}", args);
-        // Simulate some async work
-        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+        // Commit the transaction
+        txn.commit()?;
+
         Ok(())
     }
 }
@@ -225,7 +314,9 @@ pub fn create_graph_consumer(
     config: WriterConfig,
     db_path: &Path,
 ) -> Consumer<Graph> {
-    let storage = Arc::new(Storage::readwrite(db_path));
+    let mut storage = Storage::readwrite(db_path);
+    storage.ready().expect("Failed to ready storage");
+    let storage = Arc::new(storage);
     let processor = Graph::new(storage);
     Consumer::new(receiver, config, processor)
 }
@@ -237,7 +328,9 @@ pub fn create_graph_consumer_with_next(
     db_path: &Path,
     next: mpsc::Sender<crate::Mutation>,
 ) -> Consumer<Graph> {
-    let storage = Arc::new(Storage::readwrite(db_path));
+    let mut storage = Storage::readwrite(db_path);
+    storage.ready().expect("Failed to ready storage");
+    let storage = Arc::new(storage);
     let processor = Graph::new(storage);
     Consumer::with_next(receiver, config, processor, next)
 }

@@ -14,6 +14,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_graph_consumer_basic_processing() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
         let config = WriterConfig {
             channel_buffer_size: 10,
         };
@@ -22,7 +25,7 @@ mod tests {
 
         // Spawn consumer
         let consumer_handle =
-            spawn_graph_consumer(receiver, config, Path::new("/tmp/test_graph_db"));
+            spawn_graph_consumer(receiver, config, &db_path);
 
         // Send some mutations
         let vertex_args = AddNodeArgs {
@@ -53,13 +56,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_graph_consumer_multiple_mutations() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
         let config = WriterConfig {
             channel_buffer_size: 100,
         };
 
         let (writer, receiver) = create_mutation_writer(config.clone());
         let consumer_handle =
-            spawn_graph_consumer(receiver, config, Path::new("/tmp/test_graph_db"));
+            spawn_graph_consumer(receiver, config, &db_path);
 
         // Send 5 mutations rapidly
         for i in 0..5 {
@@ -81,10 +87,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_graph_consumer_all_mutation_types() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
         let config = WriterConfig::default();
         let (writer, receiver) = create_mutation_writer(config.clone());
         let consumer_handle =
-            spawn_graph_consumer(receiver, config, Path::new("/tmp/test_graph_db"));
+            spawn_graph_consumer(receiver, config, &db_path);
 
         // Test all mutation types
         writer
@@ -135,6 +144,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_graph_to_fulltext_chaining() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
         let config = WriterConfig {
             channel_buffer_size: 100,
         };
@@ -148,7 +160,7 @@ mod tests {
         let graph_handle = spawn_graph_consumer_with_next(
             graph_receiver,
             config.clone(),
-            Path::new("/tmp/test_graph_db"),
+            &db_path,
             fulltext_sender,
         );
 
@@ -501,7 +513,8 @@ mod tests {
         options.set_error_if_exists(true);
         options.create_if_missing(false);
 
-        let mut storage2 = Storage::readwrite_with_options(&db_path, options);
+        let txn_options = rocksdb::TransactionDBOptions::default();
+        let mut storage2 = Storage::readwrite_with_options(&db_path, options, txn_options);
 
         let result = storage2.ready();
         assert!(
@@ -529,7 +542,8 @@ mod tests {
         let mut options = rocksdb::Options::default();
         options.create_missing_column_families(false); // Don't create missing CFs
 
-        let mut storage = Storage::readwrite_with_options(&db_path, options);
+        let txn_options = rocksdb::TransactionDBOptions::default();
+        let mut storage = Storage::readwrite_with_options(&db_path, options, txn_options);
 
         let result = storage.ready();
         assert!(
