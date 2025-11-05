@@ -1,28 +1,60 @@
 use anyhow::{Context, Result};
-use motlie_db::{Id, TimestampMilli};
-use rocksdb::{IteratorMode, DB};
+use csv::ReaderBuilder;
+use rocksdb::DB;
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::fs::File;
 use std::path::Path;
 
 fn main() -> Result<()> {
     println!("Motlie Store Verifier");
     println!("====================");
-    println!("Reading from: /tmp/motlie_graph_db");
     println!();
 
+    // Parse command-line arguments
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 2 {
+        eprintln!("Usage: {} <csv_file>", args[0]);
+        eprintln!();
+        eprintln!("Example:");
+        eprintln!("  cargo run --example verify_store /tmp/test_data.csv");
+        eprintln!();
+        eprintln!("This will verify that the data in /tmp/motlie_graph_db");
+        eprintln!("matches what was sent from the CSV file.");
+        std::process::exit(1);
+    }
+
+    let csv_path = &args[1];
     let db_path = Path::new("/tmp/motlie_graph_db");
+
+    println!("CSV file: {}", csv_path);
+    println!("Database: /tmp/motlie_graph_db");
+    println!();
+
+    // Check if CSV file exists
+    if !Path::new(csv_path).exists() {
+        eprintln!("❌ CSV file does not exist: {}", csv_path);
+        std::process::exit(1);
+    }
 
     // Check if database exists
     if !db_path.exists() {
-        println!("❌ Database does not exist at /tmp/motlie_graph_db");
-        println!("Run the store example first with some input data:");
-        println!("  echo 'alice,Alice is a researcher' | cargo run --example store");
-        return Ok(());
+        eprintln!("❌ Database does not exist at /tmp/motlie_graph_db");
+        eprintln!("Run the store example first:");
+        eprintln!("  cat {} | cargo run --example store", csv_path);
+        std::process::exit(1);
     }
 
-    // Define column families
-    let column_families = vec!["nodes", "edges", "fragments", "forward_edges", "reverse_edges"];
+    // Parse CSV file to extract expected data
+    println!("📄 Parsing CSV file...");
+    let expected_data = parse_csv(csv_path)?;
+    println!("   Nodes: {}", expected_data.nodes.len());
+    println!("   Edges: {}", expected_data.edges.len());
+    println!("   Total fragments: {}", expected_data.node_fragments.len() + expected_data.edge_fragments.len());
+    println!();
 
     // Open database in read-only mode
+    let column_families = vec!["nodes", "edges", "fragments", "forward_edges", "reverse_edges"];
     let db = DB::open_cf_for_read_only(
         &rocksdb::Options::default(),
         db_path,
@@ -33,247 +65,243 @@ fn main() -> Result<()> {
 
     println!("✓ Database opened successfully\n");
 
-    // Verify Nodes column family
-    println!("📦 Nodes Column Family:");
-    println!("─────────────────────────");
-    verify_nodes(&db)?;
+    // Verify data
+    let mut all_ok = true;
 
-    // Verify Edges column family
-    println!("\n📦 Edges Column Family:");
-    println!("──────────────────────────");
-    verify_edges(&db)?;
+    println!("🔍 Verifying Nodes...");
+    if !verify_nodes(&db, &expected_data)? {
+        all_ok = false;
+    }
 
-    // Verify Fragments column family
-    println!("\n📦 Fragments Column Family:");
-    println!("──────────────────────────────");
-    verify_fragments(&db)?;
+    println!("\n🔍 Verifying Edges...");
+    if !verify_edges(&db, &expected_data)? {
+        all_ok = false;
+    }
 
-    // Verify ForwardEdges column family
-    println!("\n📦 Forward Edges Column Family:");
-    println!("──────────────────────────────────");
-    verify_forward_edges(&db)?;
+    println!("\n🔍 Verifying Fragments...");
+    if !verify_fragments(&db, &expected_data)? {
+        all_ok = false;
+    }
 
-    // Verify ReverseEdges column family
-    println!("\n📦 Reverse Edges Column Family:");
-    println!("──────────────────────────────────");
-    verify_reverse_edges(&db)?;
-
-    println!("\n✓ Verification complete!");
+    println!();
+    if all_ok {
+        println!("✅ All verification checks passed!");
+        println!("   The database contents match the CSV input.");
+    } else {
+        println!("❌ Some verification checks failed!");
+        println!("   The database contents do not fully match the CSV input.");
+        std::process::exit(1);
+    }
 
     Ok(())
 }
 
-fn verify_nodes(db: &DB) -> Result<()> {
-    let cf = db
-        .cf_handle("nodes")
-        .context("Nodes column family not found")?;
+#[derive(Debug)]
+struct ExpectedData {
+    nodes: HashMap<String, String>, // name -> fragment
+    edges: Vec<EdgeData>,
+    node_fragments: HashMap<String, String>, // node_name -> fragment
+    edge_fragments: HashMap<(String, String, String), String>, // (source, target, name) -> fragment
+}
 
-    let mut count = 0;
-    let iter = db.iterator_cf(cf, IteratorMode::Start);
+#[derive(Debug)]
+struct EdgeData {
+    source: String,
+    target: String,
+    name: String,
+    fragment: String,
+}
 
-    for item in iter {
-        let (key, value) = item.context("Failed to read from nodes CF")?;
-        count += 1;
+fn parse_csv(csv_path: &str) -> Result<ExpectedData> {
+    let file = File::open(csv_path).context("Failed to open CSV file")?;
+    let mut reader = ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(file);
 
-        // Try to deserialize the key as an Id
-        match deserialize_id(&key) {
-            Ok(id) => {
-                // Try to deserialize value as NodeSummary
-                match deserialize_node_value(&value) {
-                    Ok(summary) => {
-                        println!("  Node #{}: ID={}", count, id.as_str());
-                        println!("    Value: {}", truncate(&summary, 100));
-                    }
-                    Err(_) => {
-                        println!("  Node #{}: ID={}", count, id.as_str());
-                        println!("    Value: {} bytes (raw)", value.len());
-                    }
-                }
+    let mut nodes = HashMap::new();
+    let mut edges = Vec::new();
+    let mut node_fragments = HashMap::new();
+    let mut edge_fragments = HashMap::new();
+
+    for result in reader.records() {
+        let record = result.context("Failed to read CSV record")?;
+
+        match record.len() {
+            2 => {
+                // Node with fragment: name, fragment
+                let name = record.get(0).unwrap().trim().to_string();
+                let fragment = record.get(1).unwrap().trim().to_string();
+                nodes.insert(name.clone(), fragment.clone());
+                node_fragments.insert(name, fragment);
             }
-            Err(_) => {
-                println!("  Node #{}: Key={} bytes, Value={} bytes", count, key.len(), value.len());
+            4 => {
+                // Edge with fragment: source, target, edge_name, fragment
+                let source = record.get(0).unwrap().trim().to_string();
+                let target = record.get(1).unwrap().trim().to_string();
+                let edge_name = record.get(2).unwrap().trim().to_string();
+                let fragment = record.get(3).unwrap().trim().to_string();
+
+                // Ensure source and target nodes exist (they might not have explicit fragments)
+                nodes.entry(source.clone()).or_insert_with(|| String::new());
+                nodes.entry(target.clone()).or_insert_with(|| String::new());
+
+                edge_fragments.insert((source.clone(), target.clone(), edge_name.clone()), fragment.clone());
+                edges.push(EdgeData {
+                    source,
+                    target,
+                    name: edge_name,
+                    fragment,
+                });
+            }
+            _ => {
+                // Skip invalid rows
             }
         }
     }
 
-    if count == 0 {
-        println!("  (empty)");
-    } else {
-        println!("\n  Total: {} nodes", count);
-    }
-
-    Ok(())
+    Ok(ExpectedData {
+        nodes,
+        edges,
+        node_fragments,
+        edge_fragments,
+    })
 }
 
-fn verify_edges(db: &DB) -> Result<()> {
-    let cf = db
-        .cf_handle("edges")
-        .context("Edges column family not found")?;
+fn verify_nodes(db: &DB, expected: &ExpectedData) -> Result<bool> {
+    let cf = db.cf_handle("nodes").context("Nodes CF not found")?;
 
-    let mut count = 0;
-    let iter = db.iterator_cf(cf, IteratorMode::Start);
+    // Count nodes in database
+    let mut db_node_count = 0;
+    let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+    let mut db_node_names = HashSet::new();
 
     for item in iter {
-        let (key, value) = item.context("Failed to read from edges CF")?;
-        count += 1;
+        let (_key, value) = item.context("Failed to read from nodes CF")?;
+        db_node_count += 1;
 
-        match deserialize_id(&key) {
-            Ok(id) => {
-                match deserialize_edge_value(&value) {
-                    Ok(summary) => {
-                        println!("  Edge #{}: ID={}", count, id.as_str());
-                        println!("    Value: {}", truncate(&summary, 100));
-                    }
-                    Err(_) => {
-                        println!("  Edge #{}: ID={}", count, id.as_str());
-                        println!("    Value: {} bytes (raw)", value.len());
-                    }
-                }
-            }
-            Err(_) => {
-                println!("  Edge #{}: Key={} bytes, Value={} bytes", count, key.len(), value.len());
+        // Deserialize to extract node name
+        if let Ok(node_value) = deserialize_node_value(&value) {
+            // Extract name from markdown summary (format: "# name\n")
+            if let Some(name_line) = node_value.lines().nth(1) {
+                let name = name_line.trim_start_matches("# ").trim();
+                db_node_names.insert(name.to_string());
             }
         }
     }
 
-    if count == 0 {
-        println!("  (empty)");
+    let expected_count = expected.nodes.len();
+    println!("   Expected: {} nodes", expected_count);
+    println!("   Found:    {} nodes", db_node_count);
+
+    let mut all_ok = true;
+
+    if db_node_count == expected_count {
+        println!("   ✓ Node count matches");
     } else {
-        println!("\n  Total: {} edges", count);
+        println!("   ✗ Node count mismatch!");
+        all_ok = false;
     }
 
-    Ok(())
-}
-
-fn verify_fragments(db: &DB) -> Result<()> {
-    let cf = db
-        .cf_handle("fragments")
-        .context("Fragments column family not found")?;
-
-    let mut count = 0;
-    let iter = db.iterator_cf(cf, IteratorMode::Start);
-
-    for item in iter {
-        let (key, value) = item.context("Failed to read from fragments CF")?;
-        count += 1;
-
-        match deserialize_fragment_key(&key) {
-            Ok((id, timestamp)) => {
-                match deserialize_fragment_value(&value) {
-                    Ok(content) => {
-                        println!("  Fragment #{}: ID={}, Timestamp={}", count, id.as_str(), timestamp.0);
-                        println!("    Content: {}", truncate(&content, 100));
-                    }
-                    Err(_) => {
-                        println!("  Fragment #{}: ID={}, Timestamp={}", count, id.as_str(), timestamp.0);
-                        println!("    Content: {} bytes (raw)", value.len());
-                    }
-                }
-            }
-            Err(_) => {
-                println!("  Fragment #{}: Key={} bytes, Value={} bytes", count, key.len(), value.len());
-            }
+    // Check if all expected node names are present
+    let mut missing_nodes = Vec::new();
+    for expected_name in expected.nodes.keys() {
+        if !db_node_names.contains(expected_name) {
+            missing_nodes.push(expected_name);
         }
     }
 
-    if count == 0 {
-        println!("  (empty)");
+    if missing_nodes.is_empty() {
+        println!("   ✓ All expected nodes found in database");
     } else {
-        println!("\n  Total: {} fragments", count);
+        println!("   ✗ Missing nodes: {:?}", missing_nodes);
+        all_ok = false;
     }
 
-    Ok(())
+    Ok(all_ok)
 }
 
-fn verify_forward_edges(db: &DB) -> Result<()> {
-    let cf = db
-        .cf_handle("forward_edges")
-        .context("ForwardEdges column family not found")?;
+fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
+    let cf = db.cf_handle("edges").context("Edges CF not found")?;
 
-    let mut count = 0;
-    let iter = db.iterator_cf(cf, IteratorMode::Start);
+    // Count edges in database
+    let mut db_edge_count = 0;
+    let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
 
     for item in iter {
-        let (key, value) = item.context("Failed to read from forward_edges CF")?;
-        count += 1;
+        let _ = item.context("Failed to read from edges CF")?;
+        db_edge_count += 1;
+    }
 
-        match deserialize_forward_edge_key(&key) {
-            Ok((source, dest, name)) => {
-                match deserialize_edge_value(&value) {
-                    Ok(summary) => {
-                        println!("  ForwardEdge #{}: {} -> {} ({})", count, source.as_str(), dest.as_str(), name);
-                        println!("    Value: {}", truncate(&summary, 100));
-                    }
-                    Err(_) => {
-                        println!("  ForwardEdge #{}: {} -> {} ({})", count, source.as_str(), dest.as_str(), name);
-                        println!("    Value: {} bytes (raw)", value.len());
-                    }
-                }
-            }
-            Err(_) => {
-                println!("  ForwardEdge #{}: Key={} bytes, Value={} bytes", count, key.len(), value.len());
-            }
+    let expected_count = expected.edges.len();
+    println!("   Expected: {} edges", expected_count);
+    println!("   Found:    {} edges", db_edge_count);
+
+    let all_ok = if db_edge_count == expected_count {
+        println!("   ✓ Edge count matches");
+        true
+    } else {
+        println!("   ✗ Edge count mismatch!");
+        false
+    };
+
+    Ok(all_ok)
+}
+
+fn verify_fragments(db: &DB, expected: &ExpectedData) -> Result<bool> {
+    let cf = db.cf_handle("fragments").context("Fragments CF not found")?;
+
+    // Count fragments in database
+    let mut db_fragment_count = 0;
+    let mut db_fragments_content = HashSet::new();
+    let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+
+    for item in iter {
+        let (_, value) = item.context("Failed to read from fragments CF")?;
+        db_fragment_count += 1;
+
+        if let Ok(content) = deserialize_fragment_value(&value) {
+            db_fragments_content.insert(content);
         }
     }
 
-    if count == 0 {
-        println!("  (empty)");
+    let expected_count = expected.node_fragments.len() + expected.edge_fragments.len();
+    println!("   Expected: at least {} fragments", expected_count);
+    println!("   Found:    {} fragments", db_fragment_count);
+
+    let mut all_ok = true;
+
+    if db_fragment_count >= expected_count {
+        println!("   ✓ Fragment count OK (database may have additional fragments for implicit nodes)");
     } else {
-        println!("\n  Total: {} forward edges", count);
+        println!("   ✗ Fragment count too low!");
+        all_ok = false;
     }
 
-    Ok(())
-}
-
-fn verify_reverse_edges(db: &DB) -> Result<()> {
-    let cf = db
-        .cf_handle("reverse_edges")
-        .context("ReverseEdges column family not found")?;
-
-    let mut count = 0;
-    let iter = db.iterator_cf(cf, IteratorMode::Start);
-
-    for item in iter {
-        let (key, value) = item.context("Failed to read from reverse_edges CF")?;
-        count += 1;
-
-        match deserialize_reverse_edge_key(&key) {
-            Ok((dest, source, name)) => {
-                match deserialize_edge_value(&value) {
-                    Ok(summary) => {
-                        println!("  ReverseEdge #{}: {} <- {} ({})", count, dest.as_str(), source.as_str(), name);
-                        println!("    Value: {}", truncate(&summary, 100));
-                    }
-                    Err(_) => {
-                        println!("  ReverseEdge #{}: {} <- {} ({})", count, dest.as_str(), source.as_str(), name);
-                        println!("    Value: {} bytes (raw)", value.len());
-                    }
-                }
-            }
-            Err(_) => {
-                println!("  ReverseEdge #{}: Key={} bytes, Value={} bytes", count, key.len(), value.len());
-            }
+    // Check if expected fragments are present
+    let mut missing_fragments = 0;
+    for fragment in expected.node_fragments.values() {
+        if !fragment.is_empty() && !db_fragments_content.contains(fragment) {
+            missing_fragments += 1;
+        }
+    }
+    for fragment in expected.edge_fragments.values() {
+        if !db_fragments_content.contains(fragment) {
+            missing_fragments += 1;
         }
     }
 
-    if count == 0 {
-        println!("  (empty)");
+    if missing_fragments == 0 {
+        println!("   ✓ All expected fragments found in database");
     } else {
-        println!("\n  Total: {} reverse edges", count);
+        println!("   ✗ {} expected fragments not found", missing_fragments);
+        all_ok = false;
     }
 
-    Ok(())
+    Ok(all_ok)
 }
 
-// Deserialization helpers using MessagePack (rmp_serde)
-
-fn deserialize_id(bytes: &[u8]) -> Result<Id> {
-    #[derive(serde::Deserialize)]
-    struct NodeCfKey(Id);
-
-    let key: NodeCfKey = rmp_serde::from_slice(bytes).context("Failed to deserialize ID")?;
-    Ok(key.0)
-}
+// Deserialization helpers
 
 fn deserialize_node_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
@@ -286,25 +314,6 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<String> {
     Ok(value.0.0)
 }
 
-fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
-    #[derive(serde::Deserialize)]
-    struct EdgeCfValue(EdgeSummary);
-
-    #[derive(serde::Deserialize)]
-    struct EdgeSummary(String);
-
-    let value: EdgeCfValue = rmp_serde::from_slice(bytes).context("Failed to deserialize edge value")?;
-    Ok(value.0.0)
-}
-
-fn deserialize_fragment_key(bytes: &[u8]) -> Result<(Id, TimestampMilli)> {
-    #[derive(serde::Deserialize)]
-    struct FragmentCfKey(Id, TimestampMilli);
-
-    let key: FragmentCfKey = rmp_serde::from_slice(bytes).context("Failed to deserialize fragment key")?;
-    Ok((key.0, key.1))
-}
-
 fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct FragmentCfValue(FragmentContent);
@@ -314,46 +323,4 @@ fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
 
     let value: FragmentCfValue = rmp_serde::from_slice(bytes).context("Failed to deserialize fragment value")?;
     Ok(value.0.0)
-}
-
-fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(Id, Id, String)> {
-    #[derive(serde::Deserialize)]
-    struct ForwardEdgeCfKey(EdgeSourceId, EdgeDestinationId, EdgeName);
-
-    #[derive(serde::Deserialize)]
-    struct EdgeSourceId(Id);
-
-    #[derive(serde::Deserialize)]
-    struct EdgeDestinationId(Id);
-
-    #[derive(serde::Deserialize)]
-    struct EdgeName(String);
-
-    let key: ForwardEdgeCfKey = rmp_serde::from_slice(bytes).context("Failed to deserialize forward edge key")?;
-    Ok((key.0.0, key.1.0, key.2.0))
-}
-
-fn deserialize_reverse_edge_key(bytes: &[u8]) -> Result<(Id, Id, String)> {
-    #[derive(serde::Deserialize)]
-    struct ReverseEdgeCfKey(EdgeDestinationId, EdgeSourceId, EdgeName);
-
-    #[derive(serde::Deserialize)]
-    struct EdgeSourceId(Id);
-
-    #[derive(serde::Deserialize)]
-    struct EdgeDestinationId(Id);
-
-    #[derive(serde::Deserialize)]
-    struct EdgeName(String);
-
-    let key: ReverseEdgeCfKey = rmp_serde::from_slice(bytes).context("Failed to deserialize reverse edge key")?;
-    Ok((key.0.0, key.1.0, key.2.0))
-}
-
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len])
-    }
 }

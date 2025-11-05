@@ -21,14 +21,17 @@ git clone <repository-url>
 cd motlie
 cargo build
 
-# Run the store example with test data
-cat examples/store/test_input.csv | cargo run --example store
+# Generate test data (~100 nodes, ~1000 edges)
+python3 examples/store/generate_data.py --total-nodes 100 2>/dev/null > /tmp/test_data.csv
 
-# Verify data was written to RocksDB
-cargo run --example verify_store
+# Run the store example with generated data
+cat /tmp/test_data.csv | cargo run --example store
+
+# Verify data was written correctly to RocksDB
+cargo run --example verify_store /tmp/test_data.csv
 ```
 
-The test input (`examples/store/test_input.csv`) includes 3 nodes (alice, bob, charlie) and 3 edges (knows, collaborates, mentors) with associated fragments.
+This generates a realistic graph with professional entities (people, companies, projects, artifacts), social connections, and creates a fully indexed RocksDB database. The verification tool compares the CSV input with the database contents to ensure all data was stored correctly.
 
 ## Architecture
 
@@ -107,22 +110,29 @@ user1,user2,friendship,Connected as friends
 
 ## Running Examples
 
-### Basic Processing
+### Generate and Process Data
 ```bash
-# Process test data
-cat examples/store/test_input.csv | cargo run --example store
+# Generate a dataset with 100 nodes
+python3 examples/store/generate_data.py --total-nodes 100 2>/dev/null > /tmp/test_data.csv
+
+# Process the data
+cat /tmp/test_data.csv | cargo run --example store
+
+# Verify data persistence and correctness
+cargo run --example verify_store /tmp/test_data.csv
 ```
 
 ### With Logging
 ```bash
 # See detailed processing logs
-RUST_LOG=info cat examples/store/test_input.csv | cargo run --example store
+python3 examples/store/generate_data.py --total-nodes 50 2>/dev/null > /tmp/test_data.csv
+RUST_LOG=info cat /tmp/test_data.csv | cargo run --example store
 ```
 
-### Verify Data Persistence
+### Small Test Dataset
 ```bash
-# After running store example, verify data was written to RocksDB
-cargo run --example verify_store
+# Use the small test input file (3 nodes, 3 edges)
+cat examples/store/test_input.csv | cargo run --example store
 ```
 
 ### Sample Output
@@ -130,13 +140,14 @@ cargo run --example verify_store
 Motlie CSV Processor - Demonstrating Graph → FullText Chaining
 ===================================================================
 
-Sent vertex 'alice' with fragment (52 chars) to chain
-Sent vertex 'bob' with fragment (53 chars) to chain
-Sent vertex 'charlie' with fragment (56 chars) to chain
-Sent edge 'alice' -> 'bob' (name: 'knows', fragment: 76 chars) to chain
+Sent vertex 'Helen Smith' with fragment (156 chars) to chain
+Sent vertex 'Ivan Clark' with fragment (152 chars) to chain
+...
+Sent edge 'Helen Smith' -> 'TechStart Inc' (name: 'works_at', fragment: 89 chars) to chain
+...
 
-Processed 6 lines from stdin
-Created 3 unique nodes
+Processed 1063 lines from stdin
+Created 99 unique nodes
 Shutting down consumer chain...
 All consumers shut down successfully
 ```
@@ -145,17 +156,36 @@ All consumers shut down successfully
 ```
 Motlie Store Verifier
 ====================
-Reading from: /tmp/motlie_graph_db
+
+CSV file: /tmp/test_data.csv
+Database: /tmp/motlie_graph_db
+
+📄 Parsing CSV file...
+   Nodes: 99
+   Edges: 964
+   Total fragments: 1050
 
 ✓ Database opened successfully
 
-📦 Nodes Column Family:
-  Total: 3 nodes
+🔍 Verifying Nodes...
+   Expected: 99 nodes
+   Found:    99 nodes
+   ✓ Node count matches
+   ✓ All expected nodes found in database
 
-📦 Fragments Column Family:
-  Total: 6 fragments
+🔍 Verifying Edges...
+   Expected: 964 edges
+   Found:    964 edges
+   ✓ Edge count matches
 
-✓ Verification complete!
+🔍 Verifying Fragments...
+   Expected: at least 1050 fragments
+   Found:    1063 fragments
+   ✓ Fragment count OK (database may have additional fragments for implicit nodes)
+   ✓ All expected fragments found in database
+
+✅ All verification checks passed!
+   The database contents match the CSV input.
 ```
 
 ## Development

@@ -13,61 +13,87 @@ The example sets up a chain: **Writer → Graph → FullText**
 
 ## Running the Example
 
+### With Generated Data (Recommended)
+
 ```bash
-# Run with sample data
-RUST_LOG=info cargo run --example store < examples/store/sample_data.csv
+# Generate a dataset with 100 nodes (~1000 edges)
+python3 generate_data.py --total-nodes 100 2>/dev/null > /tmp/test_data.csv
 
-# Or pipe your own CSV data
-echo "Node1,Fragment for Node1" | RUST_LOG=info cargo run --example store
+# Run the store example
+cat /tmp/test_data.csv | cargo run --example store
 
-# Or use the test input file
+# Verify data was stored correctly
+cargo run --example verify_store /tmp/test_data.csv
+```
+
+### With Small Test Data
+
+```bash
+# Use the small test input file (3 nodes, 3 edges)
 cat examples/store/test_input.csv | cargo run --example store
+```
+
+### With Logging
+
+```bash
+# See detailed processing logs
+python3 generate_data.py --total-nodes 50 2>/dev/null > /tmp/test_data.csv
+RUST_LOG=info cat /tmp/test_data.csv | cargo run --example store
 ```
 
 ## Verifying Data Persistence
 
-After running the store example, you can verify that all data was correctly written to RocksDB using the verification tool:
+After running the store example, verify that all data was correctly written to RocksDB:
 
 ```bash
-# Run the verification tool
-cargo run --example verify_store
+# Verify database contents match the CSV input
+cargo run --example verify_store /tmp/test_data.csv
 ```
 
-This will:
-- Open the RocksDB database at `/tmp/motlie_graph_db` in read-only mode
-- Display all data from each column family:
-  - **Nodes**: All vertices with their IDs and summary data
-  - **Edges**: All edges with their IDs and metadata
-  - **Fragments**: All fragment content with timestamps
-  - **Forward Edges**: Edges indexed by (source → destination, name) for traversal
-  - **Reverse Edges**: Edges indexed by (destination ← source, name) for bidirectional queries
+The verification tool:
+- Parses the CSV file to extract expected nodes, edges, and fragments
+- Opens the RocksDB database at `/tmp/motlie_graph_db` in read-only mode
+- Queries each column family and compares with expected data:
+  - **Nodes**: Verifies all expected nodes are present
+  - **Edges**: Verifies edge count matches
+  - **Fragments**: Verifies all expected fragments are stored
+- Reports success or failure with detailed counts
 
 ### Example Output
 
 ```
 Motlie Store Verifier
 ====================
-Reading from: /tmp/motlie_graph_db
+
+CSV file: /tmp/test_data.csv
+Database: /tmp/motlie_graph_db
+
+📄 Parsing CSV file...
+   Nodes: 99
+   Edges: 964
+   Total fragments: 1050
 
 ✓ Database opened successfully
 
-📦 Nodes Column Family:
-─────────────────────────
-  Node #1: ID=01K99ASWS8J67Y0P6Z1MACNJ7F
-    Value: [comment]:\#<!-- id=01K99ASWS8J67Y0P6Z1MACNJ7F -->]
-# bob
-# Summary
+🔍 Verifying Nodes...
+   Expected: 99 nodes
+   Found:    99 nodes
+   ✓ Node count matches
+   ✓ All expected nodes found in database
 
-  Total: 3 nodes
+🔍 Verifying Edges...
+   Expected: 964 edges
+   Found:    964 edges
+   ✓ Edge count matches
 
-📦 Fragments Column Family:
-──────────────────────────────
-  Fragment #1: ID=01K99ASWS8J67Y0P6Z1MACNJ7F, Timestamp=1762323657512
-    Content: Bob is a software developer specializing in databases
+🔍 Verifying Fragments...
+   Expected: at least 1050 fragments
+   Found:    1063 fragments
+   ✓ Fragment count OK (database may have additional fragments for implicit nodes)
+   ✓ All expected fragments found in database
 
-  Total: 6 fragments
-
-✓ Verification complete!
+✅ All verification checks passed!
+   The database contents match the CSV input.
 ```
 
 ### End-to-End Workflow
@@ -76,14 +102,17 @@ Reading from: /tmp/motlie_graph_db
 # 1. Clean any existing database
 rm -rf /tmp/motlie_graph_db
 
-# 2. Run the store example with test data
-cat examples/store/test_input.csv | cargo run --example store
+# 2. Generate test data
+python3 generate_data.py --total-nodes 100 2>/dev/null > /tmp/test_data.csv
 
-# 3. Verify the data was written correctly
-cargo run --example verify_store
+# 3. Run the store example
+cat /tmp/test_data.csv | cargo run --example store
+
+# 4. Verify the data was written correctly
+cargo run --example verify_store /tmp/test_data.csv
 ```
 
-This demonstrates the complete write path: **CSV Input → Writer → Graph Processor → RocksDB Storage → Query Verification** ✓
+This demonstrates the complete write path: **CSV Input → Writer → Graph Processor → RocksDB Storage → Verification** ✓
 
 ## CSV Format
 
