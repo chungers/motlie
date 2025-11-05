@@ -182,13 +182,13 @@ mod tests {
 
         // Send mutations to both writers (simulating fanout)
         for i in 0..3 {
-            let vertex_args = AddNodeArgs {
+            let vertex_args = AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("integration_test_vertex_{}", i),
             };
 
-            let fragment_args = AddFragmentArgs {
+            let fragment_args = AddFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now().0,
                 content: format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i),
@@ -426,13 +426,13 @@ mod tests {
     #[test]
     fn test_struct_usage() {
         // Test that our structs work with the new Id type
-        let vertex = AddNodeArgs {
+        let vertex = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
 
-        let edge = AddEdgeArgs {
+        let edge = AddEdge {
             id: Id::new(),
             source_node_id: Id::new(),
             target_node_id: Id::new(),
@@ -440,7 +440,7 @@ mod tests {
             name: "test_edge".to_string(),
         };
 
-        let fragment = AddFragmentArgs {
+        let fragment = AddFragment {
             id: Id::new(),
             ts_millis: TimestampMilli::now().0,
             content: "test fragment body".to_string(),

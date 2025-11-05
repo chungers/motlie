@@ -5,26 +5,26 @@ use crate::{Id, TimestampMilli, WriterConfig};
 
 #[derive(Debug, Clone)]
 pub enum Mutation {
-    AddNode(AddNodeArgs),
-    AddEdge(AddEdgeArgs),
-    AddFragment(AddFragmentArgs),
+    AddNode(AddNode),
+    AddEdge(AddEdge),
+    AddFragment(AddFragment),
     Invalidate(InvalidateArgs),
 }
 
 #[derive(Debug, Clone)]
-pub struct AddNodeArgs {
+pub struct AddNode {
     /// The UUID of the Vertex
     pub id: Id,
 
     /// The timestamp as number of milliseconds since the Unix epoch
     pub ts_millis: TimestampMilli,
 
-    /// The name of the Vertex
+    /// The name of the Node
     pub name: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct AddEdgeArgs {
+pub struct AddEdge {
     /// The UUID of the Vertex, Edge, or Fragment
     pub id: Id,
 
@@ -42,7 +42,7 @@ pub struct AddEdgeArgs {
 }
 
 #[derive(Debug, Clone)]
-pub struct AddFragmentArgs {
+pub struct AddFragment {
     /// The UUID of the Vertex, Edge, or Fragment
     pub id: Id,
 
@@ -50,6 +50,8 @@ pub struct AddFragmentArgs {
     pub ts_millis: u64,
 
     /// The body of the Fragment
+    /// TODO - support image data url (e.g. base64 encoded image -
+    /// "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==")
     pub content: String,
 }
 
@@ -69,13 +71,13 @@ pub struct InvalidateArgs {
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
     /// Process an AddVertex mutation
-    async fn process_add_vertex(&self, args: &AddNodeArgs) -> Result<()>;
+    async fn process_add_vertex(&self, args: &AddNode) -> Result<()>;
 
     /// Process an AddEdge mutation
-    async fn process_add_edge(&self, args: &AddEdgeArgs) -> Result<()>;
+    async fn process_add_edge(&self, args: &AddEdge) -> Result<()>;
 
     /// Process an AddFragment mutation
-    async fn process_add_fragment(&self, args: &AddFragmentArgs) -> Result<()>;
+    async fn process_add_fragment(&self, args: &AddFragment) -> Result<()>;
 
     /// Process an Invalidate mutation
     async fn process_invalidate(&self, args: &InvalidateArgs) -> Result<()>;
@@ -202,17 +204,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Processor for TestProcessor {
-        async fn process_add_vertex(&self, _args: &AddNodeArgs) -> Result<()> {
+        async fn process_add_vertex(&self, _args: &AddNode) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(1)).await;
             Ok(())
         }
 
-        async fn process_add_edge(&self, _args: &AddEdgeArgs) -> Result<()> {
+        async fn process_add_edge(&self, _args: &AddEdge) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(1)).await;
             Ok(())
         }
 
-        async fn process_add_fragment(&self, _args: &AddFragmentArgs) -> Result<()> {
+        async fn process_add_fragment(&self, _args: &AddFragment) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(1)).await;
             Ok(())
         }
@@ -242,7 +244,7 @@ mod tests {
         let consumer_handle = spawn_consumer(consumer);
 
         // Send a mutation
-        let vertex_args = AddNodeArgs {
+        let vertex_args = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),

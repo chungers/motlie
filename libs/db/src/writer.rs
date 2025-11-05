@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::{AddEdgeArgs, AddFragmentArgs, AddNodeArgs, InvalidateArgs, Mutation, TimestampMilli};
+use crate::{AddEdge, AddFragment, AddNode, InvalidateArgs, Mutation, TimestampMilli};
 
 /// Configuration for the mutation writer
 #[derive(Debug, Clone)]
@@ -39,17 +39,17 @@ impl Writer {
     }
 
     /// Send an AddVertex mutation
-    pub async fn add_vertex(&self, args: AddNodeArgs) -> Result<()> {
+    pub async fn add_vertex(&self, args: AddNode) -> Result<()> {
         self.send(Mutation::AddNode(args)).await
     }
 
     /// Send an AddEdge mutation
-    pub async fn add_edge(&self, args: AddEdgeArgs) -> Result<()> {
+    pub async fn add_edge(&self, args: AddEdge) -> Result<()> {
         self.send(Mutation::AddEdge(args)).await
     }
 
     /// Send an AddFragment mutation
-    pub async fn add_fragment(&self, args: AddFragmentArgs) -> Result<()> {
+    pub async fn add_fragment(&self, args: AddFragment) -> Result<()> {
         self.send(Mutation::AddFragment(args)).await
     }
 
@@ -98,13 +98,13 @@ mod tests {
         let (writer, _receiver) = create_mutation_writer(config);
 
         // Test that all send operations work
-        let vertex_args = AddNodeArgs {
+        let vertex_args = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
 
-        let edge_args = AddEdgeArgs {
+        let edge_args = AddEdge {
             id: Id::new(),
             source_node_id: Id::new(),
             target_node_id: Id::new(),
@@ -112,7 +112,7 @@ mod tests {
             name: "test_edge".to_string(),
         };
 
-        let fragment_args = AddFragmentArgs {
+        let fragment_args = AddFragment {
             id: Id::new(),
             ts_millis: TimestampMilli::now().0,
             content: "test fragment".to_string(),

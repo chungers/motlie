@@ -1,7 +1,42 @@
-use crate::{AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id};
+use crate::graph::{PutCf, StorageOperation};
+use crate::TimestampMilli;
+use crate::{AddEdge, AddFragment, AddNode, Id};
 use serde::{Deserialize, Serialize};
 
-use crate::TimestampMilli;
+pub(crate) struct Plan {}
+impl Plan {
+    pub(crate) fn create_node(
+        op: &AddNode,
+    ) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        Ok(vec![StorageOperation::PutCf(PutCf(
+            Nodes::CF_NAME,
+            Nodes::create_bytes(op)?,
+        ))])
+    }
+    pub(crate) fn create_edge(
+        op: &AddEdge,
+    ) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        Ok(vec![
+            StorageOperation::PutCf(PutCf(Edges::CF_NAME, Edges::create_bytes(op)?)),
+            StorageOperation::PutCf(PutCf(
+                ForwardEdges::CF_NAME,
+                ForwardEdges::create_bytes(op)?,
+            )),
+            StorageOperation::PutCf(PutCf(
+                ReverseEdges::CF_NAME,
+                ReverseEdges::create_bytes(op)?,
+            )),
+        ])
+    }
+    pub(crate) fn create_fragment(
+        op: &AddFragment,
+    ) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        Ok(vec![StorageOperation::PutCf(PutCf(
+            Fragments::CF_NAME,
+            Fragments::create_bytes(op)?,
+        ))])
+    }
+}
 
 /// Trait for column family record types that can create and serialize key-value pairs.
 pub(crate) trait ColumnFamilyRecord {
@@ -14,13 +49,13 @@ pub(crate) trait ColumnFamilyRecord {
     type Value: Serialize + for<'de> Deserialize<'de>;
 
     /// The argument type for creating records
-    type Args;
+    type CreateOp;
 
     /// Create a key-value pair from arguments
-    fn record_from(args: &Self::Args) -> (Self::Key, Self::Value);
+    fn record_from(args: &Self::CreateOp) -> (Self::Key, Self::Value);
 
     /// Create and serialize to bytes using MessagePack
-    fn create_bytes(args: &Self::Args) -> Result<(Vec<u8>, Vec<u8>), rmp_serde::encode::Error> {
+    fn create_bytes(args: &Self::CreateOp) -> Result<(Vec<u8>, Vec<u8>), rmp_serde::encode::Error> {
         let (key, value) = Self::record_from(args);
         let key_bytes = rmp_serde::to_vec(&key)?;
         let value_bytes = rmp_serde::to_vec(&value)?;
@@ -64,9 +99,9 @@ impl ColumnFamilyRecord for Nodes {
     const CF_NAME: &'static str = "nodes";
     type Key = NodeCfKey;
     type Value = NodeCfValue;
-    type Args = AddNodeArgs;
+    type CreateOp = AddNode;
 
-    fn record_from(args: &AddNodeArgs) -> (NodeCfKey, NodeCfValue) {
+    fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
         let summary = format!(
             "[comment]:\\#<!-- id={} -->]\n# {}\n# Summary\n",
@@ -92,9 +127,9 @@ impl ColumnFamilyRecord for Edges {
     const CF_NAME: &'static str = "edges";
     type Key = EdgeCfKey;
     type Value = EdgeCfValue;
-    type Args = AddEdgeArgs;
+    type CreateOp = AddEdge;
 
-    fn record_from(args: &AddEdgeArgs) -> (EdgeCfKey, EdgeCfValue) {
+    fn record_from(args: &AddEdge) -> (EdgeCfKey, EdgeCfValue) {
         let key = EdgeCfKey(args.id);
         let summary = format!(
             "[comment]:\\#<!-- id={} -->]\n# {}\n# Summary\n",
@@ -120,9 +155,9 @@ impl ColumnFamilyRecord for Fragments {
     const CF_NAME: &'static str = "fragments";
     type Key = FragmentCfKey;
     type Value = FragmentCfValue;
-    type Args = AddFragmentArgs;
+    type CreateOp = AddFragment;
 
-    fn record_from(args: &AddFragmentArgs) -> (FragmentCfKey, FragmentCfValue) {
+    fn record_from(args: &AddFragment) -> (FragmentCfKey, FragmentCfValue) {
         let key = FragmentCfKey(args.id, TimestampMilli(args.ts_millis));
         let content = FragmentContent(args.content.clone());
         let value = FragmentCfValue(content);
@@ -155,9 +190,9 @@ impl ColumnFamilyRecord for ForwardEdges {
     const CF_NAME: &'static str = "forward_edges";
     type Key = ForwardEdgeCfKey;
     type Value = ForwardEdgeCfValue;
-    type Args = AddEdgeArgs;
+    type CreateOp = AddEdge;
 
-    fn record_from(args: &AddEdgeArgs) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
+    fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let key = ForwardEdgeCfKey(
             EdgeSourceId(args.source_node_id),
             EdgeDestinationId(args.target_node_id),
@@ -188,9 +223,9 @@ impl ColumnFamilyRecord for ReverseEdges {
     const CF_NAME: &'static str = "reverse_edges";
     type Key = ReverseEdgeCfKey;
     type Value = ReverseEdgeCfValue;
-    type Args = AddEdgeArgs;
+    type CreateOp = AddEdge;
 
-    fn record_from(args: &AddEdgeArgs) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
+    fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
         let key = ReverseEdgeCfKey(
             EdgeDestinationId(args.source_node_id),
             EdgeSourceId(args.target_node_id),
@@ -218,7 +253,7 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AddEdgeArgs, Id};
+    use crate::{AddEdge, Id};
 
     #[test]
     fn test_forward_edges_keys_lexicographically_sortable() {
@@ -226,28 +261,28 @@ mod tests {
         // Using deterministic timestamps for stable test behavior
         let base_ts = 1700000000000u64; // Fixed base timestamp
         let edges = vec![
-            AddEdgeArgs {
+            AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts),
                 name: "edge_a".to_string(),
             },
-            AddEdgeArgs {
+            AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([1u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 1000),
                 name: "edge_b".to_string(),
             },
-            AddEdgeArgs {
+            AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([1u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 2000),
                 name: "edge_c".to_string(),
             },
-            AddEdgeArgs {
+            AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([1u8; 16]),
                 target_node_id: Id::from_bytes([1u8; 16]),
@@ -255,7 +290,7 @@ mod tests {
                 name: "edge_d".to_string(),
             },
             // Add edge with same source and target but different name
-            AddEdgeArgs {
+            AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),

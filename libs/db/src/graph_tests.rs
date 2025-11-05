@@ -3,8 +3,7 @@ mod tests {
     use crate::graph::{spawn_graph_consumer, spawn_graph_consumer_with_next, Storage};
     use crate::schema::{ColumnFamilyRecord, Edges, Fragments, Nodes, ALL_COLUMN_FAMILIES};
     use crate::{
-        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id, TimestampMilli,
-        WriterConfig,
+        create_mutation_writer, AddEdge, AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
     };
     use rocksdb::DB;
     use std::path::Path;
@@ -24,18 +23,17 @@ mod tests {
         let (writer, receiver) = create_mutation_writer(config.clone());
 
         // Spawn consumer
-        let consumer_handle =
-            spawn_graph_consumer(receiver, config, &db_path);
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
 
         // Send some mutations
-        let vertex_args = AddNodeArgs {
+        let vertex_args = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
         writer.add_vertex(vertex_args).await.unwrap();
 
-        let edge_args = AddEdgeArgs {
+        let edge_args = AddEdge {
             id: Id::new(),
             source_node_id: Id::new(),
             target_node_id: Id::new(),
@@ -64,12 +62,11 @@ mod tests {
         };
 
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle =
-            spawn_graph_consumer(receiver, config, &db_path);
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
 
         // Send 5 mutations rapidly
         for i in 0..5 {
-            let vertex_args = AddNodeArgs {
+            let vertex_args = AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_vertex_{}", i),
@@ -92,12 +89,11 @@ mod tests {
 
         let config = WriterConfig::default();
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle =
-            spawn_graph_consumer(receiver, config, &db_path);
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
 
         // Test all mutation types
         writer
-            .add_vertex(AddNodeArgs {
+            .add_vertex(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "vertex".to_string(),
@@ -106,7 +102,7 @@ mod tests {
             .unwrap();
 
         writer
-            .add_edge(AddEdgeArgs {
+            .add_edge(AddEdge {
                 id: Id::new(),
                 source_node_id: Id::new(),
                 target_node_id: Id::new(),
@@ -117,7 +113,7 @@ mod tests {
             .unwrap();
 
         writer
-            .add_fragment(AddFragmentArgs {
+            .add_fragment(AddFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now().0,
                 content: "fragment body".to_string(),
@@ -166,12 +162,12 @@ mod tests {
 
         // Send mutations - they should flow through Graph -> FullText
         for i in 0..3 {
-            let vertex_args = AddNodeArgs {
+            let vertex_args = AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("chained_vertex_{}", i),
             };
-            let fragment_args = AddFragmentArgs {
+            let fragment_args = AddFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now().0,
                 content: format!(

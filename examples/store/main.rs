@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use motlie_db::{
-    create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdgeArgs,
-    AddFragmentArgs, AddNodeArgs, Id, TimestampMilli, WriterConfig,
+    create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdge,
+    AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
 };
 use std::collections::HashMap;
 use std::io;
@@ -85,14 +85,14 @@ async fn main() -> Result<()> {
                 let current_time = TimestampMilli::now();
 
                 // Create vertex
-                let vertex_args = AddNodeArgs {
+                let vertex_args = AddNode {
                     id: node_id.clone(),
                     ts_millis: current_time,
                     name: node_name.to_string(),
                 };
 
                 // Create fragment
-                let fragment_args = AddFragmentArgs {
+                let fragment_args = AddFragment {
                     id: node_id,
                     ts_millis: current_time.0,
                     content: fragment_text.to_string(),
@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
 
                 let current_time = TimestampMilli::now();
 
-                let edge_args = AddEdgeArgs {
+                let edge_args = AddEdge {
                     id: edge_id.clone(),
                     source_node_id: source_id,
                     target_node_id: target_id,
@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
                 };
 
                 // Create fragment for the edge
-                let fragment_args = AddFragmentArgs {
+                let fragment_args = AddFragment {
                     id: edge_id,
                     ts_millis: current_time.0,
                     content: edge_fragment.to_string(),

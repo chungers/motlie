@@ -4,8 +4,7 @@ mod tests {
         spawn_fulltext_consumer, spawn_fulltext_consumer_with_params, FullTextProcessor,
     };
     use crate::{
-        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id, TimestampMilli,
-        WriterConfig,
+        create_mutation_writer, AddEdge, AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
     };
     use tokio::time::Duration;
 
@@ -21,14 +20,14 @@ mod tests {
         let consumer_handle = spawn_fulltext_consumer(receiver, config);
 
         // Send some mutations
-        let vertex_args = AddNodeArgs {
+        let vertex_args = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
         writer.add_vertex(vertex_args).await.unwrap();
 
-        let fragment_args = AddFragmentArgs {
+        let fragment_args = AddFragment {
             id: Id::new(),
             ts_millis: 1234567890,
             content: "This is a test fragment with some searchable content".to_string(),
@@ -58,7 +57,7 @@ mod tests {
         let consumer_handle = spawn_fulltext_consumer_with_params(receiver, config, k1, b);
 
         // Send a fragment with substantial content
-        let fragment_args = AddFragmentArgs {
+        let fragment_args = AddFragment {
             id: Id::new(),
             ts_millis: 1234567890,
             content: "The quick brown fox jumps over the lazy dog. This is a longer text fragment that would benefit from BM25 scoring with custom parameters.".to_string(),
@@ -81,7 +80,7 @@ mod tests {
 
         // Test all mutation types with search-relevant content
         writer
-            .add_vertex(AddNodeArgs {
+            .add_vertex(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "search vertex".to_string(),
@@ -90,7 +89,7 @@ mod tests {
             .unwrap();
 
         writer
-            .add_edge(AddEdgeArgs {
+            .add_edge(AddEdge {
                 id: Id::new(),
                 source_node_id: Id::new(),
                 target_node_id: Id::new(),
@@ -101,7 +100,7 @@ mod tests {
             .unwrap();
 
         writer
-            .add_fragment(AddFragmentArgs {
+            .add_fragment(AddFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now().0,
                 content: "This fragment contains searchable text that should be indexed using BM25 algorithm for effective information retrieval.".to_string(),
@@ -155,7 +154,7 @@ mod tests {
 
         // Send 5 fragments rapidly
         for i in 0..5 {
-            let fragment_args = AddFragmentArgs {
+            let fragment_args = AddFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now().0,
                 content: format!(

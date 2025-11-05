@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 
 use crate::{
     mutation::{Consumer, Processor},
-    AddEdgeArgs, AddFragmentArgs, AddNodeArgs, InvalidateArgs, WriterConfig,
+    AddEdge, AddFragment, AddNode, InvalidateArgs, WriterConfig,
 };
 
 /// Full-text search mutation processor for search indexing
@@ -41,7 +41,7 @@ impl Default for FullTextProcessor {
 #[async_trait::async_trait]
 impl Processor for FullTextProcessor {
     /// Process an AddVertex mutation - index vertex for search
-    async fn process_add_vertex(&self, args: &AddNodeArgs) -> Result<()> {
+    async fn process_add_vertex(&self, args: &AddNode) -> Result<()> {
         // TODO: Implement actual vertex indexing in full-text search index
         log::info!(
             "[FullText] Would index vertex for search: id={}, name='{}', k1={}, b={}",
@@ -60,7 +60,7 @@ impl Processor for FullTextProcessor {
     }
 
     /// Process an AddEdge mutation - index edge relationships for search
-    async fn process_add_edge(&self, args: &AddEdgeArgs) -> Result<()> {
+    async fn process_add_edge(&self, args: &AddEdge) -> Result<()> {
         // TODO: Implement actual edge relationship indexing in full-text search index
         log::info!(
             "[FullText] Would index edge relationship: source={}, target={}, name='{}', k1={}, b={}",
@@ -80,7 +80,7 @@ impl Processor for FullTextProcessor {
     }
 
     /// Process an AddFragment mutation - index fragment content for full-text search
-    async fn process_add_fragment(&self, args: &AddFragmentArgs) -> Result<()> {
+    async fn process_add_fragment(&self, args: &AddFragment) -> Result<()> {
         // TODO: Implement actual fragment content indexing in full-text search index
         log::info!(
             "[FullText] Would index fragment content: id={}, body_len={}, k1={}, b={}",

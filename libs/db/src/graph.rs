@@ -10,11 +10,18 @@ use tokio::task::JoinHandle;
 
 use rocksdb::{Options, TransactionDB, TransactionDBOptions, DB};
 
+use crate::schema;
 use crate::{
     mutation::{Consumer, Processor},
     schema::ALL_COLUMN_FAMILIES,
-    AddEdgeArgs, AddFragmentArgs, AddNodeArgs, InvalidateArgs, WriterConfig,
+    AddEdge, AddFragment, AddNode, InvalidateArgs, WriterConfig,
 };
+
+pub(crate) enum StorageOperation {
+    PutCf(PutCf),
+}
+
+pub(crate) struct PutCf(pub(crate) &'static str, pub(crate) (Vec<u8>, Vec<u8>));
 
 /// Handle for either a read-only DB or read-write TransactionDB
 enum DatabaseHandle {
@@ -201,7 +208,7 @@ impl Storage {
     }
 
     /// Get a reference to the underlying DB (only works in readonly mode)
-    pub fn db(&self) -> Result<&DB> {
+    pub(crate) fn db(&self) -> Result<&DB> {
         self.db
             .as_ref()
             .and_then(|handle| handle.as_db())
@@ -209,7 +216,7 @@ impl Storage {
     }
 
     /// Get a reference to the TransactionDB (only works in readwrite mode)
-    pub fn transaction_db(&self) -> Result<&TransactionDB> {
+    pub(crate) fn transaction_db(&self) -> Result<&TransactionDB> {
         self.db
             .as_ref()
             .and_then(|handle| handle.as_transaction_db())
@@ -240,16 +247,22 @@ impl Graph {
 #[async_trait::async_trait]
 impl Processor for Graph {
     /// Process an AddVertex mutation
-    async fn process_add_vertex(&self, args: &AddNodeArgs) -> Result<()> {
+    async fn process_add_vertex(&self, args: &AddNode) -> Result<()> {
+        log::info!("[Graph] About to insert node: {:?}", args);
         let txn_db = self.storage.transaction_db()?;
 
         // Create a transaction
         let txn = txn_db.transaction();
-
-        // TODO: Implement actual vertex insertion
-        // Example: txn.put_cf(cf_handle, key, value)?;
-        log::info!("[Graph] Would insert vertex: {:?}", args);
-
+        for op in schema::Plan::create_node(args)? {
+            match op {
+                StorageOperation::PutCf(PutCf(cf_name, (key, value))) => {
+                    let cf = txn_db
+                        .cf_handle(cf_name)
+                        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
+                    txn.put_cf(cf, key, value)?;
+                }
+            }
+        }
         // Commit the transaction
         txn.commit()?;
 
@@ -257,16 +270,22 @@ impl Processor for Graph {
     }
 
     /// Process an AddEdge mutation
-    async fn process_add_edge(&self, args: &AddEdgeArgs) -> Result<()> {
+    async fn process_add_edge(&self, args: &AddEdge) -> Result<()> {
+        log::info!("[Graph] About to insert edge: {:?}", args);
         let txn_db = self.storage.transaction_db()?;
 
         // Create a transaction
         let txn = txn_db.transaction();
-
-        // TODO: Implement actual edge insertion
-        // Example: txn.put_cf(cf_handle, key, value)?;
-        log::info!("[Graph] Would insert edge: {:?}", args);
-
+        for op in schema::Plan::create_edge(args)? {
+            match op {
+                StorageOperation::PutCf(PutCf(cf_name, (key, value))) => {
+                    let cf = txn_db
+                        .cf_handle(cf_name)
+                        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
+                    txn.put_cf(cf, key, value)?;
+                }
+            }
+        }
         // Commit the transaction
         txn.commit()?;
 
@@ -274,16 +293,21 @@ impl Processor for Graph {
     }
 
     /// Process an AddFragment mutation
-    async fn process_add_fragment(&self, args: &AddFragmentArgs) -> Result<()> {
+    async fn process_add_fragment(&self, args: &AddFragment) -> Result<()> {
+        log::info!("[Graph] About to insert fragment: {:?}", args);
         let txn_db = self.storage.transaction_db()?;
-
         // Create a transaction
         let txn = txn_db.transaction();
-
-        // TODO: Implement actual fragment insertion
-        // Example: txn.put_cf(cf_handle, key, value)?;
-        log::info!("[Graph] Would insert fragment: {:?}", args);
-
+        for op in schema::Plan::create_fragment(args)? {
+            match op {
+                StorageOperation::PutCf(PutCf(cf_name, (key, value))) => {
+                    let cf = txn_db
+                        .cf_handle(cf_name)
+                        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
+                    txn.put_cf(cf, key, value)?;
+                }
+            }
+        }
         // Commit the transaction
         txn.commit()?;
 
