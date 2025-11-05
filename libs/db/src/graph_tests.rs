@@ -3,7 +3,8 @@ mod tests {
     use crate::graph::{spawn_graph_consumer, spawn_graph_consumer_with_next, Storage};
     use crate::schema::{ColumnFamilyRecord, Edges, Fragments, Nodes, ALL_COLUMN_FAMILIES};
     use crate::{
-        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id, WriterConfig,
+        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id, TimestampMilli,
+        WriterConfig,
     };
     use rocksdb::DB;
     use std::path::Path;
@@ -26,7 +27,7 @@ mod tests {
         // Send some mutations
         let vertex_args = AddNodeArgs {
             id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
         writer.add_vertex(vertex_args).await.unwrap();
@@ -35,7 +36,7 @@ mod tests {
             id: Id::new(),
             source_node_id: Id::new(),
             target_node_id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now(),
             name: "test_edge".to_string(),
         };
         writer.add_edge(edge_args).await.unwrap();
@@ -64,7 +65,7 @@ mod tests {
         for i in 0..5 {
             let vertex_args = AddNodeArgs {
                 id: Id::new(),
-                ts_millis: 1234567890 + i,
+                ts_millis: TimestampMilli::now(),
                 name: format!("test_vertex_{}", i),
             };
             writer.add_vertex(vertex_args).await.unwrap();
@@ -89,7 +90,7 @@ mod tests {
         writer
             .add_vertex(AddNodeArgs {
                 id: Id::new(),
-                ts_millis: 1234567890,
+                ts_millis: TimestampMilli::now(),
                 name: "vertex".to_string(),
             })
             .await
@@ -100,7 +101,7 @@ mod tests {
                 id: Id::new(),
                 source_node_id: Id::new(),
                 target_node_id: Id::new(),
-                ts_millis: 1234567890,
+                ts_millis: TimestampMilli::now(),
                 name: "edge".to_string(),
             })
             .await
@@ -109,7 +110,7 @@ mod tests {
         writer
             .add_fragment(AddFragmentArgs {
                 id: Id::new(),
-                ts_millis: 1234567890,
+                ts_millis: TimestampMilli::now().0,
                 content: "fragment body".to_string(),
             })
             .await
@@ -118,7 +119,7 @@ mod tests {
         writer
             .invalidate(crate::InvalidateArgs {
                 id: Id::new(),
-                ts_millis: 1234567890,
+                ts_millis: TimestampMilli::now(),
                 reason: "test invalidation".to_string(),
             })
             .await
@@ -155,12 +156,12 @@ mod tests {
         for i in 0..3 {
             let vertex_args = AddNodeArgs {
                 id: Id::new(),
-                ts_millis: 1234567890 + i,
+                ts_millis: TimestampMilli::now(),
                 name: format!("chained_vertex_{}", i),
             };
             let fragment_args = AddFragmentArgs {
                 id: Id::new(),
-                ts_millis: 1234567890 + i,
+                ts_millis: TimestampMilli::now().0,
                 content: format!(
                     "Chained fragment {} processed by both Graph and FullText",
                     i

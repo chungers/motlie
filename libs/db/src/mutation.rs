@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::{Id, WriterConfig};
+use crate::{Id, TimestampMilli, WriterConfig};
 
 #[derive(Debug, Clone)]
 pub enum Mutation {
@@ -17,7 +17,7 @@ pub struct AddNodeArgs {
     pub id: Id,
 
     /// The timestamp as number of milliseconds since the Unix epoch
-    pub ts_millis: u64,
+    pub ts_millis: TimestampMilli,
 
     /// The name of the Vertex
     pub name: String,
@@ -35,7 +35,7 @@ pub struct AddEdgeArgs {
     pub target_node_id: Id,
 
     /// The timestamp as number of milliseconds since the Unix epoch
-    pub ts_millis: u64,
+    pub ts_millis: TimestampMilli,
 
     /// The name of the Edge
     pub name: String,
@@ -59,7 +59,7 @@ pub struct InvalidateArgs {
     pub id: Id,
 
     /// The timestamp as number of milliseconds since the Unix epoch
-    pub ts_millis: u64,
+    pub ts_millis: TimestampMilli,
 
     /// The reason for invalidation
     pub reason: String,
@@ -244,7 +244,7 @@ mod tests {
         // Send a mutation
         let vertex_args = AddNodeArgs {
             id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
         writer.add_vertex(vertex_args).await.unwrap();

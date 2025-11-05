@@ -1,6 +1,8 @@
 use crate::{AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id};
 use serde::{Deserialize, Serialize};
 
+use crate::TimestampMilli;
+
 /// Trait for column family record types that can create and serialize key-value pairs.
 pub(crate) trait ColumnFamilyRecord {
     const CF_NAME: &'static str;
@@ -45,9 +47,6 @@ pub(crate) trait ColumnFamilyRecord {
         rmp_serde::from_slice(bytes)
     }
 }
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct TimestampMillisecond(pub(crate) u64);
 
 /// Nodes column family.
 pub(crate) struct Nodes;
@@ -109,7 +108,7 @@ impl ColumnFamilyRecord for Edges {
 pub(crate) struct Fragments;
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct FragmentCfKey(pub(crate) Id, pub(crate) TimestampMillisecond);
+pub(crate) struct FragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FragmentCfValue(pub(crate) FragmentContent);
@@ -124,7 +123,7 @@ impl ColumnFamilyRecord for Fragments {
     type Args = AddFragmentArgs;
 
     fn record_from(args: &AddFragmentArgs) -> (FragmentCfKey, FragmentCfValue) {
-        let key = FragmentCfKey(args.id, TimestampMillisecond(args.ts_millis));
+        let key = FragmentCfKey(args.id, TimestampMilli(args.ts_millis));
         let content = FragmentContent(args.content.clone());
         let value = FragmentCfValue(content);
         (key, value)
@@ -224,33 +223,35 @@ mod tests {
     #[test]
     fn test_forward_edges_keys_lexicographically_sortable() {
         // Create multiple edge arguments with different source/destination combinations
+        // Using deterministic timestamps for stable test behavior
+        let base_ts = 1700000000000u64; // Fixed base timestamp
         let edges = vec![
             AddEdgeArgs {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
-                ts_millis: 1000,
+                ts_millis: TimestampMilli(base_ts),
                 name: "edge_a".to_string(),
             },
             AddEdgeArgs {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([1u8; 16]),
-                ts_millis: 2000,
+                ts_millis: TimestampMilli(base_ts + 1000),
                 name: "edge_b".to_string(),
             },
             AddEdgeArgs {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([1u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
-                ts_millis: 3000,
+                ts_millis: TimestampMilli(base_ts + 2000),
                 name: "edge_c".to_string(),
             },
             AddEdgeArgs {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([1u8; 16]),
                 target_node_id: Id::from_bytes([1u8; 16]),
-                ts_millis: 4000,
+                ts_millis: TimestampMilli(base_ts + 3000),
                 name: "edge_d".to_string(),
             },
             // Add edge with same source and target but different name
@@ -258,7 +259,7 @@ mod tests {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
-                ts_millis: 5000,
+                ts_millis: TimestampMilli(base_ts + 4000),
                 name: "edge_z".to_string(),
             },
         ];

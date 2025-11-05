@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::{AddEdgeArgs, AddFragmentArgs, AddNodeArgs, InvalidateArgs, Mutation};
+use crate::{AddEdgeArgs, AddFragmentArgs, AddNodeArgs, InvalidateArgs, Mutation, TimestampMilli};
 
 /// Configuration for the mutation writer
 #[derive(Debug, Clone)]
@@ -100,7 +100,7 @@ mod tests {
         // Test that all send operations work
         let vertex_args = AddNodeArgs {
             id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
 
@@ -108,19 +108,19 @@ mod tests {
             id: Id::new(),
             source_node_id: Id::new(),
             target_node_id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now(),
             name: "test_edge".to_string(),
         };
 
         let fragment_args = AddFragmentArgs {
             id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now().0,
             content: "test fragment".to_string(),
         };
 
         let invalidate_args = InvalidateArgs {
             id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now(),
             reason: "test reason".to_string(),
         };
 

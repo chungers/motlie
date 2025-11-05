@@ -4,7 +4,8 @@ mod tests {
         spawn_fulltext_consumer, spawn_fulltext_consumer_with_params, FullTextProcessor,
     };
     use crate::{
-        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id, WriterConfig,
+        create_mutation_writer, AddEdgeArgs, AddFragmentArgs, AddNodeArgs, Id, TimestampMilli,
+        WriterConfig,
     };
     use tokio::time::Duration;
 
@@ -22,7 +23,7 @@ mod tests {
         // Send some mutations
         let vertex_args = AddNodeArgs {
             id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
         writer.add_vertex(vertex_args).await.unwrap();
@@ -82,7 +83,7 @@ mod tests {
         writer
             .add_vertex(AddNodeArgs {
                 id: Id::new(),
-                ts_millis: 1234567890,
+                ts_millis: TimestampMilli::now(),
                 name: "search vertex".to_string(),
             })
             .await
@@ -93,7 +94,7 @@ mod tests {
                 id: Id::new(),
                 source_node_id: Id::new(),
                 target_node_id: Id::new(),
-                ts_millis: 1234567890,
+                ts_millis: TimestampMilli::now(),
                 name: "connects to".to_string(),
             })
             .await
@@ -102,7 +103,7 @@ mod tests {
         writer
             .add_fragment(AddFragmentArgs {
                 id: Id::new(),
-                ts_millis: 1234567890,
+                ts_millis: TimestampMilli::now().0,
                 content: "This fragment contains searchable text that should be indexed using BM25 algorithm for effective information retrieval.".to_string(),
             })
             .await
@@ -111,7 +112,7 @@ mod tests {
         writer
             .invalidate(crate::InvalidateArgs {
                 id: Id::new(),
-                ts_millis: 1234567890,
+                ts_millis: TimestampMilli::now(),
                 reason: "content removed from search index".to_string(),
             })
             .await
@@ -156,7 +157,7 @@ mod tests {
         for i in 0..5 {
             let fragment_args = AddFragmentArgs {
                 id: Id::new(),
-                ts_millis: 1234567890 + i,
+                ts_millis: TimestampMilli::now().0,
                 content: format!(
                     "Fragment {} with searchable content for full-text indexing",
                     i

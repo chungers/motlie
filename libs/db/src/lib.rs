@@ -31,7 +31,22 @@ impl std::error::Error for IdError {}
 
 /// A typesafe wrapper for ULID with 128-bit internal representation as 16 bytes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Id([u8; 16]);
+pub(crate) struct Id([u8; 16]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct TimestampMilli(pub(crate) u64);
+
+impl TimestampMilli {
+    /// Create a new timestamp from the current time
+    pub fn now() -> Self {
+        TimestampMilli(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        )
+    }
+}
 
 impl Id {
     /// Generate a new ULID with 128-bit internal representation
@@ -164,13 +179,13 @@ mod tests {
         for i in 0..3 {
             let vertex_args = AddNodeArgs {
                 id: Id::new(),
-                ts_millis: 1234567890 + i,
+                ts_millis: TimestampMilli::now(),
                 name: format!("integration_test_vertex_{}", i),
             };
 
             let fragment_args = AddFragmentArgs {
                 id: Id::new(),
-                ts_millis: 1234567890 + i,
+                ts_millis: TimestampMilli::now().0,
                 content: format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i),
             };
 
@@ -408,7 +423,7 @@ mod tests {
         // Test that our structs work with the new Id type
         let vertex = AddNodeArgs {
             id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
 
@@ -416,13 +431,13 @@ mod tests {
             id: Id::new(),
             source_node_id: Id::new(),
             target_node_id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now(),
             name: "test_edge".to_string(),
         };
 
         let fragment = AddFragmentArgs {
             id: Id::new(),
-            ts_millis: 1234567890,
+            ts_millis: TimestampMilli::now().0,
             content: "test fragment body".to_string(),
         };
 
