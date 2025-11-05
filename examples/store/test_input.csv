@@ -1,0 +1,6 @@
+alice,Alice is a researcher working on distributed systems
+bob,Bob is a software developer specializing in databases
+charlie,Charlie is a data scientist focusing on machine learning
+alice,bob,knows,Alice knows Bob from university where they studied computer science together
+bob,charlie,collaborates,Bob collaborates with Charlie on an open source project
+alice,charlie,mentors,Alice mentors Charlie in research methodology

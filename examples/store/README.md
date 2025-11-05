@@ -19,7 +19,71 @@ RUST_LOG=info cargo run --example store < examples/store/sample_data.csv
 
 # Or pipe your own CSV data
 echo "Node1,Fragment for Node1" | RUST_LOG=info cargo run --example store
+
+# Or use the test input file
+cat examples/store/test_input.csv | cargo run --example store
 ```
+
+## Verifying Data Persistence
+
+After running the store example, you can verify that all data was correctly written to RocksDB using the verification tool:
+
+```bash
+# Run the verification tool
+cargo run --example verify_store
+```
+
+This will:
+- Open the RocksDB database at `/tmp/motlie_graph_db` in read-only mode
+- Display all data from each column family:
+  - **Nodes**: All vertices with their IDs and summary data
+  - **Edges**: All edges with their IDs and metadata
+  - **Fragments**: All fragment content with timestamps
+  - **Forward Edges**: Edges indexed by (source → destination, name) for traversal
+  - **Reverse Edges**: Edges indexed by (destination ← source, name) for bidirectional queries
+
+### Example Output
+
+```
+Motlie Store Verifier
+====================
+Reading from: /tmp/motlie_graph_db
+
+✓ Database opened successfully
+
+📦 Nodes Column Family:
+─────────────────────────
+  Node #1: ID=01K99ASWS8J67Y0P6Z1MACNJ7F
+    Value: [comment]:\#<!-- id=01K99ASWS8J67Y0P6Z1MACNJ7F -->]
+# bob
+# Summary
+
+  Total: 3 nodes
+
+📦 Fragments Column Family:
+──────────────────────────────
+  Fragment #1: ID=01K99ASWS8J67Y0P6Z1MACNJ7F, Timestamp=1762323657512
+    Content: Bob is a software developer specializing in databases
+
+  Total: 6 fragments
+
+✓ Verification complete!
+```
+
+### End-to-End Workflow
+
+```bash
+# 1. Clean any existing database
+rm -rf /tmp/motlie_graph_db
+
+# 2. Run the store example with test data
+cat examples/store/test_input.csv | cargo run --example store
+
+# 3. Verify the data was written correctly
+cargo run --example verify_store
+```
+
+This demonstrates the complete write path: **CSV Input → Writer → Graph Processor → RocksDB Storage → Query Verification** ✓
 
 ## CSV Format
 

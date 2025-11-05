@@ -360,6 +360,9 @@ dependencies = [
  "csv",
  "env_logger",
  "motlie-db",
+ "rmp-serde",
+ "rocksdb",
+ "serde",
  "tokio",
 ]
 

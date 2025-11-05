@@ -13,7 +13,7 @@ The system uses MPSC (multiple-producer, single-consumer) queues to efficiently 
 
 ## Quick Start
 
-The easiest way to get started is with the basic usage example:
+The easiest way to get started is with the store example:
 
 ```bash
 # Clone and build
@@ -21,29 +21,36 @@ git clone <repository-url>
 cd motlie
 cargo build
 
-# Run the CSV processor example
-echo "user1,Hello world from user1
-user2,Greetings from user2
-user1,user2,friendship,Connected as friends" | cargo run --example basic-usage
+# Run the store example with test data
+cat examples/store/test_input.csv | cargo run --example store
 
-# Or process sample data
-cargo run --example basic-usage < examples/sample_data.csv
+# Verify data was written to RocksDB
+cargo run --example verify_store
 ```
+
+The test input (`examples/store/test_input.csv`) includes 3 nodes (alice, bob, charlie) and 3 edges (knows, collaborates, mentors) with associated fragments.
 
 ## Architecture
 
+The store example demonstrates consumer chaining, where mutations flow through multiple processors:
+
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   CSV Input     │───▶│  MutationWriter  │───▶│  MPSC Channels  │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+│   CSV Input     │───▶│  MutationWriter  │───▶│  Graph Consumer │
+└─────────────────┘    └──────────────────┘    └────────┬────────┘
                                                          │
-                                               ┌─────────▼─────────┐
-                                               │                   │
-                                               ▼                   ▼
-                                    ┌─────────────────┐ ┌─────────────────┐
-                                    │ BM25 Consumer   │ │ Rocks Consumer  │
-                                    │ (Search Index)  │ │ (Key-Value DB)  │
-                                    └─────────────────┘ └─────────────────┘
+                                                         │ (forwards)
+                                                         ▼
+                                              ┌──────────────────────┐
+                                              │  FullText Consumer   │
+                                              │  (Search Index)      │
+                                              └──────────────────────┘
+                                                         │
+                                                         ▼
+                                              ┌──────────────────────┐
+                                              │      RocksDB         │
+                                              │  (Persistent Store)  │
+                                              └──────────────────────┘
 ```
 
 ## Core Concepts
@@ -68,14 +75,18 @@ cargo run --example basic-usage < examples/sample_data.csv
 ```
 motlie/
 ├── libs/
-│   ├── core/           # Core data structures and utilities
-│   ├── db/             # Database abstraction and mutation processing
-│   └── mcp/            # MCP (Model Context Protocol) integration
+│   ├── core/                    # Core data structures and utilities
+│   ├── db/                      # Database abstraction and mutation processing
+│   └── mcp/                     # MCP (Model Context Protocol) integration
 ├── examples/
-│   ├── basic-usage.rs  # CSV processor example
-│   ├── sample_data.csv # Sample data for testing
-│   └── README.md       # Example documentation
-└── README.md           # This file
+│   └── store/
+│       ├── main.rs              # CSV processor with consumer chaining
+│       ├── verify_store.rs      # RocksDB verification tool
+│       ├── test_input.csv       # Sample test data (3 nodes, 3 edges)
+│       ├── generate_data.py     # Data generator for testing
+│       ├── graph_viewer.html    # Interactive graph visualizer
+│       └── README.md            # Detailed example documentation
+└── README.md                    # This file
 ```
 
 ## CSV Format
@@ -98,31 +109,53 @@ user1,user2,friendship,Connected as friends
 
 ### Basic Processing
 ```bash
-# Process simple data
-echo "alice,Software engineer
-bob,Data scientist
-alice,bob,Collaborators" | cargo run --example basic-usage
+# Process test data
+cat examples/store/test_input.csv | cargo run --example store
 ```
 
 ### With Logging
 ```bash
 # See detailed processing logs
-RUST_LOG=info cargo run --example basic-usage < examples/sample_data.csv
+RUST_LOG=info cat examples/store/test_input.csv | cargo run --example store
+```
+
+### Verify Data Persistence
+```bash
+# After running store example, verify data was written to RocksDB
+cargo run --example verify_store
 ```
 
 ### Sample Output
 ```
-Motlie CSV Processor
-Reading CSV from stdin...
+Motlie CSV Processor - Demonstrating Graph → FullText Chaining
+===================================================================
 
-Processed vertex 'alice' with fragment (17 chars)
-Processed vertex 'bob' with fragment (14 chars)
-Processed edge 'alice' -> 'bob' (name: 'collaboration', fragment: 13 chars)
+Sent vertex 'alice' with fragment (52 chars) to chain
+Sent vertex 'bob' with fragment (53 chars) to chain
+Sent vertex 'charlie' with fragment (56 chars) to chain
+Sent edge 'alice' -> 'bob' (name: 'knows', fragment: 76 chars) to chain
 
-Processed 3 lines from stdin
-Created 2 unique nodes
-Shutting down consumers...
+Processed 6 lines from stdin
+Created 3 unique nodes
+Shutting down consumer chain...
 All consumers shut down successfully
+```
+
+### Verification Output
+```
+Motlie Store Verifier
+====================
+Reading from: /tmp/motlie_graph_db
+
+✓ Database opened successfully
+
+📦 Nodes Column Family:
+  Total: 3 nodes
+
+📦 Fragments Column Family:
+  Total: 6 fragments
+
+✓ Verification complete!
 ```
 
 ## Development
@@ -147,22 +180,41 @@ cargo check --workspace
 
 The system is designed to be extensible. To add a new consumer:
 
-1. Implement the `Processor` trait
-2. Create specialized processing logic for each mutation type
+1. Implement the `Processor` trait from `libs/db/src/mutation.rs`
+2. Create specialized processing logic for each mutation type:
+   - `process_add_vertex()` - Handle node creation
+   - `process_add_edge()` - Handle edge creation
+   - `process_add_fragment()` - Handle fragment content
+   - `process_invalidate()` - Handle deletions/invalidations
 3. Use the generic `Consumer<P>` with your processor
-4. Spawn your consumer alongside existing ones
+4. Spawn your consumer in a chain or standalone
 
-See `libs/db/src/bm25.rs` and `libs/db/src/rocks.rs` for examples.
+See `libs/db/src/graph.rs` and `libs/db/src/fulltext.rs` for examples.
+
+### RocksDB Schema and Column Families
+
+The Graph consumer writes to 5 column families in RocksDB:
+
+- **nodes**: Node records keyed by node ID
+- **edges**: Edge records keyed by edge ID
+- **fragments**: Fragment content keyed by (ID, timestamp)
+- **forward_edges**: Edges indexed by (source → destination, name) for efficient traversal
+- **reverse_edges**: Edges indexed by (destination ← source, name) for bidirectional queries
+
+All data is serialized using MessagePack (`rmp-serde`) for compact storage.
 
 ## Features
 
-- ✅ **Concurrent Processing**: Multiple consumers process same mutations simultaneously
-- ✅ **Type-Safe IDs**: UUID-based identifiers prevent mixing different entity types  
-- ✅ **Configurable Batching**: Efficient batch processing with timeout controls
+- ✅ **Consumer Chaining**: Mutations flow through multiple processors in sequence
+- ✅ **Persistent Storage**: RocksDB with 5 specialized column families for efficient queries
+- ✅ **Type-Safe IDs**: ULID-based identifiers with timestamp information
+- ✅ **Bidirectional Edges**: Forward and reverse edge indices for graph traversal
 - ✅ **Graceful Shutdown**: Ensures all mutations are processed before exit
 - ✅ **Rich Logging**: Detailed processing logs for debugging and monitoring
 - ✅ **Error Handling**: Comprehensive error handling with context
-- ✅ **Flexible Input**: CSV format supports mixed vertex and edge creation
+- ✅ **Flexible Input**: CSV format supports mixed node and edge creation
+- ✅ **Verification Tool**: Standalone tool to inspect RocksDB data
+- ✅ **Full Test Coverage**: 101+ tests covering all mutation types and storage operations
 
 ## License
 

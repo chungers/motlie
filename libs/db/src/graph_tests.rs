@@ -1102,4 +1102,265 @@ mod tests {
             "Test completed: ReadWrite closed first, all ReadOnly instances remained functional"
         );
     }
+
+    #[tokio::test]
+    async fn test_nodes_written_to_correct_column_family() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create a node with known ID
+        let node_id = Id::new();
+        let node_args = AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli::now(),
+            name: "test_node".to_string(),
+        };
+
+        writer.add_vertex(node_args.clone()).await.unwrap();
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop writer to close channel
+        drop(writer);
+
+        // Wait for consumer to finish
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify the node was written to the correct column family
+        let db = DB::open_cf_for_read_only(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES, false)
+            .expect("Failed to open database for verification");
+
+        let cf_handle = db.cf_handle(Nodes::CF_NAME).expect("Nodes column family should exist");
+
+        // Create the key using the schema's serialization
+        let (key, _value) = Nodes::record_from(&node_args);
+        let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
+
+        // Query the database
+        let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+        assert!(result.is_some(), "Node should be written to the 'nodes' column family");
+
+        // Verify we can deserialize the value
+        let value_bytes = result.unwrap();
+        let value = Nodes::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
+        assert!(value.0.0.contains("test_node"), "Node value should contain the node name");
+    }
+
+    #[tokio::test]
+    async fn test_edges_written_to_correct_column_families() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create an edge with known IDs
+        let edge_id = Id::new();
+        let source_id = Id::new();
+        let target_id = Id::new();
+        let edge_args = AddEdge {
+            id: edge_id,
+            source_node_id: source_id,
+            target_node_id: target_id,
+            ts_millis: TimestampMilli::now(),
+            name: "test_edge".to_string(),
+        };
+
+        writer.add_edge(edge_args.clone()).await.unwrap();
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop writer to close channel
+        drop(writer);
+
+        // Wait for consumer to finish
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify the edge was written to all three column families
+        let db = DB::open_cf_for_read_only(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES, false)
+            .expect("Failed to open database for verification");
+
+        // Check Edges column family
+        {
+            let cf_handle = db.cf_handle(Edges::CF_NAME).expect("Edges column family should exist");
+            let (key, _value) = Edges::record_from(&edge_args);
+            let key_bytes = Edges::key_to_bytes(&key).expect("Failed to serialize key");
+            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+            assert!(result.is_some(), "Edge should be written to the 'edges' column family");
+
+            let value_bytes = result.unwrap();
+            let value = Edges::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
+            assert!(value.0.0.contains("test_edge"), "Edge value should contain the edge name");
+        }
+
+        // Check ForwardEdges column family
+        {
+            use crate::schema::ForwardEdges;
+            let cf_handle = db.cf_handle(ForwardEdges::CF_NAME).expect("ForwardEdges column family should exist");
+            let (key, _value) = ForwardEdges::record_from(&edge_args);
+            let key_bytes = ForwardEdges::key_to_bytes(&key).expect("Failed to serialize key");
+            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+            assert!(result.is_some(), "Edge should be written to the 'forward_edges' column family");
+        }
+
+        // Check ReverseEdges column family
+        {
+            use crate::schema::ReverseEdges;
+            let cf_handle = db.cf_handle(ReverseEdges::CF_NAME).expect("ReverseEdges column family should exist");
+            let (key, _value) = ReverseEdges::record_from(&edge_args);
+            let key_bytes = ReverseEdges::key_to_bytes(&key).expect("Failed to serialize key");
+            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+            assert!(result.is_some(), "Edge should be written to the 'reverse_edges' column family");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fragments_written_to_correct_column_family() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create a fragment with known ID and timestamp
+        let fragment_id = Id::new();
+        let timestamp = TimestampMilli::now();
+        let fragment_args = AddFragment {
+            id: fragment_id,
+            ts_millis: timestamp.0,
+            content: "This is test fragment content".to_string(),
+        };
+
+        writer.add_fragment(fragment_args.clone()).await.unwrap();
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop writer to close channel
+        drop(writer);
+
+        // Wait for consumer to finish
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify the fragment was written to the correct column family
+        let db = DB::open_cf_for_read_only(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES, false)
+            .expect("Failed to open database for verification");
+
+        let cf_handle = db.cf_handle(Fragments::CF_NAME).expect("Fragments column family should exist");
+
+        // Create the key using the schema's serialization
+        let (key, _value) = Fragments::record_from(&fragment_args);
+        let key_bytes = Fragments::key_to_bytes(&key).expect("Failed to serialize key");
+
+        // Query the database
+        let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+        assert!(result.is_some(), "Fragment should be written to the 'fragments' column family");
+
+        // Verify we can deserialize the value
+        let value_bytes = result.unwrap();
+        let value = Fragments::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
+        assert_eq!(value.0.0, "This is test fragment content", "Fragment content should match");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_nodes_query_by_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create multiple nodes with known IDs
+        let node1_id = Id::new();
+        let node2_id = Id::new();
+        let node3_id = Id::new();
+
+        let node1_args = AddNode {
+            id: node1_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node_one".to_string(),
+        };
+
+        let node2_args = AddNode {
+            id: node2_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node_two".to_string(),
+        };
+
+        let node3_args = AddNode {
+            id: node3_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node_three".to_string(),
+        };
+
+        writer.add_vertex(node1_args.clone()).await.unwrap();
+        writer.add_vertex(node2_args.clone()).await.unwrap();
+        writer.add_vertex(node3_args.clone()).await.unwrap();
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop writer to close channel
+        drop(writer);
+
+        // Wait for consumer to finish
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify all nodes can be queried by their keys
+        let db = DB::open_cf_for_read_only(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES, false)
+            .expect("Failed to open database for verification");
+
+        let cf_handle = db.cf_handle(Nodes::CF_NAME).expect("Nodes column family should exist");
+
+        // Query node 1
+        {
+            let (key, _value) = Nodes::record_from(&node1_args);
+            let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
+            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+            assert!(result.is_some(), "Node 1 should exist");
+            let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
+            assert!(value.0.0.contains("node_one"));
+        }
+
+        // Query node 2
+        {
+            let (key, _value) = Nodes::record_from(&node2_args);
+            let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
+            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+            assert!(result.is_some(), "Node 2 should exist");
+            let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
+            assert!(value.0.0.contains("node_two"));
+        }
+
+        // Query node 3
+        {
+            let (key, _value) = Nodes::record_from(&node3_args);
+            let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
+            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+            assert!(result.is_some(), "Node 3 should exist");
+            let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
+            assert!(value.0.0.contains("node_three"));
+        }
+    }
 }
