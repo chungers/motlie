@@ -31,10 +31,10 @@ impl std::error::Error for IdError {}
 
 /// A typesafe wrapper for ULID with 128-bit internal representation as 16 bytes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct Id([u8; 16]);
+pub struct Id([u8; 16]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct TimestampMilli(pub(crate) u64);
+pub struct TimestampMilli(pub u64);
 
 impl TimestampMilli {
     /// Create a new timestamp from the current time
@@ -58,6 +58,11 @@ impl Id {
                 .as_millis(),
         );
         Id(ulid.to_raw().to_be_bytes())
+    }
+
+    /// Returns the timestamp of the ULID
+    pub fn timestamp(&self) -> TimestampMilli {
+        TimestampMilli(ULID::from_raw(u128::from_be_bytes(self.0)).timestamp() as u64)
     }
 
     /// Create from a byte slice

@@ -2,12 +2,11 @@ use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use motlie_db::{
     create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdgeArgs,
-    AddFragmentArgs, AddNodeArgs, Id, WriterConfig,
+    AddFragmentArgs, AddNodeArgs, Id, TimestampMilli, WriterConfig,
 };
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -83,10 +82,7 @@ async fn main() -> Result<()> {
                     .or_insert_with(Id::new)
                     .clone();
 
-                let current_time = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
+                let current_time = TimestampMilli::now();
 
                 // Create vertex
                 let vertex_args = AddNodeArgs {
@@ -98,7 +94,7 @@ async fn main() -> Result<()> {
                 // Create fragment
                 let fragment_args = AddFragmentArgs {
                     id: node_id,
-                    ts_millis: current_time,
+                    ts_millis: current_time.0,
                     content: fragment_text.to_string(),
                 };
 
@@ -146,10 +142,7 @@ async fn main() -> Result<()> {
                 // Generate a unique ID for this edge
                 let edge_id = Id::new();
 
-                let current_time = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
+                let current_time = TimestampMilli::now();
 
                 let edge_args = AddEdgeArgs {
                     id: edge_id.clone(),
@@ -162,7 +155,7 @@ async fn main() -> Result<()> {
                 // Create fragment for the edge
                 let fragment_args = AddFragmentArgs {
                     id: edge_id,
-                    ts_millis: current_time,
+                    ts_millis: current_time.0,
                     content: edge_fragment.to_string(),
                 };
 
