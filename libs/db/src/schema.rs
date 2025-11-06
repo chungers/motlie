@@ -76,10 +76,7 @@ impl ColumnFamilyRecord for Nodes {
 
     fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
-        let markdown = format!(
-            "<!-- id={} -->]\n# {}\n# Summary\n",
-            args.id, args.name
-        );
+        let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name);
         let value = NodeCfValue(NodeSummary::new(markdown));
         (key, value)
     }
@@ -118,10 +115,7 @@ impl ColumnFamilyRecord for Edges {
 
     fn record_from(args: &AddEdge) -> (EdgeCfKey, EdgeCfValue) {
         let key = EdgeCfKey(args.id);
-        let markdown = format!(
-            "<!-- id={} -->]\n# {}\n# Summary\n",
-            args.id, args.name
-        );
+        let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name);
         let value = EdgeCfValue(EdgeSummary::new(markdown));
         (key, value)
     }

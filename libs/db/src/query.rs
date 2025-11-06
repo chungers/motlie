@@ -26,10 +26,54 @@ pub trait QueryWithResult: Send + Sync {
     fn timeout(&self) -> Duration;
 }
 
-/// Query to find a node by its ID
+/// Sealed trait module to prevent external implementations
+mod sealed {
+    use crate::schema::{FragmentContent, NodeSummary};
+
+    pub trait ByIdQueryable {}
+    impl ByIdQueryable for NodeSummary {}
+    impl ByIdQueryable for FragmentContent {}
+}
+
+/// Trait for types that can be queried by ID
+#[async_trait::async_trait]
+pub trait ByIdQueryable: sealed::ByIdQueryable + Send + Sync + 'static {
+    /// Call the appropriate processor method for this type
+    async fn fetch_by_id<P: Processor>(
+        id: Id,
+        processor: &P,
+        query: &ByIdQuery<Self>,
+    ) -> Result<Self>
+    where
+        Self: Sized;
+}
+
+#[async_trait::async_trait]
+impl ByIdQueryable for NodeSummary {
+    async fn fetch_by_id<P: Processor>(
+        _id: Id,
+        processor: &P,
+        query: &ByIdQuery<Self>,
+    ) -> Result<Self> {
+        processor.get_node_summary_by_id(query).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ByIdQueryable for FragmentContent {
+    async fn fetch_by_id<P: Processor>(
+        _id: Id,
+        processor: &P,
+        query: &ByIdQuery<Self>,
+    ) -> Result<Self> {
+        processor.get_fragment_content_by_id(query).await
+    }
+}
+
+/// Generic query to find an entity by its ID
 #[derive(Debug)]
-pub struct NodeSummaryByIdQuery {
-    /// The node ID to search for
+pub struct ByIdQuery<T: ByIdQueryable> {
+    /// The entity ID to search for
     pub id: Id,
 
     /// Timestamp of when the query was created
@@ -39,15 +83,15 @@ pub struct NodeSummaryByIdQuery {
     pub timeout: Duration,
 
     /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<NodeSummary>>,
+    result_tx: oneshot::Sender<Result<T>>,
 }
 
-impl NodeSummaryByIdQuery {
-    /// Create a new NodeByIdQuery
+impl<T: ByIdQueryable> ByIdQuery<T> {
+    /// Create a new ByIdQuery
     pub fn new(
         id: Id,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<NodeSummary>>,
+        result_tx: oneshot::Sender<Result<T>>,
     ) -> Self {
         Self {
             id,
@@ -58,20 +102,20 @@ impl NodeSummaryByIdQuery {
     }
 
     /// Send the result back to the client (consumes self)
-    pub fn send_result(self, result: Result<NodeSummary>) {
+    pub fn send_result(self, result: Result<T>) {
         // Ignore error if receiver was dropped (client timeout/cancellation)
         let _ = self.result_tx.send(result);
     }
 }
 
 #[async_trait::async_trait]
-impl QueryWithResult for NodeSummaryByIdQuery {
-    type ResultType = NodeSummary;
+impl<T: ByIdQueryable> QueryWithResult for ByIdQuery<T> {
+    type ResultType = T;
 
-    async fn result<P: Processor>(&self, processor: &P) -> Result<NodeSummary> {
+    async fn result<P: Processor>(&self, processor: &P) -> Result<T> {
         let result = tokio::time::timeout(
             self.timeout,
-            processor.get_node_summary_by_id(self)
+            T::fetch_by_id(self.id, processor, self)
         ).await;
 
         match result {
@@ -84,6 +128,9 @@ impl QueryWithResult for NodeSummaryByIdQuery {
         self.timeout
     }
 }
+
+/// Type alias for querying node summaries by ID
+pub type NodeSummaryByIdQuery = ByIdQuery<NodeSummary>;
 
 /// Query to find an edge by source ID, destination ID, and name
 #[derive(Debug)]
@@ -151,67 +198,14 @@ impl QueryWithResult for EdgeSummaryBySrcDstNameQuery {
     }
 }
 
-/// Query to find a fragment by its ID
-#[derive(Debug)]
-pub struct FragmentContentByIdQuery {
-    /// The fragment ID to search for
-    pub id: Id,
-
-    /// Timestamp of when the query was created
-    pub ts_millis: TimestampMilli,
-
-    /// Timeout for this query
-    pub timeout: Duration,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<FragmentContent>>,
-}
-
-impl FragmentContentByIdQuery {
-    pub fn new(
-        id: Id,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<FragmentContent>>,
-    ) -> Self {
-        Self {
-            id,
-            ts_millis: TimestampMilli::now(),
-            timeout,
-            result_tx,
-        }
-    }
-
-    pub fn send_result(self, result: Result<FragmentContent>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
-#[async_trait::async_trait]
-impl QueryWithResult for FragmentContentByIdQuery {
-    type ResultType = FragmentContent;
-
-    async fn result<P: Processor>(&self, processor: &P) -> Result<FragmentContent> {
-        let result = tokio::time::timeout(
-            self.timeout,
-            processor.get_fragment_content_by_id(self)
-        ).await;
-
-        match result {
-            Ok(r) => r,
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout)),
-        }
-    }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
-}
+/// Type alias for querying fragment content by ID
+pub type FragmentContentByIdQuery = ByIdQuery<FragmentContent>;
 
 /// Trait for processing different types of queries
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
     /// Get a node summary by its ID
-    async fn get_node_summary_by_id(&self, query: &NodeSummaryByIdQuery) -> Result<NodeSummary>;
+    async fn get_node_summary_by_id(&self, query: &ByIdQuery<NodeSummary>) -> Result<NodeSummary>;
 
     /// Get an edge summary by source ID, destination ID, and name
     async fn get_edge_summary_by_src_dst_name(
@@ -222,7 +216,7 @@ pub trait Processor: Send + Sync {
     /// Get fragment content by its ID
     async fn get_fragment_content_by_id(
         &self,
-        query: &FragmentContentByIdQuery,
+        query: &ByIdQuery<FragmentContent>,
     ) -> Result<FragmentContent>;
 }
 
