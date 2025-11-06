@@ -98,10 +98,10 @@ mod tests {
         let (writer, _receiver) = create_mutation_writer(config);
 
         // Test that all send operations work
-        let vertex_args = AddNode {
+        let node_args = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
-            name: "test_vertex".to_string(),
+            name: "test_node".to_string(),
         };
 
         let edge_args = AddEdge {
@@ -125,7 +125,7 @@ mod tests {
         };
 
         // These should not panic or error
-        writer.add_node(vertex_args).await.unwrap();
+        writer.add_node(node_args).await.unwrap();
         writer.add_edge(edge_args).await.unwrap();
         writer.add_fragment(fragment_args).await.unwrap();
         writer.invalidate(invalidate_args).await.unwrap();

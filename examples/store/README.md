@@ -220,9 +220,9 @@ The example accepts two formats:
 When you run the example, you should see logs showing that Graph processes mutations **before** FullText:
 
 ```
-[Graph] Would insert vertex: AddVertexArgs { id: ..., name: "Alice" }
+[Graph] Would insert node: AddNodeArgs { id: ..., name: "Alice" }
 [Graph] Would insert fragment: AddFragmentArgs { id: ..., body: "Alice is..." }
-[FullText] Would index vertex for search: id=..., name='Alice', k1=1.2, b=0.75
+[FullText] Would index node for search: id=..., name='Alice', k1=1.2, b=0.75
 [FullText] Would index fragment content: id=..., body_len=55, k1=1.2, b=0.75
 ```
 
@@ -249,7 +249,7 @@ let graph_handle = spawn_graph_consumer_with_next(graph_receiver, config, fullte
 
 ```rust
 // Send to the writer - goes to Graph, then forwarded to FullText
-writer.add_vertex(vertex_args).await?;
+writer.add_node(node_args).await?;
 writer.add_fragment(fragment_args).await?;
 ```
 

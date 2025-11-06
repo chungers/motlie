@@ -292,8 +292,8 @@ impl Graph {
 
 #[async_trait::async_trait]
 impl Processor for Graph {
-    /// Process an AddVertex mutation
-    async fn process_add_vertex(&self, args: &AddNode) -> Result<()> {
+    /// Process an AddNode mutation
+    async fn process_add_node(&self, args: &AddNode) -> Result<()> {
         log::info!("[Graph] About to insert node: {:?}", args);
         let txn_db = self.storage.transaction_db()?;
 

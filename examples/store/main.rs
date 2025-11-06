@@ -105,7 +105,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
 
         match record.len() {
             2 => {
-                // node,fragment - create vertex and fragment
+                // node,fragment - create node and fragment
                 let node_name = record.get(0).unwrap().trim();
                 let fragment_text = record.get(1).unwrap().trim();
 
@@ -122,8 +122,8 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
 
                 let current_time = TimestampMilli::now();
 
-                // Create vertex
-                let vertex_args = AddNode {
+                // Create node
+                let node_args = AddNode {
                     id: node_id.clone(),
                     ts_millis: current_time,
                     name: node_name.to_string(),
@@ -138,16 +138,16 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
 
                 // Send to Graph consumer (which will forward to FullText)
                 writer
-                    .add_node(vertex_args)
+                    .add_node(node_args)
                     .await
-                    .context("Failed to send vertex to consumer chain")?;
+                    .context("Failed to send node to consumer chain")?;
                 writer
                     .add_fragment(fragment_args)
                     .await
                     .context("Failed to send fragment to consumer chain")?;
 
                 println!(
-                    "Sent vertex '{}' with fragment ({} chars) to chain",
+                    "Sent node '{}' with fragment ({} chars) to chain",
                     node_name,
                     fragment_text.len()
                 );

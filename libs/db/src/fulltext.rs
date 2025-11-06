@@ -40,17 +40,17 @@ impl Default for FullTextProcessor {
 
 #[async_trait::async_trait]
 impl Processor for FullTextProcessor {
-    /// Process an AddVertex mutation - index vertex for search
-    async fn process_add_vertex(&self, args: &AddNode) -> Result<()> {
-        // TODO: Implement actual vertex indexing in full-text search index
+    /// Process an AddNode mutation - index node for search
+    async fn process_add_node(&self, args: &AddNode) -> Result<()> {
+        // TODO: Implement actual node indexing in full-text search index
         log::info!(
-            "[FullText] Would index vertex for search: id={}, name='{}', k1={}, b={}",
+            "[FullText] Would index node for search: id={}, name='{}', k1={}, b={}",
             args.id,
             args.name,
             self.k1,
             self.b
         );
-        // TODO: Extract terms from vertex name and content
+        // TODO: Extract terms from node name and content
         // TODO: Update document frequencies and term frequencies
         // TODO: Update BM25 index structures
 

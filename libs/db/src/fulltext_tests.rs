@@ -20,12 +20,12 @@ mod tests {
         let consumer_handle = spawn_fulltext_consumer(receiver, config);
 
         // Send some mutations
-        let vertex_args = AddNode {
+        let node_args = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
-            name: "test_vertex".to_string(),
+            name: "test_node".to_string(),
         };
-        writer.add_node(vertex_args).await.unwrap();
+        writer.add_node(node_args).await.unwrap();
 
         let fragment_args = AddFragment {
             id: Id::new(),
@@ -83,7 +83,7 @@ mod tests {
             .add_node(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
-                name: "search vertex".to_string(),
+                name: "search node".to_string(),
             })
             .await
             .unwrap();

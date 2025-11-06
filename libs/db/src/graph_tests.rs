@@ -27,12 +27,12 @@ mod tests {
         let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
 
         // Send some mutations
-        let vertex_args = AddNode {
+        let node_args = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
-            name: "test_vertex".to_string(),
+            name: "test_node".to_string(),
         };
-        writer.add_node(vertex_args).await.unwrap();
+        writer.add_node(node_args).await.unwrap();
 
         let edge_args = AddEdge {
             id: Id::new(),
@@ -67,12 +67,12 @@ mod tests {
 
         // Send 5 mutations rapidly
         for i in 0..5 {
-            let vertex_args = AddNode {
+            let node_args = AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
-                name: format!("test_vertex_{}", i),
+                name: format!("test_node_{}", i),
             };
-            writer.add_node(vertex_args).await.unwrap();
+            writer.add_node(node_args).await.unwrap();
         }
 
         // Give consumer time to process
@@ -97,7 +97,7 @@ mod tests {
             .add_node(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
-                name: "vertex".to_string(),
+                name: "node".to_string(),
             })
             .await
             .unwrap();
@@ -163,10 +163,10 @@ mod tests {
 
         // Send mutations - they should flow through Graph -> FullText
         for i in 0..3 {
-            let vertex_args = AddNode {
+            let node_args = AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
-                name: format!("chained_vertex_{}", i),
+                name: format!("chained_node_{}", i),
             };
             let fragment_args = AddFragment {
                 id: Id::new(),
@@ -177,7 +177,7 @@ mod tests {
                 ),
             };
 
-            writer.add_node(vertex_args).await.unwrap();
+            writer.add_node(node_args).await.unwrap();
             writer.add_fragment(fragment_args).await.unwrap();
         }
 

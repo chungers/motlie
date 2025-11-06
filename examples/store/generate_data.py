@@ -316,7 +316,7 @@ COMPANY_TYPES = [
 ]
 
 COMPANY_NAMES = [
-    "Innovate", "Nexus", "Vertex", "Quantum", "Synergy", "Catalyst", "Meridian", "Zenith",
+    "Innovate", "Nexus", "Node", "Quantum", "Synergy", "Catalyst", "Meridian", "Zenith",
     "Apex", "Vanguard", "Pinnacle", "Horizon", "Luminary", "Genesis", "Paramount"
 ]
 

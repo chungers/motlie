@@ -13,7 +13,7 @@ pub enum Mutation {
 
 #[derive(Debug, Clone)]
 pub struct AddNode {
-    /// The UUID of the Vertex
+    /// The UUID of the Node
     pub id: Id,
 
     /// The timestamp as number of milliseconds since the Unix epoch
@@ -25,7 +25,7 @@ pub struct AddNode {
 
 #[derive(Debug, Clone)]
 pub struct AddEdge {
-    /// The UUID of the Vertex, Edge, or Fragment
+    /// The UUID of the Node, Edge, or Fragment
     pub id: Id,
 
     /// The UUID of the source Node
@@ -43,7 +43,7 @@ pub struct AddEdge {
 
 #[derive(Debug, Clone)]
 pub struct AddFragment {
-    /// The UUID of the Vertex, Edge, or Fragment
+    /// The UUID of the Node, Edge, or Fragment
     pub id: Id,
 
     /// The timestamp as number of milliseconds since the Unix epoch
@@ -57,7 +57,7 @@ pub struct AddFragment {
 
 #[derive(Debug, Clone)]
 pub struct InvalidateArgs {
-    /// The UUID of the Vertex, Edge, or Fragment
+    /// The UUID of the Node, Edge, or Fragment
     pub id: Id,
 
     /// The timestamp as number of milliseconds since the Unix epoch
@@ -70,8 +70,8 @@ pub struct InvalidateArgs {
 /// Trait for processing different types of mutations
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
-    /// Process an AddVertex mutation
-    async fn process_add_vertex(&self, args: &AddNode) -> Result<()>;
+    /// Process an AddNode mutation
+    async fn process_add_node(&self, args: &AddNode) -> Result<()>;
 
     /// Process an AddEdge mutation
     async fn process_add_edge(&self, args: &AddEdge) -> Result<()>;
@@ -145,8 +145,8 @@ impl<P: Processor> Consumer<P> {
         // Process the mutation with the processor
         match mutation {
             Mutation::AddNode(args) => {
-                log::debug!("Processing AddVertex: id={}, name={}", args.id, args.name);
-                self.processor.process_add_vertex(args).await?;
+                log::debug!("Processing AddNode: id={}, name={}", args.id, args.name);
+                self.processor.process_add_node(args).await?;
             }
             Mutation::AddEdge(args) => {
                 log::debug!(
@@ -204,7 +204,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Processor for TestProcessor {
-        async fn process_add_vertex(&self, _args: &AddNode) -> Result<()> {
+        async fn process_add_node(&self, _args: &AddNode) -> Result<()> {
             tokio::time::sleep(Duration::from_millis(1)).await;
             Ok(())
         }
@@ -244,12 +244,12 @@ mod tests {
         let consumer_handle = spawn_consumer(consumer);
 
         // Send a mutation
-        let vertex_args = AddNode {
+        let node_args = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
-            name: "test_vertex".to_string(),
+            name: "test_node".to_string(),
         };
-        writer.add_node(vertex_args).await.unwrap();
+        writer.add_node(node_args).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;

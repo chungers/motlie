@@ -294,10 +294,10 @@ mod tests {
 
         // Send mutations to both writers (simulating fanout)
         for i in 0..3 {
-            let vertex_args = AddNode {
+            let node_args = AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
-                name: format!("integration_test_vertex_{}", i),
+                name: format!("integration_test_node_{}", i),
             };
 
             let fragment_args = AddFragment {
@@ -307,10 +307,10 @@ mod tests {
             };
 
             // Send to both consumers
-            writer1.add_node(vertex_args.clone()).await.unwrap();
+            writer1.add_node(node_args.clone()).await.unwrap();
             writer1.add_fragment(fragment_args.clone()).await.unwrap();
 
-            writer2.add_node(vertex_args).await.unwrap();
+            writer2.add_node(node_args).await.unwrap();
             writer2.add_fragment(fragment_args).await.unwrap();
         }
 
@@ -538,10 +538,10 @@ mod tests {
     #[test]
     fn test_struct_usage() {
         // Test that our structs work with the new Id type
-        let vertex = AddNode {
+        let node = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
-            name: "test_vertex".to_string(),
+            name: "test_node".to_string(),
         };
 
         let edge = AddEdge {
@@ -559,7 +559,7 @@ mod tests {
         };
 
         // Ensure they can be created and debugged
-        println!("{:?}", vertex);
+        println!("{:?}", node);
         println!("{:?}", edge);
         println!("{:?}", fragment);
     }
