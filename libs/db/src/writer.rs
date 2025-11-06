@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::{AddEdge, AddFragment, AddNode, InvalidateArgs, Mutation, TimestampMilli};
+use crate::{AddEdge, AddFragment, AddNode, InvalidateArgs, Mutation};
 
 /// Configuration for the mutation writer
 #[derive(Debug, Clone)]
@@ -74,7 +74,7 @@ pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<M
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Id;
+    use crate::{Id, TimestampMilli};
     use tokio::time::Duration;
 
     #[tokio::test]

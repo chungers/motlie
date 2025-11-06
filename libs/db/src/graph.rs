@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -16,6 +17,51 @@ use crate::{
     schema::ALL_COLUMN_FAMILIES,
     AddEdge, AddFragment, AddNode, InvalidateArgs, WriterConfig,
 };
+
+/// Trait for column family record types that can create and serialize key-value pairs.
+pub(crate) trait ColumnFamilyRecord {
+    const CF_NAME: &'static str;
+
+    /// The key type for this column family
+    type Key: Serialize + for<'de> Deserialize<'de>;
+
+    /// The value type for this column family
+    type Value: Serialize + for<'de> Deserialize<'de>;
+
+    /// The argument type for creating records
+    type CreateOp;
+
+    /// Create a key-value pair from arguments
+    fn record_from(args: &Self::CreateOp) -> (Self::Key, Self::Value);
+
+    /// Create and serialize to bytes using MessagePack
+    fn create_bytes(args: &Self::CreateOp) -> Result<(Vec<u8>, Vec<u8>), rmp_serde::encode::Error> {
+        let (key, value) = Self::record_from(args);
+        let key_bytes = rmp_serde::to_vec(&key)?;
+        let value_bytes = rmp_serde::to_vec(&value)?;
+        Ok((key_bytes, value_bytes))
+    }
+
+    /// Serialize the key to bytes using MessagePack
+    fn key_to_bytes(key: &Self::Key) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+        rmp_serde::to_vec(key)
+    }
+
+    /// Serialize the value to bytes using MessagePack
+    fn value_to_bytes(value: &Self::Value) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+        rmp_serde::to_vec(value)
+    }
+
+    /// Deserialize the key from bytes using MessagePack
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(bytes)
+    }
+
+    /// Deserialize the value from bytes using MessagePack
+    fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(bytes)
+    }
+}
 
 pub(crate) enum StorageOperation {
     PutCf(PutCf),

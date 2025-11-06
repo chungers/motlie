@@ -1,12 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use crate::graph::{spawn_graph_consumer, spawn_graph_consumer_with_next, Storage};
-    use crate::schema::{ColumnFamilyRecord, Edges, Fragments, Nodes, ALL_COLUMN_FAMILIES};
+    use crate::graph::{spawn_graph_consumer, spawn_graph_consumer_with_next, Storage, ColumnFamilyRecord};
+    use crate::schema::{Edges, Fragments, Nodes, ALL_COLUMN_FAMILIES};
     use crate::{
         create_mutation_writer, AddEdge, AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
     };
     use rocksdb::DB;
-    use std::path::Path;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
     use tokio::time::Duration;

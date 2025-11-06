@@ -1,4 +1,4 @@
-use crate::graph::{PutCf, StorageOperation};
+use crate::graph::{ColumnFamilyRecord, PutCf, StorageOperation};
 use crate::TimestampMilli;
 use crate::{AddEdge, AddFragment, AddNode, Id};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ impl Plan {
         op: &AddNode,
     ) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
         Ok(vec![StorageOperation::PutCf(PutCf(
-            Nodes::CF_NAME,
+            Nodes::CF_NAME, // Nodes (id)
             Nodes::create_bytes(op)?,
         ))])
     }
@@ -17,13 +17,16 @@ impl Plan {
         op: &AddEdge,
     ) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
         Ok(vec![
-            StorageOperation::PutCf(PutCf(Edges::CF_NAME, Edges::create_bytes(op)?)),
             StorageOperation::PutCf(PutCf(
-                ForwardEdges::CF_NAME,
+                Edges::CF_NAME, // Edges (id)
+                Edges::create_bytes(op)?,
+            )),
+            StorageOperation::PutCf(PutCf(
+                ForwardEdges::CF_NAME, // ForwardEdges (src, dst, name)
                 ForwardEdges::create_bytes(op)?,
             )),
             StorageOperation::PutCf(PutCf(
-                ReverseEdges::CF_NAME,
+                ReverseEdges::CF_NAME, // ReverseEdges (dst, src, name)
                 ReverseEdges::create_bytes(op)?,
             )),
         ])
@@ -32,54 +35,9 @@ impl Plan {
         op: &AddFragment,
     ) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
         Ok(vec![StorageOperation::PutCf(PutCf(
-            Fragments::CF_NAME,
+            Fragments::CF_NAME, // Fragments (id)
             Fragments::create_bytes(op)?,
         ))])
-    }
-}
-
-/// Trait for column family record types that can create and serialize key-value pairs.
-pub(crate) trait ColumnFamilyRecord {
-    const CF_NAME: &'static str;
-
-    /// The key type for this column family
-    type Key: Serialize + for<'de> Deserialize<'de>;
-
-    /// The value type for this column family
-    type Value: Serialize + for<'de> Deserialize<'de>;
-
-    /// The argument type for creating records
-    type CreateOp;
-
-    /// Create a key-value pair from arguments
-    fn record_from(args: &Self::CreateOp) -> (Self::Key, Self::Value);
-
-    /// Create and serialize to bytes using MessagePack
-    fn create_bytes(args: &Self::CreateOp) -> Result<(Vec<u8>, Vec<u8>), rmp_serde::encode::Error> {
-        let (key, value) = Self::record_from(args);
-        let key_bytes = rmp_serde::to_vec(&key)?;
-        let value_bytes = rmp_serde::to_vec(&value)?;
-        Ok((key_bytes, value_bytes))
-    }
-
-    /// Serialize the key to bytes using MessagePack
-    fn key_to_bytes(key: &Self::Key) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-        rmp_serde::to_vec(key)
-    }
-
-    /// Serialize the value to bytes using MessagePack
-    fn value_to_bytes(value: &Self::Value) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-        rmp_serde::to_vec(value)
-    }
-
-    /// Deserialize the key from bytes using MessagePack
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(bytes)
-    }
-
-    /// Deserialize the value from bytes using MessagePack
-    fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(bytes)
     }
 }
 
