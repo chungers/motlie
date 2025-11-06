@@ -11,6 +11,9 @@ use std::io;
 use std::path::Path;
 use tokio::sync::mpsc;
 
+// Helper type for deserialization
+type IdBytes = [u8; 16];
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging to see the mutation processing order
@@ -399,21 +402,21 @@ fn parse_csv_from_stdin() -> Result<ExpectedData> {
 fn verify_nodes(db: &DB, expected: &ExpectedData) -> Result<bool> {
     let cf = db.cf_handle("nodes").context("Nodes CF not found")?;
 
-    // Count nodes in database
+    // Build map of node ID -> node name and collect all node data
     let mut db_node_count = 0;
     let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
-    let mut db_node_names = HashSet::new();
+    let mut db_node_names: HashSet<String> = HashSet::new(); // Just collect names
 
     for item in iter {
         let (_key, value) = item.context("Failed to read from nodes CF")?;
         db_node_count += 1;
 
-        // Deserialize to extract node name
+        // Deserialize to extract node name from markdown
         if let Ok(node_value) = deserialize_node_value(&value) {
-            // Extract name from markdown summary (format: "# name\n")
+            // Extract name from markdown summary (format: "<!-- id=... -->\n# name\n# Summary\n")
             if let Some(name_line) = node_value.lines().nth(1) {
-                let name = name_line.trim_start_matches("# ").trim();
-                db_node_names.insert(name.to_string());
+                let name = name_line.trim_start_matches("# ").trim().to_string();
+                db_node_names.insert(name);
             }
         }
     }
@@ -440,9 +443,9 @@ fn verify_nodes(db: &DB, expected: &ExpectedData) -> Result<bool> {
     }
 
     if missing_nodes.is_empty() {
-        println!("   ✓ All expected nodes found in database");
+        println!("   ✓ All expected node names found in database");
     } else {
-        println!("   ✗ Missing nodes: {:?}", missing_nodes);
+        println!("   ✗ Missing node names: {:?}", missing_nodes);
         all_ok = false;
     }
 
@@ -450,28 +453,74 @@ fn verify_nodes(db: &DB, expected: &ExpectedData) -> Result<bool> {
 }
 
 fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
-    let cf = db.cf_handle("edges").context("Edges CF not found")?;
+    // First build a map of node IDs to names
+    let nodes_cf = db.cf_handle("nodes").context("Nodes CF not found")?;
+    let mut id_to_name: HashMap<IdBytes, String> = HashMap::new();
 
-    // Count edges in database
+    for item in db.iterator_cf(nodes_cf, rocksdb::IteratorMode::Start) {
+        let (key, value) = item.context("Failed to read from nodes CF")?;
+        let node_id = deserialize_node_id(&key)?;
+        if let Ok(node_value) = deserialize_node_value(&value) {
+            if let Some(name_line) = node_value.lines().nth(1) {
+                let name = name_line.trim_start_matches("# ").trim().to_string();
+                id_to_name.insert(node_id, name);
+            }
+        }
+    }
+
+    // Now verify edges using forward_edges CF which has (source_id, target_id, edge_name) as key
+    let forward_edges_cf = db.cf_handle("forward_edges").context("ForwardEdges CF not found")?;
+
     let mut db_edge_count = 0;
-    let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+    let mut db_edges: HashSet<(String, String, String)> = HashSet::new(); // (source_name, target_name, edge_name)
 
-    for item in iter {
-        let _ = item.context("Failed to read from edges CF")?;
+    for item in db.iterator_cf(forward_edges_cf, rocksdb::IteratorMode::Start) {
+        let (key, _value) = item.context("Failed to read from forward_edges CF")?;
         db_edge_count += 1;
+
+        // Deserialize key to get source_id, target_id, edge_name
+        // The key contains the canonical edge information
+        let (source_id, target_id, edge_name) = deserialize_forward_edge_key(&key)?;
+
+        // Map IDs to names
+        if let (Some(source_name), Some(target_name)) =
+            (id_to_name.get(&source_id), id_to_name.get(&target_id)) {
+            db_edges.insert((source_name.clone(), target_name.clone(), edge_name));
+        }
     }
 
     let expected_count = expected.edges.len();
     println!("   Expected: {} edges", expected_count);
     println!("   Found:    {} edges", db_edge_count);
 
-    let all_ok = if db_edge_count == expected_count {
+    let mut all_ok = true;
+
+    if db_edge_count == expected_count {
         println!("   ✓ Edge count matches");
-        true
     } else {
         println!("   ✗ Edge count mismatch!");
-        false
-    };
+        all_ok = false;
+    }
+
+    // Check if all expected edges are present
+    let mut missing_edges = Vec::new();
+
+    for edge in &expected.edges {
+        let edge_tuple = (edge.source.clone(), edge.target.clone(), edge.name.clone());
+        if !db_edges.contains(&edge_tuple) {
+            missing_edges.push(format!("{} -> {} ({})", edge.source, edge.target, edge.name));
+        }
+    }
+
+    if missing_edges.is_empty() {
+        println!("   ✓ All expected edges found with correct source, target, and name");
+    } else {
+        println!("   ✗ Missing or mismatched edges:");
+        for edge in &missing_edges {
+            println!("      - {}", edge);
+        }
+        all_ok = false;
+    }
 
     Ok(all_ok)
 }
@@ -479,7 +528,7 @@ fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
 fn verify_fragments(db: &DB, expected: &ExpectedData) -> Result<bool> {
     let cf = db.cf_handle("fragments").context("Fragments CF not found")?;
 
-    // Count fragments in database
+    // Count fragments in database and collect all content
     let mut db_fragment_count = 0;
     let mut db_fragments_content = HashSet::new();
     let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
@@ -489,6 +538,8 @@ fn verify_fragments(db: &DB, expected: &ExpectedData) -> Result<bool> {
         db_fragment_count += 1;
 
         if let Ok(content) = deserialize_fragment_value(&value) {
+            // Fragments are stored as markdown, but we want to compare the raw content
+            // The content should match what was in the CSV
             db_fragments_content.insert(content);
         }
     }
@@ -506,23 +557,34 @@ fn verify_fragments(db: &DB, expected: &ExpectedData) -> Result<bool> {
         all_ok = false;
     }
 
-    // Check if expected fragments are present
-    let mut missing_fragments = 0;
-    for fragment in expected.node_fragments.values() {
+    // Check if expected fragment content is present
+    let mut missing_fragments = Vec::new();
+
+    for (node_name, fragment) in &expected.node_fragments {
         if !fragment.is_empty() && !db_fragments_content.contains(fragment) {
-            missing_fragments += 1;
-        }
-    }
-    for fragment in expected.edge_fragments.values() {
-        if !db_fragments_content.contains(fragment) {
-            missing_fragments += 1;
+            missing_fragments.push(format!("Node '{}': {:?}", node_name,
+                if fragment.len() > 50 { &fragment[..50] } else { fragment }));
         }
     }
 
-    if missing_fragments == 0 {
-        println!("   ✓ All expected fragments found in database");
+    for ((source, target, edge_name), fragment) in &expected.edge_fragments {
+        if !db_fragments_content.contains(fragment) {
+            missing_fragments.push(format!("Edge '{} -> {} ({})': {:?}",
+                source, target, edge_name,
+                if fragment.len() > 50 { &fragment[..50] } else { fragment }));
+        }
+    }
+
+    if missing_fragments.is_empty() {
+        println!("   ✓ All expected fragment content found in database");
     } else {
-        println!("   ✗ {} expected fragments not found", missing_fragments);
+        println!("   ✗ {} expected fragments not found:", missing_fragments.len());
+        for (i, frag) in missing_fragments.iter().take(5).enumerate() {
+            println!("      {}. {}", i + 1, frag);
+        }
+        if missing_fragments.len() > 5 {
+            println!("      ... and {} more", missing_fragments.len() - 5);
+        }
         all_ok = false;
     }
 
@@ -530,6 +592,14 @@ fn verify_fragments(db: &DB, expected: &ExpectedData) -> Result<bool> {
 }
 
 // Deserialization helpers
+
+fn deserialize_node_id(bytes: &[u8]) -> Result<IdBytes> {
+    #[derive(serde::Deserialize)]
+    struct NodeCfKey(IdBytes);
+
+    let key: NodeCfKey = rmp_serde::from_slice(bytes).context("Failed to deserialize node key")?;
+    Ok(key.0)
+}
 
 fn deserialize_node_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
@@ -542,6 +612,49 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<String> {
     struct DataUrl(String);
 
     let value: NodeCfValue = rmp_serde::from_slice(bytes).context("Failed to deserialize node value")?;
+
+    // Decode the data URL to get the actual content
+    let data_url_str = &value.0.0.0;
+    let parsed = data_url::DataUrl::process(data_url_str)
+        .context("Failed to parse data URL")?;
+    let (body, _) = parsed.decode_to_vec()
+        .context("Failed to decode data URL")?;
+    let content = String::from_utf8(body)
+        .context("Failed to convert bytes to UTF-8")?;
+
+    Ok(content)
+}
+
+fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, String)> {
+    #[derive(serde::Deserialize)]
+    struct ForwardEdgeCfKey(EdgeSourceId, EdgeDestinationId, EdgeName);
+
+    #[derive(serde::Deserialize)]
+    struct EdgeSourceId(IdBytes);
+
+    #[derive(serde::Deserialize)]
+    struct EdgeDestinationId(IdBytes);
+
+    #[derive(serde::Deserialize)]
+    struct EdgeName(String);
+
+    let key: ForwardEdgeCfKey = rmp_serde::from_slice(bytes)
+        .context("Failed to deserialize forward edge key")?;
+
+    Ok((key.0.0, key.1.0, key.2.0))
+}
+
+fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
+    #[derive(serde::Deserialize)]
+    struct EdgeCfValue(EdgeSummary);
+
+    #[derive(serde::Deserialize)]
+    struct EdgeSummary(DataUrl);
+
+    #[derive(serde::Deserialize)]
+    struct DataUrl(String);
+
+    let value: EdgeCfValue = rmp_serde::from_slice(bytes).context("Failed to deserialize edge value")?;
 
     // Decode the data URL to get the actual content
     let data_url_str = &value.0.0.0;

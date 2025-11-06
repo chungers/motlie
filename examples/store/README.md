@@ -99,25 +99,25 @@ After storing data, verify that all data was correctly written to RocksDB using 
 cat /tmp/test_data.csv | target/release/examples/store --verify /tmp/motlie_graph_db
 ```
 
-The verification mode:
+The verification mode performs comprehensive checks:
 - Reads CSV from stdin to extract expected nodes, edges, and fragments
 - Opens the RocksDB database in read-only mode
-- Queries each column family and compares with expected data:
-  - **Nodes**: Verifies all expected nodes are present
-  - **Edges**: Verifies edge count matches
-  - **Fragments**: Verifies all expected fragments are stored
-- Reports success or failure with detailed counts
+- Performs detailed verification on each data type:
+  - **Nodes**: Verifies count and that all expected node names are present
+  - **Edges**: Verifies count and validates each edge's source node, target node, and edge name
+  - **Fragments**: Verifies count and that all expected fragment content is present
+- Reports success or failure with detailed error messages showing exactly what doesn't match
 
-### Example Output
+### Successful Verification Output
 
 ```
 Motlie Store Verifier
 ====================
 
-CSV file: /tmp/test_data.csv
 Database: /tmp/motlie_graph_db
+Reading CSV from stdin...
 
-📄 Parsing CSV file...
+📄 Parsing CSV from stdin...
    Nodes: 99
    Edges: 964
    Total fragments: 1050
@@ -128,22 +128,57 @@ Database: /tmp/motlie_graph_db
    Expected: 99 nodes
    Found:    99 nodes
    ✓ Node count matches
-   ✓ All expected nodes found in database
+   ✓ All expected node names found in database
 
 🔍 Verifying Edges...
    Expected: 964 edges
    Found:    964 edges
    ✓ Edge count matches
+   ✓ All expected edges found with correct source, target, and name
 
 🔍 Verifying Fragments...
    Expected: at least 1050 fragments
    Found:    1063 fragments
    ✓ Fragment count OK (database may have additional fragments for implicit nodes)
-   ✓ All expected fragments found in database
+   ✓ All expected fragment content found in database
 
 ✅ All verification checks passed!
    The database contents match the CSV input.
 ```
+
+### Failed Verification Output
+
+When data doesn't match, the verification provides detailed error messages:
+
+```
+🔍 Verifying Nodes...
+   Expected: 3 nodes
+   Found:    3 nodes
+   ✓ Node count matches
+   ✓ All expected node names found in database
+
+🔍 Verifying Edges...
+   Expected: 1 edges
+   Found:    3 edges
+   ✗ Edge count mismatch!
+   ✗ Missing or mismatched edges:
+      - alice -> bob (knows_wrong)
+
+🔍 Verifying Fragments...
+   Expected: at least 4 fragments
+   Found:    6 fragments
+   ✓ Fragment count OK (database may have additional fragments for implicit nodes)
+   ✗ 1 expected fragments not found:
+      1. Edge 'alice -> bob (knows_wrong)': "Alice knows Bob from university"
+
+❌ Some verification checks failed!
+   The database contents do not fully match the CSV input.
+```
+
+The verification catches:
+- **Incorrect node names**: Reports which expected nodes are missing
+- **Wrong edge relationships**: Shows edges with incorrect source, target, or edge name
+- **Missing fragment content**: Lists specific fragments that aren't found in the database
 
 ### End-to-End Workflow
 
