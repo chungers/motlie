@@ -52,18 +52,18 @@ pub(crate) struct NodeCfKey(pub(crate) Id);
 pub(crate) struct NodeCfValue(pub(crate) NodeSummary);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct NodeSummary(pub(crate) DataUrl);
+pub struct NodeSummary(pub(crate) DataUrl);
 
 impl NodeSummary {
-    pub(crate) fn new(content: impl AsRef<str>) -> Self {
+    pub fn new(content: impl AsRef<str>) -> Self {
         NodeSummary(DataUrl::from_markdown(content.as_ref()))
     }
 
-    pub(crate) fn content(&self) -> Result<String, crate::DataUrlError> {
+    pub fn content(&self) -> Result<String, crate::DataUrlError> {
         self.0.decode_string()
     }
 
-    pub(crate) fn as_data_url(&self) -> &DataUrl {
+    pub fn as_data_url(&self) -> &DataUrl {
         &self.0
     }
 }
@@ -94,18 +94,18 @@ pub(crate) struct EdgeCfKey(pub(crate) Id);
 pub(crate) struct EdgeCfValue(pub(crate) EdgeSummary);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EdgeSummary(pub(crate) DataUrl);
+pub struct EdgeSummary(pub(crate) DataUrl);
 
 impl EdgeSummary {
-    pub(crate) fn new(content: impl AsRef<str>) -> Self {
+    pub fn new(content: impl AsRef<str>) -> Self {
         EdgeSummary(DataUrl::from_markdown(content.as_ref()))
     }
 
-    pub(crate) fn content(&self) -> Result<String, crate::DataUrlError> {
+    pub fn content(&self) -> Result<String, crate::DataUrlError> {
         self.0.decode_string()
     }
 
-    pub(crate) fn as_data_url(&self) -> &DataUrl {
+    pub fn as_data_url(&self) -> &DataUrl {
         &self.0
     }
 }
@@ -136,19 +136,19 @@ pub(crate) struct FragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
 pub(crate) struct FragmentCfValue(pub(crate) FragmentContent);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct FragmentContent(pub(crate) DataUrl);
+pub struct FragmentContent(pub(crate) DataUrl);
 
 impl FragmentContent {
-    pub(crate) fn new(content: impl AsRef<str>) -> Self {
+    pub fn new(content: impl AsRef<str>) -> Self {
         // Treat all fragment content as markdown per user requirement
         FragmentContent(DataUrl::from_markdown(content.as_ref()))
     }
 
-    pub(crate) fn content(&self) -> Result<String, crate::DataUrlError> {
+    pub fn content(&self) -> Result<String, crate::DataUrlError> {
         self.0.decode_string()
     }
 
-    pub(crate) fn as_data_url(&self) -> &DataUrl {
+    pub fn as_data_url(&self) -> &DataUrl {
         &self.0
     }
 }

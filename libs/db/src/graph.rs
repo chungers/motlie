@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 
 use rocksdb::{Options, TransactionDB, TransactionDBOptions, DB};
 
-use crate::schema;
+use crate::schema::{self, EdgeSummary, FragmentContent, NodeSummary};
 use crate::{
     mutation::{Consumer, Processor},
     schema::ALL_COLUMN_FAMILIES,
@@ -378,6 +378,133 @@ impl Processor for Graph {
     }
 }
 
+/// Implement query processor for Graph
+#[async_trait::async_trait]
+impl crate::query::Processor for Graph {
+    async fn get_node_summary_by_id(
+        &self,
+        query: &crate::query::NodeSummaryByIdQuery,
+    ) -> Result<NodeSummary> {
+        let id = query.id;
+
+        let key = schema::NodeCfKey(id);
+        let key_bytes = schema::Nodes::key_to_bytes(&key)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize key: {}", e))?;
+
+        // Handle both readonly and readwrite modes
+        let value_bytes = if let Ok(db) = self.storage.db() {
+            let cf = db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+            })?;
+            db.get_cf(cf, key_bytes)?
+        } else {
+            let txn_db = self.storage.transaction_db()?;
+            let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+            })?;
+            txn_db.get_cf(cf, key_bytes)?
+        };
+
+        let value_bytes = value_bytes.ok_or_else(|| anyhow::anyhow!("Node not found: {}", id))?;
+
+        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+        Ok(value.0)
+    }
+
+    async fn get_edge_summary_by_src_dst_name(
+        &self,
+        query: &crate::query::EdgeSummaryBySrcDstNameQuery,
+    ) -> Result<EdgeSummary> {
+        let source_id = query.source_id;
+        let dest_id = query.dest_id;
+        let name = &query.name;
+
+        let key = schema::ForwardEdgeCfKey(
+            schema::EdgeSourceId(source_id),
+            schema::EdgeDestinationId(dest_id),
+            schema::EdgeName(name.clone()),
+        );
+        let key_bytes = schema::ForwardEdges::key_to_bytes(&key)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize key: {}", e))?;
+
+        // Handle both readonly and readwrite modes
+        let value_bytes = if let Ok(db) = self.storage.db() {
+            let cf = db.cf_handle(schema::ForwardEdges::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ForwardEdges::CF_NAME
+                )
+            })?;
+            db.get_cf(cf, key_bytes)?
+        } else {
+            let txn_db = self.storage.transaction_db()?;
+            let cf = txn_db
+                .cf_handle(schema::ForwardEdges::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Column family '{}' not found",
+                        schema::ForwardEdges::CF_NAME
+                    )
+                })?;
+            txn_db.get_cf(cf, key_bytes)?
+        };
+
+        let value_bytes = value_bytes.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Edge not found: source={}, dest={}, name={}",
+                source_id,
+                dest_id,
+                name
+            )
+        })?;
+
+        let value: schema::ForwardEdgeCfValue =
+            schema::ForwardEdges::value_from_bytes(&value_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+        Ok(value.0)
+    }
+
+    async fn get_fragment_content_by_id(
+        &self,
+        query: &crate::query::FragmentContentByIdQuery,
+    ) -> Result<FragmentContent> {
+        let id = query.id;
+
+        // Fragment key includes timestamp from the query
+        let key = schema::FragmentCfKey(id, query.ts_millis);
+        let key_bytes = schema::Fragments::key_to_bytes(&key)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize key: {}", e))?;
+
+        // Handle both readonly and readwrite modes
+        let value_bytes = if let Ok(db) = self.storage.db() {
+            let cf = db.cf_handle(schema::Fragments::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
+            })?;
+            db.get_cf(cf, key_bytes)?
+        } else {
+            let txn_db = self.storage.transaction_db()?;
+            let cf = txn_db
+                .cf_handle(schema::Fragments::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
+                })?;
+            txn_db.get_cf(cf, key_bytes)?
+        };
+
+        let value_bytes = value_bytes.ok_or_else(|| {
+            anyhow::anyhow!("Fragment not found: id={}, ts={:?}", id, query.ts_millis)
+        })?;
+
+        let value: schema::FragmentCfValue = schema::Fragments::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+        Ok(value.0)
+    }
+}
+
 /// Create a new graph mutation consumer
 pub fn create_graph_consumer(
     receiver: mpsc::Receiver<crate::Mutation>,
@@ -424,6 +551,29 @@ pub fn spawn_graph_consumer_with_next(
 ) -> JoinHandle<Result<()>> {
     let consumer = create_graph_consumer_with_next(receiver, config, db_path, next);
     crate::mutation::spawn_consumer(consumer)
+}
+
+/// Create a new query consumer for the graph
+pub fn create_query_consumer(
+    receiver: flume::Receiver<crate::query::Query>,
+    config: crate::ReaderConfig,
+    db_path: &Path,
+) -> crate::query::Consumer<Graph> {
+    let mut storage = Storage::readonly(db_path);
+    storage.ready().expect("Failed to ready storage");
+    let storage = Arc::new(storage);
+    let processor = Graph::new(storage);
+    crate::query::Consumer::new(receiver, config, processor)
+}
+
+/// Spawn a query consumer as a background task
+pub fn spawn_query_consumer(
+    receiver: flume::Receiver<crate::query::Query>,
+    config: crate::ReaderConfig,
+    db_path: &Path,
+) -> JoinHandle<Result<()>> {
+    let consumer = create_query_consumer(receiver, config, db_path);
+    crate::query::spawn_consumer(consumer)
 }
 
 #[cfg(test)]

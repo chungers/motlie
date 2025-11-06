@@ -6,6 +6,13 @@ use serde::{Deserialize, Serialize};
 pub use writer::*;
 mod mutation;
 pub use mutation::*;
+mod reader;
+pub use reader::*;
+mod query;
+// Re-export query types but not Consumer/Processor/spawn_consumer to avoid ambiguity
+pub use query::{
+    EdgeSummaryBySrcDstNameQuery, FragmentContentByIdQuery, NodeSummaryByIdQuery, Query,
+};
 mod graph;
 pub use graph::*;
 mod fulltext;
