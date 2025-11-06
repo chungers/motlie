@@ -11,7 +11,56 @@ The example sets up a chain: **Writer → Graph → FullText**
 - Graph forwards the mutation to FullText
 - FullText processes the mutation (simulates full-text search indexing)
 
+## Building the Example
+
+First, build the example binary:
+
+```bash
+cargo build --example store --release
+```
+
+The binary will be located at:
+- `target/release/examples/store`
+
+For development builds (faster compilation, slower execution):
+
+```bash
+cargo build --example store
+```
+
+Development binary is at:
+- `target/debug/examples/store`
+
 ## Running the Example
+
+The `store` binary operates in two modes:
+
+### Store Mode (default)
+
+Reads CSV from stdin and stores data in the database:
+
+```bash
+cat input.csv | target/release/examples/store <db_path>
+```
+
+### Verify Mode
+
+Reads CSV from stdin and verifies it against existing database:
+
+```bash
+cat input.csv | target/release/examples/store --verify <db_path>
+```
+
+### Command Line Arguments
+
+```bash
+target/release/examples/store [--verify] <db_path>
+```
+
+- `--verify` (optional): Enable verification mode
+- `db_path` (required): Path to RocksDB database directory
+
+**Note:** CSV data is always read from stdin in both modes.
 
 ### With Generated Data (Recommended)
 
@@ -19,18 +68,18 @@ The example sets up a chain: **Writer → Graph → FullText**
 # Generate a dataset with 100 nodes (~1000 edges)
 python3 generate_data.py --total-nodes 100 2>/dev/null > /tmp/test_data.csv
 
-# Run the store example
-cat /tmp/test_data.csv | cargo run --example store
+# Store the data
+cat /tmp/test_data.csv | target/release/examples/store /tmp/motlie_graph_db
 
 # Verify data was stored correctly
-cargo run --example verify_store /tmp/test_data.csv
+cat /tmp/test_data.csv | target/release/examples/store --verify /tmp/motlie_graph_db
 ```
 
 ### With Small Test Data
 
 ```bash
 # Use the small test input file (3 nodes, 3 edges)
-cat examples/store/test_input.csv | cargo run --example store
+cat examples/store/test_input.csv | target/release/examples/store /tmp/motlie_graph_db
 ```
 
 ### With Logging
@@ -38,21 +87,21 @@ cat examples/store/test_input.csv | cargo run --example store
 ```bash
 # See detailed processing logs
 python3 generate_data.py --total-nodes 50 2>/dev/null > /tmp/test_data.csv
-RUST_LOG=info cat /tmp/test_data.csv | cargo run --example store
+RUST_LOG=info cat /tmp/test_data.csv | target/release/examples/store /tmp/motlie_graph_db
 ```
 
 ## Verifying Data Persistence
 
-After running the store example, verify that all data was correctly written to RocksDB:
+After storing data, verify that all data was correctly written to RocksDB using the `--verify` flag:
 
 ```bash
 # Verify database contents match the CSV input
-cargo run --example verify_store /tmp/test_data.csv
+cat /tmp/test_data.csv | target/release/examples/store --verify /tmp/motlie_graph_db
 ```
 
-The verification tool:
-- Parses the CSV file to extract expected nodes, edges, and fragments
-- Opens the RocksDB database at `/tmp/motlie_graph_db` in read-only mode
+The verification mode:
+- Reads CSV from stdin to extract expected nodes, edges, and fragments
+- Opens the RocksDB database in read-only mode
 - Queries each column family and compares with expected data:
   - **Nodes**: Verifies all expected nodes are present
   - **Edges**: Verifies edge count matches
@@ -99,17 +148,20 @@ Database: /tmp/motlie_graph_db
 ### End-to-End Workflow
 
 ```bash
-# 1. Clean any existing database
+# 1. Build the example
+cargo build --example store --release
+
+# 2. Clean any existing database
 rm -rf /tmp/motlie_graph_db
 
-# 2. Generate test data
+# 3. Generate test data
 python3 generate_data.py --total-nodes 100 2>/dev/null > /tmp/test_data.csv
 
-# 3. Run the store example
-cat /tmp/test_data.csv | cargo run --example store
+# 4. Store the data
+cat /tmp/test_data.csv | target/release/examples/store /tmp/motlie_graph_db
 
-# 4. Verify the data was written correctly
-cargo run --example verify_store /tmp/test_data.csv
+# 5. Verify the data was written correctly
+cat /tmp/test_data.csv | target/release/examples/store --verify /tmp/motlie_graph_db
 ```
 
 This demonstrates the complete write path: **CSV Input → Writer → Graph Processor → RocksDB Storage → Verification** ✓

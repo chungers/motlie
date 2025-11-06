@@ -47,7 +47,3 @@ data-url = "0.3"
 [[example]]
 name = "store"
 path = "examples/store/main.rs"
-
-[[example]]
-name = "verify_store"
-path = "examples/store/verify_store.rs"
