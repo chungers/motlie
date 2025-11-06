@@ -38,7 +38,9 @@ async fn main() -> Result<()> {
             eprintln!();
             eprintln!("Examples:");
             eprintln!("  cat input.csv | target/release/examples/store /tmp/motlie_graph_db");
-            eprintln!("  cat input.csv | target/release/examples/store --verify /tmp/motlie_graph_db");
+            eprintln!(
+                "  cat input.csv | target/release/examples/store --verify /tmp/motlie_graph_db"
+            );
             std::process::exit(1);
         }
     };
@@ -80,12 +82,8 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
     // Create the Graph consumer that forwards to FullText
     println!("  2. Creating Graph consumer (forwards to FullText)");
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_handle = spawn_graph_consumer_with_next(
-        graph_receiver,
-        config,
-        Path::new(db_path),
-        fulltext_sender,
-    );
+    let graph_handle =
+        spawn_graph_consumer_with_next(graph_receiver, config, Path::new(db_path), fulltext_sender);
 
     println!("  3. Consumer chain ready: Writer → Graph → FullText");
     println!();
@@ -140,7 +138,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
 
                 // Send to Graph consumer (which will forward to FullText)
                 writer
-                    .add_vertex(vertex_args)
+                    .add_node(vertex_args)
                     .await
                     .context("Failed to send vertex to consumer chain")?;
                 writer
@@ -271,7 +269,10 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
     if !db_path_obj.exists() {
         eprintln!("❌ Database does not exist at {}", db_path);
         eprintln!("Run in store mode first:");
-        eprintln!("  cat input.csv | target/release/examples/store {}", db_path);
+        eprintln!(
+            "  cat input.csv | target/release/examples/store {}",
+            db_path
+        );
         std::process::exit(1);
     }
 
@@ -280,11 +281,20 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
     let expected_data = parse_csv_from_stdin()?;
     println!("   Nodes: {}", expected_data.nodes.len());
     println!("   Edges: {}", expected_data.edges.len());
-    println!("   Total fragments: {}", expected_data.node_fragments.len() + expected_data.edge_fragments.len());
+    println!(
+        "   Total fragments: {}",
+        expected_data.node_fragments.len() + expected_data.edge_fragments.len()
+    );
     println!();
 
     // Open database in read-only mode
-    let column_families = vec!["nodes", "edges", "fragments", "forward_edges", "reverse_edges"];
+    let column_families = vec![
+        "nodes",
+        "edges",
+        "fragments",
+        "forward_edges",
+        "reverse_edges",
+    ];
     let db = DB::open_cf_for_read_only(
         &rocksdb::Options::default(),
         db_path_obj,
@@ -377,7 +387,10 @@ fn parse_csv_from_stdin() -> Result<ExpectedData> {
                 nodes.entry(source.clone()).or_insert_with(|| String::new());
                 nodes.entry(target.clone()).or_insert_with(|| String::new());
 
-                edge_fragments.insert((source.clone(), target.clone(), edge_name.clone()), fragment.clone());
+                edge_fragments.insert(
+                    (source.clone(), target.clone(), edge_name.clone()),
+                    fragment.clone(),
+                );
                 edges.push(EdgeData {
                     source,
                     target,
@@ -469,7 +482,9 @@ fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
     }
 
     // Now verify edges using forward_edges CF which has (source_id, target_id, edge_name) as key
-    let forward_edges_cf = db.cf_handle("forward_edges").context("ForwardEdges CF not found")?;
+    let forward_edges_cf = db
+        .cf_handle("forward_edges")
+        .context("ForwardEdges CF not found")?;
 
     let mut db_edge_count = 0;
     let mut db_edges: HashSet<(String, String, String)> = HashSet::new(); // (source_name, target_name, edge_name)
@@ -484,7 +499,8 @@ fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
 
         // Map IDs to names
         if let (Some(source_name), Some(target_name)) =
-            (id_to_name.get(&source_id), id_to_name.get(&target_id)) {
+            (id_to_name.get(&source_id), id_to_name.get(&target_id))
+        {
             db_edges.insert((source_name.clone(), target_name.clone(), edge_name));
         }
     }
@@ -508,7 +524,10 @@ fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
     for edge in &expected.edges {
         let edge_tuple = (edge.source.clone(), edge.target.clone(), edge.name.clone());
         if !db_edges.contains(&edge_tuple) {
-            missing_edges.push(format!("{} -> {} ({})", edge.source, edge.target, edge.name));
+            missing_edges.push(format!(
+                "{} -> {} ({})",
+                edge.source, edge.target, edge.name
+            ));
         }
     }
 
@@ -526,7 +545,9 @@ fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
 }
 
 fn verify_fragments(db: &DB, expected: &ExpectedData) -> Result<bool> {
-    let cf = db.cf_handle("fragments").context("Fragments CF not found")?;
+    let cf = db
+        .cf_handle("fragments")
+        .context("Fragments CF not found")?;
 
     // Count fragments in database and collect all content
     let mut db_fragment_count = 0;
@@ -551,7 +572,9 @@ fn verify_fragments(db: &DB, expected: &ExpectedData) -> Result<bool> {
     let mut all_ok = true;
 
     if db_fragment_count >= expected_count {
-        println!("   ✓ Fragment count OK (database may have additional fragments for implicit nodes)");
+        println!(
+            "   ✓ Fragment count OK (database may have additional fragments for implicit nodes)"
+        );
     } else {
         println!("   ✗ Fragment count too low!");
         all_ok = false;
@@ -562,23 +585,41 @@ fn verify_fragments(db: &DB, expected: &ExpectedData) -> Result<bool> {
 
     for (node_name, fragment) in &expected.node_fragments {
         if !fragment.is_empty() && !db_fragments_content.contains(fragment) {
-            missing_fragments.push(format!("Node '{}': {:?}", node_name,
-                if fragment.len() > 50 { &fragment[..50] } else { fragment }));
+            missing_fragments.push(format!(
+                "Node '{}': {:?}",
+                node_name,
+                if fragment.len() > 50 {
+                    &fragment[..50]
+                } else {
+                    fragment
+                }
+            ));
         }
     }
 
     for ((source, target, edge_name), fragment) in &expected.edge_fragments {
         if !db_fragments_content.contains(fragment) {
-            missing_fragments.push(format!("Edge '{} -> {} ({})': {:?}",
-                source, target, edge_name,
-                if fragment.len() > 50 { &fragment[..50] } else { fragment }));
+            missing_fragments.push(format!(
+                "Edge '{} -> {} ({})': {:?}",
+                source,
+                target,
+                edge_name,
+                if fragment.len() > 50 {
+                    &fragment[..50]
+                } else {
+                    fragment
+                }
+            ));
         }
     }
 
     if missing_fragments.is_empty() {
         println!("   ✓ All expected fragment content found in database");
     } else {
-        println!("   ✗ {} expected fragments not found:", missing_fragments.len());
+        println!(
+            "   ✗ {} expected fragments not found:",
+            missing_fragments.len()
+        );
         for (i, frag) in missing_fragments.iter().take(5).enumerate() {
             println!("      {}. {}", i + 1, frag);
         }
@@ -611,16 +652,16 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct DataUrl(String);
 
-    let value: NodeCfValue = rmp_serde::from_slice(bytes).context("Failed to deserialize node value")?;
+    let value: NodeCfValue =
+        rmp_serde::from_slice(bytes).context("Failed to deserialize node value")?;
 
     // Decode the data URL to get the actual content
-    let data_url_str = &value.0.0.0;
-    let parsed = data_url::DataUrl::process(data_url_str)
-        .context("Failed to parse data URL")?;
-    let (body, _) = parsed.decode_to_vec()
+    let data_url_str = &value.0 .0 .0;
+    let parsed = data_url::DataUrl::process(data_url_str).context("Failed to parse data URL")?;
+    let (body, _) = parsed
+        .decode_to_vec()
         .context("Failed to decode data URL")?;
-    let content = String::from_utf8(body)
-        .context("Failed to convert bytes to UTF-8")?;
+    let content = String::from_utf8(body).context("Failed to convert bytes to UTF-8")?;
 
     Ok(content)
 }
@@ -638,10 +679,10 @@ fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, Strin
     #[derive(serde::Deserialize)]
     struct EdgeName(String);
 
-    let key: ForwardEdgeCfKey = rmp_serde::from_slice(bytes)
-        .context("Failed to deserialize forward edge key")?;
+    let key: ForwardEdgeCfKey =
+        rmp_serde::from_slice(bytes).context("Failed to deserialize forward edge key")?;
 
-    Ok((key.0.0, key.1.0, key.2.0))
+    Ok((key.0 .0, key.1 .0, key.2 .0))
 }
 
 fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
@@ -654,16 +695,16 @@ fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct DataUrl(String);
 
-    let value: EdgeCfValue = rmp_serde::from_slice(bytes).context("Failed to deserialize edge value")?;
+    let value: EdgeCfValue =
+        rmp_serde::from_slice(bytes).context("Failed to deserialize edge value")?;
 
     // Decode the data URL to get the actual content
-    let data_url_str = &value.0.0.0;
-    let parsed = data_url::DataUrl::process(data_url_str)
-        .context("Failed to parse data URL")?;
-    let (body, _) = parsed.decode_to_vec()
+    let data_url_str = &value.0 .0 .0;
+    let parsed = data_url::DataUrl::process(data_url_str).context("Failed to parse data URL")?;
+    let (body, _) = parsed
+        .decode_to_vec()
         .context("Failed to decode data URL")?;
-    let content = String::from_utf8(body)
-        .context("Failed to convert bytes to UTF-8")?;
+    let content = String::from_utf8(body).context("Failed to convert bytes to UTF-8")?;
 
     Ok(content)
 }
@@ -678,16 +719,16 @@ fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct DataUrl(String);
 
-    let value: FragmentCfValue = rmp_serde::from_slice(bytes).context("Failed to deserialize fragment value")?;
+    let value: FragmentCfValue =
+        rmp_serde::from_slice(bytes).context("Failed to deserialize fragment value")?;
 
     // Decode the data URL to get the actual content
-    let data_url_str = &value.0.0.0;
-    let parsed = data_url::DataUrl::process(data_url_str)
-        .context("Failed to parse data URL")?;
-    let (body, _) = parsed.decode_to_vec()
+    let data_url_str = &value.0 .0 .0;
+    let parsed = data_url::DataUrl::process(data_url_str).context("Failed to parse data URL")?;
+    let (body, _) = parsed
+        .decode_to_vec()
         .context("Failed to decode data URL")?;
-    let content = String::from_utf8(body)
-        .context("Failed to convert bytes to UTF-8")?;
+    let content = String::from_utf8(body).context("Failed to convert bytes to UTF-8")?;
 
     Ok(content)
 }

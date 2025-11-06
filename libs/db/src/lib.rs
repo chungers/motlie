@@ -89,7 +89,10 @@ impl DataUrl {
 
     /// Create a DataUrl for JSON content
     pub fn from_json(content: impl AsRef<str>) -> Self {
-        Self::new(content.as_ref().as_bytes(), "application/json;charset=utf-8")
+        Self::new(
+            content.as_ref().as_bytes(),
+            "application/json;charset=utf-8",
+        )
     }
 
     /// Create a DataUrl for HTML content
@@ -304,10 +307,10 @@ mod tests {
             };
 
             // Send to both consumers
-            writer1.add_vertex(vertex_args.clone()).await.unwrap();
+            writer1.add_node(vertex_args.clone()).await.unwrap();
             writer1.add_fragment(fragment_args.clone()).await.unwrap();
 
-            writer2.add_vertex(vertex_args).await.unwrap();
+            writer2.add_node(vertex_args).await.unwrap();
             writer2.add_fragment(fragment_args).await.unwrap();
         }
 
@@ -787,7 +790,8 @@ mod tests {
     fn test_data_url_serde_roundtrip() {
         let original = DataUrl::from_markdown("# Test\nContent");
         let serialized = rmp_serde::to_vec(&original).expect("Failed to serialize");
-        let deserialized: DataUrl = rmp_serde::from_slice(&serialized).expect("Failed to deserialize");
+        let deserialized: DataUrl =
+            rmp_serde::from_slice(&serialized).expect("Failed to deserialize");
         assert_eq!(original, deserialized);
         assert_eq!(
             original.decode_string().unwrap(),

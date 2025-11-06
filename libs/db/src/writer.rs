@@ -38,8 +38,8 @@ impl Writer {
             .context("Failed to send mutation to writer queue")
     }
 
-    /// Send an AddVertex mutation
-    pub async fn add_vertex(&self, args: AddNode) -> Result<()> {
+    /// Send an AddNode mutation
+    pub async fn add_node(&self, args: AddNode) -> Result<()> {
         self.send(Mutation::AddNode(args)).await
     }
 
@@ -125,7 +125,7 @@ mod tests {
         };
 
         // These should not panic or error
-        writer.add_vertex(vertex_args).await.unwrap();
+        writer.add_node(vertex_args).await.unwrap();
         writer.add_edge(edge_args).await.unwrap();
         writer.add_fragment(fragment_args).await.unwrap();
         writer.invalidate(invalidate_args).await.unwrap();

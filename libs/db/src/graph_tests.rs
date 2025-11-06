@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::graph::{spawn_graph_consumer, spawn_graph_consumer_with_next, Storage, ColumnFamilyRecord};
+    use crate::graph::{
+        spawn_graph_consumer, spawn_graph_consumer_with_next, ColumnFamilyRecord, Storage,
+    };
     use crate::schema::{Edges, Fragments, Nodes, ALL_COLUMN_FAMILIES};
     use crate::{
         create_mutation_writer, AddEdge, AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
@@ -30,7 +32,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
-        writer.add_vertex(vertex_args).await.unwrap();
+        writer.add_node(vertex_args).await.unwrap();
 
         let edge_args = AddEdge {
             id: Id::new(),
@@ -70,7 +72,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_vertex_{}", i),
             };
-            writer.add_vertex(vertex_args).await.unwrap();
+            writer.add_node(vertex_args).await.unwrap();
         }
 
         // Give consumer time to process
@@ -92,7 +94,7 @@ mod tests {
 
         // Test all mutation types
         writer
-            .add_vertex(AddNode {
+            .add_node(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "vertex".to_string(),
@@ -175,7 +177,7 @@ mod tests {
                 ),
             };
 
-            writer.add_vertex(vertex_args).await.unwrap();
+            writer.add_node(vertex_args).await.unwrap();
             writer.add_fragment(fragment_args).await.unwrap();
         }
 
@@ -1122,7 +1124,7 @@ mod tests {
             name: "test_node".to_string(),
         };
 
-        writer.add_vertex(node_args.clone()).await.unwrap();
+        writer.add_node(node_args.clone()).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1134,24 +1136,39 @@ mod tests {
         consumer_handle.await.unwrap().unwrap();
 
         // Verify the node was written to the correct column family
-        let db = DB::open_cf_for_read_only(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES, false)
-            .expect("Failed to open database for verification");
+        let db = DB::open_cf_for_read_only(
+            &rocksdb::Options::default(),
+            &db_path,
+            ALL_COLUMN_FAMILIES,
+            false,
+        )
+        .expect("Failed to open database for verification");
 
-        let cf_handle = db.cf_handle(Nodes::CF_NAME).expect("Nodes column family should exist");
+        let cf_handle = db
+            .cf_handle(Nodes::CF_NAME)
+            .expect("Nodes column family should exist");
 
         // Create the key using the schema's serialization
         let (key, _value) = Nodes::record_from(&node_args);
         let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
 
         // Query the database
-        let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
-        assert!(result.is_some(), "Node should be written to the 'nodes' column family");
+        let result = db
+            .get_cf(cf_handle, &key_bytes)
+            .expect("Failed to query database");
+        assert!(
+            result.is_some(),
+            "Node should be written to the 'nodes' column family"
+        );
 
         // Verify we can deserialize the value
         let value_bytes = result.unwrap();
         let value = Nodes::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
         let content = value.0.content().expect("Failed to decode DataUrl");
-        assert!(content.contains("test_node"), "Node value should contain the node name");
+        assert!(
+            content.contains("test_node"),
+            "Node value should contain the node name"
+        );
     }
 
     #[tokio::test]
@@ -1190,41 +1207,70 @@ mod tests {
         consumer_handle.await.unwrap().unwrap();
 
         // Verify the edge was written to all three column families
-        let db = DB::open_cf_for_read_only(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES, false)
-            .expect("Failed to open database for verification");
+        let db = DB::open_cf_for_read_only(
+            &rocksdb::Options::default(),
+            &db_path,
+            ALL_COLUMN_FAMILIES,
+            false,
+        )
+        .expect("Failed to open database for verification");
 
         // Check Edges column family
         {
-            let cf_handle = db.cf_handle(Edges::CF_NAME).expect("Edges column family should exist");
+            let cf_handle = db
+                .cf_handle(Edges::CF_NAME)
+                .expect("Edges column family should exist");
             let (key, _value) = Edges::record_from(&edge_args);
             let key_bytes = Edges::key_to_bytes(&key).expect("Failed to serialize key");
-            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
-            assert!(result.is_some(), "Edge should be written to the 'edges' column family");
+            let result = db
+                .get_cf(cf_handle, &key_bytes)
+                .expect("Failed to query database");
+            assert!(
+                result.is_some(),
+                "Edge should be written to the 'edges' column family"
+            );
 
             let value_bytes = result.unwrap();
             let value = Edges::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
             let content = value.0.content().expect("Failed to decode DataUrl");
-            assert!(content.contains("test_edge"), "Edge value should contain the edge name");
+            assert!(
+                content.contains("test_edge"),
+                "Edge value should contain the edge name"
+            );
         }
 
         // Check ForwardEdges column family
         {
             use crate::schema::ForwardEdges;
-            let cf_handle = db.cf_handle(ForwardEdges::CF_NAME).expect("ForwardEdges column family should exist");
+            let cf_handle = db
+                .cf_handle(ForwardEdges::CF_NAME)
+                .expect("ForwardEdges column family should exist");
             let (key, _value) = ForwardEdges::record_from(&edge_args);
             let key_bytes = ForwardEdges::key_to_bytes(&key).expect("Failed to serialize key");
-            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
-            assert!(result.is_some(), "Edge should be written to the 'forward_edges' column family");
+            let result = db
+                .get_cf(cf_handle, &key_bytes)
+                .expect("Failed to query database");
+            assert!(
+                result.is_some(),
+                "Edge should be written to the 'forward_edges' column family"
+            );
         }
 
         // Check ReverseEdges column family
         {
             use crate::schema::ReverseEdges;
-            let cf_handle = db.cf_handle(ReverseEdges::CF_NAME).expect("ReverseEdges column family should exist");
+            let cf_handle = db
+                .cf_handle(ReverseEdges::CF_NAME)
+                .expect("ReverseEdges column family should exist");
             let (key, _value) = ReverseEdges::record_from(&edge_args);
             let key_bytes = ReverseEdges::key_to_bytes(&key).expect("Failed to serialize key");
-            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
-            assert!(result.is_some(), "Edge should be written to the 'reverse_edges' column family");
+            let result = db
+                .get_cf(cf_handle, &key_bytes)
+                .expect("Failed to query database");
+            assert!(
+                result.is_some(),
+                "Edge should be written to the 'reverse_edges' column family"
+            );
         }
     }
 
@@ -1261,24 +1307,39 @@ mod tests {
         consumer_handle.await.unwrap().unwrap();
 
         // Verify the fragment was written to the correct column family
-        let db = DB::open_cf_for_read_only(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES, false)
-            .expect("Failed to open database for verification");
+        let db = DB::open_cf_for_read_only(
+            &rocksdb::Options::default(),
+            &db_path,
+            ALL_COLUMN_FAMILIES,
+            false,
+        )
+        .expect("Failed to open database for verification");
 
-        let cf_handle = db.cf_handle(Fragments::CF_NAME).expect("Fragments column family should exist");
+        let cf_handle = db
+            .cf_handle(Fragments::CF_NAME)
+            .expect("Fragments column family should exist");
 
         // Create the key using the schema's serialization
         let (key, _value) = Fragments::record_from(&fragment_args);
         let key_bytes = Fragments::key_to_bytes(&key).expect("Failed to serialize key");
 
         // Query the database
-        let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
-        assert!(result.is_some(), "Fragment should be written to the 'fragments' column family");
+        let result = db
+            .get_cf(cf_handle, &key_bytes)
+            .expect("Failed to query database");
+        assert!(
+            result.is_some(),
+            "Fragment should be written to the 'fragments' column family"
+        );
 
         // Verify we can deserialize the value
         let value_bytes = result.unwrap();
         let value = Fragments::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
         let content = value.0.content().expect("Failed to decode DataUrl");
-        assert_eq!(content, "This is test fragment content", "Fragment content should match");
+        assert_eq!(
+            content, "This is test fragment content",
+            "Fragment content should match"
+        );
     }
 
     #[tokio::test]
@@ -1316,9 +1377,9 @@ mod tests {
             name: "node_three".to_string(),
         };
 
-        writer.add_vertex(node1_args.clone()).await.unwrap();
-        writer.add_vertex(node2_args.clone()).await.unwrap();
-        writer.add_vertex(node3_args.clone()).await.unwrap();
+        writer.add_node(node1_args.clone()).await.unwrap();
+        writer.add_node(node2_args.clone()).await.unwrap();
+        writer.add_node(node3_args.clone()).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1330,16 +1391,25 @@ mod tests {
         consumer_handle.await.unwrap().unwrap();
 
         // Verify all nodes can be queried by their keys
-        let db = DB::open_cf_for_read_only(&rocksdb::Options::default(), &db_path, ALL_COLUMN_FAMILIES, false)
-            .expect("Failed to open database for verification");
+        let db = DB::open_cf_for_read_only(
+            &rocksdb::Options::default(),
+            &db_path,
+            ALL_COLUMN_FAMILIES,
+            false,
+        )
+        .expect("Failed to open database for verification");
 
-        let cf_handle = db.cf_handle(Nodes::CF_NAME).expect("Nodes column family should exist");
+        let cf_handle = db
+            .cf_handle(Nodes::CF_NAME)
+            .expect("Nodes column family should exist");
 
         // Query node 1
         {
             let (key, _value) = Nodes::record_from(&node1_args);
             let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
-            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+            let result = db
+                .get_cf(cf_handle, &key_bytes)
+                .expect("Failed to query database");
             assert!(result.is_some(), "Node 1 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
             let content = value.0.content().expect("Failed to decode DataUrl");
@@ -1350,7 +1420,9 @@ mod tests {
         {
             let (key, _value) = Nodes::record_from(&node2_args);
             let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
-            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+            let result = db
+                .get_cf(cf_handle, &key_bytes)
+                .expect("Failed to query database");
             assert!(result.is_some(), "Node 2 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
             let content = value.0.content().expect("Failed to decode DataUrl");
@@ -1361,7 +1433,9 @@ mod tests {
         {
             let (key, _value) = Nodes::record_from(&node3_args);
             let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
-            let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
+            let result = db
+                .get_cf(cf_handle, &key_bytes)
+                .expect("Failed to query database");
             assert!(result.is_some(), "Node 3 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
             let content = value.0.content().expect("Failed to decode DataUrl");

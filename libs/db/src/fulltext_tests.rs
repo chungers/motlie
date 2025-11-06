@@ -25,7 +25,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
-        writer.add_vertex(vertex_args).await.unwrap();
+        writer.add_node(vertex_args).await.unwrap();
 
         let fragment_args = AddFragment {
             id: Id::new(),
@@ -80,7 +80,7 @@ mod tests {
 
         // Test all mutation types with search-relevant content
         writer
-            .add_vertex(AddNode {
+            .add_node(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "search vertex".to_string(),

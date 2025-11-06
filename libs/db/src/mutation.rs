@@ -249,7 +249,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_vertex".to_string(),
         };
-        writer.add_vertex(vertex_args).await.unwrap();
+        writer.add_node(vertex_args).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
