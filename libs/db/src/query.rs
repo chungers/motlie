@@ -13,6 +13,19 @@ pub enum Query {
     FragmentContentById(FragmentContentByIdQuery),
 }
 
+/// Trait for queries that produce results with timeout handling
+#[async_trait::async_trait]
+pub trait QueryWithResult: Send + Sync {
+    /// The type of result this query produces
+    type ResultType: Send;
+
+    /// Execute the query with timeout and return the result
+    async fn result<P: Processor>(&self, processor: &P) -> Result<Self::ResultType>;
+
+    /// Get the timeout for this query
+    fn timeout(&self) -> Duration;
+}
+
 /// Query to find a node by its ID
 #[derive(Debug)]
 pub struct NodeSummaryByIdQuery {
@@ -48,6 +61,27 @@ impl NodeSummaryByIdQuery {
     pub fn send_result(self, result: Result<NodeSummary>) {
         // Ignore error if receiver was dropped (client timeout/cancellation)
         let _ = self.result_tx.send(result);
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryWithResult for NodeSummaryByIdQuery {
+    type ResultType = NodeSummary;
+
+    async fn result<P: Processor>(&self, processor: &P) -> Result<NodeSummary> {
+        let result = tokio::time::timeout(
+            self.timeout,
+            processor.get_node_summary_by_id(self)
+        ).await;
+
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout)),
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
     }
 }
 
@@ -96,6 +130,27 @@ impl EdgeSummaryBySrcDstNameQuery {
     }
 }
 
+#[async_trait::async_trait]
+impl QueryWithResult for EdgeSummaryBySrcDstNameQuery {
+    type ResultType = EdgeSummary;
+
+    async fn result<P: Processor>(&self, processor: &P) -> Result<EdgeSummary> {
+        let result = tokio::time::timeout(
+            self.timeout,
+            processor.get_edge_summary_by_src_dst_name(self)
+        ).await;
+
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout)),
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
 /// Query to find a fragment by its ID
 #[derive(Debug)]
 pub struct FragmentContentByIdQuery {
@@ -128,6 +183,27 @@ impl FragmentContentByIdQuery {
 
     pub fn send_result(self, result: Result<FragmentContent>) {
         let _ = self.result_tx.send(result);
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryWithResult for FragmentContentByIdQuery {
+    type ResultType = FragmentContent;
+
+    async fn result<P: Processor>(&self, processor: &P) -> Result<FragmentContent> {
+        let result = tokio::time::timeout(
+            self.timeout,
+            processor.get_fragment_content_by_id(self)
+        ).await;
+
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout)),
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
     }
 }
 
@@ -192,19 +268,7 @@ impl<P: Processor> Consumer<P> {
         match query {
             Query::NodeSummaryById(q) => {
                 log::debug!("Processing NodeById: id={}", q.id);
-
-                // Apply timeout from the query
-                let result = tokio::time::timeout(
-                    q.timeout,
-                    self.processor.get_node_summary_by_id(&q)
-                ).await;
-
-                // Convert timeout error to anyhow error
-                let result = match result {
-                    Ok(r) => r,
-                    Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", q.timeout)),
-                };
-
+                let result = q.result(&self.processor).await;
                 q.send_result(result);
             }
             Query::EdgeSummaryBySrcDstName(q) => {
@@ -214,32 +278,12 @@ impl<P: Processor> Consumer<P> {
                     q.dest_id,
                     q.name
                 );
-
-                let result = tokio::time::timeout(
-                    q.timeout,
-                    self.processor.get_edge_summary_by_src_dst_name(&q)
-                ).await;
-
-                let result = match result {
-                    Ok(r) => r,
-                    Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", q.timeout)),
-                };
-
+                let result = q.result(&self.processor).await;
                 q.send_result(result);
             }
             Query::FragmentContentById(q) => {
                 log::debug!("Processing FragmentById: id={}", q.id);
-
-                let result = tokio::time::timeout(
-                    q.timeout,
-                    self.processor.get_fragment_content_by_id(&q)
-                ).await;
-
-                let result = match result {
-                    Ok(r) => r,
-                    Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", q.timeout)),
-                };
-
+                let result = q.result(&self.processor).await;
                 q.send_result(result);
             }
         }
