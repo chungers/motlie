@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 
 use crate::query::{
-    EdgeSummaryBySrcDstNameQuery, FragmentContentByIdQuery, NodeSummaryByIdQuery, Query,
+    EdgeSummaryByIdQuery, EdgeSummaryBySrcDstNameQuery, FragmentContentByIdQuery,
+    NodeSummaryByIdQuery, Query,
 };
 use crate::schema::{EdgeSummary, FragmentContent, NodeSummary};
 use crate::Id;
@@ -35,13 +36,27 @@ impl Reader {
     }
 
     /// Query a node by its ID
-    pub async fn node_by_id(&self, id: Id, timeout: Duration) -> Result<NodeSummary> {
+    pub async fn node_summary_by_id(&self, id: Id, timeout: Duration) -> Result<NodeSummary> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
         let query = NodeSummaryByIdQuery::new(id, timeout, result_tx);
 
         self.sender
             .send_async(Query::NodeSummaryById(query))
+            .await
+            .context("Failed to send query to reader queue")?;
+
+        // Await result - timeout is handled by the consumer
+        result_rx.await?
+    }
+
+    /// Query an edge by its ID
+    pub async fn edge_summary_by_id(&self, id: Id, timeout: Duration) -> Result<EdgeSummary> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let query = EdgeSummaryByIdQuery::new(id, timeout, result_tx);
+
+        self.sender
+            .send_async(Query::EdgeSummaryById(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -59,13 +74,7 @@ impl Reader {
     ) -> Result<EdgeSummary> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgeSummaryBySrcDstNameQuery::new(
-            source_id,
-            dest_id,
-            name,
-            timeout,
-            result_tx,
-        );
+        let query = EdgeSummaryBySrcDstNameQuery::new(source_id, dest_id, name, timeout, result_tx);
 
         self.sender
             .send_async(Query::EdgeSummaryBySrcDstName(query))
@@ -77,7 +86,11 @@ impl Reader {
     }
 
     /// Query a fragment by its ID
-    pub async fn fragment_by_id(&self, id: Id, timeout: Duration) -> Result<FragmentContent> {
+    pub async fn fragments_by_id(
+        &self,
+        id: Id,
+        timeout: Duration,
+    ) -> Result<Vec<(crate::TimestampMilli, FragmentContent)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
         let query = FragmentContentByIdQuery::new(id, timeout, result_tx);

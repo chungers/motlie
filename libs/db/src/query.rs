@@ -9,9 +9,17 @@ use crate::{Id, ReaderConfig, TimestampMilli};
 #[derive(Debug)]
 pub enum Query {
     NodeSummaryById(NodeSummaryByIdQuery),
+    EdgeSummaryById(EdgeSummaryByIdQuery),
     EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
     FragmentContentById(FragmentContentByIdQuery),
 }
+
+/// Type alias for querying node summaries by ID
+pub type NodeSummaryByIdQuery = ByIdQuery<NodeSummary>;
+/// Type alias for querying edge summaries by ID
+pub type EdgeSummaryByIdQuery = ByIdQuery<EdgeSummary>;
+/// Type alias for querying fragment content by ID of node or edge associated with it
+pub type FragmentContentByIdQuery = ByIdQuery<Vec<(TimestampMilli, FragmentContent)>>;
 
 /// Trait for queries that produce results with timeout handling
 #[async_trait::async_trait]
@@ -28,11 +36,13 @@ pub trait QueryWithResult: Send + Sync {
 
 /// Sealed trait module to prevent external implementations
 mod sealed {
-    use crate::schema::{FragmentContent, NodeSummary};
+    use crate::schema::{EdgeSummary, FragmentContent, NodeSummary};
+    use crate::TimestampMilli;
 
     pub trait ByIdQueryable {}
     impl ByIdQueryable for NodeSummary {}
-    impl ByIdQueryable for FragmentContent {}
+    impl ByIdQueryable for EdgeSummary {}
+    impl ByIdQueryable for Vec<(TimestampMilli, FragmentContent)> {}
 }
 
 /// Trait for types that can be queried by ID
@@ -60,7 +70,18 @@ impl ByIdQueryable for NodeSummary {
 }
 
 #[async_trait::async_trait]
-impl ByIdQueryable for FragmentContent {
+impl ByIdQueryable for EdgeSummary {
+    async fn fetch_by_id<P: Processor>(
+        _id: Id,
+        processor: &P,
+        query: &ByIdQuery<Self>,
+    ) -> Result<Self> {
+        processor.get_edge_summary_by_id(query).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ByIdQueryable for Vec<(TimestampMilli, FragmentContent)> {
     async fn fetch_by_id<P: Processor>(
         _id: Id,
         processor: &P,
@@ -88,11 +109,7 @@ pub struct ByIdQuery<T: ByIdQueryable> {
 
 impl<T: ByIdQueryable> ByIdQuery<T> {
     /// Create a new ByIdQuery
-    pub fn new(
-        id: Id,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<T>>,
-    ) -> Self {
+    pub fn new(id: Id, timeout: Duration, result_tx: oneshot::Sender<Result<T>>) -> Self {
         Self {
             id,
             ts_millis: TimestampMilli::now(),
@@ -113,10 +130,8 @@ impl<T: ByIdQueryable> QueryWithResult for ByIdQuery<T> {
     type ResultType = T;
 
     async fn result<P: Processor>(&self, processor: &P) -> Result<T> {
-        let result = tokio::time::timeout(
-            self.timeout,
-            T::fetch_by_id(self.id, processor, self)
-        ).await;
+        let result =
+            tokio::time::timeout(self.timeout, T::fetch_by_id(self.id, processor, self)).await;
 
         match result {
             Ok(r) => r,
@@ -128,9 +143,6 @@ impl<T: ByIdQueryable> QueryWithResult for ByIdQuery<T> {
         self.timeout
     }
 }
-
-/// Type alias for querying node summaries by ID
-pub type NodeSummaryByIdQuery = ByIdQuery<NodeSummary>;
 
 /// Query to find an edge by source ID, destination ID, and name
 #[derive(Debug)]
@@ -151,7 +163,7 @@ pub struct EdgeSummaryBySrcDstNameQuery {
     pub timeout: Duration,
 
     /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<EdgeSummary>>,
+    result_tx: oneshot::Sender<Result<(Id, EdgeSummary)>>,
 }
 
 impl EdgeSummaryBySrcDstNameQuery {
@@ -184,8 +196,9 @@ impl QueryWithResult for EdgeSummaryBySrcDstNameQuery {
     async fn result<P: Processor>(&self, processor: &P) -> Result<EdgeSummary> {
         let result = tokio::time::timeout(
             self.timeout,
-            processor.get_edge_summary_by_src_dst_name(self)
-        ).await;
+            processor.get_edge_summary_by_src_dst_name(self),
+        )
+        .await;
 
         match result {
             Ok(r) => r,
@@ -198,14 +211,14 @@ impl QueryWithResult for EdgeSummaryBySrcDstNameQuery {
     }
 }
 
-/// Type alias for querying fragment content by ID
-pub type FragmentContentByIdQuery = ByIdQuery<FragmentContent>;
-
 /// Trait for processing different types of queries
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
     /// Get a node summary by its ID
     async fn get_node_summary_by_id(&self, query: &ByIdQuery<NodeSummary>) -> Result<NodeSummary>;
+
+    /// Get an edge summary by its ID
+    async fn get_edge_summary_by_id(&self, query: &ByIdQuery<EdgeSummary>) -> Result<EdgeSummary>;
 
     /// Get an edge summary by source ID, destination ID, and name
     async fn get_edge_summary_by_src_dst_name(
@@ -213,11 +226,11 @@ pub trait Processor: Send + Sync {
         query: &EdgeSummaryBySrcDstNameQuery,
     ) -> Result<EdgeSummary>;
 
-    /// Get fragment content by its ID
+    /// Get all fragment content with timestamps for a given ID, sorted by timestamp
     async fn get_fragment_content_by_id(
         &self,
-        query: &ByIdQuery<FragmentContent>,
-    ) -> Result<FragmentContent>;
+        query: &ByIdQuery<Vec<(TimestampMilli, FragmentContent)>>,
+    ) -> Result<Vec<(TimestampMilli, FragmentContent)>>;
 }
 
 /// Generic consumer that processes queries using a Processor
@@ -265,6 +278,11 @@ impl<P: Processor> Consumer<P> {
                 let result = q.result(&self.processor).await;
                 q.send_result(result);
             }
+            Query::EdgeSummaryById(q) => {
+                log::debug!("Processing EdgeById: id={}", q.id);
+                let result = q.result(&self.processor).await;
+                q.send_result(result);
+            }
             Query::EdgeSummaryBySrcDstName(q) => {
                 log::debug!(
                     "Processing EdgeBySrcDstName: source={}, dest={}, name={}",
@@ -302,9 +320,20 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Processor for TestProcessor {
-        async fn get_node_summary_by_id(&self, query: &NodeSummaryByIdQuery) -> Result<NodeSummary> {
+        async fn get_node_summary_by_id(
+            &self,
+            query: &NodeSummaryByIdQuery,
+        ) -> Result<NodeSummary> {
             tokio::time::sleep(Duration::from_millis(10)).await;
             Ok(NodeSummary::new(format!("Node: {:?}", query.id)))
+        }
+
+        async fn get_edge_summary_by_id(
+            &self,
+            query: &EdgeSummaryByIdQuery,
+        ) -> Result<EdgeSummary> {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok(EdgeSummary::new(format!("Edge: {:?}", query.id)))
         }
 
         async fn get_edge_summary_by_src_dst_name(
@@ -318,9 +347,12 @@ mod tests {
         async fn get_fragment_content_by_id(
             &self,
             query: &FragmentContentByIdQuery,
-        ) -> Result<FragmentContent> {
+        ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            Ok(FragmentContent::new(format!("Fragment: {:?}", query.id)))
+            Ok(vec![(
+                query.ts_millis,
+                FragmentContent::new(format!("Fragment: {:?}", query.id)),
+            )])
         }
     }
 
@@ -345,7 +377,7 @@ mod tests {
         // Send a query
         let node_id = Id::new();
         let result = reader
-            .node_by_id(node_id, Duration::from_secs(5))
+            .node_summary_by_id(node_id, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -366,18 +398,37 @@ mod tests {
 
         #[async_trait::async_trait]
         impl Processor for SlowProcessor {
-            async fn get_node_summary_by_id(&self, _query: &NodeSummaryByIdQuery) -> Result<NodeSummary> {
+            async fn get_node_summary_by_id(
+                &self,
+                _query: &NodeSummaryByIdQuery,
+            ) -> Result<NodeSummary> {
                 // Sleep longer than the query timeout
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 Ok(NodeSummary::new("Should not get here".to_string()))
             }
 
-            async fn get_edge_summary_by_src_dst_name(&self, _query: &EdgeSummaryBySrcDstNameQuery) -> Result<EdgeSummary> {
+            async fn get_edge_summary_by_id(
+                &self,
+                _query: &EdgeSummaryByIdQuery,
+            ) -> Result<EdgeSummary> {
                 Ok(EdgeSummary::new("N/A".to_string()))
             }
 
-            async fn get_fragment_content_by_id(&self, _query: &FragmentContentByIdQuery) -> Result<FragmentContent> {
-                Ok(FragmentContent::new("N/A".to_string()))
+            async fn get_edge_summary_by_src_dst_name(
+                &self,
+                _query: &EdgeSummaryBySrcDstNameQuery,
+            ) -> Result<EdgeSummary> {
+                Ok(EdgeSummary::new("N/A".to_string()))
+            }
+
+            async fn get_fragment_content_by_id(
+                &self,
+                query: &FragmentContentByIdQuery,
+            ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
+                Ok(vec![(
+                    query.ts_millis,
+                    FragmentContent::new("N/A".to_string()),
+                )])
             }
         }
 
@@ -395,7 +446,9 @@ mod tests {
 
         // Send query with short timeout
         let node_id = Id::new();
-        let result = reader.node_by_id(node_id, Duration::from_millis(50)).await;
+        let result = reader
+            .node_summary_by_id(node_id, Duration::from_millis(50))
+            .await;
 
         // Should timeout because processor takes 200ms but timeout is 50ms
         assert!(result.is_err());

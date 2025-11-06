@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use rocksdb::{Options, TransactionDB, TransactionDBOptions, DB};
 
 use crate::schema::{self, EdgeSummary, FragmentContent, NodeSummary};
+use crate::TimestampMilli;
 use crate::{
     mutation::{Consumer, Processor},
     schema::ALL_COLUMN_FAMILIES,
@@ -413,6 +414,37 @@ impl crate::query::Processor for Graph {
         Ok(value.0)
     }
 
+    async fn get_edge_summary_by_id(
+        &self,
+        query: &crate::query::EdgeSummaryByIdQuery,
+    ) -> Result<EdgeSummary> {
+        let id = query.id;
+        let key = schema::EdgeCfKey(id);
+        let key_bytes = schema::Edges::key_to_bytes(&key)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize key: {}", e))?;
+
+        // Handle both readonly and readwrite modes
+        let value_bytes = if let Ok(db) = self.storage.db() {
+            let cf = db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
+            })?;
+            db.get_cf(cf, key_bytes)?
+        } else {
+            let txn_db = self.storage.transaction_db()?;
+            let cf = txn_db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
+            })?;
+            txn_db.get_cf(cf, key_bytes)?
+        };
+
+        let value_bytes = value_bytes.ok_or_else(|| anyhow::anyhow!("Edge not found: {}", id))?;
+
+        let value: schema::EdgeCfValue = schema::Edges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+        Ok(value.0)
+    }
+
     async fn get_edge_summary_by_src_dst_name(
         &self,
         query: &crate::query::EdgeSummaryBySrcDstNameQuery,
@@ -470,20 +502,37 @@ impl crate::query::Processor for Graph {
     async fn get_fragment_content_by_id(
         &self,
         query: &crate::query::FragmentContentByIdQuery,
-    ) -> Result<FragmentContent> {
+    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
         let id = query.id;
 
-        // Fragment key includes timestamp from the query
-        let key = schema::FragmentCfKey(id, query.ts_millis);
-        let key_bytes = schema::Fragments::key_to_bytes(&key)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize key: {}", e))?;
+        // Scan the fragments column family for all fragments with this ID
+        // Keys are (id, timestamp) and RocksDB stores them in sorted order,
+        // so fragments will naturally be in chronological order
+
+        let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
 
         // Handle both readonly and readwrite modes
-        let value_bytes = if let Ok(db) = self.storage.db() {
+        if let Ok(db) = self.storage.db() {
             let cf = db.cf_handle(schema::Fragments::CF_NAME).ok_or_else(|| {
                 anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
             })?;
-            db.get_cf(cf, key_bytes)?
+
+            let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key_bytes, value_bytes) = item?;
+                let key: schema::FragmentCfKey = schema::Fragments::key_from_bytes(&key_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+                if key.0 == id {
+                    let value: schema::FragmentCfValue =
+                        schema::Fragments::value_from_bytes(&value_bytes)
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+                    fragments.push((key.1, value.0));
+                } else if key.0 > id {
+                    // Keys are sorted, so once we pass the target ID, we can stop
+                    break;
+                }
+            }
         } else {
             let txn_db = self.storage.transaction_db()?;
             let cf = txn_db
@@ -491,17 +540,26 @@ impl crate::query::Processor for Graph {
                 .ok_or_else(|| {
                     anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
                 })?;
-            txn_db.get_cf(cf, key_bytes)?
-        };
 
-        let value_bytes = value_bytes.ok_or_else(|| {
-            anyhow::anyhow!("Fragment not found: id={}, ts={:?}", id, query.ts_millis)
-        })?;
+            let iter = txn_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key_bytes, value_bytes) = item?;
+                let key: schema::FragmentCfKey = schema::Fragments::key_from_bytes(&key_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-        let value: schema::FragmentCfValue = schema::Fragments::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+                if key.0 == id {
+                    let value: schema::FragmentCfValue =
+                        schema::Fragments::value_from_bytes(&value_bytes)
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+                    fragments.push((key.1, value.0));
+                } else if key.0 > id {
+                    // Keys are sorted, so once we pass the target ID, we can stop
+                    break;
+                }
+            }
+        }
 
-        Ok(value.0)
+        Ok(fragments)
     }
 }
 
