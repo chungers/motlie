@@ -464,7 +464,7 @@ impl crate::query::Processor for Graph {
             schema::ForwardEdges::value_from_bytes(&value_bytes)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-        Ok(value.0)
+        Ok(value.1)
     }
 
     async fn get_fragment_content_by_id(
