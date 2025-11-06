@@ -308,10 +308,23 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<String> {
     struct NodeCfValue(NodeSummary);
 
     #[derive(serde::Deserialize)]
-    struct NodeSummary(String);
+    struct NodeSummary(DataUrl);
+
+    #[derive(serde::Deserialize)]
+    struct DataUrl(String);
 
     let value: NodeCfValue = rmp_serde::from_slice(bytes).context("Failed to deserialize node value")?;
-    Ok(value.0.0)
+
+    // Decode the data URL to get the actual content
+    let data_url_str = &value.0.0.0;
+    let parsed = data_url::DataUrl::process(data_url_str)
+        .context("Failed to parse data URL")?;
+    let (body, _) = parsed.decode_to_vec()
+        .context("Failed to decode data URL")?;
+    let content = String::from_utf8(body)
+        .context("Failed to convert bytes to UTF-8")?;
+
+    Ok(content)
 }
 
 fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
@@ -319,8 +332,21 @@ fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
     struct FragmentCfValue(FragmentContent);
 
     #[derive(serde::Deserialize)]
-    struct FragmentContent(String);
+    struct FragmentContent(DataUrl);
+
+    #[derive(serde::Deserialize)]
+    struct DataUrl(String);
 
     let value: FragmentCfValue = rmp_serde::from_slice(bytes).context("Failed to deserialize fragment value")?;
-    Ok(value.0.0)
+
+    // Decode the data URL to get the actual content
+    let data_url_str = &value.0.0.0;
+    let parsed = data_url::DataUrl::process(data_url_str)
+        .context("Failed to parse data URL")?;
+    let (body, _) = parsed.decode_to_vec()
+        .context("Failed to decode data URL")?;
+    let content = String::from_utf8(body)
+        .context("Failed to convert bytes to UTF-8")?;
+
+    Ok(content)
 }

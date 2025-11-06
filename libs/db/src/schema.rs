@@ -1,4 +1,5 @@
 use crate::graph::{ColumnFamilyRecord, PutCf, StorageOperation};
+use crate::DataUrl;
 use crate::TimestampMilli;
 use crate::{AddEdge, AddFragment, AddNode, Id};
 use serde::{Deserialize, Serialize};
@@ -50,8 +51,22 @@ pub(crate) struct NodeCfKey(pub(crate) Id);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeCfValue(pub(crate) NodeSummary);
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct NodeSummary(pub(crate) String);
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct NodeSummary(pub(crate) DataUrl);
+
+impl NodeSummary {
+    pub(crate) fn new(content: impl AsRef<str>) -> Self {
+        NodeSummary(DataUrl::from_markdown(content.as_ref()))
+    }
+
+    pub(crate) fn content(&self) -> Result<String, crate::DataUrlError> {
+        self.0.decode_string()
+    }
+
+    pub(crate) fn as_data_url(&self) -> &DataUrl {
+        &self.0
+    }
+}
 
 impl ColumnFamilyRecord for Nodes {
     const CF_NAME: &'static str = "nodes";
@@ -61,11 +76,11 @@ impl ColumnFamilyRecord for Nodes {
 
     fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
-        let summary = format!(
-            "[comment]:\\#<!-- id={} -->]\n# {}\n# Summary\n",
+        let markdown = format!(
+            "<!-- id={} -->]\n# {}\n# Summary\n",
             args.id, args.name
         );
-        let value = NodeCfValue(NodeSummary(summary));
+        let value = NodeCfValue(NodeSummary::new(markdown));
         (key, value)
     }
 }
@@ -78,8 +93,22 @@ pub(crate) struct EdgeCfKey(pub(crate) Id);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EdgeCfValue(pub(crate) EdgeSummary);
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeSummary(pub(crate) String);
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct EdgeSummary(pub(crate) DataUrl);
+
+impl EdgeSummary {
+    pub(crate) fn new(content: impl AsRef<str>) -> Self {
+        EdgeSummary(DataUrl::from_markdown(content.as_ref()))
+    }
+
+    pub(crate) fn content(&self) -> Result<String, crate::DataUrlError> {
+        self.0.decode_string()
+    }
+
+    pub(crate) fn as_data_url(&self) -> &DataUrl {
+        &self.0
+    }
+}
 
 impl ColumnFamilyRecord for Edges {
     const CF_NAME: &'static str = "edges";
@@ -89,11 +118,11 @@ impl ColumnFamilyRecord for Edges {
 
     fn record_from(args: &AddEdge) -> (EdgeCfKey, EdgeCfValue) {
         let key = EdgeCfKey(args.id);
-        let summary = format!(
-            "[comment]:\\#<!-- id={} -->]\n# {}\n# Summary\n",
+        let markdown = format!(
+            "<!-- id={} -->]\n# {}\n# Summary\n",
             args.id, args.name
         );
-        let value = EdgeCfValue(EdgeSummary(summary));
+        let value = EdgeCfValue(EdgeSummary::new(markdown));
         (key, value)
     }
 }
@@ -106,8 +135,23 @@ pub(crate) struct FragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FragmentCfValue(pub(crate) FragmentContent);
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct FragmentContent(pub(crate) String);
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct FragmentContent(pub(crate) DataUrl);
+
+impl FragmentContent {
+    pub(crate) fn new(content: impl AsRef<str>) -> Self {
+        // Treat all fragment content as markdown per user requirement
+        FragmentContent(DataUrl::from_markdown(content.as_ref()))
+    }
+
+    pub(crate) fn content(&self) -> Result<String, crate::DataUrlError> {
+        self.0.decode_string()
+    }
+
+    pub(crate) fn as_data_url(&self) -> &DataUrl {
+        &self.0
+    }
+}
 
 impl ColumnFamilyRecord for Fragments {
     const CF_NAME: &'static str = "fragments";
@@ -117,8 +161,7 @@ impl ColumnFamilyRecord for Fragments {
 
     fn record_from(args: &AddFragment) -> (FragmentCfKey, FragmentCfValue) {
         let key = FragmentCfKey(args.id, TimestampMilli(args.ts_millis));
-        let content = FragmentContent(args.content.clone());
-        let value = FragmentCfValue(content);
+        let value = FragmentCfValue(FragmentContent::new(&args.content));
         (key, value)
     }
 }
@@ -156,11 +199,11 @@ impl ColumnFamilyRecord for ForwardEdges {
             EdgeDestinationId(args.target_node_id),
             EdgeName(args.name.clone()),
         );
-        let summary = format!(
+        let markdown = format!(
             "[comment]:\\#<!-- id={} -->]\n# {}\n# Summary\n",
             args.id, args.name
         );
-        let value = ForwardEdgeCfValue(EdgeSummary(summary));
+        let value = ForwardEdgeCfValue(EdgeSummary::new(markdown));
         (key, value)
     }
 }
@@ -189,11 +232,11 @@ impl ColumnFamilyRecord for ReverseEdges {
             EdgeSourceId(args.target_node_id),
             EdgeName(args.name.clone()),
         );
-        let summary = format!(
+        let markdown = format!(
             "[comment]:\\#<!-- id={} -->]\n# {}\n# Summary\n",
             args.id, args.name
         );
-        let value = ReverseEdgeCfValue(EdgeSummary(summary));
+        let value = ReverseEdgeCfValue(EdgeSummary::new(markdown));
         (key, value)
     }
 }

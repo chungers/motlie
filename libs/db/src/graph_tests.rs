@@ -1150,7 +1150,8 @@ mod tests {
         // Verify we can deserialize the value
         let value_bytes = result.unwrap();
         let value = Nodes::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
-        assert!(value.0.0.contains("test_node"), "Node value should contain the node name");
+        let content = value.0.content().expect("Failed to decode DataUrl");
+        assert!(content.contains("test_node"), "Node value should contain the node name");
     }
 
     #[tokio::test]
@@ -1202,7 +1203,8 @@ mod tests {
 
             let value_bytes = result.unwrap();
             let value = Edges::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
-            assert!(value.0.0.contains("test_edge"), "Edge value should contain the edge name");
+            let content = value.0.content().expect("Failed to decode DataUrl");
+            assert!(content.contains("test_edge"), "Edge value should contain the edge name");
         }
 
         // Check ForwardEdges column family
@@ -1275,7 +1277,8 @@ mod tests {
         // Verify we can deserialize the value
         let value_bytes = result.unwrap();
         let value = Fragments::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
-        assert_eq!(value.0.0, "This is test fragment content", "Fragment content should match");
+        let content = value.0.content().expect("Failed to decode DataUrl");
+        assert_eq!(content, "This is test fragment content", "Fragment content should match");
     }
 
     #[tokio::test]
@@ -1339,7 +1342,8 @@ mod tests {
             let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
             assert!(result.is_some(), "Node 1 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
-            assert!(value.0.0.contains("node_one"));
+            let content = value.0.content().expect("Failed to decode DataUrl");
+            assert!(content.contains("node_one"));
         }
 
         // Query node 2
@@ -1349,7 +1353,8 @@ mod tests {
             let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
             assert!(result.is_some(), "Node 2 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
-            assert!(value.0.0.contains("node_two"));
+            let content = value.0.content().expect("Failed to decode DataUrl");
+            assert!(content.contains("node_two"));
         }
 
         // Query node 3
@@ -1359,7 +1364,8 @@ mod tests {
             let result = db.get_cf(cf_handle, &key_bytes).expect("Failed to query database");
             assert!(result.is_some(), "Node 3 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
-            assert!(value.0.0.contains("node_three"));
+            let content = value.0.content().expect("Failed to decode DataUrl");
+            assert!(content.contains("node_three"));
         }
     }
 }
