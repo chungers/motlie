@@ -415,10 +415,10 @@ impl crate::query::Processor for Graph {
         Ok((value.0, value.1))
     }
 
-    async fn get_edge_summary_by_id(
+    async fn get_edge_by_id(
         &self,
-        query: &crate::query::EdgeSummaryByIdQuery,
-    ) -> Result<EdgeSummary> {
+        query: &crate::query::EdgeByIdQuery,
+    ) -> Result<(Id, Id, schema::EdgeName, EdgeSummary)> {
         let id = query.id;
         let key = schema::EdgeCfKey(id);
         let key_bytes = schema::Edges::key_to_bytes(&key)
@@ -443,7 +443,9 @@ impl crate::query::Processor for Graph {
         let value: schema::EdgeCfValue = schema::Edges::value_from_bytes(&value_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-        Ok(value.0)
+        // EdgeCfValue is now (SrcId, EdgeName, DstId, EdgeSummary)
+        // Return as: (source_id, dest_id, edge_name, summary)
+        Ok((value.0, value.2, value.1, value.3))
     }
 
     async fn get_edge_summary_by_src_dst_name(
@@ -525,7 +527,8 @@ impl crate::query::Processor for Graph {
         let edge_value: schema::EdgeCfValue = schema::Edges::value_from_bytes(&edge_value_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
 
-        Ok((edge_id, edge_value.0))
+        // EdgeCfValue is now (src_id, dst_id, name, summary), so .3 is the summary
+        Ok((edge_id, edge_value.3))
     }
 
     async fn get_fragment_content_by_id(

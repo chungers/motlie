@@ -9,7 +9,7 @@ use crate::{Id, ReaderConfig, TimestampMilli};
 #[derive(Debug)]
 pub enum Query {
     NodeById(NodeByIdQuery),
-    EdgeSummaryById(EdgeSummaryByIdQuery),
+    EdgeById(EdgeByIdQuery),
     EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
     FragmentContentById(FragmentContentByIdQuery),
     EdgesFromNodeById(EdgesFromNodeByIdQuery),
@@ -18,8 +18,8 @@ pub enum Query {
 
 /// Type alias for querying node by ID (returns name and summary)
 pub type NodeByIdQuery = ByIdQuery<(NodeName, NodeSummary)>;
-/// Type alias for querying edge summaries by ID
-pub type EdgeSummaryByIdQuery = ByIdQuery<EdgeSummary>;
+/// Type alias for querying edge by ID (returns topology and summary)
+pub type EdgeByIdQuery = ByIdQuery<(Id, Id, EdgeName, EdgeSummary)>;
 /// Type alias for querying fragment content by ID of node or edge associated with it
 pub type FragmentContentByIdQuery = ByIdQuery<Vec<(TimestampMilli, FragmentContent)>>;
 // Note: EdgesFromNodeByIdQuery and EdgesToNodeByIdQuery can't use ByIdQuery<T>
@@ -46,7 +46,7 @@ mod sealed {
 
     pub trait ByIdQueryable {}
     impl ByIdQueryable for (NodeName, NodeSummary) {}
-    impl ByIdQueryable for EdgeSummary {}
+    impl ByIdQueryable for (Id, Id, EdgeName, EdgeSummary) {}
     impl ByIdQueryable for Vec<(TimestampMilli, FragmentContent)> {}
     impl ByIdQueryable for Vec<(Id, EdgeName, Id)> {} // Forward and reverse edges use same tuple type
 }
@@ -76,13 +76,13 @@ impl ByIdQueryable for (NodeName, NodeSummary) {
 }
 
 #[async_trait::async_trait]
-impl ByIdQueryable for EdgeSummary {
+impl ByIdQueryable for (Id, Id, EdgeName, EdgeSummary) {
     async fn fetch_by_id<P: Processor>(
         _id: Id,
         processor: &P,
         query: &ByIdQuery<Self>,
     ) -> Result<Self> {
-        processor.get_edge_summary_by_id(query).await
+        processor.get_edge_by_id(query).await
     }
 }
 
@@ -343,8 +343,8 @@ pub trait Processor: Send + Sync {
     /// Get a node by its ID (returns name and summary)
     async fn get_node_by_id(&self, query: &ByIdQuery<(NodeName, NodeSummary)>) -> Result<(NodeName, NodeSummary)>;
 
-    /// Get an edge summary by its ID
-    async fn get_edge_summary_by_id(&self, query: &ByIdQuery<EdgeSummary>) -> Result<EdgeSummary>;
+    /// Get an edge by its ID (returns topology and summary)
+    async fn get_edge_by_id(&self, query: &ByIdQuery<(Id, Id, EdgeName, EdgeSummary)>) -> Result<(Id, Id, EdgeName, EdgeSummary)>;
 
     /// Get an edge summary by source ID, destination ID, and name
     /// Returns (edge_id, edge_summary)
@@ -419,7 +419,7 @@ impl<P: Processor> Consumer<P> {
                 let result = q.result(&self.processor).await;
                 q.send_result(result);
             }
-            Query::EdgeSummaryById(q) => {
+            Query::EdgeById(q) => {
                 log::debug!("Processing EdgeById: id={}", q.id);
                 let result = q.result(&self.processor).await;
                 q.send_result(result);
@@ -482,12 +482,17 @@ mod tests {
             ))
         }
 
-        async fn get_edge_summary_by_id(
+        async fn get_edge_by_id(
             &self,
-            query: &EdgeSummaryByIdQuery,
-        ) -> Result<EdgeSummary> {
+            query: &EdgeByIdQuery,
+        ) -> Result<(Id, Id, EdgeName, EdgeSummary)> {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            Ok(EdgeSummary::new(format!("Edge: {:?}", query.id)))
+            Ok((
+                query.id,
+                Id::new(),
+                EdgeName("test_edge".to_string()),
+                EdgeSummary::new(format!("Edge: {:?}", query.id)),
+            ))
         }
 
         async fn get_edge_summary_by_src_dst_name(
@@ -592,11 +597,16 @@ mod tests {
                 ))
             }
 
-            async fn get_edge_summary_by_id(
+            async fn get_edge_by_id(
                 &self,
-                _query: &EdgeSummaryByIdQuery,
-            ) -> Result<EdgeSummary> {
-                Ok(EdgeSummary::new("N/A".to_string()))
+                _query: &EdgeByIdQuery,
+            ) -> Result<(Id, Id, EdgeName, EdgeSummary)> {
+                Ok((
+                    Id::new(),
+                    Id::new(),
+                    EdgeName("N/A".to_string()),
+                    EdgeSummary::new("N/A".to_string()),
+                ))
             }
 
             async fn get_edge_summary_by_src_dst_name(

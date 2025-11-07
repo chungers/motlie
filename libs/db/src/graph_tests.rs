@@ -1234,7 +1234,8 @@ mod tests {
 
             let value_bytes = result.unwrap();
             let value = Edges::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
-            let content = value.0.content().expect("Failed to decode DataUrl");
+            // EdgeCfValue is now (src_id, dst_id, name, summary), so .3 is the summary
+            let content = value.3.content().expect("Failed to decode DataUrl");
             assert!(
                 content.contains("test_edge"),
                 "Edge value should contain the edge name"

@@ -1,4 +1,5 @@
 use crate::graph::{ColumnFamilyRecord, PutCf, StorageOperation};
+use crate::query::{DstId, SrcId};
 use crate::DataUrl;
 use crate::TimestampMilli;
 use crate::{AddEdge, AddFragment, AddNode, Id};
@@ -90,7 +91,12 @@ pub(crate) struct Edges;
 pub(crate) struct EdgeCfKey(pub(crate) Id);
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeCfValue(pub(crate) EdgeSummary);
+pub(crate) struct EdgeCfValue(
+    pub(crate) SrcId,       // source_id
+    pub(crate) EdgeName,    // edge name
+    pub(crate) DstId,       // dest_id
+    pub(crate) EdgeSummary, // edge summary
+);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EdgeSummary(pub(crate) DataUrl);
@@ -118,7 +124,12 @@ impl ColumnFamilyRecord for Edges {
     fn record_from(args: &AddEdge) -> (EdgeCfKey, EdgeCfValue) {
         let key = EdgeCfKey(args.id);
         let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name);
-        let value = EdgeCfValue(EdgeSummary::new(markdown));
+        let value = EdgeCfValue(
+            args.source_node_id,
+            EdgeName(args.name.clone()),
+            args.target_node_id,
+            EdgeSummary::new(markdown),
+        );
         (key, value)
     }
 }

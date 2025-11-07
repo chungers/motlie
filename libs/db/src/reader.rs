@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 
 use crate::query::{
-    DstId, EdgeSummaryByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
+    DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
     EdgesToNodeByIdQuery, FragmentContentByIdQuery, NodeByIdQuery, Query, SrcId,
 };
 use crate::schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
@@ -50,13 +50,18 @@ impl Reader {
         result_rx.await?
     }
 
-    /// Query an edge by its ID
-    pub async fn edge_summary_by_id(&self, id: Id, timeout: Duration) -> Result<EdgeSummary> {
+    /// Query an edge by its ID (returns topology and summary)
+    /// Returns (source_id, dest_id, edge_name, summary)
+    pub async fn edge_by_id(
+        &self,
+        id: Id,
+        timeout: Duration,
+    ) -> Result<(SrcId, DstId, EdgeName, EdgeSummary)> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query = EdgeSummaryByIdQuery::new(id, timeout, result_tx);
+        let query = EdgeByIdQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Query::EdgeSummaryById(query))
+            .send_async(Query::EdgeById(query))
             .await
             .context("Failed to send query to reader queue")?;
 
