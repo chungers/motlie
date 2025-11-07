@@ -54,8 +54,6 @@ impl Processor for FullTextProcessor {
         // TODO: Update document frequencies and term frequencies
         // TODO: Update BM25 index structures
 
-        // Simulate some async indexing work
-        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
         Ok(())
     }
 
@@ -74,8 +72,6 @@ impl Processor for FullTextProcessor {
         // TODO: Update graph-aware search features
         // TODO: Update BM25 scores considering edge relationships
 
-        // Simulate some async indexing work
-        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
         Ok(())
     }
 
@@ -94,8 +90,6 @@ impl Processor for FullTextProcessor {
         // TODO: Update term frequencies and document frequencies
         // TODO: Calculate and store BM25 scores
 
-        // Simulate some async indexing work (fragments are more text-heavy)
-        tokio::time::sleep(tokio::time::Duration::from_millis(3)).await;
         Ok(())
     }
 
@@ -114,8 +108,6 @@ impl Processor for FullTextProcessor {
         // TODO: Recalculate BM25 scores for affected terms
         // TODO: Cleanup orphaned index entries
 
-        // Simulate some async cleanup work
-        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         Ok(())
     }
 }

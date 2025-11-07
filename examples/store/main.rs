@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use motlie_db::{
-    create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdge,
+    create_mutation_writer, spawn_batched_graph_consumer_with_next, spawn_fulltext_consumer, AddEdge,
     AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
 };
 use rocksdb::DB;
@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io;
 use std::path::Path;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 // Helper type for deserialization
@@ -55,6 +56,8 @@ async fn main() -> Result<()> {
 }
 
 async fn store_mode_main(db_path: &str) -> Result<()> {
+    let total_start = Instant::now();
+
     println!("Motlie CSV Processor - Demonstrating Graph → FullText Chaining");
     println!("===================================================================");
     println!("Mutations will flow: Writer → Graph → FullText");
@@ -76,30 +79,42 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
     // Create the FullText consumer (end of chain)
     println!("Setting up consumer chain:");
     println!("  1. Creating FullText consumer (end of chain)");
+    let setup_start = Instant::now();
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
     let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone());
 
-    // Create the Graph consumer that forwards to FullText
-    println!("  2. Creating Graph consumer (forwards to FullText)");
+    // Create the Graph consumer that forwards to FullText with batching
+    println!("  2. Creating Batched Graph consumer (forwards to FullText)");
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
+    let batch_size = 100; // Process 100 mutations per transaction
     let graph_handle =
-        spawn_graph_consumer_with_next(graph_receiver, config, Path::new(db_path), fulltext_sender);
+        spawn_batched_graph_consumer_with_next(graph_receiver, config, Path::new(db_path), batch_size, fulltext_sender);
 
+    let setup_duration = setup_start.elapsed();
     println!("  3. Consumer chain ready: Writer → Graph → FullText");
+    println!("     ⏱️  Setup time: {:.2}ms", setup_duration.as_secs_f64() * 1000.0);
     println!();
 
     // Keep track of node name to ID mapping for edges
     let mut node_ids: HashMap<String, Id> = HashMap::new();
 
     // Process CSV from stdin
+    let csv_start = Instant::now();
     let mut reader = ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
         .from_reader(io::stdin());
 
     let mut line_count = 0;
+    let mut node_count = 0;
+    let mut edge_count = 0;
+
+    // Timing instrumentation
+    let mut total_csv_parse_time = std::time::Duration::ZERO;
+    let mut total_writer_send_time = std::time::Duration::ZERO;
 
     for result in reader.records() {
+        let record_start = Instant::now();
         let record = result.context("Failed to read CSV record")?;
         line_count += 1;
 
@@ -136,6 +151,9 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     content: fragment_text.to_string(),
                 };
 
+                // Time the writer sends
+                let send_start = Instant::now();
+
                 // Send to Graph consumer (which will forward to FullText)
                 writer
                     .add_node(node_args)
@@ -146,11 +164,17 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     .await
                     .context("Failed to send fragment to consumer chain")?;
 
-                println!(
-                    "Sent node '{}' with fragment ({} chars) to chain",
-                    node_name,
-                    fragment_text.len()
-                );
+                total_writer_send_time += send_start.elapsed();
+                total_csv_parse_time += record_start.elapsed();
+
+                node_count += 1;
+                if line_count <= 10 || line_count % 1000 == 0 {
+                    println!(
+                        "Sent node '{}' with fragment ({} chars) to chain",
+                        node_name,
+                        fragment_text.len()
+                    );
+                }
             }
             4 => {
                 // source,target,edge_name,edge_fragment - create edge with fragment
@@ -197,6 +221,9 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     content: edge_fragment.to_string(),
                 };
 
+                // Time the writer sends
+                let send_start = Instant::now();
+
                 // Send to Graph consumer (which will forward to FullText)
                 writer
                     .add_edge(edge_args)
@@ -207,13 +234,19 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     .await
                     .context("Failed to send edge fragment to consumer chain")?;
 
-                println!(
-                    "Sent edge '{}' -> '{}' (name: '{}', fragment: {} chars) to chain",
-                    source_name,
-                    target_name,
-                    edge_name,
-                    edge_fragment.len()
-                );
+                total_writer_send_time += send_start.elapsed();
+                total_csv_parse_time += record_start.elapsed();
+
+                edge_count += 1;
+                if line_count <= 10 || line_count % 1000 == 0 {
+                    println!(
+                        "Sent edge '{}' -> '{}' (name: '{}', fragment: {} chars) to chain",
+                        source_name,
+                        target_name,
+                        edge_name,
+                        edge_fragment.len()
+                    );
+                }
             }
             _ => {
                 println!(
@@ -226,11 +259,24 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
         }
     }
 
+    let csv_duration = csv_start.elapsed();
+
     println!("\nProcessed {} lines from stdin", line_count);
-    println!("Created {} unique nodes", node_ids.len());
-    println!("Shutting down consumer chain...");
+    println!("  Nodes: {}", node_count);
+    println!("  Edges: {}", edge_count);
+    println!("  Unique node names: {}", node_ids.len());
+    println!("  ⏱️  CSV processing time: {:.2}ms", csv_duration.as_secs_f64() * 1000.0);
+    println!("\n⏱️  Detailed Timing Breakdown:");
+    println!("  CSV Parsing:        {:.2}ms ({:.1}%)",
+             total_csv_parse_time.as_secs_f64() * 1000.0,
+             (total_csv_parse_time.as_secs_f64() / csv_duration.as_secs_f64()) * 100.0);
+    println!("  Writer Send Time:   {:.2}ms ({:.1}%)",
+             total_writer_send_time.as_secs_f64() * 1000.0,
+             (total_writer_send_time.as_secs_f64() / csv_duration.as_secs_f64()) * 100.0);
+    println!("\nShutting down consumer chain...");
 
     // Close writer to signal shutdown (this will cascade through the chain)
+    let shutdown_start = Instant::now();
     drop(writer);
 
     // Wait for Graph consumer to finish (which will close FullText's channel)
@@ -249,13 +295,75 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
         .context("FullText consumer failed")?;
     println!("  4. FullText consumer finished");
 
-    println!("\nAll consumers shut down successfully");
-    println!("Check the logs above - you should see [Graph] messages before [FullText] messages");
+    let shutdown_duration = shutdown_start.elapsed();
+    let total_duration = total_start.elapsed();
+
+    println!("\n✅ All consumers shut down successfully");
+    println!("   ⏱️  Shutdown time: {:.2}ms", shutdown_duration.as_secs_f64() * 1000.0);
+
+    // Get database size
+    use std::fs;
+    let db_size = get_directory_size(Path::new(db_path))?;
+
+    println!("\n📊 Performance Summary:");
+    println!("   Setup:              {:.2}ms", setup_duration.as_secs_f64() * 1000.0);
+    println!("   CSV Processing:     {:.2}ms", csv_duration.as_secs_f64() * 1000.0);
+    println!("   Shutdown:           {:.2}ms", shutdown_duration.as_secs_f64() * 1000.0);
+    println!("   ─────────────────────────────");
+    println!("   Total:              {:.2}ms ({:.2}s)",
+             total_duration.as_secs_f64() * 1000.0,
+             total_duration.as_secs_f64());
+
+    println!("\n📈 Throughput:");
+    println!("   Items stored:       {} ({} nodes + {} edges)",
+             node_count + edge_count, node_count, edge_count);
+    let items_per_sec = (node_count + edge_count) as f64 / total_duration.as_secs_f64();
+    println!("   Rate:               {:.0} items/sec", items_per_sec);
+
+    println!("\n💾 Database Size:");
+    println!("   Total:              {}", format_bytes(db_size));
+    println!("   Per item:           {}", format_bytes(db_size / (node_count + edge_count) as u64));
 
     Ok(())
 }
 
+fn get_directory_size(path: &Path) -> Result<u64> {
+    let mut total_size = 0u64;
+
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_file() {
+                total_size += metadata.len();
+            } else if metadata.is_dir() {
+                total_size += get_directory_size(&entry.path())?;
+            }
+        }
+    }
+
+    Ok(total_size)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}
+
 fn verify_mode_main(db_path: &str) -> Result<()> {
+    let total_start = Instant::now();
+
     println!("Motlie Store Verifier");
     println!("====================");
     println!();
@@ -278,16 +386,21 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
 
     // Parse CSV from stdin
     println!("📄 Parsing CSV from stdin...");
+    let parse_start = Instant::now();
     let expected_data = parse_csv_from_stdin()?;
+    let parse_duration = parse_start.elapsed();
+
     println!("   Nodes: {}", expected_data.nodes.len());
     println!("   Edges: {}", expected_data.edges.len());
     println!(
         "   Total fragments: {}",
         expected_data.node_fragments.len() + expected_data.edge_fragments.len()
     );
+    println!("   ⏱️  Parse time: {:.2}ms", parse_duration.as_secs_f64() * 1000.0);
     println!();
 
     // Open database in read-only mode
+    let db_open_start = Instant::now();
     let column_families = vec![
         "nodes",
         "edges",
@@ -302,25 +415,68 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
         false,
     )
     .context("Failed to open database")?;
+    let db_open_duration = db_open_start.elapsed();
 
-    println!("✓ Database opened successfully\n");
+    println!("✓ Database opened successfully");
+    println!("   ⏱️  DB open time: {:.2}ms\n", db_open_duration.as_secs_f64() * 1000.0);
 
     // Verify data
     let mut all_ok = true;
 
     println!("🔍 Verifying Nodes...");
-    if !verify_nodes(&db, &expected_data)? {
+    let verify_nodes_start = Instant::now();
+    let nodes_ok = verify_nodes(&db, &expected_data)?;
+    let verify_nodes_duration = verify_nodes_start.elapsed();
+    println!("   ⏱️  Verification time: {:.2}ms", verify_nodes_duration.as_secs_f64() * 1000.0);
+    if !nodes_ok {
         all_ok = false;
     }
 
     println!("\n🔍 Verifying Edges...");
-    if !verify_edges(&db, &expected_data)? {
+    let verify_edges_start = Instant::now();
+    let edges_ok = verify_edges(&db, &expected_data)?;
+    let verify_edges_duration = verify_edges_start.elapsed();
+    println!("   ⏱️  Verification time: {:.2}ms", verify_edges_duration.as_secs_f64() * 1000.0);
+    if !edges_ok {
         all_ok = false;
     }
 
     println!("\n🔍 Verifying Fragments...");
-    if !verify_fragments(&db, &expected_data)? {
+    let verify_fragments_start = Instant::now();
+    let fragments_ok = verify_fragments(&db, &expected_data)?;
+    let verify_fragments_duration = verify_fragments_start.elapsed();
+    println!("   ⏱️  Verification time: {:.2}ms", verify_fragments_duration.as_secs_f64() * 1000.0);
+    if !fragments_ok {
         all_ok = false;
+    }
+
+    let total_duration = total_start.elapsed();
+
+    println!();
+    println!("📊 Performance Summary:");
+    println!("   CSV Parse:          {:.2}ms", parse_duration.as_secs_f64() * 1000.0);
+    println!("   DB Open:            {:.2}ms", db_open_duration.as_secs_f64() * 1000.0);
+    println!("   Verify Nodes:       {:.2}ms", verify_nodes_duration.as_secs_f64() * 1000.0);
+    println!("   Verify Edges:       {:.2}ms", verify_edges_duration.as_secs_f64() * 1000.0);
+    println!("   Verify Fragments:   {:.2}ms", verify_fragments_duration.as_secs_f64() * 1000.0);
+    println!("   ─────────────────────────────");
+    println!("   Total:              {:.2}ms ({:.2}s)",
+             total_duration.as_secs_f64() * 1000.0,
+             total_duration.as_secs_f64());
+
+    // Calculate throughput
+    let total_items = expected_data.nodes.len() + expected_data.edges.len();
+    let items_per_sec = total_items as f64 / total_duration.as_secs_f64();
+    println!("\n📈 Throughput:");
+    println!("   Items verified:     {}", total_items);
+    println!("   Rate:               {:.0} items/sec", items_per_sec);
+
+    // Get database size
+    let db_size = get_directory_size(db_path_obj)?;
+    println!("\n💾 Database Size:");
+    println!("   Total:              {}", format_bytes(db_size));
+    if total_items > 0 {
+        println!("   Per item:           {}", format_bytes(db_size / total_items as u64));
     }
 
     println!();
@@ -628,11 +784,13 @@ fn verify_fragments(db: &DB, expected: &ExpectedData) -> Result<bool> {
 // Deserialization helpers
 
 fn deserialize_node_id(bytes: &[u8]) -> Result<IdBytes> {
-    #[derive(serde::Deserialize)]
-    struct NodeCfKey(IdBytes);
-
-    let key: NodeCfKey = rmp_serde::from_slice(bytes).context("Failed to deserialize node key")?;
-    Ok(key.0)
+    // Keys are now stored as raw 16-byte arrays, not MessagePack
+    if bytes.len() != 16 {
+        anyhow::bail!("Invalid node ID length: expected 16, got {}", bytes.len());
+    }
+    let mut id_bytes = [0u8; 16];
+    id_bytes.copy_from_slice(bytes);
+    Ok(id_bytes)
 }
 
 fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
@@ -661,22 +819,22 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
 }
 
 fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, String)> {
-    #[derive(serde::Deserialize)]
-    struct ForwardEdgeCfKey(EdgeSourceId, EdgeDestinationId, EdgeName);
+    // Keys are now stored as: [src_id (16)] + [dst_id (16)] + [name UTF-8 bytes]
+    if bytes.len() < 32 {
+        anyhow::bail!("Invalid forward edge key length: expected >= 32, got {}", bytes.len());
+    }
 
-    #[derive(serde::Deserialize)]
-    struct EdgeSourceId(IdBytes);
+    let mut src_id_bytes = [0u8; 16];
+    src_id_bytes.copy_from_slice(&bytes[0..16]);
 
-    #[derive(serde::Deserialize)]
-    struct EdgeDestinationId(IdBytes);
+    let mut dst_id_bytes = [0u8; 16];
+    dst_id_bytes.copy_from_slice(&bytes[16..32]);
 
-    #[derive(serde::Deserialize)]
-    struct EdgeName(String);
+    let name_bytes = &bytes[32..];
+    let name = String::from_utf8(name_bytes.to_vec())
+        .context("Invalid UTF-8 in edge name")?;
 
-    let key: ForwardEdgeCfKey =
-        rmp_serde::from_slice(bytes).context("Failed to deserialize forward edge key")?;
-
-    Ok((key.0 .0, key.1 .0, key.2 .0))
+    Ok((src_id_bytes, dst_id_bytes, name))
 }
 
 fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
