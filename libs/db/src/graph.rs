@@ -496,7 +496,35 @@ impl crate::query::Processor for Graph {
             schema::ForwardEdges::value_from_bytes(&value_bytes)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-        Ok((value.0, value.1))
+        // The ForwardEdge value only contains the edge ID, so we need to look up the EdgeSummary
+        let edge_id = value.0;
+
+        // Look up the edge summary from the edges column family
+        let edge_key = schema::EdgeCfKey(edge_id);
+        let edge_key_bytes = schema::Edges::key_to_bytes(&edge_key)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize edge key: {}", e))?;
+
+        let edge_value_bytes = if let Ok(db) = self.storage.db() {
+            let cf = db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
+            })?;
+            db.get_cf(cf, edge_key_bytes)?
+        } else {
+            let txn_db = self.storage.transaction_db()?;
+            let cf = txn_db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
+            })?;
+            txn_db.get_cf(cf, edge_key_bytes)?
+        };
+
+        let edge_value_bytes = edge_value_bytes.ok_or_else(|| {
+            anyhow::anyhow!("Edge summary not found for edge_id: {}", edge_id)
+        })?;
+
+        let edge_value: schema::EdgeCfValue = schema::Edges::value_from_bytes(&edge_value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+
+        Ok((edge_id, edge_value.0))
     }
 
     async fn get_fragment_content_by_id(

@@ -170,7 +170,7 @@ pub(crate) struct ForwardEdgeCfKey(
 );
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ForwardEdgeCfValue(pub(crate) Id, pub(crate) EdgeSummary);
+pub(crate) struct ForwardEdgeCfValue(pub(crate) Id);
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EdgeSourceId(pub(crate) Id);
@@ -193,11 +193,7 @@ impl ColumnFamilyRecord for ForwardEdges {
             EdgeDestinationId(args.target_node_id),
             EdgeName(args.name.clone()),
         );
-        let markdown = format!(
-            "[comment]:\\#<!-- id={} -->]\n# {}\n# Summary\n",
-            args.id, args.name
-        );
-        let value = ForwardEdgeCfValue(args.id, EdgeSummary::new(markdown));
+        let value = ForwardEdgeCfValue(args.id);
         (key, value)
     }
 }
@@ -212,7 +208,7 @@ pub(crate) struct ReverseEdgeCfKey(
 );
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ReverseEdgeCfValue(pub(crate) Id, pub(crate) EdgeSummary);
+pub(crate) struct ReverseEdgeCfValue(pub(crate) Id);
 
 impl ColumnFamilyRecord for ReverseEdges {
     const CF_NAME: &'static str = "reverse_edges";
@@ -222,15 +218,11 @@ impl ColumnFamilyRecord for ReverseEdges {
 
     fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
         let key = ReverseEdgeCfKey(
-            EdgeDestinationId(args.source_node_id),
-            EdgeSourceId(args.target_node_id),
+            EdgeDestinationId(args.target_node_id),
+            EdgeSourceId(args.source_node_id),
             EdgeName(args.name.clone()),
         );
-        let markdown = format!(
-            "[comment]:\\#<!-- id={} -->]\n# {}\n# Summary\n",
-            args.id, args.name
-        );
-        let value = ReverseEdgeCfValue(args.id, EdgeSummary::new(markdown));
+        let value = ReverseEdgeCfValue(args.id);
         (key, value)
     }
 }
