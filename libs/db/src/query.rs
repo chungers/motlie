@@ -13,7 +13,7 @@ pub enum Query {
     EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
     FragmentContentById(FragmentContentByIdQuery),
     EdgesFromNodeById(EdgesFromNodeByIdQuery),
-    EdgesToNodeById(EdgesFromNodeByIdQuery),
+    EdgesToNodeById(EdgesToNodeByIdQuery),
 }
 
 /// Type alias for querying node summaries by ID
@@ -223,6 +223,12 @@ impl QueryWithResult for EdgeSummaryBySrcDstNameQuery {
     }
 }
 
+/// Id of edge source node
+pub type SrcId = Id;
+
+/// Id of edge destination node
+pub type DstId = Id;
+
 /// Query to find all edges emanating from a node by its ID
 #[derive(Debug)]
 pub struct EdgesFromNodeByIdQuery {
@@ -236,14 +242,14 @@ pub struct EdgesFromNodeByIdQuery {
     pub timeout: Duration,
 
     /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(Id, EdgeName, Id)>>>,
+    result_tx: oneshot::Sender<Result<Vec<(SrcId, EdgeName, DstId)>>>,
 }
 
 impl EdgesFromNodeByIdQuery {
     pub fn new(
         id: Id,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Id, EdgeName, Id)>>>,
+        result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
     ) -> Self {
         Self {
             id,
@@ -290,14 +296,14 @@ pub struct EdgesToNodeByIdQuery {
     pub timeout: Duration,
 
     /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(Id, EdgeName, Id)>>>,
+    result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
 }
 
 impl EdgesToNodeByIdQuery {
     pub fn new(
         id: Id,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(Id, EdgeName, Id)>>>,
+        result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
     ) -> Self {
         Self {
             id,
@@ -307,14 +313,14 @@ impl EdgesToNodeByIdQuery {
         }
     }
 
-    pub fn send_result(self, result: Result<Vec<(Id, EdgeName, Id)>>) {
+    pub fn send_result(self, result: Result<Vec<(DstId, EdgeName, SrcId)>>) {
         let _ = self.result_tx.send(result);
     }
 }
 
 #[async_trait::async_trait]
 impl QueryWithResult for EdgesToNodeByIdQuery {
-    type ResultType = Vec<(Id, EdgeName, Id)>;
+    type ResultType = Vec<(SrcId, EdgeName, DstId)>;
 
     async fn result<P: Processor>(&self, processor: &P) -> Result<Vec<(Id, EdgeName, Id)>> {
         let result =

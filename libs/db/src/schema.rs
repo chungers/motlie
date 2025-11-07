@@ -49,10 +49,12 @@ pub(crate) struct Nodes;
 pub(crate) struct NodeCfKey(pub(crate) Id);
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct NodeCfValue(pub(crate) NodeSummary);
+pub(crate) struct NodeCfValue(pub(crate) NodeName, pub(crate) NodeSummary);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeSummary(pub(crate) DataUrl);
+
+pub type NodeName = String;
 
 impl NodeSummary {
     pub fn new(content: impl AsRef<str>) -> Self {
@@ -77,7 +79,7 @@ impl ColumnFamilyRecord for Nodes {
     fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
         let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name);
-        let value = NodeCfValue(NodeSummary::new(markdown));
+        let value = NodeCfValue(args.name.clone(), NodeSummary::new(markdown));
         (key, value)
     }
 }

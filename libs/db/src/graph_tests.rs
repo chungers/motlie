@@ -1164,7 +1164,9 @@ mod tests {
         // Verify we can deserialize the value
         let value_bytes = result.unwrap();
         let value = Nodes::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
-        let content = value.0.content().expect("Failed to decode DataUrl");
+        let node_name = &value.0;
+        let content = value.1.content().expect("Failed to decode DataUrl");
+        assert_eq!(node_name, "test_node", "Node name should match");
         assert!(
             content.contains("test_node"),
             "Node value should contain the node name"
@@ -1412,7 +1414,8 @@ mod tests {
                 .expect("Failed to query database");
             assert!(result.is_some(), "Node 1 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
-            let content = value.0.content().expect("Failed to decode DataUrl");
+            assert_eq!(&value.0, "node_one", "Node name should match");
+            let content = value.1.content().expect("Failed to decode DataUrl");
             assert!(content.contains("node_one"));
         }
 
@@ -1425,7 +1428,8 @@ mod tests {
                 .expect("Failed to query database");
             assert!(result.is_some(), "Node 2 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
-            let content = value.0.content().expect("Failed to decode DataUrl");
+            assert_eq!(&value.0, "node_two", "Node name should match");
+            let content = value.1.content().expect("Failed to decode DataUrl");
             assert!(content.contains("node_two"));
         }
 
@@ -1438,8 +1442,232 @@ mod tests {
                 .expect("Failed to query database");
             assert!(result.is_some(), "Node 3 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
-            let content = value.0.content().expect("Failed to decode DataUrl");
+            assert_eq!(&value.0, "node_three", "Node name should match");
+            let content = value.1.content().expect("Failed to decode DataUrl");
             assert!(content.contains("node_three"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_forward_and_reverse_edge_queries() {
+        // Test that exercises writing nodes and edges, then querying forward and reverse edges
+        // to verify SrcId and DstId match the topology
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_edge_queries_db");
+
+        let writer_config = WriterConfig {
+            channel_buffer_size: 100,
+        };
+
+        let reader_config = crate::ReaderConfig {
+            channel_buffer_size: 100,
+        };
+
+        // Create writer
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+
+        // Spawn mutation consumer first
+        let mutation_handle = spawn_graph_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Give mutation consumer time to initialize the database
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Create two nodes: A and B
+        let node_a_id = Id::new();
+        let node_b_id = Id::new();
+
+        let node_a = AddNode {
+            id: node_a_id,
+            ts_millis: TimestampMilli::now(),
+            name: "Node_A".to_string(),
+        };
+
+        let node_b = AddNode {
+            id: node_b_id,
+            ts_millis: TimestampMilli::now(),
+            name: "Node_B".to_string(),
+        };
+
+        writer.add_node(node_a).await.unwrap();
+        writer.add_node(node_b).await.unwrap();
+
+        // Create multiple edges from A to B with different names
+        let edge_a_to_b_1 = AddEdge {
+            id: Id::new(),
+            source_node_id: node_a_id,
+            target_node_id: node_b_id,
+            ts_millis: TimestampMilli::now(),
+            name: "likes".to_string(),
+        };
+
+        let edge_a_to_b_2 = AddEdge {
+            id: Id::new(),
+            source_node_id: node_a_id,
+            target_node_id: node_b_id,
+            ts_millis: TimestampMilli::now(),
+            name: "follows".to_string(),
+        };
+
+        let edge_a_to_b_3 = AddEdge {
+            id: Id::new(),
+            source_node_id: node_a_id,
+            target_node_id: node_b_id,
+            ts_millis: TimestampMilli::now(),
+            name: "mentions".to_string(),
+        };
+
+        // Create different edges from B to A
+        let edge_b_to_a_1 = AddEdge {
+            id: Id::new(),
+            source_node_id: node_b_id,
+            target_node_id: node_a_id,
+            ts_millis: TimestampMilli::now(),
+            name: "replies_to".to_string(),
+        };
+
+        let edge_b_to_a_2 = AddEdge {
+            id: Id::new(),
+            source_node_id: node_b_id,
+            target_node_id: node_a_id,
+            ts_millis: TimestampMilli::now(),
+            name: "retweets".to_string(),
+        };
+
+        // Write all edges
+        writer.add_edge(edge_a_to_b_1).await.unwrap();
+        writer.add_edge(edge_a_to_b_2).await.unwrap();
+        writer.add_edge(edge_a_to_b_3).await.unwrap();
+        writer.add_edge(edge_b_to_a_1).await.unwrap();
+        writer.add_edge(edge_b_to_a_2).await.unwrap();
+
+        // Give time for mutations to be processed and flushed to disk
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Close writer and wait for mutation consumer to finish
+        drop(writer);
+        mutation_handle.await.unwrap().unwrap();
+
+        // Now create reader and spawn query consumer
+        let (reader, query_receiver) = crate::create_query_reader(reader_config.clone());
+        let query_handle = crate::graph::spawn_query_consumer(query_receiver, reader_config, &db_path);
+
+        // Give query consumer time to initialize
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Query forward edges from A (should get edges to B)
+        let edges_from_a = reader
+            .edges_from_node_by_id(node_a_id, Duration::from_secs(5))
+            .await
+            .expect("Failed to query edges from A");
+
+        // Query forward edges from B (should get edges to A)
+        let edges_from_b = reader
+            .edges_from_node_by_id(node_b_id, Duration::from_secs(5))
+            .await
+            .expect("Failed to query edges from B");
+
+        // Query reverse edges to A (should get edges from B)
+        let edges_to_a = reader
+            .edges_to_node_by_id(node_a_id, Duration::from_secs(5))
+            .await
+            .expect("Failed to query edges to A");
+
+        // Query reverse edges to B (should get edges from A)
+        let edges_to_b = reader
+            .edges_to_node_by_id(node_b_id, Duration::from_secs(5))
+            .await
+            .expect("Failed to query edges to B");
+
+        // Verify edges from A to B
+        assert_eq!(edges_from_a.len(), 3, "A should have 3 outgoing edges to B");
+        for (src_id, edge_name, dst_id) in &edges_from_a {
+            assert_eq!(*src_id, node_a_id, "Source should be A");
+            assert_eq!(*dst_id, node_b_id, "Destination should be B");
+            assert!(
+                edge_name.0 == "likes" || edge_name.0 == "follows" || edge_name.0 == "mentions",
+                "Edge name should be one of the A→B edges: got {}",
+                edge_name.0
+            );
+        }
+
+        // Verify all expected edge names from A to B are present
+        let edge_names_a_to_b: Vec<String> = edges_from_a.iter().map(|(_, name, _)| name.0.clone()).collect();
+        assert!(edge_names_a_to_b.contains(&"likes".to_string()));
+        assert!(edge_names_a_to_b.contains(&"follows".to_string()));
+        assert!(edge_names_a_to_b.contains(&"mentions".to_string()));
+
+        // Verify edges from B to A
+        assert_eq!(edges_from_b.len(), 2, "B should have 2 outgoing edges to A");
+        for (src_id, edge_name, dst_id) in &edges_from_b {
+            assert_eq!(*src_id, node_b_id, "Source should be B");
+            assert_eq!(*dst_id, node_a_id, "Destination should be A");
+            assert!(
+                edge_name.0 == "replies_to" || edge_name.0 == "retweets",
+                "Edge name should be one of the B→A edges: got {}",
+                edge_name.0
+            );
+        }
+
+        // Verify all expected edge names from B to A are present
+        let edge_names_b_to_a: Vec<String> = edges_from_b.iter().map(|(_, name, _)| name.0.clone()).collect();
+        assert!(edge_names_b_to_a.contains(&"replies_to".to_string()));
+        assert!(edge_names_b_to_a.contains(&"retweets".to_string()));
+
+        // Verify reverse edges to A (incoming from B)
+        assert_eq!(edges_to_a.len(), 2, "A should have 2 incoming edges from B");
+        for (dst_id, edge_name, src_id) in &edges_to_a {
+            assert_eq!(*dst_id, node_a_id, "Destination should be A");
+            assert_eq!(*src_id, node_b_id, "Source should be B");
+            assert!(
+                edge_name.0 == "replies_to" || edge_name.0 == "retweets",
+                "Edge name should be one of the B→A edges: got {}",
+                edge_name.0
+            );
+        }
+
+        // Verify all expected edge names to A are present
+        let edge_names_to_a: Vec<String> = edges_to_a.iter().map(|(_, name, _)| name.0.clone()).collect();
+        assert!(edge_names_to_a.contains(&"replies_to".to_string()));
+        assert!(edge_names_to_a.contains(&"retweets".to_string()));
+
+        // Verify reverse edges to B (incoming from A)
+        assert_eq!(edges_to_b.len(), 3, "B should have 3 incoming edges from A");
+        for (dst_id, edge_name, src_id) in &edges_to_b {
+            assert_eq!(*dst_id, node_b_id, "Destination should be B");
+            assert_eq!(*src_id, node_a_id, "Source should be A");
+            assert!(
+                edge_name.0 == "likes" || edge_name.0 == "follows" || edge_name.0 == "mentions",
+                "Edge name should be one of the A→B edges: got {}",
+                edge_name.0
+            );
+        }
+
+        // Verify all expected edge names to B are present
+        let edge_names_to_b: Vec<String> = edges_to_b.iter().map(|(_, name, _)| name.0.clone()).collect();
+        assert!(edge_names_to_b.contains(&"likes".to_string()));
+        assert!(edge_names_to_b.contains(&"follows".to_string()));
+        assert!(edge_names_to_b.contains(&"mentions".to_string()));
+
+        // Verify topology consistency:
+        // - Forward edges from A should match reverse edges to B
+        assert_eq!(
+            edges_from_a.len(),
+            edges_to_b.len(),
+            "Forward edges from A should match reverse edges to B"
+        );
+
+        // - Forward edges from B should match reverse edges to A
+        assert_eq!(
+            edges_from_b.len(),
+            edges_to_a.len(),
+            "Forward edges from B should match reverse edges to A"
+        );
+
+        // Cleanup
+        drop(reader);
+
+        // Wait for query consumer to complete
+        query_handle.await.unwrap().unwrap();
     }
 }

@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 use rocksdb::{Options, TransactionDB, TransactionDBOptions, DB};
 
+use crate::query::{DstId, SrcId};
 use crate::schema::{self, EdgeSummary, FragmentContent, NodeSummary};
 use crate::TimestampMilli;
 use crate::{
@@ -382,10 +383,10 @@ impl Processor for Graph {
 /// Implement query processor for Graph
 #[async_trait::async_trait]
 impl crate::query::Processor for Graph {
-    async fn get_node_summary_by_id(
+    async fn get_node_by_id(
         &self,
-        query: &crate::query::NodeSummaryByIdQuery,
-    ) -> Result<NodeSummary> {
+        query: &crate::query::NodeByIdQuery,
+    ) -> Result<(schema::NodeName, NodeSummary)> {
         let id = query.id;
 
         let key = schema::NodeCfKey(id);
@@ -411,7 +412,7 @@ impl crate::query::Processor for Graph {
         let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-        Ok(value.0)
+        Ok((value.0, value.1))
     }
 
     async fn get_edge_summary_by_id(
@@ -592,13 +593,13 @@ impl crate::query::Processor for Graph {
     async fn get_edges_from_node_by_id(
         &self,
         query: &crate::query::EdgesFromNodeByIdQuery,
-    ) -> Result<Vec<(Id, crate::schema::EdgeName, Id)>> {
+    ) -> Result<Vec<(SrcId, crate::schema::EdgeName, DstId)>> {
         let id = query.id;
 
         // Scan the forward_edges column family for all edges with this source ID
         // Keys are (source_id, dest_id, name) and RocksDB stores them in sorted order
 
-        let mut edges: Vec<(Id, crate::schema::EdgeName, Id)> = Vec::new();
+        let mut edges: Vec<(SrcId, crate::schema::EdgeName, DstId)> = Vec::new();
 
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
@@ -657,13 +658,13 @@ impl crate::query::Processor for Graph {
     async fn get_edges_to_node_by_id(
         &self,
         query: &crate::query::EdgesToNodeByIdQuery,
-    ) -> Result<Vec<(Id, crate::schema::EdgeName, Id)>> {
+    ) -> Result<Vec<(DstId, crate::schema::EdgeName, SrcId)>> {
         let id = query.id;
 
         // Scan the reverse_edges column family for all edges with this destination ID
         // Keys are (dest_id, source_id, name) and RocksDB stores them in sorted order
 
-        let mut edges: Vec<(Id, crate::schema::EdgeName, Id)> = Vec::new();
+        let mut edges: Vec<(DstId, crate::schema::EdgeName, SrcId)> = Vec::new();
 
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
