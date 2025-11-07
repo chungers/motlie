@@ -65,13 +65,14 @@ impl Reader {
     }
 
     /// Query an edge by source ID, destination ID, and name
+    /// Returns (edge_id, edge_summary)
     pub async fn edge_by_src_dst_name(
         &self,
         source_id: Id,
         dest_id: Id,
         name: String,
         timeout: Duration,
-    ) -> Result<EdgeSummary> {
+    ) -> Result<(Id, EdgeSummary)> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
         let query = EdgeSummaryBySrcDstNameQuery::new(source_id, dest_id, name, timeout, result_tx);

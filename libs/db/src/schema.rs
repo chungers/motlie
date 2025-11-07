@@ -178,8 +178,8 @@ pub(crate) struct EdgeSourceId(pub(crate) Id);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EdgeDestinationId(pub(crate) Id);
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeName(pub(crate) String);
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EdgeName(pub String);
 
 impl ColumnFamilyRecord for ForwardEdges {
     const CF_NAME: &'static str = "forward_edges";

@@ -16,7 +16,7 @@ use crate::TimestampMilli;
 use crate::{
     mutation::{Consumer, Processor},
     schema::ALL_COLUMN_FAMILIES,
-    AddEdge, AddFragment, AddNode, InvalidateArgs, WriterConfig,
+    AddEdge, AddFragment, AddNode, Id, InvalidateArgs, WriterConfig,
 };
 
 /// Trait for column family record types that can create and serialize key-value pairs.
@@ -448,7 +448,7 @@ impl crate::query::Processor for Graph {
     async fn get_edge_summary_by_src_dst_name(
         &self,
         query: &crate::query::EdgeSummaryBySrcDstNameQuery,
-    ) -> Result<EdgeSummary> {
+    ) -> Result<(Id, EdgeSummary)> {
         let source_id = query.source_id;
         let dest_id = query.dest_id;
         let name = &query.name;
@@ -496,7 +496,7 @@ impl crate::query::Processor for Graph {
             schema::ForwardEdges::value_from_bytes(&value_bytes)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-        Ok(value.1)
+        Ok((value.0, value.1))
     }
 
     async fn get_fragment_content_by_id(
@@ -553,13 +553,142 @@ impl crate::query::Processor for Graph {
                             .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
                     fragments.push((key.1, value.0));
                 } else if key.0 > id {
-                    // Keys are sorted, so once we pass the target ID, we can stop
                     break;
                 }
             }
         }
 
         Ok(fragments)
+    }
+
+    async fn get_edges_from_node_by_id(
+        &self,
+        query: &crate::query::EdgesFromNodeByIdQuery,
+    ) -> Result<Vec<(Id, crate::schema::EdgeName, Id)>> {
+        let id = query.id;
+
+        // Scan the forward_edges column family for all edges with this source ID
+        // Keys are (source_id, dest_id, name) and RocksDB stores them in sorted order
+
+        let mut edges: Vec<(Id, crate::schema::EdgeName, Id)> = Vec::new();
+
+        // Handle both readonly and readwrite modes
+        if let Ok(db) = self.storage.db() {
+            let cf = db
+                .cf_handle(schema::ForwardEdges::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Column family '{}' not found", schema::ForwardEdges::CF_NAME)
+                })?;
+
+            let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key_bytes, _value_bytes) = item?;
+                let key: schema::ForwardEdgeCfKey =
+                    schema::ForwardEdges::key_from_bytes(&key_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+                let source_id = key.0 .0;
+                if source_id == id {
+                    let dest_id = key.1 .0;
+                    let edge_name = key.2 .0;
+                    edges.push((source_id, crate::schema::EdgeName(edge_name), dest_id));
+                } else if source_id > id {
+                    // Keys are sorted by source_id first, so once we pass the target ID, stop
+                    break;
+                }
+            }
+        } else {
+            let txn_db = self.storage.transaction_db()?;
+            let cf = txn_db
+                .cf_handle(schema::ForwardEdges::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Column family '{}' not found", schema::ForwardEdges::CF_NAME)
+                })?;
+
+            let iter = txn_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key_bytes, _value_bytes) = item?;
+                let key: schema::ForwardEdgeCfKey =
+                    schema::ForwardEdges::key_from_bytes(&key_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+                let source_id = key.0 .0;
+                if source_id == id {
+                    let dest_id = key.1 .0;
+                    let edge_name = key.2 .0;
+                    edges.push((source_id, crate::schema::EdgeName(edge_name), dest_id));
+                } else if source_id > id {
+                    break;
+                }
+            }
+        }
+
+        Ok(edges)
+    }
+
+    async fn get_edges_to_node_by_id(
+        &self,
+        query: &crate::query::EdgesToNodeByIdQuery,
+    ) -> Result<Vec<(Id, crate::schema::EdgeName, Id)>> {
+        let id = query.id;
+
+        // Scan the reverse_edges column family for all edges with this destination ID
+        // Keys are (dest_id, source_id, name) and RocksDB stores them in sorted order
+
+        let mut edges: Vec<(Id, crate::schema::EdgeName, Id)> = Vec::new();
+
+        // Handle both readonly and readwrite modes
+        if let Ok(db) = self.storage.db() {
+            let cf = db
+                .cf_handle(schema::ReverseEdges::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Column family '{}' not found", schema::ReverseEdges::CF_NAME)
+                })?;
+
+            let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key_bytes, _value_bytes) = item?;
+                let key: schema::ReverseEdgeCfKey =
+                    schema::ReverseEdges::key_from_bytes(&key_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+                let dest_id = key.0 .0;
+                if dest_id == id {
+                    let source_id = key.1 .0;
+                    let edge_name = key.2 .0;
+                    edges.push((dest_id, crate::schema::EdgeName(edge_name), source_id));
+                } else if dest_id > id {
+                    // Keys are sorted by dest_id first, so once we pass the target ID, stop
+                    break;
+                }
+            }
+        } else {
+            let txn_db = self.storage.transaction_db()?;
+            let cf = txn_db
+                .cf_handle(schema::ReverseEdges::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Column family '{}' not found", schema::ReverseEdges::CF_NAME)
+                })?;
+
+            let iter = txn_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key_bytes, _value_bytes) = item?;
+                let key: schema::ReverseEdgeCfKey =
+                    schema::ReverseEdges::key_from_bytes(&key_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+                let dest_id = key.0 .0;
+                if dest_id == id {
+                    let source_id = key.1 .0;
+                    let edge_name = key.2 .0;
+                    edges.push((dest_id, crate::schema::EdgeName(edge_name), source_id));
+                } else if dest_id > id {
+                    break;
+                }
+            }
+        }
+
+        Ok(edges)
     }
 }
 
