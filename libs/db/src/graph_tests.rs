@@ -1150,7 +1150,7 @@ mod tests {
 
         // Create the key using the schema's serialization
         let (key, _value) = Nodes::record_from(&node_args);
-        let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
+        let key_bytes = Nodes::key_to_bytes(&key);
 
         // Query the database
         let result = db
@@ -1223,7 +1223,7 @@ mod tests {
                 .cf_handle(Edges::CF_NAME)
                 .expect("Edges column family should exist");
             let (key, _value) = Edges::record_from(&edge_args);
-            let key_bytes = Edges::key_to_bytes(&key).expect("Failed to serialize key");
+            let key_bytes = Edges::key_to_bytes(&key);
             let result = db
                 .get_cf(cf_handle, &key_bytes)
                 .expect("Failed to query database");
@@ -1249,7 +1249,7 @@ mod tests {
                 .cf_handle(ForwardEdges::CF_NAME)
                 .expect("ForwardEdges column family should exist");
             let (key, _value) = ForwardEdges::record_from(&edge_args);
-            let key_bytes = ForwardEdges::key_to_bytes(&key).expect("Failed to serialize key");
+            let key_bytes = ForwardEdges::key_to_bytes(&key);
             let result = db
                 .get_cf(cf_handle, &key_bytes)
                 .expect("Failed to query database");
@@ -1266,7 +1266,7 @@ mod tests {
                 .cf_handle(ReverseEdges::CF_NAME)
                 .expect("ReverseEdges column family should exist");
             let (key, _value) = ReverseEdges::record_from(&edge_args);
-            let key_bytes = ReverseEdges::key_to_bytes(&key).expect("Failed to serialize key");
+            let key_bytes = ReverseEdges::key_to_bytes(&key);
             let result = db
                 .get_cf(cf_handle, &key_bytes)
                 .expect("Failed to query database");
@@ -1324,7 +1324,7 @@ mod tests {
 
         // Create the key using the schema's serialization
         let (key, _value) = Fragments::record_from(&fragment_args);
-        let key_bytes = Fragments::key_to_bytes(&key).expect("Failed to serialize key");
+        let key_bytes = Fragments::key_to_bytes(&key);
 
         // Query the database
         let result = db
@@ -1409,7 +1409,7 @@ mod tests {
         // Query node 1
         {
             let (key, _value) = Nodes::record_from(&node1_args);
-            let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
+            let key_bytes = Nodes::key_to_bytes(&key);
             let result = db
                 .get_cf(cf_handle, &key_bytes)
                 .expect("Failed to query database");
@@ -1423,7 +1423,7 @@ mod tests {
         // Query node 2
         {
             let (key, _value) = Nodes::record_from(&node2_args);
-            let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
+            let key_bytes = Nodes::key_to_bytes(&key);
             let result = db
                 .get_cf(cf_handle, &key_bytes)
                 .expect("Failed to query database");
@@ -1437,7 +1437,7 @@ mod tests {
         // Query node 3
         {
             let (key, _value) = Nodes::record_from(&node3_args);
-            let key_bytes = Nodes::key_to_bytes(&key).expect("Failed to serialize key");
+            let key_bytes = Nodes::key_to_bytes(&key);
             let result = db
                 .get_cf(cf_handle, &key_bytes)
                 .expect("Failed to query database");

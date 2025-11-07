@@ -21,6 +21,9 @@ use crate::{
 };
 
 /// Trait for column family record types that can create and serialize key-value pairs.
+///
+/// This trait uses direct byte concatenation for keys (to enable RocksDB prefix extractors)
+/// and MessagePack for values (where self-describing format is beneficial).
 pub(crate) trait ColumnFamilyRecord {
     const CF_NAME: &'static str;
 
@@ -36,32 +39,35 @@ pub(crate) trait ColumnFamilyRecord {
     /// Create a key-value pair from arguments
     fn record_from(args: &Self::CreateOp) -> (Self::Key, Self::Value);
 
-    /// Create and serialize to bytes using MessagePack
-    fn create_bytes(args: &Self::CreateOp) -> Result<(Vec<u8>, Vec<u8>), rmp_serde::encode::Error> {
-        let (key, value) = Self::record_from(args);
-        let key_bytes = rmp_serde::to_vec(&key)?;
-        let value_bytes = rmp_serde::to_vec(&value)?;
-        Ok((key_bytes, value_bytes))
-    }
+    /// Serialize the key to bytes using direct concatenation (no MessagePack).
+    /// This enables constant-length prefixes for RocksDB prefix extractors.
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8>;
 
-    /// Serialize the key to bytes using MessagePack
-    fn key_to_bytes(key: &Self::Key) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-        rmp_serde::to_vec(key)
-    }
+    /// Deserialize the key from bytes (direct format, no MessagePack).
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error>;
 
-    /// Serialize the value to bytes using MessagePack
+    /// Serialize the value to bytes using MessagePack (unchanged).
     fn value_to_bytes(value: &Self::Value) -> Result<Vec<u8>, rmp_serde::encode::Error> {
         rmp_serde::to_vec(value)
     }
 
-    /// Deserialize the key from bytes using MessagePack
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, rmp_serde::decode::Error> {
+    /// Deserialize the value from bytes using MessagePack (unchanged).
+    fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value, rmp_serde::decode::Error> {
         rmp_serde::from_slice(bytes)
     }
 
-    /// Deserialize the value from bytes using MessagePack
-    fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(bytes)
+    /// Create and serialize to bytes using direct encoding for keys, MessagePack for values.
+    fn create_bytes(args: &Self::CreateOp) -> Result<(Vec<u8>, Vec<u8>), rmp_serde::encode::Error> {
+        let (key, value) = Self::record_from(args);
+        let key_bytes = Self::key_to_bytes(&key);
+        let value_bytes = rmp_serde::to_vec(&value)?;
+        Ok((key_bytes, value_bytes))
+    }
+
+    /// Configure RocksDB options for this column family.
+    /// Each implementer specifies their own prefix extractor and bloom filter settings.
+    fn column_family_options() -> rocksdb::Options {
+        rocksdb::Options::default()
     }
 }
 
@@ -230,22 +236,47 @@ impl Storage {
             Ok(false) => {}
         }
 
+        // Create column family descriptors with encapsulated options
+        use rocksdb::ColumnFamilyDescriptor;
+        let cf_descriptors = vec![
+            ColumnFamilyDescriptor::new(
+                schema::Nodes::CF_NAME,
+                schema::Nodes::column_family_options(),
+            ),
+            ColumnFamilyDescriptor::new(
+                schema::Edges::CF_NAME,
+                schema::Edges::column_family_options(),
+            ),
+            ColumnFamilyDescriptor::new(
+                schema::Fragments::CF_NAME,
+                schema::Fragments::column_family_options(),
+            ),
+            ColumnFamilyDescriptor::new(
+                schema::ForwardEdges::CF_NAME,
+                schema::ForwardEdges::column_family_options(),
+            ),
+            ColumnFamilyDescriptor::new(
+                schema::ReverseEdges::CF_NAME,
+                schema::ReverseEdges::column_family_options(),
+            ),
+        ];
+
         match self.mode {
             StorageMode::ReadOnly => {
-                let db = DB::open_cf_for_read_only(
+                let db = DB::open_cf_descriptors_read_only(
                     &self.db_options,
                     &self.db_path,
-                    self.column_families,
+                    cf_descriptors,
                     false,
                 )?;
                 self.db = Some(DatabaseHandle::ReadOnly(db));
             }
             StorageMode::ReadWrite => {
-                let txn_db = TransactionDB::open_cf(
+                let txn_db = TransactionDB::open_cf_descriptors(
                     &self.db_options,
                     &self.txn_db_options,
                     &self.db_path,
-                    self.column_families,
+                    cf_descriptors,
                 )?;
                 self.db = Some(DatabaseHandle::ReadWrite(txn_db));
             }
@@ -390,8 +421,7 @@ impl crate::query::Processor for Graph {
         let id = query.id;
 
         let key = schema::NodeCfKey(id);
-        let key_bytes = schema::Nodes::key_to_bytes(&key)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize key: {}", e))?;
+        let key_bytes = schema::Nodes::key_to_bytes(&key);
 
         // Handle both readonly and readwrite modes
         let value_bytes = if let Ok(db) = self.storage.db() {
@@ -421,8 +451,7 @@ impl crate::query::Processor for Graph {
     ) -> Result<(Id, Id, schema::EdgeName, EdgeSummary)> {
         let id = query.id;
         let key = schema::EdgeCfKey(id);
-        let key_bytes = schema::Edges::key_to_bytes(&key)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize key: {}", e))?;
+        let key_bytes = schema::Edges::key_to_bytes(&key);
 
         // Handle both readonly and readwrite modes
         let value_bytes = if let Ok(db) = self.storage.db() {
@@ -461,8 +490,7 @@ impl crate::query::Processor for Graph {
             schema::EdgeDestinationId(dest_id),
             schema::EdgeName(name.clone()),
         );
-        let key_bytes = schema::ForwardEdges::key_to_bytes(&key)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize key: {}", e))?;
+        let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
 
         // Handle both readonly and readwrite modes
         let value_bytes = if let Ok(db) = self.storage.db() {
@@ -504,8 +532,7 @@ impl crate::query::Processor for Graph {
 
         // Look up the edge summary from the edges column family
         let edge_key = schema::EdgeCfKey(edge_id);
-        let edge_key_bytes = schema::Edges::key_to_bytes(&edge_key)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize edge key: {}", e))?;
+        let edge_key_bytes = schema::Edges::key_to_bytes(&edge_key);
 
         let edge_value_bytes = if let Ok(db) = self.storage.db() {
             let cf = db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
@@ -543,27 +570,35 @@ impl crate::query::Processor for Graph {
 
         let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
 
+        // Create prefix: just the Id (16 bytes) for prefix seeking
+        let prefix = id.into_bytes();
+
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
             let cf = db.cf_handle(schema::Fragments::CF_NAME).ok_or_else(|| {
                 anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
             })?;
 
-            let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            // Seek directly to the first key with this prefix
+            let iter = db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            );
+
             for item in iter {
                 let (key_bytes, value_bytes) = item?;
                 let key: schema::FragmentCfKey = schema::Fragments::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                if key.0 == id {
-                    let value: schema::FragmentCfValue =
-                        schema::Fragments::value_from_bytes(&value_bytes)
-                            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-                    fragments.push((key.1, value.0));
-                } else if key.0 > id {
-                    // Keys are sorted, so once we pass the target ID, we can stop
+                if key.0 != id {
+                    // Once we see a different Id, we're done
                     break;
                 }
+
+                let value: schema::FragmentCfValue =
+                    schema::Fragments::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+                fragments.push((key.1, value.0));
             }
         } else {
             let txn_db = self.storage.transaction_db()?;
@@ -573,20 +608,26 @@ impl crate::query::Processor for Graph {
                     anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
                 })?;
 
-            let iter = txn_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            // Seek directly to the first key with this prefix
+            let iter = txn_db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            );
+
             for item in iter {
                 let (key_bytes, value_bytes) = item?;
                 let key: schema::FragmentCfKey = schema::Fragments::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                if key.0 == id {
-                    let value: schema::FragmentCfValue =
-                        schema::Fragments::value_from_bytes(&value_bytes)
-                            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-                    fragments.push((key.1, value.0));
-                } else if key.0 > id {
+                if key.0 != id {
+                    // Once we see a different Id, we're done
                     break;
                 }
+
+                let value: schema::FragmentCfValue =
+                    schema::Fragments::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+                fragments.push((key.1, value.0));
             }
         }
 
@@ -604,6 +645,9 @@ impl crate::query::Processor for Graph {
 
         let mut edges: Vec<(SrcId, crate::schema::EdgeName, DstId)> = Vec::new();
 
+        // Create prefix: just the source_id (16 bytes) for prefix seeking
+        let prefix = id.into_bytes();
+
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
             let cf = db
@@ -612,7 +656,12 @@ impl crate::query::Processor for Graph {
                     anyhow::anyhow!("Column family '{}' not found", schema::ForwardEdges::CF_NAME)
                 })?;
 
-            let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            // Seek directly to the first key with this prefix (O(1) instead of O(N))
+            let iter = db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            );
+
             for item in iter {
                 let (key_bytes, _value_bytes) = item?;
                 let key: schema::ForwardEdgeCfKey =
@@ -620,14 +669,14 @@ impl crate::query::Processor for Graph {
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let source_id = key.0 .0;
-                if source_id == id {
-                    let dest_id = key.1 .0;
-                    let edge_name = key.2 .0;
-                    edges.push((source_id, crate::schema::EdgeName(edge_name), dest_id));
-                } else if source_id > id {
-                    // Keys are sorted by source_id first, so once we pass the target ID, stop
+                if source_id != id {
+                    // Once we see a different source_id, we're done
                     break;
                 }
+
+                let dest_id = key.1 .0;
+                let edge_name = key.2 .0;
+                edges.push((source_id, crate::schema::EdgeName(edge_name), dest_id));
             }
         } else {
             let txn_db = self.storage.transaction_db()?;
@@ -637,7 +686,12 @@ impl crate::query::Processor for Graph {
                     anyhow::anyhow!("Column family '{}' not found", schema::ForwardEdges::CF_NAME)
                 })?;
 
-            let iter = txn_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            // Seek directly to the first key with this prefix (O(1) instead of O(N))
+            let iter = txn_db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            );
+
             for item in iter {
                 let (key_bytes, _value_bytes) = item?;
                 let key: schema::ForwardEdgeCfKey =
@@ -645,13 +699,14 @@ impl crate::query::Processor for Graph {
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let source_id = key.0 .0;
-                if source_id == id {
-                    let dest_id = key.1 .0;
-                    let edge_name = key.2 .0;
-                    edges.push((source_id, crate::schema::EdgeName(edge_name), dest_id));
-                } else if source_id > id {
+                if source_id != id {
+                    // Once we see a different source_id, we're done
                     break;
                 }
+
+                let dest_id = key.1 .0;
+                let edge_name = key.2 .0;
+                edges.push((source_id, crate::schema::EdgeName(edge_name), dest_id));
             }
         }
 
@@ -669,6 +724,9 @@ impl crate::query::Processor for Graph {
 
         let mut edges: Vec<(DstId, crate::schema::EdgeName, SrcId)> = Vec::new();
 
+        // Create prefix: just the destination_id (16 bytes) for prefix seeking
+        let prefix = id.into_bytes();
+
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
             let cf = db
@@ -677,7 +735,12 @@ impl crate::query::Processor for Graph {
                     anyhow::anyhow!("Column family '{}' not found", schema::ReverseEdges::CF_NAME)
                 })?;
 
-            let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            // Seek directly to the first key with this prefix (O(1) instead of O(N))
+            let iter = db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            );
+
             for item in iter {
                 let (key_bytes, _value_bytes) = item?;
                 let key: schema::ReverseEdgeCfKey =
@@ -685,14 +748,14 @@ impl crate::query::Processor for Graph {
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let dest_id = key.0 .0;
-                if dest_id == id {
-                    let source_id = key.1 .0;
-                    let edge_name = key.2 .0;
-                    edges.push((dest_id, crate::schema::EdgeName(edge_name), source_id));
-                } else if dest_id > id {
-                    // Keys are sorted by dest_id first, so once we pass the target ID, stop
+                if dest_id != id {
+                    // Once we see a different dest_id, we're done
                     break;
                 }
+
+                let source_id = key.1 .0;
+                let edge_name = key.2 .0;
+                edges.push((dest_id, crate::schema::EdgeName(edge_name), source_id));
             }
         } else {
             let txn_db = self.storage.transaction_db()?;
@@ -702,7 +765,12 @@ impl crate::query::Processor for Graph {
                     anyhow::anyhow!("Column family '{}' not found", schema::ReverseEdges::CF_NAME)
                 })?;
 
-            let iter = txn_db.iterator_cf(cf, rocksdb::IteratorMode::Start);
+            // Seek directly to the first key with this prefix (O(1) instead of O(N))
+            let iter = txn_db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+            );
+
             for item in iter {
                 let (key_bytes, _value_bytes) = item?;
                 let key: schema::ReverseEdgeCfKey =
@@ -710,13 +778,14 @@ impl crate::query::Processor for Graph {
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let dest_id = key.0 .0;
-                if dest_id == id {
-                    let source_id = key.1 .0;
-                    let edge_name = key.2 .0;
-                    edges.push((dest_id, crate::schema::EdgeName(edge_name), source_id));
-                } else if dest_id > id {
+                if dest_id != id {
+                    // Once we see a different dest_id, we're done
                     break;
                 }
+
+                let source_id = key.1 .0;
+                let edge_name = key.2 .0;
+                edges.push((dest_id, crate::schema::EdgeName(edge_name), source_id));
             }
         }
 

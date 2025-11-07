@@ -83,6 +83,25 @@ impl ColumnFamilyRecord for Nodes {
         let value = NodeCfValue(args.name.clone(), NodeSummary::new(markdown));
         (key, value)
     }
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // NodeCfKey(Id) -> just the 16-byte Id
+        key.0.into_bytes().to_vec()
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
+        if bytes.len() != 16 {
+            anyhow::bail!("Invalid NodeCfKey length: expected 16, got {}", bytes.len());
+        }
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(bytes);
+        Ok(NodeCfKey(Id::from_bytes(id_bytes)))
+    }
+
+    fn column_family_options() -> rocksdb::Options {
+        // Point lookups by Id only, no prefix scanning needed
+        rocksdb::Options::default()
+    }
 }
 
 pub(crate) struct Edges;
@@ -132,6 +151,25 @@ impl ColumnFamilyRecord for Edges {
         );
         (key, value)
     }
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // EdgeCfKey(Id) -> just the 16-byte Id
+        key.0.into_bytes().to_vec()
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
+        if bytes.len() != 16 {
+            anyhow::bail!("Invalid EdgeCfKey length: expected 16, got {}", bytes.len());
+        }
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(bytes);
+        Ok(EdgeCfKey(Id::from_bytes(id_bytes)))
+    }
+
+    fn column_family_options() -> rocksdb::Options {
+        // Point lookups by Id only, no prefix scanning needed
+        rocksdb::Options::default()
+    }
 }
 
 pub(crate) struct Fragments;
@@ -171,6 +209,48 @@ impl ColumnFamilyRecord for Fragments {
         let value = FragmentCfValue(FragmentContent::new(&args.content));
         (key, value)
     }
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // FragmentCfKey(Id, TimestampMilli)
+        // Layout: [Id bytes (16)] + [timestamp big-endian (8)]
+        let mut bytes = Vec::with_capacity(24);
+        bytes.extend_from_slice(&key.0.into_bytes());
+        bytes.extend_from_slice(&key.1 .0.to_be_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
+        if bytes.len() != 24 {
+            anyhow::bail!("Invalid FragmentCfKey length: expected 24, got {}", bytes.len());
+        }
+
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(&bytes[0..16]);
+
+        let mut ts_bytes = [0u8; 8];
+        ts_bytes.copy_from_slice(&bytes[16..24]);
+        let timestamp = u64::from_be_bytes(ts_bytes);
+
+        Ok(FragmentCfKey(
+            Id::from_bytes(id_bytes),
+            TimestampMilli(timestamp),
+        ))
+    }
+
+    fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+
+        // Key layout: [Id (16 bytes)] + [TimestampMilli (8 bytes)]
+        // Use 16-byte prefix to scan all fragments for a given Id
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+
+        // Enable prefix bloom filter for fast prefix existence checks
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
 }
 
 pub(crate) struct ForwardEdges;
@@ -209,6 +289,57 @@ impl ColumnFamilyRecord for ForwardEdges {
         let value = ForwardEdgeCfValue(args.id);
         (key, value)
     }
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // ForwardEdgeCfKey(EdgeSourceId, EdgeDestinationId, EdgeName)
+        // Layout: [src_id (16)] + [dst_id (16)] + [name UTF-8 bytes]
+        let name_bytes = key.2 .0.as_bytes();
+        let mut bytes = Vec::with_capacity(32 + name_bytes.len());
+        bytes.extend_from_slice(&key.0 .0.into_bytes());
+        bytes.extend_from_slice(&key.1 .0.into_bytes());
+        bytes.extend_from_slice(name_bytes);
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
+        if bytes.len() < 32 {
+            anyhow::bail!(
+                "Invalid ForwardEdgeCfKey length: expected >= 32, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut src_id_bytes = [0u8; 16];
+        src_id_bytes.copy_from_slice(&bytes[0..16]);
+
+        let mut dst_id_bytes = [0u8; 16];
+        dst_id_bytes.copy_from_slice(&bytes[16..32]);
+
+        let name_bytes = &bytes[32..];
+        let name = String::from_utf8(name_bytes.to_vec())
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
+
+        Ok(ForwardEdgeCfKey(
+            EdgeSourceId(Id::from_bytes(src_id_bytes)),
+            EdgeDestinationId(Id::from_bytes(dst_id_bytes)),
+            EdgeName(name),
+        ))
+    }
+
+    fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name (variable)]
+        // Use 16-byte prefix to scan all edges from a source node
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+
+        // Enable prefix bloom filter for O(1) prefix existence check
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
 }
 
 pub(crate) struct ReverseEdges;
@@ -237,6 +368,57 @@ impl ColumnFamilyRecord for ReverseEdges {
         );
         let value = ReverseEdgeCfValue(args.id);
         (key, value)
+    }
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // ReverseEdgeCfKey(EdgeDestinationId, EdgeSourceId, EdgeName)
+        // Layout: [dst_id (16)] + [src_id (16)] + [name UTF-8 bytes]
+        let name_bytes = key.2 .0.as_bytes();
+        let mut bytes = Vec::with_capacity(32 + name_bytes.len());
+        bytes.extend_from_slice(&key.0 .0.into_bytes());
+        bytes.extend_from_slice(&key.1 .0.into_bytes());
+        bytes.extend_from_slice(name_bytes);
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
+        if bytes.len() < 32 {
+            anyhow::bail!(
+                "Invalid ReverseEdgeCfKey length: expected >= 32, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut dst_id_bytes = [0u8; 16];
+        dst_id_bytes.copy_from_slice(&bytes[0..16]);
+
+        let mut src_id_bytes = [0u8; 16];
+        src_id_bytes.copy_from_slice(&bytes[16..32]);
+
+        let name_bytes = &bytes[32..];
+        let name = String::from_utf8(name_bytes.to_vec())
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
+
+        Ok(ReverseEdgeCfKey(
+            EdgeDestinationId(Id::from_bytes(dst_id_bytes)),
+            EdgeSourceId(Id::from_bytes(src_id_bytes)),
+            EdgeName(name),
+        ))
+    }
+
+    fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+
+        // Key layout: [dst_id (16)] + [src_id (16)] + [name (variable)]
+        // Use 16-byte prefix to scan all edges to a destination node
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+
+        // Enable prefix bloom filter for O(1) prefix existence check
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
     }
 }
 
@@ -304,7 +486,7 @@ mod tests {
             .iter()
             .map(|args| {
                 let (key, _value) = ForwardEdges::record_from(args);
-                let key_bytes = ForwardEdges::key_to_bytes(&key).unwrap();
+                let key_bytes = ForwardEdges::key_to_bytes(&key);
                 (key_bytes, args.name.clone())
             })
             .collect();
