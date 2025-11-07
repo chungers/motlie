@@ -424,13 +424,9 @@ fn verify_nodes(db: &DB, expected: &ExpectedData) -> Result<bool> {
         let (_key, value) = item.context("Failed to read from nodes CF")?;
         db_node_count += 1;
 
-        // Deserialize to extract node name from markdown
-        if let Ok(node_value) = deserialize_node_value(&value) {
-            // Extract name from markdown summary (format: "<!-- id=... -->\n# name\n# Summary\n")
-            if let Some(name_line) = node_value.lines().nth(1) {
-                let name = name_line.trim_start_matches("# ").trim().to_string();
-                db_node_names.insert(name);
-            }
+        // Deserialize to extract node name (now directly from the tuple)
+        if let Ok((node_name, _markdown_content)) = deserialize_node_value(&value) {
+            db_node_names.insert(node_name);
         }
     }
 
@@ -473,11 +469,8 @@ fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
     for item in db.iterator_cf(nodes_cf, rocksdb::IteratorMode::Start) {
         let (key, value) = item.context("Failed to read from nodes CF")?;
         let node_id = deserialize_node_id(&key)?;
-        if let Ok(node_value) = deserialize_node_value(&value) {
-            if let Some(name_line) = node_value.lines().nth(1) {
-                let name = name_line.trim_start_matches("# ").trim().to_string();
-                id_to_name.insert(node_id, name);
-            }
+        if let Ok((node_name, _markdown_content)) = deserialize_node_value(&value) {
+            id_to_name.insert(node_id, node_name);
         }
     }
 
@@ -642,9 +635,9 @@ fn deserialize_node_id(bytes: &[u8]) -> Result<IdBytes> {
     Ok(key.0)
 }
 
-fn deserialize_node_value(bytes: &[u8]) -> Result<String> {
+fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
     #[derive(serde::Deserialize)]
-    struct NodeCfValue(NodeSummary);
+    struct NodeCfValue(String, NodeSummary);
 
     #[derive(serde::Deserialize)]
     struct NodeSummary(DataUrl);
@@ -655,15 +648,16 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<String> {
     let value: NodeCfValue =
         rmp_serde::from_slice(bytes).context("Failed to deserialize node value")?;
 
+    let node_name = value.0;
     // Decode the data URL to get the actual content
-    let data_url_str = &value.0 .0 .0;
+    let data_url_str = &value.1 .0 .0;
     let parsed = data_url::DataUrl::process(data_url_str).context("Failed to parse data URL")?;
     let (body, _) = parsed
         .decode_to_vec()
         .context("Failed to decode data URL")?;
     let content = String::from_utf8(body).context("Failed to convert bytes to UTF-8")?;
 
-    Ok(content)
+    Ok((node_name, content))
 }
 
 fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, String)> {

@@ -2,13 +2,13 @@ use anyhow::Result;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-use crate::schema::{EdgeName, EdgeSummary, FragmentContent, NodeSummary};
+use crate::schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
 use crate::{Id, ReaderConfig, TimestampMilli};
 
 /// Query enum representing all possible query types
 #[derive(Debug)]
 pub enum Query {
-    NodeSummaryById(NodeSummaryByIdQuery),
+    NodeById(NodeByIdQuery),
     EdgeSummaryById(EdgeSummaryByIdQuery),
     EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
     FragmentContentById(FragmentContentByIdQuery),
@@ -16,8 +16,8 @@ pub enum Query {
     EdgesToNodeById(EdgesToNodeByIdQuery),
 }
 
-/// Type alias for querying node summaries by ID
-pub type NodeSummaryByIdQuery = ByIdQuery<NodeSummary>;
+/// Type alias for querying node by ID (returns name and summary)
+pub type NodeByIdQuery = ByIdQuery<(NodeName, NodeSummary)>;
 /// Type alias for querying edge summaries by ID
 pub type EdgeSummaryByIdQuery = ByIdQuery<EdgeSummary>;
 /// Type alias for querying fragment content by ID of node or edge associated with it
@@ -41,11 +41,11 @@ pub trait QueryWithResult: Send + Sync {
 
 /// Sealed trait module to prevent external implementations
 mod sealed {
-    use crate::schema::{EdgeName, EdgeSummary, FragmentContent, NodeSummary};
+    use crate::schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
     use crate::{Id, TimestampMilli};
 
     pub trait ByIdQueryable {}
-    impl ByIdQueryable for NodeSummary {}
+    impl ByIdQueryable for (NodeName, NodeSummary) {}
     impl ByIdQueryable for EdgeSummary {}
     impl ByIdQueryable for Vec<(TimestampMilli, FragmentContent)> {}
     impl ByIdQueryable for Vec<(Id, EdgeName, Id)> {} // Forward and reverse edges use same tuple type
@@ -65,13 +65,13 @@ pub trait ByIdQueryable: sealed::ByIdQueryable + Send + Sync + 'static {
 }
 
 #[async_trait::async_trait]
-impl ByIdQueryable for NodeSummary {
+impl ByIdQueryable for (NodeName, NodeSummary) {
     async fn fetch_by_id<P: Processor>(
         _id: Id,
         processor: &P,
         query: &ByIdQuery<Self>,
     ) -> Result<Self> {
-        processor.get_node_summary_by_id(query).await
+        processor.get_node_by_id(query).await
     }
 }
 
@@ -340,8 +340,8 @@ impl QueryWithResult for EdgesToNodeByIdQuery {
 /// Trait for processing different types of queries
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
-    /// Get a node summary by its ID
-    async fn get_node_summary_by_id(&self, query: &ByIdQuery<NodeSummary>) -> Result<NodeSummary>;
+    /// Get a node by its ID (returns name and summary)
+    async fn get_node_by_id(&self, query: &ByIdQuery<(NodeName, NodeSummary)>) -> Result<(NodeName, NodeSummary)>;
 
     /// Get an edge summary by its ID
     async fn get_edge_summary_by_id(&self, query: &ByIdQuery<EdgeSummary>) -> Result<EdgeSummary>;
@@ -414,7 +414,7 @@ impl<P: Processor> Consumer<P> {
     /// Process a single query
     async fn process_query(&self, query: Query) {
         match query {
-            Query::NodeSummaryById(q) => {
+            Query::NodeById(q) => {
                 log::debug!("Processing NodeById: id={}", q.id);
                 let result = q.result(&self.processor).await;
                 q.send_result(result);
@@ -471,12 +471,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Processor for TestProcessor {
-        async fn get_node_summary_by_id(
+        async fn get_node_by_id(
             &self,
-            query: &NodeSummaryByIdQuery,
-        ) -> Result<NodeSummary> {
+            query: &NodeByIdQuery,
+        ) -> Result<(NodeName, NodeSummary)> {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            Ok(NodeSummary::new(format!("Node: {:?}", query.id)))
+            Ok((
+                format!("node_{}", query.id),
+                NodeSummary::new(format!("Node: {:?}", query.id)),
+            ))
         }
 
         async fn get_edge_summary_by_id(
@@ -554,13 +557,14 @@ mod tests {
 
         // Send a query
         let node_id = Id::new();
-        let result = reader
-            .node_summary_by_id(node_id, Duration::from_secs(5))
+        let (name, summary) = reader
+            .node_by_id(node_id, Duration::from_secs(5))
             .await
             .unwrap();
 
-        // The mock processor returns "Node: Some(...)" so just check for "Node:"
-        assert!(result.content().unwrap().contains("Node:"));
+        // The mock processor returns name and summary
+        assert!(name.starts_with("node_"));
+        assert!(summary.content().unwrap().contains("Node:"));
 
         // Drop reader to close channel
         drop(reader);
@@ -576,13 +580,16 @@ mod tests {
 
         #[async_trait::async_trait]
         impl Processor for SlowProcessor {
-            async fn get_node_summary_by_id(
+            async fn get_node_by_id(
                 &self,
-                _query: &NodeSummaryByIdQuery,
-            ) -> Result<NodeSummary> {
+                _query: &NodeByIdQuery,
+            ) -> Result<(NodeName, NodeSummary)> {
                 // Sleep longer than the query timeout
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok(NodeSummary::new("Should not get here".to_string()))
+                Ok((
+                    "should_not_get_here".to_string(),
+                    NodeSummary::new("Should not get here".to_string()),
+                ))
             }
 
             async fn get_edge_summary_by_id(
@@ -647,7 +654,7 @@ mod tests {
         // Send query with short timeout
         let node_id = Id::new();
         let result = reader
-            .node_summary_by_id(node_id, Duration::from_millis(50))
+            .node_by_id(node_id, Duration::from_millis(50))
             .await;
 
         // Should timeout because processor takes 200ms but timeout is 50ms
