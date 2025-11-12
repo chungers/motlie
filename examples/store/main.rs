@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use motlie_db::{
-    create_mutation_writer, spawn_batched_graph_consumer_with_next, spawn_fulltext_consumer, AddEdge,
+    create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdge,
     AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
 };
 use rocksdb::DB;
@@ -86,13 +86,15 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
     // Create the Graph consumer that forwards to FullText with batching
     println!("  2. Creating Batched Graph consumer (forwards to FullText)");
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let batch_size = 100; // Process 100 mutations per transaction
     let graph_handle =
-        spawn_batched_graph_consumer_with_next(graph_receiver, config, Path::new(db_path), batch_size, fulltext_sender);
+        spawn_graph_consumer_with_next(graph_receiver, config, Path::new(db_path), fulltext_sender);
 
     let setup_duration = setup_start.elapsed();
     println!("  3. Consumer chain ready: Writer → Graph → FullText");
-    println!("     ⏱️  Setup time: {:.2}ms", setup_duration.as_secs_f64() * 1000.0);
+    println!(
+        "     ⏱️  Setup time: {:.2}ms",
+        setup_duration.as_secs_f64() * 1000.0
+    );
     println!();
 
     // Keep track of node name to ID mapping for edges
@@ -265,14 +267,21 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
     println!("  Nodes: {}", node_count);
     println!("  Edges: {}", edge_count);
     println!("  Unique node names: {}", node_ids.len());
-    println!("  ⏱️  CSV processing time: {:.2}ms", csv_duration.as_secs_f64() * 1000.0);
+    println!(
+        "  ⏱️  CSV processing time: {:.2}ms",
+        csv_duration.as_secs_f64() * 1000.0
+    );
     println!("\n⏱️  Detailed Timing Breakdown:");
-    println!("  CSV Parsing:        {:.2}ms ({:.1}%)",
-             total_csv_parse_time.as_secs_f64() * 1000.0,
-             (total_csv_parse_time.as_secs_f64() / csv_duration.as_secs_f64()) * 100.0);
-    println!("  Writer Send Time:   {:.2}ms ({:.1}%)",
-             total_writer_send_time.as_secs_f64() * 1000.0,
-             (total_writer_send_time.as_secs_f64() / csv_duration.as_secs_f64()) * 100.0);
+    println!(
+        "  CSV Parsing:        {:.2}ms ({:.1}%)",
+        total_csv_parse_time.as_secs_f64() * 1000.0,
+        (total_csv_parse_time.as_secs_f64() / csv_duration.as_secs_f64()) * 100.0
+    );
+    println!(
+        "  Writer Send Time:   {:.2}ms ({:.1}%)",
+        total_writer_send_time.as_secs_f64() * 1000.0,
+        (total_writer_send_time.as_secs_f64() / csv_duration.as_secs_f64()) * 100.0
+    );
     println!("\nShutting down consumer chain...");
 
     // Close writer to signal shutdown (this will cascade through the chain)
@@ -299,30 +308,51 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
     let total_duration = total_start.elapsed();
 
     println!("\n✅ All consumers shut down successfully");
-    println!("   ⏱️  Shutdown time: {:.2}ms", shutdown_duration.as_secs_f64() * 1000.0);
+    println!(
+        "   ⏱️  Shutdown time: {:.2}ms",
+        shutdown_duration.as_secs_f64() * 1000.0
+    );
 
     // Get database size
-    use std::fs;
+
     let db_size = get_directory_size(Path::new(db_path))?;
 
     println!("\n📊 Performance Summary:");
-    println!("   Setup:              {:.2}ms", setup_duration.as_secs_f64() * 1000.0);
-    println!("   CSV Processing:     {:.2}ms", csv_duration.as_secs_f64() * 1000.0);
-    println!("   Shutdown:           {:.2}ms", shutdown_duration.as_secs_f64() * 1000.0);
+    println!(
+        "   Setup:              {:.2}ms",
+        setup_duration.as_secs_f64() * 1000.0
+    );
+    println!(
+        "   CSV Processing:     {:.2}ms",
+        csv_duration.as_secs_f64() * 1000.0
+    );
+    println!(
+        "   Shutdown:           {:.2}ms",
+        shutdown_duration.as_secs_f64() * 1000.0
+    );
     println!("   ─────────────────────────────");
-    println!("   Total:              {:.2}ms ({:.2}s)",
-             total_duration.as_secs_f64() * 1000.0,
-             total_duration.as_secs_f64());
+    println!(
+        "   Total:              {:.2}ms ({:.2}s)",
+        total_duration.as_secs_f64() * 1000.0,
+        total_duration.as_secs_f64()
+    );
 
     println!("\n📈 Throughput:");
-    println!("   Items stored:       {} ({} nodes + {} edges)",
-             node_count + edge_count, node_count, edge_count);
+    println!(
+        "   Items stored:       {} ({} nodes + {} edges)",
+        node_count + edge_count,
+        node_count,
+        edge_count
+    );
     let items_per_sec = (node_count + edge_count) as f64 / total_duration.as_secs_f64();
     println!("   Rate:               {:.0} items/sec", items_per_sec);
 
     println!("\n💾 Database Size:");
     println!("   Total:              {}", format_bytes(db_size));
-    println!("   Per item:           {}", format_bytes(db_size / (node_count + edge_count) as u64));
+    println!(
+        "   Per item:           {}",
+        format_bytes(db_size / (node_count + edge_count) as u64)
+    );
 
     Ok(())
 }
@@ -396,7 +426,10 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
         "   Total fragments: {}",
         expected_data.node_fragments.len() + expected_data.edge_fragments.len()
     );
-    println!("   ⏱️  Parse time: {:.2}ms", parse_duration.as_secs_f64() * 1000.0);
+    println!(
+        "   ⏱️  Parse time: {:.2}ms",
+        parse_duration.as_secs_f64() * 1000.0
+    );
     println!();
 
     // Open database in read-only mode
@@ -418,7 +451,10 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
     let db_open_duration = db_open_start.elapsed();
 
     println!("✓ Database opened successfully");
-    println!("   ⏱️  DB open time: {:.2}ms\n", db_open_duration.as_secs_f64() * 1000.0);
+    println!(
+        "   ⏱️  DB open time: {:.2}ms\n",
+        db_open_duration.as_secs_f64() * 1000.0
+    );
 
     // Verify data
     let mut all_ok = true;
@@ -427,7 +463,10 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
     let verify_nodes_start = Instant::now();
     let nodes_ok = verify_nodes(&db, &expected_data)?;
     let verify_nodes_duration = verify_nodes_start.elapsed();
-    println!("   ⏱️  Verification time: {:.2}ms", verify_nodes_duration.as_secs_f64() * 1000.0);
+    println!(
+        "   ⏱️  Verification time: {:.2}ms",
+        verify_nodes_duration.as_secs_f64() * 1000.0
+    );
     if !nodes_ok {
         all_ok = false;
     }
@@ -436,7 +475,10 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
     let verify_edges_start = Instant::now();
     let edges_ok = verify_edges(&db, &expected_data)?;
     let verify_edges_duration = verify_edges_start.elapsed();
-    println!("   ⏱️  Verification time: {:.2}ms", verify_edges_duration.as_secs_f64() * 1000.0);
+    println!(
+        "   ⏱️  Verification time: {:.2}ms",
+        verify_edges_duration.as_secs_f64() * 1000.0
+    );
     if !edges_ok {
         all_ok = false;
     }
@@ -445,7 +487,10 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
     let verify_fragments_start = Instant::now();
     let fragments_ok = verify_fragments(&db, &expected_data)?;
     let verify_fragments_duration = verify_fragments_start.elapsed();
-    println!("   ⏱️  Verification time: {:.2}ms", verify_fragments_duration.as_secs_f64() * 1000.0);
+    println!(
+        "   ⏱️  Verification time: {:.2}ms",
+        verify_fragments_duration.as_secs_f64() * 1000.0
+    );
     if !fragments_ok {
         all_ok = false;
     }
@@ -454,15 +499,32 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
 
     println!();
     println!("📊 Performance Summary:");
-    println!("   CSV Parse:          {:.2}ms", parse_duration.as_secs_f64() * 1000.0);
-    println!("   DB Open:            {:.2}ms", db_open_duration.as_secs_f64() * 1000.0);
-    println!("   Verify Nodes:       {:.2}ms", verify_nodes_duration.as_secs_f64() * 1000.0);
-    println!("   Verify Edges:       {:.2}ms", verify_edges_duration.as_secs_f64() * 1000.0);
-    println!("   Verify Fragments:   {:.2}ms", verify_fragments_duration.as_secs_f64() * 1000.0);
+    println!(
+        "   CSV Parse:          {:.2}ms",
+        parse_duration.as_secs_f64() * 1000.0
+    );
+    println!(
+        "   DB Open:            {:.2}ms",
+        db_open_duration.as_secs_f64() * 1000.0
+    );
+    println!(
+        "   Verify Nodes:       {:.2}ms",
+        verify_nodes_duration.as_secs_f64() * 1000.0
+    );
+    println!(
+        "   Verify Edges:       {:.2}ms",
+        verify_edges_duration.as_secs_f64() * 1000.0
+    );
+    println!(
+        "   Verify Fragments:   {:.2}ms",
+        verify_fragments_duration.as_secs_f64() * 1000.0
+    );
     println!("   ─────────────────────────────");
-    println!("   Total:              {:.2}ms ({:.2}s)",
-             total_duration.as_secs_f64() * 1000.0,
-             total_duration.as_secs_f64());
+    println!(
+        "   Total:              {:.2}ms ({:.2}s)",
+        total_duration.as_secs_f64() * 1000.0,
+        total_duration.as_secs_f64()
+    );
 
     // Calculate throughput
     let total_items = expected_data.nodes.len() + expected_data.edges.len();
@@ -476,7 +538,10 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
     println!("\n💾 Database Size:");
     println!("   Total:              {}", format_bytes(db_size));
     if total_items > 0 {
-        println!("   Per item:           {}", format_bytes(db_size / total_items as u64));
+        println!(
+            "   Per item:           {}",
+            format_bytes(db_size / total_items as u64)
+        );
     }
 
     println!();
@@ -821,7 +886,10 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
 fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, String)> {
     // Keys are now stored as: [src_id (16)] + [dst_id (16)] + [name UTF-8 bytes]
     if bytes.len() < 32 {
-        anyhow::bail!("Invalid forward edge key length: expected >= 32, got {}", bytes.len());
+        anyhow::bail!(
+            "Invalid forward edge key length: expected >= 32, got {}",
+            bytes.len()
+        );
     }
 
     let mut src_id_bytes = [0u8; 16];
@@ -831,8 +899,7 @@ fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, Strin
     dst_id_bytes.copy_from_slice(&bytes[16..32]);
 
     let name_bytes = &bytes[32..];
-    let name = String::from_utf8(name_bytes.to_vec())
-        .context("Invalid UTF-8 in edge name")?;
+    let name = String::from_utf8(name_bytes.to_vec()).context("Invalid UTF-8 in edge name")?;
 
     Ok((src_id_bytes, dst_id_bytes, name))
 }

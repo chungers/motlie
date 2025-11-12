@@ -176,10 +176,15 @@ impl<P: Processor> Consumer<P> {
         }
 
         // Forward the mutation to the next consumer in the chain if configured
+        // This is a best-effort send - if the buffer is full, we log and continue
         if let Some(sender) = &self.next {
-            sender.send(mutation.clone()).await.map_err(|e| {
-                anyhow::anyhow!("Failed to forward mutation to next consumer: {}", e)
-            })?;
+            if let Err(e) = sender.try_send(mutation.clone()) {
+                log::warn!(
+                    "[BUFFER FULL] Next consumer busy, dropping mutation: err={} payload={:?}",
+                    e,
+                    mutation
+                );
+            }
         }
 
         Ok(())
@@ -197,30 +202,67 @@ pub fn spawn_consumer<P: Processor + 'static>(
 mod tests {
     use super::*;
     use crate::Id;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tokio::time::Duration;
 
     // Mock processor for testing
-    struct TestProcessor;
+    struct TestProcessor {
+        delay_ms: u64,
+        processed_count: Arc<AtomicUsize>,
+    }
+
+    impl TestProcessor {
+        fn new(delay_ms: u64) -> Self {
+            Self {
+                delay_ms,
+                processed_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn with_counter(delay_ms: u64, counter: Arc<AtomicUsize>) -> Self {
+            Self {
+                delay_ms,
+                processed_count: counter,
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.processed_count.load(Ordering::SeqCst)
+        }
+    }
 
     #[async_trait::async_trait]
     impl Processor for TestProcessor {
         async fn process_add_node(&self, _args: &AddNode) -> Result<()> {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            if self.delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            }
+            self.processed_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
         async fn process_add_edge(&self, _args: &AddEdge) -> Result<()> {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            if self.delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            }
+            self.processed_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
         async fn process_add_fragment(&self, _args: &AddFragment) -> Result<()> {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            if self.delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            }
+            self.processed_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
         async fn process_invalidate(&self, _args: &InvalidateArgs) -> Result<()> {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            if self.delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+            }
+            self.processed_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -237,7 +279,7 @@ mod tests {
             (writer, receiver)
         };
 
-        let processor = TestProcessor;
+        let processor = TestProcessor::new(1);
         let consumer = Consumer::new(receiver, config, processor);
 
         // Spawn consumer
@@ -259,5 +301,102 @@ mod tests {
 
         // Wait for consumer to finish
         consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_graph_processor_continues_when_fulltext_slow() {
+        // This test verifies that the graph processor can continue processing mutations
+        // even when the fulltext consumer isn't keeping up and the MPSC buffer is full.
+
+        let graph_config = crate::WriterConfig {
+            channel_buffer_size: 100,
+        };
+
+        let fulltext_config = crate::WriterConfig {
+            channel_buffer_size: 2, // Very small buffer to force overflow
+        };
+
+        // Create channels
+        let (graph_sender, graph_receiver) = mpsc::channel(graph_config.channel_buffer_size);
+        let (fulltext_sender, fulltext_receiver) =
+            mpsc::channel(fulltext_config.channel_buffer_size);
+
+        // Create writer
+        let writer = crate::Writer::new(graph_sender);
+
+        // Create graph processor (fast, no delay)
+        let graph_counter = Arc::new(AtomicUsize::new(0));
+        let graph_processor = TestProcessor::with_counter(0, graph_counter.clone());
+
+        // Create fulltext processor (slow, 50ms delay per mutation)
+        let fulltext_counter = Arc::new(AtomicUsize::new(0));
+        let fulltext_processor = TestProcessor::with_counter(50, fulltext_counter.clone());
+
+        // Create consumers
+        let graph_consumer =
+            Consumer::with_next(graph_receiver, graph_config, graph_processor, fulltext_sender);
+        let fulltext_consumer = Consumer::new(fulltext_receiver, fulltext_config, fulltext_processor);
+
+        // Spawn consumers
+        let graph_handle = spawn_consumer(graph_consumer);
+        let fulltext_handle = spawn_consumer(fulltext_consumer);
+
+        // Send many mutations quickly (more than fulltext buffer can handle)
+        let num_mutations = 20;
+        for i in 0..num_mutations {
+            let node_args = AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli::now(),
+                name: format!("test_node_{}", i),
+            };
+            writer.add_node(node_args).await.unwrap();
+        }
+
+        // Give graph processor time to process all mutations
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify that graph processor processed all mutations
+        let graph_processed = graph_counter.load(Ordering::SeqCst);
+        assert_eq!(
+            graph_processed, num_mutations,
+            "Graph processor should have processed all {} mutations, but processed {}",
+            num_mutations, graph_processed
+        );
+
+        // Verify that fulltext processor received fewer mutations (due to buffer overflow)
+        let fulltext_processed = fulltext_counter.load(Ordering::SeqCst);
+        assert!(
+            fulltext_processed < num_mutations,
+            "Fulltext processor should have processed fewer than {} mutations due to buffer overflow, but processed {}",
+            num_mutations, fulltext_processed
+        );
+
+        println!(
+            "Graph processed: {}, Fulltext processed: {}, Dropped: {}",
+            graph_processed,
+            fulltext_processed,
+            graph_processed - fulltext_processed
+        );
+
+        // Drop writer to close channels
+        drop(writer);
+
+        // Wait for graph consumer to finish (should finish quickly)
+        let graph_result = tokio::time::timeout(Duration::from_secs(5), graph_handle).await;
+        assert!(graph_result.is_ok(), "Graph consumer should finish promptly");
+        graph_result.unwrap().unwrap().unwrap();
+
+        // Give fulltext consumer some time to finish processing remaining items
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // The fulltext consumer will continue running until its channel is closed
+        // Since we dropped the graph consumer's sender to fulltext, the fulltext receiver
+        // channel should now be closed, allowing fulltext consumer to exit
+        let fulltext_result = tokio::time::timeout(Duration::from_secs(5), fulltext_handle).await;
+        assert!(
+            fulltext_result.is_ok(),
+            "Fulltext consumer should finish after channel closed"
+        );
+        fulltext_result.unwrap().unwrap().unwrap();
     }
 }
