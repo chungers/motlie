@@ -260,8 +260,12 @@ impl Storage {
                 schema::ReverseEdges::column_family_options(),
             ),
             ColumnFamilyDescriptor::new(
-                schema::NamedEdges::CF_NAME,
-                schema::NamedEdges::column_family_options(),
+                schema::NodeNames::CF_NAME,
+                schema::NodeNames::column_family_options(),
+            ),
+            ColumnFamilyDescriptor::new(
+                schema::EdgeNames::CF_NAME,
+                schema::EdgeNames::column_family_options(),
             ),
         ];
 
@@ -647,9 +651,11 @@ impl crate::query::Processor for Graph {
             process_items!(iter);
         } else {
             let txn_db = self.storage.transaction_db()?;
-            let cf = txn_db.cf_handle(schema::Fragments::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
-            })?;
+            let cf = txn_db
+                .cf_handle(schema::Fragments::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
+                })?;
 
             let iter = txn_db.iterator_cf(
                 cf,
@@ -663,7 +669,7 @@ impl crate::query::Processor for Graph {
 
     async fn get_edges_from_node_by_id(
         &self,
-        query: &crate::query::EdgesFromNodeByIdQuery,
+        query: &crate::query::EdgesFromNodeQuery,
     ) -> Result<Vec<(SrcId, crate::schema::EdgeName, DstId)>> {
         let id = query.id;
 
@@ -746,7 +752,7 @@ impl crate::query::Processor for Graph {
 
     async fn get_edges_to_node_by_id(
         &self,
-        query: &crate::query::EdgesToNodeByIdQuery,
+        query: &crate::query::EdgesToNodeQuery,
     ) -> Result<Vec<(DstId, crate::schema::EdgeName, SrcId)>> {
         let id = query.id;
 
@@ -821,6 +827,180 @@ impl crate::query::Processor for Graph {
                 let source_id = key.1 .0;
                 let edge_name = key.2 .0;
                 edges.push((dest_id, crate::schema::EdgeName(edge_name), source_id));
+            }
+        }
+
+        Ok(edges)
+    }
+
+    async fn get_nodes_by_name(
+        &self,
+        query: &crate::query::NodesByNameQuery,
+    ) -> Result<Vec<(schema::NodeName, Id)>> {
+        let name = &query.name;
+
+        // Scan the node_names column family for all nodes with this name prefix
+        // Keys are (name, id) and RocksDB stores them in sorted order
+
+        let mut nodes: Vec<(schema::NodeName, Id)> = Vec::new();
+
+        // Create prefix: the name as UTF-8 bytes for prefix seeking
+        let prefix = name.as_bytes();
+
+        // Handle both readonly and readwrite modes
+        if let Ok(db) = self.storage.db() {
+            let cf = db.cf_handle(schema::NodeNames::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::NodeNames::CF_NAME
+                )
+            })?;
+
+            // Seek directly to the first key with this prefix
+            let iter = db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+            );
+
+            for item in iter {
+                let (key_bytes, _value_bytes) = item?;
+                let key: schema::NodeNamesCfKey =
+                    schema::NodeNames::key_from_bytes(&key_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+                let node_name = key.0;
+
+                // Check if this key still matches the prefix
+                if !node_name.starts_with(name) {
+                    // Once we see a different prefix, we're done
+                    break;
+                }
+
+                let node_id = key.1;
+                nodes.push((node_name, node_id));
+            }
+        } else {
+            let txn_db = self.storage.transaction_db()?;
+            let cf = txn_db
+                .cf_handle(schema::NodeNames::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Column family '{}' not found",
+                        schema::NodeNames::CF_NAME
+                    )
+                })?;
+
+            // Seek directly to the first key with this prefix
+            let iter = txn_db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+            );
+
+            for item in iter {
+                let (key_bytes, _value_bytes) = item?;
+                let key: schema::NodeNamesCfKey =
+                    schema::NodeNames::key_from_bytes(&key_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+                let node_name = key.0;
+
+                // Check if this key still matches the prefix
+                if !node_name.starts_with(name) {
+                    // Once we see a different prefix, we're done
+                    break;
+                }
+
+                let node_id = key.1;
+                nodes.push((node_name, node_id));
+            }
+        }
+
+        Ok(nodes)
+    }
+
+    async fn get_edges_by_name(
+        &self,
+        query: &crate::query::EdgesByNameQuery,
+    ) -> Result<Vec<(crate::schema::EdgeName, Id)>> {
+        let name = &query.name;
+
+        // Scan the edge_names column family for all edges with this name prefix
+        // Keys are (name, dst_id, src_id, edge_id) and RocksDB stores them in sorted order
+
+        let mut edges: Vec<(crate::schema::EdgeName, Id)> = Vec::new();
+
+        // Create prefix: the name as UTF-8 bytes for prefix seeking
+        let prefix = name.as_bytes();
+
+        // Handle both readonly and readwrite modes
+        if let Ok(db) = self.storage.db() {
+            let cf = db.cf_handle(schema::EdgeNames::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::EdgeNames::CF_NAME
+                )
+            })?;
+
+            // Seek directly to the first key with this prefix
+            let iter = db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+            );
+
+            for item in iter {
+                let (key_bytes, _value_bytes) = item?;
+                let key: schema::EdgeNamesCfKey =
+                    schema::EdgeNames::key_from_bytes(&key_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+                let edge_name = &key.0;
+
+                // Check if this key still matches the prefix
+                if !edge_name.0.starts_with(name) {
+                    // Once we see a different prefix, we're done
+                    break;
+                }
+
+                // EdgeNamesCfKey is (EdgeName, EdgeDestinationId, EdgeSourceId, Id)
+                // The edge_id is the 4th element
+                let edge_id = key.3;
+                edges.push((edge_name.clone(), edge_id));
+            }
+        } else {
+            let txn_db = self.storage.transaction_db()?;
+            let cf = txn_db
+                .cf_handle(schema::EdgeNames::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Column family '{}' not found",
+                        schema::EdgeNames::CF_NAME
+                    )
+                })?;
+
+            // Seek directly to the first key with this prefix
+            let iter = txn_db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+            );
+
+            for item in iter {
+                let (key_bytes, _value_bytes) = item?;
+                let key: schema::EdgeNamesCfKey =
+                    schema::EdgeNames::key_from_bytes(&key_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+                let edge_name = &key.0;
+
+                // Check if this key still matches the prefix
+                if !edge_name.0.starts_with(name) {
+                    // Once we see a different prefix, we're done
+                    break;
+                }
+
+                // EdgeNamesCfKey is (EdgeName, EdgeDestinationId, EdgeSourceId, Id)
+                // The edge_id is the 4th element
+                let edge_id = key.3;
+                edges.push((edge_name.clone(), edge_id));
             }
         }
 

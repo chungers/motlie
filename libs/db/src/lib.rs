@@ -11,8 +11,8 @@ pub use reader::*;
 mod query;
 // Re-export query types but not Consumer/Processor/spawn_consumer to avoid ambiguity
 pub use query::{
-    DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
-    EdgesToNodeByIdQuery, FragmentsByIdTimeRangeQuery, NodeByIdQuery, Queries, SrcId,
+    DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeQuery, EdgesToNodeQuery,
+    FragmentsByIdTimeRangeQuery, NodeByIdQuery, Queries, SrcId,
 };
 pub use schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
 mod graph;

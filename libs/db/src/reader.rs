@@ -3,8 +3,9 @@ use std::ops::Bound;
 use std::time::Duration;
 
 use crate::query::{
-    DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
-    EdgesToNodeByIdQuery, FragmentsByIdTimeRangeQuery, NodeByIdQuery, Queries, SrcId,
+    DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesByNameQuery, EdgesFromNodeQuery,
+    EdgesToNodeQuery, FragmentsByIdTimeRangeQuery, NodeByIdQuery, NodesByNameQuery, Queries,
+    SrcId,
 };
 use crate::schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
 use crate::{Id, TimestampMilli};
@@ -143,10 +144,10 @@ impl Reader {
     ) -> Result<Vec<(SrcId, EdgeName, DstId)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgesFromNodeByIdQuery::new(id, timeout, result_tx);
+        let query = EdgesFromNodeQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Queries::EdgesFromNodeById(query))
+            .send_async(Queries::EdgesFromNode(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -163,10 +164,51 @@ impl Reader {
     ) -> Result<Vec<(DstId, EdgeName, SrcId)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgesToNodeByIdQuery::new(id, timeout, result_tx);
+        let query = EdgesToNodeQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Queries::EdgesToNodeById(query))
+            .send_async(Queries::EdgesToNode(query))
+            .await
+            .context("Failed to send query to reader queue")?;
+
+        // Await result - timeout is handled by the consumer
+        result_rx.await?
+    }
+
+    /// Query nodes by name prefix
+    /// Returns Vec<(node_name, node_id)>
+    pub async fn nodes_by_name(
+        &self,
+        name: NodeName,
+        timeout: Duration,
+    ) -> Result<Vec<(NodeName, Id)>> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        let query = NodesByNameQuery::new(name, timeout, result_tx);
+
+        self.sender
+            .send_async(Queries::NodesByName(query))
+            .await
+            .context("Failed to send query to reader queue")?;
+
+        // Await result - timeout is handled by the consumer
+        result_rx.await?
+    }
+
+    /// Query edges by name prefix
+    /// Returns Vec<(edge_name, edge_id)>
+    /// Results are sorted by name, then destination_id, then source_id per EdgeNames CF key structure
+    pub async fn edges_by_name(
+        &self,
+        name: String,
+        timeout: Duration,
+    ) -> Result<Vec<(EdgeName, Id)>> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        let query = EdgesByNameQuery::new(name, timeout, result_tx);
+
+        self.sender
+            .send_async(Queries::EdgesByName(query))
             .await
             .context("Failed to send query to reader queue")?;
 

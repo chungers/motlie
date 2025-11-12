@@ -19,6 +19,13 @@ pub trait QueryWithTimeout: Send + Sync {
     fn timeout(&self) -> Duration;
 }
 
+/// Trait for processing queries without needing to know the result type
+#[async_trait::async_trait]
+pub trait QueryProcessor: Send {
+    /// Process the query and send the result (consumes self)
+    async fn process_and_send<P: Processor>(self, processor: &P);
+}
+
 /// Query enum representing all possible query types
 #[derive(Debug)]
 pub enum Queries {
@@ -26,8 +33,73 @@ pub enum Queries {
     EdgeById(EdgeByIdQuery),
     EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
     FragmentsByIdTimeRange(FragmentsByIdTimeRangeQuery),
-    EdgesFromNodeById(EdgesFromNodeByIdQuery),
-    EdgesToNodeById(EdgesToNodeByIdQuery),
+    EdgesFromNode(EdgesFromNodeQuery),
+    EdgesToNode(EdgesToNodeQuery),
+    NodesByName(NodesByNameQuery),
+    EdgesByName(EdgesByNameQuery),
+}
+
+impl std::fmt::Display for Queries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Queries::NodeById(q) => write!(f, "NodeById: id={}", q.id),
+            Queries::EdgeById(q) => write!(f, "EdgeById: id={}", q.id),
+            Queries::EdgeSummaryBySrcDstName(q) => write!(
+                f,
+                "EdgeBySrcDstName: source={}, dest={}, name={}",
+                q.source_id, q.dest_id, q.name
+            ),
+            Queries::FragmentsByIdTimeRange(q) => {
+                write!(f, "FragmentsByIdTimeRange: id={}, range={:?}", q.id, q.time_range)
+            }
+            Queries::EdgesFromNode(q) => write!(f, "EdgesFromNodeById: id={}", q.id),
+            Queries::EdgesToNode(q) => write!(f, "EdgesToNodeById: id={}", q.id),
+            Queries::NodesByName(q) => write!(f, "NodesByName: name={}", q.name),
+            Queries::EdgesByName(q) => write!(f, "EdgesByName: name={}", q.name),
+        }
+    }
+}
+
+/// Macro to implement QueryProcessor for query types
+macro_rules! impl_query_processor {
+    ($($query_type:ty),+ $(,)?) => {
+        $(
+            #[async_trait::async_trait]
+            impl QueryProcessor for $query_type {
+                async fn process_and_send<P: Processor>(self, processor: &P) {
+                    let result = self.result(processor).await;
+                    self.send_result(result);
+                }
+            }
+        )+
+    };
+}
+
+impl_query_processor!(
+    NodeByIdQuery,
+    EdgeByIdQuery,
+    EdgeSummaryBySrcDstNameQuery,
+    FragmentsByIdTimeRangeQuery,
+    EdgesFromNodeQuery,
+    EdgesToNodeQuery,
+    NodesByNameQuery,
+    EdgesByNameQuery,
+);
+
+#[async_trait::async_trait]
+impl QueryProcessor for Queries {
+    async fn process_and_send<P: Processor>(self, processor: &P) {
+        match self {
+            Queries::NodeById(q) => q.process_and_send(processor).await,
+            Queries::EdgeById(q) => q.process_and_send(processor).await,
+            Queries::EdgeSummaryBySrcDstName(q) => q.process_and_send(processor).await,
+            Queries::FragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
+            Queries::EdgesFromNode(q) => q.process_and_send(processor).await,
+            Queries::EdgesToNode(q) => q.process_and_send(processor).await,
+            Queries::NodesByName(q) => q.process_and_send(processor).await,
+            Queries::EdgesByName(q) => q.process_and_send(processor).await,
+        }
+    }
 }
 
 /// Type alias for querying node by ID (returns name and summary)
@@ -214,10 +286,9 @@ impl QueryWithTimeout for FragmentsByIdTimeRangeQuery {
     type ResultType = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn result<P: Processor>(&self, processor: &P) -> Result<Self::ResultType> {
-        let result = tokio::time::timeout(
-            self.timeout,
-            processor.get_fragments_by_id_time_range(self)
-        ).await;
+        let result =
+            tokio::time::timeout(self.timeout, processor.get_fragments_by_id_time_range(self))
+                .await;
 
         match result {
             Ok(r) => r,
@@ -305,7 +376,7 @@ pub type DstId = Id;
 
 /// Query to find all edges emanating from a node by its ID
 #[derive(Debug)]
-pub struct EdgesFromNodeByIdQuery {
+pub struct EdgesFromNodeQuery {
     /// The node ID to search for
     pub id: Id,
 
@@ -319,7 +390,7 @@ pub struct EdgesFromNodeByIdQuery {
     result_tx: oneshot::Sender<Result<Vec<(SrcId, EdgeName, DstId)>>>,
 }
 
-impl EdgesFromNodeByIdQuery {
+impl EdgesFromNodeQuery {
     pub fn new(
         id: Id,
         timeout: Duration,
@@ -339,7 +410,7 @@ impl EdgesFromNodeByIdQuery {
 }
 
 #[async_trait::async_trait]
-impl QueryWithTimeout for EdgesFromNodeByIdQuery {
+impl QueryWithTimeout for EdgesFromNodeQuery {
     type ResultType = Vec<(SrcId, EdgeName, DstId)>;
 
     async fn result<P: Processor>(&self, processor: &P) -> Result<Vec<(SrcId, EdgeName, DstId)>> {
@@ -359,7 +430,7 @@ impl QueryWithTimeout for EdgesFromNodeByIdQuery {
 
 /// Query to find all edges terminating at a node by its ID
 #[derive(Debug)]
-pub struct EdgesToNodeByIdQuery {
+pub struct EdgesToNodeQuery {
     /// The node ID to search for
     pub id: DstId,
 
@@ -373,7 +444,7 @@ pub struct EdgesToNodeByIdQuery {
     result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
 }
 
-impl EdgesToNodeByIdQuery {
+impl EdgesToNodeQuery {
     pub fn new(
         id: DstId,
         timeout: Duration,
@@ -393,12 +464,118 @@ impl EdgesToNodeByIdQuery {
 }
 
 #[async_trait::async_trait]
-impl QueryWithTimeout for EdgesToNodeByIdQuery {
+impl QueryWithTimeout for EdgesToNodeQuery {
     type ResultType = Vec<(SrcId, EdgeName, DstId)>;
 
     async fn result<P: Processor>(&self, processor: &P) -> Result<Vec<(DstId, EdgeName, SrcId)>> {
         let result =
             tokio::time::timeout(self.timeout, processor.get_edges_to_node_by_id(self)).await;
+
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout)),
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+/// Query to find nodes by name prefix
+#[derive(Debug)]
+pub struct NodesByNameQuery {
+    /// The node name or prefix to search for
+    pub name: NodeName,
+
+    /// Timestamp of when the query was created
+    pub ts_millis: TimestampMilli,
+
+    /// Timeout for this query
+    pub timeout: Duration,
+
+    /// Channel to send the result back to the client
+    result_tx: oneshot::Sender<Result<Vec<(NodeName, Id)>>>,
+}
+
+impl NodesByNameQuery {
+    pub fn new(
+        name: NodeName,
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<Vec<(NodeName, Id)>>>,
+    ) -> Self {
+        Self {
+            name,
+            ts_millis: TimestampMilli::now(),
+            timeout,
+            result_tx,
+        }
+    }
+
+    pub fn send_result(self, result: Result<Vec<(NodeName, Id)>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryWithTimeout for NodesByNameQuery {
+    type ResultType = Vec<(NodeName, Id)>;
+
+    async fn result<P: Processor>(&self, processor: &P) -> Result<Vec<(NodeName, Id)>> {
+        let result = tokio::time::timeout(self.timeout, processor.get_nodes_by_name(self)).await;
+
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout)),
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+/// Query to find edges by name prefix
+#[derive(Debug)]
+pub struct EdgesByNameQuery {
+    /// The edge name or prefix to search for
+    pub name: String,
+
+    /// Timestamp of when the query was created
+    pub ts_millis: TimestampMilli,
+
+    /// Timeout for this query
+    pub timeout: Duration,
+
+    /// Channel to send the result back to the client
+    result_tx: oneshot::Sender<Result<Vec<(EdgeName, Id)>>>,
+}
+
+impl EdgesByNameQuery {
+    pub fn new(
+        name: String,
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<Vec<(EdgeName, Id)>>>,
+    ) -> Self {
+        Self {
+            name,
+            ts_millis: TimestampMilli::now(),
+            timeout,
+            result_tx,
+        }
+    }
+
+    pub fn send_result(self, result: Result<Vec<(EdgeName, Id)>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryWithTimeout for EdgesByNameQuery {
+    type ResultType = Vec<(EdgeName, Id)>;
+
+    async fn result<P: Processor>(&self, processor: &P) -> Result<Vec<(EdgeName, Id)>> {
+        let result = tokio::time::timeout(self.timeout, processor.get_edges_by_name(self)).await;
 
         match result {
             Ok(r) => r,
@@ -443,15 +620,25 @@ pub trait Processor: Send + Sync {
     /// Returns (source_id, edge_name, dest_id) tuples sorted by RocksDB key order
     async fn get_edges_from_node_by_id(
         &self,
-        query: &EdgesFromNodeByIdQuery,
+        query: &EdgesFromNodeQuery,
     ) -> Result<Vec<(SrcId, EdgeName, DstId)>>;
 
     /// Get all edges terminating at a node by its ID
     /// Returns (dest_id, edge_name, source_id) tuples sorted by RocksDB key order
     async fn get_edges_to_node_by_id(
         &self,
-        query: &EdgesToNodeByIdQuery,
+        query: &EdgesToNodeQuery,
     ) -> Result<Vec<(DstId, EdgeName, SrcId)>>;
+
+    /// Get nodes by name prefix scan
+    /// Returns Vec<(node_name, node_id)> sorted by RocksDB key order
+    async fn get_nodes_by_name(&self, query: &NodesByNameQuery) -> Result<Vec<(NodeName, Id)>>;
+
+    /// Get edges by name prefix scan
+    /// Returns Vec<(edge_name, edge_id)> sorted by RocksDB key order
+    /// Note: EdgeNames CF key is (name, dst_id, src_id, edge_id), so results
+    /// will be grouped by name, then ordered by destination, then source
+    async fn get_edges_by_name(&self, query: &EdgesByNameQuery) -> Result<Vec<(EdgeName, Id)>>;
 }
 
 /// Generic consumer that processes queries using a Processor
@@ -493,46 +680,8 @@ impl<P: Processor> Consumer<P> {
 
     /// Process a single query
     async fn process_query(&self, query: Queries) {
-        match query {
-            Queries::NodeById(q) => {
-                log::debug!("Processing NodeById: id={}", q.id);
-                let result = q.result(&self.processor).await;
-                q.send_result(result);
-            }
-            Queries::EdgeById(q) => {
-                log::debug!("Processing EdgeById: id={}", q.id);
-                let result = q.result(&self.processor).await;
-                q.send_result(result);
-            }
-            Queries::EdgeSummaryBySrcDstName(q) => {
-                log::debug!(
-                    "Processing EdgeBySrcDstName: source={}, dest={}, name={}",
-                    q.source_id,
-                    q.dest_id,
-                    q.name
-                );
-                let result = q.result(&self.processor).await;
-                q.send_result(result);
-            }
-            Queries::FragmentsByIdTimeRange(q) => {
-                log::debug!(
-                    "Processing FragmentsByIdTimeRange: id={}, range={:?}",
-                    q.id, q.time_range
-                );
-                let result = q.result(&self.processor).await;
-                q.send_result(result);
-            }
-            Queries::EdgesFromNodeById(q) => {
-                log::debug!("Processing EdgesFromNodeById: id={}", q.id);
-                let result = q.result(&self.processor).await;
-                q.send_result(result);
-            }
-            Queries::EdgesToNodeById(q) => {
-                log::debug!("Processing EdgesToNodeById: id={}", q.id);
-                let result = q.result(&self.processor).await;
-                q.send_result(result);
-            }
-        }
+        log::debug!("Processing {}", query);
+        query.process_and_send(&self.processor).await;
     }
 }
 
@@ -599,7 +748,7 @@ mod tests {
 
         async fn get_edges_from_node_by_id(
             &self,
-            query: &EdgesFromNodeByIdQuery,
+            query: &EdgesFromNodeQuery,
         ) -> Result<Vec<(Id, crate::schema::EdgeName, Id)>> {
             tokio::time::sleep(Duration::from_millis(10)).await;
             Ok(vec![(
@@ -611,12 +760,30 @@ mod tests {
 
         async fn get_edges_to_node_by_id(
             &self,
-            query: &EdgesToNodeByIdQuery,
+            query: &EdgesToNodeQuery,
         ) -> Result<Vec<(Id, crate::schema::EdgeName, Id)>> {
             tokio::time::sleep(Duration::from_millis(10)).await;
             Ok(vec![(
                 query.id,
                 crate::schema::EdgeName("test_edge".to_string()),
+                Id::new(),
+            )])
+        }
+
+        async fn get_nodes_by_name(&self, query: &NodesByNameQuery) -> Result<Vec<(NodeName, Id)>> {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Mock: return a node matching the prefix
+            Ok(vec![(format!("{}_test", query.name), Id::new())])
+        }
+
+        async fn get_edges_by_name(
+            &self,
+            query: &EdgesByNameQuery,
+        ) -> Result<Vec<(crate::schema::EdgeName, Id)>> {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Mock: return an edge matching the prefix
+            Ok(vec![(
+                crate::schema::EdgeName(format!("{}_test", query.name)),
                 Id::new(),
             )])
         }
@@ -708,7 +875,7 @@ mod tests {
 
             async fn get_edges_from_node_by_id(
                 &self,
-                query: &EdgesFromNodeByIdQuery,
+                query: &EdgesFromNodeQuery,
             ) -> Result<Vec<(Id, crate::schema::EdgeName, Id)>> {
                 Ok(vec![(
                     query.id,
@@ -719,10 +886,27 @@ mod tests {
 
             async fn get_edges_to_node_by_id(
                 &self,
-                query: &EdgesToNodeByIdQuery,
+                query: &EdgesToNodeQuery,
             ) -> Result<Vec<(Id, crate::schema::EdgeName, Id)>> {
                 Ok(vec![(
                     query.id,
+                    crate::schema::EdgeName("N/A".to_string()),
+                    Id::new(),
+                )])
+            }
+
+            async fn get_nodes_by_name(
+                &self,
+                _query: &NodesByNameQuery,
+            ) -> Result<Vec<(NodeName, Id)>> {
+                Ok(vec![("N/A".to_string(), Id::new())])
+            }
+
+            async fn get_edges_by_name(
+                &self,
+                _query: &EdgesByNameQuery,
+            ) -> Result<Vec<(crate::schema::EdgeName, Id)>> {
+                Ok(vec![(
                     crate::schema::EdgeName("N/A".to_string()),
                     Id::new(),
                 )])

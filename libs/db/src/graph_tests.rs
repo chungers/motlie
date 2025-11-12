@@ -1174,6 +1174,181 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_node_names_column_family() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create multiple nodes with different names
+        let node_a_id = Id::new();
+        let node_a = AddNode {
+            id: node_a_id,
+            ts_millis: TimestampMilli::now(),
+            name: "alice".to_string(),
+        };
+
+        let node_b_id = Id::new();
+        let node_b = AddNode {
+            id: node_b_id,
+            ts_millis: TimestampMilli::now(),
+            name: "bob".to_string(),
+        };
+
+        let node_c_id = Id::new();
+        let node_c = AddNode {
+            id: node_c_id,
+            ts_millis: TimestampMilli::now(),
+            name: "alice".to_string(), // Same name as node_a
+        };
+
+        let node_d_id = Id::new();
+        let node_d = AddNode {
+            id: node_d_id,
+            ts_millis: TimestampMilli::now(),
+            name: "charlie".to_string(),
+        };
+
+        writer.add_node(node_a.clone()).await.unwrap();
+        writer.add_node(node_b.clone()).await.unwrap();
+        writer.add_node(node_c.clone()).await.unwrap();
+        writer.add_node(node_d.clone()).await.unwrap();
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop writer to close channel
+        drop(writer);
+
+        // Wait for consumer to finish
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify the nodes were written to the NodeNames column family
+        let db = DB::open_cf_for_read_only(
+            &rocksdb::Options::default(),
+            &db_path,
+            ALL_COLUMN_FAMILIES,
+            false,
+        )
+        .expect("Failed to open database for verification");
+
+        use crate::schema::NodeNames;
+        let cf_handle = db
+            .cf_handle(NodeNames::CF_NAME)
+            .expect("NodeNames column family should exist");
+
+        // Verify each node is in the NodeNames column family
+        for node in &[&node_a, &node_b, &node_c, &node_d] {
+            let (key, _value) = NodeNames::record_from(node);
+            let key_bytes = NodeNames::key_to_bytes(&key);
+            let result = db
+                .get_cf(cf_handle, &key_bytes)
+                .expect("Failed to query database");
+            assert!(
+                result.is_some(),
+                "Node {:?} should be written to the 'node_names' column family",
+                node.id
+            );
+
+            // Verify the key contains the correct node ID
+            // NodeNamesCfValue is empty, the node ID is stored in the key (key.1)
+            assert_eq!(
+                key.1, node.id,
+                "NodeNames key should contain the correct node ID"
+            );
+        }
+
+        // Verify key ordering: nodes with same name should be grouped together
+        // and ordered by (name, node_id)
+        let iter = db.prefix_iterator_cf(cf_handle, b"");
+        let mut all_keys: Vec<(String, Id)> = Vec::new();
+
+        for item in iter {
+            let (key_bytes, _value_bytes) = item.expect("Failed to iterate");
+            let key = NodeNames::key_from_bytes(&key_bytes)
+                .expect("Failed to deserialize key");
+            all_keys.push((key.0.clone(), key.1));
+        }
+
+        // Should have 4 nodes total
+        assert_eq!(all_keys.len(), 4, "Should have 4 nodes in NodeNames CF");
+
+        // Verify that nodes are ordered lexicographically by (name, id)
+        for i in 0..all_keys.len() - 1 {
+            let (name1, id1) = &all_keys[i];
+            let (name2, id2) = &all_keys[i + 1];
+
+            // Compare as tuples - this gives us lexicographic ordering
+            assert!(
+                (name1, id1) <= (name2, id2),
+                "Keys should be in lexicographic order: {:?} should be <= {:?}",
+                (name1, id1),
+                (name2, id2)
+            );
+        }
+
+        // Verify that nodes are grouped by name
+        let alice_positions: Vec<usize> = all_keys
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _))| name == "alice")
+            .map(|(i, _)| i)
+            .collect();
+
+        let bob_positions: Vec<usize> = all_keys
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _))| name == "bob")
+            .map(|(i, _)| i)
+            .collect();
+
+        let charlie_positions: Vec<usize> = all_keys
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _))| name == "charlie")
+            .map(|(i, _)| i)
+            .collect();
+
+        assert_eq!(alice_positions.len(), 2, "Should have 2 'alice' nodes");
+        assert_eq!(bob_positions.len(), 1, "Should have 1 'bob' node");
+        assert_eq!(charlie_positions.len(), 1, "Should have 1 'charlie' node");
+
+        // All "alice" positions should be consecutive
+        if alice_positions.len() == 2 {
+            assert_eq!(
+                alice_positions[1] - alice_positions[0],
+                1,
+                "Alice nodes should be consecutive"
+            );
+        }
+
+        // Verify alphabetical ordering of names
+        // "alice" should come before "bob" and "charlie"
+        if let (Some(&max_alice_pos), Some(&min_bob_pos)) =
+            (alice_positions.iter().max(), bob_positions.iter().min())
+        {
+            assert!(
+                max_alice_pos < min_bob_pos,
+                "All 'alice' nodes should come before 'bob' nodes"
+            );
+        }
+
+        if let (Some(&max_bob_pos), Some(&min_charlie_pos)) =
+            (bob_positions.iter().max(), charlie_positions.iter().min())
+        {
+            assert!(
+                max_bob_pos < min_charlie_pos,
+                "All 'bob' nodes should come before 'charlie' nodes"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_edges_written_to_correct_column_families() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
@@ -1276,29 +1451,27 @@ mod tests {
             );
         }
 
-        // Check NamedEdges column family
+        // Check EdgeNames column family
         {
-            use crate::schema::NamedEdges;
+            use crate::schema::EdgeNames;
             let cf_handle = db
-                .cf_handle(NamedEdges::CF_NAME)
-                .expect("NamedEdges column family should exist");
-            let (key, _value) = NamedEdges::record_from(&edge_args);
-            let key_bytes = NamedEdges::key_to_bytes(&key);
+                .cf_handle(EdgeNames::CF_NAME)
+                .expect("EdgeNames column family should exist");
+            let (key, _value) = EdgeNames::record_from(&edge_args);
+            let key_bytes = EdgeNames::key_to_bytes(&key);
             let result = db
                 .get_cf(cf_handle, &key_bytes)
                 .expect("Failed to query database");
             assert!(
                 result.is_some(),
-                "Edge should be written to the 'named_edges' column family"
+                "Edge should be written to the 'edge_names' column family"
             );
 
-            // Verify the value contains the correct edge ID
-            let value_bytes = result.unwrap();
-            let value = NamedEdges::value_from_bytes(&value_bytes)
-                .expect("Failed to deserialize NamedEdges value");
+            // Verify the key contains the correct edge ID
+            // EdgeNamesCfValue is empty, the edge ID is stored in the key (key.3)
             assert_eq!(
-                value.0, edge_id,
-                "NamedEdges value should contain the correct edge ID"
+                key.3, edge_id,
+                "EdgeNames key should contain the correct edge ID"
             );
         }
     }
@@ -1699,7 +1872,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_named_edges_column_family() {
+    async fn test_edge_names_column_family() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
@@ -1762,7 +1935,7 @@ mod tests {
         // Wait for consumer to finish
         consumer_handle.await.unwrap().unwrap();
 
-        // Verify the edges were written to the NamedEdges column family
+        // Verify the edges were written to the EdgeNames column family
         let db = DB::open_cf_for_read_only(
             &rocksdb::Options::default(),
             &db_path,
@@ -1771,31 +1944,29 @@ mod tests {
         )
         .expect("Failed to open database for verification");
 
-        use crate::schema::NamedEdges;
+        use crate::schema::EdgeNames;
         let cf_handle = db
-            .cf_handle(NamedEdges::CF_NAME)
-            .expect("NamedEdges column family should exist");
+            .cf_handle(EdgeNames::CF_NAME)
+            .expect("EdgeNames column family should exist");
 
-        // Verify each edge is in the NamedEdges column family
+        // Verify each edge is in the EdgeNames column family
         for edge in &[&edge_1, &edge_2, &edge_3, &edge_4] {
-            let (key, _value) = NamedEdges::record_from(edge);
-            let key_bytes = NamedEdges::key_to_bytes(&key);
+            let (key, _value) = EdgeNames::record_from(edge);
+            let key_bytes = EdgeNames::key_to_bytes(&key);
             let result = db
                 .get_cf(cf_handle, &key_bytes)
                 .expect("Failed to query database");
             assert!(
                 result.is_some(),
-                "Edge {:?} should be written to the 'named_edges' column family",
+                "Edge {:?} should be written to the 'edge_names' column family",
                 edge.id
             );
 
-            // Verify the value contains the correct edge ID
-            let value_bytes = result.unwrap();
-            let value = NamedEdges::value_from_bytes(&value_bytes)
-                .expect("Failed to deserialize NamedEdges value");
+            // Verify the key contains the correct edge ID
+            // EdgeNamesCfValue is empty, the edge ID is stored in the key (key.3)
             assert_eq!(
-                value.0, edge.id,
-                "NamedEdges value should contain the correct edge ID"
+                key.3, edge.id,
+                "EdgeNames key should contain the correct edge ID"
             );
         }
 
@@ -1806,13 +1977,13 @@ mod tests {
 
         for item in iter {
             let (key_bytes, _value_bytes) = item.expect("Failed to iterate");
-            let key = NamedEdges::key_from_bytes(&key_bytes)
+            let key = EdgeNames::key_from_bytes(&key_bytes)
                 .expect("Failed to deserialize key");
             all_keys.push((key.0 .0.clone(), key.1 .0, key.2 .0));
         }
 
         // Should have 4 edges total
-        assert_eq!(all_keys.len(), 4, "Should have 4 edges in NamedEdges CF");
+        assert_eq!(all_keys.len(), 4, "Should have 4 edges in EdgeNames CF");
 
         // Verify that edges are ordered lexicographically by (name, dst, src)
         for i in 0..all_keys.len() - 1 {
@@ -2355,6 +2526,326 @@ mod tests {
             .unwrap();
 
         assert_eq!(fragments.len(), 0, "Should retrieve no fragments for non-existent ID");
+
+        drop(reader);
+        query_consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_nodes_by_name_query_multiple_matches() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        // Set up graph consumer
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create nodes with same name prefix but different IDs
+        let user_1_id = Id::new();
+        let user_1 = AddNode {
+            id: user_1_id,
+            ts_millis: TimestampMilli::now(),
+            name: "user_alice".to_string(),
+        };
+
+        let user_2_id = Id::new();
+        let user_2 = AddNode {
+            id: user_2_id,
+            ts_millis: TimestampMilli::now(),
+            name: "user_bob".to_string(),
+        };
+
+        let user_3_id = Id::new();
+        let user_3 = AddNode {
+            id: user_3_id,
+            ts_millis: TimestampMilli::now(),
+            name: "user_charlie".to_string(),
+        };
+
+        // Create nodes with exact same name but different IDs (duplicates)
+        let user_4_id = Id::new();
+        let user_4 = AddNode {
+            id: user_4_id,
+            ts_millis: TimestampMilli::now(),
+            name: "user_alice".to_string(), // Same name as user_1
+        };
+
+        // Create a node that doesn't match the prefix
+        let admin_id = Id::new();
+        let admin = AddNode {
+            id: admin_id,
+            ts_millis: TimestampMilli::now(),
+            name: "admin_alice".to_string(),
+        };
+
+        writer.add_node(user_1.clone()).await.unwrap();
+        writer.add_node(user_2.clone()).await.unwrap();
+        writer.add_node(user_3.clone()).await.unwrap();
+        writer.add_node(user_4.clone()).await.unwrap();
+        writer.add_node(admin.clone()).await.unwrap();
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Set up query consumer
+        let reader_config = crate::ReaderConfig {
+            channel_buffer_size: 10,
+        };
+        let (reader, query_receiver) = crate::reader::create_query_reader(reader_config.clone());
+        let query_consumer_handle =
+            crate::graph::spawn_query_consumer(query_receiver, reader_config, &db_path);
+
+        // Query for nodes with prefix "user_"
+        let results = reader
+            .nodes_by_name("user_".to_string(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Verify we got all 4 nodes with "user_" prefix
+        assert_eq!(
+            results.len(),
+            4,
+            "Should retrieve all nodes with 'user_' prefix"
+        );
+
+        // Verify all returned nodes have the correct prefix
+        for (name, _id) in &results {
+            assert!(
+                name.starts_with("user_"),
+                "Node name '{}' should start with 'user_'",
+                name
+            );
+        }
+
+        // Verify we got both user_alice instances (different IDs)
+        let alice_nodes: Vec<_> = results
+            .iter()
+            .filter(|(name, _)| name == "user_alice")
+            .collect();
+        assert_eq!(
+            alice_nodes.len(),
+            2,
+            "Should have 2 nodes named 'user_alice'"
+        );
+
+        // Verify the IDs are different for the two alice nodes
+        assert_ne!(
+            alice_nodes[0].1, alice_nodes[1].1,
+            "Two 'user_alice' nodes should have different IDs"
+        );
+
+        // Verify the correct IDs are present
+        let result_ids: std::collections::HashSet<Id> =
+            results.iter().map(|(_, id)| *id).collect();
+        assert!(result_ids.contains(&user_1_id));
+        assert!(result_ids.contains(&user_2_id));
+        assert!(result_ids.contains(&user_3_id));
+        assert!(result_ids.contains(&user_4_id));
+        assert!(!result_ids.contains(&admin_id), "Should not include admin node");
+
+        // Query for exact name "user_alice" should match both instances
+        let alice_results = reader
+            .nodes_by_name("user_alice".to_string(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            alice_results.len(),
+            2,
+            "Should retrieve both nodes with exact name 'user_alice'"
+        );
+
+        // Query for non-existent prefix
+        let empty_results = reader
+            .nodes_by_name("nonexistent_".to_string(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            empty_results.len(),
+            0,
+            "Should return empty for non-existent prefix"
+        );
+
+        drop(reader);
+        query_consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_edges_by_name_query_multiple_matches() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        // Set up graph consumer
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create nodes first
+        let node_a_id = Id::new();
+        let node_b_id = Id::new();
+        let node_c_id = Id::new();
+        let node_d_id = Id::new();
+
+        // Create multiple edges with same name but different endpoints
+        let likes_1_id = Id::new();
+        let likes_1 = AddEdge {
+            id: likes_1_id,
+            source_node_id: node_a_id,
+            target_node_id: node_b_id,
+            ts_millis: TimestampMilli::now(),
+            name: "likes".to_string(),
+        };
+
+        let likes_2_id = Id::new();
+        let likes_2 = AddEdge {
+            id: likes_2_id,
+            source_node_id: node_b_id,
+            target_node_id: node_c_id,
+            ts_millis: TimestampMilli::now(),
+            name: "likes".to_string(),
+        };
+
+        let likes_3_id = Id::new();
+        let likes_3 = AddEdge {
+            id: likes_3_id,
+            source_node_id: node_c_id,
+            target_node_id: node_d_id,
+            ts_millis: TimestampMilli::now(),
+            name: "likes".to_string(),
+        };
+
+        // Create edges with different names but similar prefix
+        let likes_very_much_id = Id::new();
+        let likes_very_much = AddEdge {
+            id: likes_very_much_id,
+            source_node_id: node_a_id,
+            target_node_id: node_c_id,
+            ts_millis: TimestampMilli::now(),
+            name: "likes_very_much".to_string(),
+        };
+
+        // Create edge with completely different name
+        let follows_id = Id::new();
+        let follows = AddEdge {
+            id: follows_id,
+            source_node_id: node_a_id,
+            target_node_id: node_d_id,
+            ts_millis: TimestampMilli::now(),
+            name: "follows".to_string(),
+        };
+
+        writer.add_edge(likes_1.clone()).await.unwrap();
+        writer.add_edge(likes_2.clone()).await.unwrap();
+        writer.add_edge(likes_3.clone()).await.unwrap();
+        writer.add_edge(likes_very_much.clone()).await.unwrap();
+        writer.add_edge(follows.clone()).await.unwrap();
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Set up query consumer
+        let reader_config = crate::ReaderConfig {
+            channel_buffer_size: 10,
+        };
+        let (reader, query_receiver) = crate::reader::create_query_reader(reader_config.clone());
+        let query_consumer_handle =
+            crate::graph::spawn_query_consumer(query_receiver, reader_config, &db_path);
+
+        // Query for edges with prefix "likes"
+        let results = reader
+            .edges_by_name("likes".to_string(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Verify we got all 4 edges with "likes" prefix
+        assert_eq!(
+            results.len(),
+            4,
+            "Should retrieve all edges with 'likes' prefix"
+        );
+
+        // Verify all returned edges have the correct prefix
+        for (edge_name, _id) in &results {
+            assert!(
+                edge_name.0.starts_with("likes"),
+                "Edge name '{}' should start with 'likes'",
+                edge_name.0
+            );
+        }
+
+        // Verify the correct edge IDs are present
+        let result_ids: std::collections::HashSet<Id> =
+            results.iter().map(|(_, id)| *id).collect();
+        assert!(result_ids.contains(&likes_1_id));
+        assert!(result_ids.contains(&likes_2_id));
+        assert!(result_ids.contains(&likes_3_id));
+        assert!(result_ids.contains(&likes_very_much_id));
+        assert!(
+            !result_ids.contains(&follows_id),
+            "Should not include 'follows' edge"
+        );
+
+        // Query for exact name "likes" should match only the 3 exact matches
+        let exact_results = reader
+            .edges_by_name("likes".to_string(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // This will return 4 because "likes" is a prefix of "likes_very_much"
+        assert_eq!(
+            exact_results.len(),
+            4,
+            "Prefix match includes 'likes_very_much'"
+        );
+
+        // Count exact matches
+        let exact_likes_count = exact_results
+            .iter()
+            .filter(|(name, _)| name.0 == "likes")
+            .count();
+        assert_eq!(
+            exact_likes_count, 3,
+            "Should have exactly 3 edges named 'likes'"
+        );
+
+        // Query with more specific prefix
+        let specific_results = reader
+            .edges_by_name("likes_very".to_string(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            specific_results.len(),
+            1,
+            "Should retrieve only 'likes_very_much' edge"
+        );
+        assert_eq!(specific_results[0].1, likes_very_much_id);
+
+        // Query for non-existent prefix
+        let empty_results = reader
+            .edges_by_name("hates".to_string(), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            empty_results.len(),
+            0,
+            "Should return empty for non-existent prefix"
+        );
 
         drop(reader);
         query_consumer_handle.await.unwrap().unwrap();
