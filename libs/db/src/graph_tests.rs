@@ -1208,7 +1208,7 @@ mod tests {
         // Wait for consumer to finish
         consumer_handle.await.unwrap().unwrap();
 
-        // Verify the edge was written to all three column families
+        // Verify the edge was written to all four column families
         let db = DB::open_cf_for_read_only(
             &rocksdb::Options::default(),
             &db_path,
@@ -1273,6 +1273,32 @@ mod tests {
             assert!(
                 result.is_some(),
                 "Edge should be written to the 'reverse_edges' column family"
+            );
+        }
+
+        // Check NamedEdges column family
+        {
+            use crate::schema::NamedEdges;
+            let cf_handle = db
+                .cf_handle(NamedEdges::CF_NAME)
+                .expect("NamedEdges column family should exist");
+            let (key, _value) = NamedEdges::record_from(&edge_args);
+            let key_bytes = NamedEdges::key_to_bytes(&key);
+            let result = db
+                .get_cf(cf_handle, &key_bytes)
+                .expect("Failed to query database");
+            assert!(
+                result.is_some(),
+                "Edge should be written to the 'named_edges' column family"
+            );
+
+            // Verify the value contains the correct edge ID
+            let value_bytes = result.unwrap();
+            let value = NamedEdges::value_from_bytes(&value_bytes)
+                .expect("Failed to deserialize NamedEdges value");
+            assert_eq!(
+                value.0, edge_id,
+                "NamedEdges value should contain the correct edge ID"
             );
         }
     }
@@ -1670,5 +1696,164 @@ mod tests {
 
         // Wait for query consumer to complete
         query_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_named_edges_column_family() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create multiple edges with the same name to different nodes
+        let node_a_id = Id::new();
+        let node_b_id = Id::new();
+        let node_c_id = Id::new();
+
+        let edge_1 = AddEdge {
+            id: Id::new(),
+            source_node_id: node_a_id,
+            target_node_id: node_b_id,
+            ts_millis: TimestampMilli::now(),
+            name: "likes".to_string(),
+        };
+
+        let edge_2 = AddEdge {
+            id: Id::new(),
+            source_node_id: node_b_id,
+            target_node_id: node_c_id,
+            ts_millis: TimestampMilli::now(),
+            name: "likes".to_string(),
+        };
+
+        let edge_3 = AddEdge {
+            id: Id::new(),
+            source_node_id: node_c_id,
+            target_node_id: node_a_id,
+            ts_millis: TimestampMilli::now(),
+            name: "likes".to_string(),
+        };
+
+        // Create edges with different names
+        let edge_4 = AddEdge {
+            id: Id::new(),
+            source_node_id: node_a_id,
+            target_node_id: node_c_id,
+            ts_millis: TimestampMilli::now(),
+            name: "follows".to_string(),
+        };
+
+        writer.add_edge(edge_1.clone()).await.unwrap();
+        writer.add_edge(edge_2.clone()).await.unwrap();
+        writer.add_edge(edge_3.clone()).await.unwrap();
+        writer.add_edge(edge_4.clone()).await.unwrap();
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop writer to close channel
+        drop(writer);
+
+        // Wait for consumer to finish
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify the edges were written to the NamedEdges column family
+        let db = DB::open_cf_for_read_only(
+            &rocksdb::Options::default(),
+            &db_path,
+            ALL_COLUMN_FAMILIES,
+            false,
+        )
+        .expect("Failed to open database for verification");
+
+        use crate::schema::NamedEdges;
+        let cf_handle = db
+            .cf_handle(NamedEdges::CF_NAME)
+            .expect("NamedEdges column family should exist");
+
+        // Verify each edge is in the NamedEdges column family
+        for edge in &[&edge_1, &edge_2, &edge_3, &edge_4] {
+            let (key, _value) = NamedEdges::record_from(edge);
+            let key_bytes = NamedEdges::key_to_bytes(&key);
+            let result = db
+                .get_cf(cf_handle, &key_bytes)
+                .expect("Failed to query database");
+            assert!(
+                result.is_some(),
+                "Edge {:?} should be written to the 'named_edges' column family",
+                edge.id
+            );
+
+            // Verify the value contains the correct edge ID
+            let value_bytes = result.unwrap();
+            let value = NamedEdges::value_from_bytes(&value_bytes)
+                .expect("Failed to deserialize NamedEdges value");
+            assert_eq!(
+                value.0, edge.id,
+                "NamedEdges value should contain the correct edge ID"
+            );
+        }
+
+        // Verify key ordering: edges with same name should be grouped together
+        // and ordered by (name, dst_id, src_id)
+        let iter = db.prefix_iterator_cf(cf_handle, b"");
+        let mut all_keys: Vec<(String, Id, Id)> = Vec::new();
+
+        for item in iter {
+            let (key_bytes, _value_bytes) = item.expect("Failed to iterate");
+            let key = NamedEdges::key_from_bytes(&key_bytes)
+                .expect("Failed to deserialize key");
+            all_keys.push((key.0 .0.clone(), key.1 .0, key.2 .0));
+        }
+
+        // Should have 4 edges total
+        assert_eq!(all_keys.len(), 4, "Should have 4 edges in NamedEdges CF");
+
+        // Verify that edges are ordered lexicographically by (name, dst, src)
+        for i in 0..all_keys.len() - 1 {
+            let (name1, dst1, src1) = &all_keys[i];
+            let (name2, dst2, src2) = &all_keys[i + 1];
+
+            // Compare as tuples - this gives us lexicographic ordering
+            assert!(
+                (name1, dst1, src1) <= (name2, dst2, src2),
+                "Keys should be in lexicographic order: {:?} should be <= {:?}",
+                (name1, dst1, src1),
+                (name2, dst2, src2)
+            );
+        }
+
+        // Verify that all "follows" edges come before "likes" edges (alphabetically)
+        let likes_positions: Vec<usize> = all_keys
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _, _))| name == "likes")
+            .map(|(i, _)| i)
+            .collect();
+
+        let follows_positions: Vec<usize> = all_keys
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _, _))| name == "follows")
+            .map(|(i, _)| i)
+            .collect();
+
+        assert_eq!(likes_positions.len(), 3, "Should have 3 'likes' edges");
+        assert_eq!(follows_positions.len(), 1, "Should have 1 'follows' edge");
+
+        // All "follows" positions should come before all "likes" positions (alphabetically)
+        if let (Some(&max_follows_pos), Some(&min_likes_pos)) =
+            (follows_positions.iter().max(), likes_positions.iter().min())
+        {
+            assert!(
+                max_follows_pos < min_likes_pos,
+                "All 'follows' edges should come before 'likes' edges (alphabetically)"
+            );
+        }
     }
 }

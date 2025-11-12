@@ -31,6 +31,10 @@ impl Plan {
                 ReverseEdges::CF_NAME, // ReverseEdges (dst, src, name)
                 ReverseEdges::create_bytes(op)?,
             )),
+            StorageOperation::PutCf(PutCf(
+                NamedEdges::CF_NAME, // NamedEdges (name, dst, src)
+                NamedEdges::create_bytes(op)?,
+            )),
         ])
     }
     pub(crate) fn create_fragment(
@@ -221,7 +225,10 @@ impl ColumnFamilyRecord for Fragments {
 
     fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
         if bytes.len() != 24 {
-            anyhow::bail!("Invalid FragmentCfKey length: expected 24, got {}", bytes.len());
+            anyhow::bail!(
+                "Invalid FragmentCfKey length: expected 24, got {}",
+                bytes.len()
+            );
         }
 
         let mut id_bytes = [0u8; 16];
@@ -422,6 +429,80 @@ impl ColumnFamilyRecord for ReverseEdges {
     }
 }
 
+pub(crate) struct NamedEdges;
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NamedEdgesCfKey(
+    pub(crate) EdgeName,
+    pub(crate) EdgeDestinationId,
+    pub(crate) EdgeSourceId,
+);
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NamedEdgesCfValue(pub(crate) Id);
+
+impl ColumnFamilyRecord for NamedEdges {
+    const CF_NAME: &'static str = "named_edges";
+    type Key = NamedEdgesCfKey;
+    type Value = NamedEdgesCfValue;
+    type CreateOp = AddEdge;
+
+    fn record_from(args: &AddEdge) -> (NamedEdgesCfKey, NamedEdgesCfValue) {
+        let key = NamedEdgesCfKey(
+            EdgeName(args.name.clone()),
+            EdgeDestinationId(args.target_node_id),
+            EdgeSourceId(args.source_node_id),
+        );
+        let value = NamedEdgesCfValue(args.id);
+        (key, value)
+    }
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // NamedEdgesCfKey(EdgeName, EdgeDestinationId, EdgeSourceId)
+        // Layout: [name UTF-8 bytes] + [dst_id (16)] + [src_id (16)]
+        let name_bytes = key.0 .0.as_bytes();
+        let mut bytes = Vec::with_capacity(name_bytes.len() + 32);
+        bytes.extend_from_slice(name_bytes);
+        bytes.extend_from_slice(&key.1 .0.into_bytes());
+        bytes.extend_from_slice(&key.2 .0.into_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
+        if bytes.len() < 32 {
+            anyhow::bail!(
+                "Invalid NamedEdgesCfKey length: expected >= 32, got {}",
+                bytes.len()
+            );
+        }
+
+        // The name is everything before the last 32 bytes (which are dst_id + src_id)
+        let name_end = bytes.len() - 32;
+        let name_bytes = &bytes[0..name_end];
+        let name = String::from_utf8(name_bytes.to_vec())
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
+
+        let mut dst_id_bytes = [0u8; 16];
+        dst_id_bytes.copy_from_slice(&bytes[name_end..name_end + 16]);
+
+        let mut src_id_bytes = [0u8; 16];
+        src_id_bytes.copy_from_slice(&bytes[name_end + 16..name_end + 32]);
+
+        Ok(NamedEdgesCfKey(
+            EdgeName(name),
+            EdgeDestinationId(Id::from_bytes(dst_id_bytes)),
+            EdgeSourceId(Id::from_bytes(src_id_bytes)),
+        ))
+    }
+
+    fn column_family_options() -> rocksdb::Options {
+        // Key layout: [name (variable)] + [dst_id (16)] + [src_id (16)]
+        // No prefix extraction needed for this column family
+        // as queries will typically be by name which is variable-length at the start
+        rocksdb::Options::default()
+    }
+}
+
 /// All column families used in the database.
 /// This is the authoritative list that should be used when opening the database.
 pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
@@ -430,6 +511,7 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     Fragments::CF_NAME,
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
+    NamedEdges::CF_NAME,
 ];
 
 #[cfg(test)]

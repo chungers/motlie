@@ -259,6 +259,10 @@ impl Storage {
                 schema::ReverseEdges::CF_NAME,
                 schema::ReverseEdges::column_family_options(),
             ),
+            ColumnFamilyDescriptor::new(
+                schema::NamedEdges::CF_NAME,
+                schema::NamedEdges::column_family_options(),
+            ),
         ];
 
         match self.mode {
