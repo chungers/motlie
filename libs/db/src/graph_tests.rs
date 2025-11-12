@@ -1856,4 +1856,507 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_fragments_time_range_query_all() {
+        use std::ops::Bound;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Setup: Create graph with fragments at different timestamps
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config.clone(), &db_path);
+
+        let entity_id = Id::new();
+
+        // Create fragments at different timestamps (manually setting timestamps)
+        let t1 = TimestampMilli(1000);
+        let t2 = TimestampMilli(2000);
+        let t3 = TimestampMilli(3000);
+        let t4 = TimestampMilli(4000);
+        let t5 = TimestampMilli(5000);
+
+        writer.add_fragment(AddFragment {
+            id: entity_id,
+            ts_millis: t1.0,
+            content: "fragment_1".to_string(),
+        }).await.unwrap();
+
+        writer.add_fragment(AddFragment {
+            id: entity_id,
+            ts_millis: t2.0,
+            content: "fragment_2".to_string(),
+        }).await.unwrap();
+
+        writer.add_fragment(AddFragment {
+            id: entity_id,
+            ts_millis: t3.0,
+            content: "fragment_3".to_string(),
+        }).await.unwrap();
+
+        writer.add_fragment(AddFragment {
+            id: entity_id,
+            ts_millis: t4.0,
+            content: "fragment_4".to_string(),
+        }).await.unwrap();
+
+        writer.add_fragment(AddFragment {
+            id: entity_id,
+            ts_millis: t5.0,
+            content: "fragment_5".to_string(),
+        }).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Query: Get all fragments (unbounded)
+        let (reader, receiver) = crate::create_query_reader(crate::ReaderConfig::default());
+        let query_consumer_handle = crate::graph::spawn_query_consumer(
+            receiver,
+            crate::ReaderConfig::default(),
+            &db_path,
+        );
+
+        let fragments = reader
+            .fragments_by_id_time_range(
+                entity_id,
+                (Bound::Unbounded, Bound::Unbounded),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fragments.len(), 5, "Should retrieve all 5 fragments");
+        assert_eq!(fragments[0].0, t1);
+        assert_eq!(fragments[1].0, t2);
+        assert_eq!(fragments[2].0, t3);
+        assert_eq!(fragments[3].0, t4);
+        assert_eq!(fragments[4].0, t5);
+
+        drop(reader);
+        query_consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fragments_time_range_query_after() {
+        use std::ops::Bound;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config.clone(), &db_path);
+
+        let entity_id = Id::new();
+
+        let t1 = TimestampMilli(1000);
+        let t2 = TimestampMilli(2000);
+        let t3 = TimestampMilli(3000);
+        let t4 = TimestampMilli(4000);
+        let t5 = TimestampMilli(5000);
+
+        for (ts, content) in [
+            (t1, "fragment_1"),
+            (t2, "fragment_2"),
+            (t3, "fragment_3"),
+            (t4, "fragment_4"),
+            (t5, "fragment_5"),
+        ] {
+            writer.add_fragment(AddFragment {
+                id: entity_id,
+                ts_millis: ts.0,
+                content: content.to_string(),
+            }).await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Query: Get fragments after t3 (>= t3)
+        let (reader, receiver) = crate::create_query_reader(crate::ReaderConfig::default());
+        let query_consumer_handle = crate::graph::spawn_query_consumer(
+            receiver,
+            crate::ReaderConfig::default(),
+            &db_path,
+        );
+
+        let fragments = reader
+            .fragments_by_id_time_range(
+                entity_id,
+                (Bound::Included(t3), Bound::Unbounded),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fragments.len(), 3, "Should retrieve 3 fragments (t3, t4, t5)");
+        assert_eq!(fragments[0].0, t3);
+        assert_eq!(fragments[1].0, t4);
+        assert_eq!(fragments[2].0, t5);
+
+        drop(reader);
+        query_consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fragments_time_range_query_before() {
+        use std::ops::Bound;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config.clone(), &db_path);
+
+        let entity_id = Id::new();
+
+        let t1 = TimestampMilli(1000);
+        let t2 = TimestampMilli(2000);
+        let t3 = TimestampMilli(3000);
+        let t4 = TimestampMilli(4000);
+        let t5 = TimestampMilli(5000);
+
+        for (ts, content) in [
+            (t1, "fragment_1"),
+            (t2, "fragment_2"),
+            (t3, "fragment_3"),
+            (t4, "fragment_4"),
+            (t5, "fragment_5"),
+        ] {
+            writer.add_fragment(AddFragment {
+                id: entity_id,
+                ts_millis: ts.0,
+                content: content.to_string(),
+            }).await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Query: Get fragments before/until t3 (<= t3)
+        let (reader, receiver) = crate::create_query_reader(crate::ReaderConfig::default());
+        let query_consumer_handle = crate::graph::spawn_query_consumer(
+            receiver,
+            crate::ReaderConfig::default(),
+            &db_path,
+        );
+
+        let fragments = reader
+            .fragments_by_id_time_range(
+                entity_id,
+                (Bound::Unbounded, Bound::Included(t3)),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fragments.len(), 3, "Should retrieve 3 fragments (t1, t2, t3)");
+        assert_eq!(fragments[0].0, t1);
+        assert_eq!(fragments[1].0, t2);
+        assert_eq!(fragments[2].0, t3);
+
+        drop(reader);
+        query_consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fragments_time_range_query_between_inclusive() {
+        use std::ops::Bound;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config.clone(), &db_path);
+
+        let entity_id = Id::new();
+
+        let t1 = TimestampMilli(1000);
+        let t2 = TimestampMilli(2000);
+        let t3 = TimestampMilli(3000);
+        let t4 = TimestampMilli(4000);
+        let t5 = TimestampMilli(5000);
+
+        for (ts, content) in [
+            (t1, "fragment_1"),
+            (t2, "fragment_2"),
+            (t3, "fragment_3"),
+            (t4, "fragment_4"),
+            (t5, "fragment_5"),
+        ] {
+            writer.add_fragment(AddFragment {
+                id: entity_id,
+                ts_millis: ts.0,
+                content: content.to_string(),
+            }).await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Query: Get fragments between t2 and t4 inclusive [t2, t4]
+        let (reader, receiver) = crate::create_query_reader(crate::ReaderConfig::default());
+        let query_consumer_handle = crate::graph::spawn_query_consumer(
+            receiver,
+            crate::ReaderConfig::default(),
+            &db_path,
+        );
+
+        let fragments = reader
+            .fragments_by_id_time_range(
+                entity_id,
+                (Bound::Included(t2), Bound::Included(t4)),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fragments.len(), 3, "Should retrieve 3 fragments (t2, t3, t4)");
+        assert_eq!(fragments[0].0, t2);
+        assert_eq!(fragments[1].0, t3);
+        assert_eq!(fragments[2].0, t4);
+
+        drop(reader);
+        query_consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fragments_time_range_query_between_exclusive() {
+        use std::ops::Bound;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config.clone(), &db_path);
+
+        let entity_id = Id::new();
+
+        let t1 = TimestampMilli(1000);
+        let t2 = TimestampMilli(2000);
+        let t3 = TimestampMilli(3000);
+        let t4 = TimestampMilli(4000);
+        let t5 = TimestampMilli(5000);
+
+        for (ts, content) in [
+            (t1, "fragment_1"),
+            (t2, "fragment_2"),
+            (t3, "fragment_3"),
+            (t4, "fragment_4"),
+            (t5, "fragment_5"),
+        ] {
+            writer.add_fragment(AddFragment {
+                id: entity_id,
+                ts_millis: ts.0,
+                content: content.to_string(),
+            }).await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Query: Get fragments between t2 and t4 exclusive (t2, t4)
+        let (reader, receiver) = crate::create_query_reader(crate::ReaderConfig::default());
+        let query_consumer_handle = crate::graph::spawn_query_consumer(
+            receiver,
+            crate::ReaderConfig::default(),
+            &db_path,
+        );
+
+        let fragments = reader
+            .fragments_by_id_time_range(
+                entity_id,
+                (Bound::Excluded(t2), Bound::Excluded(t4)),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fragments.len(), 1, "Should retrieve 1 fragment (only t3)");
+        assert_eq!(fragments[0].0, t3);
+
+        drop(reader);
+        query_consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fragments_time_range_query_mixed_bounds() {
+        use std::ops::Bound;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config.clone(), &db_path);
+
+        let entity_id = Id::new();
+
+        let t1 = TimestampMilli(1000);
+        let t2 = TimestampMilli(2000);
+        let t3 = TimestampMilli(3000);
+        let t4 = TimestampMilli(4000);
+        let t5 = TimestampMilli(5000);
+
+        for (ts, content) in [
+            (t1, "fragment_1"),
+            (t2, "fragment_2"),
+            (t3, "fragment_3"),
+            (t4, "fragment_4"),
+            (t5, "fragment_5"),
+        ] {
+            writer.add_fragment(AddFragment {
+                id: entity_id,
+                ts_millis: ts.0,
+                content: content.to_string(),
+            }).await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Query: Get fragments [t2, t4) - inclusive start, exclusive end
+        let (reader, receiver) = crate::create_query_reader(crate::ReaderConfig::default());
+        let query_consumer_handle = crate::graph::spawn_query_consumer(
+            receiver,
+            crate::ReaderConfig::default(),
+            &db_path,
+        );
+
+        let fragments = reader
+            .fragments_by_id_time_range(
+                entity_id,
+                (Bound::Included(t2), Bound::Excluded(t4)),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fragments.len(), 2, "Should retrieve 2 fragments (t2, t3)");
+        assert_eq!(fragments[0].0, t2);
+        assert_eq!(fragments[1].0, t3);
+
+        drop(reader);
+        query_consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fragments_time_range_query_empty_result() {
+        use std::ops::Bound;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config.clone(), &db_path);
+
+        let entity_id = Id::new();
+
+        let t1 = TimestampMilli(1000);
+        let t2 = TimestampMilli(2000);
+        let t3 = TimestampMilli(3000);
+
+        for (ts, content) in [
+            (t1, "fragment_1"),
+            (t2, "fragment_2"),
+            (t3, "fragment_3"),
+        ] {
+            writer.add_fragment(AddFragment {
+                id: entity_id,
+                ts_millis: ts.0,
+                content: content.to_string(),
+            }).await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Query: Get fragments after t3 (should be empty)
+        let (reader, receiver) = crate::create_query_reader(crate::ReaderConfig::default());
+        let query_consumer_handle = crate::graph::spawn_query_consumer(
+            receiver,
+            crate::ReaderConfig::default(),
+            &db_path,
+        );
+
+        let fragments = reader
+            .fragments_by_id_time_range(
+                entity_id,
+                (Bound::Excluded(t3), Bound::Unbounded),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fragments.len(), 0, "Should retrieve no fragments");
+
+        drop(reader);
+        query_consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fragments_time_range_query_no_matching_id() {
+        use std::ops::Bound;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config.clone(), &db_path);
+
+        let entity_id = Id::new();
+        let other_id = Id::new();
+
+        let t1 = TimestampMilli(1000);
+        let t2 = TimestampMilli(2000);
+
+        for (ts, content) in [(t1, "fragment_1"), (t2, "fragment_2")] {
+            writer.add_fragment(AddFragment {
+                id: entity_id,
+                ts_millis: ts.0,
+                content: content.to_string(),
+            }).await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Query: Get fragments for different ID (should be empty)
+        let (reader, receiver) = crate::create_query_reader(crate::ReaderConfig::default());
+        let query_consumer_handle = crate::graph::spawn_query_consumer(
+            receiver,
+            crate::ReaderConfig::default(),
+            &db_path,
+        );
+
+        let fragments = reader
+            .fragments_by_id_time_range(
+                other_id,
+                (Bound::Unbounded, Bound::Unbounded),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(fragments.len(), 0, "Should retrieve no fragments for non-existent ID");
+
+        drop(reader);
+        query_consumer_handle.await.unwrap().unwrap();
+    }
 }

@@ -1,34 +1,14 @@
 use anyhow::Result;
+use std::ops::Bound;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
 use crate::schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
 use crate::{Id, ReaderConfig, TimestampMilli};
 
-/// Query enum representing all possible query types
-#[derive(Debug)]
-pub enum Query {
-    NodeById(NodeByIdQuery),
-    EdgeById(EdgeByIdQuery),
-    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
-    FragmentContentById(FragmentContentByIdQuery),
-    EdgesFromNodeById(EdgesFromNodeByIdQuery),
-    EdgesToNodeById(EdgesToNodeByIdQuery),
-}
-
-/// Type alias for querying node by ID (returns name and summary)
-pub type NodeByIdQuery = ByIdQuery<(NodeName, NodeSummary)>;
-/// Type alias for querying edge by ID (returns topology and summary)
-pub type EdgeByIdQuery = ByIdQuery<(Id, Id, EdgeName, EdgeSummary)>;
-/// Type alias for querying fragment content by ID of node or edge associated with it
-pub type FragmentContentByIdQuery = ByIdQuery<Vec<(TimestampMilli, FragmentContent)>>;
-// Note: EdgesFromNodeByIdQuery and EdgesToNodeByIdQuery can't use ByIdQuery<T>
-// because they have the same result type but different processing logic.
-// They are implemented as separate structs below.
-
 /// Trait for queries that produce results with timeout handling
 #[async_trait::async_trait]
-pub trait QueryWithResult: Send + Sync {
+pub trait QueryWithTimeout: Send + Sync {
     /// The type of result this query produces
     type ResultType: Send;
 
@@ -39,21 +19,40 @@ pub trait QueryWithResult: Send + Sync {
     fn timeout(&self) -> Duration;
 }
 
+/// Query enum representing all possible query types
+#[derive(Debug)]
+pub enum Queries {
+    NodeById(NodeByIdQuery),
+    EdgeById(EdgeByIdQuery),
+    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
+    FragmentsByIdTimeRange(FragmentsByIdTimeRangeQuery),
+    EdgesFromNodeById(EdgesFromNodeByIdQuery),
+    EdgesToNodeById(EdgesToNodeByIdQuery),
+}
+
+/// Type alias for querying node by ID (returns name and summary)
+pub type NodeByIdQuery = ByIdQuery<(NodeName, NodeSummary)>;
+/// Type alias for querying edge by ID (returns topology and summary)
+pub type EdgeByIdQuery = ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>;
+// Note: EdgesFromNodeByIdQuery and EdgesToNodeByIdQuery can't use ByIdQuery<T>
+// because they have the same result type but different processing logic.
+// They are implemented as separate structs below.
+
 /// Sealed trait module to prevent external implementations
 mod sealed {
-    use crate::schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
-    use crate::{Id, TimestampMilli};
+    use crate::query::{DstId, SrcId};
+    use crate::schema::{EdgeName, EdgeSummary, NodeName, NodeSummary};
+    use crate::Id;
 
-    pub trait ByIdQueryable {}
-    impl ByIdQueryable for (NodeName, NodeSummary) {}
-    impl ByIdQueryable for (Id, Id, EdgeName, EdgeSummary) {}
-    impl ByIdQueryable for Vec<(TimestampMilli, FragmentContent)> {}
-    impl ByIdQueryable for Vec<(Id, EdgeName, Id)> {} // Forward and reverse edges use same tuple type
+    pub trait Queryable {}
+    impl Queryable for (NodeName, NodeSummary) {}
+    impl Queryable for (SrcId, DstId, EdgeName, EdgeSummary) {}
+    impl Queryable for Vec<(Id, EdgeName, Id)> {} // Forward and reverse edges use same tuple type
 }
 
 /// Trait for types that can be queried by ID
 #[async_trait::async_trait]
-pub trait ByIdQueryable: sealed::ByIdQueryable + Send + Sync + 'static {
+pub trait ByIdQueryable: sealed::Queryable + Send + Sync + 'static {
     /// Call the appropriate processor method for this type
     async fn fetch_by_id<P: Processor>(
         id: Id,
@@ -76,24 +75,13 @@ impl ByIdQueryable for (NodeName, NodeSummary) {
 }
 
 #[async_trait::async_trait]
-impl ByIdQueryable for (Id, Id, EdgeName, EdgeSummary) {
+impl ByIdQueryable for (SrcId, DstId, EdgeName, EdgeSummary) {
     async fn fetch_by_id<P: Processor>(
         _id: Id,
         processor: &P,
         query: &ByIdQuery<Self>,
     ) -> Result<Self> {
         processor.get_edge_by_id(query).await
-    }
-}
-
-#[async_trait::async_trait]
-impl ByIdQueryable for Vec<(TimestampMilli, FragmentContent)> {
-    async fn fetch_by_id<P: Processor>(
-        _id: Id,
-        processor: &P,
-        query: &ByIdQuery<Self>,
-    ) -> Result<Self> {
-        processor.get_fragment_content_by_id(query).await
     }
 }
 
@@ -138,12 +126,98 @@ impl<T: ByIdQueryable> ByIdQuery<T> {
 }
 
 #[async_trait::async_trait]
-impl<T: ByIdQueryable> QueryWithResult for ByIdQuery<T> {
+impl<T: ByIdQueryable> QueryWithTimeout for ByIdQuery<T> {
     type ResultType = T;
 
     async fn result<P: Processor>(&self, processor: &P) -> Result<T> {
         let result =
             tokio::time::timeout(self.timeout, T::fetch_by_id(self.id, processor, self)).await;
+
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout)),
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+/// Query to scan fragments by ID with time range filtering
+/// This is different from ByIdQuery because it requires time range filtering
+/// and returns multiple results (scan operation) rather than a single entity lookup.
+#[derive(Debug)]
+pub struct FragmentsByIdTimeRangeQuery {
+    /// The entity ID to search for
+    pub id: Id,
+
+    /// Time range bounds (start_bound, end_bound)
+    /// Use std::ops::Bound for idiomatic Rust range specification
+    pub time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
+
+    /// Timestamp of when the query was created
+    pub ts_millis: TimestampMilli,
+
+    /// Timeout for this query
+    pub timeout: Duration,
+
+    /// Channel to send the result back to the client
+    result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
+}
+
+impl FragmentsByIdTimeRangeQuery {
+    /// Create a new FragmentsByIdTimeRangeQuery
+    pub fn new(
+        id: Id,
+        time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
+    ) -> Self {
+        Self {
+            id,
+            time_range,
+            ts_millis: TimestampMilli::now(),
+            timeout,
+            result_tx,
+        }
+    }
+
+    /// Send the result back to the client (consumes self)
+    pub fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
+        // Ignore error if receiver was dropped (client timeout/cancellation)
+        let _ = self.result_tx.send(result);
+    }
+
+    /// Check if a timestamp falls within this range
+    pub fn contains(&self, ts: TimestampMilli) -> bool {
+        let (start_bound, end_bound) = &self.time_range;
+
+        let start_ok = match start_bound {
+            Bound::Unbounded => true,
+            Bound::Included(start) => ts.0 >= start.0,
+            Bound::Excluded(start) => ts.0 > start.0,
+        };
+
+        let end_ok = match end_bound {
+            Bound::Unbounded => true,
+            Bound::Included(end) => ts.0 <= end.0,
+            Bound::Excluded(end) => ts.0 < end.0,
+        };
+
+        start_ok && end_ok
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryWithTimeout for FragmentsByIdTimeRangeQuery {
+    type ResultType = Vec<(TimestampMilli, FragmentContent)>;
+
+    async fn result<P: Processor>(&self, processor: &P) -> Result<Self::ResultType> {
+        let result = tokio::time::timeout(
+            self.timeout,
+            processor.get_fragments_by_id_time_range(self)
+        ).await;
 
         match result {
             Ok(r) => r,
@@ -180,8 +254,8 @@ pub struct EdgeSummaryBySrcDstNameQuery {
 
 impl EdgeSummaryBySrcDstNameQuery {
     pub fn new(
-        source_id: Id,
-        dest_id: Id,
+        source_id: SrcId,
+        dest_id: DstId,
         name: String,
         timeout: Duration,
         result_tx: oneshot::Sender<Result<(Id, EdgeSummary)>>,
@@ -202,7 +276,7 @@ impl EdgeSummaryBySrcDstNameQuery {
 }
 
 #[async_trait::async_trait]
-impl QueryWithResult for EdgeSummaryBySrcDstNameQuery {
+impl QueryWithTimeout for EdgeSummaryBySrcDstNameQuery {
     type ResultType = (Id, EdgeSummary);
 
     async fn result<P: Processor>(&self, processor: &P) -> Result<(Id, EdgeSummary)> {
@@ -249,7 +323,7 @@ impl EdgesFromNodeByIdQuery {
     pub fn new(
         id: Id,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
+        result_tx: oneshot::Sender<Result<Vec<(SrcId, EdgeName, DstId)>>>,
     ) -> Self {
         Self {
             id,
@@ -259,16 +333,16 @@ impl EdgesFromNodeByIdQuery {
         }
     }
 
-    pub fn send_result(self, result: Result<Vec<(Id, EdgeName, Id)>>) {
+    pub fn send_result(self, result: Result<Vec<(SrcId, EdgeName, DstId)>>) {
         let _ = self.result_tx.send(result);
     }
 }
 
 #[async_trait::async_trait]
-impl QueryWithResult for EdgesFromNodeByIdQuery {
-    type ResultType = Vec<(Id, EdgeName, Id)>;
+impl QueryWithTimeout for EdgesFromNodeByIdQuery {
+    type ResultType = Vec<(SrcId, EdgeName, DstId)>;
 
-    async fn result<P: Processor>(&self, processor: &P) -> Result<Vec<(Id, EdgeName, Id)>> {
+    async fn result<P: Processor>(&self, processor: &P) -> Result<Vec<(SrcId, EdgeName, DstId)>> {
         let result =
             tokio::time::timeout(self.timeout, processor.get_edges_from_node_by_id(self)).await;
 
@@ -287,7 +361,7 @@ impl QueryWithResult for EdgesFromNodeByIdQuery {
 #[derive(Debug)]
 pub struct EdgesToNodeByIdQuery {
     /// The node ID to search for
-    pub id: Id,
+    pub id: DstId,
 
     /// Timestamp of when the query was created
     pub ts_millis: TimestampMilli,
@@ -301,7 +375,7 @@ pub struct EdgesToNodeByIdQuery {
 
 impl EdgesToNodeByIdQuery {
     pub fn new(
-        id: Id,
+        id: DstId,
         timeout: Duration,
         result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
     ) -> Self {
@@ -319,10 +393,10 @@ impl EdgesToNodeByIdQuery {
 }
 
 #[async_trait::async_trait]
-impl QueryWithResult for EdgesToNodeByIdQuery {
+impl QueryWithTimeout for EdgesToNodeByIdQuery {
     type ResultType = Vec<(SrcId, EdgeName, DstId)>;
 
-    async fn result<P: Processor>(&self, processor: &P) -> Result<Vec<(Id, EdgeName, Id)>> {
+    async fn result<P: Processor>(&self, processor: &P) -> Result<Vec<(DstId, EdgeName, SrcId)>> {
         let result =
             tokio::time::timeout(self.timeout, processor.get_edges_to_node_by_id(self)).await;
 
@@ -341,10 +415,16 @@ impl QueryWithResult for EdgesToNodeByIdQuery {
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
     /// Get a node by its ID (returns name and summary)
-    async fn get_node_by_id(&self, query: &ByIdQuery<(NodeName, NodeSummary)>) -> Result<(NodeName, NodeSummary)>;
+    async fn get_node_by_id(
+        &self,
+        query: &ByIdQuery<(NodeName, NodeSummary)>,
+    ) -> Result<(NodeName, NodeSummary)>;
 
     /// Get an edge by its ID (returns topology and summary)
-    async fn get_edge_by_id(&self, query: &ByIdQuery<(Id, Id, EdgeName, EdgeSummary)>) -> Result<(Id, Id, EdgeName, EdgeSummary)>;
+    async fn get_edge_by_id(
+        &self,
+        query: &ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>,
+    ) -> Result<(SrcId, DstId, EdgeName, EdgeSummary)>;
 
     /// Get an edge summary by source ID, destination ID, and name
     /// Returns (edge_id, edge_summary)
@@ -353,10 +433,10 @@ pub trait Processor: Send + Sync {
         query: &EdgeSummaryBySrcDstNameQuery,
     ) -> Result<(Id, EdgeSummary)>;
 
-    /// Get all fragment content with timestamps for a given ID, sorted by timestamp
-    async fn get_fragment_content_by_id(
+    /// Get fragments by ID filtered by time range
+    async fn get_fragments_by_id_time_range(
         &self,
-        query: &ByIdQuery<Vec<(TimestampMilli, FragmentContent)>>,
+        query: &FragmentsByIdTimeRangeQuery,
     ) -> Result<Vec<(TimestampMilli, FragmentContent)>>;
 
     /// Get all edges emanating from a node by its ID
@@ -364,26 +444,26 @@ pub trait Processor: Send + Sync {
     async fn get_edges_from_node_by_id(
         &self,
         query: &EdgesFromNodeByIdQuery,
-    ) -> Result<Vec<(Id, EdgeName, Id)>>;
+    ) -> Result<Vec<(SrcId, EdgeName, DstId)>>;
 
     /// Get all edges terminating at a node by its ID
     /// Returns (dest_id, edge_name, source_id) tuples sorted by RocksDB key order
     async fn get_edges_to_node_by_id(
         &self,
         query: &EdgesToNodeByIdQuery,
-    ) -> Result<Vec<(Id, EdgeName, Id)>>;
+    ) -> Result<Vec<(DstId, EdgeName, SrcId)>>;
 }
 
 /// Generic consumer that processes queries using a Processor
 pub struct Consumer<P: Processor> {
-    receiver: flume::Receiver<Query>,
+    receiver: flume::Receiver<Queries>,
     config: ReaderConfig,
     processor: P,
 }
 
 impl<P: Processor> Consumer<P> {
     /// Create a new Consumer
-    pub fn new(receiver: flume::Receiver<Query>, config: ReaderConfig, processor: P) -> Self {
+    pub fn new(receiver: flume::Receiver<Queries>, config: ReaderConfig, processor: P) -> Self {
         Self {
             receiver,
             config,
@@ -412,19 +492,19 @@ impl<P: Processor> Consumer<P> {
     }
 
     /// Process a single query
-    async fn process_query(&self, query: Query) {
+    async fn process_query(&self, query: Queries) {
         match query {
-            Query::NodeById(q) => {
+            Queries::NodeById(q) => {
                 log::debug!("Processing NodeById: id={}", q.id);
                 let result = q.result(&self.processor).await;
                 q.send_result(result);
             }
-            Query::EdgeById(q) => {
+            Queries::EdgeById(q) => {
                 log::debug!("Processing EdgeById: id={}", q.id);
                 let result = q.result(&self.processor).await;
                 q.send_result(result);
             }
-            Query::EdgeSummaryBySrcDstName(q) => {
+            Queries::EdgeSummaryBySrcDstName(q) => {
                 log::debug!(
                     "Processing EdgeBySrcDstName: source={}, dest={}, name={}",
                     q.source_id,
@@ -434,17 +514,20 @@ impl<P: Processor> Consumer<P> {
                 let result = q.result(&self.processor).await;
                 q.send_result(result);
             }
-            Query::FragmentContentById(q) => {
-                log::debug!("Processing FragmentById: id={}", q.id);
+            Queries::FragmentsByIdTimeRange(q) => {
+                log::debug!(
+                    "Processing FragmentsByIdTimeRange: id={}, range={:?}",
+                    q.id, q.time_range
+                );
                 let result = q.result(&self.processor).await;
                 q.send_result(result);
             }
-            Query::EdgesFromNodeById(q) => {
+            Queries::EdgesFromNodeById(q) => {
                 log::debug!("Processing EdgesFromNodeById: id={}", q.id);
                 let result = q.result(&self.processor).await;
                 q.send_result(result);
             }
-            Query::EdgesToNodeById(q) => {
+            Queries::EdgesToNodeById(q) => {
                 log::debug!("Processing EdgesToNodeById: id={}", q.id);
                 let result = q.result(&self.processor).await;
                 q.send_result(result);
@@ -471,10 +554,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Processor for TestProcessor {
-        async fn get_node_by_id(
-            &self,
-            query: &NodeByIdQuery,
-        ) -> Result<(NodeName, NodeSummary)> {
+        async fn get_node_by_id(&self, query: &NodeByIdQuery) -> Result<(NodeName, NodeSummary)> {
             tokio::time::sleep(Duration::from_millis(10)).await;
             Ok((
                 format!("node_{}", query.id),
@@ -485,7 +565,7 @@ mod tests {
         async fn get_edge_by_id(
             &self,
             query: &EdgeByIdQuery,
-        ) -> Result<(Id, Id, EdgeName, EdgeSummary)> {
+        ) -> Result<(SrcId, DstId, EdgeName, EdgeSummary)> {
             tokio::time::sleep(Duration::from_millis(10)).await;
             Ok((
                 query.id,
@@ -506,9 +586,9 @@ mod tests {
             ))
         }
 
-        async fn get_fragment_content_by_id(
+        async fn get_fragments_by_id_time_range(
             &self,
-            query: &FragmentContentByIdQuery,
+            query: &FragmentsByIdTimeRangeQuery,
         ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
             tokio::time::sleep(Duration::from_millis(10)).await;
             Ok(vec![(
@@ -600,7 +680,7 @@ mod tests {
             async fn get_edge_by_id(
                 &self,
                 _query: &EdgeByIdQuery,
-            ) -> Result<(Id, Id, EdgeName, EdgeSummary)> {
+            ) -> Result<(SrcId, DstId, EdgeName, EdgeSummary)> {
                 Ok((
                     Id::new(),
                     Id::new(),
@@ -616,9 +696,9 @@ mod tests {
                 Ok((Id::new(), EdgeSummary::new("N/A".to_string())))
             }
 
-            async fn get_fragment_content_by_id(
+            async fn get_fragments_by_id_time_range(
                 &self,
-                query: &FragmentContentByIdQuery,
+                query: &FragmentsByIdTimeRangeQuery,
             ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
                 Ok(vec![(
                     query.ts_millis,
@@ -653,7 +733,7 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (sender, receiver) = flume::bounded::<Query>(config.channel_buffer_size);
+        let (sender, receiver) = flume::bounded::<Queries>(config.channel_buffer_size);
         let reader = crate::Reader::new(sender);
 
         // Spawn consumer with slow processor
@@ -663,9 +743,7 @@ mod tests {
 
         // Send query with short timeout
         let node_id = Id::new();
-        let result = reader
-            .node_by_id(node_id, Duration::from_millis(50))
-            .await;
+        let result = reader.node_by_id(node_id, Duration::from_millis(50)).await;
 
         // Should timeout because processor takes 200ms but timeout is 50ms
         assert!(result.is_err());

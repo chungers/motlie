@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
+use std::ops::Bound;
 use std::time::Duration;
 
 use crate::query::{
     DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
-    EdgesToNodeByIdQuery, FragmentContentByIdQuery, NodeByIdQuery, Query, SrcId,
+    EdgesToNodeByIdQuery, FragmentsByIdTimeRangeQuery, NodeByIdQuery, Queries, SrcId,
 };
 use crate::schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
-use crate::Id;
+use crate::{Id, TimestampMilli};
 
 /// Configuration for the query reader
 #[derive(Debug, Clone)]
@@ -26,12 +27,12 @@ impl Default for ReaderConfig {
 /// Handle for sending queries to the reader
 #[derive(Debug, Clone)]
 pub struct Reader {
-    sender: flume::Sender<Query>,
+    sender: flume::Sender<Queries>,
 }
 
 impl Reader {
     /// Create a new Reader with the given sender
-    pub fn new(sender: flume::Sender<Query>) -> Self {
+    pub fn new(sender: flume::Sender<Queries>) -> Self {
         Reader { sender }
     }
 
@@ -42,7 +43,7 @@ impl Reader {
         let query = NodeByIdQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Query::NodeById(query))
+            .send_async(Queries::NodeById(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -61,7 +62,7 @@ impl Reader {
         let query = EdgeByIdQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Query::EdgeById(query))
+            .send_async(Queries::EdgeById(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -73,8 +74,8 @@ impl Reader {
     /// Returns (edge_id, edge_summary)
     pub async fn edge_by_src_dst_name(
         &self,
-        source_id: Id,
-        dest_id: Id,
+        source_id: SrcId,
+        dest_id: DstId,
         name: String,
         timeout: Duration,
     ) -> Result<(Id, EdgeSummary)> {
@@ -83,7 +84,7 @@ impl Reader {
         let query = EdgeSummaryBySrcDstNameQuery::new(source_id, dest_id, name, timeout, result_tx);
 
         self.sender
-            .send_async(Query::EdgeSummaryBySrcDstName(query))
+            .send_async(Queries::EdgeSummaryBySrcDstName(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -91,18 +92,41 @@ impl Reader {
         result_rx.await?
     }
 
-    /// Query a fragment by its ID
-    pub async fn fragments_by_id(
+    /// Query fragments by ID with time range filtering
+    ///
+    /// # Arguments
+    /// * `id` - The entity ID to search for
+    /// * `time_range` - Tuple of (start_bound, end_bound) using std::ops::Bound
+    /// * `timeout` - Query timeout duration
+    ///
+    /// # Examples
+    /// ```ignore
+    /// use std::ops::Bound;
+    ///
+    /// // Query all fragments (unbounded)
+    /// reader.fragments_by_id_time_range(id, (Bound::Unbounded, Bound::Unbounded), timeout).await?;
+    ///
+    /// // Query fragments from start time onwards (start..)
+    /// reader.fragments_by_id_time_range(id, (Bound::Included(start), Bound::Unbounded), timeout).await?;
+    ///
+    /// // Query fragments up to end time (..=end)
+    /// reader.fragments_by_id_time_range(id, (Bound::Unbounded, Bound::Included(end)), timeout).await?;
+    ///
+    /// // Query fragments in range (start..=end)
+    /// reader.fragments_by_id_time_range(id, (Bound::Included(start), Bound::Included(end)), timeout).await?;
+    /// ```
+    pub async fn fragments_by_id_time_range(
         &self,
         id: Id,
+        time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
         timeout: Duration,
     ) -> Result<Vec<(crate::TimestampMilli, FragmentContent)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = FragmentContentByIdQuery::new(id, timeout, result_tx);
+        let query = FragmentsByIdTimeRangeQuery::new(id, time_range, timeout, result_tx);
 
         self.sender
-            .send_async(Query::FragmentContentById(query))
+            .send_async(Queries::FragmentsByIdTimeRange(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -114,7 +138,7 @@ impl Reader {
     /// Returns Vec<(source_id, edge_name, dest_id)>
     pub async fn edges_from_node_by_id(
         &self,
-        id: Id,
+        id: SrcId,
         timeout: Duration,
     ) -> Result<Vec<(SrcId, EdgeName, DstId)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -122,7 +146,7 @@ impl Reader {
         let query = EdgesFromNodeByIdQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Query::EdgesFromNodeById(query))
+            .send_async(Queries::EdgesFromNodeById(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -134,7 +158,7 @@ impl Reader {
     /// Returns Vec<(dest_id, edge_name, source_id)>
     pub async fn edges_to_node_by_id(
         &self,
-        id: Id,
+        id: DstId,
         timeout: Duration,
     ) -> Result<Vec<(DstId, EdgeName, SrcId)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -142,7 +166,7 @@ impl Reader {
         let query = EdgesToNodeByIdQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Query::EdgesToNodeById(query))
+            .send_async(Queries::EdgesToNodeById(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -157,7 +181,7 @@ impl Reader {
 }
 
 /// Create a new query reader and receiver pair
-pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Query>) {
+pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Queries>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
     let reader = Reader::new(sender);
     (reader, receiver)

@@ -12,7 +12,7 @@ mod query;
 // Re-export query types but not Consumer/Processor/spawn_consumer to avoid ambiguity
 pub use query::{
     DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
-    EdgesToNodeByIdQuery, FragmentContentByIdQuery, NodeByIdQuery, Query, SrcId,
+    EdgesToNodeByIdQuery, FragmentsByIdTimeRangeQuery, NodeByIdQuery, Queries, SrcId,
 };
 pub use schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
 mod graph;
@@ -63,7 +63,7 @@ impl TimestampMilli {
 ///
 /// This is OpenAI-compliant and can be used for text, markdown, JSON, images, etc.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct DataUrl(String);
+pub struct DataUrl(String);
 
 /// Custom error type for DataUrl operations
 #[derive(Debug, Clone, PartialEq, Eq)]

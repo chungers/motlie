@@ -551,9 +551,8 @@ impl crate::query::Processor for Graph {
             txn_db.get_cf(cf, edge_key_bytes)?
         };
 
-        let edge_value_bytes = edge_value_bytes.ok_or_else(|| {
-            anyhow::anyhow!("Edge summary not found for edge_id: {}", edge_id)
-        })?;
+        let edge_value_bytes = edge_value_bytes
+            .ok_or_else(|| anyhow::anyhow!("Edge summary not found for edge_id: {}", edge_id))?;
 
         let edge_value: schema::EdgeCfValue = schema::Edges::value_from_bytes(&edge_value_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
@@ -562,20 +561,78 @@ impl crate::query::Processor for Graph {
         Ok((edge_id, edge_value.3))
     }
 
-    async fn get_fragment_content_by_id(
+    async fn get_fragments_by_id_time_range(
         &self,
-        query: &crate::query::FragmentContentByIdQuery,
+        query: &crate::query::FragmentsByIdTimeRangeQuery,
     ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
+        use std::ops::Bound;
+
         let id = query.id;
-
-        // Scan the fragments column family for all fragments with this ID
-        // Keys are (id, timestamp) and RocksDB stores them in sorted order,
-        // so fragments will naturally be in chronological order
-
         let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
 
-        // Create prefix: just the Id (16 bytes) for prefix seeking
-        let prefix = id.into_bytes();
+        // Construct optimal starting key based on start bound
+        // This leverages RocksDB's B-tree structure for O(log N) seek instead of O(N) scan
+        let start_key = match &query.time_range.0 {
+            Bound::Unbounded => {
+                // Start from minimum timestamp for this ID
+                let mut key = Vec::with_capacity(24);
+                key.extend_from_slice(&id.into_bytes());
+                key.extend_from_slice(&0u64.to_be_bytes());
+                key
+            }
+            Bound::Included(start_ts) => {
+                // Start exactly at start_ts
+                schema::Fragments::key_to_bytes(&schema::FragmentCfKey(id, *start_ts))
+            }
+            Bound::Excluded(start_ts) => {
+                // Start at start_ts + 1 (skip the boundary)
+                schema::Fragments::key_to_bytes(&schema::FragmentCfKey(
+                    id,
+                    TimestampMilli(start_ts.0 + 1),
+                ))
+            }
+        };
+
+        // Helper macro with optimized early termination
+        // No need for contains() check - we start at the right position and stop early
+        macro_rules! process_items {
+            ($iter:expr) => {{
+                for item in $iter {
+                    let (key_bytes, value_bytes) = item?;
+                    let key: schema::FragmentCfKey = schema::Fragments::key_from_bytes(&key_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+                    // Check if we've moved past this ID
+                    if key.0 != id {
+                        break;
+                    }
+
+                    let timestamp = key.1;
+
+                    // Early termination based on end bound
+                    // Since keys are sorted by timestamp, we can stop as soon as we exceed the bound
+                    match &query.time_range.1 {
+                        Bound::Unbounded => { /* continue scanning */ }
+                        Bound::Included(end_ts) => {
+                            if timestamp.0 > end_ts.0 {
+                                break; // Exceeded end bound
+                            }
+                        }
+                        Bound::Excluded(end_ts) => {
+                            if timestamp.0 >= end_ts.0 {
+                                break; // Reached or exceeded end bound
+                            }
+                        }
+                    }
+
+                    // Fragment is within range, deserialize and add
+                    let value: schema::FragmentCfValue =
+                        schema::Fragments::value_from_bytes(&value_bytes)
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+                    fragments.push((timestamp, value.0));
+                }
+            }};
+        }
 
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
@@ -583,56 +640,22 @@ impl crate::query::Processor for Graph {
                 anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
             })?;
 
-            // Seek directly to the first key with this prefix
             let iter = db.iterator_cf(
                 cf,
-                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+                rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
             );
-
-            for item in iter {
-                let (key_bytes, value_bytes) = item?;
-                let key: schema::FragmentCfKey = schema::Fragments::key_from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-                if key.0 != id {
-                    // Once we see a different Id, we're done
-                    break;
-                }
-
-                let value: schema::FragmentCfValue =
-                    schema::Fragments::value_from_bytes(&value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-                fragments.push((key.1, value.0));
-            }
+            process_items!(iter);
         } else {
             let txn_db = self.storage.transaction_db()?;
-            let cf = txn_db
-                .cf_handle(schema::Fragments::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
-                })?;
+            let cf = txn_db.cf_handle(schema::Fragments::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
+            })?;
 
-            // Seek directly to the first key with this prefix
             let iter = txn_db.iterator_cf(
                 cf,
-                rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+                rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
             );
-
-            for item in iter {
-                let (key_bytes, value_bytes) = item?;
-                let key: schema::FragmentCfKey = schema::Fragments::key_from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-                if key.0 != id {
-                    // Once we see a different Id, we're done
-                    break;
-                }
-
-                let value: schema::FragmentCfValue =
-                    schema::Fragments::value_from_bytes(&value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-                fragments.push((key.1, value.0));
-            }
+            process_items!(iter);
         }
 
         Ok(fragments)
@@ -654,11 +677,12 @@ impl crate::query::Processor for Graph {
 
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
-            let cf = db
-                .cf_handle(schema::ForwardEdges::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Column family '{}' not found", schema::ForwardEdges::CF_NAME)
-                })?;
+            let cf = db.cf_handle(schema::ForwardEdges::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ForwardEdges::CF_NAME
+                )
+            })?;
 
             // Seek directly to the first key with this prefix (O(1) instead of O(N))
             let iter = db.iterator_cf(
@@ -687,7 +711,10 @@ impl crate::query::Processor for Graph {
             let cf = txn_db
                 .cf_handle(schema::ForwardEdges::CF_NAME)
                 .ok_or_else(|| {
-                    anyhow::anyhow!("Column family '{}' not found", schema::ForwardEdges::CF_NAME)
+                    anyhow::anyhow!(
+                        "Column family '{}' not found",
+                        schema::ForwardEdges::CF_NAME
+                    )
                 })?;
 
             // Seek directly to the first key with this prefix (O(1) instead of O(N))
@@ -733,11 +760,12 @@ impl crate::query::Processor for Graph {
 
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
-            let cf = db
-                .cf_handle(schema::ReverseEdges::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Column family '{}' not found", schema::ReverseEdges::CF_NAME)
-                })?;
+            let cf = db.cf_handle(schema::ReverseEdges::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ReverseEdges::CF_NAME
+                )
+            })?;
 
             // Seek directly to the first key with this prefix (O(1) instead of O(N))
             let iter = db.iterator_cf(
@@ -766,7 +794,10 @@ impl crate::query::Processor for Graph {
             let cf = txn_db
                 .cf_handle(schema::ReverseEdges::CF_NAME)
                 .ok_or_else(|| {
-                    anyhow::anyhow!("Column family '{}' not found", schema::ReverseEdges::CF_NAME)
+                    anyhow::anyhow!(
+                        "Column family '{}' not found",
+                        schema::ReverseEdges::CF_NAME
+                    )
                 })?;
 
             // Seek directly to the first key with this prefix (O(1) instead of O(N))
@@ -847,7 +878,7 @@ pub fn spawn_graph_consumer_with_next(
 
 /// Create a new query consumer for the graph
 pub fn create_query_consumer(
-    receiver: flume::Receiver<crate::query::Query>,
+    receiver: flume::Receiver<crate::query::Queries>,
     config: crate::ReaderConfig,
     db_path: &Path,
 ) -> crate::query::Consumer<Graph> {
@@ -860,7 +891,7 @@ pub fn create_query_consumer(
 
 /// Spawn a query consumer as a background task
 pub fn spawn_query_consumer(
-    receiver: flume::Receiver<crate::query::Query>,
+    receiver: flume::Receiver<crate::query::Queries>,
     config: crate::ReaderConfig,
     db_path: &Path,
 ) -> JoinHandle<Result<()>> {
