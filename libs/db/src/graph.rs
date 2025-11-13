@@ -49,19 +49,17 @@ pub(crate) trait ColumnFamilyRecord {
     /// Serialize the value to bytes using MessagePack, then compress with LZ4.
     fn value_to_bytes(value: &Self::Value) -> Result<Vec<u8>, rmp_serde::encode::Error> {
         let msgpack_bytes = rmp_serde::to_vec(value)?;
-        let compressed = lz4::block::compress(&msgpack_bytes, None, true)
-            .map_err(|e| {
-                rmp_serde::encode::Error::Syntax(format!("LZ4 compression failed: {}", e))
-            })?;
+        let compressed = lz4::block::compress(&msgpack_bytes, None, true).map_err(|e| {
+            rmp_serde::encode::Error::Syntax(format!("LZ4 compression failed: {}", e))
+        })?;
         Ok(compressed)
     }
 
     /// Decompress with LZ4, then deserialize the value from bytes using MessagePack.
     fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value, rmp_serde::decode::Error> {
-        let decompressed = lz4::block::decompress(bytes, None)
-            .map_err(|e| {
-                rmp_serde::decode::Error::Syntax(format!("LZ4 decompression failed: {}", e))
-            })?;
+        let decompressed = lz4::block::decompress(bytes, None).map_err(|e| {
+            rmp_serde::decode::Error::Syntax(format!("LZ4 decompression failed: {}", e))
+        })?;
         rmp_serde::from_slice(&decompressed)
     }
 
@@ -859,10 +857,7 @@ impl crate::query::Processor for Graph {
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
             let cf = db.cf_handle(schema::NodeNames::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::NodeNames::CF_NAME
-                )
+                anyhow::anyhow!("Column family '{}' not found", schema::NodeNames::CF_NAME)
             })?;
 
             // Seek directly to the first key with this prefix
@@ -873,9 +868,8 @@ impl crate::query::Processor for Graph {
 
             for item in iter {
                 let (key_bytes, _value_bytes) = item?;
-                let key: schema::NodeNamesCfKey =
-                    schema::NodeNames::key_from_bytes(&key_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+                let key: schema::NodeNamesCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let node_name = key.0;
 
@@ -893,10 +887,7 @@ impl crate::query::Processor for Graph {
             let cf = txn_db
                 .cf_handle(schema::NodeNames::CF_NAME)
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Column family '{}' not found",
-                        schema::NodeNames::CF_NAME
-                    )
+                    anyhow::anyhow!("Column family '{}' not found", schema::NodeNames::CF_NAME)
                 })?;
 
             // Seek directly to the first key with this prefix
@@ -907,9 +898,8 @@ impl crate::query::Processor for Graph {
 
             for item in iter {
                 let (key_bytes, _value_bytes) = item?;
-                let key: schema::NodeNamesCfKey =
-                    schema::NodeNames::key_from_bytes(&key_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+                let key: schema::NodeNamesCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let node_name = key.0;
 
@@ -944,10 +934,7 @@ impl crate::query::Processor for Graph {
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
             let cf = db.cf_handle(schema::EdgeNames::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::EdgeNames::CF_NAME
-                )
+                anyhow::anyhow!("Column family '{}' not found", schema::EdgeNames::CF_NAME)
             })?;
 
             // Seek directly to the first key with this prefix
@@ -958,9 +945,8 @@ impl crate::query::Processor for Graph {
 
             for item in iter {
                 let (key_bytes, _value_bytes) = item?;
-                let key: schema::EdgeNamesCfKey =
-                    schema::EdgeNames::key_from_bytes(&key_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+                let key: schema::EdgeNamesCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let edge_name = &key.0;
 
@@ -980,10 +966,7 @@ impl crate::query::Processor for Graph {
             let cf = txn_db
                 .cf_handle(schema::EdgeNames::CF_NAME)
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Column family '{}' not found",
-                        schema::EdgeNames::CF_NAME
-                    )
+                    anyhow::anyhow!("Column family '{}' not found", schema::EdgeNames::CF_NAME)
                 })?;
 
             // Seek directly to the first key with this prefix
@@ -994,9 +977,8 @@ impl crate::query::Processor for Graph {
 
             for item in iter {
                 let (key_bytes, _value_bytes) = item?;
-                let key: schema::EdgeNamesCfKey =
-                    schema::EdgeNames::key_from_bytes(&key_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+                let key: schema::EdgeNamesCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let edge_name = &key.0;
 
@@ -1067,7 +1049,7 @@ pub fn spawn_graph_consumer_with_next(
 
 /// Create a new query consumer for the graph
 pub fn create_query_consumer(
-    receiver: flume::Receiver<crate::query::Queries>,
+    receiver: flume::Receiver<crate::query::Query>,
     config: crate::ReaderConfig,
     db_path: &Path,
 ) -> crate::query::Consumer<Graph> {
@@ -1080,7 +1062,7 @@ pub fn create_query_consumer(
 
 /// Spawn a query consumer as a background task
 pub fn spawn_query_consumer(
-    receiver: flume::Receiver<crate::query::Queries>,
+    receiver: flume::Receiver<crate::query::Query>,
     config: crate::ReaderConfig,
     db_path: &Path,
 ) -> JoinHandle<Result<()>> {
@@ -1091,7 +1073,7 @@ pub fn spawn_query_consumer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Nodes, NodeCfValue, NodeSummary};
+    use crate::schema::{NodeCfValue, NodeSummary, Nodes};
 
     #[test]
     fn test_lz4_compression_round_trip() {
@@ -1099,15 +1081,17 @@ mod tests {
         let test_value = NodeCfValue("test_node".to_string(), NodeSummary::new("test content"));
 
         // Serialize and compress
-        let compressed_bytes = Nodes::value_to_bytes(&test_value)
-            .expect("Failed to compress");
+        let compressed_bytes = Nodes::value_to_bytes(&test_value).expect("Failed to compress");
 
         println!("Compressed size: {} bytes", compressed_bytes.len());
-        println!("First 20 bytes: {:?}", &compressed_bytes[..20.min(compressed_bytes.len())]);
+        println!(
+            "First 20 bytes: {:?}",
+            &compressed_bytes[..20.min(compressed_bytes.len())]
+        );
 
         // Decompress and deserialize
-        let decompressed_value: NodeCfValue = Nodes::value_from_bytes(&compressed_bytes)
-            .expect("Failed to decompress");
+        let decompressed_value: NodeCfValue =
+            Nodes::value_from_bytes(&compressed_bytes).expect("Failed to decompress");
 
         // Verify
         assert_eq!(test_value.0, decompressed_value.0, "Node name should match");

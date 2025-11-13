@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use crate::query::{
     DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesByNameQuery, EdgesFromNodeQuery,
-    EdgesToNodeQuery, FragmentsByIdTimeRangeQuery, NodeByIdQuery, NodesByNameQuery, Queries,
-    SrcId,
+    EdgesToNodeQuery, FragmentsByIdTimeRangeQuery, NodeByIdQuery, NodesByNameQuery, Query, SrcId,
 };
 use crate::schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
 use crate::{Id, TimestampMilli};
@@ -28,12 +27,12 @@ impl Default for ReaderConfig {
 /// Handle for sending queries to the reader
 #[derive(Debug, Clone)]
 pub struct Reader {
-    sender: flume::Sender<Queries>,
+    sender: flume::Sender<Query>,
 }
 
 impl Reader {
     /// Create a new Reader with the given sender
-    pub fn new(sender: flume::Sender<Queries>) -> Self {
+    pub fn new(sender: flume::Sender<Query>) -> Self {
         Reader { sender }
     }
 
@@ -44,7 +43,7 @@ impl Reader {
         let query = NodeByIdQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Queries::NodeById(query))
+            .send_async(Query::NodeById(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -63,7 +62,7 @@ impl Reader {
         let query = EdgeByIdQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Queries::EdgeById(query))
+            .send_async(Query::EdgeById(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -85,7 +84,7 @@ impl Reader {
         let query = EdgeSummaryBySrcDstNameQuery::new(source_id, dest_id, name, timeout, result_tx);
 
         self.sender
-            .send_async(Queries::EdgeSummaryBySrcDstName(query))
+            .send_async(Query::EdgeSummaryBySrcDstName(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -127,7 +126,7 @@ impl Reader {
         let query = FragmentsByIdTimeRangeQuery::new(id, time_range, timeout, result_tx);
 
         self.sender
-            .send_async(Queries::FragmentsByIdTimeRange(query))
+            .send_async(Query::FragmentsByIdTimeRange(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -147,7 +146,7 @@ impl Reader {
         let query = EdgesFromNodeQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Queries::EdgesFromNode(query))
+            .send_async(Query::EdgesFromNode(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -167,7 +166,7 @@ impl Reader {
         let query = EdgesToNodeQuery::new(id, timeout, result_tx);
 
         self.sender
-            .send_async(Queries::EdgesToNode(query))
+            .send_async(Query::EdgesToNode(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -187,7 +186,7 @@ impl Reader {
         let query = NodesByNameQuery::new(name, timeout, result_tx);
 
         self.sender
-            .send_async(Queries::NodesByName(query))
+            .send_async(Query::NodesByName(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -208,7 +207,7 @@ impl Reader {
         let query = EdgesByNameQuery::new(name, timeout, result_tx);
 
         self.sender
-            .send_async(Queries::EdgesByName(query))
+            .send_async(Query::EdgesByName(query))
             .await
             .context("Failed to send query to reader queue")?;
 
@@ -223,7 +222,7 @@ impl Reader {
 }
 
 /// Create a new query reader and receiver pair
-pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Queries>) {
+pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Query>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
     let reader = Reader::new(sender);
     (reader, receiver)

@@ -28,7 +28,7 @@ pub trait QueryProcessor: Send {
 
 /// Query enum representing all possible query types
 #[derive(Debug)]
-pub enum Queries {
+pub enum Query {
     NodeById(NodeByIdQuery),
     EdgeById(EdgeByIdQuery),
     EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
@@ -39,23 +39,27 @@ pub enum Queries {
     EdgesByName(EdgesByNameQuery),
 }
 
-impl std::fmt::Display for Queries {
+impl std::fmt::Display for Query {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Queries::NodeById(q) => write!(f, "NodeById: id={}", q.id),
-            Queries::EdgeById(q) => write!(f, "EdgeById: id={}", q.id),
-            Queries::EdgeSummaryBySrcDstName(q) => write!(
+            Query::NodeById(q) => write!(f, "NodeById: id={}", q.id),
+            Query::EdgeById(q) => write!(f, "EdgeById: id={}", q.id),
+            Query::EdgeSummaryBySrcDstName(q) => write!(
                 f,
                 "EdgeBySrcDstName: source={}, dest={}, name={}",
                 q.source_id, q.dest_id, q.name
             ),
-            Queries::FragmentsByIdTimeRange(q) => {
-                write!(f, "FragmentsByIdTimeRange: id={}, range={:?}", q.id, q.time_range)
+            Query::FragmentsByIdTimeRange(q) => {
+                write!(
+                    f,
+                    "FragmentsByIdTimeRange: id={}, range={:?}",
+                    q.id, q.time_range
+                )
             }
-            Queries::EdgesFromNode(q) => write!(f, "EdgesFromNodeById: id={}", q.id),
-            Queries::EdgesToNode(q) => write!(f, "EdgesToNodeById: id={}", q.id),
-            Queries::NodesByName(q) => write!(f, "NodesByName: name={}", q.name),
-            Queries::EdgesByName(q) => write!(f, "EdgesByName: name={}", q.name),
+            Query::EdgesFromNode(q) => write!(f, "EdgesFromNodeById: id={}", q.id),
+            Query::EdgesToNode(q) => write!(f, "EdgesToNodeById: id={}", q.id),
+            Query::NodesByName(q) => write!(f, "NodesByName: name={}", q.name),
+            Query::EdgesByName(q) => write!(f, "EdgesByName: name={}", q.name),
         }
     }
 }
@@ -87,17 +91,17 @@ impl_query_processor!(
 );
 
 #[async_trait::async_trait]
-impl QueryProcessor for Queries {
+impl QueryProcessor for Query {
     async fn process_and_send<P: Processor>(self, processor: &P) {
         match self {
-            Queries::NodeById(q) => q.process_and_send(processor).await,
-            Queries::EdgeById(q) => q.process_and_send(processor).await,
-            Queries::EdgeSummaryBySrcDstName(q) => q.process_and_send(processor).await,
-            Queries::FragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
-            Queries::EdgesFromNode(q) => q.process_and_send(processor).await,
-            Queries::EdgesToNode(q) => q.process_and_send(processor).await,
-            Queries::NodesByName(q) => q.process_and_send(processor).await,
-            Queries::EdgesByName(q) => q.process_and_send(processor).await,
+            Query::NodeById(q) => q.process_and_send(processor).await,
+            Query::EdgeById(q) => q.process_and_send(processor).await,
+            Query::EdgeSummaryBySrcDstName(q) => q.process_and_send(processor).await,
+            Query::FragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
+            Query::EdgesFromNode(q) => q.process_and_send(processor).await,
+            Query::EdgesToNode(q) => q.process_and_send(processor).await,
+            Query::NodesByName(q) => q.process_and_send(processor).await,
+            Query::EdgesByName(q) => q.process_and_send(processor).await,
         }
     }
 }
@@ -114,12 +118,15 @@ pub type EdgeByIdQuery = ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>;
 mod sealed {
     use crate::query::{DstId, SrcId};
     use crate::schema::{EdgeName, EdgeSummary, NodeName, NodeSummary};
-    use crate::Id;
+    use crate::{FragmentContent, Id, TimestampMilli};
 
     pub trait Queryable {}
     impl Queryable for (NodeName, NodeSummary) {}
     impl Queryable for (SrcId, DstId, EdgeName, EdgeSummary) {}
+    impl Queryable for Vec<(TimestampMilli, FragmentContent)> {}
     impl Queryable for Vec<(Id, EdgeName, Id)> {} // Forward and reverse edges use same tuple type
+    impl Queryable for Vec<(NodeName, Id)> {}
+    impl Queryable for Vec<(EdgeName, Id)> {}
 }
 
 /// Trait for types that can be queried by ID
@@ -643,14 +650,14 @@ pub trait Processor: Send + Sync {
 
 /// Generic consumer that processes queries using a Processor
 pub struct Consumer<P: Processor> {
-    receiver: flume::Receiver<Queries>,
+    receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     processor: P,
 }
 
 impl<P: Processor> Consumer<P> {
     /// Create a new Consumer
-    pub fn new(receiver: flume::Receiver<Queries>, config: ReaderConfig, processor: P) -> Self {
+    pub fn new(receiver: flume::Receiver<Query>, config: ReaderConfig, processor: P) -> Self {
         Self {
             receiver,
             config,
@@ -679,7 +686,7 @@ impl<P: Processor> Consumer<P> {
     }
 
     /// Process a single query
-    async fn process_query(&self, query: Queries) {
+    async fn process_query(&self, query: Query) {
         log::debug!("Processing {}", query);
         query.process_and_send(&self.processor).await;
     }
@@ -917,7 +924,7 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (sender, receiver) = flume::bounded::<Queries>(config.channel_buffer_size);
+        let (sender, receiver) = flume::bounded::<Query>(config.channel_buffer_size);
         let reader = crate::Reader::new(sender);
 
         // Spawn consumer with slow processor
