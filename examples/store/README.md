@@ -6,10 +6,12 @@ This example demonstrates the mutation consumer chaining feature where mutations
 
 The example sets up a chain: **Writer → Graph → FullText**
 
-- Mutations are sent to the Graph consumer
-- Graph processes each mutation (simulates graph storage)
-- Graph forwards the mutation to FullText
-- FullText processes the mutation (simulates full-text search indexing)
+- Mutations are sent to the Graph consumer as `Vec<Mutation>` (batched)
+- Graph processes each batch atomically in a single RocksDB transaction
+- Graph forwards the batch to FullText
+- FullText processes the batch (simulates full-text search indexing)
+
+**Batching**: Mutations sent individually are automatically wrapped in `Vec<Mutation>` with a single element, ensuring all code paths use the same batching infrastructure.
 
 ## Building the Example
 

@@ -67,34 +67,63 @@ pub struct InvalidateArgs {
     pub reason: String,
 }
 
-/// Trait for processing different types of mutations
+/// Trait for processing batches of mutations.
+///
+/// This trait defines a single method that processes mutations in batches,
+/// enabling efficient transaction batching in RocksDB and other storage backends.
+///
+/// # Batching Strategy
+///
+/// The `process_mutations` method receives a slice of mutations, which can be:
+/// - A single mutation (slice of length 1) - wrapped automatically by the Writer
+/// - Multiple mutations (slice of length N) - sent explicitly as a batch
+///
+/// Implementations should process all mutations atomically when possible.
+///
+/// # Example Implementation
+///
+/// ```rust,ignore
+/// #[async_trait::async_trait]
+/// impl Processor for Graph {
+///     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
+///         // Convert all mutations to storage operations
+///         let operations = schema::Plan::create_batch(mutations)?;
+///
+///         // Execute all operations in a single RocksDB transaction
+///         let txn = self.storage.transaction();
+///         for op in operations {
+///             txn.put_cf(cf, key, value)?;
+///         }
+///         txn.commit()?;  // Single commit for entire batch
+///         Ok(())
+///     }
+/// }
+/// ```
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
-    /// Process an AddNode mutation
-    async fn process_add_node(&self, args: &AddNode) -> Result<()>;
-
-    /// Process an AddEdge mutation
-    async fn process_add_edge(&self, args: &AddEdge) -> Result<()>;
-
-    /// Process an AddFragment mutation
-    async fn process_add_fragment(&self, args: &AddFragment) -> Result<()>;
-
-    /// Process an Invalidate mutation
-    async fn process_invalidate(&self, args: &InvalidateArgs) -> Result<()>;
+    /// Process a batch of mutations atomically.
+    ///
+    /// # Arguments
+    /// * `mutations` - Slice of mutations to process. Can be a single mutation or many.
+    ///
+    /// # Returns
+    /// * `Ok(())` if all mutations were processed successfully
+    /// * `Err(_)` if processing failed (implementations should rollback on error)
+    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()>;
 }
 
 /// Generic consumer that processes mutations using a Processor
 pub struct Consumer<P: Processor> {
-    receiver: mpsc::Receiver<Mutation>,
+    receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     processor: P,
     /// Optional sender to forward mutations to the next consumer in the chain
-    next: Option<mpsc::Sender<Mutation>>,
+    next: Option<mpsc::Sender<Vec<Mutation>>>,
 }
 
 impl<P: Processor> Consumer<P> {
     /// Create a new Consumer
-    pub fn new(receiver: mpsc::Receiver<Mutation>, config: WriterConfig, processor: P) -> Self {
+    pub fn new(receiver: mpsc::Receiver<Vec<Mutation>>, config: WriterConfig, processor: P) -> Self {
         Self {
             receiver,
             config,
@@ -105,10 +134,10 @@ impl<P: Processor> Consumer<P> {
 
     /// Create a new Consumer that forwards mutations to the next consumer in the chain
     pub fn with_next(
-        receiver: mpsc::Receiver<Mutation>,
+        receiver: mpsc::Receiver<Vec<Mutation>>,
         config: WriterConfig,
         processor: P,
-        next: mpsc::Sender<Mutation>,
+        next: mpsc::Sender<Vec<Mutation>>,
     ) -> Self {
         Self {
             receiver,
@@ -123,13 +152,13 @@ impl<P: Processor> Consumer<P> {
         log::info!("Starting mutation consumer with config: {:?}", self.config);
 
         loop {
-            // Wait for the next mutation
+            // Wait for the next batch of mutations
             match self.receiver.recv().await {
-                Some(mutation) => {
-                    // Process the mutation immediately
-                    self.process_mutation(&mutation)
+                Some(mutations) => {
+                    // Process the batch immediately
+                    self.process_batch(&mutations)
                         .await
-                        .with_context(|| format!("Failed to process mutation: {:?}", mutation))?;
+                        .with_context(|| format!("Failed to process mutations: {:?}", mutations))?;
                 }
                 None => {
                     // Channel closed
@@ -140,49 +169,50 @@ impl<P: Processor> Consumer<P> {
         }
     }
 
-    /// Process a single mutation
-    async fn process_mutation(&self, mutation: &Mutation) -> Result<()> {
-        // Process the mutation with the processor
-        match mutation {
-            Mutation::AddNode(args) => {
-                log::debug!("Processing AddNode: id={}, name={}", args.id, args.name);
-                self.processor.process_add_node(args).await?;
-            }
-            Mutation::AddEdge(args) => {
-                log::debug!(
-                    "Processing AddEdge: source={}, target={}, name={}",
-                    args.source_node_id,
-                    args.target_node_id,
-                    args.name
-                );
-                self.processor.process_add_edge(args).await?;
-            }
-            Mutation::AddFragment(args) => {
-                log::debug!(
-                    "Processing AddFragment: id={}, body_len={}",
-                    args.id,
-                    args.content.len()
-                );
-                self.processor.process_add_fragment(args).await?;
-            }
-            Mutation::Invalidate(args) => {
-                log::debug!(
-                    "Processing Invalidate: id={}, reason={}",
-                    args.id,
-                    args.reason
-                );
-                self.processor.process_invalidate(args).await?;
+    /// Process a batch of mutations
+    async fn process_batch(&self, mutations: &[Mutation]) -> Result<()> {
+        // Log what we're processing
+        for mutation in mutations {
+            match mutation {
+                Mutation::AddNode(args) => {
+                    log::debug!("Processing AddNode: id={}, name={}", args.id, args.name);
+                }
+                Mutation::AddEdge(args) => {
+                    log::debug!(
+                        "Processing AddEdge: source={}, target={}, name={}",
+                        args.source_node_id,
+                        args.target_node_id,
+                        args.name
+                    );
+                }
+                Mutation::AddFragment(args) => {
+                    log::debug!(
+                        "Processing AddFragment: id={}, body_len={}",
+                        args.id,
+                        args.content.len()
+                    );
+                }
+                Mutation::Invalidate(args) => {
+                    log::debug!(
+                        "Processing Invalidate: id={}, reason={}",
+                        args.id,
+                        args.reason
+                    );
+                }
             }
         }
 
-        // Forward the mutation to the next consumer in the chain if configured
+        // Process all mutations in a single call
+        self.processor.process_mutations(mutations).await?;
+
+        // Forward the batch to the next consumer in the chain if configured
         // This is a best-effort send - if the buffer is full, we log and continue
         if let Some(sender) = &self.next {
-            if let Err(e) = sender.try_send(mutation.clone()) {
+            if let Err(e) = sender.try_send(mutations.to_vec()) {
                 log::warn!(
-                    "[BUFFER FULL] Next consumer busy, dropping mutation: err={} payload={:?}",
+                    "[BUFFER FULL] Next consumer busy, dropping mutations: err={} count={}",
                     e,
-                    mutation
+                    mutations.len()
                 );
             }
         }
@@ -234,35 +264,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Processor for TestProcessor {
-        async fn process_add_node(&self, _args: &AddNode) -> Result<()> {
+        async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
             if self.delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
             }
-            self.processed_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn process_add_edge(&self, _args: &AddEdge) -> Result<()> {
-            if self.delay_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-            }
-            self.processed_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn process_add_fragment(&self, _args: &AddFragment) -> Result<()> {
-            if self.delay_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-            }
-            self.processed_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn process_invalidate(&self, _args: &InvalidateArgs) -> Result<()> {
-            if self.delay_ms > 0 {
-                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-            }
-            self.processed_count.fetch_add(1, Ordering::SeqCst);
+            self.processed_count
+                .fetch_add(mutations.len(), Ordering::SeqCst);
             Ok(())
         }
     }

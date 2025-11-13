@@ -2850,4 +2850,353 @@ mod tests {
         drop(reader);
         query_consumer_handle.await.unwrap().unwrap();
     }
+
+    #[tokio::test]
+    async fn test_transaction_batching_single_mutation() {
+        // Test that single mutations work correctly through the batching infrastructure
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        let node_id = Id::new();
+        writer
+            .add_node(AddNode {
+                id: node_id,
+                ts_millis: TimestampMilli::now(),
+                name: "test_node".to_string(),
+            })
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify the node was written
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(false);
+        let db = DB::open_cf_for_read_only(&opts, &db_path, ALL_COLUMN_FAMILIES, false).unwrap();
+        let cf = db.cf_handle("nodes").unwrap();
+        let key_bytes = node_id.into_bytes();
+        let value = db.get_cf(cf, key_bytes).unwrap();
+        assert!(value.is_some(), "Node should be written to database");
+    }
+
+    #[tokio::test]
+    async fn test_transaction_batching_multiple_mutations_atomicity() {
+        // Test that multiple mutations sent together are committed atomically
+        use crate::Mutation;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 100,
+        };
+
+        // Create a custom writer that sends batches directly
+        let (sender, receiver) = mpsc::channel::<Vec<Mutation>>(config.channel_buffer_size);
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create a batch of mutations
+        let node1_id = Id::new();
+        let node2_id = Id::new();
+        let edge_id = Id::new();
+        let fragment_id = Id::new();
+
+        let mutations = vec![
+            Mutation::AddNode(AddNode {
+                id: node1_id,
+                ts_millis: TimestampMilli::now(),
+                name: "node1".to_string(),
+            }),
+            Mutation::AddNode(AddNode {
+                id: node2_id,
+                ts_millis: TimestampMilli::now(),
+                name: "node2".to_string(),
+            }),
+            Mutation::AddEdge(AddEdge {
+                id: edge_id,
+                source_node_id: node1_id,
+                target_node_id: node2_id,
+                ts_millis: TimestampMilli::now(),
+                name: "connects".to_string(),
+            }),
+            Mutation::AddFragment(AddFragment {
+                id: fragment_id,
+                ts_millis: TimestampMilli::now().0,
+                content: "test fragment".to_string(),
+            }),
+        ];
+
+        // Send all mutations as a single batch
+        sender.send(mutations).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(sender);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify all mutations were committed
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(false);
+        let db = DB::open_cf_for_read_only(&opts, &db_path, ALL_COLUMN_FAMILIES, false).unwrap();
+
+        // Check nodes
+        let nodes_cf = db.cf_handle("nodes").unwrap();
+        assert!(
+            db.get_cf(nodes_cf, node1_id.into_bytes()).unwrap().is_some(),
+            "Node1 should be in database"
+        );
+        assert!(
+            db.get_cf(nodes_cf, node2_id.into_bytes()).unwrap().is_some(),
+            "Node2 should be in database"
+        );
+
+        // Check edge
+        let edges_cf = db.cf_handle("edges").unwrap();
+        assert!(
+            db.get_cf(edges_cf, edge_id.into_bytes()).unwrap().is_some(),
+            "Edge should be in database"
+        );
+
+        // Check fragment
+        let fragments_cf = db.cf_handle("fragments").unwrap();
+        let mut fragment_key = Vec::with_capacity(24);
+        fragment_key.extend_from_slice(&fragment_id.into_bytes());
+        fragment_key.extend_from_slice(&TimestampMilli::now().0.to_be_bytes());
+        // Note: We need to scan for the fragment since we don't know exact timestamp
+        let iter = db.iterator_cf(
+            fragments_cf,
+            rocksdb::IteratorMode::From(&fragment_id.into_bytes(), rocksdb::Direction::Forward),
+        );
+        let mut found_fragment = false;
+        for item in iter {
+            let (key, _) = item.unwrap();
+            if key.starts_with(&fragment_id.into_bytes()) {
+                found_fragment = true;
+                break;
+            }
+        }
+        assert!(found_fragment, "Fragment should be in database");
+    }
+
+    #[tokio::test]
+    async fn test_transaction_batching_large_batch() {
+        // Test batching with a large number of mutations
+        use crate::Mutation;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 100,
+        };
+
+        let (sender, receiver) = mpsc::channel::<Vec<Mutation>>(config.channel_buffer_size);
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create a batch of 100 nodes
+        let mut mutations = Vec::new();
+        let mut node_ids = Vec::new();
+
+        for i in 0..100 {
+            let node_id = Id::new();
+            node_ids.push(node_id);
+            mutations.push(Mutation::AddNode(AddNode {
+                id: node_id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("node_{}", i),
+            }));
+        }
+
+        // Send all 100 mutations as a single batch
+        sender.send(mutations).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        drop(sender);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify all 100 nodes were committed
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(false);
+        let db = DB::open_cf_for_read_only(&opts, &db_path, ALL_COLUMN_FAMILIES, false).unwrap();
+        let nodes_cf = db.cf_handle("nodes").unwrap();
+
+        let mut found_count = 0;
+        for node_id in node_ids {
+            if db.get_cf(nodes_cf, node_id.into_bytes()).unwrap().is_some() {
+                found_count += 1;
+            }
+        }
+
+        assert_eq!(found_count, 100, "All 100 nodes should be in database");
+    }
+
+    #[tokio::test]
+    async fn test_transaction_batching_vs_individual_performance() {
+        // This test demonstrates the performance benefit of batching
+        // by comparing batch vs individual mutation processing
+        use crate::Mutation;
+        use std::time::Instant;
+
+        let num_mutations = 50;
+
+        // Test 1: Individual mutations
+        let temp_dir1 = TempDir::new().unwrap();
+        let db_path1 = temp_dir1.path().join("test_db_individual");
+
+        let config1 = WriterConfig::default();
+        let (writer1, receiver1) = create_mutation_writer(config1.clone());
+        let consumer1 = spawn_graph_consumer(receiver1, config1, &db_path1);
+
+        let start1 = Instant::now();
+        for i in 0..num_mutations {
+            writer1
+                .add_node(AddNode {
+                    id: Id::new(),
+                    ts_millis: TimestampMilli::now(),
+                    name: format!("node_{}", i),
+                })
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer1);
+        consumer1.await.unwrap().unwrap();
+        let duration1 = start1.elapsed();
+
+        // Test 2: Batched mutations
+        let temp_dir2 = TempDir::new().unwrap();
+        let db_path2 = temp_dir2.path().join("test_db_batched");
+
+        let config2 = WriterConfig::default();
+        let (sender2, receiver2) = mpsc::channel::<Vec<Mutation>>(config2.channel_buffer_size);
+        let consumer2 = spawn_graph_consumer(receiver2, config2, &db_path2);
+
+        let mut batch = Vec::new();
+        for i in 0..num_mutations {
+            batch.push(Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli::now(),
+                name: format!("node_{}", i),
+            }));
+        }
+
+        let start2 = Instant::now();
+        sender2.send(batch).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(sender2);
+        consumer2.await.unwrap().unwrap();
+        let duration2 = start2.elapsed();
+
+        println!(
+            "Individual mutations: {:?}, Batched mutations: {:?}, Speedup: {:.2}x",
+            duration1,
+            duration2,
+            duration1.as_secs_f64() / duration2.as_secs_f64()
+        );
+
+        // Note: We don't assert performance here as it can vary,
+        // but batching should generally be faster for multiple mutations
+    }
+
+    #[tokio::test]
+    async fn test_transaction_batching_mixed_types() {
+        // Test that a batch with mixed mutation types all commit together
+        use crate::Mutation;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (sender, receiver) = mpsc::channel::<Vec<Mutation>>(config.channel_buffer_size);
+        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+        // Create a mixed batch
+        let node_ids: Vec<Id> = (0..10).map(|_| Id::new()).collect();
+        let edge_ids: Vec<Id> = (0..5).map(|_| Id::new()).collect();
+        let fragment_ids: Vec<Id> = (0..5).map(|_| Id::new()).collect();
+
+        let mut mutations = Vec::new();
+
+        // Add nodes
+        for (i, &id) in node_ids.iter().enumerate() {
+            mutations.push(Mutation::AddNode(AddNode {
+                id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("node_{}", i),
+            }));
+        }
+
+        // Add edges (connecting some nodes)
+        for (i, &id) in edge_ids.iter().enumerate() {
+            mutations.push(Mutation::AddEdge(AddEdge {
+                id,
+                source_node_id: node_ids[i],
+                target_node_id: node_ids[i + 1],
+                ts_millis: TimestampMilli::now(),
+                name: format!("edge_{}", i),
+            }));
+        }
+
+        // Add fragments
+        for (i, &id) in fragment_ids.iter().enumerate() {
+            mutations.push(Mutation::AddFragment(AddFragment {
+                id,
+                ts_millis: TimestampMilli::now().0,
+                content: format!("fragment_{}", i),
+            }));
+        }
+
+        // Send mixed batch
+        sender.send(mutations).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(sender);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify all were committed
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(false);
+        let db = DB::open_cf_for_read_only(&opts, &db_path, ALL_COLUMN_FAMILIES, false).unwrap();
+
+        // Check nodes
+        let nodes_cf = db.cf_handle("nodes").unwrap();
+        for &node_id in &node_ids {
+            assert!(
+                db.get_cf(nodes_cf, node_id.into_bytes()).unwrap().is_some(),
+                "All nodes should be committed"
+            );
+        }
+
+        // Check edges
+        let edges_cf = db.cf_handle("edges").unwrap();
+        for &edge_id in &edge_ids {
+            assert!(
+                db.get_cf(edges_cf, edge_id.into_bytes()).unwrap().is_some(),
+                "All edges should be committed"
+            );
+        }
+
+        // Check fragments (at least some should exist)
+        let fragments_cf = db.cf_handle("fragments").unwrap();
+        for &fragment_id in &fragment_ids {
+            let iter = db.iterator_cf(
+                fragments_cf,
+                rocksdb::IteratorMode::From(&fragment_id.into_bytes(), rocksdb::Direction::Forward),
+            );
+            let mut found = false;
+            for item in iter {
+                let (key, _) = item.unwrap();
+                if key.starts_with(&fragment_id.into_bytes()) {
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found, "All fragments should be committed");
+        }
+    }
 }

@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 
 use crate::{
     mutation::{Consumer, Processor},
-    AddEdge, AddFragment, AddNode, InvalidateArgs, WriterConfig,
+    Mutation, WriterConfig,
 };
 
 /// Full-text search mutation processor for search indexing
@@ -40,73 +40,67 @@ impl Default for FullTextProcessor {
 
 #[async_trait::async_trait]
 impl Processor for FullTextProcessor {
-    /// Process an AddNode mutation - index node for search
-    async fn process_add_node(&self, args: &AddNode) -> Result<()> {
-        // TODO: Implement actual node indexing in full-text search index
-        log::info!(
-            "[FullText] Would index node for search: id={}, name='{}', k1={}, b={}",
-            args.id,
-            args.name,
-            self.k1,
-            self.b
-        );
-        // TODO: Extract terms from node name and content
-        // TODO: Update document frequencies and term frequencies
-        // TODO: Update BM25 index structures
-
-        Ok(())
-    }
-
-    /// Process an AddEdge mutation - index edge relationships for search
-    async fn process_add_edge(&self, args: &AddEdge) -> Result<()> {
-        // TODO: Implement actual edge relationship indexing in full-text search index
-        log::info!(
-            "[FullText] Would index edge relationship: source={}, target={}, name='{}', k1={}, b={}",
-            args.source_node_id,
-            args.target_node_id,
-            args.name,
-            self.k1,
-            self.b
-        );
-        // TODO: Index edge name and relationship context
-        // TODO: Update graph-aware search features
-        // TODO: Update BM25 scores considering edge relationships
-
-        Ok(())
-    }
-
-    /// Process an AddFragment mutation - index fragment content for full-text search
-    async fn process_add_fragment(&self, args: &AddFragment) -> Result<()> {
-        // TODO: Implement actual fragment content indexing in full-text search index
-        log::info!(
-            "[FullText] Would index fragment content: id={}, body_len={}, k1={}, b={}",
-            args.id,
-            args.content.len(),
-            self.k1,
-            self.b
-        );
-        // TODO: Tokenize fragment body
-        // TODO: Extract and stem terms
-        // TODO: Update term frequencies and document frequencies
-        // TODO: Calculate and store BM25 scores
-
-        Ok(())
-    }
-
-    /// Process an Invalidate mutation - remove from search index
-    async fn process_invalidate(&self, args: &InvalidateArgs) -> Result<()> {
-        // TODO: Implement actual invalidation in full-text search index
-        log::info!(
-            "[FullText] Would remove from search index: id={}, reason='{}', k1={}, b={}",
-            args.id,
-            args.reason,
-            self.k1,
-            self.b
-        );
-        // TODO: Remove document from index
-        // TODO: Update document frequencies
-        // TODO: Recalculate BM25 scores for affected terms
-        // TODO: Cleanup orphaned index entries
+    /// Process a batch of mutations - index content for full-text search
+    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
+        for mutation in mutations {
+            match mutation {
+                Mutation::AddNode(args) => {
+                    // TODO: Implement actual node indexing in full-text search index
+                    log::info!(
+                        "[FullText] Would index node for search: id={}, name='{}', k1={}, b={}",
+                        args.id,
+                        args.name,
+                        self.k1,
+                        self.b
+                    );
+                    // TODO: Extract terms from node name and content
+                    // TODO: Update document frequencies and term frequencies
+                    // TODO: Update BM25 index structures
+                }
+                Mutation::AddEdge(args) => {
+                    // TODO: Implement actual edge relationship indexing in full-text search index
+                    log::info!(
+                        "[FullText] Would index edge relationship: source={}, target={}, name='{}', k1={}, b={}",
+                        args.source_node_id,
+                        args.target_node_id,
+                        args.name,
+                        self.k1,
+                        self.b
+                    );
+                    // TODO: Index edge name and relationship context
+                    // TODO: Update graph-aware search features
+                    // TODO: Update BM25 scores considering edge relationships
+                }
+                Mutation::AddFragment(args) => {
+                    // TODO: Implement actual fragment content indexing in full-text search index
+                    log::info!(
+                        "[FullText] Would index fragment content: id={}, body_len={}, k1={}, b={}",
+                        args.id,
+                        args.content.len(),
+                        self.k1,
+                        self.b
+                    );
+                    // TODO: Tokenize fragment body
+                    // TODO: Extract and stem terms
+                    // TODO: Update term frequencies and document frequencies
+                    // TODO: Calculate and store BM25 scores
+                }
+                Mutation::Invalidate(args) => {
+                    // TODO: Implement actual invalidation in full-text search index
+                    log::info!(
+                        "[FullText] Would remove from search index: id={}, reason='{}', k1={}, b={}",
+                        args.id,
+                        args.reason,
+                        self.k1,
+                        self.b
+                    );
+                    // TODO: Remove document from index
+                    // TODO: Update document frequencies
+                    // TODO: Recalculate BM25 scores for affected terms
+                    // TODO: Cleanup orphaned index entries
+                }
+            }
+        }
 
         Ok(())
     }
@@ -114,7 +108,7 @@ impl Processor for FullTextProcessor {
 
 /// Create a new full-text mutation consumer with default parameters
 pub fn create_fulltext_consumer(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
 ) -> Consumer<FullTextProcessor> {
     let processor = FullTextProcessor::new();
@@ -123,9 +117,9 @@ pub fn create_fulltext_consumer(
 
 /// Create a new full-text mutation consumer with default parameters that chains to another processor
 pub fn create_fulltext_consumer_with_next(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
-    next: mpsc::Sender<crate::Mutation>,
+    next: mpsc::Sender<Vec<crate::Mutation>>,
 ) -> Consumer<FullTextProcessor> {
     let processor = FullTextProcessor::new();
     Consumer::with_next(receiver, config, processor, next)
@@ -133,7 +127,7 @@ pub fn create_fulltext_consumer_with_next(
 
 /// Create a new full-text mutation consumer with custom BM25 parameters
 pub fn create_fulltext_consumer_with_params(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
     k1: f32,
     b: f32,
@@ -144,11 +138,11 @@ pub fn create_fulltext_consumer_with_params(
 
 /// Create a new full-text mutation consumer with custom BM25 parameters that chains to another processor
 pub fn create_fulltext_consumer_with_params_and_next(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
     k1: f32,
     b: f32,
-    next: mpsc::Sender<crate::Mutation>,
+    next: mpsc::Sender<Vec<crate::Mutation>>,
 ) -> Consumer<FullTextProcessor> {
     let processor = FullTextProcessor::with_params(k1, b);
     Consumer::with_next(receiver, config, processor, next)
@@ -156,7 +150,7 @@ pub fn create_fulltext_consumer_with_params_and_next(
 
 /// Spawn the full-text mutation consumer as a background task with default parameters
 pub fn spawn_fulltext_consumer(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
 ) -> JoinHandle<Result<()>> {
     let consumer = create_fulltext_consumer(receiver, config);
@@ -165,9 +159,9 @@ pub fn spawn_fulltext_consumer(
 
 /// Spawn the full-text mutation consumer as a background task with default parameters and chaining
 pub fn spawn_fulltext_consumer_with_next(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
-    next: mpsc::Sender<crate::Mutation>,
+    next: mpsc::Sender<Vec<crate::Mutation>>,
 ) -> JoinHandle<Result<()>> {
     let consumer = create_fulltext_consumer_with_next(receiver, config, next);
     crate::mutation::spawn_consumer(consumer)
@@ -175,7 +169,7 @@ pub fn spawn_fulltext_consumer_with_next(
 
 /// Spawn the full-text mutation consumer as a background task with custom BM25 parameters
 pub fn spawn_fulltext_consumer_with_params(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
     k1: f32,
     b: f32,
@@ -186,11 +180,11 @@ pub fn spawn_fulltext_consumer_with_params(
 
 /// Spawn the full-text mutation consumer as a background task with custom BM25 parameters and chaining
 pub fn spawn_fulltext_consumer_with_params_and_next(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
     k1: f32,
     b: f32,
-    next: mpsc::Sender<crate::Mutation>,
+    next: mpsc::Sender<Vec<crate::Mutation>>,
 ) -> JoinHandle<Result<()>> {
     let consumer = create_fulltext_consumer_with_params_and_next(receiver, config, k1, b, next);
     crate::mutation::spawn_consumer(consumer)

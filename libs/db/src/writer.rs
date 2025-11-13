@@ -18,22 +18,49 @@ impl Default for WriterConfig {
     }
 }
 
-/// Handle for sending mutations to the writer
+/// Handle for sending mutations to the writer with automatic batching.
+///
+/// The `Writer` sends mutations through an MPSC channel as `Vec<Mutation>` to enable
+/// efficient transaction batching in downstream processors.
+///
+/// # Batching Strategy
+///
+/// Individual mutations sent via `add_node()`, `add_edge()`, etc. are automatically
+/// wrapped in a `Vec` with a single element. This ensures all code paths use the same
+/// batching infrastructure, allowing processors to handle both single and batched
+/// mutations uniformly.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use motlie_db::{Writer, WriterConfig, AddNode, Id, TimestampMilli};
+///
+/// let (writer, receiver) = create_mutation_writer(WriterConfig::default());
+///
+/// // Send individual mutations (automatically batched)
+/// writer.add_node(AddNode {
+///     id: Id::new(),
+///     name: "Alice".to_string(),
+///     ts_millis: TimestampMilli::now(),
+/// }).await?;
+/// ```
 #[derive(Debug, Clone)]
 pub struct Writer {
-    sender: mpsc::Sender<Mutation>,
+    sender: mpsc::Sender<Vec<Mutation>>,
 }
 
 impl Writer {
     /// Create a new MutationWriter with the given sender
-    pub fn new(sender: mpsc::Sender<Mutation>) -> Self {
+    pub fn new(sender: mpsc::Sender<Vec<Mutation>>) -> Self {
         Writer { sender }
     }
 
-    /// Send a mutation to be processed
+    /// Send a mutation to be processed.
+    ///
+    /// The mutation is automatically wrapped in a `Vec` for consistent batching.
     pub async fn send(&self, mutation: Mutation) -> Result<()> {
         self.sender
-            .send(mutation)
+            .send(vec![mutation])
             .await
             .context("Failed to send mutation to writer queue")
     }
@@ -65,7 +92,7 @@ impl Writer {
 }
 
 /// Create a new mutation writer and receiver pair
-pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Mutation>) {
+pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutation>>) {
     let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
     let writer = Writer::new(sender);
     (writer, receiver)

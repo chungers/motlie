@@ -17,7 +17,7 @@ use crate::TimestampMilli;
 use crate::{
     mutation::{Consumer, Processor},
     schema::ALL_COLUMN_FAMILIES,
-    AddEdge, AddFragment, AddNode, Id, InvalidateArgs, WriterConfig,
+    Id, Mutation, WriterConfig,
 };
 
 /// Trait for column family record types that can create and serialize key-value pairs.
@@ -340,14 +340,22 @@ impl Graph {
 
 #[async_trait::async_trait]
 impl Processor for Graph {
-    /// Process an AddNode mutation
-    async fn process_add_node(&self, args: &AddNode) -> Result<()> {
-        log::info!("[Graph] About to insert node: {:?}", args);
-        let txn_db = self.storage.transaction_db()?;
+    /// Process a batch of mutations
+    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
 
-        // Create a transaction
+        log::info!("[Graph] About to insert {} mutations", mutations.len());
+
+        // Convert all mutations to storage operations
+        let operations = schema::Plan::create_batch(mutations)?;
+
+        // Execute all operations in a single transaction
+        let txn_db = self.storage.transaction_db()?;
         let txn = txn_db.transaction();
-        for op in schema::Plan::create_node(args)? {
+
+        for op in operations {
             match op {
                 StorageOperation::PutCf(PutCf(cf_name, (key, value))) => {
                     let cf = txn_db
@@ -357,71 +365,11 @@ impl Processor for Graph {
                 }
             }
         }
-        // Commit the transaction
+
+        // Single commit for all mutations
         txn.commit()?;
 
-        Ok(())
-    }
-
-    /// Process an AddEdge mutation
-    async fn process_add_edge(&self, args: &AddEdge) -> Result<()> {
-        log::info!("[Graph] About to insert edge: {:?}", args);
-        let txn_db = self.storage.transaction_db()?;
-
-        // Create a transaction
-        let txn = txn_db.transaction();
-        for op in schema::Plan::create_edge(args)? {
-            match op {
-                StorageOperation::PutCf(PutCf(cf_name, (key, value))) => {
-                    let cf = txn_db
-                        .cf_handle(cf_name)
-                        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
-                    txn.put_cf(cf, key, value)?;
-                }
-            }
-        }
-        // Commit the transaction
-        txn.commit()?;
-
-        Ok(())
-    }
-
-    /// Process an AddFragment mutation
-    async fn process_add_fragment(&self, args: &AddFragment) -> Result<()> {
-        log::info!("[Graph] About to insert fragment: {:?}", args);
-        let txn_db = self.storage.transaction_db()?;
-        // Create a transaction
-        let txn = txn_db.transaction();
-        for op in schema::Plan::create_fragment(args)? {
-            match op {
-                StorageOperation::PutCf(PutCf(cf_name, (key, value))) => {
-                    let cf = txn_db
-                        .cf_handle(cf_name)
-                        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
-                    txn.put_cf(cf, key, value)?;
-                }
-            }
-        }
-        // Commit the transaction
-        txn.commit()?;
-
-        Ok(())
-    }
-
-    /// Process an Invalidate mutation
-    async fn process_invalidate(&self, args: &InvalidateArgs) -> Result<()> {
-        let txn_db = self.storage.transaction_db()?;
-
-        // Create a transaction
-        let txn = txn_db.transaction();
-
-        // TODO: Implement actual invalidation
-        // Example: txn.delete_cf(cf_handle, key)?;
-        log::info!("[Graph] Would invalidate: {:?}", args);
-
-        // Commit the transaction
-        txn.commit()?;
-
+        log::info!("[Graph] Successfully committed {} mutations", mutations.len());
         Ok(())
     }
 }
@@ -1001,7 +949,7 @@ impl crate::query::Processor for Graph {
 
 /// Create a new graph mutation consumer
 pub fn create_graph_consumer(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
     db_path: &Path,
 ) -> Consumer<Graph> {
@@ -1014,10 +962,10 @@ pub fn create_graph_consumer(
 
 /// Create a new graph mutation consumer that chains to another processor
 pub fn create_graph_consumer_with_next(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
     db_path: &Path,
-    next: mpsc::Sender<crate::Mutation>,
+    next: mpsc::Sender<Vec<crate::Mutation>>,
 ) -> Consumer<Graph> {
     let mut storage = Storage::readwrite(db_path);
     storage.ready().expect("Failed to ready storage");
@@ -1028,7 +976,7 @@ pub fn create_graph_consumer_with_next(
 
 /// Spawn the graph mutation consumer as a background task
 pub fn spawn_graph_consumer(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
     db_path: &Path,
 ) -> JoinHandle<Result<()>> {
@@ -1038,10 +986,10 @@ pub fn spawn_graph_consumer(
 
 /// Spawn the graph mutation consumer as a background task with chaining to next processor
 pub fn spawn_graph_consumer_with_next(
-    receiver: mpsc::Receiver<crate::Mutation>,
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
     config: WriterConfig,
     db_path: &Path,
-    next: mpsc::Sender<crate::Mutation>,
+    next: mpsc::Sender<Vec<crate::Mutation>>,
 ) -> JoinHandle<Result<()>> {
     let consumer = create_graph_consumer_with_next(receiver, config, db_path, next);
     crate::mutation::spawn_consumer(consumer)
