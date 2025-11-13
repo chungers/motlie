@@ -46,21 +46,30 @@ pub(crate) trait ColumnFamilyRecord {
     /// Deserialize the key from bytes (direct format, no MessagePack).
     fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error>;
 
-    /// Serialize the value to bytes using MessagePack (unchanged).
+    /// Serialize the value to bytes using MessagePack, then compress with LZ4.
     fn value_to_bytes(value: &Self::Value) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-        rmp_serde::to_vec(value)
+        let msgpack_bytes = rmp_serde::to_vec(value)?;
+        let compressed = lz4::block::compress(&msgpack_bytes, None, true)
+            .map_err(|e| {
+                rmp_serde::encode::Error::Syntax(format!("LZ4 compression failed: {}", e))
+            })?;
+        Ok(compressed)
     }
 
-    /// Deserialize the value from bytes using MessagePack (unchanged).
+    /// Decompress with LZ4, then deserialize the value from bytes using MessagePack.
     fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(bytes)
+        let decompressed = lz4::block::decompress(bytes, None)
+            .map_err(|e| {
+                rmp_serde::decode::Error::Syntax(format!("LZ4 decompression failed: {}", e))
+            })?;
+        rmp_serde::from_slice(&decompressed)
     }
 
-    /// Create and serialize to bytes using direct encoding for keys, MessagePack for values.
+    /// Create and serialize to bytes using direct encoding for keys, compressed MessagePack for values.
     fn create_bytes(args: &Self::CreateOp) -> Result<(Vec<u8>, Vec<u8>), rmp_serde::encode::Error> {
         let (key, value) = Self::record_from(args);
         let key_bytes = Self::key_to_bytes(&key);
-        let value_bytes = rmp_serde::to_vec(&value)?;
+        let value_bytes = Self::value_to_bytes(&value)?;
         Ok((key_bytes, value_bytes))
     }
 
@@ -1077,6 +1086,32 @@ pub fn spawn_query_consumer(
 ) -> JoinHandle<Result<()>> {
     let consumer = create_query_consumer(receiver, config, db_path);
     crate::query::spawn_consumer(consumer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{Nodes, NodeCfValue, NodeSummary};
+
+    #[test]
+    fn test_lz4_compression_round_trip() {
+        // Create a simple test value
+        let test_value = NodeCfValue("test_node".to_string(), NodeSummary::new("test content"));
+
+        // Serialize and compress
+        let compressed_bytes = Nodes::value_to_bytes(&test_value)
+            .expect("Failed to compress");
+
+        println!("Compressed size: {} bytes", compressed_bytes.len());
+        println!("First 20 bytes: {:?}", &compressed_bytes[..20.min(compressed_bytes.len())]);
+
+        // Decompress and deserialize
+        let decompressed_value: NodeCfValue = Nodes::value_from_bytes(&compressed_bytes)
+            .expect("Failed to decompress");
+
+        // Verify
+        assert_eq!(test_value.0, decompressed_value.0, "Node name should match");
+    }
 }
 
 #[cfg(test)]

@@ -868,8 +868,12 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
     #[derive(serde::Deserialize)]
     struct DataUrl(String);
 
+    // Decompress LZ4 first
+    let decompressed = lz4::block::decompress(bytes, None)
+        .context("Failed to decompress node value with LZ4")?;
+
     let value: NodeCfValue =
-        rmp_serde::from_slice(bytes).context("Failed to deserialize node value")?;
+        rmp_serde::from_slice(&decompressed).context("Failed to deserialize node value")?;
 
     let node_name = value.0;
     // Decode the data URL to get the actual content
@@ -914,8 +918,12 @@ fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct DataUrl(String);
 
+    // Decompress LZ4 first
+    let decompressed = lz4::block::decompress(bytes, None)
+        .context("Failed to decompress edge value with LZ4")?;
+
     let value: EdgeCfValue =
-        rmp_serde::from_slice(bytes).context("Failed to deserialize edge value")?;
+        rmp_serde::from_slice(&decompressed).context("Failed to deserialize edge value")?;
 
     // Decode the data URL to get the actual content
     let data_url_str = &value.0 .0 .0;
@@ -938,8 +946,12 @@ fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct DataUrl(String);
 
+    // Decompress LZ4 first
+    let decompressed = lz4::block::decompress(bytes, None)
+        .context("Failed to decompress fragment value with LZ4")?;
+
     let value: FragmentCfValue =
-        rmp_serde::from_slice(bytes).context("Failed to deserialize fragment value")?;
+        rmp_serde::from_slice(&decompressed).context("Failed to deserialize fragment value")?;
 
     // Decode the data URL to get the actual content
     let data_url_str = &value.0 .0 .0;
