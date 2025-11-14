@@ -799,11 +799,12 @@ impl crate::query::Processor for Graph {
 
         let mut nodes: Vec<(schema::NodeName, Id)> = Vec::new();
 
-        // Construct seek key based on whether we have a start ID for pagination
-        let seek_key = if let Some(start_id) = query.start {
-            // Start from (name, start_id) for pagination
-            let mut bytes = Vec::with_capacity(name.len() + 16);
-            bytes.extend_from_slice(name.as_bytes());
+        // Construct seek key based on whether we have a start position for pagination
+        let seek_key = if let Some((start_name, start_id)) = &query.start {
+            // Start from (start_name, start_id) for pagination
+            // Use the FULL NAME from the last result, not just the query prefix
+            let mut bytes = Vec::with_capacity(start_name.len() + 16);
+            bytes.extend_from_slice(start_name.as_bytes());
             bytes.extend_from_slice(&start_id.into_bytes());
             bytes
         } else {
@@ -845,8 +846,8 @@ impl crate::query::Processor for Graph {
                 }
 
                 // Skip the start key itself (we want items AFTER it)
-                if let Some(start_id) = query.start {
-                    if node_id == start_id {
+                if let Some((start_name, start_id)) = &query.start {
+                    if node_name == *start_name && node_id == *start_id {
                         continue;
                     }
                 }
@@ -889,8 +890,8 @@ impl crate::query::Processor for Graph {
                 }
 
                 // Skip the start key itself (we want items AFTER it)
-                if let Some(start_id) = query.start {
-                    if node_id == start_id {
+                if let Some((start_name, start_id)) = &query.start {
+                    if node_name == *start_name && node_id == *start_id {
                         continue;
                     }
                 }
@@ -913,11 +914,12 @@ impl crate::query::Processor for Graph {
 
         let mut edges: Vec<(crate::schema::EdgeName, Id)> = Vec::new();
 
-        // Construct seek key based on whether we have a start ID for pagination
-        let seek_key = if let Some(start_id) = query.start {
-            // Start from (name, start_id) for pagination
-            let mut bytes = Vec::with_capacity(name.len() + 16);
-            bytes.extend_from_slice(name.as_bytes());
+        // Construct seek key based on whether we have a start position for pagination
+        let seek_key = if let Some((start_name, start_id)) = &query.start {
+            // Start from (start_name, start_id) for pagination
+            // Use the FULL NAME from the last result, not just the query prefix
+            let mut bytes = Vec::with_capacity(start_name.0.len() + 16);
+            bytes.extend_from_slice(start_name.0.as_bytes());
             bytes.extend_from_slice(&start_id.into_bytes());
             bytes
         } else {
@@ -959,8 +961,8 @@ impl crate::query::Processor for Graph {
                 }
 
                 // Skip the start key itself (we want items AFTER it)
-                if let Some(start_id) = query.start {
-                    if edge_id == start_id {
+                if let Some((start_name, start_id)) = &query.start {
+                    if edge_name.0 == start_name.0 && edge_id == *start_id {
                         continue;
                     }
                 }
@@ -1003,8 +1005,8 @@ impl crate::query::Processor for Graph {
                 }
 
                 // Skip the start key itself (we want items AFTER it)
-                if let Some(start_id) = query.start {
-                    if edge_id == start_id {
+                if let Some((start_name, start_id)) = &query.start {
+                    if edge_name.0 == start_name.0 && edge_id == *start_id {
                         continue;
                     }
                 }

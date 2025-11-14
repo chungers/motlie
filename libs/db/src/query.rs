@@ -495,8 +495,9 @@ pub struct NodesByNameQuery {
     /// The node name or prefix to search for
     pub name: NodeName,
 
-    /// Optional start ID for pagination (exclusive)
-    pub start: Option<Id>,
+    /// Optional start position for pagination (exclusive): (last_name, last_id)
+    /// For prefix queries, this should be the full name and ID of the last result from the previous page
+    pub start: Option<(NodeName, Id)>,
 
     /// Timestamp of when the query was created
     pub ts_millis: TimestampMilli,
@@ -514,7 +515,7 @@ pub struct NodesByNameQuery {
 impl NodesByNameQuery {
     pub fn new(
         name: NodeName,
-        start: Option<Id>,
+        start: Option<(NodeName, Id)>,
         limit: Option<usize>,
         timeout: Duration,
         result_tx: oneshot::Sender<Result<Vec<(NodeName, Id)>>>,
@@ -558,8 +559,9 @@ pub struct EdgesByNameQuery {
     /// The edge name or prefix to search for
     pub name: String,
 
-    /// Optional start ID for pagination (exclusive)
-    pub start: Option<Id>,
+    /// Optional start position for pagination (exclusive): (last_name, last_id)
+    /// For prefix queries, this should be the full name and ID of the last result from the previous page
+    pub start: Option<(EdgeName, Id)>,
 
     /// The maximum number of results to return
     pub limit: Option<usize>,
@@ -577,7 +579,7 @@ pub struct EdgesByNameQuery {
 impl EdgesByNameQuery {
     pub fn new(
         name: String,
-        start: Option<Id>,
+        start: Option<(EdgeName, Id)>,
         limit: Option<usize>,
         timeout: Duration,
         result_tx: oneshot::Sender<Result<Vec<(EdgeName, Id)>>>,

@@ -179,7 +179,7 @@ impl Reader {
     pub async fn nodes_by_name(
         &self,
         name: NodeName,
-        start: Option<Id>,
+        start: Option<(NodeName, Id)>,
         limit: Option<usize>,
         timeout: Duration,
     ) -> Result<Vec<(NodeName, Id)>> {
@@ -202,7 +202,7 @@ impl Reader {
     pub async fn edges_by_name(
         &self,
         name: String,
-        start: Option<Id>,
+        start: Option<(EdgeName, Id)>,
         limit: Option<usize>,
         timeout: Duration,
     ) -> Result<Vec<(EdgeName, Id)>> {

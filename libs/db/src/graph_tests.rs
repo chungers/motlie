@@ -3167,15 +3167,15 @@ mod tests {
             assert_eq!(name, "page_node_shared", "Should have correct name");
         }
 
-        // Test 2: Second page using last ID from first page
-        let last_id_page1 = page1.last().unwrap().1;
-        println!("Page 1 last ID: {:?}", last_id_page1);
+        // Test 2: Second page using last result from first page
+        let (last_name_page1, last_id_page1) = page1.last().unwrap().clone();
+        println!("Page 1 last: {} - {:?}", last_name_page1, last_id_page1);
         println!("Page 1 IDs: {:?}", page1.iter().map(|(n, id)| (n.clone(), *id)).collect::<Vec<_>>());
 
         let page2 = reader
             .nodes_by_name(
                 "page_node_shared".to_string(),
-                Some(last_id_page1),
+                Some((last_name_page1, last_id_page1)),
                 Some(5),
                 Duration::from_secs(5),
             )
@@ -3199,11 +3199,11 @@ mod tests {
         );
 
         // Test 4: Third page
-        let last_id_page2 = page2.last().unwrap().1;
+        let (last_name_page2, last_id_page2) = page2.last().unwrap().clone();
         let page3 = reader
             .nodes_by_name(
                 "page_node_shared".to_string(),
-                Some(last_id_page2),
+                Some((last_name_page2, last_id_page2)),
                 Some(5),
                 Duration::from_secs(5),
             )
@@ -3212,11 +3212,11 @@ mod tests {
         assert_eq!(page3.len(), 5, "Third page should return 5 nodes");
 
         // Test 5: Fourth page (should have remaining 5 nodes)
-        let last_id_page3 = page3.last().unwrap().1;
+        let (last_name_page3, last_id_page3) = page3.last().unwrap().clone();
         let page4 = reader
             .nodes_by_name(
                 "page_node_shared".to_string(),
-                Some(last_id_page3),
+                Some((last_name_page3, last_id_page3)),
                 Some(5),
                 Duration::from_secs(5),
             )
@@ -3225,11 +3225,11 @@ mod tests {
         assert_eq!(page4.len(), 5, "Fourth page should return last 5 nodes");
 
         // Test 6: Eventually pagination reaches the end
-        let last_id_page4 = page4.last().unwrap().1;
+        let (last_name_page4, last_id_page4) = page4.last().unwrap().clone();
         let page5 = reader
             .nodes_by_name(
                 "page_node_shared".to_string(),
-                Some(last_id_page4),
+                Some((last_name_page4, last_id_page4)),
                 Some(5),
                 Duration::from_secs(5),
             )
@@ -3291,7 +3291,7 @@ mod tests {
         let results_after_fake = reader
             .nodes_by_name(
                 "page_node_shared".to_string(),
-                Some(fake_id),
+                Some(("page_node_shared".to_string(), fake_id)),
                 Some(5),
                 Duration::from_secs(5),
             )
@@ -3400,12 +3400,12 @@ mod tests {
             );
         }
 
-        // Test 2: Second page using last ID from first page
-        let last_id_page1 = page1.last().unwrap().1;
+        // Test 2: Second page using last result from first page
+        let (last_name_page1, last_id_page1) = page1.last().unwrap().clone();
         let page2 = reader
             .edges_by_name(
                 "page_edge_shared".to_string(),
-                Some(last_id_page1),
+                Some((last_name_page1, last_id_page1)),
                 Some(5),
                 Duration::from_secs(5),
             )
@@ -3422,11 +3422,11 @@ mod tests {
         );
 
         // Test 4: Third page
-        let last_id_page2 = page2.last().unwrap().1;
+        let (last_name_page2, last_id_page2) = page2.last().unwrap().clone();
         let page3 = reader
             .edges_by_name(
                 "page_edge_".to_string(),
-                Some(last_id_page2),
+                Some((last_name_page2, last_id_page2)),
                 Some(5),
                 Duration::from_secs(5),
             )
@@ -3435,11 +3435,11 @@ mod tests {
         assert_eq!(page3.len(), 5, "Third page should return 5 edges");
 
         // Test 5: Fourth page (should have remaining 5 edges)
-        let last_id_page3 = page3.last().unwrap().1;
+        let (last_name_page3, last_id_page3) = page3.last().unwrap().clone();
         let page4 = reader
             .edges_by_name(
                 "page_edge_".to_string(),
-                Some(last_id_page3),
+                Some((last_name_page3, last_id_page3)),
                 Some(5),
                 Duration::from_secs(5),
             )
@@ -3448,11 +3448,11 @@ mod tests {
         assert_eq!(page4.len(), 5, "Fourth page should return last 5 edges");
 
         // Test 6: Eventually pagination reaches the end
-        let last_id_page4 = page4.last().unwrap().1;
+        let (last_name_page4, last_id_page4) = page4.last().unwrap().clone();
         let page5 = reader
             .edges_by_name(
                 "page_edge_shared".to_string(),
-                Some(last_id_page4),
+                Some((last_name_page4, last_id_page4)),
                 Some(5),
                 Duration::from_secs(5),
             )
