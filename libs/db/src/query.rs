@@ -495,8 +495,14 @@ pub struct NodesByNameQuery {
     /// The node name or prefix to search for
     pub name: NodeName,
 
+    /// Optional start ID for pagination (exclusive)
+    pub start: Option<Id>,
+
     /// Timestamp of when the query was created
     pub ts_millis: TimestampMilli,
+
+    /// Maximum number of results to return
+    pub limit: Option<usize>,
 
     /// Timeout for this query
     pub timeout: Duration,
@@ -508,13 +514,17 @@ pub struct NodesByNameQuery {
 impl NodesByNameQuery {
     pub fn new(
         name: NodeName,
+        start: Option<Id>,
+        limit: Option<usize>,
         timeout: Duration,
         result_tx: oneshot::Sender<Result<Vec<(NodeName, Id)>>>,
     ) -> Self {
         Self {
             name,
+            start,
             ts_millis: TimestampMilli::now(),
             timeout,
+            limit,
             result_tx,
         }
     }
@@ -548,6 +558,12 @@ pub struct EdgesByNameQuery {
     /// The edge name or prefix to search for
     pub name: String,
 
+    /// Optional start ID for pagination (exclusive)
+    pub start: Option<Id>,
+
+    /// The maximum number of results to return
+    pub limit: Option<usize>,
+
     /// Timestamp of when the query was created
     pub ts_millis: TimestampMilli,
 
@@ -561,11 +577,15 @@ pub struct EdgesByNameQuery {
 impl EdgesByNameQuery {
     pub fn new(
         name: String,
+        start: Option<Id>,
+        limit: Option<usize>,
         timeout: Duration,
         result_tx: oneshot::Sender<Result<Vec<(EdgeName, Id)>>>,
     ) -> Self {
         Self {
             name,
+            start,
+            limit,
             ts_millis: TimestampMilli::now(),
             timeout,
             result_tx,

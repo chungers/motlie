@@ -799,8 +799,17 @@ impl crate::query::Processor for Graph {
 
         let mut nodes: Vec<(schema::NodeName, Id)> = Vec::new();
 
-        // Create prefix: the name as UTF-8 bytes for prefix seeking
-        let prefix = name.as_bytes();
+        // Construct seek key based on whether we have a start ID for pagination
+        let seek_key = if let Some(start_id) = query.start {
+            // Start from (name, start_id) for pagination
+            let mut bytes = Vec::with_capacity(name.len() + 16);
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(&start_id.into_bytes());
+            bytes
+        } else {
+            // Start from beginning of prefix
+            name.as_bytes().to_vec()
+        };
 
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
@@ -808,18 +817,26 @@ impl crate::query::Processor for Graph {
                 anyhow::anyhow!("Column family '{}' not found", schema::NodeNames::CF_NAME)
             })?;
 
-            // Seek directly to the first key with this prefix
+            // Seek to the appropriate position based on pagination
             let iter = db.iterator_cf(
                 cf,
-                rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+                rocksdb::IteratorMode::From(&seek_key, rocksdb::Direction::Forward),
             );
 
             for item in iter {
+                // Check if we've reached the limit before processing more items
+                if let Some(limit) = query.limit {
+                    if nodes.len() >= limit {
+                        break;
+                    }
+                }
+
                 let (key_bytes, _value_bytes) = item?;
                 let key: schema::NodeNamesCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let node_name = key.0;
+                let node_id = key.1;
 
                 // Check if this key still matches the prefix
                 if !node_name.starts_with(name) {
@@ -827,7 +844,13 @@ impl crate::query::Processor for Graph {
                     break;
                 }
 
-                let node_id = key.1;
+                // Skip the start key itself (we want items AFTER it)
+                if let Some(start_id) = query.start {
+                    if node_id == start_id {
+                        continue;
+                    }
+                }
+
                 nodes.push((node_name, node_id));
             }
         } else {
@@ -838,18 +861,26 @@ impl crate::query::Processor for Graph {
                     anyhow::anyhow!("Column family '{}' not found", schema::NodeNames::CF_NAME)
                 })?;
 
-            // Seek directly to the first key with this prefix
+            // Seek to the appropriate position based on pagination
             let iter = txn_db.iterator_cf(
                 cf,
-                rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+                rocksdb::IteratorMode::From(&seek_key, rocksdb::Direction::Forward),
             );
 
             for item in iter {
+                // Check if we've reached the limit before processing more items
+                if let Some(limit) = query.limit {
+                    if nodes.len() >= limit {
+                        break;
+                    }
+                }
+
                 let (key_bytes, _value_bytes) = item?;
                 let key: schema::NodeNamesCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let node_name = key.0;
+                let node_id = key.1;
 
                 // Check if this key still matches the prefix
                 if !node_name.starts_with(name) {
@@ -857,7 +888,13 @@ impl crate::query::Processor for Graph {
                     break;
                 }
 
-                let node_id = key.1;
+                // Skip the start key itself (we want items AFTER it)
+                if let Some(start_id) = query.start {
+                    if node_id == start_id {
+                        continue;
+                    }
+                }
+
                 nodes.push((node_name, node_id));
             }
         }
@@ -872,12 +909,21 @@ impl crate::query::Processor for Graph {
         let name = &query.name;
 
         // Scan the edge_names column family for all edges with this name prefix
-        // Keys are (name, dst_id, src_id, edge_id) and RocksDB stores them in sorted order
+        // Keys are (name, edge_id, dst_id, src_id) and RocksDB stores them in sorted order
 
         let mut edges: Vec<(crate::schema::EdgeName, Id)> = Vec::new();
 
-        // Create prefix: the name as UTF-8 bytes for prefix seeking
-        let prefix = name.as_bytes();
+        // Construct seek key based on whether we have a start ID for pagination
+        let seek_key = if let Some(start_id) = query.start {
+            // Start from (name, start_id) for pagination
+            let mut bytes = Vec::with_capacity(name.len() + 16);
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.extend_from_slice(&start_id.into_bytes());
+            bytes
+        } else {
+            // Start from beginning of prefix
+            name.as_bytes().to_vec()
+        };
 
         // Handle both readonly and readwrite modes
         if let Ok(db) = self.storage.db() {
@@ -885,18 +931,26 @@ impl crate::query::Processor for Graph {
                 anyhow::anyhow!("Column family '{}' not found", schema::EdgeNames::CF_NAME)
             })?;
 
-            // Seek directly to the first key with this prefix
+            // Seek to the appropriate position based on pagination
             let iter = db.iterator_cf(
                 cf,
-                rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+                rocksdb::IteratorMode::From(&seek_key, rocksdb::Direction::Forward),
             );
 
             for item in iter {
+                // Check if we've reached the limit before processing more items
+                if let Some(limit) = query.limit {
+                    if edges.len() >= limit {
+                        break;
+                    }
+                }
+
                 let (key_bytes, _value_bytes) = item?;
                 let key: schema::EdgeNamesCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let edge_name = &key.0;
+                let edge_id = key.1;
 
                 // Check if this key still matches the prefix
                 if !edge_name.0.starts_with(name) {
@@ -904,9 +958,13 @@ impl crate::query::Processor for Graph {
                     break;
                 }
 
-                // EdgeNamesCfKey is (EdgeName, EdgeDestinationId, EdgeSourceId, Id)
-                // The edge_id is the 4th element
-                let edge_id = key.3;
+                // Skip the start key itself (we want items AFTER it)
+                if let Some(start_id) = query.start {
+                    if edge_id == start_id {
+                        continue;
+                    }
+                }
+
                 edges.push((edge_name.clone(), edge_id));
             }
         } else {
@@ -917,18 +975,26 @@ impl crate::query::Processor for Graph {
                     anyhow::anyhow!("Column family '{}' not found", schema::EdgeNames::CF_NAME)
                 })?;
 
-            // Seek directly to the first key with this prefix
+            // Seek to the appropriate position based on pagination
             let iter = txn_db.iterator_cf(
                 cf,
-                rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+                rocksdb::IteratorMode::From(&seek_key, rocksdb::Direction::Forward),
             );
 
             for item in iter {
+                // Check if we've reached the limit before processing more items
+                if let Some(limit) = query.limit {
+                    if edges.len() >= limit {
+                        break;
+                    }
+                }
+
                 let (key_bytes, _value_bytes) = item?;
                 let key: schema::EdgeNamesCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let edge_name = &key.0;
+                let edge_id = key.1;
 
                 // Check if this key still matches the prefix
                 if !edge_name.0.starts_with(name) {
@@ -936,9 +1002,13 @@ impl crate::query::Processor for Graph {
                     break;
                 }
 
-                // EdgeNamesCfKey is (EdgeName, EdgeDestinationId, EdgeSourceId, Id)
-                // The edge_id is the 4th element
-                let edge_id = key.3;
+                // Skip the start key itself (we want items AFTER it)
+                if let Some(start_id) = query.start {
+                    if edge_id == start_id {
+                        continue;
+                    }
+                }
+
                 edges.push((edge_name.clone(), edge_id));
             }
         }

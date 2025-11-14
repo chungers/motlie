@@ -179,11 +179,13 @@ impl Reader {
     pub async fn nodes_by_name(
         &self,
         name: NodeName,
+        start: Option<Id>,
+        limit: Option<usize>,
         timeout: Duration,
     ) -> Result<Vec<(NodeName, Id)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = NodesByNameQuery::new(name, timeout, result_tx);
+        let query = NodesByNameQuery::new(name, start, limit, timeout, result_tx);
 
         self.sender
             .send_async(Query::NodesByName(query))
@@ -196,15 +198,17 @@ impl Reader {
 
     /// Query edges by name prefix
     /// Returns Vec<(edge_name, edge_id)>
-    /// Results are sorted by name, then destination_id, then source_id per EdgeNames CF key structure
+    /// Results are sorted by name, then edge_id per EdgeNames CF key structure
     pub async fn edges_by_name(
         &self,
         name: String,
+        start: Option<Id>,
+        limit: Option<usize>,
         timeout: Duration,
     ) -> Result<Vec<(EdgeName, Id)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgesByNameQuery::new(name, timeout, result_tx);
+        let query = EdgesByNameQuery::new(name, start, limit, timeout, result_tx);
 
         self.sender
             .send_async(Query::EdgesByName(query))

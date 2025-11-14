@@ -503,9 +503,9 @@ pub(crate) struct EdgeNames;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EdgeNamesCfKey(
     pub(crate) EdgeName,
+    pub(crate) Id, // edge id
     pub(crate) EdgeDestinationId,
     pub(crate) EdgeSourceId,
-    pub(crate) Id, // edge id
 );
 
 #[derive(Serialize, Deserialize)]
@@ -520,23 +520,23 @@ impl ColumnFamilyRecord for EdgeNames {
     fn record_from(args: &AddEdge) -> (EdgeNamesCfKey, EdgeNamesCfValue) {
         let key = EdgeNamesCfKey(
             EdgeName(args.name.clone()),
+            args.id,
             EdgeDestinationId(args.target_node_id),
             EdgeSourceId(args.source_node_id),
-            args.id,
         );
         let value = EdgeNamesCfValue();
         (key, value)
     }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // EdgeNamesCfKey(EdgeName, EdgeDestinationId, EdgeSourceId, Id)
-        // Layout: [name UTF-8 bytes] + [dst_id (16)] + [src_id (16)] + [edge_id (16)]
+        // EdgeNamesCfKey(EdgeName, Id, EdgeDestinationId, EdgeSourceId)
+        // Layout: [name UTF-8 bytes] + [edge_id (16)] + [dst_id (16)] + [src_id (16)]
         let name_bytes = key.0 .0.as_bytes();
         let mut bytes = Vec::with_capacity(name_bytes.len() + 48);
         bytes.extend_from_slice(name_bytes);
-        bytes.extend_from_slice(&key.1 .0.into_bytes());
+        bytes.extend_from_slice(&key.1.into_bytes());
         bytes.extend_from_slice(&key.2 .0.into_bytes());
-        bytes.extend_from_slice(&key.3.into_bytes());
+        bytes.extend_from_slice(&key.3 .0.into_bytes());
         bytes
     }
 
@@ -548,26 +548,26 @@ impl ColumnFamilyRecord for EdgeNames {
             );
         }
 
-        // The name is everything before the last 48 bytes (which are dst_id + src_id + edge_id)
+        // The name is everything before the last 48 bytes (which are edge_id + dst_id + src_id)
         let name_end = bytes.len() - 48;
         let name_bytes = &bytes[0..name_end];
         let name = String::from_utf8(name_bytes.to_vec())
             .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
 
+        let mut edge_id_bytes = [0u8; 16];
+        edge_id_bytes.copy_from_slice(&bytes[name_end..name_end + 16]);
+
         let mut dst_id_bytes = [0u8; 16];
-        dst_id_bytes.copy_from_slice(&bytes[name_end..name_end + 16]);
+        dst_id_bytes.copy_from_slice(&bytes[name_end + 16..name_end + 32]);
 
         let mut src_id_bytes = [0u8; 16];
-        src_id_bytes.copy_from_slice(&bytes[name_end + 16..name_end + 32]);
-
-        let mut edge_id_bytes = [0u8; 16];
-        edge_id_bytes.copy_from_slice(&bytes[name_end + 32..name_end + 48]);
+        src_id_bytes.copy_from_slice(&bytes[name_end + 32..name_end + 48]);
 
         Ok(EdgeNamesCfKey(
             EdgeName(name),
+            Id::from_bytes(edge_id_bytes),
             EdgeDestinationId(Id::from_bytes(dst_id_bytes)),
             EdgeSourceId(Id::from_bytes(src_id_bytes)),
-            Id::from_bytes(edge_id_bytes),
         ))
     }
 
