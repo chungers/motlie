@@ -377,6 +377,10 @@ impl Processor for Graph {
 /// Implement query processor for Graph
 #[async_trait::async_trait]
 impl crate::query::Processor for Graph {
+    fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
     async fn get_node_by_id(
         &self,
         query: &crate::query::NodeByIdQuery,

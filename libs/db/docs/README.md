@@ -21,6 +21,32 @@ Complete reference for the Reader API with usage examples and query patterns.
 
 The following documents capture design discussions, analyses, and decisions made during development:
 
+#### [query-processor-simplification.md](query-processor-simplification.md) 🌟
+**IMPLEMENTED**: Simplification of query processor architecture using trait-based execution.
+
+**Problem**:
+- Current: `query::Processor` trait has 8 methods (one per query type)
+- Graph implementation: ~300 lines of fetch logic
+- Inconsistent with mutation pattern (which has 1 trait method)
+- High implementation burden for new storage backends
+
+**Proposed Solution**:
+- New `QueryExecutor` trait - each query type implements its own execution
+- Simplified `Processor` trait - single `storage()` method
+- Graph implementation: ~3 lines (90% reduction)
+- Aligns with mutation pattern philosophy
+
+**Benefits**:
+- ✅ 90% reduction in Processor trait complexity
+- ✅ Better code organization (logic with types)
+- ✅ Non-breaking query additions
+- ✅ Easier testing (mock storage, not entire trait)
+- ✅ Consistent with mutation design
+
+**Status**: ✅ Implemented - All 167 tests passing
+
+---
+
 #### [reader-api-gap-analysis.md](reader-api-gap-analysis.md)
 Analysis of whether the Reader API can replace direct RocksDB access for database verification.
 
@@ -231,6 +257,7 @@ Comprehensive benchmark strategy to measure performance improvements.
 
 ### 2. Design Evolution
 Documents tracking the evolution of API design:
+- `query-processor-simplification.md` ⭐ - **IMPLEMENTED**: Trait-based query execution
 - `reader-api-gap-analysis.md` - Initial gap identification
 - `reader-api-completeness-analysis.md` - Comprehensive gap analysis
 - `edge-by-id-explained.md` - Problem statement
@@ -283,6 +310,23 @@ Shows the iterative refinement process and decision rationale.
 - ⚠️ **Critical**: Required reading before modifications
 
 ## Key Insights
+
+### Processor Architecture Principles
+
+1. **Logic with Types**: Business logic should live with data types, not in central implementation
+   - **Mutations**: `schema::Plan::create_batch()` converts mutations to storage ops
+   - **Queries**: `QueryExecutor::execute()` implements query-specific fetch logic
+   - **Benefits**: Easier to extend, test, and maintain
+
+2. **Minimal Trait Surface**: Keep trait methods minimal to reduce implementation burden
+   - **Mutations**: 1 method (`process_mutations`)
+   - **Queries**: 1 method (`storage()`) + QueryExecutor trait per query type
+   - **Result**: 90% reduction in Processor trait complexity
+
+3. **Separation of Concerns**: Storage access vs query execution
+   - **Processor**: Provides storage access (infrastructure)
+   - **Query types**: Implement execution logic (business logic)
+   - **Clear boundaries**: Easy to test and mock
 
 ### Schema Design Principles
 
