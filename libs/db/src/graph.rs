@@ -88,6 +88,7 @@ pub(crate) struct PutCf(pub(crate) &'static str, pub(crate) (Vec<u8>, Vec<u8>));
 enum DatabaseHandle {
     ReadOnly(DB),
     ReadWrite(TransactionDB),
+    Secondary(DB),
 }
 
 impl DatabaseHandle {
@@ -95,14 +96,14 @@ impl DatabaseHandle {
     fn as_transaction_db(&self) -> Option<&TransactionDB> {
         match self {
             DatabaseHandle::ReadWrite(txn_db) => Some(txn_db),
-            DatabaseHandle::ReadOnly(_) => None,
+            DatabaseHandle::ReadOnly(_) | DatabaseHandle::Secondary(_) => None,
         }
     }
 
-    /// Get DB if in ReadOnly mode, otherwise None
+    /// Get DB if in ReadOnly or Secondary mode, otherwise None
     fn as_db(&self) -> Option<&DB> {
         match self {
-            DatabaseHandle::ReadOnly(db) => Some(db),
+            DatabaseHandle::ReadOnly(db) | DatabaseHandle::Secondary(db) => Some(db),
             DatabaseHandle::ReadWrite(_) => None,
         }
     }
@@ -116,6 +117,9 @@ impl DatabaseHandle {
 enum StorageMode {
     ReadOnly,
     ReadWrite,
+    Secondary {
+        secondary_path: PathBuf,
+    },
 }
 
 struct StorageOptions {}
@@ -147,6 +151,21 @@ impl StorageOptions {
         options.set_error_if_exists(false);
         options.create_if_missing(false);
         options.create_missing_column_families(false);
+        options
+    }
+
+    /// Default options for Storage in Secondary mode
+    ///
+    /// Key requirements for secondary instances:
+    /// - max_open_files = -1 (REQUIRED: must keep all file descriptors open)
+    /// - create_if_missing = false
+    /// - create_missing_column_families = false
+    pub fn default_for_secondary() -> Options {
+        let mut options = Options::default();
+        options.set_error_if_exists(false);
+        options.create_if_missing(false);
+        options.create_missing_column_families(false);
+        options.set_max_open_files(-1); // REQUIRED for secondary instances
         options
     }
 }
@@ -198,6 +217,43 @@ impl Storage {
             txn_db_options,
             db: None,
             mode: StorageMode::ReadWrite,
+            column_families: ALL_COLUMN_FAMILIES,
+        }
+    }
+
+    /// Create a new Storage instance in secondary mode
+    ///
+    /// Secondary instances can catch up with the primary database via
+    /// `try_catch_up_with_primary()`, making them ideal for read replicas
+    /// with ongoing writes.
+    ///
+    /// # Arguments
+    /// * `primary_path` - Path to the primary database
+    /// * `secondary_path` - Path for secondary's MANIFEST (must be different from primary)
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::path::PathBuf;
+    /// use motlie_db::Storage;
+    ///
+    /// let primary = PathBuf::from("/data/db");
+    /// let secondary = primary.join("secondary");
+    ///
+    /// let mut storage = Storage::secondary(&primary, &secondary);
+    /// storage.ready().unwrap();
+    ///
+    /// // Periodically catch up with primary
+    /// storage.try_catch_up_with_primary().unwrap();
+    /// ```
+    pub fn secondary(primary_path: &Path, secondary_path: &Path) -> Self {
+        Self {
+            db_path: PathBuf::from(primary_path),
+            db_options: StorageOptions::default_for_secondary(),
+            txn_db_options: TransactionDBOptions::default(),
+            db: None,
+            mode: StorageMode::Secondary {
+                secondary_path: PathBuf::from(secondary_path),
+            },
             column_families: ALL_COLUMN_FAMILIES,
         }
     }
@@ -276,7 +332,7 @@ impl Storage {
             ),
         ];
 
-        match self.mode {
+        match &self.mode {
             StorageMode::ReadOnly => {
                 let db = DB::open_cf_descriptors_read_only(
                     &self.db_options,
@@ -295,18 +351,27 @@ impl Storage {
                 )?;
                 self.db = Some(DatabaseHandle::ReadWrite(txn_db));
             }
+            StorageMode::Secondary { secondary_path } => {
+                let db = DB::open_cf_descriptors_as_secondary(
+                    &self.db_options,
+                    &self.db_path,
+                    secondary_path,
+                    cf_descriptors,
+                )?;
+                self.db = Some(DatabaseHandle::Secondary(db));
+            }
         }
 
         log::info!("[Storage] Ready");
         Ok(())
     }
 
-    /// Get a reference to the underlying DB (only works in readonly mode)
+    /// Get a reference to the underlying DB (only works in readonly or secondary mode)
     pub(crate) fn db(&self) -> Result<&DB> {
         self.db
             .as_ref()
             .and_then(|handle| handle.as_db())
-            .ok_or_else(|| anyhow::anyhow!("[Storage] Not in readonly mode or not ready"))
+            .ok_or_else(|| anyhow::anyhow!("[Storage] Not in readonly/secondary mode or not ready"))
     }
 
     /// Get a reference to the TransactionDB (only works in readwrite mode)
@@ -324,6 +389,61 @@ impl Storage {
             .map(|handle| handle.is_read_write())
             .unwrap_or(false)
     }
+
+    /// Check if this is a secondary instance
+    pub fn is_secondary(&self) -> bool {
+        matches!(self.mode, StorageMode::Secondary { .. })
+    }
+
+    /// Catch up with primary database (only works for secondary instances)
+    ///
+    /// This method syncs the secondary instance with the primary by:
+    /// 1. Reading MANIFEST changes (SST file additions/deletions)
+    /// 2. Replaying WAL entries to reconstruct memtables
+    /// 3. Updating file handles
+    ///
+    /// # Cost
+    /// Approximately 7-115ms depending on WAL size since last catch-up.
+    /// Safe to call every 1-30 seconds.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use motlie_db::Storage;
+    /// # use std::path::PathBuf;
+    /// let mut storage = Storage::secondary(
+    ///     &PathBuf::from("/data/db"),
+    ///     &PathBuf::from("/data/db/secondary")
+    /// );
+    /// storage.ready().unwrap();
+    ///
+    /// // Periodically catch up
+    /// loop {
+    ///     storage.try_catch_up_with_primary().unwrap();
+    ///     std::thread::sleep(std::time::Duration::from_secs(5));
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Not in Secondary mode
+    /// - Database not ready
+    /// - RocksDB catch-up fails
+    pub fn try_catch_up_with_primary(&self) -> Result<()> {
+        match &self.mode {
+            StorageMode::Secondary { .. } => {
+                match &self.db {
+                    Some(DatabaseHandle::Secondary(db)) => {
+                        db.try_catch_up_with_primary()?;
+                        Ok(())
+                    }
+                    _ => Err(anyhow::anyhow!(
+                        "[Storage] Database not ready or wrong handle type"
+                    )),
+                }
+            }
+            _ => Err(anyhow::anyhow!("[Storage] Not a secondary instance")),
+        }
+    }
 }
 
 /// Graph-specific mutation processor
@@ -335,6 +455,14 @@ impl Graph {
     /// Create a new GraphProcessor
     pub fn new(storage: Arc<Storage>) -> Self {
         Self { storage }
+    }
+}
+
+impl Clone for Graph {
+    fn clone(&self) -> Self {
+        Self {
+            storage: self.storage.clone(), // Arc<Storage> is already Clone
+        }
     }
 }
 
@@ -1071,6 +1199,27 @@ pub fn spawn_graph_consumer_with_next(
     crate::mutation::spawn_consumer(consumer)
 }
 
+/// Spawn a graph mutation consumer using an existing Graph instance
+///
+/// This allows using a shared Storage/TransactionDB instance for writes.
+/// Use this when you want the writer to share the same TransactionDB as readers.
+///
+/// # Arguments
+/// * `receiver` - Channel to receive mutation batches from
+/// * `config` - Writer configuration
+/// * `graph` - Shared Graph instance (wrapping the Storage/TransactionDB)
+///
+/// # Returns
+/// A JoinHandle for the spawned consumer task
+pub fn spawn_graph_consumer_with_graph(
+    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
+    config: WriterConfig,
+    graph: Arc<Graph>,
+) -> JoinHandle<Result<()>> {
+    let consumer = Consumer::new(receiver, config, (*graph).clone());
+    crate::mutation::spawn_consumer(consumer)
+}
+
 /// Create a new query consumer for the graph
 pub fn create_query_consumer(
     receiver: flume::Receiver<crate::query::Query>,
@@ -1091,6 +1240,101 @@ pub fn spawn_query_consumer(
     db_path: &Path,
 ) -> JoinHandle<Result<()>> {
     let consumer = create_query_consumer(receiver, config, db_path);
+    crate::query::spawn_consumer(consumer)
+}
+
+/// Create a query consumer with readwrite storage (for testing TransactionDB concurrency)
+///
+/// Unlike `create_query_consumer` which opens readonly storage, this opens readwrite storage.
+/// This allows testing whether RocksDB TransactionDB supports multiple instances accessing
+/// the same database path concurrently.
+///
+/// # Arguments
+/// * `receiver` - Channel to receive queries from
+/// * `config` - Reader configuration
+/// * `db_path` - Path to the database
+///
+/// # Returns
+/// A Consumer configured with readwrite storage
+pub fn create_query_consumer_readwrite(
+    receiver: flume::Receiver<crate::query::Query>,
+    config: crate::ReaderConfig,
+    db_path: &Path,
+) -> crate::query::Consumer<Graph> {
+    let mut storage = Storage::readwrite(db_path);
+    storage.ready().expect("Failed to ready readwrite storage");
+    let storage = Arc::new(storage);
+    let processor = Graph::new(storage);
+    crate::query::Consumer::new(receiver, config, processor)
+}
+
+/// Spawn a query consumer with readwrite storage as a background task
+///
+/// This is the readwrite variant of `spawn_query_consumer`.
+/// Use this to test concurrent access patterns with TransactionDB.
+///
+/// # Arguments
+/// * `receiver` - Channel to receive queries from
+/// * `config` - Reader configuration
+/// * `db_path` - Path to the database
+///
+/// # Returns
+/// A JoinHandle for the spawned consumer task
+pub fn spawn_query_consumer_readwrite(
+    receiver: flume::Receiver<crate::query::Query>,
+    config: crate::ReaderConfig,
+    db_path: &Path,
+) -> JoinHandle<Result<()>> {
+    let consumer = create_query_consumer_readwrite(receiver, config, db_path);
+    crate::query::spawn_consumer(consumer)
+}
+
+/// Spawn a query consumer using an existing Graph instance
+///
+/// This allows multiple query consumers to share a single Storage/TransactionDB instance.
+/// Use this when you want multiple readers to access the same readwrite TransactionDB
+/// without opening multiple database instances (which RocksDB doesn't support).
+///
+/// This is the correct way to have concurrent readers on readwrite storage, since
+/// RocksDB TransactionDB:
+/// - Does NOT support multiple instances on the same path (lock file prevents this)
+/// - DOES support thread-safe access from multiple threads to a single instance
+///
+/// # Arguments
+/// * `receiver` - Channel to receive queries from
+/// * `config` - Reader configuration
+/// * `graph` - Shared Graph instance (wrapping the Storage/TransactionDB)
+///
+/// # Example
+/// ```no_run
+/// use motlie_db::{Graph, Storage, ReaderConfig};
+/// use std::sync::Arc;
+/// use std::time::Duration;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let mut storage = Storage::readwrite(&std::path::PathBuf::from("/tmp/db"));
+/// storage.ready()?;
+/// let graph = Arc::new(Graph::new(Arc::new(storage)));
+///
+/// // Spawn multiple readers sharing the same graph/TransactionDB
+/// for _ in 0..4 {
+///     let (reader, rx) = {
+///         let config = ReaderConfig { channel_buffer_size: 10 };
+///         let (sender, receiver) = flume::bounded(config.channel_buffer_size);
+///         let reader = motlie_db::Reader::new(sender);
+///         (reader, receiver)
+///     };
+///     motlie_db::spawn_query_consumer_with_graph(rx, ReaderConfig { channel_buffer_size: 10 }, graph.clone());
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub fn spawn_query_consumer_with_graph(
+    receiver: flume::Receiver<crate::query::Query>,
+    config: crate::ReaderConfig,
+    graph: Arc<Graph>,
+) -> JoinHandle<Result<()>> {
+    let consumer = crate::query::Consumer::new(receiver, config, (*graph).clone());
     crate::query::spawn_consumer(consumer)
 }
 

@@ -4,6 +4,24 @@ This directory contains design documentation, analysis, and implementation notes
 
 ## Documentation Index
 
+### Essential Reading
+
+#### [concurrency-and-storage-modes.md](concurrency-and-storage-modes.md) ⭐
+**ESSENTIAL**: Complete guide to concurrent access patterns, storage modes, and threading.
+
+**Contents**:
+- Readonly vs Secondary vs Shared Readwrite comparison
+- RocksDB architecture and flush timing
+- Threading and concurrency patterns
+- Performance tuning for visibility vs throughput
+- Complete code examples for all patterns
+- Test results and analysis (24% → 99% success rates explained)
+- Migration guides
+
+**Status**: ✅ Comprehensive guide - Read this first for concurrency topics
+
+---
+
 ### API Documentation
 
 #### [reader.md](reader.md)

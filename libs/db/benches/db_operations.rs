@@ -115,11 +115,12 @@ fn bench_point_lookups(c: &mut Criterion) {
         channel_buffer_size: 1000,
     };
     let (reader, query_receiver) = create_query_reader(reader_config.clone());
-    let _query_handle = rt.spawn(spawn_query_consumer(
+    let _guard = rt.enter();
+    let _query_handle = spawn_query_consumer(
         query_receiver,
         reader_config,
         temp_dir.path(),
-    ));
+    );
 
     let mut group = c.benchmark_group("point_lookups");
     group.measurement_time(Duration::from_secs(10));
@@ -177,11 +178,12 @@ fn bench_prefix_scans_by_position(c: &mut Criterion) {
             channel_buffer_size: 1000,
         };
         let (reader, query_receiver) = create_query_reader(reader_config.clone());
-        let _query_handle = rt.spawn(spawn_query_consumer(
+        let _guard = rt.enter();
+        let _query_handle = spawn_query_consumer(
             query_receiver,
             reader_config,
             temp_dir.path(),
-        ));
+        );
 
         // Test different positions in the key space
         for position in ["early", "middle", "late"].iter() {
@@ -231,11 +233,12 @@ fn bench_prefix_scans_by_degree(c: &mut Criterion) {
             channel_buffer_size: 1000,
         };
         let (reader, query_receiver) = create_query_reader(reader_config.clone());
-        let _query_handle = rt.spawn(spawn_query_consumer(
+        let _guard = rt.enter();
+        let _query_handle = spawn_query_consumer(
             query_receiver,
             reader_config,
             temp_dir.path(),
-        ));
+        );
 
         // Use a middle node to avoid position effects
         let target_id = node_ids[2_500];
@@ -274,11 +277,12 @@ fn bench_scan_position_independence(c: &mut Criterion) {
         channel_buffer_size: 1000,
     };
     let (reader, query_receiver) = create_query_reader(reader_config.clone());
-    let _query_handle = rt.spawn(spawn_query_consumer(
+    let _guard = rt.enter();
+    let _query_handle = spawn_query_consumer(
         query_receiver,
         reader_config,
         temp_dir.path(),
-    ));
+    );
 
     let mut group = c.benchmark_group("scan_position_independence");
     group.measurement_time(Duration::from_secs(10));
