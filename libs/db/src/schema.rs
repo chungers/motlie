@@ -157,10 +157,10 @@ impl ColumnFamilyRecord for Edges {
 
     fn record_from(args: &AddEdge) -> (EdgeCfKey, EdgeCfValue) {
         let key = EdgeCfKey(args.id);
-        let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name);
+        let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name.0);
         let value = EdgeCfValue(
             args.source_node_id,
-            EdgeName(args.name.clone()),
+            args.name.clone(),
             args.target_node_id,
             EdgeSummary::new(markdown),
         );
@@ -220,8 +220,8 @@ impl ColumnFamilyRecord for Fragments {
     type CreateOp = AddFragment;
 
     fn record_from(args: &AddFragment) -> (FragmentCfKey, FragmentCfValue) {
-        let key = FragmentCfKey(args.id, TimestampMilli(args.ts_millis));
-        let value = FragmentCfValue(FragmentContent::new(&args.content));
+        let key = FragmentCfKey(args.id, args.ts_millis);
+        let value = FragmentCfValue(FragmentContent(args.content.clone()));
         (key, value)
     }
 
@@ -302,7 +302,7 @@ impl ColumnFamilyRecord for ForwardEdges {
         let key = ForwardEdgeCfKey(
             EdgeSourceId(args.source_node_id),
             EdgeDestinationId(args.target_node_id),
-            EdgeName(args.name.clone()),
+            args.name.clone(),
         );
         let value = ForwardEdgeCfValue(args.id);
         (key, value)
@@ -382,7 +382,7 @@ impl ColumnFamilyRecord for ReverseEdges {
         let key = ReverseEdgeCfKey(
             EdgeDestinationId(args.target_node_id),
             EdgeSourceId(args.source_node_id),
-            EdgeName(args.name.clone()),
+            args.name.clone(),
         );
         let value = ReverseEdgeCfValue(args.id);
         (key, value)
@@ -519,7 +519,7 @@ impl ColumnFamilyRecord for EdgeNames {
 
     fn record_from(args: &AddEdge) -> (EdgeNamesCfKey, EdgeNamesCfValue) {
         let key = EdgeNamesCfKey(
-            EdgeName(args.name.clone()),
+            args.name.clone(),
             args.id,
             EdgeDestinationId(args.target_node_id),
             EdgeSourceId(args.source_node_id),
@@ -607,28 +607,28 @@ mod tests {
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts),
-                name: "edge_a".to_string(),
+                name: EdgeName("edge_a".to_string()),
             },
             AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([1u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 1000),
-                name: "edge_b".to_string(),
+                name: EdgeName("edge_b".to_string()),
             },
             AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([1u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 2000),
-                name: "edge_c".to_string(),
+                name: EdgeName("edge_c".to_string()),
             },
             AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([1u8; 16]),
                 target_node_id: Id::from_bytes([1u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 3000),
-                name: "edge_d".to_string(),
+                name: EdgeName("edge_d".to_string()),
             },
             // Add edge with same source and target but different name
             AddEdge {
@@ -636,12 +636,12 @@ mod tests {
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 4000),
-                name: "edge_z".to_string(),
+                name: EdgeName("edge_z".to_string()),
             },
         ];
 
         // Generate key-value pairs and serialize the keys
-        let serialized_keys: Vec<(Vec<u8>, String)> = edges
+        let serialized_keys: Vec<(Vec<u8>, EdgeName)> = edges
             .iter()
             .map(|args| {
                 let (key, _value) = ForwardEdges::record_from(args);
@@ -667,11 +667,11 @@ mod tests {
         // 4. ([1..], [0..], "edge_c")
         // 5. ([1..], [1..], "edge_d")
 
-        assert_eq!(sorted_keys[0].1, "edge_a");
-        assert_eq!(sorted_keys[1].1, "edge_z");
-        assert_eq!(sorted_keys[2].1, "edge_b");
-        assert_eq!(sorted_keys[3].1, "edge_c");
-        assert_eq!(sorted_keys[4].1, "edge_d");
+        assert_eq!(sorted_keys[0].1.0, "edge_a");
+        assert_eq!(sorted_keys[1].1.0, "edge_z");
+        assert_eq!(sorted_keys[2].1.0, "edge_b");
+        assert_eq!(sorted_keys[3].1.0, "edge_c");
+        assert_eq!(sorted_keys[4].1.0, "edge_d");
 
         // Verify that the serialized keys are actually in lexicographic order
         for i in 0..sorted_keys.len() - 1 {

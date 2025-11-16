@@ -199,7 +199,7 @@ pub async fn writer_task(
                             source_node_id: node_id,
                             target_node_id: target_id,
                             ts_millis: TimestampMilli::now(),
-                            name: edge_name,
+                            name: motlie_db::EdgeName(edge_name),
                         })
                         .await;
 

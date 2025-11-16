@@ -39,7 +39,7 @@ mod tests {
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
-            name: "test_edge".to_string(),
+            name: crate::schema::EdgeName("test_edge".to_string()),
         };
         writer.add_edge(edge_args).await.unwrap();
 
@@ -108,7 +108,7 @@ mod tests {
                 source_node_id: Id::new(),
                 target_node_id: Id::new(),
                 ts_millis: TimestampMilli::now(),
-                name: "edge".to_string(),
+                name: crate::schema::EdgeName("edge".to_string()),
             })
             .await
             .unwrap();
@@ -116,8 +116,8 @@ mod tests {
         writer
             .add_fragment(AddFragment {
                 id: Id::new(),
-                ts_millis: TimestampMilli::now().0,
-                content: "fragment body".to_string(),
+                ts_millis: TimestampMilli::now(),
+                content: crate::DataUrl::from_text("fragment body"),
             })
             .await
             .unwrap();
@@ -170,11 +170,11 @@ mod tests {
             };
             let fragment_args = AddFragment {
                 id: Id::new(),
-                ts_millis: TimestampMilli::now().0,
-                content: format!(
+                ts_millis: TimestampMilli::now(),
+                content: crate::DataUrl::from_text(&format!(
                     "Chained fragment {} processed by both Graph and FullText",
                     i
-                ),
+                )),
             };
 
             writer.add_node(node_args).await.unwrap();
@@ -1368,7 +1368,7 @@ mod tests {
             source_node_id: source_id,
             target_node_id: target_id,
             ts_millis: TimestampMilli::now(),
-            name: "test_edge".to_string(),
+            name: crate::schema::EdgeName("test_edge".to_string()),
         };
 
         writer.add_edge(edge_args.clone()).await.unwrap();
@@ -1492,8 +1492,8 @@ mod tests {
         let timestamp = TimestampMilli::now();
         let fragment_args = AddFragment {
             id: fragment_id,
-            ts_millis: timestamp.0,
-            content: "This is test fragment content".to_string(),
+            ts_millis: timestamp,
+            content: crate::DataUrl::from_text("This is test fragment content"),
         };
 
         writer.add_fragment(fragment_args.clone()).await.unwrap();
@@ -1697,7 +1697,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
-            name: "likes".to_string(),
+            name: crate::schema::EdgeName("likes".to_string()),
         };
 
         let edge_a_to_b_2 = AddEdge {
@@ -1705,7 +1705,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
-            name: "follows".to_string(),
+            name: crate::schema::EdgeName("follows".to_string()),
         };
 
         let edge_a_to_b_3 = AddEdge {
@@ -1713,7 +1713,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
-            name: "mentions".to_string(),
+            name: crate::schema::EdgeName("mentions".to_string()),
         };
 
         // Create different edges from B to A
@@ -1722,7 +1722,7 @@ mod tests {
             source_node_id: node_b_id,
             target_node_id: node_a_id,
             ts_millis: TimestampMilli::now(),
-            name: "replies_to".to_string(),
+            name: crate::schema::EdgeName("replies_to".to_string()),
         };
 
         let edge_b_to_a_2 = AddEdge {
@@ -1730,7 +1730,7 @@ mod tests {
             source_node_id: node_b_id,
             target_node_id: node_a_id,
             ts_millis: TimestampMilli::now(),
-            name: "retweets".to_string(),
+            name: crate::schema::EdgeName("retweets".to_string()),
         };
 
         // Write all edges
@@ -1905,7 +1905,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
-            name: "likes".to_string(),
+            name: crate::schema::EdgeName("likes".to_string()),
         };
 
         let edge_2 = AddEdge {
@@ -1913,7 +1913,7 @@ mod tests {
             source_node_id: node_b_id,
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
-            name: "likes".to_string(),
+            name: crate::schema::EdgeName("likes".to_string()),
         };
 
         let edge_3 = AddEdge {
@@ -1921,7 +1921,7 @@ mod tests {
             source_node_id: node_c_id,
             target_node_id: node_a_id,
             ts_millis: TimestampMilli::now(),
-            name: "likes".to_string(),
+            name: crate::schema::EdgeName("likes".to_string()),
         };
 
         // Create edges with different names
@@ -1930,7 +1930,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
-            name: "follows".to_string(),
+            name: crate::schema::EdgeName("follows".to_string()),
         };
 
         writer.add_edge(edge_1.clone()).await.unwrap();
@@ -2063,8 +2063,8 @@ mod tests {
         writer
             .add_fragment(AddFragment {
                 id: entity_id,
-                ts_millis: t1.0,
-                content: "fragment_1".to_string(),
+                ts_millis: t1,
+                content: crate::DataUrl::from_text("fragment_1"),
             })
             .await
             .unwrap();
@@ -2072,8 +2072,8 @@ mod tests {
         writer
             .add_fragment(AddFragment {
                 id: entity_id,
-                ts_millis: t2.0,
-                content: "fragment_2".to_string(),
+                ts_millis: t2,
+                content: crate::DataUrl::from_text("fragment_2"),
             })
             .await
             .unwrap();
@@ -2081,8 +2081,8 @@ mod tests {
         writer
             .add_fragment(AddFragment {
                 id: entity_id,
-                ts_millis: t3.0,
-                content: "fragment_3".to_string(),
+                ts_millis: t3,
+                content: crate::DataUrl::from_text("fragment_3"),
             })
             .await
             .unwrap();
@@ -2090,8 +2090,8 @@ mod tests {
         writer
             .add_fragment(AddFragment {
                 id: entity_id,
-                ts_millis: t4.0,
-                content: "fragment_4".to_string(),
+                ts_millis: t4,
+                content: crate::DataUrl::from_text("fragment_4"),
             })
             .await
             .unwrap();
@@ -2099,8 +2099,8 @@ mod tests {
         writer
             .add_fragment(AddFragment {
                 id: entity_id,
-                ts_millis: t5.0,
-                content: "fragment_5".to_string(),
+                ts_millis: t5,
+                content: crate::DataUrl::from_text("fragment_5"),
             })
             .await
             .unwrap();
@@ -2163,8 +2163,8 @@ mod tests {
             writer
                 .add_fragment(AddFragment {
                     id: entity_id,
-                    ts_millis: ts.0,
-                    content: content.to_string(),
+                    ts_millis: ts,
+                    content: crate::DataUrl::from_text(content),
                 })
                 .await
                 .unwrap();
@@ -2230,8 +2230,8 @@ mod tests {
             writer
                 .add_fragment(AddFragment {
                     id: entity_id,
-                    ts_millis: ts.0,
-                    content: content.to_string(),
+                    ts_millis: ts,
+                    content: crate::DataUrl::from_text(content),
                 })
                 .await
                 .unwrap();
@@ -2297,8 +2297,8 @@ mod tests {
             writer
                 .add_fragment(AddFragment {
                     id: entity_id,
-                    ts_millis: ts.0,
-                    content: content.to_string(),
+                    ts_millis: ts,
+                    content: crate::DataUrl::from_text(content),
                 })
                 .await
                 .unwrap();
@@ -2364,8 +2364,8 @@ mod tests {
             writer
                 .add_fragment(AddFragment {
                     id: entity_id,
-                    ts_millis: ts.0,
-                    content: content.to_string(),
+                    ts_millis: ts,
+                    content: crate::DataUrl::from_text(content),
                 })
                 .await
                 .unwrap();
@@ -2425,8 +2425,8 @@ mod tests {
             writer
                 .add_fragment(AddFragment {
                     id: entity_id,
-                    ts_millis: ts.0,
-                    content: content.to_string(),
+                    ts_millis: ts,
+                    content: crate::DataUrl::from_text(content),
                 })
                 .await
                 .unwrap();
@@ -2479,8 +2479,8 @@ mod tests {
             writer
                 .add_fragment(AddFragment {
                     id: entity_id,
-                    ts_millis: ts.0,
-                    content: content.to_string(),
+                    ts_millis: ts,
+                    content: crate::DataUrl::from_text(content),
                 })
                 .await
                 .unwrap();
@@ -2531,8 +2531,8 @@ mod tests {
             writer
                 .add_fragment(AddFragment {
                     id: entity_id,
-                    ts_millis: ts.0,
-                    content: content.to_string(),
+                    ts_millis: ts,
+                    content: crate::DataUrl::from_text(content),
                 })
                 .await
                 .unwrap();
@@ -2741,7 +2741,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
-            name: "likes".to_string(),
+            name: crate::schema::EdgeName("likes".to_string()),
         };
 
         let likes_2_id = Id::new();
@@ -2750,7 +2750,7 @@ mod tests {
             source_node_id: node_b_id,
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
-            name: "likes".to_string(),
+            name: crate::schema::EdgeName("likes".to_string()),
         };
 
         let likes_3_id = Id::new();
@@ -2759,7 +2759,7 @@ mod tests {
             source_node_id: node_c_id,
             target_node_id: node_d_id,
             ts_millis: TimestampMilli::now(),
-            name: "likes".to_string(),
+            name: crate::schema::EdgeName("likes".to_string()),
         };
 
         // Create edges with different names but similar prefix
@@ -2769,7 +2769,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
-            name: "likes_very_much".to_string(),
+            name: crate::schema::EdgeName("likes_very_much".to_string()),
         };
 
         // Create edge with completely different name
@@ -2779,7 +2779,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_d_id,
             ts_millis: TimestampMilli::now(),
-            name: "follows".to_string(),
+            name: crate::schema::EdgeName("follows".to_string()),
         };
 
         writer.add_edge(likes_1.clone()).await.unwrap();
@@ -3039,7 +3039,7 @@ mod tests {
                     ts_millis: TimestampMilli::now(),
                     source_node_id: src_ids[src_idx],
                     target_node_id: dst_ids[dst_idx],
-                    name: format!("test_edge_{}", i),
+                    name: crate::schema::EdgeName(format!("test_edge_{}", i)),
                 })
                 .await
                 .unwrap();
@@ -3365,7 +3365,7 @@ mod tests {
                     ts_millis: TimestampMilli::now(),
                     source_node_id: src_ids[src_idx],
                     target_node_id: dst_ids[dst_idx],
-                    name: "page_edge_shared".to_string(), // Same name for all
+                    name: crate::schema::EdgeName("page_edge_shared".to_string()), // Same name for all
                 })
                 .await
                 .unwrap();
@@ -3589,12 +3589,12 @@ mod tests {
                 source_node_id: node1_id,
                 target_node_id: node2_id,
                 ts_millis: TimestampMilli::now(),
-                name: "connects".to_string(),
+                name: crate::schema::EdgeName("connects".to_string()),
             }),
             Mutation::AddFragment(AddFragment {
                 id: fragment_id,
-                ts_millis: TimestampMilli::now().0,
-                content: "test fragment".to_string(),
+                ts_millis: TimestampMilli::now(),
+                content: crate::DataUrl::from_text("test fragment"),
             }),
         ];
 
@@ -3808,7 +3808,7 @@ mod tests {
                 source_node_id: node_ids[i],
                 target_node_id: node_ids[i + 1],
                 ts_millis: TimestampMilli::now(),
-                name: format!("edge_{}", i),
+                name: crate::schema::EdgeName(format!("edge_{}", i)),
             }));
         }
 
@@ -3816,8 +3816,8 @@ mod tests {
         for (i, &id) in fragment_ids.iter().enumerate() {
             mutations.push(Mutation::AddFragment(AddFragment {
                 id,
-                ts_millis: TimestampMilli::now().0,
-                content: format!("fragment_{}", i),
+                ts_millis: TimestampMilli::now(),
+                content: crate::DataUrl::from_text(&format!("fragment_{}", i)),
             }));
         }
 

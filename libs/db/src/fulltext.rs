@@ -63,7 +63,7 @@ impl Processor for FullTextProcessor {
                         "[FullText] Would index edge relationship: source={}, target={}, name='{}', k1={}, b={}",
                         args.source_node_id,
                         args.target_node_id,
-                        args.name,
+                        args.name.0,
                         self.k1,
                         self.b
                     );
@@ -76,7 +76,7 @@ impl Processor for FullTextProcessor {
                     log::info!(
                         "[FullText] Would index fragment content: id={}, body_len={}, k1={}, b={}",
                         args.id,
-                        args.content.len(),
+                        args.content.0.len(),
                         self.k1,
                         self.b
                     );

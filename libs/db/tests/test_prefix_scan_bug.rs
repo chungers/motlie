@@ -347,7 +347,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
                 id: *id,
                 source_node_id: src_node,
                 target_node_id: dst_node,
-                name: name.to_string(),
+                name: motlie_db::EdgeName(name.to_string()),
                 ts_millis: TimestampMilli(2000),
             })
             .await

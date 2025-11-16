@@ -29,8 +29,8 @@ mod tests {
 
         let fragment_args = AddFragment {
             id: Id::new(),
-            ts_millis: 1234567890,
-            content: "This is a test fragment with some searchable content".to_string(),
+            ts_millis: TimestampMilli(1234567890),
+            content: crate::DataUrl::from_text("This is a test fragment with some searchable content"),
         };
         writer.add_fragment(fragment_args).await.unwrap();
 
@@ -59,8 +59,8 @@ mod tests {
         // Send a fragment with substantial content
         let fragment_args = AddFragment {
             id: Id::new(),
-            ts_millis: 1234567890,
-            content: "The quick brown fox jumps over the lazy dog. This is a longer text fragment that would benefit from BM25 scoring with custom parameters.".to_string(),
+            ts_millis: TimestampMilli(1234567890),
+            content: crate::DataUrl::from_text("The quick brown fox jumps over the lazy dog. This is a longer text fragment that would benefit from BM25 scoring with custom parameters."),
         };
         writer.add_fragment(fragment_args).await.unwrap();
 
@@ -94,7 +94,7 @@ mod tests {
                 source_node_id: Id::new(),
                 target_node_id: Id::new(),
                 ts_millis: TimestampMilli::now(),
-                name: "connects to".to_string(),
+                name: crate::schema::EdgeName("connects to".to_string()),
             })
             .await
             .unwrap();
@@ -102,8 +102,8 @@ mod tests {
         writer
             .add_fragment(AddFragment {
                 id: Id::new(),
-                ts_millis: TimestampMilli::now().0,
-                content: "This fragment contains searchable text that should be indexed using BM25 algorithm for effective information retrieval.".to_string(),
+                ts_millis: TimestampMilli::now(),
+                content: crate::DataUrl::from_text("This fragment contains searchable text that should be indexed using BM25 algorithm for effective information retrieval."),
             })
             .await
             .unwrap();
@@ -156,11 +156,11 @@ mod tests {
         for i in 0..5 {
             let fragment_args = AddFragment {
                 id: Id::new(),
-                ts_millis: TimestampMilli::now().0,
-                content: format!(
+                ts_millis: TimestampMilli::now(),
+                content: crate::DataUrl::from_text(&format!(
                     "Fragment {} with searchable content for full-text indexing",
                     i
-                ),
+                )),
             };
             writer.add_fragment(fragment_args).await.unwrap();
         }

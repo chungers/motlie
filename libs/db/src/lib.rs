@@ -77,6 +77,28 @@ impl std::fmt::Display for DataUrlError {
 
 impl std::error::Error for DataUrlError {}
 
+/// Macro to generate file-loading methods for different image formats
+macro_rules! impl_from_file {
+    ($method_name:ident, $mime_type:expr, $doc:expr) => {
+        #[doc = $doc]
+        ///
+        /// # Arguments
+        /// * `path` - Path to the file to load
+        ///
+        /// # Returns
+        /// * `Result<DataUrl, std::io::Error>` - The DataUrl on success, or an IO error
+        ///
+        /// # Example
+        /// ```ignore
+        #[doc = concat!("let data_url = DataUrl::", stringify!($method_name), r#"("image.jpg")?;"#)]
+        /// ```
+        pub fn $method_name(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+            let bytes = std::fs::read(path)?;
+            Ok(Self::new(&bytes, $mime_type))
+        }
+    };
+}
+
 impl DataUrl {
     /// Create a new DataUrl from raw content with the specified MIME type
     fn new(content: impl AsRef<[u8]>, mime_type: &str) -> Self {
@@ -124,6 +146,43 @@ impl DataUrl {
     pub fn from_png(image_data: impl AsRef<[u8]>) -> Self {
         Self::new(image_data.as_ref(), "image/png")
     }
+
+    // Generate file-loading methods using the macro
+    impl_from_file!(
+        from_png_file,
+        "image/png",
+        "Create a DataUrl by loading a PNG file from disk"
+    );
+
+    impl_from_file!(
+        from_jpeg_file,
+        "image/jpeg",
+        "Create a DataUrl by loading a JPEG file from disk"
+    );
+
+    impl_from_file!(
+        from_text_file,
+        "text/plain;charset=utf-8",
+        "Create a DataUrl by loading a plain text file from disk"
+    );
+
+    impl_from_file!(
+        from_markdown_file,
+        "text/markdown;charset=utf-8",
+        "Create a DataUrl by loading a Markdown file from disk"
+    );
+
+    impl_from_file!(
+        from_html_file,
+        "text/html;charset=utf-8",
+        "Create a DataUrl by loading an HTML file from disk"
+    );
+
+    impl_from_file!(
+        from_json_file,
+        "application/json;charset=utf-8",
+        "Create a DataUrl by loading a JSON file from disk"
+    );
 
     /// Decode and extract the content as bytes (useful for binary data like images)
     pub fn decode_bytes(&self) -> Result<Vec<u8>, DataUrlError> {
@@ -311,8 +370,8 @@ mod tests {
 
             let fragment_args = AddFragment {
                 id: Id::new(),
-                ts_millis: TimestampMilli::now().0,
-                content: format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i),
+                ts_millis: TimestampMilli::now(),
+                content: DataUrl::from_text(&format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i)),
             };
 
             // Send to both consumers
@@ -558,13 +617,13 @@ mod tests {
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
-            name: "test_edge".to_string(),
+            name: schema::EdgeName("test_edge".to_string()),
         };
 
         let fragment = AddFragment {
             id: Id::new(),
-            ts_millis: TimestampMilli::now().0,
-            content: "test fragment body".to_string(),
+            ts_millis: TimestampMilli::now(),
+            content: DataUrl::from_text("test fragment body"),
         };
 
         // Ensure they can be created and debugged
@@ -826,5 +885,185 @@ mod tests {
         let unicode = "Hello 世界 🌍 مرحبا שלום";
         let data_url = DataUrl::from_text(unicode);
         assert_eq!(data_url.decode_string().unwrap(), unicode);
+    }
+
+    #[test]
+    fn test_data_url_from_png_file() {
+        use std::io::Write;
+
+        // Create a temporary PNG file with a minimal valid PNG header
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let png_path = temp_dir.path().join("test.png");
+
+        // Minimal valid PNG file (1x1 pixel, white)
+        let png_data: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+            0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, // IDAT chunk
+            0x54, 0x08, 0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F,
+            0x00, 0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59,
+            0xE7, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, // IEND chunk
+            0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+
+        std::fs::File::create(&png_path)
+            .unwrap()
+            .write_all(png_data)
+            .unwrap();
+
+        // Test loading the file
+        let data_url = DataUrl::from_png_file(&png_path).unwrap();
+
+        // Verify it's a proper data URL
+        assert!(data_url.0.starts_with("data:image/png;base64,"));
+
+        // Verify we can decode it back to the same bytes
+        let decoded = data_url.decode_bytes().unwrap();
+        assert_eq!(decoded, png_data);
+
+        // Verify MIME type
+        assert_eq!(data_url.mime_type().unwrap(), "image/png");
+    }
+
+    #[test]
+    fn test_data_url_from_jpeg_file() {
+        use std::io::Write;
+
+        // Create a temporary JPEG file with a minimal valid JPEG header
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let jpeg_path = temp_dir.path().join("test.jpg");
+
+        // Minimal valid JPEG file (placeholder - real JPEG would be more complex)
+        let jpeg_data: &[u8] = &[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, // SOI + APP0 marker
+            0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+            0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9, // EOI marker
+        ];
+
+        std::fs::File::create(&jpeg_path)
+            .unwrap()
+            .write_all(jpeg_data)
+            .unwrap();
+
+        // Test loading the file
+        let data_url = DataUrl::from_jpeg_file(&jpeg_path).unwrap();
+
+        // Verify it's a proper data URL
+        assert!(data_url.0.starts_with("data:image/jpeg;base64,"));
+
+        // Verify we can decode it back to the same bytes
+        let decoded = data_url.decode_bytes().unwrap();
+        assert_eq!(decoded, jpeg_data);
+
+        // Verify MIME type
+        assert_eq!(data_url.mime_type().unwrap(), "image/jpeg");
+    }
+
+    #[test]
+    fn test_data_url_from_text_file() {
+        use std::io::Write;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let text_path = temp_dir.path().join("test.txt");
+
+        let text_content = "Hello, World!\nThis is a test file.";
+        std::fs::File::create(&text_path)
+            .unwrap()
+            .write_all(text_content.as_bytes())
+            .unwrap();
+
+        let data_url = DataUrl::from_text_file(&text_path).unwrap();
+
+        assert!(data_url.0.starts_with("data:text/plain;charset=utf-8;base64,"));
+        assert_eq!(data_url.decode_string().unwrap(), text_content);
+        assert_eq!(data_url.mime_type().unwrap(), "text/plain;charset=utf-8");
+    }
+
+    #[test]
+    fn test_data_url_from_markdown_file() {
+        use std::io::Write;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let md_path = temp_dir.path().join("test.md");
+
+        let md_content = "# Hello\n\nThis is **markdown**.\n\n- Item 1\n- Item 2";
+        std::fs::File::create(&md_path)
+            .unwrap()
+            .write_all(md_content.as_bytes())
+            .unwrap();
+
+        let data_url = DataUrl::from_markdown_file(&md_path).unwrap();
+
+        assert!(data_url.0.starts_with("data:text/markdown;charset=utf-8;base64,"));
+        assert_eq!(data_url.decode_string().unwrap(), md_content);
+        assert_eq!(data_url.mime_type().unwrap(), "text/markdown;charset=utf-8");
+    }
+
+    #[test]
+    fn test_data_url_from_html_file() {
+        use std::io::Write;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let html_path = temp_dir.path().join("test.html");
+
+        let html_content = r#"<!DOCTYPE html>
+<html>
+<head><title>Test</title></head>
+<body><h1>Hello</h1></body>
+</html>"#;
+        std::fs::File::create(&html_path)
+            .unwrap()
+            .write_all(html_content.as_bytes())
+            .unwrap();
+
+        let data_url = DataUrl::from_html_file(&html_path).unwrap();
+
+        assert!(data_url.0.starts_with("data:text/html;charset=utf-8;base64,"));
+        assert_eq!(data_url.decode_string().unwrap(), html_content);
+        assert_eq!(data_url.mime_type().unwrap(), "text/html;charset=utf-8");
+    }
+
+    #[test]
+    fn test_data_url_from_json_file() {
+        use std::io::Write;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let json_path = temp_dir.path().join("test.json");
+
+        let json_content = r#"{"name": "test", "value": 42, "active": true}"#;
+        std::fs::File::create(&json_path)
+            .unwrap()
+            .write_all(json_content.as_bytes())
+            .unwrap();
+
+        let data_url = DataUrl::from_json_file(&json_path).unwrap();
+
+        assert!(data_url.0.starts_with("data:application/json;charset=utf-8;base64,"));
+        assert_eq!(data_url.decode_string().unwrap(), json_content);
+        assert_eq!(data_url.mime_type().unwrap(), "application/json;charset=utf-8");
+    }
+
+    #[test]
+    fn test_data_url_from_file_nonexistent() {
+        // Test that loading a nonexistent file returns an error
+        let result = DataUrl::from_png_file("/nonexistent/path/to/file.png");
+        assert!(result.is_err());
+
+        let result = DataUrl::from_jpeg_file("/nonexistent/path/to/file.jpg");
+        assert!(result.is_err());
+
+        let result = DataUrl::from_text_file("/nonexistent/path/to/file.txt");
+        assert!(result.is_err());
+
+        let result = DataUrl::from_markdown_file("/nonexistent/path/to/file.md");
+        assert!(result.is_err());
+
+        let result = DataUrl::from_html_file("/nonexistent/path/to/file.html");
+        assert!(result.is_err());
+
+        let result = DataUrl::from_json_file("/nonexistent/path/to/file.json");
+        assert!(result.is_err());
     }
 }

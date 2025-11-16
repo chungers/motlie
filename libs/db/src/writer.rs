@@ -136,13 +136,13 @@ mod tests {
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
-            name: "test_edge".to_string(),
+            name: crate::schema::EdgeName("test_edge".to_string()),
         };
 
         let fragment_args = AddFragment {
             id: Id::new(),
-            ts_millis: TimestampMilli::now().0,
-            content: "test fragment".to_string(),
+            ts_millis: TimestampMilli::now(),
+            content: crate::DataUrl::from_text("test fragment"),
         };
 
         let invalidate_args = InvalidateArgs {

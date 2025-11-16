@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::{Id, TimestampMilli, WriterConfig};
+use crate::{schema, Id, TimestampMilli, WriterConfig};
 
 #[derive(Debug, Clone)]
 pub enum Mutation {
@@ -20,7 +20,7 @@ pub struct AddNode {
     pub ts_millis: TimestampMilli,
 
     /// The name of the Node
-    pub name: String,
+    pub name: schema::NodeName,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ pub struct AddEdge {
     pub ts_millis: TimestampMilli,
 
     /// The name of the Edge
-    pub name: String,
+    pub name: schema::EdgeName,
 }
 
 #[derive(Debug, Clone)]
@@ -47,12 +47,10 @@ pub struct AddFragment {
     pub id: Id,
 
     /// The timestamp as number of milliseconds since the Unix epoch
-    pub ts_millis: u64,
+    pub ts_millis: TimestampMilli,
 
     /// The body of the Fragment
-    /// TODO - support image data url (e.g. base64 encoded image -
-    /// "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO9TXL0Y4OHwAAAABJRU5ErkJggg==")
-    pub content: String,
+    pub content: crate::DataUrl,
 }
 
 #[derive(Debug, Clone)]
@@ -123,7 +121,11 @@ pub struct Consumer<P: Processor> {
 
 impl<P: Processor> Consumer<P> {
     /// Create a new Consumer
-    pub fn new(receiver: mpsc::Receiver<Vec<Mutation>>, config: WriterConfig, processor: P) -> Self {
+    pub fn new(
+        receiver: mpsc::Receiver<Vec<Mutation>>,
+        config: WriterConfig,
+        processor: P,
+    ) -> Self {
         Self {
             receiver,
             config,
@@ -182,14 +184,14 @@ impl<P: Processor> Consumer<P> {
                         "Processing AddEdge: source={}, target={}, name={}",
                         args.source_node_id,
                         args.target_node_id,
-                        args.name
+                        args.name.0
                     );
                 }
                 Mutation::AddFragment(args) => {
                     log::debug!(
                         "Processing AddFragment: id={}, body_len={}",
                         args.id,
-                        args.content.len()
+                        args.content.0.len()
                     );
                 }
                 Mutation::Invalidate(args) => {
@@ -340,9 +342,14 @@ mod tests {
         let fulltext_processor = TestProcessor::with_counter(50, fulltext_counter.clone());
 
         // Create consumers
-        let graph_consumer =
-            Consumer::with_next(graph_receiver, graph_config, graph_processor, fulltext_sender);
-        let fulltext_consumer = Consumer::new(fulltext_receiver, fulltext_config, fulltext_processor);
+        let graph_consumer = Consumer::with_next(
+            graph_receiver,
+            graph_config,
+            graph_processor,
+            fulltext_sender,
+        );
+        let fulltext_consumer =
+            Consumer::new(fulltext_receiver, fulltext_config, fulltext_processor);
 
         // Spawn consumers
         let graph_handle = spawn_consumer(graph_consumer);
@@ -390,7 +397,10 @@ mod tests {
 
         // Wait for graph consumer to finish (should finish quickly)
         let graph_result = tokio::time::timeout(Duration::from_secs(5), graph_handle).await;
-        assert!(graph_result.is_ok(), "Graph consumer should finish promptly");
+        assert!(
+            graph_result.is_ok(),
+            "Graph consumer should finish promptly"
+        );
         graph_result.unwrap().unwrap().unwrap();
 
         // Give fulltext consumer some time to finish processing remaining items
