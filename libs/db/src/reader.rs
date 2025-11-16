@@ -175,7 +175,33 @@ impl Reader {
     }
 
     /// Query nodes by name prefix
-    /// Returns Vec<(node_name, node_id)>
+    ///
+    /// Returns Vec<(node_name, node_id)> sorted by name, then node_id.
+    ///
+    /// # Prefix Matching Semantics
+    ///
+    /// | Parameter | Behavior |
+    /// |-----------|----------|
+    /// | `name = ""` | **Full index scan** - returns ALL nodes from start to end |
+    /// | `name = "a"` | Prefix scan - returns only nodes starting with "a" |
+    /// | `name = "apple"` | Prefix scan - returns nodes starting with "apple" |
+    /// | `limit = Some(N)` | Limits results to first N matches |
+    /// | `start = Some((last_name, last_id))` | Pagination - starts after the specified position (exclusive) |
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Get all nodes (up to 1000)
+    /// let all_nodes = reader.nodes_by_name("".to_string(), None, Some(1000), timeout).await?;
+    ///
+    /// // Get nodes starting with "user_"
+    /// let users = reader.nodes_by_name("user_".to_string(), None, Some(100), timeout).await?;
+    ///
+    /// // Paginate through results
+    /// let page1 = reader.nodes_by_name("a".to_string(), None, Some(10), timeout).await?;
+    /// let last = page1.last();
+    /// let page2 = reader.nodes_by_name("a".to_string(), last.cloned(), Some(10), timeout).await?;
+    /// ```
     pub async fn nodes_by_name(
         &self,
         name: NodeName,
@@ -197,8 +223,33 @@ impl Reader {
     }
 
     /// Query edges by name prefix
-    /// Returns Vec<(edge_name, edge_id)>
-    /// Results are sorted by name, then edge_id per EdgeNames CF key structure
+    ///
+    /// Returns Vec<(edge_name, edge_id)> sorted by name, then edge_id per EdgeNames CF key structure.
+    ///
+    /// # Prefix Matching Semantics
+    ///
+    /// | Parameter | Behavior |
+    /// |-----------|----------|
+    /// | `name = ""` | **Full index scan** - returns ALL edges from start to end |
+    /// | `name = "a"` | Prefix scan - returns only edges starting with "a" |
+    /// | `name = "follows"` | Prefix scan - returns edges starting with "follows" |
+    /// | `limit = Some(N)` | Limits results to first N matches |
+    /// | `start = Some((last_name, last_id))` | Pagination - starts after the specified position (exclusive) |
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Get all edges (up to 1000)
+    /// let all_edges = reader.edges_by_name("".to_string(), None, Some(1000), timeout).await?;
+    ///
+    /// // Get edges starting with "follows"
+    /// let follows = reader.edges_by_name("follows".to_string(), None, Some(100), timeout).await?;
+    ///
+    /// // Paginate through results
+    /// let page1 = reader.edges_by_name("rel_".to_string(), None, Some(10), timeout).await?;
+    /// let last = page1.last();
+    /// let page2 = reader.edges_by_name("rel_".to_string(), last.cloned(), Some(10), timeout).await?;
+    /// ```
     pub async fn edges_by_name(
         &self,
         name: String,
