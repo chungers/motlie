@@ -332,8 +332,8 @@ Shows the iterative refinement process and decision rationale.
 ### Processor Architecture Principles
 
 1. **Logic with Types**: Business logic should live with data types, not in central implementation
-   - **Mutations**: `schema::Plan::create_batch()` converts mutations to storage ops
-   - **Queries**: `QueryExecutor::execute()` implements query-specific fetch logic
+   - **Mutations**: Each mutation type implements `MutationPlanner::plan()` to generate storage operations
+   - **Queries**: Each query type implements `QueryExecutor::execute()` to fetch results
    - **Benefits**: Easier to extend, test, and maintain
 
 2. **Minimal Trait Surface**: Keep trait methods minimal to reduce implementation burden

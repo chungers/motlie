@@ -15,8 +15,8 @@ use crate::{Id, ReaderConfig, Storage, TimestampMilli};
 /// # Design Philosophy
 ///
 /// This follows the same pattern as mutations:
-/// - Mutations: `schema::Plan::create_batch()` knows how to convert mutations
-/// - Queries: Each query type knows how to execute itself
+/// - Mutations: Each mutation type implements `MutationPlanner::plan()` to generate storage operations
+/// - Queries: Each query type implements `QueryExecutor::execute()` to fetch results
 ///
 /// Benefits:
 /// - Logic lives with types, not in central implementation

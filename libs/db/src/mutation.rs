@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::{schema, Id, TimestampMilli, WriterConfig};
+use crate::{graph::StorageOperation, schema, Id, TimestampMilli, WriterConfig};
 
 #[derive(Debug, Clone)]
 pub enum Mutation {
@@ -65,6 +65,99 @@ pub struct InvalidateArgs {
     pub reason: String,
 }
 
+/// Trait for mutations to generate their own storage operations.
+///
+/// This trait allows each mutation type to encapsulate the logic for converting
+/// itself into the storage operations needed to persist it to the database.
+///
+/// Following the same pattern as QueryExecutor for queries, this moves the
+/// planning logic from a centralized dispatcher into the mutation types themselves.
+pub trait MutationPlanner {
+    /// Generate the storage operations needed to persist this mutation
+    fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error>;
+}
+
+impl MutationPlanner for AddNode {
+    fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        use crate::graph::{ColumnFamilyRecord, PutCf};
+        use crate::schema::{NodeNames, Nodes};
+
+        Ok(vec![
+            StorageOperation::PutCf(PutCf(
+                Nodes::CF_NAME,
+                Nodes::create_bytes(self)?,
+            )),
+            StorageOperation::PutCf(PutCf(
+                NodeNames::CF_NAME,
+                NodeNames::create_bytes(self)?,
+            )),
+        ])
+    }
+}
+
+impl MutationPlanner for AddEdge {
+    fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        use crate::graph::{ColumnFamilyRecord, PutCf};
+        use crate::schema::{EdgeNames, Edges, ForwardEdges, ReverseEdges};
+
+        Ok(vec![
+            StorageOperation::PutCf(PutCf(
+                Edges::CF_NAME,
+                Edges::create_bytes(self)?,
+            )),
+            StorageOperation::PutCf(PutCf(
+                ForwardEdges::CF_NAME,
+                ForwardEdges::create_bytes(self)?,
+            )),
+            StorageOperation::PutCf(PutCf(
+                ReverseEdges::CF_NAME,
+                ReverseEdges::create_bytes(self)?,
+            )),
+            StorageOperation::PutCf(PutCf(
+                EdgeNames::CF_NAME,
+                EdgeNames::create_bytes(self)?,
+            )),
+        ])
+    }
+}
+
+impl MutationPlanner for AddFragment {
+    fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        use crate::graph::{ColumnFamilyRecord, PutCf};
+        use crate::schema::Fragments;
+
+        Ok(vec![
+            StorageOperation::PutCf(PutCf(
+                Fragments::CF_NAME,
+                Fragments::create_bytes(self)?,
+            )),
+        ])
+    }
+}
+
+impl MutationPlanner for InvalidateArgs {
+    fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        // TODO: Implement actual invalidation operations when invalidation is ready
+        Ok(vec![])
+    }
+}
+
+impl Mutation {
+    /// Generate the storage operations for this mutation
+    ///
+    /// Each mutation type knows how to convert itself into the storage operations
+    /// needed to persist it. This follows the same pattern as QueryExecutor::execute()
+    /// for queries.
+    pub fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        match self {
+            Mutation::AddNode(m) => m.plan(),
+            Mutation::AddEdge(m) => m.plan(),
+            Mutation::AddFragment(m) => m.plan(),
+            Mutation::Invalidate(m) => m.plan(),
+        }
+    }
+}
+
 /// Trait for processing batches of mutations.
 ///
 /// This trait defines a single method that processes mutations in batches,
@@ -84,8 +177,11 @@ pub struct InvalidateArgs {
 /// #[async_trait::async_trait]
 /// impl Processor for Graph {
 ///     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-///         // Convert all mutations to storage operations
-///         let operations = schema::Plan::create_batch(mutations)?;
+///         // Each mutation generates its own storage operations
+///         let mut operations = Vec::new();
+///         for mutation in mutations {
+///             operations.extend(mutation.plan()?);
+///         }
 ///
 ///         // Execute all operations in a single RocksDB transaction
 ///         let txn = self.storage.transaction();

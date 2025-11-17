@@ -1,62 +1,9 @@
-use crate::graph::{ColumnFamilyRecord, PutCf, StorageOperation};
+use crate::graph::ColumnFamilyRecord;
 use crate::query::{DstId, SrcId};
 use crate::DataUrl;
 use crate::TimestampMilli;
-use crate::{AddEdge, AddFragment, AddNode, Id, Mutation};
+use crate::{AddEdge, AddFragment, AddNode, Id};
 use serde::{Deserialize, Serialize};
-
-pub(crate) struct Plan {}
-impl Plan {
-    pub(crate) fn create_batch(
-        mutations: &[Mutation],
-    ) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
-        let mut operations = Vec::new();
-
-        for mutation in mutations {
-            match mutation {
-                Mutation::AddNode(op) => {
-                    operations.push(StorageOperation::PutCf(PutCf(
-                        Nodes::CF_NAME,
-                        Nodes::create_bytes(op)?,
-                    )));
-                    operations.push(StorageOperation::PutCf(PutCf(
-                        NodeNames::CF_NAME,
-                        NodeNames::create_bytes(op)?,
-                    )));
-                }
-                Mutation::AddEdge(op) => {
-                    operations.push(StorageOperation::PutCf(PutCf(
-                        Edges::CF_NAME,
-                        Edges::create_bytes(op)?,
-                    )));
-                    operations.push(StorageOperation::PutCf(PutCf(
-                        ForwardEdges::CF_NAME,
-                        ForwardEdges::create_bytes(op)?,
-                    )));
-                    operations.push(StorageOperation::PutCf(PutCf(
-                        ReverseEdges::CF_NAME,
-                        ReverseEdges::create_bytes(op)?,
-                    )));
-                    operations.push(StorageOperation::PutCf(PutCf(
-                        EdgeNames::CF_NAME,
-                        EdgeNames::create_bytes(op)?,
-                    )));
-                }
-                Mutation::AddFragment(op) => {
-                    operations.push(StorageOperation::PutCf(PutCf(
-                        Fragments::CF_NAME,
-                        Fragments::create_bytes(op)?,
-                    )));
-                }
-                Mutation::Invalidate(_args) => {
-                    // TODO: Handle invalidation operations when implemented
-                }
-            }
-        }
-
-        Ok(operations)
-    }
-}
 
 /// Nodes column family.
 pub(crate) struct Nodes;

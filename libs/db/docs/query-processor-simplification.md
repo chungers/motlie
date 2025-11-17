@@ -59,8 +59,11 @@ pub enum Mutation {
 #[async_trait::async_trait]
 impl mutation::Processor for Graph {
     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-        // Convert mutations to storage operations
-        let operations = schema::Plan::create_batch(mutations)?;
+        // Each mutation generates its own storage operations
+        let mut operations = Vec::new();
+        for mutation in mutations {
+            operations.extend(mutation.plan()?);
+        }
 
         // Execute in single transaction
         // ... transaction logic
@@ -71,7 +74,7 @@ impl mutation::Processor for Graph {
 **Key characteristics**:
 - ✅ **Single trait method**: One entry point for all mutation types
 - ✅ **Enum dispatch**: Mutations are enum variants
-- ✅ **Logic separation**: `schema::Plan` contains conversion logic
+- ✅ **Logic with types**: Each mutation type implements `MutationPlanner::plan()`
 - ✅ **Simple implementation**: Graph just orchestrates, doesn't contain business logic
 
 ### Query Pattern (Current Implementation)
@@ -262,8 +265,8 @@ impl query::Processor for Graph {
 **Move query execution logic from `Processor` trait implementation to individual query types via a `QueryExecutor` trait.**
 
 This mirrors how mutations work:
-- **Mutations**: `schema::Plan::create_batch()` knows how to convert mutations
-- **Queries**: Each query type knows how to execute itself
+- **Mutations**: Each mutation type implements `MutationPlanner::plan()` to generate storage operations
+- **Queries**: Each query type implements `QueryExecutor::execute()` to fetch results
 
 ### New Architecture
 
@@ -661,7 +664,7 @@ No data migration required - this is purely code organization.
 trait Processor {
     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()>;
 }
-// Logic in: schema::Plan::create_batch()
+// Logic in: Each mutation type's MutationPlanner::plan() implementation
 ```
 
 **Queries** (proposed):

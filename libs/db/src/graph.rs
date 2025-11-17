@@ -474,8 +474,11 @@ impl Processor for Graph {
 
         log::info!("[Graph] About to insert {} mutations", mutations.len());
 
-        // Convert all mutations to storage operations
-        let operations = schema::Plan::create_batch(mutations)?;
+        // Each mutation generates its own storage operations
+        let mut operations = Vec::new();
+        for mutation in mutations {
+            operations.extend(mutation.plan()?);
+        }
 
         // Execute all operations in a single transaction
         let txn_db = self.storage.transaction_db()?;
