@@ -39,7 +39,7 @@ Complete reference for the Reader API with usage examples and query patterns.
 
 The following documents capture design discussions, analyses, and decisions made during development:
 
-#### [query-processor-simplification.md](query-processor-simplification.md) 🌟
+#### [query-and-mutation-processor-simplification.md](query-and-mutation-processor-simplification.md) 🌟
 **IMPLEMENTED** (2025-11-16): Unified trait-based architecture for queries and mutations.
 
 **Problem Solved**:
@@ -275,7 +275,7 @@ Comprehensive benchmark strategy to measure performance improvements.
 
 ### 2. Design Evolution
 Documents tracking the evolution of API design:
-- `query-processor-simplification.md` ⭐ - **IMPLEMENTED**: Trait-based query execution
+- `query-and-mutation-processor-simplification.md` ⭐ - **IMPLEMENTED**: Unified trait-based execution for queries and mutations
 - `reader-api-gap-analysis.md` - Initial gap identification
 - `reader-api-completeness-analysis.md` - Comprehensive gap analysis
 - `edge-by-id-explained.md` - Problem statement
