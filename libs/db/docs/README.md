@@ -40,28 +40,28 @@ Complete reference for the Reader API with usage examples and query patterns.
 The following documents capture design discussions, analyses, and decisions made during development:
 
 #### [query-processor-simplification.md](query-processor-simplification.md) 🌟
-**IMPLEMENTED**: Simplification of query processor architecture using trait-based execution.
+**IMPLEMENTED** (2025-11-16): Unified trait-based architecture for queries and mutations.
 
-**Problem**:
-- Current: `query::Processor` trait has 8 methods (one per query type)
-- Graph implementation: ~300 lines of fetch logic
-- Inconsistent with mutation pattern (which has 1 trait method)
-- High implementation burden for new storage backends
+**Problem Solved**:
+- **Queries**: 8 trait methods, ~640 lines in Graph implementation, inconsistent with mutation pattern
+- **Mutations**: Centralized `Plan::create_batch()` with 57-line match dispatcher
 
-**Proposed Solution**:
-- New `QueryExecutor` trait - each query type implements its own execution
-- Simplified `Processor` trait - single `storage()` method
-- Graph implementation: ~3 lines (90% reduction)
-- Aligns with mutation pattern philosophy
+**Implemented Solution**:
+- **Queries**: `QueryExecutor` trait - each query type implements `execute()`
+- **Mutations**: `MutationPlanner` trait - each mutation type implements `plan()`
+- **Processor traits**: Minimal interface (queries: `storage()`, mutations: `process_mutations()`)
+- **Graph**: Simplified implementations (queries: 3 lines, mutations: orchestration only)
 
-**Benefits**:
-- ✅ 90% reduction in Processor trait complexity
-- ✅ Better code organization (logic with types)
-- ✅ Non-breaking query additions
-- ✅ Easier testing (mock storage, not entire trait)
-- ✅ Consistent with mutation design
+**Benefits Achieved**:
+- ✅ **~800 lines removed**: 756 from queries, 57 from mutations
+- ✅ **Architectural consistency**: Both follow trait-based execution pattern
+- ✅ **Better encapsulation**: Logic lives with types, not in central dispatchers
+- ✅ **Easier extensibility**: Add new types without modifying central code
+- ✅ **Better testability**: Test individual type execution in isolation
 
-**Status**: ✅ Implemented - All 167 tests passing
+**Status**: ✅ Fully Implemented - All 174 tests passing, benchmarks successful, examples working end-to-end
+
+**Read More**: Comprehensive documentation of design, implementation, and migration results.
 
 ---
 
