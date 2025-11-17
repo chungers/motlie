@@ -63,7 +63,7 @@ impl Processor for FullTextProcessor {
                         "[FullText] Would index edge relationship: source={}, target={}, name='{}', k1={}, b={}",
                         args.source_node_id,
                         args.target_node_id,
-                        args.name.0,
+                        args.name,
                         self.k1,
                         self.b
                     );

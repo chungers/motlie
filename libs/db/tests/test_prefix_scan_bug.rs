@@ -347,7 +347,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
                 id: *id,
                 source_node_id: src_node,
                 target_node_id: dst_node,
-                name: motlie_db::EdgeName(name.to_string()),
+                name: name.to_string(),
                 ts_millis: TimestampMilli(2000),
             })
             .await
@@ -372,15 +372,15 @@ async fn test_edge_names_prefix_scan_comprehensive() {
 
     println!("✅ Query succeeded, found {} results:", result.len());
     for (name, _id) in &result {
-        println!("  - {}", name.0);
+        println!("  - {}", name);
     }
 
     // Verify all results start with "pay"
     for (name, _) in &result {
         assert!(
-            name.0.starts_with("pay"),
+            name.starts_with("pay"),
             "Result '{}' does not start with 'pay'",
-            name.0
+            name
         );
     }
 
@@ -393,7 +393,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
     );
 
     // Verify specific names
-    let result_names: Vec<String> = result.iter().map(|(name, _)| name.0.clone()).collect();
+    let result_names: Vec<String> = result.iter().map(|(name, _)| name.clone()).collect();
     assert!(result_names.contains(&"pay".to_string()));
     assert!(result_names.contains(&"payment".to_string()));
     assert!(result_names.contains(&"payment_gateway".to_string()));

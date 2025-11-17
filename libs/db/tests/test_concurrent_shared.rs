@@ -80,7 +80,7 @@ async fn writer_task_shared_graph(
                             source_node_id: node_id,
                             target_node_id: target_id,
                             ts_millis: TimestampMilli::now(),
-                            name: motlie_db::EdgeName(edge_name),
+                            name: edge_name,
                         })
                         .await;
 

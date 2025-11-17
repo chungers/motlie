@@ -7,31 +7,81 @@ use serde::{Deserialize, Serialize};
 
 /// Nodes column family.
 pub(crate) struct Nodes;
-
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeCfKey(pub(crate) Id);
-
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeCfValue(pub(crate) NodeName, pub(crate) NodeSummary);
 
+/// Edges column family.
+pub(crate) struct Edges;
+#[derive(Serialize, Deserialize)]
+pub(crate) struct EdgeCfKey(pub(crate) Id);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct EdgeCfValue(
+    pub(crate) SrcId,       // source_id
+    pub(crate) EdgeName,    // edge name
+    pub(crate) DstId,       // dest_id
+    pub(crate) EdgeSummary, // edge summary
+);
+
+/// Fragments column family.
+pub(crate) struct Fragments;
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FragmentCfValue(pub(crate) FragmentContent);
+
+/// Forward edges column family.
+pub(crate) struct ForwardEdges;
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ForwardEdgeCfKey(
+    pub(crate) EdgeSourceId,
+    pub(crate) EdgeDestinationId,
+    pub(crate) EdgeName,
+);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ForwardEdgeCfValue(pub(crate) Id);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct EdgeSourceId(pub(crate) Id);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct EdgeDestinationId(pub(crate) Id);
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NodeSummary(pub(crate) DataUrl);
+
+/// Reverse edges column family.
+pub(crate) struct ReverseEdges;
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ReverseEdgeCfKey(
+    pub(crate) EdgeDestinationId,
+    pub(crate) EdgeSourceId,
+    pub(crate) EdgeName,
+);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ReverseEdgeCfValue(pub(crate) Id);
+
+/// Node names column family.
+pub(crate) struct NodeNames;
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NodeNameCfKey(pub(crate) NodeName, pub(crate) Id);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NodeNameCfValue();
+
+/// Edge names column family.
+pub(crate) struct EdgeNames;
+#[derive(Serialize, Deserialize)]
+pub(crate) struct EdgeNameCfKey(
+    pub(crate) EdgeName,
+    pub(crate) Id, // edge id
+    pub(crate) EdgeDestinationId,
+    pub(crate) EdgeSourceId,
+);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct EdgeNameCfValue();
 
 pub type NodeName = String;
-
-impl NodeSummary {
-    pub fn new(content: impl AsRef<str>) -> Self {
-        NodeSummary(DataUrl::from_markdown(content.as_ref()))
-    }
-
-    pub fn content(&self) -> Result<String, crate::DataUrlError> {
-        self.0.decode_string()
-    }
-
-    pub fn as_data_url(&self) -> &DataUrl {
-        &self.0
-    }
-}
+pub type EdgeName = String;
+pub type NodeSummary = DataUrl;
+pub type EdgeSummary = DataUrl;
+pub type FragmentContent = DataUrl;
 
 impl ColumnFamilyRecord for Nodes {
     const CF_NAME: &'static str = "nodes";
@@ -42,7 +92,7 @@ impl ColumnFamilyRecord for Nodes {
     fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
         let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name);
-        let value = NodeCfValue(args.name.clone(), NodeSummary::new(markdown));
+        let value = NodeCfValue(args.name.clone(), DataUrl::from_markdown(markdown));
         (key, value)
     }
 
@@ -66,36 +116,6 @@ impl ColumnFamilyRecord for Nodes {
     }
 }
 
-pub(crate) struct Edges;
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeCfKey(pub(crate) Id);
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeCfValue(
-    pub(crate) SrcId,       // source_id
-    pub(crate) EdgeName,    // edge name
-    pub(crate) DstId,       // dest_id
-    pub(crate) EdgeSummary, // edge summary
-);
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct EdgeSummary(pub(crate) DataUrl);
-
-impl EdgeSummary {
-    pub fn new(content: impl AsRef<str>) -> Self {
-        EdgeSummary(DataUrl::from_markdown(content.as_ref()))
-    }
-
-    pub fn content(&self) -> Result<String, crate::DataUrlError> {
-        self.0.decode_string()
-    }
-
-    pub fn as_data_url(&self) -> &DataUrl {
-        &self.0
-    }
-}
-
 impl ColumnFamilyRecord for Edges {
     const CF_NAME: &'static str = "edges";
     type Key = EdgeCfKey;
@@ -104,12 +124,12 @@ impl ColumnFamilyRecord for Edges {
 
     fn record_from(args: &AddEdge) -> (EdgeCfKey, EdgeCfValue) {
         let key = EdgeCfKey(args.id);
-        let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name.0);
+        let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name);
         let value = EdgeCfValue(
             args.source_node_id,
             args.name.clone(),
             args.target_node_id,
-            EdgeSummary::new(markdown),
+            DataUrl::from_markdown(markdown),
         );
         (key, value)
     }
@@ -134,32 +154,6 @@ impl ColumnFamilyRecord for Edges {
     }
 }
 
-pub(crate) struct Fragments;
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct FragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct FragmentCfValue(pub(crate) FragmentContent);
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FragmentContent(pub(crate) DataUrl);
-
-impl FragmentContent {
-    pub fn new(content: impl AsRef<str>) -> Self {
-        // Treat all fragment content as markdown per user requirement
-        FragmentContent(DataUrl::from_markdown(content.as_ref()))
-    }
-
-    pub fn content(&self) -> Result<String, crate::DataUrlError> {
-        self.0.decode_string()
-    }
-
-    pub fn as_data_url(&self) -> &DataUrl {
-        &self.0
-    }
-}
-
 impl ColumnFamilyRecord for Fragments {
     const CF_NAME: &'static str = "fragments";
     type Key = FragmentCfKey;
@@ -168,7 +162,7 @@ impl ColumnFamilyRecord for Fragments {
 
     fn record_from(args: &AddFragment) -> (FragmentCfKey, FragmentCfValue) {
         let key = FragmentCfKey(args.id, args.ts_millis);
-        let value = FragmentCfValue(FragmentContent(args.content.clone()));
+        let value = FragmentCfValue(args.content.clone());
         (key, value)
     }
 
@@ -218,27 +212,6 @@ impl ColumnFamilyRecord for Fragments {
     }
 }
 
-pub(crate) struct ForwardEdges;
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ForwardEdgeCfKey(
-    pub(crate) EdgeSourceId,
-    pub(crate) EdgeDestinationId,
-    pub(crate) EdgeName,
-);
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ForwardEdgeCfValue(pub(crate) Id);
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeSourceId(pub(crate) Id);
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeDestinationId(pub(crate) Id);
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct EdgeName(pub String);
-
 impl ColumnFamilyRecord for ForwardEdges {
     const CF_NAME: &'static str = "forward_edges";
     type Key = ForwardEdgeCfKey;
@@ -258,7 +231,7 @@ impl ColumnFamilyRecord for ForwardEdges {
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         // ForwardEdgeCfKey(EdgeSourceId, EdgeDestinationId, EdgeName)
         // Layout: [src_id (16)] + [dst_id (16)] + [name UTF-8 bytes]
-        let name_bytes = key.2 .0.as_bytes();
+        let name_bytes = key.2.as_bytes();
         let mut bytes = Vec::with_capacity(32 + name_bytes.len());
         bytes.extend_from_slice(&key.0 .0.into_bytes());
         bytes.extend_from_slice(&key.1 .0.into_bytes());
@@ -287,7 +260,7 @@ impl ColumnFamilyRecord for ForwardEdges {
         Ok(ForwardEdgeCfKey(
             EdgeSourceId(Id::from_bytes(src_id_bytes)),
             EdgeDestinationId(Id::from_bytes(dst_id_bytes)),
-            EdgeName(name),
+            name,
         ))
     }
 
@@ -306,18 +279,6 @@ impl ColumnFamilyRecord for ForwardEdges {
         opts
     }
 }
-
-pub(crate) struct ReverseEdges;
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ReverseEdgeCfKey(
-    pub(crate) EdgeDestinationId,
-    pub(crate) EdgeSourceId,
-    pub(crate) EdgeName,
-);
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ReverseEdgeCfValue(pub(crate) Id);
 
 impl ColumnFamilyRecord for ReverseEdges {
     const CF_NAME: &'static str = "reverse_edges";
@@ -338,7 +299,7 @@ impl ColumnFamilyRecord for ReverseEdges {
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         // ReverseEdgeCfKey(EdgeDestinationId, EdgeSourceId, EdgeName)
         // Layout: [dst_id (16)] + [src_id (16)] + [name UTF-8 bytes]
-        let name_bytes = key.2 .0.as_bytes();
+        let name_bytes = key.2.as_bytes();
         let mut bytes = Vec::with_capacity(32 + name_bytes.len());
         bytes.extend_from_slice(&key.0 .0.into_bytes());
         bytes.extend_from_slice(&key.1 .0.into_bytes());
@@ -367,7 +328,7 @@ impl ColumnFamilyRecord for ReverseEdges {
         Ok(ReverseEdgeCfKey(
             EdgeDestinationId(Id::from_bytes(dst_id_bytes)),
             EdgeSourceId(Id::from_bytes(src_id_bytes)),
-            EdgeName(name),
+            name,
         ))
     }
 
@@ -387,23 +348,15 @@ impl ColumnFamilyRecord for ReverseEdges {
     }
 }
 
-pub(crate) struct NodeNames;
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct NodeNamesCfKey(pub(crate) NodeName, pub(crate) Id);
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct NodeNamesCfValue();
-
 impl ColumnFamilyRecord for NodeNames {
     const CF_NAME: &'static str = "node_names";
-    type Key = NodeNamesCfKey;
-    type Value = NodeNamesCfValue;
+    type Key = NodeNameCfKey;
+    type Value = NodeNameCfValue;
     type CreateOp = AddNode;
 
-    fn record_from(args: &AddNode) -> (NodeNamesCfKey, NodeNamesCfValue) {
-        let key = NodeNamesCfKey(args.name.clone(), args.id);
-        let value = NodeNamesCfValue();
+    fn record_from(args: &AddNode) -> (NodeNameCfKey, NodeNameCfValue) {
+        let key = NodeNameCfKey(args.name.clone(), args.id);
+        let value = NodeNameCfValue();
         (key, value)
     }
 
@@ -434,7 +387,7 @@ impl ColumnFamilyRecord for NodeNames {
         let mut node_id_bytes = [0u8; 16];
         node_id_bytes.copy_from_slice(&bytes[name_end..name_end + 16]);
 
-        Ok(NodeNamesCfKey(name, Id::from_bytes(node_id_bytes)))
+        Ok(NodeNameCfKey(name, Id::from_bytes(node_id_bytes)))
     }
 
     fn column_family_options() -> rocksdb::Options {
@@ -445,40 +398,27 @@ impl ColumnFamilyRecord for NodeNames {
     }
 }
 
-pub(crate) struct EdgeNames;
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeNamesCfKey(
-    pub(crate) EdgeName,
-    pub(crate) Id, // edge id
-    pub(crate) EdgeDestinationId,
-    pub(crate) EdgeSourceId,
-);
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeNamesCfValue();
-
 impl ColumnFamilyRecord for EdgeNames {
     const CF_NAME: &'static str = "edge_names";
-    type Key = EdgeNamesCfKey;
-    type Value = EdgeNamesCfValue;
+    type Key = EdgeNameCfKey;
+    type Value = EdgeNameCfValue;
     type CreateOp = AddEdge;
 
-    fn record_from(args: &AddEdge) -> (EdgeNamesCfKey, EdgeNamesCfValue) {
-        let key = EdgeNamesCfKey(
+    fn record_from(args: &AddEdge) -> (EdgeNameCfKey, EdgeNameCfValue) {
+        let key = EdgeNameCfKey(
             args.name.clone(),
             args.id,
             EdgeDestinationId(args.target_node_id),
             EdgeSourceId(args.source_node_id),
         );
-        let value = EdgeNamesCfValue();
+        let value = EdgeNameCfValue();
         (key, value)
     }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         // EdgeNamesCfKey(EdgeName, Id, EdgeDestinationId, EdgeSourceId)
         // Layout: [name UTF-8 bytes] + [edge_id (16)] + [dst_id (16)] + [src_id (16)]
-        let name_bytes = key.0 .0.as_bytes();
+        let name_bytes = key.0.as_bytes();
         let mut bytes = Vec::with_capacity(name_bytes.len() + 48);
         bytes.extend_from_slice(name_bytes);
         bytes.extend_from_slice(&key.1.into_bytes());
@@ -510,8 +450,8 @@ impl ColumnFamilyRecord for EdgeNames {
         let mut src_id_bytes = [0u8; 16];
         src_id_bytes.copy_from_slice(&bytes[name_end + 32..name_end + 48]);
 
-        Ok(EdgeNamesCfKey(
-            EdgeName(name),
+        Ok(EdgeNameCfKey(
+            name,
             Id::from_bytes(edge_id_bytes),
             EdgeDestinationId(Id::from_bytes(dst_id_bytes)),
             EdgeSourceId(Id::from_bytes(src_id_bytes)),
@@ -554,28 +494,28 @@ mod tests {
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts),
-                name: EdgeName("edge_a".to_string()),
+                name: "edge_a".to_string(),
             },
             AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([1u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 1000),
-                name: EdgeName("edge_b".to_string()),
+                name: "edge_b".to_string(),
             },
             AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([1u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 2000),
-                name: EdgeName("edge_c".to_string()),
+                name: "edge_c".to_string(),
             },
             AddEdge {
                 id: Id::new(),
                 source_node_id: Id::from_bytes([1u8; 16]),
                 target_node_id: Id::from_bytes([1u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 3000),
-                name: EdgeName("edge_d".to_string()),
+                name: "edge_d".to_string(),
             },
             // Add edge with same source and target but different name
             AddEdge {
@@ -583,7 +523,7 @@ mod tests {
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 4000),
-                name: EdgeName("edge_z".to_string()),
+                name: "edge_z".to_string(),
             },
         ];
 
@@ -614,11 +554,11 @@ mod tests {
         // 4. ([1..], [0..], "edge_c")
         // 5. ([1..], [1..], "edge_d")
 
-        assert_eq!(sorted_keys[0].1 .0, "edge_a");
-        assert_eq!(sorted_keys[1].1 .0, "edge_z");
-        assert_eq!(sorted_keys[2].1 .0, "edge_b");
-        assert_eq!(sorted_keys[3].1 .0, "edge_c");
-        assert_eq!(sorted_keys[4].1 .0, "edge_d");
+        assert_eq!(sorted_keys[0].1, "edge_a");
+        assert_eq!(sorted_keys[1].1, "edge_z");
+        assert_eq!(sorted_keys[2].1, "edge_b");
+        assert_eq!(sorted_keys[3].1, "edge_c");
+        assert_eq!(sorted_keys[4].1, "edge_d");
 
         // Verify that the serialized keys are actually in lexicographic order
         for i in 0..sorted_keys.len() - 1 {

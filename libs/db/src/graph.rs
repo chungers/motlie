@@ -701,11 +701,12 @@ pub fn spawn_query_consumer_with_graph(
 mod tests {
     use super::*;
     use crate::schema::{NodeCfValue, NodeSummary, Nodes};
+    use crate::DataUrl;
 
     #[test]
     fn test_lz4_compression_round_trip() {
         // Create a simple test value
-        let test_value = NodeCfValue("test_node".to_string(), NodeSummary::new("test content"));
+        let test_value = NodeCfValue("test_node".to_string(), DataUrl::from_markdown("test content"));
 
         // Serialize and compress
         let compressed_bytes = Nodes::value_to_bytes(&test_value).expect("Failed to compress");

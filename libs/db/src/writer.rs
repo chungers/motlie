@@ -136,7 +136,7 @@ mod tests {
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("test_edge".to_string()),
+            name: "test_edge".to_string(),
         };
 
         let fragment_args = AddFragment {

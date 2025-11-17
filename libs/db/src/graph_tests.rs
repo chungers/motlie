@@ -39,7 +39,7 @@ mod tests {
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("test_edge".to_string()),
+            name: "test_edge".to_string(),
         };
         writer.add_edge(edge_args).await.unwrap();
 
@@ -108,7 +108,7 @@ mod tests {
                 source_node_id: Id::new(),
                 target_node_id: Id::new(),
                 ts_millis: TimestampMilli::now(),
-                name: crate::schema::EdgeName("edge".to_string()),
+                name: "edge".to_string(),
             })
             .await
             .unwrap();
@@ -1165,7 +1165,7 @@ mod tests {
         let value_bytes = result.unwrap();
         let value = Nodes::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
         let node_name = &value.0;
-        let content = value.1.content().expect("Failed to decode DataUrl");
+        let content = value.1.decode_string().expect("Failed to decode DataUrl");
         assert_eq!(node_name, "test_node", "Node name should match");
         assert!(
             content.contains("test_node"),
@@ -1368,7 +1368,7 @@ mod tests {
             source_node_id: source_id,
             target_node_id: target_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("test_edge".to_string()),
+            name: "test_edge".to_string(),
         };
 
         writer.add_edge(edge_args.clone()).await.unwrap();
@@ -1409,7 +1409,7 @@ mod tests {
             let value_bytes = result.unwrap();
             let value = Edges::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
             // EdgeCfValue is now (src_id, dst_id, name, summary), so .3 is the summary
-            let content = value.3.content().expect("Failed to decode DataUrl");
+            let content = value.3.decode_string().expect("Failed to decode DataUrl");
             assert!(
                 content.contains("test_edge"),
                 "Edge value should contain the edge name"
@@ -1536,7 +1536,7 @@ mod tests {
         // Verify we can deserialize the value
         let value_bytes = result.unwrap();
         let value = Fragments::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
-        let content = value.0.content().expect("Failed to decode DataUrl");
+        let content = value.0.decode_string().expect("Failed to decode DataUrl");
         assert_eq!(
             content, "This is test fragment content",
             "Fragment content should match"
@@ -1614,7 +1614,7 @@ mod tests {
             assert!(result.is_some(), "Node 1 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
             assert_eq!(&value.0, "node_one", "Node name should match");
-            let content = value.1.content().expect("Failed to decode DataUrl");
+            let content = value.1.decode_string().expect("Failed to decode DataUrl");
             assert!(content.contains("node_one"));
         }
 
@@ -1628,7 +1628,7 @@ mod tests {
             assert!(result.is_some(), "Node 2 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
             assert_eq!(&value.0, "node_two", "Node name should match");
-            let content = value.1.content().expect("Failed to decode DataUrl");
+            let content = value.1.decode_string().expect("Failed to decode DataUrl");
             assert!(content.contains("node_two"));
         }
 
@@ -1642,7 +1642,7 @@ mod tests {
             assert!(result.is_some(), "Node 3 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
             assert_eq!(&value.0, "node_three", "Node name should match");
-            let content = value.1.content().expect("Failed to decode DataUrl");
+            let content = value.1.decode_string().expect("Failed to decode DataUrl");
             assert!(content.contains("node_three"));
         }
     }
@@ -1697,7 +1697,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("likes".to_string()),
+            name: "likes".to_string(),
         };
 
         let edge_a_to_b_2 = AddEdge {
@@ -1705,7 +1705,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("follows".to_string()),
+            name: "follows".to_string(),
         };
 
         let edge_a_to_b_3 = AddEdge {
@@ -1713,7 +1713,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("mentions".to_string()),
+            name: "mentions".to_string(),
         };
 
         // Create different edges from B to A
@@ -1722,7 +1722,7 @@ mod tests {
             source_node_id: node_b_id,
             target_node_id: node_a_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("replies_to".to_string()),
+            name: "replies_to".to_string(),
         };
 
         let edge_b_to_a_2 = AddEdge {
@@ -1730,7 +1730,7 @@ mod tests {
             source_node_id: node_b_id,
             target_node_id: node_a_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("retweets".to_string()),
+            name: "retweets".to_string(),
         };
 
         // Write all edges
@@ -1785,16 +1785,16 @@ mod tests {
             assert_eq!(*src_id, node_a_id, "Source should be A");
             assert_eq!(*dst_id, node_b_id, "Destination should be B");
             assert!(
-                edge_name.0 == "likes" || edge_name.0 == "follows" || edge_name.0 == "mentions",
+                edge_name == "likes" || edge_name == "follows" || edge_name == "mentions",
                 "Edge name should be one of the A→B edges: got {}",
-                edge_name.0
+                edge_name
             );
         }
 
         // Verify all expected edge names from A to B are present
         let edge_names_a_to_b: Vec<String> = edges_from_a
             .iter()
-            .map(|(_, name, _)| name.0.clone())
+            .map(|(_, name, _)| name.clone())
             .collect();
         assert!(edge_names_a_to_b.contains(&"likes".to_string()));
         assert!(edge_names_a_to_b.contains(&"follows".to_string()));
@@ -1806,16 +1806,16 @@ mod tests {
             assert_eq!(*src_id, node_b_id, "Source should be B");
             assert_eq!(*dst_id, node_a_id, "Destination should be A");
             assert!(
-                edge_name.0 == "replies_to" || edge_name.0 == "retweets",
+                edge_name == "replies_to" || edge_name == "retweets",
                 "Edge name should be one of the B→A edges: got {}",
-                edge_name.0
+                edge_name
             );
         }
 
         // Verify all expected edge names from B to A are present
         let edge_names_b_to_a: Vec<String> = edges_from_b
             .iter()
-            .map(|(_, name, _)| name.0.clone())
+            .map(|(_, name, _)| name.clone())
             .collect();
         assert!(edge_names_b_to_a.contains(&"replies_to".to_string()));
         assert!(edge_names_b_to_a.contains(&"retweets".to_string()));
@@ -1826,16 +1826,16 @@ mod tests {
             assert_eq!(*dst_id, node_a_id, "Destination should be A");
             assert_eq!(*src_id, node_b_id, "Source should be B");
             assert!(
-                edge_name.0 == "replies_to" || edge_name.0 == "retweets",
+                edge_name == "replies_to" || edge_name == "retweets",
                 "Edge name should be one of the B→A edges: got {}",
-                edge_name.0
+                edge_name
             );
         }
 
         // Verify all expected edge names to A are present
         let edge_names_to_a: Vec<String> = edges_to_a
             .iter()
-            .map(|(_, name, _)| name.0.clone())
+            .map(|(_, name, _)| name.clone())
             .collect();
         assert!(edge_names_to_a.contains(&"replies_to".to_string()));
         assert!(edge_names_to_a.contains(&"retweets".to_string()));
@@ -1846,16 +1846,16 @@ mod tests {
             assert_eq!(*dst_id, node_b_id, "Destination should be B");
             assert_eq!(*src_id, node_a_id, "Source should be A");
             assert!(
-                edge_name.0 == "likes" || edge_name.0 == "follows" || edge_name.0 == "mentions",
+                edge_name == "likes" || edge_name == "follows" || edge_name == "mentions",
                 "Edge name should be one of the A→B edges: got {}",
-                edge_name.0
+                edge_name
             );
         }
 
         // Verify all expected edge names to B are present
         let edge_names_to_b: Vec<String> = edges_to_b
             .iter()
-            .map(|(_, name, _)| name.0.clone())
+            .map(|(_, name, _)| name.clone())
             .collect();
         assert!(edge_names_to_b.contains(&"likes".to_string()));
         assert!(edge_names_to_b.contains(&"follows".to_string()));
@@ -1905,7 +1905,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("likes".to_string()),
+            name: "likes".to_string(),
         };
 
         let edge_2 = AddEdge {
@@ -1913,7 +1913,7 @@ mod tests {
             source_node_id: node_b_id,
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("likes".to_string()),
+            name: "likes".to_string(),
         };
 
         let edge_3 = AddEdge {
@@ -1921,7 +1921,7 @@ mod tests {
             source_node_id: node_c_id,
             target_node_id: node_a_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("likes".to_string()),
+            name: "likes".to_string(),
         };
 
         // Create edges with different names
@@ -1930,7 +1930,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("follows".to_string()),
+            name: "follows".to_string(),
         };
 
         writer.add_edge(edge_1.clone()).await.unwrap();
@@ -1990,7 +1990,7 @@ mod tests {
         for item in iter {
             let (key_bytes, _value_bytes) = item.expect("Failed to iterate");
             let key = EdgeNames::key_from_bytes(&key_bytes).expect("Failed to deserialize key");
-            all_keys.push((key.0 .0.clone(), key.1, key.2 .0));
+            all_keys.push((key.0.clone(), key.1, key.2 .0));
         }
 
         // Should have 4 edges total
@@ -2741,7 +2741,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("likes".to_string()),
+            name: "likes".to_string(),
         };
 
         let likes_2_id = Id::new();
@@ -2750,7 +2750,7 @@ mod tests {
             source_node_id: node_b_id,
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("likes".to_string()),
+            name: "likes".to_string(),
         };
 
         let likes_3_id = Id::new();
@@ -2759,7 +2759,7 @@ mod tests {
             source_node_id: node_c_id,
             target_node_id: node_d_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("likes".to_string()),
+            name: "likes".to_string(),
         };
 
         // Create edges with different names but similar prefix
@@ -2769,7 +2769,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("likes_very_much".to_string()),
+            name: "likes_very_much".to_string(),
         };
 
         // Create edge with completely different name
@@ -2779,7 +2779,7 @@ mod tests {
             source_node_id: node_a_id,
             target_node_id: node_d_id,
             ts_millis: TimestampMilli::now(),
-            name: crate::schema::EdgeName("follows".to_string()),
+            name: "follows".to_string(),
         };
 
         writer.add_edge(likes_1.clone()).await.unwrap();
@@ -2818,9 +2818,9 @@ mod tests {
         // Verify all returned edges have the correct prefix
         for (edge_name, _id) in &results {
             assert!(
-                edge_name.0.starts_with("likes"),
+                edge_name.starts_with("likes"),
                 "Edge name '{}' should start with 'likes'",
-                edge_name.0
+                edge_name
             );
         }
 
@@ -2851,7 +2851,7 @@ mod tests {
         // Count exact matches
         let exact_likes_count = exact_results
             .iter()
-            .filter(|(name, _)| name.0 == "likes")
+            .filter(|(name, _)| name == "likes")
             .count();
         assert_eq!(
             exact_likes_count, 3,
@@ -3039,7 +3039,7 @@ mod tests {
                     ts_millis: TimestampMilli::now(),
                     source_node_id: src_ids[src_idx],
                     target_node_id: dst_ids[dst_idx],
-                    name: crate::schema::EdgeName(format!("test_edge_{}", i)),
+                    name: format!("test_edge_{}", i),
                 })
                 .await
                 .unwrap();
@@ -3105,7 +3105,7 @@ mod tests {
             .unwrap();
         for (name, _id) in &results {
             assert!(
-                name.0.starts_with("test_edge_"),
+                name.starts_with("test_edge_"),
                 "All results should have correct prefix"
             );
         }
@@ -3365,7 +3365,7 @@ mod tests {
                     ts_millis: TimestampMilli::now(),
                     source_node_id: src_ids[src_idx],
                     target_node_id: dst_ids[dst_idx],
-                    name: crate::schema::EdgeName("page_edge_shared".to_string()), // Same name for all
+                    name: "page_edge_shared".to_string(), // Same name for all
                 })
                 .await
                 .unwrap();
@@ -3395,7 +3395,7 @@ mod tests {
         // Verify all results have correct name
         for (name, _id) in &page1 {
             assert_eq!(
-                &name.0, "page_edge_shared",
+                name, "page_edge_shared",
                 "Should have correct name"
             );
         }
@@ -3589,7 +3589,7 @@ mod tests {
                 source_node_id: node1_id,
                 target_node_id: node2_id,
                 ts_millis: TimestampMilli::now(),
-                name: crate::schema::EdgeName("connects".to_string()),
+                name: "connects".to_string(),
             }),
             Mutation::AddFragment(AddFragment {
                 id: fragment_id,
@@ -3808,7 +3808,7 @@ mod tests {
                 source_node_id: node_ids[i],
                 target_node_id: node_ids[i + 1],
                 ts_millis: TimestampMilli::now(),
-                name: crate::schema::EdgeName(format!("edge_{}", i)),
+                name: format!("edge_{}", i),
             }));
         }
 

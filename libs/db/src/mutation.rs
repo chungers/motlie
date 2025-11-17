@@ -280,7 +280,7 @@ impl<P: Processor> Consumer<P> {
                         "Processing AddEdge: source={}, target={}, name={}",
                         args.source_node_id,
                         args.target_node_id,
-                        args.name.0
+                        args.name
                     );
                 }
                 Mutation::AddFragment(args) => {

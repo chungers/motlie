@@ -65,7 +65,7 @@ async fn create_test_db(
                 id: Id::new(),
                 source_node_id: src_id,
                 target_node_id: dst_id,
-                name: EdgeName(format!("edge_{}", j)),
+                name: format!("edge_{}", j),
                 ts_millis: TimestampMilli::now(),
             };
 

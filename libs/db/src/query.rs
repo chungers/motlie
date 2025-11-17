@@ -43,10 +43,7 @@ impl<T: QueryExecutor> QueryWithTimeout for T {
     type ResultType = T::Output;
 
     async fn result<P: Processor>(&self, processor: &P) -> Result<Self::ResultType> {
-        let result = tokio::time::timeout(
-            self.timeout(),
-            self.execute(processor.storage())
-        ).await;
+        let result = tokio::time::timeout(self.timeout(), self.execute(processor.storage())).await;
 
         match result {
             Ok(r) => r,
@@ -366,12 +363,10 @@ impl QueryExecutor for FragmentsByIdTimeRangeQuery {
             Bound::Included(start_ts) => {
                 schema::Fragments::key_to_bytes(&schema::FragmentCfKey(id, *start_ts))
             }
-            Bound::Excluded(start_ts) => {
-                schema::Fragments::key_to_bytes(&schema::FragmentCfKey(
-                    id,
-                    TimestampMilli(start_ts.0 + 1),
-                ))
-            }
+            Bound::Excluded(start_ts) => schema::Fragments::key_to_bytes(&schema::FragmentCfKey(
+                id,
+                TimestampMilli(start_ts.0 + 1),
+            )),
         };
 
         macro_rules! process_items {
@@ -500,7 +495,7 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameQuery {
         let key = schema::ForwardEdgeCfKey(
             schema::EdgeSourceId(source_id),
             schema::EdgeDestinationId(dest_id),
-            schema::EdgeName(name.clone()),
+            name.clone(),
         );
         let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
 
@@ -647,8 +642,8 @@ impl QueryExecutor for EdgesFromNodeQuery {
                 }
 
                 let dest_id = key.1 .0;
-                let edge_name = key.2 .0;
-                edges.push((source_id, EdgeName(edge_name), dest_id));
+                let edge_name = key.2;
+                edges.push((source_id, edge_name, dest_id));
             }
         } else {
             let txn_db = storage.transaction_db()?;
@@ -678,8 +673,8 @@ impl QueryExecutor for EdgesFromNodeQuery {
                 }
 
                 let dest_id = key.1 .0;
-                let edge_name = key.2 .0;
-                edges.push((source_id, EdgeName(edge_name), dest_id));
+                let edge_name = key.2;
+                edges.push((source_id, edge_name, dest_id));
             }
         }
 
@@ -761,8 +756,8 @@ impl QueryExecutor for EdgesToNodeQuery {
                 }
 
                 let source_id = key.1 .0;
-                let edge_name = key.2 .0;
-                edges.push((dest_id, EdgeName(edge_name), source_id));
+                let edge_name = key.2;
+                edges.push((dest_id, edge_name, source_id));
             }
         } else {
             let txn_db = storage.transaction_db()?;
@@ -792,8 +787,8 @@ impl QueryExecutor for EdgesToNodeQuery {
                 }
 
                 let source_id = key.1 .0;
-                let edge_name = key.2 .0;
-                edges.push((dest_id, EdgeName(edge_name), source_id));
+                let edge_name = key.2;
+                edges.push((dest_id, edge_name, source_id));
             }
         }
 
@@ -887,7 +882,7 @@ impl QueryExecutor for NodesByNameQuery {
                 }
 
                 let (key_bytes, _value_bytes) = item?;
-                let key: schema::NodeNamesCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
+                let key: schema::NodeNameCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let node_name = key.0;
@@ -926,7 +921,7 @@ impl QueryExecutor for NodesByNameQuery {
                 }
 
                 let (key_bytes, _value_bytes) = item?;
-                let key: schema::NodeNamesCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
+                let key: schema::NodeNameCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let node_name = key.0;
@@ -1010,8 +1005,8 @@ impl QueryExecutor for EdgesByNameQuery {
         let mut edges: Vec<(EdgeName, Id)> = Vec::new();
 
         let seek_key = if let Some((start_name, start_id)) = &self.start {
-            let mut bytes = Vec::with_capacity(start_name.0.len() + 16);
-            bytes.extend_from_slice(start_name.0.as_bytes());
+            let mut bytes = Vec::with_capacity(start_name.len() + 16);
+            bytes.extend_from_slice(start_name.as_bytes());
             bytes.extend_from_slice(&start_id.into_bytes());
             bytes
         } else {
@@ -1036,18 +1031,18 @@ impl QueryExecutor for EdgesByNameQuery {
                 }
 
                 let (key_bytes, _value_bytes) = item?;
-                let key: schema::EdgeNamesCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
+                let key: schema::EdgeNameCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let edge_name = &key.0;
                 let edge_id = key.1;
 
-                if !edge_name.0.starts_with(name) {
+                if !edge_name.starts_with(name) {
                     break;
                 }
 
                 if let Some((start_name, start_id)) = &self.start {
-                    if edge_name.0 == start_name.0 && edge_id == *start_id {
+                    if edge_name == start_name && edge_id == *start_id {
                         continue;
                     }
                 }
@@ -1075,18 +1070,18 @@ impl QueryExecutor for EdgesByNameQuery {
                 }
 
                 let (key_bytes, _value_bytes) = item?;
-                let key: schema::EdgeNamesCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
+                let key: schema::EdgeNameCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                 let edge_name = &key.0;
                 let edge_id = key.1;
 
-                if !edge_name.0.starts_with(name) {
+                if !edge_name.starts_with(name) {
                     break;
                 }
 
                 if let Some((start_name, start_id)) = &self.start {
-                    if edge_name.0 == start_name.0 && edge_id == *start_id {
+                    if edge_name == start_name && edge_id == *start_id {
                         continue;
                     }
                 }
@@ -1171,7 +1166,7 @@ mod tests {
     use crate::mutation::AddNode;
     use crate::schema::NodeSummary;
     use crate::writer::{create_mutation_writer, WriterConfig};
-    use crate::{Id, Storage, TimestampMilli};
+    use crate::{DataUrl, Id, Storage, TimestampMilli};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::time::Duration;
@@ -1238,7 +1233,7 @@ mod tests {
 
         // Verify the data matches what we inserted
         assert_eq!(returned_name, node_name);
-        assert!(returned_summary.content().is_ok());
+        assert!(returned_summary.decode_string().is_ok());
 
         // Drop reader to close channel
         drop(reader);
@@ -1264,7 +1259,7 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 Ok((
                     "should_not_get_here".to_string(),
-                    NodeSummary::new("Should not get here".to_string()),
+                    DataUrl::from_markdown("Should not get here"),
                 ))
             }
 

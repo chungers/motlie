@@ -94,7 +94,7 @@ mod tests {
                 source_node_id: Id::new(),
                 target_node_id: Id::new(),
                 ts_millis: TimestampMilli::now(),
-                name: crate::schema::EdgeName("connects to".to_string()),
+                name: "connects to".to_string(),
             })
             .await
             .unwrap();

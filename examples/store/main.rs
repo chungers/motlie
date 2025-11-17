@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use motlie_db::{
     create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdge,
-    AddFragment, AddNode, DataUrl, EdgeName, Id, TimestampMilli, WriterConfig,
+    AddFragment, AddNode, DataUrl, Id, TimestampMilli, WriterConfig,
 };
 use rocksdb::DB;
 use std::collections::{HashMap, HashSet};
@@ -213,7 +213,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     source_node_id: source_id,
                     target_node_id: target_id,
                     ts_millis: current_time,
-                    name: EdgeName(edge_name.to_string()),
+                    name: edge_name.to_string(),
                 };
 
                 // Create fragment for the edge
