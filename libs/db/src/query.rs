@@ -168,65 +168,9 @@ pub type EdgeByIdQuery = ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>;
 // because they have the same result type but different processing logic.
 // They are implemented as separate structs below.
 
-/// Sealed trait module to prevent external implementations
-mod sealed {
-    use crate::query::{DstId, SrcId};
-    use crate::schema::{EdgeName, EdgeSummary, NodeName, NodeSummary};
-    use crate::{FragmentContent, Id, TimestampMilli};
-
-    pub trait Queryable {}
-    impl Queryable for (NodeName, NodeSummary) {}
-    impl Queryable for (SrcId, DstId, EdgeName, EdgeSummary) {}
-    impl Queryable for Vec<(TimestampMilli, FragmentContent)> {}
-    impl Queryable for Vec<(Id, EdgeName, Id)> {} // Forward and reverse edges use same tuple type
-    impl Queryable for Vec<(NodeName, Id)> {}
-    impl Queryable for Vec<(EdgeName, Id)> {}
-}
-
-/// Trait for types that can be queried by ID
-#[async_trait::async_trait]
-pub trait ByIdQueryable: sealed::Queryable + Send + Sync + 'static {
-    /// Call the appropriate processor method for this type
-    async fn fetch_by_id<P: Processor>(
-        id: Id,
-        processor: &P,
-        query: &ByIdQuery<Self>,
-    ) -> Result<Self>
-    where
-        Self: Sized;
-}
-
-#[async_trait::async_trait]
-impl ByIdQueryable for (NodeName, NodeSummary) {
-    async fn fetch_by_id<P: Processor>(
-        _id: Id,
-        processor: &P,
-        query: &ByIdQuery<Self>,
-    ) -> Result<Self> {
-        processor.get_node_by_id(query).await
-    }
-}
-
-#[async_trait::async_trait]
-impl ByIdQueryable for (SrcId, DstId, EdgeName, EdgeSummary) {
-    async fn fetch_by_id<P: Processor>(
-        _id: Id,
-        processor: &P,
-        query: &ByIdQuery<Self>,
-    ) -> Result<Self> {
-        processor.get_edge_by_id(query).await
-    }
-}
-
-// Note: EdgesFromNodeByIdQuery and EdgesToNodeByIdQuery share the same result type
-// Vec<(Id, EdgeName, Id)>, but the semantics differ:
-// - EdgesFromNodeById returns (source_id, edge_name, dest_id)
-// - EdgesToNodeById returns (dest_id, edge_name, source_id)
-// The ByIdQueryable trait implementation is handled via the Processor trait methods
-
 /// Generic query to find an entity by its ID
 #[derive(Debug)]
-pub struct ByIdQuery<T: ByIdQueryable> {
+pub struct ByIdQuery<T: Send + Sync + 'static> {
     /// The entity ID to search for
     pub id: Id,
 
@@ -240,7 +184,7 @@ pub struct ByIdQuery<T: ByIdQueryable> {
     result_tx: oneshot::Sender<Result<T>>,
 }
 
-impl<T: ByIdQueryable> ByIdQuery<T> {
+impl<T: Send + Sync + 'static> ByIdQuery<T> {
     /// Create a new ByIdQuery
     pub fn new(id: Id, timeout: Duration, result_tx: oneshot::Sender<Result<T>>) -> Self {
         Self {
@@ -1160,61 +1104,13 @@ impl QueryExecutor for EdgesByNameQuery {
 }
 
 /// Trait for processing different types of queries
-#[async_trait::async_trait]
+///
+/// This trait provides access to storage. Query types implement QueryExecutor
+/// to execute themselves against storage, following the same pattern as mutations.
 pub trait Processor: Send + Sync {
     /// Get access to the underlying storage
-    /// This is the new simplified interface - query types implement QueryExecutor
-    /// to execute themselves against storage
+    /// Query types use this to execute themselves via QueryExecutor::execute()
     fn storage(&self) -> &Storage;
-
-    /// Get a node by its ID (returns name and summary)
-    async fn get_node_by_id(
-        &self,
-        query: &ByIdQuery<(NodeName, NodeSummary)>,
-    ) -> Result<(NodeName, NodeSummary)>;
-
-    /// Get an edge by its ID (returns topology and summary)
-    async fn get_edge_by_id(
-        &self,
-        query: &ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>,
-    ) -> Result<(SrcId, DstId, EdgeName, EdgeSummary)>;
-
-    /// Get an edge summary by source ID, destination ID, and name
-    /// Returns (edge_id, edge_summary)
-    async fn get_edge_summary_by_src_dst_name(
-        &self,
-        query: &EdgeSummaryBySrcDstNameQuery,
-    ) -> Result<(Id, EdgeSummary)>;
-
-    /// Get fragments by ID filtered by time range
-    async fn get_fragments_by_id_time_range(
-        &self,
-        query: &FragmentsByIdTimeRangeQuery,
-    ) -> Result<Vec<(TimestampMilli, FragmentContent)>>;
-
-    /// Get all edges emanating from a node by its ID
-    /// Returns (source_id, edge_name, dest_id) tuples sorted by RocksDB key order
-    async fn get_edges_from_node_by_id(
-        &self,
-        query: &EdgesFromNodeQuery,
-    ) -> Result<Vec<(SrcId, EdgeName, DstId)>>;
-
-    /// Get all edges terminating at a node by its ID
-    /// Returns (dest_id, edge_name, source_id) tuples sorted by RocksDB key order
-    async fn get_edges_to_node_by_id(
-        &self,
-        query: &EdgesToNodeQuery,
-    ) -> Result<Vec<(DstId, EdgeName, SrcId)>>;
-
-    /// Get nodes by name prefix scan
-    /// Returns Vec<(node_name, node_id)> sorted by RocksDB key order
-    async fn get_nodes_by_name(&self, query: &NodesByNameQuery) -> Result<Vec<(NodeName, Id)>>;
-
-    /// Get edges by name prefix scan
-    /// Returns Vec<(edge_name, edge_id)> sorted by RocksDB key order
-    /// Note: EdgeNames CF key is (name, dst_id, src_id, edge_id), so results
-    /// will be grouped by name, then ordered by destination, then source
-    async fn get_edges_by_name(&self, query: &EdgesByNameQuery) -> Result<Vec<(EdgeName, Id)>>;
 }
 
 /// Generic consumer that processes queries using a Processor
