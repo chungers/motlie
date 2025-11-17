@@ -667,11 +667,11 @@ mod tests {
         // 4. ([1..], [0..], "edge_c")
         // 5. ([1..], [1..], "edge_d")
 
-        assert_eq!(sorted_keys[0].1.0, "edge_a");
-        assert_eq!(sorted_keys[1].1.0, "edge_z");
-        assert_eq!(sorted_keys[2].1.0, "edge_b");
-        assert_eq!(sorted_keys[3].1.0, "edge_c");
-        assert_eq!(sorted_keys[4].1.0, "edge_d");
+        assert_eq!(sorted_keys[0].1 .0, "edge_a");
+        assert_eq!(sorted_keys[1].1 .0, "edge_z");
+        assert_eq!(sorted_keys[2].1 .0, "edge_b");
+        assert_eq!(sorted_keys[3].1 .0, "edge_c");
+        assert_eq!(sorted_keys[4].1 .0, "edge_d");
 
         // Verify that the serialized keys are actually in lexicographic order
         for i in 0..sorted_keys.len() - 1 {

@@ -22,7 +22,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use motlie_db::{
     create_mutation_writer, create_query_reader, spawn_graph_consumer, spawn_query_consumer,
-    AddEdge, AddNode, Id, ReaderConfig, TimestampMilli, WriterConfig,
+    AddEdge, AddNode, EdgeName, Id, ReaderConfig, TimestampMilli, WriterConfig,
 };
 use std::time::Duration;
 use tempfile::TempDir;
@@ -65,7 +65,7 @@ async fn create_test_db(
                 id: Id::new(),
                 source_node_id: src_id,
                 target_node_id: dst_id,
-                name: format!("edge_{}", j),
+                name: EdgeName(format!("edge_{}", j)),
                 ts_millis: TimestampMilli::now(),
             };
 
