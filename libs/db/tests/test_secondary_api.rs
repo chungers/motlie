@@ -26,6 +26,7 @@ async fn test_secondary_instance_basic() {
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
+            temporal_range: None,
         })
         .await
         .expect("Failed to add node");
@@ -61,7 +62,7 @@ async fn test_secondary_instance_basic() {
     let consumer_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &primary_path);
 
     // Query the node from secondary
-    let result = reader.node_by_id(node_id, Duration::from_secs(1)).await;
+    let result = reader.node_by_id(node_id, None, Duration::from_secs(1)).await;
 
     assert!(result.is_ok(), "Should be able to read from secondary");
     let (returned_name, _summary) = result.unwrap();
@@ -89,6 +90,7 @@ async fn test_secondary_catch_up_sees_new_writes() {
                 id: node1_id,
                 ts_millis: TimestampMilli::now(),
                 name: "node1".to_string(),
+                temporal_range: None,
             })
             .await
             .expect("Failed to add node1");
@@ -117,6 +119,7 @@ async fn test_secondary_catch_up_sees_new_writes() {
                 id: node2_id,
                 ts_millis: TimestampMilli::now(),
                 name: "node2".to_string(),
+                temporal_range: None,
             })
             .await
             .expect("Failed to add node2");

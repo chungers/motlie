@@ -57,6 +57,7 @@ async fn writer_task_shared_graph(
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
                 name: node_name.clone(),
+                temporal_range: None,
             })
             .await;
 
@@ -81,6 +82,7 @@ async fn writer_task_shared_graph(
                             target_node_id: target_id,
                             ts_millis: TimestampMilli::now(),
                             name: edge_name,
+                            temporal_range: None,
                         })
                         .await;
 
@@ -155,7 +157,7 @@ async fn reader_task_shared_graph(
             // Query node
             if let Some(node_id) = context.get_random_node_id().await {
                 let start = Instant::now();
-                let result = reader.node_by_id(node_id, Duration::from_secs(1)).await;
+                let result = reader.node_by_id(node_id, None, Duration::from_secs(1)).await;
                 let latency_us = start.elapsed().as_micros() as u64;
 
                 match result {
@@ -167,7 +169,7 @@ async fn reader_task_shared_graph(
             // Query edge
             if let Some(edge_id) = context.get_random_edge_id().await {
                 let start = Instant::now();
-                let result = reader.edge_by_id(edge_id, Duration::from_secs(1)).await;
+                let result = reader.edge_by_id(edge_id, None, Duration::from_secs(1)).await;
                 let latency_us = start.elapsed().as_micros() as u64;
 
                 match result {

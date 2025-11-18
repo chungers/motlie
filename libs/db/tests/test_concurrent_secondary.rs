@@ -150,7 +150,7 @@ async fn reader_task_with_secondary(
         if iteration % 2 == 0 {
             if let Some(node_id) = context.get_random_node_id().await {
                 let start = Instant::now();
-                let result = reader.node_by_id(node_id, Duration::from_secs(1)).await;
+                let result = reader.node_by_id(node_id, None, Duration::from_secs(1)).await;
                 let latency_us = start.elapsed().as_micros() as u64;
 
                 match result {
@@ -161,7 +161,7 @@ async fn reader_task_with_secondary(
         } else {
             if let Some(edge_id) = context.get_random_edge_id().await {
                 let start = Instant::now();
-                let result = reader.edge_by_id(edge_id, Duration::from_secs(1)).await;
+                let result = reader.edge_by_id(edge_id, None, Duration::from_secs(1)).await;
                 let latency_us = start.elapsed().as_micros() as u64;
 
                 match result {

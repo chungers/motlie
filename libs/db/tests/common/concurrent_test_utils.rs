@@ -176,6 +176,7 @@ pub async fn writer_task(
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
                 name: node_name.clone(),
+                temporal_range: None,
             })
             .await;
 
@@ -200,6 +201,7 @@ pub async fn writer_task(
                             target_node_id: target_id,
                             ts_millis: TimestampMilli::now(),
                             name: edge_name,
+                            temporal_range: None,
                         })
                         .await;
 

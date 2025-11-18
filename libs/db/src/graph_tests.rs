@@ -143,7 +143,6 @@ mod tests {
         // Close and wait
         drop(writer);
         consumer_handle.await.unwrap().unwrap();
-        temporal_range: None,
     }
 
     #[tokio::test]
@@ -1174,8 +1173,8 @@ mod tests {
         // Verify we can deserialize the value
         let value_bytes = result.unwrap();
         let value = Nodes::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
-        let node_name = &value.0;
-        let content = value.1.decode_string().expect("Failed to decode DataUrl");
+        let node_name = &value.1; // NodeName is now field 1 (after temporal_range)
+        let content = value.2.decode_string().expect("Failed to decode DataUrl"); // NodeSummary is field 2
         assert_eq!(node_name, "test_node", "Node name should match");
         assert!(
             content.contains("test_node"),
@@ -1423,8 +1422,8 @@ mod tests {
 
             let value_bytes = result.unwrap();
             let value = Edges::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
-            // EdgeCfValue is now (src_id, dst_id, name, summary), so .3 is the summary
-            let content = value.3.decode_string().expect("Failed to decode DataUrl");
+            // EdgeCfValue is now (temporal_range, src_id, name, dst_id, summary), so .4 is the summary
+            let content = value.4.decode_string().expect("Failed to decode DataUrl");
             assert!(
                 content.contains("test_edge"),
                 "Edge value should contain the edge name"
@@ -1552,7 +1551,7 @@ mod tests {
         // Verify we can deserialize the value
         let value_bytes = result.unwrap();
         let value = Fragments::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
-        let content = value.0.decode_string().expect("Failed to decode DataUrl");
+        let content = value.1.decode_string().expect("Failed to decode DataUrl"); // FragmentContent is field 1 (after temporal_range)
         assert_eq!(
             content, "This is test fragment content",
             "Fragment content should match"
@@ -1632,8 +1631,8 @@ mod tests {
                 .expect("Failed to query database");
             assert!(result.is_some(), "Node 1 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
-            assert_eq!(&value.0, "node_one", "Node name should match");
-            let content = value.1.decode_string().expect("Failed to decode DataUrl");
+            assert_eq!(&value.1, "node_one", "Node name should match"); // NodeName is field 1
+            let content = value.2.decode_string().expect("Failed to decode DataUrl"); // NodeSummary is field 2
             assert!(content.contains("node_one"));
         }
 
@@ -1646,8 +1645,8 @@ mod tests {
                 .expect("Failed to query database");
             assert!(result.is_some(), "Node 2 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
-            assert_eq!(&value.0, "node_two", "Node name should match");
-            let content = value.1.decode_string().expect("Failed to decode DataUrl");
+            assert_eq!(&value.1, "node_two", "Node name should match"); // NodeName is field 1
+            let content = value.2.decode_string().expect("Failed to decode DataUrl"); // NodeSummary is field 2
             assert!(content.contains("node_two"));
         }
 
@@ -1660,8 +1659,8 @@ mod tests {
                 .expect("Failed to query database");
             assert!(result.is_some(), "Node 3 should exist");
             let value = Nodes::value_from_bytes(&result.unwrap()).expect("Failed to deserialize");
-            assert_eq!(&value.0, "node_three", "Node name should match");
-            let content = value.1.decode_string().expect("Failed to decode DataUrl");
+            assert_eq!(&value.1, "node_three", "Node name should match"); // NodeName is field 1
+            let content = value.2.decode_string().expect("Failed to decode DataUrl"); // NodeSummary is field 2
             assert!(content.contains("node_three"));
         }
     }
@@ -2167,7 +2166,6 @@ mod tests {
 
         drop(reader);
         query_consumer_handle.await.unwrap().unwrap();
-        temporal_range: None,
     }
 
     #[tokio::test]
@@ -3614,7 +3612,6 @@ mod tests {
         let key_bytes = node_id.into_bytes();
         let value = db.get_cf(cf, key_bytes).unwrap();
         assert!(value.is_some(), "Node should be written to database");
-        temporal_range: None,
     }
 
     #[tokio::test]
@@ -3826,7 +3823,6 @@ mod tests {
                 name: format!("node_{}", i),
                 temporal_range: None,
             }));
-            temporal_range: None,
         }
 
         let start2 = Instant::now();
@@ -3874,7 +3870,6 @@ mod tests {
                 name: format!("node_{}", i),
                 temporal_range: None,
             }));
-            temporal_range: None,
         }
 
         // Add edges (connecting some nodes)
@@ -3887,7 +3882,6 @@ mod tests {
                 name: format!("edge_{}", i),
                 temporal_range: None,
             }));
-            temporal_range: None,
         }
 
         // Add fragments
@@ -3898,7 +3892,6 @@ mod tests {
                 content: crate::DataUrl::from_text(&format!("fragment_{}", i)),
                 temporal_range: None,
             }));
-            temporal_range: None,
         }
 
         // Send mixed batch
@@ -4131,7 +4124,8 @@ mod tests {
             "All returned nodes should be unique"
         );
 
-        // Query at t0 - should only get nodes 5-9 (5 nodes that start at t0)
+        // Query at t0 - should get nodes 5-9 (valid_between t0-t4) and 15-19 (valid_until t1)
+        // Total: 10 nodes valid at t0
         let page_t0 = reader
             .nodes_by_name(
                 "user_".to_string(),
@@ -4145,11 +4139,14 @@ mod tests {
 
         assert_eq!(
             page_t0.len(),
-            5,
-            "At t0, only nodes 5-9 should be valid"
+            10,
+            "At t0, nodes 5-9 (valid_between t0-t4) and 15-19 (valid_until t1) should be valid"
         );
+        // Sorted by name: user_05 through user_09, then user_15 through user_19
         assert_eq!(page_t0[0].0, "user_05");
         assert_eq!(page_t0[4].0, "user_09");
+        assert_eq!(page_t0[5].0, "user_15");
+        assert_eq!(page_t0[9].0, "user_19");
     }
 
     /// Test 2.2: Verify edges_by_name pagination correctly filters temporally invalid records

@@ -18,31 +18,37 @@ impl Default for WriterConfig {
     }
 }
 
-/// Handle for sending mutations to the writer with automatic batching.
+/// Handle for sending mutations to the writer with batching support.
 ///
 /// The `Writer` sends mutations through an MPSC channel as `Vec<Mutation>` to enable
 /// efficient transaction batching in downstream processors.
 ///
 /// # Batching Strategy
 ///
-/// Individual mutations sent via `add_node()`, `add_edge()`, etc. are automatically
-/// wrapped in a `Vec` with a single element. This ensures all code paths use the same
-/// batching infrastructure, allowing processors to handle both single and batched
-/// mutations uniformly.
+/// - Use `send()` to send a batch of mutations at once for maximum efficiency
+/// - Use helper methods (`add_node()`, `add_edge()`, etc.) for individual mutations,
+///   which are automatically wrapped in `vec![]` before being sent
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use motlie_db::{Writer, WriterConfig, AddNode, Id, TimestampMilli};
+/// use motlie_db::{Writer, WriterConfig, AddNode, Id, TimestampMilli, Mutation};
 ///
 /// let (writer, receiver) = create_mutation_writer(WriterConfig::default());
 ///
-/// // Send individual mutations (automatically batched)
+/// // Send a single mutation using helper method
 /// writer.add_node(AddNode {
 ///     id: Id::new(),
 ///     name: "Alice".to_string(),
 ///     ts_millis: TimestampMilli::now(),
+///     temporal_range: None,
 /// }).await?;
+///
+/// // Or send multiple mutations in a batch
+/// writer.send(vec![
+///     Mutation::AddNode(AddNode { /* ... */ }),
+///     Mutation::AddEdge(AddEdge { /* ... */ }),
+/// ]).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct Writer {
@@ -55,34 +61,34 @@ impl Writer {
         Writer { sender }
     }
 
-    /// Send a mutation to be processed.
+    /// Send a batch of mutations to be processed.
     ///
-    /// The mutation is automatically wrapped in a `Vec` for consistent batching.
-    pub async fn send(&self, mutation: Mutation) -> Result<()> {
+    /// Accepts a vector of mutations to enable efficient batching.
+    pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()> {
         self.sender
-            .send(vec![mutation])
+            .send(mutations)
             .await
-            .context("Failed to send mutation to writer queue")
+            .context("Failed to send mutations to writer queue")
     }
 
     /// Send an AddNode mutation
     pub async fn add_node(&self, args: AddNode) -> Result<()> {
-        self.send(Mutation::AddNode(args)).await
+        self.send(vec![Mutation::AddNode(args)]).await
     }
 
     /// Send an AddEdge mutation
     pub async fn add_edge(&self, args: AddEdge) -> Result<()> {
-        self.send(Mutation::AddEdge(args)).await
+        self.send(vec![Mutation::AddEdge(args)]).await
     }
 
     /// Send an AddFragment mutation
     pub async fn add_fragment(&self, args: AddFragment) -> Result<()> {
-        self.send(Mutation::AddFragment(args)).await
+        self.send(vec![Mutation::AddFragment(args)]).await
     }
 
     /// Send an Invalidate mutation
     pub async fn invalidate(&self, args: InvalidateArgs) -> Result<()> {
-        self.send(Mutation::Invalidate(args)).await
+        self.send(vec![Mutation::Invalidate(args)]).await
     }
 
     /// Check if the writer is still active (receiver hasn't been dropped)

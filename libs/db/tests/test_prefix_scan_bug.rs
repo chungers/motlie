@@ -65,6 +65,7 @@ async fn test_node_names_prefix_scan_comprehensive() {
                 id: *id,
                 name: name.to_string(),
                 ts_millis: TimestampMilli(1000),
+                temporal_range: None,
             })
             .await
             .expect("Failed to add node");
@@ -86,7 +87,7 @@ async fn test_node_names_prefix_scan_comprehensive() {
 
     // Query for nodes starting with "Shop"
     let result = reader
-        .nodes_by_name("Shop".to_string(), None, Some(100), Duration::from_secs(5))
+        .nodes_by_name("Shop".to_string(), None, Some(100), None, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -155,6 +156,7 @@ async fn test_node_names_edge_cases() {
                 id: *id,
                 name: name.to_string(),
                 ts_millis: TimestampMilli(1000),
+                temporal_range: None,
             })
             .await
             .expect("Failed to add node");
@@ -170,7 +172,7 @@ async fn test_node_names_edge_cases() {
 
     // Test 1: Single character prefix
     let result = reader
-        .nodes_by_name("a".to_string(), None, Some(100), Duration::from_secs(5))
+        .nodes_by_name("a".to_string(), None, Some(100), None, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -183,7 +185,7 @@ async fn test_node_names_edge_cases() {
 
     // Test 2: Very long name prefix
     let result = reader
-        .nodes_by_name("VeryLong".to_string(), None, Some(100), Duration::from_secs(5))
+        .nodes_by_name("VeryLong".to_string(), None, Some(100), None, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -191,7 +193,7 @@ async fn test_node_names_edge_cases() {
 
     // Test 3: UTF-8 with emoji
     let result = reader
-        .nodes_by_name("UTF8🔥".to_string(), None, Some(100), Duration::from_secs(5))
+        .nodes_by_name("UTF8🔥".to_string(), None, Some(100), None, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -215,6 +217,7 @@ async fn test_node_names_pagination() {
                 id: Id::new(),
                 name: format!("test_{:03}", i),
                 ts_millis: TimestampMilli(1000),
+                temporal_range: None,
             })
             .await
             .expect("Failed to add node");
@@ -230,7 +233,7 @@ async fn test_node_names_pagination() {
 
     // Page 1: Get first 10
     let page1 = reader
-        .nodes_by_name("test_".to_string(), None, Some(10), Duration::from_secs(5))
+        .nodes_by_name("test_".to_string(), None, Some(10), None, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -250,6 +253,7 @@ async fn test_node_names_pagination() {
             "test_".to_string(),
             Some((last_name.clone(), last_id)),
             Some(10),
+            None,
             Duration::from_secs(5),
         )
         .await
@@ -286,7 +290,7 @@ async fn test_node_names_pagination() {
 
     // Get all in one query to verify total
     let all = reader
-        .nodes_by_name("test_".to_string(), None, Some(100), Duration::from_secs(5))
+        .nodes_by_name("test_".to_string(), None, Some(100), None, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -317,6 +321,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
             id: src_node,
             name: "Source".to_string(),
             ts_millis: TimestampMilli(1000),
+            temporal_range: None,
         })
         .await
         .expect("Failed to add node");
@@ -326,6 +331,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
             id: dst_node,
             name: "Destination".to_string(),
             ts_millis: TimestampMilli(1000),
+            temporal_range: None,
         })
         .await
         .expect("Failed to add node");
@@ -349,6 +355,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
                 target_node_id: dst_node,
                 name: name.to_string(),
                 ts_millis: TimestampMilli(2000),
+                temporal_range: None,
             })
             .await
             .expect("Failed to add edge");
@@ -366,7 +373,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
 
     // Query for edges starting with "pay"
     let result = reader
-        .edges_by_name("pay".to_string(), None, Some(100), Duration::from_secs(5))
+        .edges_by_name("pay".to_string(), None, Some(100), None, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -475,6 +482,7 @@ async fn test_empty_prefix_returns_all() {
                 id: Id::new(),
                 name: name.to_string(),
                 ts_millis: TimestampMilli(1000),
+                temporal_range: None,
             })
             .await
             .expect("Failed to add node");
@@ -490,7 +498,7 @@ async fn test_empty_prefix_returns_all() {
 
     // Query with empty prefix
     let result = reader
-        .nodes_by_name("".to_string(), None, Some(100), Duration::from_secs(5))
+        .nodes_by_name("".to_string(), None, Some(100), None, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -515,6 +523,7 @@ async fn test_nonexistent_prefix_returns_empty() {
                 id: Id::new(),
                 name: name.to_string(),
                 ts_millis: TimestampMilli(1000),
+                temporal_range: None,
             })
             .await
             .expect("Failed to add node");
@@ -530,7 +539,7 @@ async fn test_nonexistent_prefix_returns_empty() {
 
     // Query with non-existent prefix
     let result = reader
-        .nodes_by_name("zebra".to_string(), None, Some(100), Duration::from_secs(5))
+        .nodes_by_name("zebra".to_string(), None, Some(100), None, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
