@@ -3949,4 +3949,749 @@ mod tests {
             assert!(found, "All fragments should be committed");
         }
     }
+
+    /// Test 2.1: Verify nodes_by_name pagination correctly filters temporally invalid records
+    #[tokio::test]
+    async fn test_nodes_by_name_pagination_filters_invalid_records() {
+        use crate::schema::ValidTemporalRange;
+        use crate::{create_query_reader, spawn_query_consumer, ReaderConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let writer_config = WriterConfig {
+            channel_buffer_size: 100,
+        };
+
+        let (writer, receiver) = create_mutation_writer(writer_config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, writer_config.clone(), &db_path);
+
+        // Define fixed timestamps for testing
+        let t0 = TimestampMilli(1000);
+        let t1 = TimestampMilli(2000);
+        let t2 = TimestampMilli(3000);
+        let t3 = TimestampMilli(4000);
+        let t4 = TimestampMilli(5000);
+
+        // Create 20 nodes with name prefix "user_" with different temporal ranges
+        let mut node_ids = Vec::new();
+
+        // Nodes 0-4: valid_between(t1, t3) - will be INVALID at t0, VALID at t2
+        for i in 0..5 {
+            let id = Id::new();
+            node_ids.push(id);
+            writer
+                .add_node(AddNode {
+                    id,
+                    name: format!("user_{:02}", i),
+                    ts_millis: TimestampMilli::now(),
+                    temporal_range: ValidTemporalRange::valid_between(t1, t3),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Nodes 5-9: valid_between(t0, t4) - will be VALID at t2
+        for i in 5..10 {
+            let id = Id::new();
+            node_ids.push(id);
+            writer
+                .add_node(AddNode {
+                    id,
+                    name: format!("user_{:02}", i),
+                    ts_millis: TimestampMilli::now(),
+                    temporal_range: ValidTemporalRange::valid_between(t0, t4),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Nodes 10-14: valid_from(t2) - will be VALID at t2 and after
+        for i in 10..15 {
+            let id = Id::new();
+            node_ids.push(id);
+            writer
+                .add_node(AddNode {
+                    id,
+                    name: format!("user_{:02}", i),
+                    ts_millis: TimestampMilli::now(),
+                    temporal_range: ValidTemporalRange::valid_from(t2),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Nodes 15-19: valid_until(t1) - will be INVALID at t2 (expired)
+        for i in 15..20 {
+            let id = Id::new();
+            node_ids.push(id);
+            writer
+                .add_node(AddNode {
+                    id,
+                    name: format!("user_{:02}", i),
+                    ts_millis: TimestampMilli::now(),
+                    temporal_range: ValidTemporalRange::valid_until(t1),
+                })
+                .await
+                .unwrap();
+        }
+
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Set up reader
+        let reader_config = ReaderConfig::default();
+        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let _query_handle = spawn_query_consumer(query_receiver, reader_config, &db_path);
+
+        // Query at t2 - should get nodes 0-14 (15 nodes total)
+        // First page: limit 5
+        let page1 = reader
+            .nodes_by_name(
+                "user_".to_string(),
+                None,
+                Some(5),
+                Some(t2),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page1.len(), 5, "First page should return 5 nodes");
+        // Should be user_00, user_01, user_02, user_03, user_04 (sorted by name)
+        assert_eq!(page1[0].0, "user_00");
+        assert_eq!(page1[4].0, "user_04");
+
+        // Second page
+        let last_page1 = page1.last().unwrap().clone();
+        let page2 = reader
+            .nodes_by_name(
+                "user_".to_string(),
+                Some(last_page1),
+                Some(5),
+                Some(t2),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page2.len(), 5, "Second page should return 5 nodes");
+        assert_eq!(page2[0].0, "user_05");
+        assert_eq!(page2[4].0, "user_09");
+
+        // Third page
+        let last_page2 = page2.last().unwrap().clone();
+        let page3 = reader
+            .nodes_by_name(
+                "user_".to_string(),
+                Some(last_page2),
+                Some(5),
+                Some(t2),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page3.len(), 5, "Third page should return 5 nodes");
+        assert_eq!(page3[0].0, "user_10");
+        assert_eq!(page3[4].0, "user_14");
+
+        // Fourth page - should be empty (nodes 15-19 are expired at t2)
+        let last_page3 = page3.last().unwrap().clone();
+        let page4 = reader
+            .nodes_by_name(
+                "user_".to_string(),
+                Some(last_page3),
+                Some(5),
+                Some(t2),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            page4.len(),
+            0,
+            "Fourth page should be empty (all remaining nodes expired)"
+        );
+
+        // Verify total count
+        let all_nodes: Vec<_> = page1
+            .iter()
+            .chain(page2.iter())
+            .chain(page3.iter())
+            .collect();
+        assert_eq!(all_nodes.len(), 15, "Should get 15 valid nodes total at t2");
+
+        // Verify no duplicates
+        let unique_ids: std::collections::HashSet<_> = all_nodes.iter().map(|(_, id)| id).collect();
+        assert_eq!(
+            unique_ids.len(),
+            15,
+            "All returned nodes should be unique"
+        );
+
+        // Query at t0 - should only get nodes 5-9 (5 nodes that start at t0)
+        let page_t0 = reader
+            .nodes_by_name(
+                "user_".to_string(),
+                None,
+                Some(20),
+                Some(t0),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            page_t0.len(),
+            5,
+            "At t0, only nodes 5-9 should be valid"
+        );
+        assert_eq!(page_t0[0].0, "user_05");
+        assert_eq!(page_t0[4].0, "user_09");
+    }
+
+    /// Test 2.2: Verify edges_by_name pagination correctly filters temporally invalid records
+    #[tokio::test]
+    async fn test_edges_by_name_pagination_filters_invalid_records() {
+        use crate::schema::ValidTemporalRange;
+        use crate::{create_query_reader, spawn_query_consumer, ReaderConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let writer_config = WriterConfig {
+            channel_buffer_size: 100,
+        };
+
+        let (writer, receiver) = create_mutation_writer(writer_config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, writer_config.clone(), &db_path);
+
+        // Define fixed timestamps
+        let t0 = TimestampMilli(1000);
+        let t1 = TimestampMilli(2000);
+        let t2 = TimestampMilli(3000);
+        let t3 = TimestampMilli(4000);
+        let t4 = TimestampMilli(5000);
+
+        // Create source and target nodes
+        let src_node = Id::new();
+        let dst_node = Id::new();
+
+        writer
+            .add_node(AddNode {
+                id: src_node,
+                name: "source".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: None,
+            })
+            .await
+            .unwrap();
+
+        writer
+            .add_node(AddNode {
+                id: dst_node,
+                name: "destination".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: None,
+            })
+            .await
+            .unwrap();
+
+        // Create 20 edges with name "follows" with different temporal ranges
+        let mut edge_ids = Vec::new();
+
+        // Edges 0-4: valid_between(t1, t3) - VALID at t2
+        for i in 0..5 {
+            let id = Id::new();
+            edge_ids.push(id);
+            writer
+                .add_edge(AddEdge {
+                    id,
+                    source_node_id: src_node,
+                    target_node_id: dst_node,
+                    name: format!("follows_{:02}", i),
+                    ts_millis: TimestampMilli::now(),
+                    temporal_range: ValidTemporalRange::valid_between(t1, t3),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Edges 5-9: valid_between(t0, t4) - VALID at t2
+        for i in 5..10 {
+            let id = Id::new();
+            edge_ids.push(id);
+            writer
+                .add_edge(AddEdge {
+                    id,
+                    source_node_id: src_node,
+                    target_node_id: dst_node,
+                    name: format!("follows_{:02}", i),
+                    ts_millis: TimestampMilli::now(),
+                    temporal_range: ValidTemporalRange::valid_between(t0, t4),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Edges 10-14: valid_from(t2) - VALID at t2 and after
+        for i in 10..15 {
+            let id = Id::new();
+            edge_ids.push(id);
+            writer
+                .add_edge(AddEdge {
+                    id,
+                    source_node_id: src_node,
+                    target_node_id: dst_node,
+                    name: format!("follows_{:02}", i),
+                    ts_millis: TimestampMilli::now(),
+                    temporal_range: ValidTemporalRange::valid_from(t2),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Edges 15-19: valid_until(t1) - INVALID at t2 (expired)
+        for i in 15..20 {
+            let id = Id::new();
+            edge_ids.push(id);
+            writer
+                .add_edge(AddEdge {
+                    id,
+                    source_node_id: src_node,
+                    target_node_id: dst_node,
+                    name: format!("follows_{:02}", i),
+                    ts_millis: TimestampMilli::now(),
+                    temporal_range: ValidTemporalRange::valid_until(t1),
+                })
+                .await
+                .unwrap();
+        }
+
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Set up reader
+        let reader_config = ReaderConfig::default();
+        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let _query_handle = spawn_query_consumer(query_receiver, reader_config, &db_path);
+
+        // Query at t2 - should get edges 0-14 (15 edges total)
+        let page1 = reader
+            .edges_by_name(
+                "follows_".to_string(),
+                None,
+                Some(5),
+                Some(t2),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page1.len(), 5, "First page should return 5 edges");
+
+        // Second page
+        let last_page1 = page1.last().unwrap().clone();
+        let page2 = reader
+            .edges_by_name(
+                "follows_".to_string(),
+                Some(last_page1),
+                Some(5),
+                Some(t2),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page2.len(), 5, "Second page should return 5 edges");
+
+        // Third page
+        let last_page2 = page2.last().unwrap().clone();
+        let page3 = reader
+            .edges_by_name(
+                "follows_".to_string(),
+                Some(last_page2),
+                Some(5),
+                Some(t2),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page3.len(), 5, "Third page should return 5 edges");
+
+        // Fourth page - should be empty
+        let last_page3 = page3.last().unwrap().clone();
+        let page4 = reader
+            .edges_by_name(
+                "follows_".to_string(),
+                Some(last_page3),
+                Some(5),
+                Some(t2),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(page4.len(), 0, "Fourth page should be empty");
+
+        // Verify total and uniqueness
+        let all_edges: Vec<_> = page1
+            .iter()
+            .chain(page2.iter())
+            .chain(page3.iter())
+            .collect();
+        assert_eq!(all_edges.len(), 15, "Should get 15 valid edges total at t2");
+
+        let unique_ids: std::collections::HashSet<_> = all_edges.iter().map(|(_, id)| id).collect();
+        assert_eq!(
+            unique_ids.len(),
+            15,
+            "All returned edges should be unique"
+        );
+    }
+
+    /// Test 1.1: Verify node_by_id with explicit reference times
+    #[tokio::test]
+    async fn test_node_by_id_temporal_validity_with_explicit_time() {
+        use crate::schema::ValidTemporalRange;
+        use crate::{create_query_reader, spawn_query_consumer, ReaderConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, receiver) = create_mutation_writer(writer_config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, writer_config.clone(), &db_path);
+
+        // Define timestamps
+        let t0 = TimestampMilli(1000);
+        let t1 = TimestampMilli(2000);
+        let t2 = TimestampMilli(3000);
+        let t3 = TimestampMilli(4000);
+        let t4 = TimestampMilli(5000);
+
+        // Create node valid_between(t1, t3)
+        let node_id = Id::new();
+        writer
+            .add_node(AddNode {
+                id: node_id,
+                name: "temporal_node".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_between(t1, t3),
+            })
+            .await
+            .unwrap();
+
+        // Create node without temporal range (always valid)
+        let always_valid_node = Id::new();
+        writer
+            .add_node(AddNode {
+                id: always_valid_node,
+                name: "always_valid_node".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: None,
+            })
+            .await
+            .unwrap();
+
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Set up reader
+        let reader_config = ReaderConfig::default();
+        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let _query_handle = spawn_query_consumer(query_receiver, reader_config, &db_path);
+
+        // Query at t0 (before valid range) - should fail
+        let result_t0 = reader
+            .node_by_id(node_id, Some(t0), Duration::from_secs(5))
+            .await;
+        assert!(
+            result_t0.is_err(),
+            "Query at t0 should fail (before valid range)"
+        );
+
+        // Query at t1 (start of range, inclusive) - should succeed
+        let result_t1 = reader
+            .node_by_id(node_id, Some(t1), Duration::from_secs(5))
+            .await;
+        assert!(
+            result_t1.is_ok(),
+            "Query at t1 should succeed (inclusive start)"
+        );
+        assert_eq!(result_t1.unwrap().0, "temporal_node");
+
+        // Query at t2 (during valid range) - should succeed
+        let result_t2 = reader
+            .node_by_id(node_id, Some(t2), Duration::from_secs(5))
+            .await;
+        assert!(
+            result_t2.is_ok(),
+            "Query at t2 should succeed (within range)"
+        );
+
+        // Query at t3 (end of range, exclusive) - should fail
+        let result_t3 = reader
+            .node_by_id(node_id, Some(t3), Duration::from_secs(5))
+            .await;
+        assert!(
+            result_t3.is_err(),
+            "Query at t3 should fail (exclusive end)"
+        );
+
+        // Query at t4 (after valid range) - should fail
+        let result_t4 = reader
+            .node_by_id(node_id, Some(t4), Duration::from_secs(5))
+            .await;
+        assert!(
+            result_t4.is_err(),
+            "Query at t4 should fail (after valid range)"
+        );
+
+        // Query always valid node at any time - should always succeed
+        for t in [t0, t1, t2, t3, t4] {
+            let result = reader
+                .node_by_id(always_valid_node, Some(t), Duration::from_secs(5))
+                .await;
+            assert!(
+                result.is_ok(),
+                "Node without temporal range should be valid at any time"
+            );
+        }
+    }
+
+    /// Test 3.1: Verify edges_from_node respects temporal validity
+    #[tokio::test]
+    async fn test_edges_from_node_temporal_filtering() {
+        use crate::schema::ValidTemporalRange;
+        use crate::{create_query_reader, spawn_query_consumer, ReaderConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, receiver) = create_mutation_writer(writer_config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, writer_config.clone(), &db_path);
+
+        // Define timestamps
+        let t0 = TimestampMilli(1000);
+        let t1 = TimestampMilli(2000);
+        let t2 = TimestampMilli(3000);
+        let t3 = TimestampMilli(4000);
+        let t10 = TimestampMilli(10000);
+
+        // Create source and target nodes
+        let node_a = Id::new();
+        let node_b = Id::new();
+
+        writer
+            .add_node(AddNode {
+                id: node_a,
+                name: "node_a".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: None,
+            })
+            .await
+            .unwrap();
+
+        writer
+            .add_node(AddNode {
+                id: node_b,
+                name: "node_b".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: None,
+            })
+            .await
+            .unwrap();
+
+        // Create 5 edges from node_a with different temporal ranges
+        let edge1 = Id::new();
+        writer
+            .add_edge(AddEdge {
+                id: edge1,
+                source_node_id: node_a,
+                target_node_id: node_b,
+                name: "edge1".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_between(t1, t3), // Valid at t2
+            })
+            .await
+            .unwrap();
+
+        let edge2 = Id::new();
+        writer
+            .add_edge(AddEdge {
+                id: edge2,
+                source_node_id: node_a,
+                target_node_id: node_b,
+                name: "edge2".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_from(t0), // Valid at t2
+            })
+            .await
+            .unwrap();
+
+        let edge3 = Id::new();
+        writer
+            .add_edge(AddEdge {
+                id: edge3,
+                source_node_id: node_a,
+                target_node_id: node_b,
+                name: "edge3".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_until(t2), // NOT valid at t2 (exclusive)
+            })
+            .await
+            .unwrap();
+
+        let edge4 = Id::new();
+        writer
+            .add_edge(AddEdge {
+                id: edge4,
+                source_node_id: node_a,
+                target_node_id: node_b,
+                name: "edge4".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: None, // Always valid
+            })
+            .await
+            .unwrap();
+
+        let edge5 = Id::new();
+        writer
+            .add_edge(AddEdge {
+                id: edge5,
+                source_node_id: node_a,
+                target_node_id: node_b,
+                name: "edge5".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_from(t10), // Future, NOT valid at t2
+            })
+            .await
+            .unwrap();
+
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Set up reader
+        let reader_config = ReaderConfig::default();
+        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let _query_handle = spawn_query_consumer(query_receiver, reader_config, &db_path);
+
+        // Query edges from node_a at t2
+        let edges = reader
+            .edges_from_node_by_id(node_a, Some(t2), Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Should return: edge1 (valid t1-t3), edge2 (valid from t0), edge4 (always)
+        // Should NOT return: edge3 (expired at t2), edge5 (future)
+        assert_eq!(edges.len(), 3, "Should return 3 valid edges at t2");
+
+        let edge_names: Vec<String> = edges.iter().map(|(_, name, _)| name.clone()).collect();
+        assert!(edge_names.contains(&"edge1".to_string()));
+        assert!(edge_names.contains(&"edge2".to_string()));
+        assert!(edge_names.contains(&"edge4".to_string()));
+        assert!(!edge_names.contains(&"edge3".to_string()));
+        assert!(!edge_names.contains(&"edge5".to_string()));
+    }
+
+    /// Test 4.1: Verify temporal boundary semantics [start, end)
+    #[tokio::test]
+    async fn test_temporal_boundary_inclusive_start_exclusive_end() {
+        use crate::schema::ValidTemporalRange;
+        use crate::{create_query_reader, spawn_query_consumer, ReaderConfig};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, receiver) = create_mutation_writer(writer_config.clone());
+        let consumer_handle = spawn_graph_consumer(receiver, writer_config.clone(), &db_path);
+
+        let t_start = TimestampMilli(1000);
+        let t_end = TimestampMilli(2000);
+
+        let node_id = Id::new();
+        writer
+            .add_node(AddNode {
+                id: node_id,
+                name: "boundary_test".to_string(),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_between(t_start, t_end),
+            })
+            .await
+            .unwrap();
+
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let reader_config = ReaderConfig::default();
+        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let _query_handle = spawn_query_consumer(query_receiver, reader_config, &db_path);
+
+        // Test boundary conditions
+        let before = TimestampMilli(999);
+        let at_start = TimestampMilli(1000);
+        let middle = TimestampMilli(1500);
+        let at_end = TimestampMilli(2000);
+        let after = TimestampMilli(2001);
+
+        // Before start - INVALID
+        assert!(
+            reader
+                .node_by_id(node_id, Some(before), Duration::from_secs(5))
+                .await
+                .is_err(),
+            "Query before start should be invalid"
+        );
+
+        // At start (inclusive) - VALID
+        assert!(
+            reader
+                .node_by_id(node_id, Some(at_start), Duration::from_secs(5))
+                .await
+                .is_ok(),
+            "Query at start should be valid (inclusive)"
+        );
+
+        // Middle - VALID
+        assert!(
+            reader
+                .node_by_id(node_id, Some(middle), Duration::from_secs(5))
+                .await
+                .is_ok(),
+            "Query in middle should be valid"
+        );
+
+        // At end (exclusive) - INVALID
+        assert!(
+            reader
+                .node_by_id(node_id, Some(at_end), Duration::from_secs(5))
+                .await
+                .is_err(),
+            "Query at end should be invalid (exclusive)"
+        );
+
+        // After end - INVALID
+        assert!(
+            reader
+                .node_by_id(node_id, Some(after), Duration::from_secs(5))
+                .await
+                .is_err(),
+            "Query after end should be invalid"
+        );
+    }
 }
