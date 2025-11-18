@@ -24,6 +24,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
+            temporal_range: None,
         };
         writer.add_node(node_args).await.unwrap();
 
@@ -31,6 +32,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli(1234567890),
             content: crate::DataUrl::from_text("This is a test fragment with some searchable content"),
+            temporal_range: None,
         };
         writer.add_fragment(fragment_args).await.unwrap();
 
@@ -61,6 +63,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli(1234567890),
             content: crate::DataUrl::from_text("The quick brown fox jumps over the lazy dog. This is a longer text fragment that would benefit from BM25 scoring with custom parameters."),
+            temporal_range: None,
         };
         writer.add_fragment(fragment_args).await.unwrap();
 
@@ -84,6 +87,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "search node".to_string(),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -95,6 +99,7 @@ mod tests {
                 target_node_id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "connects to".to_string(),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -104,6 +109,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 content: crate::DataUrl::from_text("This fragment contains searchable text that should be indexed using BM25 algorithm for effective information retrieval."),
+                temporal_range: None,
             })
             .await
             .unwrap();
@@ -161,6 +167,7 @@ mod tests {
                     "Fragment {} with searchable content for full-text indexing",
                     i
                 )),
+                temporal_range: None,
             };
             writer.add_fragment(fragment_args).await.unwrap();
         }

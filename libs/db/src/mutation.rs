@@ -21,6 +21,9 @@ pub struct AddNode {
 
     /// The name of the Node
     pub name: schema::NodeName,
+
+    /// The temporal validity range for this node
+    pub temporal_range: Option<schema::ValidTemporalRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +42,9 @@ pub struct AddEdge {
 
     /// The name of the Edge
     pub name: schema::EdgeName,
+
+    /// The temporal validity range for this edge
+    pub temporal_range: Option<schema::ValidTemporalRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +57,9 @@ pub struct AddFragment {
 
     /// The body of the Fragment
     pub content: crate::DataUrl,
+
+    /// The temporal validity range for this fragment
+    pub temporal_range: Option<schema::ValidTemporalRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -395,6 +404,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
+            temporal_range: None,
         };
         writer.add_node(node_args).await.unwrap();
 
@@ -458,6 +468,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
+                temporal_range: None,
             };
             writer.add_node(node_args).await.unwrap();
         }

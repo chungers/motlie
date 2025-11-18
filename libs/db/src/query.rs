@@ -157,6 +157,12 @@ impl QueryProcessor for Query {
     }
 }
 
+/// Id of edge source node
+pub type SrcId = Id;
+
+/// Id of edge destination node
+pub type DstId = Id;
+
 /// Type alias for querying node by ID (returns name and summary)
 pub type NodeByIdQuery = ByIdQuery<(NodeName, NodeSummary)>;
 /// Type alias for querying edge by ID (returns topology and summary)
@@ -171,109 +177,17 @@ pub struct ByIdQuery<T: Send + Sync + 'static> {
     /// The entity ID to search for
     pub id: Id,
 
-    /// Timestamp of when the query was created
-    pub ts_millis: TimestampMilli,
-
     /// Timeout for this query
     pub timeout: Duration,
 
+    /// Reference timestamp for temporal validity checks
+    /// If None, defaults to current time in the query executor
+    /// Temporal validity is always checked against the ValidTemporalRange in the record
+    /// Records without a ValidTemporalRange (None) are considered always valid
+    pub reference_ts_millis: Option<TimestampMilli>,
+
     /// Channel to send the result back to the client
     result_tx: oneshot::Sender<Result<T>>,
-}
-
-impl<T: Send + Sync + 'static> ByIdQuery<T> {
-    /// Create a new ByIdQuery
-    pub fn new(id: Id, timeout: Duration, result_tx: oneshot::Sender<Result<T>>) -> Self {
-        Self {
-            id,
-            ts_millis: TimestampMilli::now(),
-            timeout,
-            result_tx,
-        }
-    }
-
-    /// Send the result back to the client (consumes self)
-    pub fn send_result(self, result: Result<T>) {
-        // Ignore error if receiver was dropped (client timeout/cancellation)
-        let _ = self.result_tx.send(result);
-    }
-}
-
-/// Implement QueryExecutor for NodeByIdQuery
-#[async_trait::async_trait]
-impl QueryExecutor for NodeByIdQuery {
-    type Output = (NodeName, NodeSummary);
-
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let id = self.id;
-
-        let key = schema::NodeCfKey(id);
-        let key_bytes = schema::Nodes::key_to_bytes(&key);
-
-        // Handle both readonly and readwrite modes
-        let value_bytes = if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-            })?;
-            db.get_cf(cf, key_bytes)?
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-            })?;
-            txn_db.get_cf(cf, key_bytes)?
-        };
-
-        let value_bytes = value_bytes.ok_or_else(|| anyhow::anyhow!("Node not found: {}", id))?;
-
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-        Ok((value.0, value.1))
-    }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
-}
-
-/// Implement QueryExecutor for EdgeByIdQuery
-#[async_trait::async_trait]
-impl QueryExecutor for EdgeByIdQuery {
-    type Output = (SrcId, DstId, EdgeName, EdgeSummary);
-
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let id = self.id;
-        let key = schema::EdgeCfKey(id);
-        let key_bytes = schema::Edges::key_to_bytes(&key);
-
-        // Handle both readonly and readwrite modes
-        let value_bytes = if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
-            })?;
-            db.get_cf(cf, key_bytes)?
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let cf = txn_db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
-            })?;
-            txn_db.get_cf(cf, key_bytes)?
-        };
-
-        let value_bytes = value_bytes.ok_or_else(|| anyhow::anyhow!("Edge not found: {}", id))?;
-
-        let value: schema::EdgeCfValue = schema::Edges::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-        // EdgeCfValue is now (SrcId, EdgeName, DstId, EdgeSummary)
-        // Return as: (source_id, dest_id, edge_name, summary)
-        Ok((value.0, value.2, value.1, value.3))
-    }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
 /// Query to scan fragments by ID with time range filtering
@@ -288,14 +202,155 @@ pub struct FragmentsByIdTimeRangeQuery {
     /// Use std::ops::Bound for idiomatic Rust range specification
     pub time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
 
-    /// Timestamp of when the query was created
-    pub ts_millis: TimestampMilli,
+    /// Timeout for this query
+    pub timeout: Duration,
+
+    /// Reference timestamp for temporal validity checks
+    /// If None, defaults to current time in the query executor
+    /// Temporal validity is always checked against the ValidTemporalRange in the record
+    /// Records without a ValidTemporalRange (None) are considered always valid
+    pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Channel to send the result back to the client
+    result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
+}
+
+/// Query to find an edge by source ID, destination ID, and name
+#[derive(Debug)]
+pub struct EdgeSummaryBySrcDstNameQuery {
+    /// Source node ID
+    pub source_id: Id,
+
+    /// Destination node ID
+    pub dest_id: Id,
+
+    /// Edge name
+    pub name: String,
 
     /// Timeout for this query
     pub timeout: Duration,
 
+    /// Reference timestamp for temporal validity checks
+    /// If None, defaults to current time in the query executor
+    /// Temporal validity is always checked against the ValidTemporalRange in the record
+    /// Records without a ValidTemporalRange (None) are considered always valid
+    pub reference_ts_millis: Option<TimestampMilli>,
+
     /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
+    result_tx: oneshot::Sender<Result<(Id, EdgeSummary)>>,
+}
+
+/// Query to find all edges emanating from a node by its ID
+#[derive(Debug)]
+pub struct EdgesFromNodeQuery {
+    /// The node ID to search for
+    pub id: Id,
+
+    /// Timeout for this query
+    pub timeout: Duration,
+
+    /// Reference timestamp for temporal validity checks
+    /// If None, defaults to current time in the query executor
+    /// Temporal validity is always checked against the ValidTemporalRange in the record
+    /// Records without a ValidTemporalRange (None) are considered always valid
+    pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Channel to send the result back to the client
+    result_tx: oneshot::Sender<Result<Vec<(SrcId, EdgeName, DstId)>>>,
+}
+
+/// Query to find all edges terminating at a node by its ID
+#[derive(Debug)]
+pub struct EdgesToNodeQuery {
+    /// The node ID to search for
+    pub id: DstId,
+
+    /// Timeout for this query
+    pub timeout: Duration,
+
+    /// Reference timestamp for temporal validity checks
+    /// If None, defaults to current time in the query executor
+    /// Temporal validity is always checked against the ValidTemporalRange in the record
+    /// Records without a ValidTemporalRange (None) are considered always valid
+    pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Channel to send the result back to the client
+    result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
+}
+
+/// Query to find nodes by name prefix
+#[derive(Debug)]
+pub struct NodesByNameQuery {
+    /// The node name or prefix to search for
+    pub name: NodeName,
+
+    /// Optional start position for pagination (exclusive): (last_name, last_id)
+    /// For prefix queries, this should be the full name and ID of the last result from the previous page
+    pub start: Option<(NodeName, Id)>,
+
+    /// Maximum number of results to return
+    pub limit: Option<usize>,
+
+    /// Timeout for this query
+    pub timeout: Duration,
+
+    /// Reference timestamp for temporal validity checks
+    /// If None, defaults to current time in the query executor
+    /// Temporal validity is always checked against the ValidTemporalRange in the record
+    /// Records without a ValidTemporalRange (None) are considered always valid
+    pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Channel to send the result back to the client
+    result_tx: oneshot::Sender<Result<Vec<(NodeName, Id)>>>,
+}
+
+/// Query to find edges by name prefix
+#[derive(Debug)]
+pub struct EdgesByNameQuery {
+    /// The edge name or prefix to search for
+    pub name: String,
+
+    /// Optional start position for pagination (exclusive): (last_name, last_id)
+    /// For prefix queries, this should be the full name and ID of the last result from the previous page
+    pub start: Option<(EdgeName, Id)>,
+
+    /// The maximum number of results to return
+    pub limit: Option<usize>,
+
+    /// Timeout for this query
+    pub timeout: Duration,
+
+    /// Reference timestamp for temporal validity checks
+    /// If None, defaults to current time in the query executor
+    /// Temporal validity is always checked against the ValidTemporalRange in the record
+    /// Records without a ValidTemporalRange (None) are considered always valid
+    pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Channel to send the result back to the client
+    result_tx: oneshot::Sender<Result<Vec<(EdgeName, Id)>>>,
+}
+
+impl<T: Send + Sync + 'static> ByIdQuery<T> {
+    /// Create a new ByIdQuery
+    pub fn new(
+        id: Id,
+        timeout: Duration,
+        reference_ts_millis: Option<TimestampMilli>,
+        result_tx: oneshot::Sender<Result<T>>,
+    ) -> Self {
+        Self {
+            id,
+            timeout,
+            reference_ts_millis,
+            result_tx,
+        }
+    }
+
+    /// Send the result back to the client (consumes self)
+    pub fn send_result(self, result: Result<T>) {
+        // Ignore error if receiver was dropped (client timeout/cancellation)
+        let _ = self.result_tx.send(result);
+    }
 }
 
 impl FragmentsByIdTimeRangeQuery {
@@ -304,13 +359,14 @@ impl FragmentsByIdTimeRangeQuery {
         id: Id,
         time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
         timeout: Duration,
+        reference_ts_millis: Option<TimestampMilli>,
         result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
     ) -> Self {
         Self {
             id,
             time_range,
-            ts_millis: TimestampMilli::now(),
             timeout,
+            reference_ts_millis,
             result_tx,
         }
     }
@@ -341,6 +397,219 @@ impl FragmentsByIdTimeRangeQuery {
     }
 }
 
+impl EdgeSummaryBySrcDstNameQuery {
+    pub fn new(
+        source_id: SrcId,
+        dest_id: DstId,
+        name: String,
+        timeout: Duration,
+        reference_ts_millis: Option<TimestampMilli>,
+        result_tx: oneshot::Sender<Result<(Id, EdgeSummary)>>,
+    ) -> Self {
+        Self {
+            source_id,
+            dest_id,
+            name,
+            timeout,
+            reference_ts_millis,
+            result_tx,
+        }
+    }
+
+    pub fn send_result(self, result: Result<(Id, EdgeSummary)>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+impl EdgesFromNodeQuery {
+    pub fn new(
+        id: Id,
+        timeout: Duration,
+        reference_ts_millis: Option<TimestampMilli>,
+        result_tx: oneshot::Sender<Result<Vec<(SrcId, EdgeName, DstId)>>>,
+    ) -> Self {
+        Self {
+            id,
+            timeout,
+            reference_ts_millis,
+            result_tx,
+        }
+    }
+
+    pub fn send_result(self, result: Result<Vec<(SrcId, EdgeName, DstId)>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+impl EdgesToNodeQuery {
+    pub fn new(
+        id: DstId,
+        timeout: Duration,
+        reference_ts_millis: Option<TimestampMilli>,
+        result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
+    ) -> Self {
+        Self {
+            id,
+            timeout,
+            reference_ts_millis,
+            result_tx,
+        }
+    }
+
+    pub fn send_result(self, result: Result<Vec<(DstId, EdgeName, SrcId)>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+impl NodesByNameQuery {
+    pub fn new(
+        name: NodeName,
+        start: Option<(NodeName, Id)>,
+        limit: Option<usize>,
+        timeout: Duration,
+        reference_ts_millis: Option<TimestampMilli>,
+        result_tx: oneshot::Sender<Result<Vec<(NodeName, Id)>>>,
+    ) -> Self {
+        Self {
+            name,
+            start,
+            limit,
+            timeout,
+            reference_ts_millis,
+            result_tx,
+        }
+    }
+
+    pub fn send_result(self, result: Result<Vec<(NodeName, Id)>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+impl EdgesByNameQuery {
+    pub fn new(
+        name: String,
+        start: Option<(EdgeName, Id)>,
+        limit: Option<usize>,
+        timeout: Duration,
+        reference_ts_millis: Option<TimestampMilli>,
+        result_tx: oneshot::Sender<Result<Vec<(EdgeName, Id)>>>,
+    ) -> Self {
+        Self {
+            name,
+            start,
+            limit,
+            timeout,
+            reference_ts_millis,
+            result_tx,
+        }
+    }
+
+    pub fn send_result(self, result: Result<Vec<(EdgeName, Id)>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+/// Implement QueryExecutor for NodeByIdQuery
+#[async_trait::async_trait]
+impl QueryExecutor for NodeByIdQuery {
+    type Output = (NodeName, NodeSummary);
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        // Default None to current time for temporal validity checks
+        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+
+        let id = self.id;
+
+        let key = schema::NodeCfKey(id);
+        let key_bytes = schema::Nodes::key_to_bytes(&key);
+
+        // Handle both readonly and readwrite modes
+        let value_bytes = if let Ok(db) = storage.db() {
+            let cf = db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+            })?;
+            db.get_cf(cf, key_bytes)?
+        } else {
+            let txn_db = storage.transaction_db()?;
+            let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+            })?;
+            txn_db.get_cf(cf, key_bytes)?
+        };
+
+        let value_bytes = value_bytes.ok_or_else(|| anyhow::anyhow!("Node not found: {}", id))?;
+
+        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+        // Always check temporal validity
+        if !schema::is_valid_at_time(&value.0, ref_time) {
+            return Err(anyhow::anyhow!(
+                "Node {} not valid at time {}",
+                id,
+                ref_time.0
+            ));
+        }
+
+        Ok((value.1, value.2))
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+/// Implement QueryExecutor for EdgeByIdQuery
+#[async_trait::async_trait]
+impl QueryExecutor for EdgeByIdQuery {
+    type Output = (SrcId, DstId, EdgeName, EdgeSummary);
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        // Default None to current time for temporal validity checks
+        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+
+        let id = self.id;
+        let key = schema::EdgeCfKey(id);
+        let key_bytes = schema::Edges::key_to_bytes(&key);
+
+        // Handle both readonly and readwrite modes
+        let value_bytes = if let Ok(db) = storage.db() {
+            let cf = db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
+            })?;
+            db.get_cf(cf, key_bytes)?
+        } else {
+            let txn_db = storage.transaction_db()?;
+            let cf = txn_db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
+            })?;
+            txn_db.get_cf(cf, key_bytes)?
+        };
+
+        let value_bytes = value_bytes.ok_or_else(|| anyhow::anyhow!("Edge not found: {}", id))?;
+
+        let value: schema::EdgeCfValue = schema::Edges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+        // Always check temporal validity
+        if !schema::is_valid_at_time(&value.0, ref_time) {
+            return Err(anyhow::anyhow!(
+                "Edge {} not valid at time {}",
+                id,
+                ref_time.0
+            ));
+        }
+
+        // EdgeCfValue is now (Option<ValidTemporalRange>, SrcId, EdgeName, DstId, EdgeSummary)
+        // Return as: (source_id, dest_id, edge_name, summary)
+        Ok((value.1, value.3, value.2, value.4))
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
 /// Implement QueryExecutor for FragmentsByIdTimeRangeQuery
 #[async_trait::async_trait]
 impl QueryExecutor for FragmentsByIdTimeRangeQuery {
@@ -348,6 +617,9 @@ impl QueryExecutor for FragmentsByIdTimeRangeQuery {
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         use std::ops::Bound;
+
+        // Default None to current time for temporal validity checks
+        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
 
         let id = self.id;
         let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
@@ -399,7 +671,13 @@ impl QueryExecutor for FragmentsByIdTimeRangeQuery {
                     let value: schema::FragmentCfValue =
                         schema::Fragments::value_from_bytes(&value_bytes)
                             .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-                    fragments.push((timestamp, value.0));
+
+                    // Always check temporal validity - skip invalid fragments
+                    if !schema::is_valid_at_time(&value.0, ref_time) {
+                        continue;
+                    }
+
+                    fragments.push((timestamp, value.1));
                 }
             }};
         }
@@ -437,57 +715,15 @@ impl QueryExecutor for FragmentsByIdTimeRangeQuery {
     }
 }
 
-/// Query to find an edge by source ID, destination ID, and name
-#[derive(Debug)]
-pub struct EdgeSummaryBySrcDstNameQuery {
-    /// Source node ID
-    pub source_id: Id,
-
-    /// Destination node ID
-    pub dest_id: Id,
-
-    /// Edge name
-    pub name: String,
-
-    /// Timestamp of when the query was created
-    pub ts_millis: TimestampMilli,
-
-    /// Timeout for this query
-    pub timeout: Duration,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<(Id, EdgeSummary)>>,
-}
-
-impl EdgeSummaryBySrcDstNameQuery {
-    pub fn new(
-        source_id: SrcId,
-        dest_id: DstId,
-        name: String,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<(Id, EdgeSummary)>>,
-    ) -> Self {
-        Self {
-            source_id,
-            dest_id,
-            name,
-            ts_millis: TimestampMilli::now(),
-            timeout,
-            result_tx,
-        }
-    }
-
-    pub fn send_result(self, result: Result<(Id, EdgeSummary)>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 /// Implement QueryExecutor for EdgeSummaryBySrcDstNameQuery
 #[async_trait::async_trait]
 impl QueryExecutor for EdgeSummaryBySrcDstNameQuery {
     type Output = (Id, EdgeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        // Default None to current time for temporal validity checks
+        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+
         let source_id = self.source_id;
         let dest_id = self.dest_id;
         let name = &self.name;
@@ -533,7 +769,18 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameQuery {
             schema::ForwardEdges::value_from_bytes(&value_bytes)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-        let edge_id = value.0;
+        // Always check temporal validity of forward edge index
+        if !schema::is_valid_at_time(&value.0, ref_time) {
+            return Err(anyhow::anyhow!(
+                "Edge not valid at time {}: source={}, dest={}, name={}",
+                ref_time.0,
+                source_id,
+                dest_id,
+                name
+            ));
+        }
+
+        let edge_id = value.1;
 
         // Look up the edge summary from the edges column family
         let edge_key = schema::EdgeCfKey(edge_id);
@@ -558,52 +805,20 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameQuery {
         let edge_value: schema::EdgeCfValue = schema::Edges::value_from_bytes(&edge_value_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
 
-        Ok((edge_id, edge_value.3))
+        // Always check temporal validity of edge record
+        if !schema::is_valid_at_time(&edge_value.0, ref_time) {
+            return Err(anyhow::anyhow!(
+                "Edge {} not valid at time {}",
+                edge_id,
+                ref_time.0
+            ));
+        }
+
+        Ok((edge_id, edge_value.4))
     }
 
     fn timeout(&self) -> Duration {
         self.timeout
-    }
-}
-
-/// Id of edge source node
-pub type SrcId = Id;
-
-/// Id of edge destination node
-pub type DstId = Id;
-
-/// Query to find all edges emanating from a node by its ID
-#[derive(Debug)]
-pub struct EdgesFromNodeQuery {
-    /// The node ID to search for
-    pub id: Id,
-
-    /// Timestamp of when the query was created
-    pub ts_millis: TimestampMilli,
-
-    /// Timeout for this query
-    pub timeout: Duration,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(SrcId, EdgeName, DstId)>>>,
-}
-
-impl EdgesFromNodeQuery {
-    pub fn new(
-        id: Id,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(SrcId, EdgeName, DstId)>>>,
-    ) -> Self {
-        Self {
-            id,
-            ts_millis: TimestampMilli::now(),
-            timeout,
-            result_tx,
-        }
-    }
-
-    pub fn send_result(self, result: Result<Vec<(SrcId, EdgeName, DstId)>>) {
-        let _ = self.result_tx.send(result);
     }
 }
 
@@ -613,6 +828,9 @@ impl QueryExecutor for EdgesFromNodeQuery {
     type Output = Vec<(SrcId, EdgeName, DstId)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        // Default None to current time for temporal validity checks
+        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+
         let id = self.id;
         let mut edges: Vec<(SrcId, EdgeName, DstId)> = Vec::new();
         let prefix = id.into_bytes();
@@ -631,7 +849,7 @@ impl QueryExecutor for EdgesFromNodeQuery {
             );
 
             for item in iter {
-                let (key_bytes, _value_bytes) = item?;
+                let (key_bytes, value_bytes) = item?;
                 let key: schema::ForwardEdgeCfKey =
                     schema::ForwardEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
@@ -639,6 +857,16 @@ impl QueryExecutor for EdgesFromNodeQuery {
                 let source_id = key.0 .0;
                 if source_id != id {
                     break;
+                }
+
+                // Deserialize and check temporal validity
+                let value: schema::ForwardEdgeCfValue =
+                    schema::ForwardEdges::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+                // Always check temporal validity - skip invalid edges
+                if !schema::is_valid_at_time(&value.0, ref_time) {
+                    continue;
                 }
 
                 let dest_id = key.1 .0;
@@ -662,7 +890,7 @@ impl QueryExecutor for EdgesFromNodeQuery {
             );
 
             for item in iter {
-                let (key_bytes, _value_bytes) = item?;
+                let (key_bytes, value_bytes) = item?;
                 let key: schema::ForwardEdgeCfKey =
                     schema::ForwardEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
@@ -670,6 +898,16 @@ impl QueryExecutor for EdgesFromNodeQuery {
                 let source_id = key.0 .0;
                 if source_id != id {
                     break;
+                }
+
+                // Deserialize and check temporal validity
+                let value: schema::ForwardEdgeCfValue =
+                    schema::ForwardEdges::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+                // Always check temporal validity - skip invalid edges
+                if !schema::is_valid_at_time(&value.0, ref_time) {
+                    continue;
                 }
 
                 let dest_id = key.1 .0;
@@ -686,47 +924,15 @@ impl QueryExecutor for EdgesFromNodeQuery {
     }
 }
 
-/// Query to find all edges terminating at a node by its ID
-#[derive(Debug)]
-pub struct EdgesToNodeQuery {
-    /// The node ID to search for
-    pub id: DstId,
-
-    /// Timestamp of when the query was created
-    pub ts_millis: TimestampMilli,
-
-    /// Timeout for this query
-    pub timeout: Duration,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
-}
-
-impl EdgesToNodeQuery {
-    pub fn new(
-        id: DstId,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
-    ) -> Self {
-        Self {
-            id,
-            ts_millis: TimestampMilli::now(),
-            timeout,
-            result_tx,
-        }
-    }
-
-    pub fn send_result(self, result: Result<Vec<(DstId, EdgeName, SrcId)>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 /// Implement QueryExecutor for EdgesToNodeQuery
 #[async_trait::async_trait]
 impl QueryExecutor for EdgesToNodeQuery {
     type Output = Vec<(DstId, EdgeName, SrcId)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        // Default None to current time for temporal validity checks
+        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+
         let id = self.id;
         let mut edges: Vec<(DstId, EdgeName, SrcId)> = Vec::new();
         let prefix = id.into_bytes();
@@ -745,7 +951,7 @@ impl QueryExecutor for EdgesToNodeQuery {
             );
 
             for item in iter {
-                let (key_bytes, _value_bytes) = item?;
+                let (key_bytes, value_bytes) = item?;
                 let key: schema::ReverseEdgeCfKey =
                     schema::ReverseEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
@@ -753,6 +959,16 @@ impl QueryExecutor for EdgesToNodeQuery {
                 let dest_id = key.0 .0;
                 if dest_id != id {
                     break;
+                }
+
+                // Deserialize and check temporal validity
+                let value: schema::ReverseEdgeCfValue =
+                    schema::ReverseEdges::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+                // Always check temporal validity - skip invalid edges
+                if !schema::is_valid_at_time(&value.0, ref_time) {
+                    continue;
                 }
 
                 let source_id = key.1 .0;
@@ -776,7 +992,7 @@ impl QueryExecutor for EdgesToNodeQuery {
             );
 
             for item in iter {
-                let (key_bytes, _value_bytes) = item?;
+                let (key_bytes, value_bytes) = item?;
                 let key: schema::ReverseEdgeCfKey =
                     schema::ReverseEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
@@ -784,6 +1000,16 @@ impl QueryExecutor for EdgesToNodeQuery {
                 let dest_id = key.0 .0;
                 if dest_id != id {
                     break;
+                }
+
+                // Deserialize and check temporal validity
+                let value: schema::ReverseEdgeCfValue =
+                    schema::ReverseEdges::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+                // Always check temporal validity - skip invalid edges
+                if !schema::is_valid_at_time(&value.0, ref_time) {
+                    continue;
                 }
 
                 let source_id = key.1 .0;
@@ -800,58 +1026,15 @@ impl QueryExecutor for EdgesToNodeQuery {
     }
 }
 
-/// Query to find nodes by name prefix
-#[derive(Debug)]
-pub struct NodesByNameQuery {
-    /// The node name or prefix to search for
-    pub name: NodeName,
-
-    /// Optional start position for pagination (exclusive): (last_name, last_id)
-    /// For prefix queries, this should be the full name and ID of the last result from the previous page
-    pub start: Option<(NodeName, Id)>,
-
-    /// Timestamp of when the query was created
-    pub ts_millis: TimestampMilli,
-
-    /// Maximum number of results to return
-    pub limit: Option<usize>,
-
-    /// Timeout for this query
-    pub timeout: Duration,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(NodeName, Id)>>>,
-}
-
-impl NodesByNameQuery {
-    pub fn new(
-        name: NodeName,
-        start: Option<(NodeName, Id)>,
-        limit: Option<usize>,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(NodeName, Id)>>>,
-    ) -> Self {
-        Self {
-            name,
-            start,
-            ts_millis: TimestampMilli::now(),
-            timeout,
-            limit,
-            result_tx,
-        }
-    }
-
-    pub fn send_result(self, result: Result<Vec<(NodeName, Id)>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 /// Implement QueryExecutor for NodesByNameQuery
 #[async_trait::async_trait]
 impl QueryExecutor for NodesByNameQuery {
     type Output = Vec<(NodeName, Id)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        // Default None to current time for temporal validity checks
+        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+
         let name = &self.name;
         let mut nodes: Vec<(NodeName, Id)> = Vec::new();
 
@@ -881,7 +1064,7 @@ impl QueryExecutor for NodesByNameQuery {
                     }
                 }
 
-                let (key_bytes, _value_bytes) = item?;
+                let (key_bytes, value_bytes) = item?;
                 let key: schema::NodeNameCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
@@ -896,6 +1079,16 @@ impl QueryExecutor for NodesByNameQuery {
                     if node_name == *start_name && node_id == *start_id {
                         continue;
                     }
+                }
+
+                // Deserialize and check temporal validity
+                let value: schema::NodeNameCfValue =
+                    schema::NodeNames::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+                // Always check temporal validity - skip invalid node names
+                if !schema::is_valid_at_time(&value.0, ref_time) {
+                    continue;
                 }
 
                 nodes.push((node_name, node_id));
@@ -920,7 +1113,7 @@ impl QueryExecutor for NodesByNameQuery {
                     }
                 }
 
-                let (key_bytes, _value_bytes) = item?;
+                let (key_bytes, value_bytes) = item?;
                 let key: schema::NodeNameCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
@@ -937,6 +1130,16 @@ impl QueryExecutor for NodesByNameQuery {
                     }
                 }
 
+                // Deserialize and check temporal validity
+                let value: schema::NodeNameCfValue =
+                    schema::NodeNames::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+                // Always check temporal validity - skip invalid node names
+                if !schema::is_valid_at_time(&value.0, ref_time) {
+                    continue;
+                }
+
                 nodes.push((node_name, node_id));
             }
         }
@@ -949,58 +1152,15 @@ impl QueryExecutor for NodesByNameQuery {
     }
 }
 
-/// Query to find edges by name prefix
-#[derive(Debug)]
-pub struct EdgesByNameQuery {
-    /// The edge name or prefix to search for
-    pub name: String,
-
-    /// Optional start position for pagination (exclusive): (last_name, last_id)
-    /// For prefix queries, this should be the full name and ID of the last result from the previous page
-    pub start: Option<(EdgeName, Id)>,
-
-    /// The maximum number of results to return
-    pub limit: Option<usize>,
-
-    /// Timestamp of when the query was created
-    pub ts_millis: TimestampMilli,
-
-    /// Timeout for this query
-    pub timeout: Duration,
-
-    /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<Vec<(EdgeName, Id)>>>,
-}
-
-impl EdgesByNameQuery {
-    pub fn new(
-        name: String,
-        start: Option<(EdgeName, Id)>,
-        limit: Option<usize>,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(EdgeName, Id)>>>,
-    ) -> Self {
-        Self {
-            name,
-            start,
-            limit,
-            ts_millis: TimestampMilli::now(),
-            timeout,
-            result_tx,
-        }
-    }
-
-    pub fn send_result(self, result: Result<Vec<(EdgeName, Id)>>) {
-        let _ = self.result_tx.send(result);
-    }
-}
-
 /// Implement QueryExecutor for EdgesByNameQuery
 #[async_trait::async_trait]
 impl QueryExecutor for EdgesByNameQuery {
     type Output = Vec<(EdgeName, Id)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        // Default None to current time for temporal validity checks
+        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+
         let name = &self.name;
         let mut edges: Vec<(EdgeName, Id)> = Vec::new();
 
@@ -1030,7 +1190,7 @@ impl QueryExecutor for EdgesByNameQuery {
                     }
                 }
 
-                let (key_bytes, _value_bytes) = item?;
+                let (key_bytes, value_bytes) = item?;
                 let key: schema::EdgeNameCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
@@ -1045,6 +1205,16 @@ impl QueryExecutor for EdgesByNameQuery {
                     if edge_name == start_name && edge_id == *start_id {
                         continue;
                     }
+                }
+
+                // Deserialize and check temporal validity
+                let value: schema::EdgeNameCfValue =
+                    schema::EdgeNames::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+                // Always check temporal validity - skip invalid edge names
+                if !schema::is_valid_at_time(&value.0, ref_time) {
+                    continue;
                 }
 
                 edges.push((edge_name.clone(), edge_id));
@@ -1069,7 +1239,7 @@ impl QueryExecutor for EdgesByNameQuery {
                     }
                 }
 
-                let (key_bytes, _value_bytes) = item?;
+                let (key_bytes, value_bytes) = item?;
                 let key: schema::EdgeNameCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
@@ -1084,6 +1254,16 @@ impl QueryExecutor for EdgesByNameQuery {
                     if edge_name == start_name && edge_id == *start_id {
                         continue;
                     }
+                }
+
+                // Deserialize and check temporal validity
+                let value: schema::EdgeNameCfValue =
+                    schema::EdgeNames::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+                // Always check temporal validity - skip invalid edge names
+                if !schema::is_valid_at_time(&value.0, ref_time) {
+                    continue;
                 }
 
                 edges.push((edge_name.clone(), edge_id));
@@ -1192,6 +1372,7 @@ mod tests {
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
+            temporal_range: None,
         };
         writer.add_node(node_args).await.unwrap();
 
@@ -1227,7 +1408,7 @@ mod tests {
 
         // Query the node we just created
         let (returned_name, returned_summary) = reader
-            .node_by_id(node_id, Duration::from_secs(5))
+            .node_by_id(node_id, None, Duration::from_secs(5))
             .await
             .unwrap();
 

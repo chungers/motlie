@@ -31,6 +31,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
+            temporal_range: None,
         };
         writer.add_node(node_args).await.unwrap();
 
@@ -40,6 +41,7 @@ mod tests {
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_edge".to_string(),
+            temporal_range: None,
         };
         writer.add_edge(edge_args).await.unwrap();
 
@@ -71,6 +73,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
+                temporal_range: None,
             };
             writer.add_node(node_args).await.unwrap();
         }
@@ -98,6 +101,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "node".to_string(),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -109,6 +113,7 @@ mod tests {
                 target_node_id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "edge".to_string(),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -118,6 +123,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 content: crate::DataUrl::from_text("fragment body"),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -137,6 +143,7 @@ mod tests {
         // Close and wait
         drop(writer);
         consumer_handle.await.unwrap().unwrap();
+        temporal_range: None,
     }
 
     #[tokio::test]
@@ -167,6 +174,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("chained_node_{}", i),
+                temporal_range: None,
             };
             let fragment_args = AddFragment {
                 id: Id::new(),
@@ -175,6 +183,7 @@ mod tests {
                     "Chained fragment {} processed by both Graph and FullText",
                     i
                 )),
+                temporal_range: None,
             };
 
             writer.add_node(node_args).await.unwrap();
@@ -1122,6 +1131,7 @@ mod tests {
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
+            temporal_range: None,
         };
 
         writer.add_node(node_args.clone()).await.unwrap();
@@ -1191,6 +1201,7 @@ mod tests {
             id: node_a_id,
             ts_millis: TimestampMilli::now(),
             name: "alice".to_string(),
+            temporal_range: None,
         };
 
         let node_b_id = Id::new();
@@ -1198,6 +1209,7 @@ mod tests {
             id: node_b_id,
             ts_millis: TimestampMilli::now(),
             name: "bob".to_string(),
+            temporal_range: None,
         };
 
         let node_c_id = Id::new();
@@ -1205,6 +1217,7 @@ mod tests {
             id: node_c_id,
             ts_millis: TimestampMilli::now(),
             name: "alice".to_string(), // Same name as node_a
+            temporal_range: None,
         };
 
         let node_d_id = Id::new();
@@ -1212,6 +1225,7 @@ mod tests {
             id: node_d_id,
             ts_millis: TimestampMilli::now(),
             name: "charlie".to_string(),
+            temporal_range: None,
         };
 
         writer.add_node(node_a.clone()).await.unwrap();
@@ -1369,6 +1383,7 @@ mod tests {
             target_node_id: target_id,
             ts_millis: TimestampMilli::now(),
             name: "test_edge".to_string(),
+            temporal_range: None,
         };
 
         writer.add_edge(edge_args.clone()).await.unwrap();
@@ -1494,6 +1509,7 @@ mod tests {
             id: fragment_id,
             ts_millis: timestamp,
             content: crate::DataUrl::from_text("This is test fragment content"),
+            temporal_range: None,
         };
 
         writer.add_fragment(fragment_args.clone()).await.unwrap();
@@ -1564,18 +1580,21 @@ mod tests {
             id: node1_id,
             ts_millis: TimestampMilli::now(),
             name: "node_one".to_string(),
+            temporal_range: None,
         };
 
         let node2_args = AddNode {
             id: node2_id,
             ts_millis: TimestampMilli::now(),
             name: "node_two".to_string(),
+            temporal_range: None,
         };
 
         let node3_args = AddNode {
             id: node3_id,
             ts_millis: TimestampMilli::now(),
             name: "node_three".to_string(),
+            temporal_range: None,
         };
 
         writer.add_node(node1_args.clone()).await.unwrap();
@@ -1680,12 +1699,14 @@ mod tests {
             id: node_a_id,
             ts_millis: TimestampMilli::now(),
             name: "Node_A".to_string(),
+            temporal_range: None,
         };
 
         let node_b = AddNode {
             id: node_b_id,
             ts_millis: TimestampMilli::now(),
             name: "Node_B".to_string(),
+            temporal_range: None,
         };
 
         writer.add_node(node_a).await.unwrap();
@@ -1698,6 +1719,7 @@ mod tests {
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
             name: "likes".to_string(),
+            temporal_range: None,
         };
 
         let edge_a_to_b_2 = AddEdge {
@@ -1706,6 +1728,7 @@ mod tests {
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
             name: "follows".to_string(),
+            temporal_range: None,
         };
 
         let edge_a_to_b_3 = AddEdge {
@@ -1714,6 +1737,7 @@ mod tests {
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
             name: "mentions".to_string(),
+            temporal_range: None,
         };
 
         // Create different edges from B to A
@@ -1723,6 +1747,7 @@ mod tests {
             target_node_id: node_a_id,
             ts_millis: TimestampMilli::now(),
             name: "replies_to".to_string(),
+            temporal_range: None,
         };
 
         let edge_b_to_a_2 = AddEdge {
@@ -1731,6 +1756,7 @@ mod tests {
             target_node_id: node_a_id,
             ts_millis: TimestampMilli::now(),
             name: "retweets".to_string(),
+            temporal_range: None,
         };
 
         // Write all edges
@@ -1757,25 +1783,25 @@ mod tests {
 
         // Query forward edges from A (should get edges to B)
         let edges_from_a = reader
-            .edges_from_node_by_id(node_a_id, Duration::from_secs(5))
+            .edges_from_node_by_id(node_a_id, None, Duration::from_secs(5))
             .await
             .expect("Failed to query edges from A");
 
         // Query forward edges from B (should get edges to A)
         let edges_from_b = reader
-            .edges_from_node_by_id(node_b_id, Duration::from_secs(5))
+            .edges_from_node_by_id(node_b_id, None, Duration::from_secs(5))
             .await
             .expect("Failed to query edges from B");
 
         // Query reverse edges to A (should get edges from B)
         let edges_to_a = reader
-            .edges_to_node_by_id(node_a_id, Duration::from_secs(5))
+            .edges_to_node_by_id(node_a_id, None, Duration::from_secs(5))
             .await
             .expect("Failed to query edges to A");
 
         // Query reverse edges to B (should get edges from A)
         let edges_to_b = reader
-            .edges_to_node_by_id(node_b_id, Duration::from_secs(5))
+            .edges_to_node_by_id(node_b_id, None, Duration::from_secs(5))
             .await
             .expect("Failed to query edges to B");
 
@@ -1906,6 +1932,7 @@ mod tests {
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
             name: "likes".to_string(),
+            temporal_range: None,
         };
 
         let edge_2 = AddEdge {
@@ -1914,6 +1941,7 @@ mod tests {
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
             name: "likes".to_string(),
+            temporal_range: None,
         };
 
         let edge_3 = AddEdge {
@@ -1922,6 +1950,7 @@ mod tests {
             target_node_id: node_a_id,
             ts_millis: TimestampMilli::now(),
             name: "likes".to_string(),
+            temporal_range: None,
         };
 
         // Create edges with different names
@@ -1931,6 +1960,7 @@ mod tests {
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
             name: "follows".to_string(),
+            temporal_range: None,
         };
 
         writer.add_edge(edge_1.clone()).await.unwrap();
@@ -2065,6 +2095,7 @@ mod tests {
                 id: entity_id,
                 ts_millis: t1,
                 content: crate::DataUrl::from_text("fragment_1"),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -2074,6 +2105,7 @@ mod tests {
                 id: entity_id,
                 ts_millis: t2,
                 content: crate::DataUrl::from_text("fragment_2"),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -2083,6 +2115,7 @@ mod tests {
                 id: entity_id,
                 ts_millis: t3,
                 content: crate::DataUrl::from_text("fragment_3"),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -2092,6 +2125,7 @@ mod tests {
                 id: entity_id,
                 ts_millis: t4,
                 content: crate::DataUrl::from_text("fragment_4"),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -2101,6 +2135,7 @@ mod tests {
                 id: entity_id,
                 ts_millis: t5,
                 content: crate::DataUrl::from_text("fragment_5"),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -2118,7 +2153,7 @@ mod tests {
             .fragments_by_id_time_range(
                 entity_id,
                 (Bound::Unbounded, Bound::Unbounded),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -2132,6 +2167,7 @@ mod tests {
 
         drop(reader);
         query_consumer_handle.await.unwrap().unwrap();
+        temporal_range: None,
     }
 
     #[tokio::test]
@@ -2165,6 +2201,7 @@ mod tests {
                     id: entity_id,
                     ts_millis: ts,
                     content: crate::DataUrl::from_text(content),
+                    temporal_range: None
                 })
                 .await
                 .unwrap();
@@ -2183,7 +2220,7 @@ mod tests {
             .fragments_by_id_time_range(
                 entity_id,
                 (Bound::Included(t3), Bound::Unbounded),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -2232,6 +2269,7 @@ mod tests {
                     id: entity_id,
                     ts_millis: ts,
                     content: crate::DataUrl::from_text(content),
+                    temporal_range: None
                 })
                 .await
                 .unwrap();
@@ -2250,7 +2288,7 @@ mod tests {
             .fragments_by_id_time_range(
                 entity_id,
                 (Bound::Unbounded, Bound::Included(t3)),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -2299,6 +2337,7 @@ mod tests {
                     id: entity_id,
                     ts_millis: ts,
                     content: crate::DataUrl::from_text(content),
+                    temporal_range: None
                 })
                 .await
                 .unwrap();
@@ -2317,7 +2356,7 @@ mod tests {
             .fragments_by_id_time_range(
                 entity_id,
                 (Bound::Included(t2), Bound::Included(t4)),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -2366,6 +2405,7 @@ mod tests {
                     id: entity_id,
                     ts_millis: ts,
                     content: crate::DataUrl::from_text(content),
+                    temporal_range: None
                 })
                 .await
                 .unwrap();
@@ -2384,7 +2424,7 @@ mod tests {
             .fragments_by_id_time_range(
                 entity_id,
                 (Bound::Excluded(t2), Bound::Excluded(t4)),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -2427,6 +2467,7 @@ mod tests {
                     id: entity_id,
                     ts_millis: ts,
                     content: crate::DataUrl::from_text(content),
+                    temporal_range: None
                 })
                 .await
                 .unwrap();
@@ -2445,7 +2486,7 @@ mod tests {
             .fragments_by_id_time_range(
                 entity_id,
                 (Bound::Included(t2), Bound::Excluded(t4)),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -2481,6 +2522,7 @@ mod tests {
                     id: entity_id,
                     ts_millis: ts,
                     content: crate::DataUrl::from_text(content),
+                    temporal_range: None
                 })
                 .await
                 .unwrap();
@@ -2499,7 +2541,7 @@ mod tests {
             .fragments_by_id_time_range(
                 entity_id,
                 (Bound::Excluded(t3), Bound::Unbounded),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -2533,6 +2575,7 @@ mod tests {
                     id: entity_id,
                     ts_millis: ts,
                     content: crate::DataUrl::from_text(content),
+                    temporal_range: None
                 })
                 .await
                 .unwrap();
@@ -2551,7 +2594,7 @@ mod tests {
             .fragments_by_id_time_range(
                 other_id,
                 (Bound::Unbounded, Bound::Unbounded),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -2585,6 +2628,7 @@ mod tests {
             id: user_1_id,
             ts_millis: TimestampMilli::now(),
             name: "user_alice".to_string(),
+            temporal_range: None,
         };
 
         let user_2_id = Id::new();
@@ -2592,6 +2636,7 @@ mod tests {
             id: user_2_id,
             ts_millis: TimestampMilli::now(),
             name: "user_bob".to_string(),
+            temporal_range: None,
         };
 
         let user_3_id = Id::new();
@@ -2599,6 +2644,7 @@ mod tests {
             id: user_3_id,
             ts_millis: TimestampMilli::now(),
             name: "user_charlie".to_string(),
+            temporal_range: None,
         };
 
         // Create nodes with exact same name but different IDs (duplicates)
@@ -2607,6 +2653,7 @@ mod tests {
             id: user_4_id,
             ts_millis: TimestampMilli::now(),
             name: "user_alice".to_string(), // Same name as user_1
+            temporal_range: None,
         };
 
         // Create a node that doesn't match the prefix
@@ -2615,6 +2662,7 @@ mod tests {
             id: admin_id,
             ts_millis: TimestampMilli::now(),
             name: "admin_alice".to_string(),
+            temporal_range: None,
         };
 
         writer.add_node(user_1.clone()).await.unwrap();
@@ -2639,7 +2687,7 @@ mod tests {
 
         // Query for nodes with prefix "user_"
         let results = reader
-            .nodes_by_name("user_".to_string(), None, None, Duration::from_secs(5))
+            .nodes_by_name("user_".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2689,7 +2737,7 @@ mod tests {
 
         // Query for exact name "user_alice" should match both instances
         let alice_results = reader
-            .nodes_by_name("user_alice".to_string(), None, None, Duration::from_secs(5))
+            .nodes_by_name("user_alice".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2701,7 +2749,7 @@ mod tests {
 
         // Query for non-existent prefix
         let empty_results = reader
-            .nodes_by_name("nonexistent_".to_string(), None, None, Duration::from_secs(5))
+            .nodes_by_name("nonexistent_".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2742,6 +2790,7 @@ mod tests {
             target_node_id: node_b_id,
             ts_millis: TimestampMilli::now(),
             name: "likes".to_string(),
+            temporal_range: None,
         };
 
         let likes_2_id = Id::new();
@@ -2751,6 +2800,7 @@ mod tests {
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
             name: "likes".to_string(),
+            temporal_range: None,
         };
 
         let likes_3_id = Id::new();
@@ -2760,6 +2810,7 @@ mod tests {
             target_node_id: node_d_id,
             ts_millis: TimestampMilli::now(),
             name: "likes".to_string(),
+            temporal_range: None,
         };
 
         // Create edges with different names but similar prefix
@@ -2770,6 +2821,7 @@ mod tests {
             target_node_id: node_c_id,
             ts_millis: TimestampMilli::now(),
             name: "likes_very_much".to_string(),
+            temporal_range: None,
         };
 
         // Create edge with completely different name
@@ -2780,6 +2832,7 @@ mod tests {
             target_node_id: node_d_id,
             ts_millis: TimestampMilli::now(),
             name: "follows".to_string(),
+            temporal_range: None,
         };
 
         writer.add_edge(likes_1.clone()).await.unwrap();
@@ -2804,7 +2857,7 @@ mod tests {
 
         // Query for edges with prefix "likes"
         let results = reader
-            .edges_by_name("likes".to_string(), None, None, Duration::from_secs(5))
+            .edges_by_name("likes".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2837,7 +2890,7 @@ mod tests {
 
         // Query for exact name "likes" should match only the 3 exact matches
         let exact_results = reader
-            .edges_by_name("likes".to_string(), None, None, Duration::from_secs(5))
+            .edges_by_name("likes".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2860,7 +2913,7 @@ mod tests {
 
         // Query with more specific prefix
         let specific_results = reader
-            .edges_by_name("likes_very".to_string(), None, None, Duration::from_secs(5))
+            .edges_by_name("likes_very".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2873,7 +2926,7 @@ mod tests {
 
         // Query for non-existent prefix
         let empty_results = reader
-            .edges_by_name("hates".to_string(), None, None, Duration::from_secs(5))
+            .edges_by_name("hates".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2909,6 +2962,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
+                temporal_range: None,
             };
             writer.add_node(node).await.unwrap();
         }
@@ -2929,35 +2983,35 @@ mod tests {
 
         // Test 1: No limit returns all results
         let results = reader
-            .nodes_by_name("test_node_".to_string(), None, None, Duration::from_secs(5))
+            .nodes_by_name("test_node_".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 10, "No limit should return all 10 nodes");
 
         // Test 2: Limit smaller than available results
         let results = reader
-            .nodes_by_name("test_node_".to_string(), None, Some(3), Duration::from_secs(5))
+            .nodes_by_name("test_node_".to_string(), None, Some(3), None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 3, "Limit of 3 should return exactly 3 nodes");
 
         // Test 3: Limit of 1
         let results = reader
-            .nodes_by_name("test_node_".to_string(), None, Some(1), Duration::from_secs(5))
+            .nodes_by_name("test_node_".to_string(), None, Some(1), None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "Limit of 1 should return exactly 1 node");
 
         // Test 4: Limit of 0 returns empty
         let results = reader
-            .nodes_by_name("test_node_".to_string(), None, Some(0), Duration::from_secs(5))
+            .nodes_by_name("test_node_".to_string(), None, Some(0), None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 0, "Limit of 0 should return 0 nodes");
 
         // Test 5: Limit larger than available results
         let results = reader
-            .nodes_by_name("test_node_".to_string(), None, Some(20), Duration::from_secs(5))
+            .nodes_by_name("test_node_".to_string(), None, Some(20), None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(
@@ -2968,7 +3022,7 @@ mod tests {
 
         // Test 6: Verify results have correct prefix
         let results = reader
-            .nodes_by_name("test_node_".to_string(), None, Some(5), Duration::from_secs(5))
+            .nodes_by_name("test_node_".to_string(), None, Some(5), None, Duration::from_secs(5))
             .await
             .unwrap();
         for (name, _id) in &results {
@@ -3010,6 +3064,7 @@ mod tests {
                     id: src_id,
                     ts_millis: TimestampMilli::now(),
                     name: format!("src_{}", i),
+                    temporal_range: None,
                 })
                 .await
                 .unwrap();
@@ -3019,6 +3074,7 @@ mod tests {
                     id: dst_id,
                     ts_millis: TimestampMilli::now(),
                     name: format!("dst_{}", i),
+                    temporal_range: None,
                 })
                 .await
                 .unwrap();
@@ -3040,6 +3096,7 @@ mod tests {
                     source_node_id: src_ids[src_idx],
                     target_node_id: dst_ids[dst_idx],
                     name: format!("test_edge_{}", i),
+                    temporal_range: None,
                 })
                 .await
                 .unwrap();
@@ -3061,35 +3118,35 @@ mod tests {
 
         // Test 1: No limit returns all results
         let results = reader
-            .edges_by_name("test_edge_".to_string(), None, None, Duration::from_secs(5))
+            .edges_by_name("test_edge_".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 10, "No limit should return all 10 edges");
 
         // Test 2: Limit smaller than available results
         let results = reader
-            .edges_by_name("test_edge_".to_string(), None, Some(3), Duration::from_secs(5))
+            .edges_by_name("test_edge_".to_string(), None, Some(3), None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 3, "Limit of 3 should return exactly 3 edges");
 
         // Test 3: Limit of 1
         let results = reader
-            .edges_by_name("test_edge_".to_string(), None, Some(1), Duration::from_secs(5))
+            .edges_by_name("test_edge_".to_string(), None, Some(1), None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "Limit of 1 should return exactly 1 edge");
 
         // Test 4: Limit of 0 returns empty
         let results = reader
-            .edges_by_name("test_edge_".to_string(), None, Some(0), Duration::from_secs(5))
+            .edges_by_name("test_edge_".to_string(), None, Some(0), None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 0, "Limit of 0 should return 0 edges");
 
         // Test 5: Limit larger than available results
         let results = reader
-            .edges_by_name("test_edge_".to_string(), None, Some(20), Duration::from_secs(5))
+            .edges_by_name("test_edge_".to_string(), None, Some(20), None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(
@@ -3100,7 +3157,7 @@ mod tests {
 
         // Test 6: Verify results have correct prefix
         let results = reader
-            .edges_by_name("test_edge_".to_string(), None, Some(5), Duration::from_secs(5))
+            .edges_by_name("test_edge_".to_string(), None, Some(5), None, Duration::from_secs(5))
             .await
             .unwrap();
         for (name, _id) in &results {
@@ -3137,6 +3194,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: "page_node_shared".to_string(), // Same name for all
+                temporal_range: None,
             };
             writer.add_node(node).await.unwrap();
         }
@@ -3157,7 +3215,7 @@ mod tests {
 
         // Test 1: First page with start=None, limit=5
         let page1 = reader
-            .nodes_by_name("page_node_shared".to_string(), None, Some(5), Duration::from_secs(5))
+            .nodes_by_name("page_node_shared".to_string(), None, Some(5), None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(page1.len(), 5, "First page should return 5 nodes");
@@ -3177,7 +3235,7 @@ mod tests {
                 "page_node_shared".to_string(),
                 Some((last_name_page1, last_id_page1)),
                 Some(5),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -3205,7 +3263,7 @@ mod tests {
                 "page_node_shared".to_string(),
                 Some((last_name_page2, last_id_page2)),
                 Some(5),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -3218,7 +3276,7 @@ mod tests {
                 "page_node_shared".to_string(),
                 Some((last_name_page3, last_id_page3)),
                 Some(5),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -3231,7 +3289,7 @@ mod tests {
                 "page_node_shared".to_string(),
                 Some((last_name_page4, last_id_page4)),
                 Some(5),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -3261,7 +3319,7 @@ mod tests {
 
         // Test 8: Query without pagination returns all results
         let all_results = reader
-            .nodes_by_name("page_node_".to_string(), None, None, Duration::from_secs(5))
+            .nodes_by_name("page_node_".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(
@@ -3276,7 +3334,7 @@ mod tests {
                 "nonexistent_".to_string(),
                 None,
                 Some(5),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -3293,7 +3351,7 @@ mod tests {
                 "page_node_shared".to_string(),
                 Some(("page_node_shared".to_string(), fake_id)),
                 Some(5),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -3335,6 +3393,7 @@ mod tests {
                     id: src_id,
                     ts_millis: TimestampMilli::now(),
                     name: format!("src_{}", i),
+                    temporal_range: None,
                 })
                 .await
                 .unwrap();
@@ -3344,6 +3403,7 @@ mod tests {
                     id: dst_id,
                     ts_millis: TimestampMilli::now(),
                     name: format!("dst_{}", i),
+                    temporal_range: None,
                 })
                 .await
                 .unwrap();
@@ -3365,7 +3425,8 @@ mod tests {
                     ts_millis: TimestampMilli::now(),
                     source_node_id: src_ids[src_idx],
                     target_node_id: dst_ids[dst_idx],
-                    name: "page_edge_shared".to_string(), // Same name for all
+                    name: "page_edge_shared".to_string(), // Same name for all,
+                    temporal_range: None
                 })
                 .await
                 .unwrap();
@@ -3387,7 +3448,7 @@ mod tests {
 
         // Test 1: First page with start=None, limit=5
         let page1 = reader
-            .edges_by_name("page_edge_shared".to_string(), None, Some(5), Duration::from_secs(5))
+            .edges_by_name("page_edge_shared".to_string(), None, Some(5), None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(page1.len(), 5, "First page should return 5 edges");
@@ -3407,7 +3468,7 @@ mod tests {
                 "page_edge_shared".to_string(),
                 Some((last_name_page1, last_id_page1)),
                 Some(5),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -3428,6 +3489,7 @@ mod tests {
                 "page_edge_".to_string(),
                 Some((last_name_page2, last_id_page2)),
                 Some(5),
+                None,
                 Duration::from_secs(5),
             )
             .await
@@ -3441,6 +3503,7 @@ mod tests {
                 "page_edge_".to_string(),
                 Some((last_name_page3, last_id_page3)),
                 Some(5),
+                None,
                 Duration::from_secs(5),
             )
             .await
@@ -3454,6 +3517,7 @@ mod tests {
                 "page_edge_shared".to_string(),
                 Some((last_name_page4, last_id_page4)),
                 Some(5),
+                None,
                 Duration::from_secs(5),
             )
             .await
@@ -3478,7 +3542,7 @@ mod tests {
 
         // Test 8: Query without pagination returns all results
         let all_results = reader
-            .edges_by_name("page_edge_shared".to_string(), None, None, Duration::from_secs(5))
+            .edges_by_name("page_edge_shared".to_string(), None, None, None, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(
@@ -3503,7 +3567,7 @@ mod tests {
                 "nonexistent_".to_string(),
                 None,
                 Some(5),
-                Duration::from_secs(5),
+                None, Duration::from_secs(5),
             )
             .await
             .unwrap();
@@ -3533,6 +3597,7 @@ mod tests {
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
                 name: "test_node".to_string(),
+                temporal_range: None
             })
             .await
             .unwrap();
@@ -3549,6 +3614,7 @@ mod tests {
         let key_bytes = node_id.into_bytes();
         let value = db.get_cf(cf, key_bytes).unwrap();
         assert!(value.is_some(), "Node should be written to database");
+        temporal_range: None,
     }
 
     #[tokio::test]
@@ -3578,11 +3644,13 @@ mod tests {
                 id: node1_id,
                 ts_millis: TimestampMilli::now(),
                 name: "node1".to_string(),
+                temporal_range: None
             }),
             Mutation::AddNode(AddNode {
                 id: node2_id,
                 ts_millis: TimestampMilli::now(),
                 name: "node2".to_string(),
+                temporal_range: None
             }),
             Mutation::AddEdge(AddEdge {
                 id: edge_id,
@@ -3590,11 +3658,13 @@ mod tests {
                 target_node_id: node2_id,
                 ts_millis: TimestampMilli::now(),
                 name: "connects".to_string(),
+                temporal_range: None
             }),
             Mutation::AddFragment(AddFragment {
                 id: fragment_id,
                 ts_millis: TimestampMilli::now(),
                 content: crate::DataUrl::from_text("test fragment"),
+                temporal_range: None
             }),
         ];
 
@@ -3679,6 +3749,7 @@ mod tests {
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
+                temporal_range: None,
             }));
         }
 
@@ -3729,6 +3800,7 @@ mod tests {
                     id: Id::new(),
                     ts_millis: TimestampMilli::now(),
                     name: format!("node_{}", i),
+                    temporal_range: None,
                 })
                 .await
                 .unwrap();
@@ -3752,7 +3824,9 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
+                temporal_range: None,
             }));
+            temporal_range: None,
         }
 
         let start2 = Instant::now();
@@ -3798,7 +3872,9 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
+                temporal_range: None,
             }));
+            temporal_range: None,
         }
 
         // Add edges (connecting some nodes)
@@ -3809,7 +3885,9 @@ mod tests {
                 target_node_id: node_ids[i + 1],
                 ts_millis: TimestampMilli::now(),
                 name: format!("edge_{}", i),
+                temporal_range: None,
             }));
+            temporal_range: None,
         }
 
         // Add fragments
@@ -3818,7 +3896,9 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 content: crate::DataUrl::from_text(&format!("fragment_{}", i)),
+                temporal_range: None,
             }));
+            temporal_range: None,
         }
 
         // Send mixed batch

@@ -129,6 +129,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
+            temporal_range: None,
         };
 
         let edge_args = AddEdge {
@@ -137,12 +138,14 @@ mod tests {
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_edge".to_string(),
+            temporal_range: None,
         };
 
         let fragment_args = AddFragment {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             content: crate::DataUrl::from_text("test fragment"),
+            temporal_range: None,
         };
 
         let invalidate_args = InvalidateArgs {

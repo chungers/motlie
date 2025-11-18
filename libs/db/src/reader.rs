@@ -37,10 +37,21 @@ impl Reader {
     }
 
     /// Query a node by its ID (returns name and summary)
-    pub async fn node_by_id(&self, id: Id, timeout: Duration) -> Result<(NodeName, NodeSummary)> {
+    ///
+    /// # Arguments
+    /// * `id` - The node ID to query
+    /// * `reference_ts_millis` - Optional reference timestamp for temporal validity checks.
+    ///   If None, defaults to current time in the query executor.
+    /// * `timeout` - Query timeout duration
+    pub async fn node_by_id(
+        &self,
+        id: Id,
+        reference_ts_millis: Option<TimestampMilli>,
+        timeout: Duration,
+    ) -> Result<(NodeName, NodeSummary)> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = NodeByIdQuery::new(id, timeout, result_tx);
+        let query = NodeByIdQuery::new(id, timeout, reference_ts_millis, result_tx);
 
         self.sender
             .send_async(Query::NodeById(query))
@@ -53,13 +64,20 @@ impl Reader {
 
     /// Query an edge by its ID (returns topology and summary)
     /// Returns (source_id, dest_id, edge_name, summary)
+    ///
+    /// # Arguments
+    /// * `id` - The edge ID to query
+    /// * `reference_ts_millis` - Optional reference timestamp for temporal validity checks.
+    ///   If None, defaults to current time in the query executor.
+    /// * `timeout` - Query timeout duration
     pub async fn edge_by_id(
         &self,
         id: Id,
+        reference_ts_millis: Option<TimestampMilli>,
         timeout: Duration,
     ) -> Result<(SrcId, DstId, EdgeName, EdgeSummary)> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query = EdgeByIdQuery::new(id, timeout, result_tx);
+        let query = EdgeByIdQuery::new(id, timeout, reference_ts_millis, result_tx);
 
         self.sender
             .send_async(Query::EdgeById(query))
@@ -72,16 +90,25 @@ impl Reader {
 
     /// Query an edge by source ID, destination ID, and name
     /// Returns (edge_id, edge_summary)
+    ///
+    /// # Arguments
+    /// * `source_id` - Source node ID
+    /// * `dest_id` - Destination node ID
+    /// * `name` - Edge name
+    /// * `reference_ts_millis` - Optional reference timestamp for temporal validity checks.
+    ///   If None, defaults to current time in the query executor.
+    /// * `timeout` - Query timeout duration
     pub async fn edge_by_src_dst_name(
         &self,
         source_id: SrcId,
         dest_id: DstId,
         name: String,
+        reference_ts_millis: Option<TimestampMilli>,
         timeout: Duration,
     ) -> Result<(Id, EdgeSummary)> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgeSummaryBySrcDstNameQuery::new(source_id, dest_id, name, timeout, result_tx);
+        let query = EdgeSummaryBySrcDstNameQuery::new(source_id, dest_id, name, timeout, reference_ts_millis, result_tx);
 
         self.sender
             .send_async(Query::EdgeSummaryBySrcDstName(query))
@@ -96,7 +123,9 @@ impl Reader {
     ///
     /// # Arguments
     /// * `id` - The entity ID to search for
-    /// * `time_range` - Tuple of (start_bound, end_bound) using std::ops::Bound
+    /// * `time_range` - Tuple of (start_bound, end_bound) using std::ops::Bound for RocksDB scan range
+    /// * `reference_ts_millis` - Optional reference timestamp for temporal validity checks.
+    ///   If None, defaults to current time in the query executor.
     /// * `timeout` - Query timeout duration
     ///
     /// # Examples
@@ -104,26 +133,27 @@ impl Reader {
     /// use std::ops::Bound;
     ///
     /// // Query all fragments (unbounded)
-    /// reader.fragments_by_id_time_range(id, (Bound::Unbounded, Bound::Unbounded), timeout).await?;
+    /// reader.fragments_by_id_time_range(id, (Bound::Unbounded, Bound::Unbounded), None, timeout).await?;
     ///
     /// // Query fragments from start time onwards (start..)
-    /// reader.fragments_by_id_time_range(id, (Bound::Included(start), Bound::Unbounded), timeout).await?;
+    /// reader.fragments_by_id_time_range(id, (Bound::Included(start), Bound::Unbounded), None, timeout).await?;
     ///
     /// // Query fragments up to end time (..=end)
-    /// reader.fragments_by_id_time_range(id, (Bound::Unbounded, Bound::Included(end)), timeout).await?;
+    /// reader.fragments_by_id_time_range(id, (Bound::Unbounded, Bound::Included(end)), None, timeout).await?;
     ///
     /// // Query fragments in range (start..=end)
-    /// reader.fragments_by_id_time_range(id, (Bound::Included(start), Bound::Included(end)), timeout).await?;
+    /// reader.fragments_by_id_time_range(id, (Bound::Included(start), Bound::Included(end)), None, timeout).await?;
     /// ```
     pub async fn fragments_by_id_time_range(
         &self,
         id: Id,
         time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
+        reference_ts_millis: Option<TimestampMilli>,
         timeout: Duration,
     ) -> Result<Vec<(crate::TimestampMilli, FragmentContent)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = FragmentsByIdTimeRangeQuery::new(id, time_range, timeout, result_tx);
+        let query = FragmentsByIdTimeRangeQuery::new(id, time_range, timeout, reference_ts_millis, result_tx);
 
         self.sender
             .send_async(Query::FragmentsByIdTimeRange(query))
@@ -136,14 +166,21 @@ impl Reader {
 
     /// Query all edges from a node (outgoing edges)
     /// Returns Vec<(source_id, edge_name, dest_id)>
+    ///
+    /// # Arguments
+    /// * `id` - The source node ID
+    /// * `reference_ts_millis` - Optional reference timestamp for temporal validity checks.
+    ///   If None, defaults to current time in the query executor.
+    /// * `timeout` - Query timeout duration
     pub async fn edges_from_node_by_id(
         &self,
         id: SrcId,
+        reference_ts_millis: Option<TimestampMilli>,
         timeout: Duration,
     ) -> Result<Vec<(SrcId, EdgeName, DstId)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgesFromNodeQuery::new(id, timeout, result_tx);
+        let query = EdgesFromNodeQuery::new(id, timeout, reference_ts_millis, result_tx);
 
         self.sender
             .send_async(Query::EdgesFromNode(query))
@@ -156,14 +193,21 @@ impl Reader {
 
     /// Query all edges to a node (incoming edges)
     /// Returns Vec<(dest_id, edge_name, source_id)>
+    ///
+    /// # Arguments
+    /// * `id` - The destination node ID
+    /// * `reference_ts_millis` - Optional reference timestamp for temporal validity checks.
+    ///   If None, defaults to current time in the query executor.
+    /// * `timeout` - Query timeout duration
     pub async fn edges_to_node_by_id(
         &self,
         id: DstId,
+        reference_ts_millis: Option<TimestampMilli>,
         timeout: Duration,
     ) -> Result<Vec<(DstId, EdgeName, SrcId)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgesToNodeQuery::new(id, timeout, result_tx);
+        let query = EdgesToNodeQuery::new(id, timeout, reference_ts_millis, result_tx);
 
         self.sender
             .send_async(Query::EdgesToNode(query))
@@ -198,20 +242,21 @@ impl Reader {
     /// let users = reader.nodes_by_name("user_".to_string(), None, Some(100), timeout).await?;
     ///
     /// // Paginate through results
-    /// let page1 = reader.nodes_by_name("a".to_string(), None, Some(10), timeout).await?;
+    /// let page1 = reader.nodes_by_name("a".to_string(), None, Some(10), None, timeout).await?;
     /// let last = page1.last();
-    /// let page2 = reader.nodes_by_name("a".to_string(), last.cloned(), Some(10), timeout).await?;
+    /// let page2 = reader.nodes_by_name("a".to_string(), last.cloned(), Some(10), None, timeout).await?;
     /// ```
     pub async fn nodes_by_name(
         &self,
         name: NodeName,
         start: Option<(NodeName, Id)>,
         limit: Option<usize>,
+        reference_ts_millis: Option<TimestampMilli>,
         timeout: Duration,
     ) -> Result<Vec<(NodeName, Id)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = NodesByNameQuery::new(name, start, limit, timeout, result_tx);
+        let query = NodesByNameQuery::new(name, start, limit, timeout, reference_ts_millis, result_tx);
 
         self.sender
             .send_async(Query::NodesByName(query))
@@ -246,20 +291,21 @@ impl Reader {
     /// let follows = reader.edges_by_name("follows".to_string(), None, Some(100), timeout).await?;
     ///
     /// // Paginate through results
-    /// let page1 = reader.edges_by_name("rel_".to_string(), None, Some(10), timeout).await?;
+    /// let page1 = reader.edges_by_name("rel_".to_string(), None, Some(10), None, timeout).await?;
     /// let last = page1.last();
-    /// let page2 = reader.edges_by_name("rel_".to_string(), last.cloned(), Some(10), timeout).await?;
+    /// let page2 = reader.edges_by_name("rel_".to_string(), last.cloned(), Some(10), None, timeout).await?;
     /// ```
     pub async fn edges_by_name(
         &self,
         name: String,
         start: Option<(EdgeName, Id)>,
         limit: Option<usize>,
+        reference_ts_millis: Option<TimestampMilli>,
         timeout: Duration,
     ) -> Result<Vec<(EdgeName, Id)>> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgesByNameQuery::new(name, start, limit, timeout, result_tx);
+        let query = EdgesByNameQuery::new(name, start, limit, timeout, reference_ts_millis, result_tx);
 
         self.sender
             .send_async(Query::EdgesByName(query))

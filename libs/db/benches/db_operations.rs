@@ -49,6 +49,7 @@ async fn create_test_db(
             id,
             name: format!("node_{}", i),
             ts_millis: TimestampMilli::now(),
+            temporal_range: None,
         };
 
         writer.add_node(node).await.unwrap();
@@ -67,6 +68,7 @@ async fn create_test_db(
                 target_node_id: dst_id,
                 name: format!("edge_{}", j),
                 ts_millis: TimestampMilli::now(),
+                temporal_range: None,
             };
 
             writer.add_edge(edge).await.unwrap();
@@ -141,7 +143,7 @@ fn bench_point_lookups(c: &mut Criterion) {
             |b, _| {
                 b.to_async(&rt).iter(|| async {
                     let result = reader
-                        .node_by_id(target_id, Duration::from_secs(5))
+                        .node_by_id(target_id, None, Duration::from_secs(5))
                         .await
                         .unwrap();
                     black_box(result)
@@ -201,7 +203,7 @@ fn bench_prefix_scans_by_position(c: &mut Criterion) {
                 |b, _| {
                     b.to_async(&rt).iter(|| async {
                         let result = reader
-                            .edges_from_node_by_id(target_id, Duration::from_secs(5))
+                            .edges_from_node_by_id(target_id, None, Duration::from_secs(5))
                             .await
                             .unwrap();
                         black_box(result)
@@ -249,7 +251,7 @@ fn bench_prefix_scans_by_degree(c: &mut Criterion) {
             |b, _| {
                 b.to_async(&rt).iter(|| async {
                     let result = reader
-                        .edges_from_node_by_id(target_id, Duration::from_secs(5))
+                        .edges_from_node_by_id(target_id, None, Duration::from_secs(5))
                         .await
                         .unwrap();
                     black_box(result)
@@ -298,7 +300,7 @@ fn bench_scan_position_independence(c: &mut Criterion) {
             |b, _| {
                 b.to_async(&rt).iter(|| async {
                     let result = reader
-                        .edges_from_node_by_id(target_id, Duration::from_secs(5))
+                        .edges_from_node_by_id(target_id, None, Duration::from_secs(5))
                         .await
                         .unwrap();
                     black_box(result)

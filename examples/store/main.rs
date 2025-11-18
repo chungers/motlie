@@ -144,6 +144,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     id: node_id.clone(),
                     ts_millis: current_time,
                     name: node_name.to_string(),
+                    temporal_range: None,
                 };
 
                 // Create fragment
@@ -151,6 +152,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     id: node_id,
                     ts_millis: current_time,
                     content: DataUrl::from_markdown(fragment_text),
+                    temporal_range: None,
                 };
 
                 // Time the writer sends
@@ -214,6 +216,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     target_node_id: target_id,
                     ts_millis: current_time,
                     name: edge_name.to_string(),
+                    temporal_range: None,
                 };
 
                 // Create fragment for the edge
@@ -221,6 +224,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     id: edge_id,
                     ts_millis: current_time,
                     content: DataUrl::from_markdown(edge_fragment),
+                    temporal_range: None,
                 };
 
                 // Time the writer sends
@@ -860,7 +864,10 @@ fn deserialize_node_id(bytes: &[u8]) -> Result<IdBytes> {
 
 fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
     #[derive(serde::Deserialize)]
-    struct NodeCfValue(String, NodeSummary);
+    struct ValidTemporalRange(Option<u64>, Option<u64>);
+
+    #[derive(serde::Deserialize)]
+    struct NodeCfValue(Option<ValidTemporalRange>, String, NodeSummary);
 
     #[derive(serde::Deserialize)]
     struct NodeSummary(DataUrl);
@@ -875,9 +882,9 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
     let value: NodeCfValue =
         rmp_serde::from_slice(&decompressed).context("Failed to deserialize node value")?;
 
-    let node_name = value.0;
+    let node_name = value.1;
     // Decode the data URL to get the actual content
-    let data_url_str = &value.1 .0 .0;
+    let data_url_str = &value.2 .0 .0;
     let parsed = data_url::DataUrl::process(data_url_str).context("Failed to parse data URL")?;
     let (body, _) = parsed
         .decode_to_vec()
@@ -910,7 +917,10 @@ fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, Strin
 
 fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
-    struct EdgeCfValue(EdgeSummary);
+    struct ValidTemporalRange(Option<u64>, Option<u64>);
+
+    #[derive(serde::Deserialize)]
+    struct EdgeCfValue(Option<ValidTemporalRange>, IdBytes, IdBytes, String, EdgeSummary);
 
     #[derive(serde::Deserialize)]
     struct EdgeSummary(DataUrl);
@@ -926,7 +936,7 @@ fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
         rmp_serde::from_slice(&decompressed).context("Failed to deserialize edge value")?;
 
     // Decode the data URL to get the actual content
-    let data_url_str = &value.0 .0 .0;
+    let data_url_str = &value.4 .0 .0;
     let parsed = data_url::DataUrl::process(data_url_str).context("Failed to parse data URL")?;
     let (body, _) = parsed
         .decode_to_vec()
@@ -938,7 +948,10 @@ fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
 
 fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
-    struct FragmentCfValue(FragmentContent);
+    struct ValidTemporalRange(Option<u64>, Option<u64>);
+
+    #[derive(serde::Deserialize)]
+    struct FragmentCfValue(Option<ValidTemporalRange>, FragmentContent);
 
     #[derive(serde::Deserialize)]
     struct FragmentContent(DataUrl);
@@ -954,7 +967,7 @@ fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
         rmp_serde::from_slice(&decompressed).context("Failed to deserialize fragment value")?;
 
     // Decode the data URL to get the actual content
-    let data_url_str = &value.0 .0 .0;
+    let data_url_str = &value.1 .0 .0;
     let parsed = data_url::DataUrl::process(data_url_str).context("Failed to parse data URL")?;
     let (body, _) = parsed
         .decode_to_vec()

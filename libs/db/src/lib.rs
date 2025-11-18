@@ -369,12 +369,14 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("integration_test_node_{}", i),
+                temporal_range: None,
             };
 
             let fragment_args = AddFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_text(&format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i)),
+                temporal_range: None,
             };
 
             // Send to both consumers
@@ -613,6 +615,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
+            temporal_range: None,
         };
 
         let edge = AddEdge {
@@ -621,12 +624,14 @@ mod tests {
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_edge".to_string(),
+            temporal_range: None,
         };
 
         let fragment = AddFragment {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text("test fragment body"),
+            temporal_range: None,
         };
 
         // Ensure they can be created and debugged
