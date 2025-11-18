@@ -20,7 +20,7 @@
 mod common;
 
 use common::concurrent_test_utils::{Metrics, TestContext, writer_task};
-use motlie_db::ReaderConfig;
+use motlie_db::{EdgeByIdQuery, NodeByIdQuery, ReaderConfig, Runnable};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -70,7 +70,9 @@ async fn reader_task(
             // Query node
             if let Some(node_id) = context.get_random_node_id().await {
                 let start = Instant::now();
-                let result = reader.node_by_id(node_id, None, Duration::from_secs(1)).await;
+                let result = NodeByIdQuery::new(node_id, None)
+                    .run(&reader, Duration::from_secs(1))
+                    .await;
                 let latency_us = start.elapsed().as_micros() as u64;
 
                 match result {
@@ -82,7 +84,9 @@ async fn reader_task(
             // Query edge
             if let Some(edge_id) = context.get_random_edge_id().await {
                 let start = Instant::now();
-                let result = reader.edge_by_id(edge_id, None, Duration::from_secs(1)).await;
+                let result = EdgeByIdQuery::new(edge_id, None)
+                    .run(&reader, Duration::from_secs(1))
+                    .await;
                 let latency_us = start.elapsed().as_micros() as u64;
 
                 match result {

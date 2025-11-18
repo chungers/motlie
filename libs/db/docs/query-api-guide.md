@@ -612,8 +612,39 @@ let (name, summary) = NodeByIdQuery::new(id, Some(ref_time))
 
 2. ✅ Update method calls:
    ```rust
-   // Old: reader.node_by_id(id, ref_ts, timeout)
+   // Old (deprecated): reader.node_by_id(id, ref_ts, timeout)
    // New: NodeByIdQuery::new(id, ref_ts).run(&reader, timeout)
+   ```
+
+   **Common method migrations:**
+   ```rust
+   // NodeByIdQuery
+   // Old: reader.node_by_id(id, ref_ts, timeout).await?
+   NodeByIdQuery::new(id, ref_ts).run(&reader, timeout).await?
+
+   // EdgeByIdQuery
+   // Old: reader.edge_by_id(id, ref_ts, timeout).await?
+   EdgeByIdQuery::new(id, ref_ts).run(&reader, timeout).await?
+
+   // FragmentsByIdTimeRangeQuery
+   // Old: reader.fragments_by_id_time_range(id, range, ref_ts, timeout).await?
+   FragmentsByIdTimeRangeQuery::new(id, range, ref_ts).run(&reader, timeout).await?
+
+   // OutgoingEdgesQuery
+   // Old: reader.edges_from_node_by_id(node_id, ref_ts, timeout).await?
+   OutgoingEdgesQuery::new(node_id, ref_ts).run(&reader, timeout).await?
+
+   // IncomingEdgesQuery
+   // Old: reader.edges_to_node_by_id(node_id, ref_ts, timeout).await?
+   IncomingEdgesQuery::new(node_id, ref_ts).run(&reader, timeout).await?
+
+   // NodesByNameQuery
+   // Old: reader.nodes_by_name(prefix, cursor, limit, ref_ts, timeout).await?
+   NodesByNameQuery::new(prefix, cursor, limit, ref_ts).run(&reader, timeout).await?
+
+   // EdgesByNameQuery
+   // Old: reader.edges_by_name(prefix, cursor, limit, ref_ts, timeout).await?
+   EdgesByNameQuery::new(prefix, cursor, limit, ref_ts).run(&reader, timeout).await?
    ```
 
 3. ✅ Parameter order changed:

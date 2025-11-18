@@ -22,7 +22,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use motlie_db::{
     create_mutation_writer, create_query_reader, spawn_graph_consumer, spawn_query_consumer,
-    AddEdge, AddNode, EdgeName, Id, ReaderConfig, TimestampMilli, WriterConfig,
+    AddEdge, AddNode, Id, NodeByIdQuery, OutgoingEdgesQuery, ReaderConfig, Runnable,
+    TimestampMilli, WriterConfig,
 };
 use std::time::Duration;
 use tempfile::TempDir;
@@ -142,8 +143,8 @@ fn bench_point_lookups(c: &mut Criterion) {
             position,
             |b, _| {
                 b.to_async(&rt).iter(|| async {
-                    let result = reader
-                        .node_by_id(target_id, None, Duration::from_secs(5))
+                    let result = NodeByIdQuery::new(target_id, None)
+                        .run(&reader, Duration::from_secs(5))
                         .await
                         .unwrap();
                     black_box(result)
@@ -202,8 +203,8 @@ fn bench_prefix_scans_by_position(c: &mut Criterion) {
                 &(db_size, position),
                 |b, _| {
                     b.to_async(&rt).iter(|| async {
-                        let result = reader
-                            .edges_from_node_by_id(target_id, None, Duration::from_secs(5))
+                        let result = OutgoingEdgesQuery::new(target_id, None)
+                            .run(&reader, Duration::from_secs(5))
                             .await
                             .unwrap();
                         black_box(result)
@@ -250,8 +251,8 @@ fn bench_prefix_scans_by_degree(c: &mut Criterion) {
             degree,
             |b, _| {
                 b.to_async(&rt).iter(|| async {
-                    let result = reader
-                        .edges_from_node_by_id(target_id, None, Duration::from_secs(5))
+                    let result = OutgoingEdgesQuery::new(target_id, None)
+                        .run(&reader, Duration::from_secs(5))
                         .await
                         .unwrap();
                     black_box(result)
@@ -299,8 +300,8 @@ fn bench_scan_position_independence(c: &mut Criterion) {
             position_pct,
             |b, _| {
                 b.to_async(&rt).iter(|| async {
-                    let result = reader
-                        .edges_from_node_by_id(target_id, None, Duration::from_secs(5))
+                    let result = OutgoingEdgesQuery::new(target_id, None)
+                        .run(&reader, Duration::from_secs(5))
                         .await
                         .unwrap();
                     black_box(result)

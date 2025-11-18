@@ -16,7 +16,7 @@
 ///
 /// See: libs/db/docs/prefix-scanning-analysis-final.md
 
-use motlie_db::{AddEdge, AddNode, Id, TimestampMilli};
+use motlie_db::{AddEdge, AddNode, EdgesByNameQuery, Id, NodesByNameQuery, Runnable, TimestampMilli};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -86,8 +86,8 @@ async fn test_node_names_prefix_scan_comprehensive() {
         motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query for nodes starting with "Shop"
-    let result = reader
-        .nodes_by_name("Shop".to_string(), None, Some(100), None, Duration::from_secs(5))
+    let result = NodesByNameQuery::new("Shop".to_string(), None, Some(100), None)
+        .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -171,8 +171,8 @@ async fn test_node_names_edge_cases() {
         motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Test 1: Single character prefix
-    let result = reader
-        .nodes_by_name("a".to_string(), None, Some(100), None, Duration::from_secs(5))
+    let result = NodesByNameQuery::new("a".to_string(), None, Some(100), None)
+        .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -184,16 +184,16 @@ async fn test_node_names_edge_cases() {
     assert!(names.contains(&"abcd".to_string()));
 
     // Test 2: Very long name prefix
-    let result = reader
-        .nodes_by_name("VeryLong".to_string(), None, Some(100), None, Duration::from_secs(5))
+    let result = NodesByNameQuery::new("VeryLong".to_string(), None, Some(100), None)
+        .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
     assert_eq!(result.len(), 1, "Should find 1 node with very long name");
 
     // Test 3: UTF-8 with emoji
-    let result = reader
-        .nodes_by_name("UTF8🔥".to_string(), None, Some(100), None, Duration::from_secs(5))
+    let result = NodesByNameQuery::new("UTF8🔥".to_string(), None, Some(100), None)
+        .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -232,8 +232,8 @@ async fn test_node_names_pagination() {
         motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Page 1: Get first 10
-    let page1 = reader
-        .nodes_by_name("test_".to_string(), None, Some(10), None, Duration::from_secs(5))
+    let page1 = NodesByNameQuery::new("test_".to_string(), None, Some(10), None)
+        .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -248,14 +248,13 @@ async fn test_node_names_pagination() {
     let (last_name, last_id) = page1.last().unwrap().clone();
     println!("\n=== Seeking from: {} - {} ===", last_name, last_id);
 
-    let page2 = reader
-        .nodes_by_name(
+    let page2 = NodesByNameQuery::new(
             "test_".to_string(),
             Some((last_name.clone(), last_id)),
             Some(10),
             None,
-            Duration::from_secs(5),
         )
+        .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -289,8 +288,8 @@ async fn test_node_names_pagination() {
     );
 
     // Get all in one query to verify total
-    let all = reader
-        .nodes_by_name("test_".to_string(), None, Some(100), None, Duration::from_secs(5))
+    let all = NodesByNameQuery::new("test_".to_string(), None, Some(100), None)
+        .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -372,8 +371,8 @@ async fn test_edge_names_prefix_scan_comprehensive() {
         motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query for edges starting with "pay"
-    let result = reader
-        .edges_by_name("pay".to_string(), None, Some(100), None, Duration::from_secs(5))
+    let result = EdgesByNameQuery::new("pay".to_string(), None, Some(100), None)
+        .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -497,8 +496,8 @@ async fn test_empty_prefix_returns_all() {
         motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query with empty prefix
-    let result = reader
-        .nodes_by_name("".to_string(), None, Some(100), None, Duration::from_secs(5))
+    let result = NodesByNameQuery::new("".to_string(), None, Some(100), None)
+        .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
@@ -538,8 +537,8 @@ async fn test_nonexistent_prefix_returns_empty() {
         motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query with non-existent prefix
-    let result = reader
-        .nodes_by_name("zebra".to_string(), None, Some(100), None, Duration::from_secs(5))
+    let result = NodesByNameQuery::new("zebra".to_string(), None, Some(100), None)
+        .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 

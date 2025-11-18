@@ -37,7 +37,9 @@ struct EdgeNamesCfKey(
 
 ```rust
 // Query: Find all nodes with names starting with "Shop"
-reader.nodes_by_name("Shop".to_string(), None, Some(100), timeout).await?
+NodesByNameQuery::new("Shop".to_string(), None, Some(100), None)
+    .run(&reader, timeout)
+    .await?
 
 // Results:
 // - "Shop"
@@ -787,7 +789,9 @@ let nodes = vec![
 // ...
 
 // Query with prefix "Shop"
-let results = reader.nodes_by_name("Shop".to_string(), None, Some(10), timeout).await?;
+let results = NodesByNameQuery::new("Shop".to_string(), None, Some(10), None)
+    .run(&reader, timeout)
+    .await?;
 ```
 
 **Expected**: All 6 nodes starting with "Shop"

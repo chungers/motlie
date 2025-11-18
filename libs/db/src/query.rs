@@ -1680,8 +1680,8 @@ mod tests {
         let consumer_handle = spawn_consumer(consumer);
 
         // Query the node we just created
-        let (returned_name, returned_summary) = reader
-            .node_by_id(node_id, None, Duration::from_secs(5))
+        let (returned_name, returned_summary) = NodeByIdQuery::new(node_id, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 

@@ -726,7 +726,9 @@ async fn test_edge_by_id_returns_complete_topology() {
 async fn test_edge_by_id_not_found() {
     // ... setup ...
 
-    let result = reader.edge_by_id(Id::new(), Duration::from_secs(5)).await;
+    let result = EdgeByIdQuery::new(Id::new(), None)
+        .run(&reader, Duration::from_secs(5))
+        .await;
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));

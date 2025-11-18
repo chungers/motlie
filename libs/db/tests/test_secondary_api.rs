@@ -3,7 +3,7 @@
 /// Secondary instances provide dynamic catch-up capability for read replicas,
 /// allowing them to see new writes from the primary database.
 
-use motlie_db::{AddNode, Id, TimestampMilli};
+use motlie_db::{AddNode, Id, NodeByIdQuery, Runnable, TimestampMilli};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -62,7 +62,7 @@ async fn test_secondary_instance_basic() {
     let consumer_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &primary_path);
 
     // Query the node from secondary
-    let result = reader.node_by_id(node_id, None, Duration::from_secs(1)).await;
+    let result = NodeByIdQuery::new(node_id, None).run(&reader, Duration::from_secs(1)).await;
 
     assert!(result.is_ok(), "Should be able to read from secondary");
     let (returned_name, _summary) = result.unwrap();

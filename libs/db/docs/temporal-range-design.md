@@ -591,11 +591,15 @@ All 5 benchmark groups compile and run successfully:
 
 **Future:** Expose query time parameter in public API:
 ```rust
-// Current (implicit)
-reader.node_by_id(node_id, timeout).await?
+// Current (implicit - uses current time as reference timestamp)
+NodeByIdQuery::new(node_id, None)
+    .run(&reader, timeout)
+    .await?
 
-// Future (explicit)
-reader.node_by_id_at_time(node_id, query_time, timeout).await?
+// Future (explicit - specify reference timestamp)
+NodeByIdQuery::new(node_id, Some(query_time))
+    .run(&reader, timeout)
+    .await?
 ```
 
 #### 2. Temporal Range Queries
@@ -605,7 +609,10 @@ reader.node_by_id_at_time(node_id, query_time, timeout).await?
 **Future:** Range queries to find all records valid during a period:
 ```rust
 // Find all nodes valid anytime between T1 and T2
-reader.nodes_valid_during(start_time, end_time, timeout).await?
+// This would require a new query type in the future
+NodesValidDuringQuery::new(start_time, end_time)
+    .run(&reader, timeout)
+    .await?
 ```
 
 #### 3. Versioning Support
@@ -628,10 +635,14 @@ pub struct VersionedRecord {
 **Future:** Dedicated invalidation API:
 ```rust
 // Soft delete: set until timestamp to now
-writer.invalidate_node(node_id, reason).await?
+// This would be a new mutation type
+writer.send(vec![Mutation::InvalidateNode(InvalidateNode {
+    id: node_id,
+    ts_millis: TimestampMilli::now(),
+    reason: reason.to_string(),
+})]).await?
 
-// Generates mutation:
-// temporal_range: Some((original_start, Some(now)))
+// Would update temporal_range: Some((original_start, Some(now)))
 ```
 
 #### 5. Temporal Indexes

@@ -3,11 +3,16 @@ mod tests {
     use crate::graph::{
         spawn_graph_consumer, spawn_graph_consumer_with_next, ColumnFamilyRecord, Graph, Storage,
     };
+    use crate::query::{
+        EdgeByIdQuery, EdgesByNameQuery, FragmentsByIdTimeRangeQuery, IncomingEdgesQuery,
+        NodeByIdQuery, NodesByNameQuery, OutgoingEdgesQuery, Runnable,
+    };
     use crate::schema::{Edges, Fragments, Nodes, ALL_COLUMN_FAMILIES};
     use crate::{
         create_mutation_writer, AddEdge, AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
     };
     use rocksdb::DB;
+    use std::ops::Bound;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
     use tokio::time::Duration;
@@ -1781,26 +1786,26 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Query forward edges from A (should get edges to B)
-        let edges_from_a = reader
-            .edges_from_node_by_id(node_a_id, None, Duration::from_secs(5))
+        let edges_from_a = OutgoingEdgesQuery::new(node_a_id, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .expect("Failed to query edges from A");
 
         // Query forward edges from B (should get edges to A)
-        let edges_from_b = reader
-            .edges_from_node_by_id(node_b_id, None, Duration::from_secs(5))
+        let edges_from_b = OutgoingEdgesQuery::new(node_b_id, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .expect("Failed to query edges from B");
 
         // Query reverse edges to A (should get edges from B)
-        let edges_to_a = reader
-            .edges_to_node_by_id(node_a_id, None, Duration::from_secs(5))
+        let edges_to_a = IncomingEdgesQuery::new(node_a_id, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .expect("Failed to query edges to A");
 
         // Query reverse edges to B (should get edges from A)
-        let edges_to_b = reader
-            .edges_to_node_by_id(node_b_id, None, Duration::from_secs(5))
+        let edges_to_b = IncomingEdgesQuery::new(node_b_id, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .expect("Failed to query edges to B");
 
@@ -2148,12 +2153,12 @@ mod tests {
         let query_consumer_handle =
             crate::graph::spawn_query_consumer(receiver, crate::ReaderConfig::default(), &db_path);
 
-        let fragments = reader
-            .fragments_by_id_time_range(
+        let fragments = FragmentsByIdTimeRangeQuery::new(
                 entity_id,
                 (Bound::Unbounded, Bound::Unbounded),
-                None, Duration::from_secs(5),
+                None,
             )
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2214,12 +2219,12 @@ mod tests {
         let query_consumer_handle =
             crate::graph::spawn_query_consumer(receiver, crate::ReaderConfig::default(), &db_path);
 
-        let fragments = reader
-            .fragments_by_id_time_range(
+        let fragments = FragmentsByIdTimeRangeQuery::new(
                 entity_id,
                 (Bound::Included(t3), Bound::Unbounded),
-                None, Duration::from_secs(5),
+                None,
             )
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2282,12 +2287,12 @@ mod tests {
         let query_consumer_handle =
             crate::graph::spawn_query_consumer(receiver, crate::ReaderConfig::default(), &db_path);
 
-        let fragments = reader
-            .fragments_by_id_time_range(
+        let fragments = FragmentsByIdTimeRangeQuery::new(
                 entity_id,
                 (Bound::Unbounded, Bound::Included(t3)),
-                None, Duration::from_secs(5),
+                None,
             )
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2350,12 +2355,12 @@ mod tests {
         let query_consumer_handle =
             crate::graph::spawn_query_consumer(receiver, crate::ReaderConfig::default(), &db_path);
 
-        let fragments = reader
-            .fragments_by_id_time_range(
+        let fragments = FragmentsByIdTimeRangeQuery::new(
                 entity_id,
                 (Bound::Included(t2), Bound::Included(t4)),
-                None, Duration::from_secs(5),
+                None,
             )
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2418,12 +2423,12 @@ mod tests {
         let query_consumer_handle =
             crate::graph::spawn_query_consumer(receiver, crate::ReaderConfig::default(), &db_path);
 
-        let fragments = reader
-            .fragments_by_id_time_range(
+        let fragments = FragmentsByIdTimeRangeQuery::new(
                 entity_id,
                 (Bound::Excluded(t2), Bound::Excluded(t4)),
-                None, Duration::from_secs(5),
+                None,
             )
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2480,12 +2485,12 @@ mod tests {
         let query_consumer_handle =
             crate::graph::spawn_query_consumer(receiver, crate::ReaderConfig::default(), &db_path);
 
-        let fragments = reader
-            .fragments_by_id_time_range(
+        let fragments = FragmentsByIdTimeRangeQuery::new(
                 entity_id,
                 (Bound::Included(t2), Bound::Excluded(t4)),
-                None, Duration::from_secs(5),
+                None,
             )
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2535,12 +2540,12 @@ mod tests {
         let query_consumer_handle =
             crate::graph::spawn_query_consumer(receiver, crate::ReaderConfig::default(), &db_path);
 
-        let fragments = reader
-            .fragments_by_id_time_range(
+        let fragments = FragmentsByIdTimeRangeQuery::new(
                 entity_id,
                 (Bound::Excluded(t3), Bound::Unbounded),
-                None, Duration::from_secs(5),
+                None,
             )
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2588,12 +2593,12 @@ mod tests {
         let query_consumer_handle =
             crate::graph::spawn_query_consumer(receiver, crate::ReaderConfig::default(), &db_path);
 
-        let fragments = reader
-            .fragments_by_id_time_range(
+        let fragments = FragmentsByIdTimeRangeQuery::new(
                 other_id,
                 (Bound::Unbounded, Bound::Unbounded),
-                None, Duration::from_secs(5),
+                None,
             )
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2684,8 +2689,8 @@ mod tests {
             crate::graph::spawn_query_consumer(query_receiver, reader_config, &db_path);
 
         // Query for nodes with prefix "user_"
-        let results = reader
-            .nodes_by_name("user_".to_string(), None, None, None, Duration::from_secs(5))
+        let results = NodesByNameQuery::new("user_".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2734,8 +2739,8 @@ mod tests {
         );
 
         // Query for exact name "user_alice" should match both instances
-        let alice_results = reader
-            .nodes_by_name("user_alice".to_string(), None, None, None, Duration::from_secs(5))
+        let alice_results = NodesByNameQuery::new("user_alice".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2746,8 +2751,8 @@ mod tests {
         );
 
         // Query for non-existent prefix
-        let empty_results = reader
-            .nodes_by_name("nonexistent_".to_string(), None, None, None, Duration::from_secs(5))
+        let empty_results = NodesByNameQuery::new("nonexistent_".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2854,8 +2859,8 @@ mod tests {
             crate::graph::spawn_query_consumer(query_receiver, reader_config, &db_path);
 
         // Query for edges with prefix "likes"
-        let results = reader
-            .edges_by_name("likes".to_string(), None, None, None, Duration::from_secs(5))
+        let results = EdgesByNameQuery::new("likes".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2887,8 +2892,8 @@ mod tests {
         );
 
         // Query for exact name "likes" should match only the 3 exact matches
-        let exact_results = reader
-            .edges_by_name("likes".to_string(), None, None, None, Duration::from_secs(5))
+        let exact_results = EdgesByNameQuery::new("likes".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2910,8 +2915,8 @@ mod tests {
         );
 
         // Query with more specific prefix
-        let specific_results = reader
-            .edges_by_name("likes_very".to_string(), None, None, None, Duration::from_secs(5))
+        let specific_results = EdgesByNameQuery::new("likes_very".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2923,8 +2928,8 @@ mod tests {
         assert_eq!(specific_results[0].1, likes_very_much_id);
 
         // Query for non-existent prefix
-        let empty_results = reader
-            .edges_by_name("hates".to_string(), None, None, None, Duration::from_secs(5))
+        let empty_results = EdgesByNameQuery::new("hates".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -2980,36 +2985,36 @@ mod tests {
             crate::graph::spawn_query_consumer(query_receiver, reader_config, &db_path);
 
         // Test 1: No limit returns all results
-        let results = reader
-            .nodes_by_name("test_node_".to_string(), None, None, None, Duration::from_secs(5))
+        let results = NodesByNameQuery::new("test_node_".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 10, "No limit should return all 10 nodes");
 
         // Test 2: Limit smaller than available results
-        let results = reader
-            .nodes_by_name("test_node_".to_string(), None, Some(3), None, Duration::from_secs(5))
+        let results = NodesByNameQuery::new("test_node_".to_string(), None, Some(3), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 3, "Limit of 3 should return exactly 3 nodes");
 
         // Test 3: Limit of 1
-        let results = reader
-            .nodes_by_name("test_node_".to_string(), None, Some(1), None, Duration::from_secs(5))
+        let results = NodesByNameQuery::new("test_node_".to_string(), None, Some(1), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "Limit of 1 should return exactly 1 node");
 
         // Test 4: Limit of 0 returns empty
-        let results = reader
-            .nodes_by_name("test_node_".to_string(), None, Some(0), None, Duration::from_secs(5))
+        let results = NodesByNameQuery::new("test_node_".to_string(), None, Some(0), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 0, "Limit of 0 should return 0 nodes");
 
         // Test 5: Limit larger than available results
-        let results = reader
-            .nodes_by_name("test_node_".to_string(), None, Some(20), None, Duration::from_secs(5))
+        let results = NodesByNameQuery::new("test_node_".to_string(), None, Some(20), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(
@@ -3019,8 +3024,8 @@ mod tests {
         );
 
         // Test 6: Verify results have correct prefix
-        let results = reader
-            .nodes_by_name("test_node_".to_string(), None, Some(5), None, Duration::from_secs(5))
+        let results = NodesByNameQuery::new("test_node_".to_string(), None, Some(5), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         for (name, _id) in &results {
@@ -3115,36 +3120,36 @@ mod tests {
             crate::graph::spawn_query_consumer(query_receiver, reader_config, &db_path);
 
         // Test 1: No limit returns all results
-        let results = reader
-            .edges_by_name("test_edge_".to_string(), None, None, None, Duration::from_secs(5))
+        let results = EdgesByNameQuery::new("test_edge_".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 10, "No limit should return all 10 edges");
 
         // Test 2: Limit smaller than available results
-        let results = reader
-            .edges_by_name("test_edge_".to_string(), None, Some(3), None, Duration::from_secs(5))
+        let results = EdgesByNameQuery::new("test_edge_".to_string(), None, Some(3), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 3, "Limit of 3 should return exactly 3 edges");
 
         // Test 3: Limit of 1
-        let results = reader
-            .edges_by_name("test_edge_".to_string(), None, Some(1), None, Duration::from_secs(5))
+        let results = EdgesByNameQuery::new("test_edge_".to_string(), None, Some(1), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "Limit of 1 should return exactly 1 edge");
 
         // Test 4: Limit of 0 returns empty
-        let results = reader
-            .edges_by_name("test_edge_".to_string(), None, Some(0), None, Duration::from_secs(5))
+        let results = EdgesByNameQuery::new("test_edge_".to_string(), None, Some(0), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(results.len(), 0, "Limit of 0 should return 0 edges");
 
         // Test 5: Limit larger than available results
-        let results = reader
-            .edges_by_name("test_edge_".to_string(), None, Some(20), None, Duration::from_secs(5))
+        let results = EdgesByNameQuery::new("test_edge_".to_string(), None, Some(20), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(
@@ -3154,8 +3159,8 @@ mod tests {
         );
 
         // Test 6: Verify results have correct prefix
-        let results = reader
-            .edges_by_name("test_edge_".to_string(), None, Some(5), None, Duration::from_secs(5))
+        let results = EdgesByNameQuery::new("test_edge_".to_string(), None, Some(5), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         for (name, _id) in &results {
@@ -3212,8 +3217,8 @@ mod tests {
             crate::graph::spawn_query_consumer(query_receiver, reader_config, &db_path);
 
         // Test 1: First page with start=None, limit=5
-        let page1 = reader
-            .nodes_by_name("page_node_shared".to_string(), None, Some(5), None, Duration::from_secs(5))
+        let page1 = NodesByNameQuery::new("page_node_shared".to_string(), None, Some(5), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(page1.len(), 5, "First page should return 5 nodes");
@@ -3228,13 +3233,12 @@ mod tests {
         println!("Page 1 last: {} - {:?}", last_name_page1, last_id_page1);
         println!("Page 1 IDs: {:?}", page1.iter().map(|(n, id)| (n.clone(), *id)).collect::<Vec<_>>());
 
-        let page2 = reader
-            .nodes_by_name(
+        let page2 = NodesByNameQuery::new(
                 "page_node_shared".to_string(),
                 Some((last_name_page1, last_id_page1)),
                 Some(5),
-                None, Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         println!("Page 2 IDs: {:?}", page2.iter().map(|(n, id)| (n.clone(), *id)).collect::<Vec<_>>());
@@ -3256,39 +3260,36 @@ mod tests {
 
         // Test 4: Third page
         let (last_name_page2, last_id_page2) = page2.last().unwrap().clone();
-        let page3 = reader
-            .nodes_by_name(
+        let page3 = NodesByNameQuery::new(
                 "page_node_shared".to_string(),
                 Some((last_name_page2, last_id_page2)),
                 Some(5),
-                None, Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(page3.len(), 5, "Third page should return 5 nodes");
 
         // Test 5: Fourth page (should have remaining 5 nodes)
         let (last_name_page3, last_id_page3) = page3.last().unwrap().clone();
-        let page4 = reader
-            .nodes_by_name(
+        let page4 = NodesByNameQuery::new(
                 "page_node_shared".to_string(),
                 Some((last_name_page3, last_id_page3)),
                 Some(5),
-                None, Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(page4.len(), 5, "Fourth page should return last 5 nodes");
 
         // Test 6: Eventually pagination reaches the end
         let (last_name_page4, last_id_page4) = page4.last().unwrap().clone();
-        let page5 = reader
-            .nodes_by_name(
+        let page5 = NodesByNameQuery::new(
                 "page_node_shared".to_string(),
                 Some((last_name_page4, last_id_page4)),
                 Some(5),
-                None, Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         // Page 5 may have 0 or few items depending on total count
@@ -3316,8 +3317,8 @@ mod tests {
         }
 
         // Test 8: Query without pagination returns all results
-        let all_results = reader
-            .nodes_by_name("page_node_".to_string(), None, None, None, Duration::from_secs(5))
+        let all_results = NodesByNameQuery::new("page_node_".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(
@@ -3327,13 +3328,12 @@ mod tests {
         );
 
         // Test 9: Pagination with different prefix
-        let other_results = reader
-            .nodes_by_name(
+        let other_results = NodesByNameQuery::new(
                 "nonexistent_".to_string(),
                 None,
                 Some(5),
-                None, Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(
@@ -3344,13 +3344,12 @@ mod tests {
 
         // Test 10: Start with non-existent ID (should return nodes after where it would be)
         let fake_id = Id::new(); // This ID doesn't exist in the database
-        let results_after_fake = reader
-            .nodes_by_name(
+        let results_after_fake = NodesByNameQuery::new(
                 "page_node_shared".to_string(),
                 Some(("page_node_shared".to_string(), fake_id)),
                 Some(5),
-                None, Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         // Should return some results (the ones that come after this ID in sort order)
@@ -3445,8 +3444,8 @@ mod tests {
             crate::graph::spawn_query_consumer(query_receiver, reader_config, &db_path);
 
         // Test 1: First page with start=None, limit=5
-        let page1 = reader
-            .edges_by_name("page_edge_shared".to_string(), None, Some(5), None, Duration::from_secs(5))
+        let page1 = EdgesByNameQuery::new("page_edge_shared".to_string(), None, Some(5), None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(page1.len(), 5, "First page should return 5 edges");
@@ -3461,13 +3460,12 @@ mod tests {
 
         // Test 2: Second page using last result from first page
         let (last_name_page1, last_id_page1) = page1.last().unwrap().clone();
-        let page2 = reader
-            .edges_by_name(
+        let page2 = EdgesByNameQuery::new(
                 "page_edge_shared".to_string(),
                 Some((last_name_page1, last_id_page1)),
                 Some(5),
-                None, Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(page2.len(), 5, "Second page should return 5 edges");
@@ -3482,42 +3480,36 @@ mod tests {
 
         // Test 4: Third page
         let (last_name_page2, last_id_page2) = page2.last().unwrap().clone();
-        let page3 = reader
-            .edges_by_name(
+        let page3 = EdgesByNameQuery::new(
                 "page_edge_".to_string(),
                 Some((last_name_page2, last_id_page2)),
                 Some(5),
-                None,
-                Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(page3.len(), 5, "Third page should return 5 edges");
 
         // Test 5: Fourth page (should have remaining 5 edges)
         let (last_name_page3, last_id_page3) = page3.last().unwrap().clone();
-        let page4 = reader
-            .edges_by_name(
+        let page4 = EdgesByNameQuery::new(
                 "page_edge_".to_string(),
                 Some((last_name_page3, last_id_page3)),
                 Some(5),
-                None,
-                Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(page4.len(), 5, "Fourth page should return last 5 edges");
 
         // Test 6: Eventually pagination reaches the end
         let (last_name_page4, last_id_page4) = page4.last().unwrap().clone();
-        let page5 = reader
-            .edges_by_name(
+        let page5 = EdgesByNameQuery::new(
                 "page_edge_shared".to_string(),
                 Some((last_name_page4, last_id_page4)),
                 Some(5),
-                None,
-                Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         // Page 5 may have 0 or few items depending on total count
@@ -3539,8 +3531,8 @@ mod tests {
         // The important tests (no overlap between consecutive pages) already passed above.
 
         // Test 8: Query without pagination returns all results
-        let all_results = reader
-            .edges_by_name("page_edge_shared".to_string(), None, None, None, Duration::from_secs(5))
+        let all_results = EdgesByNameQuery::new("page_edge_shared".to_string(), None, None, None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(
@@ -3560,13 +3552,12 @@ mod tests {
         );
 
         // Test 10: Pagination with different prefix
-        let other_results = reader
-            .edges_by_name(
+        let other_results = EdgesByNameQuery::new(
                 "nonexistent_".to_string(),
                 None,
                 Some(5),
-                None, Duration::from_secs(5),
-            )
+                None)
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
         assert_eq!(
@@ -4039,14 +4030,12 @@ mod tests {
 
         // Query at t2 - should get nodes 0-14 (15 nodes total)
         // First page: limit 5
-        let page1 = reader
-            .nodes_by_name(
+        let page1 = NodesByNameQuery::new(
                 "user_".to_string(),
                 None,
                 Some(5),
-                Some(t2),
-                Duration::from_secs(5),
-            )
+                Some(t2))
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -4057,14 +4046,12 @@ mod tests {
 
         // Second page
         let last_page1 = page1.last().unwrap().clone();
-        let page2 = reader
-            .nodes_by_name(
+        let page2 = NodesByNameQuery::new(
                 "user_".to_string(),
                 Some(last_page1),
                 Some(5),
-                Some(t2),
-                Duration::from_secs(5),
-            )
+                Some(t2))
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -4074,14 +4061,12 @@ mod tests {
 
         // Third page
         let last_page2 = page2.last().unwrap().clone();
-        let page3 = reader
-            .nodes_by_name(
+        let page3 = NodesByNameQuery::new(
                 "user_".to_string(),
                 Some(last_page2),
                 Some(5),
-                Some(t2),
-                Duration::from_secs(5),
-            )
+                Some(t2))
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -4091,14 +4076,12 @@ mod tests {
 
         // Fourth page - should be empty (nodes 15-19 are expired at t2)
         let last_page3 = page3.last().unwrap().clone();
-        let page4 = reader
-            .nodes_by_name(
+        let page4 = NodesByNameQuery::new(
                 "user_".to_string(),
                 Some(last_page3),
                 Some(5),
-                Some(t2),
-                Duration::from_secs(5),
-            )
+                Some(t2))
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -4126,14 +4109,12 @@ mod tests {
 
         // Query at t0 - should get nodes 5-9 (valid_between t0-t4) and 15-19 (valid_until t1)
         // Total: 10 nodes valid at t0
-        let page_t0 = reader
-            .nodes_by_name(
+        let page_t0 = NodesByNameQuery::new(
                 "user_".to_string(),
                 None,
                 Some(20),
-                Some(t0),
-                Duration::from_secs(5),
-            )
+                Some(t0))
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -4276,14 +4257,12 @@ mod tests {
         let _query_handle = spawn_query_consumer(query_receiver, reader_config, &db_path);
 
         // Query at t2 - should get edges 0-14 (15 edges total)
-        let page1 = reader
-            .edges_by_name(
+        let page1 = EdgesByNameQuery::new(
                 "follows_".to_string(),
                 None,
                 Some(5),
-                Some(t2),
-                Duration::from_secs(5),
-            )
+                Some(t2))
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -4291,14 +4270,12 @@ mod tests {
 
         // Second page
         let last_page1 = page1.last().unwrap().clone();
-        let page2 = reader
-            .edges_by_name(
+        let page2 = EdgesByNameQuery::new(
                 "follows_".to_string(),
                 Some(last_page1),
                 Some(5),
-                Some(t2),
-                Duration::from_secs(5),
-            )
+                Some(t2))
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -4306,14 +4283,12 @@ mod tests {
 
         // Third page
         let last_page2 = page2.last().unwrap().clone();
-        let page3 = reader
-            .edges_by_name(
+        let page3 = EdgesByNameQuery::new(
                 "follows_".to_string(),
                 Some(last_page2),
                 Some(5),
-                Some(t2),
-                Duration::from_secs(5),
-            )
+                Some(t2))
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -4321,14 +4296,12 @@ mod tests {
 
         // Fourth page - should be empty
         let last_page3 = page3.last().unwrap().clone();
-        let page4 = reader
-            .edges_by_name(
+        let page4 = EdgesByNameQuery::new(
                 "follows_".to_string(),
                 Some(last_page3),
                 Some(5),
-                Some(t2),
-                Duration::from_secs(5),
-            )
+                Some(t2))
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -4406,8 +4379,8 @@ mod tests {
         let _query_handle = spawn_query_consumer(query_receiver, reader_config, &db_path);
 
         // Query at t0 (before valid range) - should fail
-        let result_t0 = reader
-            .node_by_id(node_id, Some(t0), Duration::from_secs(5))
+        let result_t0 = NodeByIdQuery::new(node_id, Some(t0))
+            .run(&reader, Duration::from_secs(5))
             .await;
         assert!(
             result_t0.is_err(),
@@ -4415,8 +4388,8 @@ mod tests {
         );
 
         // Query at t1 (start of range, inclusive) - should succeed
-        let result_t1 = reader
-            .node_by_id(node_id, Some(t1), Duration::from_secs(5))
+        let result_t1 = NodeByIdQuery::new(node_id, Some(t1))
+            .run(&reader, Duration::from_secs(5))
             .await;
         assert!(
             result_t1.is_ok(),
@@ -4425,8 +4398,8 @@ mod tests {
         assert_eq!(result_t1.unwrap().0, "temporal_node");
 
         // Query at t2 (during valid range) - should succeed
-        let result_t2 = reader
-            .node_by_id(node_id, Some(t2), Duration::from_secs(5))
+        let result_t2 = NodeByIdQuery::new(node_id, Some(t2))
+            .run(&reader, Duration::from_secs(5))
             .await;
         assert!(
             result_t2.is_ok(),
@@ -4434,8 +4407,8 @@ mod tests {
         );
 
         // Query at t3 (end of range, exclusive) - should fail
-        let result_t3 = reader
-            .node_by_id(node_id, Some(t3), Duration::from_secs(5))
+        let result_t3 = NodeByIdQuery::new(node_id, Some(t3))
+            .run(&reader, Duration::from_secs(5))
             .await;
         assert!(
             result_t3.is_err(),
@@ -4443,8 +4416,8 @@ mod tests {
         );
 
         // Query at t4 (after valid range) - should fail
-        let result_t4 = reader
-            .node_by_id(node_id, Some(t4), Duration::from_secs(5))
+        let result_t4 = NodeByIdQuery::new(node_id, Some(t4))
+            .run(&reader, Duration::from_secs(5))
             .await;
         assert!(
             result_t4.is_err(),
@@ -4453,8 +4426,8 @@ mod tests {
 
         // Query always valid node at any time - should always succeed
         for t in [t0, t1, t2, t3, t4] {
-            let result = reader
-                .node_by_id(always_valid_node, Some(t), Duration::from_secs(5))
+            let result = NodeByIdQuery::new(always_valid_node, Some(t))
+                .run(&reader, Duration::from_secs(5))
                 .await;
             assert!(
                 result.is_ok(),
@@ -4585,8 +4558,8 @@ mod tests {
         let _query_handle = spawn_query_consumer(query_receiver, reader_config, &db_path);
 
         // Query edges from node_a at t2
-        let edges = reader
-            .edges_from_node_by_id(node_a, Some(t2), Duration::from_secs(5))
+        let edges = OutgoingEdgesQuery::new(node_a, Some(t2))
+            .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();
 
@@ -4648,8 +4621,8 @@ mod tests {
 
         // Before start - INVALID
         assert!(
-            reader
-                .node_by_id(node_id, Some(before), Duration::from_secs(5))
+            NodeByIdQuery::new(node_id, Some(before))
+                .run(&reader, Duration::from_secs(5))
                 .await
                 .is_err(),
             "Query before start should be invalid"
@@ -4657,8 +4630,8 @@ mod tests {
 
         // At start (inclusive) - VALID
         assert!(
-            reader
-                .node_by_id(node_id, Some(at_start), Duration::from_secs(5))
+            NodeByIdQuery::new(node_id, Some(at_start))
+                .run(&reader, Duration::from_secs(5))
                 .await
                 .is_ok(),
             "Query at start should be valid (inclusive)"
@@ -4666,8 +4639,8 @@ mod tests {
 
         // Middle - VALID
         assert!(
-            reader
-                .node_by_id(node_id, Some(middle), Duration::from_secs(5))
+            NodeByIdQuery::new(node_id, Some(middle))
+                .run(&reader, Duration::from_secs(5))
                 .await
                 .is_ok(),
             "Query in middle should be valid"
@@ -4675,8 +4648,8 @@ mod tests {
 
         // At end (exclusive) - INVALID
         assert!(
-            reader
-                .node_by_id(node_id, Some(at_end), Duration::from_secs(5))
+            NodeByIdQuery::new(node_id, Some(at_end))
+                .run(&reader, Duration::from_secs(5))
                 .await
                 .is_err(),
             "Query at end should be invalid (exclusive)"
@@ -4684,8 +4657,8 @@ mod tests {
 
         // After end - INVALID
         assert!(
-            reader
-                .node_by_id(node_id, Some(after), Duration::from_secs(5))
+            NodeByIdQuery::new(node_id, Some(after))
+                .run(&reader, Duration::from_secs(5))
                 .await
                 .is_err(),
             "Query after end should be invalid"

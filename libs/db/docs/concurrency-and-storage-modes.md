@@ -283,7 +283,9 @@ async fn reader_task(db_path: std::path::PathBuf) {
     );
 
     // Query data
-    let result = reader.node_by_id(id, Duration::from_secs(1)).await;
+    let result = NodeByIdQuery::new(id, None)
+        .run(&reader, Duration::from_secs(1))
+        .await;
 
     // Cleanup
     drop(reader);
@@ -789,7 +791,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Query
     let node_id = Id::new();
-    match reader.node_by_id(node_id, Duration::from_secs(1)).await {
+    match NodeByIdQuery::new(node_id, None)
+        .run(&reader, Duration::from_secs(1))
+        .await
+    {
         Ok((name, summary)) => println!("Found: {}", name),
         Err(e) => println!("Not found: {}", e),
     }
@@ -899,7 +904,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Read immediately (99%+ will succeed)
     let (reader, _) = &readers[0];
-    match reader.node_by_id(node_id, Duration::from_secs(1)).await {
+    match NodeByIdQuery::new(node_id, None)
+        .run(&reader, Duration::from_secs(1))
+        .await
+    {
         Ok((name, _)) => println!("Immediate read succeeded: {}", name),
         Err(e) => println!("Read failed: {}", e),
     }

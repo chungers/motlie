@@ -363,7 +363,9 @@ let summary = reader.edge_summary_by_id(edge_id, Duration::from_secs(5)).await?;
 assert!(summary.content()?.contains("test"));
 
 // NEW:
-let (src_id, dst_id, edge_name, summary) = reader.edge_by_id(edge_id, Duration::from_secs(5)).await?;
+let (src_id, dst_id, edge_name, summary) = EdgeByIdQuery::new(edge_id, None)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
 assert_eq!(src_id, expected_source_id);
 assert_eq!(dst_id, expected_dest_id);
 assert_eq!(edge_name.0, "test_edge");
@@ -465,8 +467,9 @@ fn find_edge_topology_in_forward_cf(
        }).await?;
 
        // Query should return topology
-       let (ret_src, ret_dst, ret_name, _summary) =
-           reader.edge_by_id(edge_id, timeout).await?;
+       let (ret_src, ret_dst, ret_name, _summary) = EdgeByIdQuery::new(edge_id, None)
+           .run(&reader, timeout)
+           .await?;
 
        assert_eq!(ret_src, src);
        assert_eq!(ret_dst, dst);
@@ -478,7 +481,9 @@ fn find_edge_topology_in_forward_cf(
    ```rust
    #[tokio::test]
    async fn test_edge_by_id_not_found() {
-       let result = reader.edge_by_id(Id::new(), timeout).await;
+       let result = EdgeByIdQuery::new(Id::new(), None)
+           .run(&reader, timeout)
+           .await;
        assert!(result.is_err());
        assert!(result.unwrap_err().to_string().contains("not found"));
    }
