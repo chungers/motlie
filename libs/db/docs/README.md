@@ -24,14 +24,31 @@ This directory contains design documentation, analysis, and implementation notes
 
 ### API Documentation
 
-#### [reader.md](reader.md)
-Complete reference for the Reader API with usage examples and query patterns.
+#### [query-api-guide.md](query-api-guide.md) ⭐
+**ESSENTIAL**: Complete guide to the modern Query API (v0.2.0+).
 
 **Contents**:
-- Query operations (node_by_id, edge_by_id, etc.)
+- Type-driven query construction
+- All 8 query types with examples
+- Common patterns (concurrent queries, pagination, traversal)
+- Advanced usage (composition, retry strategies)
+- Migration guide from deprecated Reader API
+- Performance considerations
+
+**Status**: ✅ Current - **Start here for query operations**
+
+---
+
+#### [reader.md](reader.md)
+Legacy reference for the deprecated Reader API (v0.1.x).
+
+**Contents**:
+- Query operations (node_by_id, edge_by_id, etc.) - **DEPRECATED**
 - Timeout handling
 - Return types and semantics
 - Example usage patterns
+
+**Status**: 📋 Historical - Use [query-api-guide.md](query-api-guide.md) instead
 
 ---
 
@@ -62,19 +79,6 @@ The following documents capture design discussions, analyses, and decisions made
 **Status**: ✅ Fully Implemented - All 174 tests passing, benchmarks successful, examples working end-to-end
 
 **Read More**: Comprehensive documentation of design, implementation, and migration results.
-
----
-
-#### [reader-api-gap-analysis.md](reader-api-gap-analysis.md)
-Analysis of whether the Reader API can replace direct RocksDB access for database verification.
-
-**Key Findings**:
-- Reader API designed for point queries (requires IDs)
-- Verification requires bulk iteration (unknown IDs)
-- Recommendation: Keep direct RocksDB for admin operations
-- Future consideration: Separate `DatabaseInspector` API
-
-**Status**: ✅ Analyzed - Current design is appropriate
 
 ---
 
@@ -271,13 +275,11 @@ Comprehensive benchmark strategy to measure performance improvements.
 ## Document Categories
 
 ### 1. API Reference
-- `reader.md` - Complete Reader API documentation
+- `query-api-guide.md` ⭐ - **Current Query API** (v0.2.0+)
 
 ### 2. Design Evolution
 Documents tracking the evolution of API design:
 - `query-and-mutation-processor-simplification.md` ⭐ - **IMPLEMENTED**: Unified trait-based execution for queries and mutations
-- `reader-api-gap-analysis.md` - Initial gap identification
-- `reader-api-completeness-analysis.md` - Comprehensive gap analysis
 - `edge-by-id-explained.md` - Problem statement
 - `edge-by-id-implementation-plan.md` - Initial plan (struct approach)
 - `edge-by-id-tuple-implementation.md` - Revised plan (tuple approach)
@@ -293,8 +295,9 @@ Critical documents for understanding database internals:
 ### For New Contributors
 
 1. **Start here**: [`../README.md`](../README.md) - Library overview and architecture
-2. **API usage**: [`reader.md`](reader.md) - How to use the Reader API
-3. **Schema design**: [`variable-length-fields-in-keys.md`](variable-length-fields-in-keys.md) - Critical for understanding key layout
+2. **API usage**: [`query-api-guide.md`](query-api-guide.md) - How to query the database ⭐
+3. **Concurrency**: [`concurrency-and-storage-modes.md`](concurrency-and-storage-modes.md) - Threading patterns
+4. **Schema design**: [`variable-length-fields-in-keys.md`](variable-length-fields-in-keys.md) - Critical for understanding key layout
 
 ### For Schema Modifications
 
@@ -313,9 +316,9 @@ Critical documents for understanding database internals:
 
 Understanding the design process:
 
-1. [`reader-api-gap-analysis.md`](reader-api-gap-analysis.md) - Initial analysis
-2. [`reader-api-completeness-analysis.md`](reader-api-completeness-analysis.md) - Gap identification
-3. [`edge-by-id-explained.md`](edge-by-id-explained.md) - Problem deep-dive
+1. [`query-api-guide.md`](query-api-guide.md) - **Current Query API** (v0.2.0+) ⭐
+2. [`query-and-mutation-processor-simplification.md`](query-and-mutation-processor-simplification.md) - Trait-based refactoring
+3. [`edge-by-id-explained.md`](edge-by-id-explained.md) - Problem deep-dive (edge topology implementation)
 4. [`edge-by-id-tuple-implementation.md`](edge-by-id-tuple-implementation.md) - Solution
 
 Shows the iterative refinement process and decision rationale.

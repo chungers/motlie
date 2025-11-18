@@ -183,10 +183,10 @@ pub trait Processor: Send + Sync {
     async fn get_fragments_by_id_time_range(&self, query: &FragmentsByIdTimeRangeQuery)
         -> Result<Vec<(TimestampMilli, FragmentContent)>>;
 
-    async fn get_edges_from_node_by_id(&self, query: &EdgesFromNodeQuery)
+    async fn get_outgoing_edges_by_id(&self, query: &OutgoingEdgesQuery)
         -> Result<Vec<(SrcId, EdgeName, DstId)>>;
 
-    async fn get_edges_to_node_by_id(&self, query: &EdgesToNodeQuery)
+    async fn get_incoming_edges_by_id(&self, query: &IncomingEdgesQuery)
         -> Result<Vec<(DstId, EdgeName, SrcId)>>;
 
     async fn get_nodes_by_name(&self, query: &NodesByNameQuery)

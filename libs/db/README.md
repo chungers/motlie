@@ -51,49 +51,64 @@ A graph database library built on RocksDB with async query/mutation processing a
 
 ### Reader API (Query System)
 
-The `Reader` provides async query operations with timeout support:
+The `Reader` provides async query operations with a modern, type-driven API:
 
 ```rust
-use motlie_db::{Reader, ReaderConfig, Id};
+use motlie_db::{Reader, NodeByIdQuery, EdgeByIdQuery, Runnable, Id};
 use std::time::Duration;
 
-// Create reader
-let (reader, receiver) = create_query_reader(ReaderConfig::default());
+let timeout = Duration::from_secs(5);
 
 // Query node by ID
-let (name, summary) = reader
-    .node_by_id(node_id, Duration::from_secs(5))
+let (name, summary) = NodeByIdQuery::new(node_id, None)
+    .run(&reader, timeout)
     .await?;
 
 // Query edge by ID (returns topology + summary)
-let (src_id, dst_id, edge_name, summary) = reader
-    .edge_by_id(edge_id, Duration::from_secs(5))
+let (src_id, dst_id, edge_name, summary) = EdgeByIdQuery::new(edge_id, None)
+    .run(&reader, timeout)
     .await?;
 
 // Query edges from a node (outgoing)
-let edges = reader
-    .edges_from_node_by_id(node_id, Duration::from_secs(5))
+let edges = OutgoingEdgesQuery::new(node_id, None)
+    .run(&reader, timeout)
     .await?;
 
 // Query edges to a node (incoming)
-let edges = reader
-    .edges_to_node_by_id(node_id, Duration::from_secs(5))
+let edges = IncomingEdgesQuery::new(node_id, None)
+    .run(&reader, timeout)
     .await?;
 
-// Query fragments by ID
-let fragments = reader
-    .fragments_by_id(entity_id, Duration::from_secs(5))
-    .await?;
+// Query fragments by ID and time range
+use std::ops::Bound;
+let fragments = FragmentsByIdTimeRangeQuery::new(
+    entity_id,
+    (Bound::Unbounded, Bound::Unbounded),
+    None
+)
+.run(&reader, timeout)
+.await?;
+
+// Concurrent queries using tokio::try_join!
+use tokio::try_join;
+
+let (node_info, outgoing, incoming) = try_join!(
+    NodeByIdQuery::new(node_id, None).run(&reader, timeout),
+    OutgoingEdgesQuery::new(node_id, None).run(&reader, timeout),
+    IncomingEdgesQuery::new(node_id, None).run(&reader, timeout)
+)?;
 ```
 
 **Key Features**:
-- Point queries by ID
-- Edge topology queries (neighbors)
-- Fragment retrieval
-- Timeout support for all operations
+- **Type-driven API** - Query type determines result type
+- **Timeout at execution** - Timeout is a runtime parameter, not construction
+- **No builder boilerplate** - Direct query construction
+- **Composable queries** - Queries are values that can be stored and reused
+- **Temporal queries** - Optional reference timestamp for historical queries
+- **Concurrent execution** - Use tokio::join! for parallel queries
 - Returns complete data (no need for joins)
 
-See: [`docs/reader.md`](docs/reader.md) for detailed API documentation
+See: [`docs/query-api-guide.md`](docs/query-api-guide.md) ⭐ for comprehensive API documentation
 
 ### Writer API (Mutation System)
 
@@ -280,10 +295,10 @@ pub trait Processor: Send + Sync {
     async fn get_edge_by_id(&self, query: &EdgeByIdQuery)
         -> Result<(SrcId, DstId, EdgeName, EdgeSummary)>;
 
-    async fn get_edges_from_node_by_id(&self, query: &EdgesFromNodeByIdQuery)
+    async fn get_outgoing_edges_by_id(&self, query: &EdgesFromNodeByIdQuery)
         -> Result<Vec<(SrcId, EdgeName, DstId)>>;
 
-    async fn get_edges_to_node_by_id(&self, query: &EdgesToNodeByIdQuery)
+    async fn get_incoming_edges_by_id(&self, query: &EdgesToNodeByIdQuery)
         -> Result<Vec<(DstId, EdgeName, SrcId)>>;
 
     // ... more methods
@@ -574,9 +589,17 @@ cat input.csv | cargo run --release --example store --verify /tmp/motlie_db
 
 Comprehensive design documentation available in [`docs/`](docs/):
 
-- **API Design**: Reader API analysis and design decisions
-- **Schema Design**: RocksDB schema and MessagePack serialization
-- **Performance**: Prefix scanning and key ordering optimization
+### Essential Reading
+
+- **[Query API Guide](docs/query-api-guide.md)** ⭐ - Complete guide to the modern Query API (v0.2.0+)
+- **[Concurrency & Storage Modes](docs/concurrency-and-storage-modes.md)** - Threading patterns and concurrent access
+- **[Schema Design](docs/variable-length-fields-in-keys.md)** - RocksDB key design principles
+
+### Design Documentation
+
+- **API Evolution**: Query and mutation processor architecture
+- **Performance**: Prefix scanning optimization and benchmarks
+- **Implementation**: Trait-based execution patterns
 
 See [`docs/README.md`](docs/README.md) for complete documentation index.
 
@@ -588,8 +611,8 @@ See [`docs/README.md`](docs/README.md) for complete documentation index.
 |-----------|-----------|-------|
 | `node_by_id()` | O(1) | Direct RocksDB get |
 | `edge_by_id()` | O(1) | Direct RocksDB get, returns full topology |
-| `edges_from_node_by_id()` | O(N) | N = edges from node, uses prefix scan |
-| `edges_to_node_by_id()` | O(N) | N = edges to node, uses prefix scan |
+| `outgoing_edges_by_id()` | O(N) | N = edges from node, uses prefix scan |
+| `incoming_edges_by_id()` | O(N) | N = edges to node, uses prefix scan |
 | `fragments_by_id()` | O(F) | F = fragments for entity, prefix scan |
 
 ### Mutation Performance
