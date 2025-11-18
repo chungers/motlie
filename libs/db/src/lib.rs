@@ -351,13 +351,16 @@ mod tests {
             channel_buffer_size: 100,
         };
 
+        // Create temporary directory for test database (auto-cleanup on drop)
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
         // Create writer and two separate receivers for each consumer type
         let (writer1, receiver1) = create_mutation_writer(config.clone());
         let (writer2, receiver2) = create_mutation_writer(config.clone());
 
         // Spawn both consumer types
         let graph_handle =
-            spawn_graph_consumer(receiver1, config.clone(), Path::new("/tmp/test_graph_db"));
+            spawn_graph_consumer(receiver1, config.clone(), temp_dir.path());
         let fulltext_handle = spawn_fulltext_consumer(receiver2, config.clone());
 
         // Send mutations to both writers (simulating fanout)
