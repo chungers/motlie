@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::{AddEdge, AddFragment, AddNode, InvalidateArgs, Mutation};
+use crate::{AddEdge, AddFragment, AddNode, Mutation, UpdateEdgeValidSinceUntil};
 
 /// Configuration for the mutation writer
 #[derive(Debug, Clone)]
@@ -154,9 +154,9 @@ mod tests {
             temporal_range: None,
         };
 
-        let invalidate_args = InvalidateArgs {
+        let invalidate_args = UpdateEdgeValidSinceUntil {
             id: Id::new(),
-            ts_millis: TimestampMilli::now(),
+            temporal_range: crate::schema::ValidTemporalRange(None, None),
             reason: "test reason".to_string(),
         };
 

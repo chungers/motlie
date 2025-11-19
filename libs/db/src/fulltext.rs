@@ -85,7 +85,7 @@ impl Processor for FullTextProcessor {
                     // TODO: Update term frequencies and document frequencies
                     // TODO: Calculate and store BM25 scores
                 }
-                Mutation::Invalidate(args) => {
+                Mutation::UpdateEdgeValidSinceUntil(args) => {
                     // TODO: Implement actual invalidation in full-text search index
                     log::info!(
                         "[FullText] Would remove from search index: id={}, reason='{}', k1={}, b={}",

@@ -3,10 +3,10 @@ mod tests {
     use crate::fulltext::{
         spawn_fulltext_consumer, spawn_fulltext_consumer_with_params, FullTextProcessor,
     };
+    use crate::mutation::Runnable as MutRunnable;
     use crate::{
         create_mutation_writer, AddEdge, AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
     };
-    use crate::mutation::Runnable as MutRunnable;
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -32,7 +32,9 @@ mod tests {
         let fragment_args = AddFragment {
             id: Id::new(),
             ts_millis: TimestampMilli(1234567890),
-            content: crate::DataUrl::from_text("This is a test fragment with some searchable content"),
+            content: crate::DataUrl::from_text(
+                "This is a test fragment with some searchable content",
+            ),
             temporal_range: None,
         };
         fragment_args.run(&writer).await.unwrap();
@@ -87,7 +89,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "search node".to_string(),
-            temporal_range: None
+            temporal_range: None,
         }
         .run(&writer)
         .await
@@ -99,7 +101,7 @@ mod tests {
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "connects to".to_string(),
-            temporal_range: None
+            temporal_range: None,
         }
         .run(&writer)
         .await
@@ -115,9 +117,9 @@ mod tests {
         .await
         .unwrap();
 
-        crate::InvalidateArgs {
+        crate::UpdateEdgeValidSinceUntil {
             id: Id::new(),
-            ts_millis: TimestampMilli::now(),
+            temporal_range: crate::schema::ValidTemporalRange(None, None),
             reason: "content removed from search index".to_string(),
         }
         .run(&writer)

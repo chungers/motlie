@@ -3,6 +3,7 @@ mod tests {
     use crate::graph::{
         spawn_graph_consumer, spawn_graph_consumer_with_next, ColumnFamilyRecord, Graph, Storage,
     };
+    use crate::mutation::Runnable as MutRunnable;
     use crate::query::{
         EdgeById, EdgesByName, FragmentsByIdTimeRange, IncomingEdges, NodeById, NodesByName,
         OutgoingEdges, Runnable,
@@ -11,7 +12,6 @@ mod tests {
     use crate::{
         create_mutation_writer, AddEdge, AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
     };
-    use crate::mutation::Runnable as MutRunnable;
     use rocksdb::DB;
     use std::ops::Bound;
     use tempfile::TempDir;
@@ -134,9 +134,9 @@ mod tests {
         .await
         .unwrap();
 
-        crate::InvalidateArgs {
+        crate::UpdateEdgeValidSinceUntil {
             id: Id::new(),
-            ts_millis: TimestampMilli::now(),
+            temporal_range: crate::schema::ValidTemporalRange(None, None),
             reason: "test invalidation".to_string(),
         }
         .run(&writer)
@@ -2021,7 +2021,7 @@ mod tests {
         for item in iter {
             let (key_bytes, _value_bytes) = item.expect("Failed to iterate");
             let key = EdgeNames::key_from_bytes(&key_bytes).expect("Failed to deserialize key");
-            all_keys.push((key.0.clone(), key.1, key.2 .0));
+            all_keys.push((key.0.clone(), key.1, key.2));
         }
 
         // Should have 4 edges total
@@ -4605,5 +4605,269 @@ mod tests {
                 .is_err(),
             "Query after end should be invalid"
         );
+    }
+
+    // ===== DeleteCf and PatchCf Tests =====
+
+    #[test]
+    fn test_delete_cf_nonexistent_key() {
+        use crate::graph::{ColumnFamilyRecord, DeleteCf};
+        use crate::schema::NodeCfKey;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create graph storage
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+
+        // Create a delete operation for a non-existent key
+        let fake_key = vec![1, 2, 3, 4];
+
+        // Process through transaction
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+        let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+        txn.delete_cf(cf, fake_key).unwrap();
+
+        let result = txn.commit();
+        assert!(result.is_ok(), "Delete of non-existent key should succeed");
+    }
+
+    #[test]
+    fn test_patch_cf_existing_value() {
+        use crate::graph::ColumnFamilyRecord;
+        use crate::schema::{NodeCfKey, NodeCfValue};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create storage and add a node
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+
+        let node_id = Id::new();
+        let key = NodeCfKey(node_id);
+        let key_bytes = Nodes::key_to_bytes(&key);
+        let value = NodeCfValue(
+            None,
+            "original_name".to_string(),
+            crate::DataUrl::from_markdown("test"),
+        );
+        let value_bytes = Nodes::value_to_bytes(&value).unwrap();
+
+        // Add the node
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+        let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+        txn.put_cf(cf, &key_bytes, &value_bytes).unwrap();
+        txn.commit().unwrap();
+
+        // Now patch it
+        let txn = txn_db.transaction();
+        let current_value = txn
+            .get_cf(cf, &key_bytes)
+            .unwrap()
+            .ok_or_else(|| anyhow::anyhow!("Key not found"))
+            .unwrap();
+
+        let mut node_value: NodeCfValue = Nodes::value_from_bytes(&current_value).unwrap();
+        node_value.1 = "patched_name".to_string();
+        let patched_bytes = Nodes::value_to_bytes(&node_value).unwrap();
+
+        txn.put_cf(cf, &key_bytes, patched_bytes).unwrap();
+        txn.commit().unwrap();
+
+        // Verify
+        let txn = txn_db.transaction();
+        let final_value = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+        let final_node: NodeCfValue = Nodes::value_from_bytes(&final_value).unwrap();
+        assert_eq!(final_node.1, "patched_name");
+    }
+
+    #[test]
+    fn test_patch_cf_error_on_nonexistent_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+
+        let fake_key = vec![9, 9, 9, 9];
+
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+        let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+
+        let current_value = txn.get_cf(cf, &fake_key).unwrap();
+        assert!(current_value.is_none(), "Should not find non-existent key");
+    }
+
+    #[test]
+    fn test_patch_cf_transaction_rollback_on_error() {
+        use crate::graph::ColumnFamilyRecord;
+        use crate::schema::{NodeCfKey, NodeCfValue};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+
+        let node_id = Id::new();
+        let key = NodeCfKey(node_id);
+        let key_bytes = Nodes::key_to_bytes(&key);
+        let value = NodeCfValue(
+            None,
+            "original".to_string(),
+            crate::DataUrl::from_markdown("test"),
+        );
+        let value_bytes = Nodes::value_to_bytes(&value).unwrap();
+
+        // Add node
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+        let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+        txn.put_cf(cf, &key_bytes, &value_bytes).unwrap();
+        txn.commit().unwrap();
+
+        // Try to modify but don't commit (simulating error/rollback)
+        let txn = txn_db.transaction();
+        let current = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+        let mut node_value: NodeCfValue = Nodes::value_from_bytes(&current).unwrap();
+        node_value.1 = "should_not_persist".to_string();
+        let new_bytes = Nodes::value_to_bytes(&node_value).unwrap();
+        txn.put_cf(cf, &key_bytes, new_bytes).unwrap();
+        // DON'T commit - drop the transaction
+        drop(txn);
+
+        // Verify original value unchanged
+        let txn = txn_db.transaction();
+        let final_value = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+        let final_node: NodeCfValue = Nodes::value_from_bytes(&final_value).unwrap();
+        assert_eq!(
+            final_node.1, "original",
+            "Value should be unchanged after rollback"
+        );
+    }
+
+    #[test]
+    fn test_mixed_operations_in_transaction() {
+        use crate::graph::ColumnFamilyRecord;
+        use crate::schema::{NodeCfKey, NodeCfValue};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+
+        let node1_id = Id::new();
+        let node2_id = Id::new();
+        let node3_id = Id::new();
+
+        let key1 = Nodes::key_to_bytes(&NodeCfKey(node1_id));
+        let key2 = Nodes::key_to_bytes(&NodeCfKey(node2_id));
+        let key3 = Nodes::key_to_bytes(&NodeCfKey(node3_id));
+
+        // Setup: add node1 and node2
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+        let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+
+        let val1 = NodeCfValue(None, "node1".to_string(), crate::DataUrl::from_markdown(""));
+        let val2 = NodeCfValue(None, "node2".to_string(), crate::DataUrl::from_markdown(""));
+        txn.put_cf(cf, &key1, Nodes::value_to_bytes(&val1).unwrap())
+            .unwrap();
+        txn.put_cf(cf, &key2, Nodes::value_to_bytes(&val2).unwrap())
+            .unwrap();
+        txn.commit().unwrap();
+
+        // Mixed operations: patch node1, delete node2, add node3
+        let txn = txn_db.transaction();
+
+        // Patch node1
+        let current1 = txn.get_cf(cf, &key1).unwrap().unwrap();
+        let mut node1: NodeCfValue = Nodes::value_from_bytes(&current1).unwrap();
+        node1.1 = "node1_modified".to_string();
+        txn.put_cf(cf, &key1, Nodes::value_to_bytes(&node1).unwrap())
+            .unwrap();
+
+        // Delete node2
+        txn.delete_cf(cf, &key2).unwrap();
+
+        // Add node3
+        let val3 = NodeCfValue(None, "node3".to_string(), crate::DataUrl::from_markdown(""));
+        txn.put_cf(cf, &key3, Nodes::value_to_bytes(&val3).unwrap())
+            .unwrap();
+
+        txn.commit().unwrap();
+
+        // Verify
+        let txn = txn_db.transaction();
+
+        let v1 = txn.get_cf(cf, &key1).unwrap().unwrap();
+        let n1: NodeCfValue = Nodes::value_from_bytes(&v1).unwrap();
+        assert_eq!(n1.1, "node1_modified");
+
+        let v2 = txn.get_cf(cf, &key2).unwrap();
+        assert!(v2.is_none(), "Node2 should be deleted");
+
+        let v3 = txn.get_cf(cf, &key3).unwrap();
+        assert!(v3.is_some(), "Node3 should exist");
+    }
+
+    #[test]
+    fn test_transaction_rollback_prevents_all_changes() {
+        use crate::graph::ColumnFamilyRecord;
+        use crate::schema::{NodeCfKey, NodeCfValue};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+
+        let node1_id = Id::new();
+        let node2_id = Id::new();
+        let key1 = Nodes::key_to_bytes(&NodeCfKey(node1_id));
+        let key2 = Nodes::key_to_bytes(&NodeCfKey(node2_id));
+
+        // Add node1
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+        let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+        let val1 = NodeCfValue(None, "node1".to_string(), crate::DataUrl::from_markdown(""));
+        txn.put_cf(cf, &key1, Nodes::value_to_bytes(&val1).unwrap())
+            .unwrap();
+        txn.commit().unwrap();
+
+        // Try transaction: add node2 + modify node1, then rollback
+        let txn = txn_db.transaction();
+
+        // Add node2
+        let val2 = NodeCfValue(None, "node2".to_string(), crate::DataUrl::from_markdown(""));
+        txn.put_cf(cf, &key2, Nodes::value_to_bytes(&val2).unwrap())
+            .unwrap();
+
+        // Modify node1
+        let current1 = txn.get_cf(cf, &key1).unwrap().unwrap();
+        let mut node1: NodeCfValue = Nodes::value_from_bytes(&current1).unwrap();
+        node1.1 = "modified".to_string();
+        txn.put_cf(cf, &key1, Nodes::value_to_bytes(&node1).unwrap())
+            .unwrap();
+
+        // DON'T commit - simulate error and rollback
+        drop(txn);
+
+        // Verify nothing changed
+        let txn = txn_db.transaction();
+
+        let v1 = txn.get_cf(cf, &key1).unwrap().unwrap();
+        let n1: NodeCfValue = Nodes::value_from_bytes(&v1).unwrap();
+        assert_eq!(n1.1, "node1", "Node1 should be unchanged");
+
+        let v2 = txn.get_cf(cf, &key2).unwrap();
+        assert!(v2.is_none(), "Node2 should not exist");
     }
 }

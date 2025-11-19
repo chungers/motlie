@@ -9,8 +9,8 @@ mod mutation;
 // Re-export mutation types
 pub use mutation::{
     spawn_consumer as spawn_mutation_consumer, AddEdge, AddFragment, AddNode,
-    Consumer as MutationConsumer, InvalidateArgs, Mutation, MutationBatch, MutationPlanner,
-    Processor as MutationProcessor, Runnable as MutationRunnable,
+    Consumer as MutationConsumer, Mutation, MutationBatch, MutationPlanner,
+    Processor as MutationProcessor, Runnable as MutationRunnable, UpdateEdgeValidSinceUntil,
 };
 // Note: mutations![] macro is automatically available via #[macro_export] in mutation.rs
 
@@ -20,10 +20,10 @@ pub use reader::*;
 mod query;
 // Re-export query types but not Consumer/Processor/spawn_consumer to avoid ambiguity
 pub use query::{
-    DstId, EdgeById, EdgeSummaryBySrcDstName, EdgesByName, FragmentsByIdTimeRange, IncomingEdges,
-    NodeById, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable, SrcId,
+    EdgeById, EdgeSummaryBySrcDstName, EdgesByName, FragmentsByIdTimeRange, IncomingEdges,
+    NodeById, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
 };
-pub use schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
+pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 mod graph;
 pub use graph::*;
 mod fulltext;

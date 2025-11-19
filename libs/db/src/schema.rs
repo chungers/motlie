@@ -1,5 +1,4 @@
 use crate::graph::ColumnFamilyRecord;
-use crate::query::{DstId, SrcId};
 use crate::DataUrl;
 use crate::TimestampMilli;
 use crate::{AddEdge, AddFragment, AddNode, Id};
@@ -70,6 +69,11 @@ pub(crate) struct NodeCfValue(
     pub(crate) NodeSummary,
 );
 
+/// Id of edge source node
+pub type SrcId = Id;
+/// Id of edge destination node
+pub type DstId = Id;
+
 /// Edges column family.
 pub(crate) struct Edges;
 #[derive(Serialize, Deserialize)]
@@ -77,10 +81,10 @@ pub(crate) struct EdgeCfKey(pub(crate) Id);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EdgeCfValue(
     pub(crate) Option<ValidTemporalRange>, // temporal validity
-    pub(crate) SrcId,                       // source_id
-    pub(crate) EdgeName,                    // edge name
-    pub(crate) DstId,                       // dest_id
-    pub(crate) EdgeSummary,                 // edge summary
+    pub(crate) SrcId,                      // source_id
+    pub(crate) EdgeName,                   // edge name
+    pub(crate) DstId,                      // dest_id
+    pub(crate) EdgeSummary,                // edge summary
 );
 
 /// Fragments column family.
@@ -96,35 +100,16 @@ pub(crate) struct FragmentCfValue(
 /// Forward edges column family.
 pub(crate) struct ForwardEdges;
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ForwardEdgeCfKey(
-    pub(crate) EdgeSourceId,
-    pub(crate) EdgeDestinationId,
-    pub(crate) EdgeName,
-);
+pub(crate) struct ForwardEdgeCfKey(pub(crate) SrcId, pub(crate) DstId, pub(crate) EdgeName);
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<ValidTemporalRange>,
-    pub(crate) Id,
-);
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeSourceId(pub(crate) Id);
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeDestinationId(pub(crate) Id);
-#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct ForwardEdgeCfValue(pub(crate) Option<ValidTemporalRange>, pub(crate) Id);
 
 /// Reverse edges column family.
 pub(crate) struct ReverseEdges;
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ReverseEdgeCfKey(
-    pub(crate) EdgeDestinationId,
-    pub(crate) EdgeSourceId,
-    pub(crate) EdgeName,
-);
+pub(crate) struct ReverseEdgeCfKey(pub(crate) DstId, pub(crate) SrcId, pub(crate) EdgeName);
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ReverseEdgeCfValue(
-    pub(crate) Option<ValidTemporalRange>,
-    pub(crate) Id,
-);
+pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<ValidTemporalRange>, pub(crate) Id);
 
 /// Node names column family.
 pub(crate) struct NodeNames;
@@ -139,8 +124,8 @@ pub(crate) struct EdgeNames;
 pub(crate) struct EdgeNameCfKey(
     pub(crate) EdgeName,
     pub(crate) Id, // edge id
-    pub(crate) EdgeDestinationId,
-    pub(crate) EdgeSourceId,
+    pub(crate) SrcId,
+    pub(crate) DstId,
 );
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EdgeNameCfValue(pub(crate) Option<ValidTemporalRange>);
@@ -292,11 +277,7 @@ impl ColumnFamilyRecord for ForwardEdges {
     type CreateOp = AddEdge;
 
     fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
-        let key = ForwardEdgeCfKey(
-            EdgeSourceId(args.source_node_id),
-            EdgeDestinationId(args.target_node_id),
-            args.name.clone(),
-        );
+        let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, args.name.clone());
         let value = ForwardEdgeCfValue(args.temporal_range.clone(), args.id);
         (key, value)
     }
@@ -306,8 +287,8 @@ impl ColumnFamilyRecord for ForwardEdges {
         // Layout: [src_id (16)] + [dst_id (16)] + [name UTF-8 bytes]
         let name_bytes = key.2.as_bytes();
         let mut bytes = Vec::with_capacity(32 + name_bytes.len());
-        bytes.extend_from_slice(&key.0 .0.into_bytes());
-        bytes.extend_from_slice(&key.1 .0.into_bytes());
+        bytes.extend_from_slice(&key.0.into_bytes());
+        bytes.extend_from_slice(&key.1.into_bytes());
         bytes.extend_from_slice(name_bytes);
         bytes
     }
@@ -331,8 +312,8 @@ impl ColumnFamilyRecord for ForwardEdges {
             .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
 
         Ok(ForwardEdgeCfKey(
-            EdgeSourceId(Id::from_bytes(src_id_bytes)),
-            EdgeDestinationId(Id::from_bytes(dst_id_bytes)),
+            Id::from_bytes(src_id_bytes),
+            Id::from_bytes(dst_id_bytes),
             name,
         ))
     }
@@ -360,11 +341,7 @@ impl ColumnFamilyRecord for ReverseEdges {
     type CreateOp = AddEdge;
 
     fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
-        let key = ReverseEdgeCfKey(
-            EdgeDestinationId(args.target_node_id),
-            EdgeSourceId(args.source_node_id),
-            args.name.clone(),
-        );
+        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, args.name.clone());
         let value = ReverseEdgeCfValue(args.temporal_range.clone(), args.id);
         (key, value)
     }
@@ -374,8 +351,8 @@ impl ColumnFamilyRecord for ReverseEdges {
         // Layout: [dst_id (16)] + [src_id (16)] + [name UTF-8 bytes]
         let name_bytes = key.2.as_bytes();
         let mut bytes = Vec::with_capacity(32 + name_bytes.len());
-        bytes.extend_from_slice(&key.0 .0.into_bytes());
-        bytes.extend_from_slice(&key.1 .0.into_bytes());
+        bytes.extend_from_slice(&key.0.into_bytes());
+        bytes.extend_from_slice(&key.1.into_bytes());
         bytes.extend_from_slice(name_bytes);
         bytes
     }
@@ -399,8 +376,8 @@ impl ColumnFamilyRecord for ReverseEdges {
             .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
 
         Ok(ReverseEdgeCfKey(
-            EdgeDestinationId(Id::from_bytes(dst_id_bytes)),
-            EdgeSourceId(Id::from_bytes(src_id_bytes)),
+            Id::from_bytes(dst_id_bytes),
+            Id::from_bytes(src_id_bytes),
             name,
         ))
     }
@@ -481,8 +458,8 @@ impl ColumnFamilyRecord for EdgeNames {
         let key = EdgeNameCfKey(
             args.name.clone(),
             args.id,
-            EdgeDestinationId(args.target_node_id),
-            EdgeSourceId(args.source_node_id),
+            args.target_node_id,
+            args.source_node_id,
         );
         let value = EdgeNameCfValue(args.temporal_range.clone());
         (key, value)
@@ -495,8 +472,8 @@ impl ColumnFamilyRecord for EdgeNames {
         let mut bytes = Vec::with_capacity(name_bytes.len() + 48);
         bytes.extend_from_slice(name_bytes);
         bytes.extend_from_slice(&key.1.into_bytes());
-        bytes.extend_from_slice(&key.2 .0.into_bytes());
-        bytes.extend_from_slice(&key.3 .0.into_bytes());
+        bytes.extend_from_slice(&key.2.into_bytes());
+        bytes.extend_from_slice(&key.3.into_bytes());
         bytes
     }
 
@@ -526,8 +503,8 @@ impl ColumnFamilyRecord for EdgeNames {
         Ok(EdgeNameCfKey(
             name,
             Id::from_bytes(edge_id_bytes),
-            EdgeDestinationId(Id::from_bytes(dst_id_bytes)),
-            EdgeSourceId(Id::from_bytes(src_id_bytes)),
+            Id::from_bytes(dst_id_bytes),
+            Id::from_bytes(src_id_bytes),
         ))
     }
 

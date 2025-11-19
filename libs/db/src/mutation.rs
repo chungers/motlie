@@ -20,7 +20,7 @@ pub enum Mutation {
     AddNode(AddNode),
     AddEdge(AddEdge),
     AddFragment(AddFragment),
-    Invalidate(InvalidateArgs),
+    UpdateEdgeValidSinceUntil(UpdateEdgeValidSinceUntil),
 }
 
 #[derive(Debug, Clone)]
@@ -75,12 +75,12 @@ pub struct AddFragment {
 }
 
 #[derive(Debug, Clone)]
-pub struct InvalidateArgs {
-    /// The UUID of the Node, Edge, or Fragment
+pub struct UpdateEdgeValidSinceUntil {
+    /// The UUID of the Edge
     pub id: Id,
 
-    /// The timestamp as number of milliseconds since the Unix epoch
-    pub ts_millis: TimestampMilli,
+    /// The temporal validity range for this fragment
+    pub temporal_range: schema::ValidTemporalRange,
 
     /// The reason for invalidation
     pub reason: String,
@@ -130,7 +130,7 @@ impl MutationPlanner for AddFragment {
     }
 }
 
-impl MutationPlanner for InvalidateArgs {
+impl MutationPlanner for UpdateEdgeValidSinceUntil {
     fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
         // TODO: Implement actual invalidation operations when invalidation is ready
         Ok(vec![])
@@ -148,7 +148,7 @@ impl Mutation {
             Mutation::AddNode(m) => m.plan(),
             Mutation::AddEdge(m) => m.plan(),
             Mutation::AddFragment(m) => m.plan(),
-            Mutation::Invalidate(m) => m.plan(),
+            Mutation::UpdateEdgeValidSinceUntil(m) => m.plan(),
         }
     }
 }
@@ -202,9 +202,11 @@ impl Runnable for AddFragment {
     }
 }
 
-impl Runnable for InvalidateArgs {
+impl Runnable for UpdateEdgeValidSinceUntil {
     async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(vec![Mutation::Invalidate(self)]).await
+        writer
+            .send(vec![Mutation::UpdateEdgeValidSinceUntil(self)])
+            .await
     }
 }
 
@@ -230,9 +232,9 @@ impl From<AddFragment> for Mutation {
     }
 }
 
-impl From<InvalidateArgs> for Mutation {
-    fn from(m: InvalidateArgs) -> Self {
-        Mutation::Invalidate(m)
+impl From<UpdateEdgeValidSinceUntil> for Mutation {
+    fn from(m: UpdateEdgeValidSinceUntil) -> Self {
+        Mutation::UpdateEdgeValidSinceUntil(m)
     }
 }
 
@@ -481,7 +483,7 @@ impl<P: Processor> Consumer<P> {
                         args.content.0.len()
                     );
                 }
-                Mutation::Invalidate(args) => {
+                Mutation::UpdateEdgeValidSinceUntil(args) => {
                     log::debug!(
                         "Processing Invalidate: id={}, reason={}",
                         args.id,

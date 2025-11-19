@@ -4,7 +4,9 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use crate::graph::ColumnFamilyRecord;
-use crate::schema::{self, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
+use crate::schema::{
+    self, DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
+};
 use crate::{Id, ReaderConfig, Storage, TimestampMilli};
 
 /// Trait that all query types implement to execute themselves.
@@ -156,12 +158,6 @@ impl QueryProcessor for Query {
         }
     }
 }
-
-/// Id of edge source node
-pub type SrcId = Id;
-
-/// Id of edge destination node
-pub type DstId = Id;
 
 /// Trait for query builders that can be executed
 #[async_trait::async_trait]
@@ -1008,11 +1004,7 @@ impl QueryExecutor for EdgeSummaryBySrcDstName {
         let dest_id = self.dest_id;
         let name = &self.name;
 
-        let key = schema::ForwardEdgeCfKey(
-            schema::EdgeSourceId(source_id),
-            schema::EdgeDestinationId(dest_id),
-            name.clone(),
-        );
+        let key = schema::ForwardEdgeCfKey(source_id, dest_id, name.clone());
         let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
 
         let value_bytes = if let Ok(db) = storage.db() {
@@ -1137,7 +1129,7 @@ impl QueryExecutor for OutgoingEdges {
                     schema::ForwardEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let source_id = key.0 .0;
+                let source_id = key.0;
                 if source_id != id {
                     break;
                 }
@@ -1152,7 +1144,7 @@ impl QueryExecutor for OutgoingEdges {
                     continue;
                 }
 
-                let dest_id = key.1 .0;
+                let dest_id = key.1;
                 let edge_name = key.2;
                 edges.push((source_id, edge_name, dest_id));
             }
@@ -1178,7 +1170,7 @@ impl QueryExecutor for OutgoingEdges {
                     schema::ForwardEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let source_id = key.0 .0;
+                let source_id = key.0;
                 if source_id != id {
                     break;
                 }
@@ -1193,7 +1185,7 @@ impl QueryExecutor for OutgoingEdges {
                     continue;
                 }
 
-                let dest_id = key.1 .0;
+                let dest_id = key.1;
                 let edge_name = key.2;
                 edges.push((source_id, edge_name, dest_id));
             }
@@ -1242,7 +1234,7 @@ impl QueryExecutor for IncomingEdges {
                     schema::ReverseEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let dest_id = key.0 .0;
+                let dest_id = key.0;
                 if dest_id != id {
                     break;
                 }
@@ -1257,7 +1249,7 @@ impl QueryExecutor for IncomingEdges {
                     continue;
                 }
 
-                let source_id = key.1 .0;
+                let source_id = key.1;
                 let edge_name = key.2;
                 edges.push((dest_id, edge_name, source_id));
             }
@@ -1283,7 +1275,7 @@ impl QueryExecutor for IncomingEdges {
                     schema::ReverseEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let dest_id = key.0 .0;
+                let dest_id = key.0;
                 if dest_id != id {
                     break;
                 }
@@ -1298,7 +1290,7 @@ impl QueryExecutor for IncomingEdges {
                     continue;
                 }
 
-                let source_id = key.1 .0;
+                let source_id = key.1;
                 let edge_name = key.2;
                 edges.push((dest_id, edge_name, source_id));
             }

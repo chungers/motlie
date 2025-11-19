@@ -76,11 +76,32 @@ pub(crate) trait ColumnFamilyRecord {
     }
 }
 
-pub(crate) enum StorageOperation {
+pub enum StorageOperation {
     PutCf(PutCf),
+    DeleteCf(DeleteCf),
+    PatchCf(PatchCf),
 }
 
-pub(crate) struct PutCf(pub(crate) &'static str, pub(crate) (Vec<u8>, Vec<u8>));
+/// Storage operation to put a key-value pair into a column family.
+pub(crate) struct PutCf(
+    pub(crate) &'static str,       // CF name
+    pub(crate) (Vec<u8>, Vec<u8>), // Key-value pair
+);
+
+/// Storage operation to delete a key from a column family.
+pub(crate) struct DeleteCf(
+    pub(crate) &'static str, // CF name
+    pub(crate) Vec<u8>,      // Key to delete
+);
+
+/// Storage operation to patch a value in a column family.
+pub(crate) struct PatchCf(
+    pub(crate) &'static str,       // CF name
+    pub(crate) (Vec<u8>, Patcher), // Key to lookup / update and patcher function
+);
+
+/// Patcher is a simple function that takes original value and returns patched value.
+pub(crate) type Patcher = fn(Option<Vec<u8>>) -> Result<Vec<u8>, anyhow::Error>;
 
 /// Handle for either a read-only DB or read-write TransactionDB
 enum DatabaseHandle {
@@ -115,9 +136,7 @@ impl DatabaseHandle {
 enum StorageMode {
     ReadOnly,
     ReadWrite,
-    Secondary {
-        secondary_path: PathBuf,
-    },
+    Secondary { secondary_path: PathBuf },
 }
 
 struct StorageOptions {}
@@ -428,17 +447,15 @@ impl Storage {
     /// - RocksDB catch-up fails
     pub fn try_catch_up_with_primary(&self) -> Result<()> {
         match &self.mode {
-            StorageMode::Secondary { .. } => {
-                match &self.db {
-                    Some(DatabaseHandle::Secondary(db)) => {
-                        db.try_catch_up_with_primary()?;
-                        Ok(())
-                    }
-                    _ => Err(anyhow::anyhow!(
-                        "[Storage] Database not ready or wrong handle type"
-                    )),
+            StorageMode::Secondary { .. } => match &self.db {
+                Some(DatabaseHandle::Secondary(db)) => {
+                    db.try_catch_up_with_primary()?;
+                    Ok(())
                 }
-            }
+                _ => Err(anyhow::anyhow!(
+                    "[Storage] Database not ready or wrong handle type"
+                )),
+            },
             _ => Err(anyhow::anyhow!("[Storage] Not a secondary instance")),
         }
     }
@@ -492,13 +509,32 @@ impl Processor for Graph {
                         .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
                     txn.put_cf(cf, key, value)?;
                 }
+                StorageOperation::DeleteCf(DeleteCf(cf_name, key)) => {
+                    let cf = txn_db
+                        .cf_handle(cf_name)
+                        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
+                    txn.delete_cf(cf, key)?;
+                }
+                StorageOperation::PatchCf(PatchCf(cf_name, (key, patcher))) => {
+                    let cf = txn_db
+                        .cf_handle(cf_name)
+                        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
+                    // First read the current value
+                    let current_value = txn.get_cf(cf, &key)?
+                        .ok_or_else(|| anyhow::anyhow!("Key not found for patch operation"))?;
+                    // Then apply the patch
+                    txn.put_cf(cf, key, patcher(Some(current_value))?)?;
+                }
             }
         }
 
         // Single commit for all mutations
         txn.commit()?;
 
-        log::info!("[Graph] Successfully committed {} mutations", mutations.len());
+        log::info!(
+            "[Graph] Successfully committed {} mutations",
+            mutations.len()
+        );
         Ok(())
     }
 }
@@ -706,7 +742,11 @@ mod tests {
     #[test]
     fn test_lz4_compression_round_trip() {
         // Create a simple test value
-        let test_value = NodeCfValue(None, "test_node".to_string(), DataUrl::from_markdown("test content"));
+        let test_value = NodeCfValue(
+            None,
+            "test_node".to_string(),
+            DataUrl::from_markdown("test content"),
+        );
 
         // Serialize and compress
         let compressed_bytes = Nodes::value_to_bytes(&test_value).expect("Failed to compress");
