@@ -376,36 +376,6 @@ impl<T: Send + Sync + 'static> ByIdQuery<T> {
     }
 }
 
-/// Implement Runnable for NodeByIdQuery specifically
-#[async_trait::async_trait]
-impl Runnable for NodeById {
-    type Output = (NodeName, NodeSummary);
-
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        let query = NodeById::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
-
-        reader.send_query(Query::NodeById(query)).await?;
-        result_rx.await?
-    }
-}
-
-/// Implement Runnable for EdgeByIdQuery specifically
-#[async_trait::async_trait]
-impl Runnable for EdgeById {
-    type Output = (SrcId, DstId, EdgeName, EdgeSummary);
-
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        let query = EdgeById::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
-
-        reader.send_query(Query::EdgeById(query)).await?;
-        result_rx.await?
-    }
-}
-
 impl FragmentsByIdTimeRange {
     /// Create a new query request (public API - no channel, no timeout yet)
     /// Use `.run(reader, timeout)` to execute this query
@@ -468,29 +438,6 @@ impl FragmentsByIdTimeRange {
     }
 }
 
-/// Implement Runnable for FragmentsByIdTimeRangeQuery
-#[async_trait::async_trait]
-impl Runnable for FragmentsByIdTimeRange {
-    type Output = Vec<(TimestampMilli, FragmentContent)>;
-
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        let query = FragmentsByIdTimeRange::with_channel(
-            self.id,
-            self.time_range,
-            self.reference_ts_millis,
-            timeout,
-            result_tx,
-        );
-
-        reader
-            .send_query(Query::FragmentsByIdTimeRange(query))
-            .await?;
-        result_rx.await?
-    }
-}
-
 impl EdgeSummaryBySrcDstName {
     /// Create a new query request (public API - no channel, no timeout yet)
     /// Use `.run(reader, timeout)` to execute this query
@@ -536,30 +483,6 @@ impl EdgeSummaryBySrcDstName {
     }
 }
 
-/// Implement Runnable for EdgeSummaryBySrcDstNameQuery
-#[async_trait::async_trait]
-impl Runnable for EdgeSummaryBySrcDstName {
-    type Output = (Id, EdgeSummary);
-
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        let query = EdgeSummaryBySrcDstName::with_channel(
-            self.source_id,
-            self.dest_id,
-            self.name,
-            self.reference_ts_millis,
-            timeout,
-            result_tx,
-        );
-
-        reader
-            .send_query(Query::EdgeSummaryBySrcDstName(query))
-            .await?;
-        result_rx.await?
-    }
-}
-
 impl OutgoingEdges {
     /// Create a new query request (public API - no channel, no timeout yet)
     pub fn new(id: Id, reference_ts_millis: Option<TimestampMilli>) -> Self {
@@ -593,19 +516,6 @@ impl OutgoingEdges {
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable for OutgoingEdges {
-    type Output = Vec<(SrcId, EdgeName, DstId)>;
-
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query =
-            OutgoingEdges::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
-        reader.send_query(Query::OutgoingEdges(query)).await?;
-        result_rx.await?
-    }
-}
-
 impl IncomingEdges {
     /// Create a new query request (public API - no channel, no timeout yet)
     pub fn new(id: DstId, reference_ts_millis: Option<TimestampMilli>) -> Self {
@@ -636,19 +546,6 @@ impl IncomingEdges {
         if let Some(tx) = self.result_tx {
             let _ = tx.send(result);
         }
-    }
-}
-
-#[async_trait::async_trait]
-impl Runnable for IncomingEdges {
-    type Output = Vec<(DstId, EdgeName, SrcId)>;
-
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query =
-            IncomingEdges::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
-        reader.send_query(Query::IncomingEdges(query)).await?;
-        result_rx.await?
     }
 }
 
@@ -696,25 +593,6 @@ impl NodesByName {
     }
 }
 
-#[async_trait::async_trait]
-impl Runnable for NodesByName {
-    type Output = Vec<(NodeName, Id)>;
-
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query = NodesByName::with_channel(
-            self.name,
-            self.start,
-            self.limit,
-            self.reference_ts_millis,
-            timeout,
-            result_tx,
-        );
-        reader.send_query(Query::NodesByName(query)).await?;
-        result_rx.await?
-    }
-}
-
 impl EdgesByName {
     /// Create a new query request (public API - no channel, no timeout yet)
     pub fn new(
@@ -756,6 +634,128 @@ impl EdgesByName {
         if let Some(tx) = self.result_tx {
             let _ = tx.send(result);
         }
+    }
+}
+
+/// Implement Runnable for NodeByIdQuery specifically
+#[async_trait::async_trait]
+impl Runnable for NodeById {
+    type Output = (NodeName, NodeSummary);
+
+    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        let query = NodeById::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
+
+        reader.send_query(Query::NodeById(query)).await?;
+        result_rx.await?
+    }
+}
+
+/// Implement Runnable for EdgeByIdQuery specifically
+#[async_trait::async_trait]
+impl Runnable for EdgeById {
+    type Output = (SrcId, DstId, EdgeName, EdgeSummary);
+
+    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        let query = EdgeById::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
+
+        reader.send_query(Query::EdgeById(query)).await?;
+        result_rx.await?
+    }
+}
+
+/// Implement Runnable for FragmentsByIdTimeRangeQuery
+#[async_trait::async_trait]
+impl Runnable for FragmentsByIdTimeRange {
+    type Output = Vec<(TimestampMilli, FragmentContent)>;
+
+    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        let query = FragmentsByIdTimeRange::with_channel(
+            self.id,
+            self.time_range,
+            self.reference_ts_millis,
+            timeout,
+            result_tx,
+        );
+
+        reader
+            .send_query(Query::FragmentsByIdTimeRange(query))
+            .await?;
+        result_rx.await?
+    }
+}
+
+/// Implement Runnable for EdgeSummaryBySrcDstNameQuery
+#[async_trait::async_trait]
+impl Runnable for EdgeSummaryBySrcDstName {
+    type Output = (Id, EdgeSummary);
+
+    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        let query = EdgeSummaryBySrcDstName::with_channel(
+            self.source_id,
+            self.dest_id,
+            self.name,
+            self.reference_ts_millis,
+            timeout,
+            result_tx,
+        );
+
+        reader
+            .send_query(Query::EdgeSummaryBySrcDstName(query))
+            .await?;
+        result_rx.await?
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for OutgoingEdges {
+    type Output = Vec<(SrcId, EdgeName, DstId)>;
+
+    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let query =
+            OutgoingEdges::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
+        reader.send_query(Query::OutgoingEdges(query)).await?;
+        result_rx.await?
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for IncomingEdges {
+    type Output = Vec<(DstId, EdgeName, SrcId)>;
+
+    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let query =
+            IncomingEdges::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
+        reader.send_query(Query::IncomingEdges(query)).await?;
+        result_rx.await?
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for NodesByName {
+    type Output = Vec<(NodeName, Id)>;
+
+    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let query = NodesByName::with_channel(
+            self.name,
+            self.start,
+            self.limit,
+            self.reference_ts_millis,
+            timeout,
+            result_tx,
+        );
+        reader.send_query(Query::NodesByName(query)).await?;
+        result_rx.await?
     }
 }
 
@@ -1637,6 +1637,7 @@ mod tests {
     use super::*;
     use crate::graph::{spawn_graph_consumer, Graph};
     use crate::mutation::AddNode;
+    use crate::mutation::Runnable as MutRunnable;
     use crate::schema::NodeSummary;
     use crate::writer::{create_mutation_writer, WriterConfig};
     use crate::{DataUrl, Id, Storage, TimestampMilli};
@@ -1667,7 +1668,7 @@ mod tests {
             name: node_name.clone(),
             temporal_range: None,
         };
-        writer.add_node(node_args).await.unwrap();
+        node_args.run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;

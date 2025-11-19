@@ -23,33 +23,43 @@ impl Default for WriterConfig {
 /// The `Writer` sends mutations through an MPSC channel as `Vec<Mutation>` to enable
 /// efficient transaction batching in downstream processors.
 ///
-/// # Batching Strategy
+/// # Usage
 ///
-/// - Use `send()` to send a batch of mutations at once for maximum efficiency
-/// - Use helper methods (`add_node()`, `add_edge()`, etc.) for individual mutations,
-///   which are automatically wrapped in `vec![]` before being sent
+/// Use the new mutation API for sending mutations:
 ///
-/// # Example
+/// ## Single Mutations
 ///
 /// ```rust,ignore
-/// use motlie_db::{Writer, WriterConfig, AddNode, Id, TimestampMilli, Mutation};
+/// use motlie_db::{Writer, AddNode, MutationRunnable, Id, TimestampMilli};
 ///
-/// let (writer, receiver) = create_mutation_writer(WriterConfig::default());
+/// let (writer, receiver) = create_mutation_writer(Default::default());
 ///
-/// // Send a single mutation using helper method
-/// writer.add_node(AddNode {
+/// // Send a single mutation using .run() pattern
+/// AddNode {
 ///     id: Id::new(),
 ///     name: "Alice".to_string(),
 ///     ts_millis: TimestampMilli::now(),
 ///     temporal_range: None,
-/// }).await?;
-///
-/// // Or send multiple mutations in a batch
-/// writer.send(vec![
-///     Mutation::AddNode(AddNode { /* ... */ }),
-///     Mutation::AddEdge(AddEdge { /* ... */ }),
-/// ]).await?;
+/// }
+/// .run(&writer)
+/// .await?;
 /// ```
+///
+/// ## Batch Mutations
+///
+/// ```rust,ignore
+/// use motlie_db::{mutations, AddNode, AddEdge, MutationRunnable};
+///
+/// // Send multiple mutations in a batch
+/// mutations![
+///     AddNode { /* ... */ },
+///     AddEdge { /* ... */ },
+/// ]
+/// .run(&writer)
+/// .await?;
+/// ```
+///
+/// See [Mutation API Guide](../docs/mutation-api-guide.md) for complete documentation.
 #[derive(Debug, Clone)]
 pub struct Writer {
     sender: mpsc::Sender<Vec<Mutation>>,
@@ -63,32 +73,21 @@ impl Writer {
 
     /// Send a batch of mutations to be processed.
     ///
-    /// Accepts a vector of mutations to enable efficient batching.
+    /// This is a low-level method used internally by the mutation API.
+    /// Most users should use the `MutationRunnable` trait instead:
+    ///
+    /// ```rust,ignore
+    /// // Single mutation
+    /// AddNode { /* ... */ }.run(&writer).await?;
+    ///
+    /// // Batch mutations
+    /// mutations![AddNode { /* ... */ }, AddEdge { /* ... */ }].run(&writer).await?;
+    /// ```
     pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()> {
         self.sender
             .send(mutations)
             .await
             .context("Failed to send mutations to writer queue")
-    }
-
-    /// Send an AddNode mutation
-    pub async fn add_node(&self, args: AddNode) -> Result<()> {
-        self.send(vec![Mutation::AddNode(args)]).await
-    }
-
-    /// Send an AddEdge mutation
-    pub async fn add_edge(&self, args: AddEdge) -> Result<()> {
-        self.send(vec![Mutation::AddEdge(args)]).await
-    }
-
-    /// Send an AddFragment mutation
-    pub async fn add_fragment(&self, args: AddFragment) -> Result<()> {
-        self.send(vec![Mutation::AddFragment(args)]).await
-    }
-
-    /// Send an Invalidate mutation
-    pub async fn invalidate(&self, args: InvalidateArgs) -> Result<()> {
-        self.send(vec![Mutation::Invalidate(args)]).await
     }
 
     /// Check if the writer is still active (receiver hasn't been dropped)
@@ -107,6 +106,7 @@ pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mutation::Runnable as MutRunnable;
     use crate::{Id, TimestampMilli};
     use tokio::time::Duration;
 
@@ -130,7 +130,7 @@ mod tests {
         let config = WriterConfig::default();
         let (writer, _receiver) = create_mutation_writer(config);
 
-        // Test that all send operations work
+        // Test that all send operations work with new API
         let node_args = AddNode {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
@@ -160,10 +160,10 @@ mod tests {
             reason: "test reason".to_string(),
         };
 
-        // These should not panic or error
-        writer.add_node(node_args).await.unwrap();
-        writer.add_edge(edge_args).await.unwrap();
-        writer.add_fragment(fragment_args).await.unwrap();
-        writer.invalidate(invalidate_args).await.unwrap();
+        // Test new mutation API
+        node_args.run(&writer).await.unwrap();
+        edge_args.run(&writer).await.unwrap();
+        fragment_args.run(&writer).await.unwrap();
+        invalidate_args.run(&writer).await.unwrap();
     }
 }

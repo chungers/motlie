@@ -19,7 +19,7 @@
 mod common;
 
 use common::concurrent_test_utils::{writer_task, Metrics, TestContext};
-use motlie_db::{EdgeById, NodeById, ReaderConfig, Runnable};
+use motlie_db::{EdgeById, NodeById, QueryRunnable, ReaderConfig};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;

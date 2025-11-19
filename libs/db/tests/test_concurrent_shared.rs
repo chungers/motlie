@@ -18,7 +18,8 @@ mod common;
 
 use common::concurrent_test_utils::{Metrics, TestContext};
 use motlie_db::{
-    AddEdge, AddNode, EdgeById, Id, NodeById, ReaderConfig, Runnable, TimestampMilli, WriterConfig,
+    AddEdge, AddNode, EdgeById, Id, MutationRunnable, NodeById, QueryRunnable, ReaderConfig,
+    TimestampMilli, WriterConfig,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -50,14 +51,14 @@ async fn writer_task_shared_graph(
         let node_name = format!("node_{}", i);
 
         let start = Instant::now();
-        let result = writer
-            .add_node(AddNode {
-                id: node_id,
-                ts_millis: TimestampMilli::now(),
-                name: node_name.clone(),
-                temporal_range: None,
-            })
-            .await;
+        let result = AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli::now(),
+            name: node_name.clone(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await;
 
         let latency_us = start.elapsed().as_micros() as u64;
 
@@ -73,16 +74,16 @@ async fn writer_task_shared_graph(
                     let edge_name = format!("edge_{}_{}", i, j);
 
                     let start = Instant::now();
-                    let result = writer
-                        .add_edge(AddEdge {
-                            id: edge_id,
-                            source_node_id: node_id,
-                            target_node_id: target_id,
-                            ts_millis: TimestampMilli::now(),
-                            name: edge_name,
-                            temporal_range: None,
-                        })
-                        .await;
+                    let result = AddEdge {
+                        id: edge_id,
+                        source_node_id: node_id,
+                        target_node_id: target_id,
+                        ts_millis: TimestampMilli::now(),
+                        name: edge_name,
+                        temporal_range: None,
+                    }
+                    .run(&writer)
+                    .await;
 
                     let latency_us = start.elapsed().as_micros() as u64;
 

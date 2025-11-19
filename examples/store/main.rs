@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use motlie_db::{
     create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdge,
-    AddFragment, AddNode, DataUrl, Id, TimestampMilli, WriterConfig,
+    AddFragment, AddNode, DataUrl, Id, MutationRunnable, TimestampMilli, WriterConfig,
 };
 use rocksdb::DB;
 use std::collections::{HashMap, HashSet};
@@ -159,12 +159,12 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                 let send_start = Instant::now();
 
                 // Send to Graph consumer (which will forward to FullText)
-                writer
-                    .add_node(node_args)
+                node_args
+                    .run(&writer)
                     .await
                     .context("Failed to send node to consumer chain")?;
-                writer
-                    .add_fragment(fragment_args)
+                fragment_args
+                    .run(&writer)
                     .await
                     .context("Failed to send fragment to consumer chain")?;
 
@@ -231,12 +231,12 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                 let send_start = Instant::now();
 
                 // Send to Graph consumer (which will forward to FullText)
-                writer
-                    .add_edge(edge_args)
+                edge_args
+                    .run(&writer)
                     .await
                     .context("Failed to send edge to consumer chain")?;
-                writer
-                    .add_fragment(fragment_args)
+                fragment_args
+                    .run(&writer)
                     .await
                     .context("Failed to send edge fragment to consumer chain")?;
 

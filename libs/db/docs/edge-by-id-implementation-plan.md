@@ -458,13 +458,15 @@ fn find_edge_topology_in_forward_cf(
        let dst = Id::new();
        let edge_id = Id::new();
 
-       writer.add_edge(AddEdge {
+       AddEdge {
            id: edge_id,
            source_node_id: src,
            target_node_id: dst,
            name: "follows".to_string(),
            ts_millis: TimestampMilli::now(),
-       }).await?;
+       }
+       .run(&writer)
+       .await?;
 
        // Query should return topology
        let (ret_src, ret_dst, ret_name, _summary) = EdgeById::new(edge_id, None)

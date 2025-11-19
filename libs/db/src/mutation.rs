@@ -1,7 +1,19 @@
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use crate::{graph::StorageOperation, schema, Id, TimestampMilli, WriterConfig};
+use crate::{graph::StorageOperation, schema, Id, TimestampMilli, Writer, WriterConfig};
+
+/// Trait for mutations to generate their own storage operations.
+///
+/// This trait allows each mutation type to encapsulate the logic for converting
+/// itself into the storage operations needed to persist it to the database.
+///
+/// Following the same pattern as QueryExecutor for queries, this moves the
+/// planning logic from a centralized dispatcher into the mutation types themselves.
+pub trait MutationPlanner {
+    /// Generate the storage operations needed to persist this mutation
+    fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error>;
+}
 
 #[derive(Debug, Clone)]
 pub enum Mutation {
@@ -74,32 +86,14 @@ pub struct InvalidateArgs {
     pub reason: String,
 }
 
-/// Trait for mutations to generate their own storage operations.
-///
-/// This trait allows each mutation type to encapsulate the logic for converting
-/// itself into the storage operations needed to persist it to the database.
-///
-/// Following the same pattern as QueryExecutor for queries, this moves the
-/// planning logic from a centralized dispatcher into the mutation types themselves.
-pub trait MutationPlanner {
-    /// Generate the storage operations needed to persist this mutation
-    fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error>;
-}
-
 impl MutationPlanner for AddNode {
     fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
         use crate::graph::{ColumnFamilyRecord, PutCf};
         use crate::schema::{NodeNames, Nodes};
 
         Ok(vec![
-            StorageOperation::PutCf(PutCf(
-                Nodes::CF_NAME,
-                Nodes::create_bytes(self)?,
-            )),
-            StorageOperation::PutCf(PutCf(
-                NodeNames::CF_NAME,
-                NodeNames::create_bytes(self)?,
-            )),
+            StorageOperation::PutCf(PutCf(Nodes::CF_NAME, Nodes::create_bytes(self)?)),
+            StorageOperation::PutCf(PutCf(NodeNames::CF_NAME, NodeNames::create_bytes(self)?)),
         ])
     }
 }
@@ -110,10 +104,7 @@ impl MutationPlanner for AddEdge {
         use crate::schema::{EdgeNames, Edges, ForwardEdges, ReverseEdges};
 
         Ok(vec![
-            StorageOperation::PutCf(PutCf(
-                Edges::CF_NAME,
-                Edges::create_bytes(self)?,
-            )),
+            StorageOperation::PutCf(PutCf(Edges::CF_NAME, Edges::create_bytes(self)?)),
             StorageOperation::PutCf(PutCf(
                 ForwardEdges::CF_NAME,
                 ForwardEdges::create_bytes(self)?,
@@ -122,10 +113,7 @@ impl MutationPlanner for AddEdge {
                 ReverseEdges::CF_NAME,
                 ReverseEdges::create_bytes(self)?,
             )),
-            StorageOperation::PutCf(PutCf(
-                EdgeNames::CF_NAME,
-                EdgeNames::create_bytes(self)?,
-            )),
+            StorageOperation::PutCf(PutCf(EdgeNames::CF_NAME, EdgeNames::create_bytes(self)?)),
         ])
     }
 }
@@ -135,12 +123,10 @@ impl MutationPlanner for AddFragment {
         use crate::graph::{ColumnFamilyRecord, PutCf};
         use crate::schema::Fragments;
 
-        Ok(vec![
-            StorageOperation::PutCf(PutCf(
-                Fragments::CF_NAME,
-                Fragments::create_bytes(self)?,
-            )),
-        ])
+        Ok(vec![StorageOperation::PutCf(PutCf(
+            Fragments::CF_NAME,
+            Fragments::create_bytes(self)?,
+        ))])
     }
 }
 
@@ -165,6 +151,202 @@ impl Mutation {
             Mutation::Invalidate(m) => m.plan(),
         }
     }
+}
+
+// ============================================================================
+// Runnable Trait - Execute mutations against a Writer
+// ============================================================================
+
+/// Trait for mutations that can be executed against a Writer.
+///
+/// This trait follows the same pattern as the Query API's Runnable trait,
+/// enabling mutations to be constructed separately from execution.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use motlie_db::{AddNode, Id, TimestampMilli, Runnable};
+///
+/// // Construct mutation
+/// let mutation = AddNode {
+///     id: Id::new(),
+///     name: "Alice".to_string(),
+///     ts_millis: TimestampMilli::now(),
+///     temporal_range: None,
+/// };
+///
+/// // Execute it
+/// mutation.run(&writer).await?;
+/// ```
+pub trait Runnable {
+    /// Execute this mutation against the writer
+    async fn run(self, writer: &Writer) -> Result<()>;
+}
+
+// Implement Runnable for individual mutation types
+impl Runnable for AddNode {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::AddNode(self)]).await
+    }
+}
+
+impl Runnable for AddEdge {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::AddEdge(self)]).await
+    }
+}
+
+impl Runnable for AddFragment {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::AddFragment(self)]).await
+    }
+}
+
+impl Runnable for InvalidateArgs {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::Invalidate(self)]).await
+    }
+}
+
+// ============================================================================
+// From Trait - Automatic conversion to Mutation enum
+// ============================================================================
+
+impl From<AddNode> for Mutation {
+    fn from(m: AddNode) -> Self {
+        Mutation::AddNode(m)
+    }
+}
+
+impl From<AddEdge> for Mutation {
+    fn from(m: AddEdge) -> Self {
+        Mutation::AddEdge(m)
+    }
+}
+
+impl From<AddFragment> for Mutation {
+    fn from(m: AddFragment) -> Self {
+        Mutation::AddFragment(m)
+    }
+}
+
+impl From<InvalidateArgs> for Mutation {
+    fn from(m: InvalidateArgs) -> Self {
+        Mutation::Invalidate(m)
+    }
+}
+
+// ============================================================================
+// MutationBatch - Zero-overhead batching
+// ============================================================================
+
+/// A batch of mutations to be executed atomically.
+///
+/// This type provides zero-overhead batching of mutations without requiring
+/// heap allocation via boxing (unlike implementing Runnable on Vec<Mutation>).
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use motlie_db::{MutationBatch, AddNode, AddEdge, Mutation, Runnable};
+///
+/// // Manual construction
+/// let batch = MutationBatch(vec![
+///     Mutation::AddNode(AddNode { /* ... */ }),
+///     Mutation::AddEdge(AddEdge { /* ... */ }),
+/// ]);
+/// batch.run(&writer).await?;
+///
+/// // Using the mutations![] macro (recommended)
+/// mutations![
+///     AddNode { /* ... */ },
+///     AddEdge { /* ... */ },
+/// ].run(&writer).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct MutationBatch(pub Vec<Mutation>);
+
+impl MutationBatch {
+    /// Create a new empty mutation batch
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Create a new mutation batch with the given capacity
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+
+    /// Add a mutation to the batch
+    pub fn push(&mut self, mutation: impl Into<Mutation>) {
+        self.0.push(mutation.into());
+    }
+
+    /// Get the number of mutations in the batch
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Check if the batch is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Default for MutationBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Runnable for MutationBatch {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(self.0).await
+    }
+}
+
+// ============================================================================
+// mutations![] Macro - Ergonomic batch construction
+// ============================================================================
+
+/// Convenience macro for creating a MutationBatch with automatic type conversion.
+///
+/// This macro provides `vec![]`-like syntax for creating mutation batches,
+/// with automatic conversion from mutation types to the Mutation enum.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use motlie_db::{mutations, AddNode, AddEdge, Runnable};
+///
+/// // Empty batch
+/// let batch = mutations![];
+///
+/// // Single mutation
+/// mutations![
+///     AddNode {
+///         id: Id::new(),
+///         name: "Alice".to_string(),
+///         ts_millis: TimestampMilli::now(),
+///         temporal_range: None,
+///     }
+/// ].run(&writer).await?;
+///
+/// // Multiple mutations
+/// mutations![
+///     AddNode { /* ... */ },
+///     AddEdge { /* ... */ },
+///     AddFragment { /* ... */ },
+/// ].run(&writer).await?;
+/// ```
+#[macro_export]
+macro_rules! mutations {
+    () => {
+        $crate::MutationBatch::new()
+    };
+    ($($mutation:expr),+ $(,)?) => {
+        $crate::MutationBatch(vec![$($mutation.into()),+])
+    };
 }
 
 /// Trait for processing batches of mutations.
@@ -406,7 +588,7 @@ mod tests {
             name: "test_node".to_string(),
             temporal_range: None,
         };
-        writer.add_node(node_args).await.unwrap();
+        node_args.run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -470,7 +652,7 @@ mod tests {
                 name: format!("test_node_{}", i),
                 temporal_range: None,
             };
-            writer.add_node(node_args).await.unwrap();
+            node_args.run(&writer).await.unwrap();
         }
 
         // Give graph processor time to process all mutations

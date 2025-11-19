@@ -6,6 +6,7 @@ mod tests {
     use crate::{
         create_mutation_writer, AddEdge, AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
     };
+    use crate::mutation::Runnable as MutRunnable;
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -26,7 +27,7 @@ mod tests {
             name: "test_node".to_string(),
             temporal_range: None,
         };
-        writer.add_node(node_args).await.unwrap();
+        node_args.run(&writer).await.unwrap();
 
         let fragment_args = AddFragment {
             id: Id::new(),
@@ -34,7 +35,7 @@ mod tests {
             content: crate::DataUrl::from_text("This is a test fragment with some searchable content"),
             temporal_range: None,
         };
-        writer.add_fragment(fragment_args).await.unwrap();
+        fragment_args.run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -65,7 +66,7 @@ mod tests {
             content: crate::DataUrl::from_text("The quick brown fox jumps over the lazy dog. This is a longer text fragment that would benefit from BM25 scoring with custom parameters."),
             temporal_range: None,
         };
-        writer.add_fragment(fragment_args).await.unwrap();
+        fragment_args.run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -82,46 +83,46 @@ mod tests {
         let consumer_handle = spawn_fulltext_consumer(receiver, config);
 
         // Test all mutation types with search-relevant content
-        writer
-            .add_node(AddNode {
-                id: Id::new(),
-                ts_millis: TimestampMilli::now(),
-                name: "search node".to_string(),
-                temporal_range: None
-            })
-            .await
-            .unwrap();
+        AddNode {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "search node".to_string(),
+            temporal_range: None
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .add_edge(AddEdge {
-                id: Id::new(),
-                source_node_id: Id::new(),
-                target_node_id: Id::new(),
-                ts_millis: TimestampMilli::now(),
-                name: "connects to".to_string(),
-                temporal_range: None
-            })
-            .await
-            .unwrap();
+        AddEdge {
+            id: Id::new(),
+            source_node_id: Id::new(),
+            target_node_id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "connects to".to_string(),
+            temporal_range: None
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .add_fragment(AddFragment {
-                id: Id::new(),
-                ts_millis: TimestampMilli::now(),
-                content: crate::DataUrl::from_text("This fragment contains searchable text that should be indexed using BM25 algorithm for effective information retrieval."),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddFragment {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            content: crate::DataUrl::from_text("This fragment contains searchable text that should be indexed using BM25 algorithm for effective information retrieval."),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .invalidate(crate::InvalidateArgs {
-                id: Id::new(),
-                ts_millis: TimestampMilli::now(),
-                reason: "content removed from search index".to_string(),
-            })
-            .await
-            .unwrap();
+        crate::InvalidateArgs {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            reason: "content removed from search index".to_string(),
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -169,7 +170,7 @@ mod tests {
                 )),
                 temporal_range: None,
             };
-            writer.add_fragment(fragment_args).await.unwrap();
+            fragment_args.run(&writer).await.unwrap();
         }
 
         // Give consumer time to process

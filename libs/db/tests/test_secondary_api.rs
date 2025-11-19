@@ -2,7 +2,7 @@
 ///
 /// Secondary instances provide dynamic catch-up capability for read replicas,
 /// allowing them to see new writes from the primary database.
-use motlie_db::{AddNode, Id, NodeById, Runnable, TimestampMilli};
+use motlie_db::{AddNode, Id, MutationRunnable, NodeById, QueryRunnable, TimestampMilli};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -20,15 +20,15 @@ async fn test_secondary_instance_basic() {
     let node_id = Id::new();
     let node_name = "test_node".to_string();
 
-    writer
-        .add_node(AddNode {
-            id: node_id,
-            ts_millis: TimestampMilli::now(),
-            name: node_name.clone(),
-            temporal_range: None,
-        })
-        .await
-        .expect("Failed to add node");
+    AddNode {
+        id: node_id,
+        ts_millis: TimestampMilli::now(),
+        name: node_name.clone(),
+        temporal_range: None,
+    }
+    .run(&writer)
+    .await
+    .expect("Failed to add node");
 
     // Give writer time to flush
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -94,15 +94,15 @@ async fn test_secondary_catch_up_sees_new_writes() {
             motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &primary_path);
 
         let node1_id = Id::new();
-        writer
-            .add_node(AddNode {
-                id: node1_id,
-                ts_millis: TimestampMilli::now(),
-                name: "node1".to_string(),
-                temporal_range: None,
-            })
-            .await
-            .expect("Failed to add node1");
+        AddNode {
+            id: node1_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node1".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .expect("Failed to add node1");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(writer);
@@ -125,15 +125,15 @@ async fn test_secondary_catch_up_sees_new_writes() {
         let writer_handle =
             motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &primary_path);
 
-        writer
-            .add_node(AddNode {
-                id: node2_id,
-                ts_millis: TimestampMilli::now(),
-                name: "node2".to_string(),
-                temporal_range: None,
-            })
-            .await
-            .expect("Failed to add node2");
+        AddNode {
+            id: node2_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node2".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .expect("Failed to add node2");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(writer);

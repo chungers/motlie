@@ -11,6 +11,7 @@ mod tests {
     use crate::{
         create_mutation_writer, AddEdge, AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
     };
+    use crate::mutation::Runnable as MutRunnable;
     use rocksdb::DB;
     use std::ops::Bound;
     use tempfile::TempDir;
@@ -38,7 +39,7 @@ mod tests {
             name: "test_node".to_string(),
             temporal_range: None,
         };
-        writer.add_node(node_args).await.unwrap();
+        node_args.run(&writer).await.unwrap();
 
         let edge_args = AddEdge {
             id: Id::new(),
@@ -48,7 +49,7 @@ mod tests {
             name: "test_edge".to_string(),
             temporal_range: None,
         };
-        writer.add_edge(edge_args).await.unwrap();
+        edge_args.run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -80,7 +81,7 @@ mod tests {
                 name: format!("test_node_{}", i),
                 temporal_range: None,
             };
-            writer.add_node(node_args).await.unwrap();
+            node_args.run(&writer).await.unwrap();
         }
 
         // Give consumer time to process
@@ -101,46 +102,46 @@ mod tests {
         let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
 
         // Test all mutation types
-        writer
-            .add_node(AddNode {
-                id: Id::new(),
-                ts_millis: TimestampMilli::now(),
-                name: "node".to_string(),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddNode {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .add_edge(AddEdge {
-                id: Id::new(),
-                source_node_id: Id::new(),
-                target_node_id: Id::new(),
-                ts_millis: TimestampMilli::now(),
-                name: "edge".to_string(),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddEdge {
+            id: Id::new(),
+            source_node_id: Id::new(),
+            target_node_id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "edge".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .add_fragment(AddFragment {
-                id: Id::new(),
-                ts_millis: TimestampMilli::now(),
-                content: crate::DataUrl::from_text("fragment body"),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddFragment {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            content: crate::DataUrl::from_text("fragment body"),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .invalidate(crate::InvalidateArgs {
-                id: Id::new(),
-                ts_millis: TimestampMilli::now(),
-                reason: "test invalidation".to_string(),
-            })
-            .await
-            .unwrap();
+        crate::InvalidateArgs {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            reason: "test invalidation".to_string(),
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -190,8 +191,8 @@ mod tests {
                 temporal_range: None,
             };
 
-            writer.add_node(node_args).await.unwrap();
-            writer.add_fragment(fragment_args).await.unwrap();
+            node_args.run(&writer).await.unwrap();
+            fragment_args.run(&writer).await.unwrap();
         }
 
         // Give both consumers time to process
@@ -1138,7 +1139,7 @@ mod tests {
             temporal_range: None,
         };
 
-        writer.add_node(node_args.clone()).await.unwrap();
+        node_args.clone().run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1232,10 +1233,10 @@ mod tests {
             temporal_range: None,
         };
 
-        writer.add_node(node_a.clone()).await.unwrap();
-        writer.add_node(node_b.clone()).await.unwrap();
-        writer.add_node(node_c.clone()).await.unwrap();
-        writer.add_node(node_d.clone()).await.unwrap();
+        node_a.clone().run(&writer).await.unwrap();
+        node_b.clone().run(&writer).await.unwrap();
+        node_c.clone().run(&writer).await.unwrap();
+        node_d.clone().run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1390,7 +1391,7 @@ mod tests {
             temporal_range: None,
         };
 
-        writer.add_edge(edge_args.clone()).await.unwrap();
+        edge_args.clone().run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1516,7 +1517,7 @@ mod tests {
             temporal_range: None,
         };
 
-        writer.add_fragment(fragment_args.clone()).await.unwrap();
+        fragment_args.clone().run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1601,9 +1602,9 @@ mod tests {
             temporal_range: None,
         };
 
-        writer.add_node(node1_args.clone()).await.unwrap();
-        writer.add_node(node2_args.clone()).await.unwrap();
-        writer.add_node(node3_args.clone()).await.unwrap();
+        node1_args.clone().run(&writer).await.unwrap();
+        node2_args.clone().run(&writer).await.unwrap();
+        node3_args.clone().run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1713,8 +1714,8 @@ mod tests {
             temporal_range: None,
         };
 
-        writer.add_node(node_a).await.unwrap();
-        writer.add_node(node_b).await.unwrap();
+        node_a.run(&writer).await.unwrap();
+        node_b.run(&writer).await.unwrap();
 
         // Create multiple edges from A to B with different names
         let edge_a_to_b_1 = AddEdge {
@@ -1764,11 +1765,11 @@ mod tests {
         };
 
         // Write all edges
-        writer.add_edge(edge_a_to_b_1).await.unwrap();
-        writer.add_edge(edge_a_to_b_2).await.unwrap();
-        writer.add_edge(edge_a_to_b_3).await.unwrap();
-        writer.add_edge(edge_b_to_a_1).await.unwrap();
-        writer.add_edge(edge_b_to_a_2).await.unwrap();
+        edge_a_to_b_1.run(&writer).await.unwrap();
+        edge_a_to_b_2.run(&writer).await.unwrap();
+        edge_a_to_b_3.run(&writer).await.unwrap();
+        edge_b_to_a_1.run(&writer).await.unwrap();
+        edge_b_to_a_2.run(&writer).await.unwrap();
 
         // Give time for mutations to be processed and flushed to disk
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1963,10 +1964,10 @@ mod tests {
             temporal_range: None,
         };
 
-        writer.add_edge(edge_1.clone()).await.unwrap();
-        writer.add_edge(edge_2.clone()).await.unwrap();
-        writer.add_edge(edge_3.clone()).await.unwrap();
-        writer.add_edge(edge_4.clone()).await.unwrap();
+        edge_1.clone().run(&writer).await.unwrap();
+        edge_2.clone().run(&writer).await.unwrap();
+        edge_3.clone().run(&writer).await.unwrap();
+        edge_4.clone().run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2090,55 +2091,55 @@ mod tests {
         let t4 = TimestampMilli(4000);
         let t5 = TimestampMilli(5000);
 
-        writer
-            .add_fragment(AddFragment {
-                id: entity_id,
-                ts_millis: t1,
-                content: crate::DataUrl::from_text("fragment_1"),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddFragment {
+            id: entity_id,
+            ts_millis: t1,
+            content: crate::DataUrl::from_text("fragment_1"),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .add_fragment(AddFragment {
-                id: entity_id,
-                ts_millis: t2,
-                content: crate::DataUrl::from_text("fragment_2"),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddFragment {
+            id: entity_id,
+            ts_millis: t2,
+            content: crate::DataUrl::from_text("fragment_2"),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .add_fragment(AddFragment {
-                id: entity_id,
-                ts_millis: t3,
-                content: crate::DataUrl::from_text("fragment_3"),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddFragment {
+            id: entity_id,
+            ts_millis: t3,
+            content: crate::DataUrl::from_text("fragment_3"),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .add_fragment(AddFragment {
-                id: entity_id,
-                ts_millis: t4,
-                content: crate::DataUrl::from_text("fragment_4"),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddFragment {
+            id: entity_id,
+            ts_millis: t4,
+            content: crate::DataUrl::from_text("fragment_4"),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .add_fragment(AddFragment {
-                id: entity_id,
-                ts_millis: t5,
-                content: crate::DataUrl::from_text("fragment_5"),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddFragment {
+            id: entity_id,
+            ts_millis: t5,
+            content: crate::DataUrl::from_text("fragment_5"),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(writer);
@@ -2192,15 +2193,15 @@ mod tests {
             (t4, "fragment_4"),
             (t5, "fragment_5"),
         ] {
-            writer
-                .add_fragment(AddFragment {
-                    id: entity_id,
-                    ts_millis: ts,
-                    content: crate::DataUrl::from_text(content),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddFragment {
+                id: entity_id,
+                ts_millis: ts,
+                content: crate::DataUrl::from_text(content),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2257,15 +2258,15 @@ mod tests {
             (t4, "fragment_4"),
             (t5, "fragment_5"),
         ] {
-            writer
-                .add_fragment(AddFragment {
-                    id: entity_id,
-                    ts_millis: ts,
-                    content: crate::DataUrl::from_text(content),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddFragment {
+                id: entity_id,
+                ts_millis: ts,
+                content: crate::DataUrl::from_text(content),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2322,15 +2323,15 @@ mod tests {
             (t4, "fragment_4"),
             (t5, "fragment_5"),
         ] {
-            writer
-                .add_fragment(AddFragment {
-                    id: entity_id,
-                    ts_millis: ts,
-                    content: crate::DataUrl::from_text(content),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddFragment {
+                id: entity_id,
+                ts_millis: ts,
+                content: crate::DataUrl::from_text(content),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2390,15 +2391,15 @@ mod tests {
             (t4, "fragment_4"),
             (t5, "fragment_5"),
         ] {
-            writer
-                .add_fragment(AddFragment {
-                    id: entity_id,
-                    ts_millis: ts,
-                    content: crate::DataUrl::from_text(content),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddFragment {
+                id: entity_id,
+                ts_millis: ts,
+                content: crate::DataUrl::from_text(content),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2452,15 +2453,15 @@ mod tests {
             (t4, "fragment_4"),
             (t5, "fragment_5"),
         ] {
-            writer
-                .add_fragment(AddFragment {
-                    id: entity_id,
-                    ts_millis: ts,
-                    content: crate::DataUrl::from_text(content),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddFragment {
+                id: entity_id,
+                ts_millis: ts,
+                content: crate::DataUrl::from_text(content),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2507,15 +2508,15 @@ mod tests {
         let t3 = TimestampMilli(3000);
 
         for (ts, content) in [(t1, "fragment_1"), (t2, "fragment_2"), (t3, "fragment_3")] {
-            writer
-                .add_fragment(AddFragment {
-                    id: entity_id,
-                    ts_millis: ts,
-                    content: crate::DataUrl::from_text(content),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddFragment {
+                id: entity_id,
+                ts_millis: ts,
+                content: crate::DataUrl::from_text(content),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2557,15 +2558,15 @@ mod tests {
         let t2 = TimestampMilli(2000);
 
         for (ts, content) in [(t1, "fragment_1"), (t2, "fragment_2")] {
-            writer
-                .add_fragment(AddFragment {
-                    id: entity_id,
-                    ts_millis: ts,
-                    content: crate::DataUrl::from_text(content),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddFragment {
+                id: entity_id,
+                ts_millis: ts,
+                content: crate::DataUrl::from_text(content),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2649,11 +2650,11 @@ mod tests {
             temporal_range: None,
         };
 
-        writer.add_node(user_1.clone()).await.unwrap();
-        writer.add_node(user_2.clone()).await.unwrap();
-        writer.add_node(user_3.clone()).await.unwrap();
-        writer.add_node(user_4.clone()).await.unwrap();
-        writer.add_node(admin.clone()).await.unwrap();
+        user_1.clone().run(&writer).await.unwrap();
+        user_2.clone().run(&writer).await.unwrap();
+        user_3.clone().run(&writer).await.unwrap();
+        user_4.clone().run(&writer).await.unwrap();
+        admin.clone().run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2819,11 +2820,11 @@ mod tests {
             temporal_range: None,
         };
 
-        writer.add_edge(likes_1.clone()).await.unwrap();
-        writer.add_edge(likes_2.clone()).await.unwrap();
-        writer.add_edge(likes_3.clone()).await.unwrap();
-        writer.add_edge(likes_very_much.clone()).await.unwrap();
-        writer.add_edge(follows.clone()).await.unwrap();
+        likes_1.clone().run(&writer).await.unwrap();
+        likes_2.clone().run(&writer).await.unwrap();
+        likes_3.clone().run(&writer).await.unwrap();
+        likes_very_much.clone().run(&writer).await.unwrap();
+        follows.clone().run(&writer).await.unwrap();
 
         // Give consumer time to process
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2948,7 +2949,7 @@ mod tests {
                 name: format!("test_node_{}", i),
                 temporal_range: None,
             };
-            writer.add_node(node).await.unwrap();
+            node.run(&writer).await.unwrap();
         }
 
         // Give consumer time to process
@@ -3043,25 +3044,25 @@ mod tests {
             src_ids.push(src_id);
             dst_ids.push(dst_id);
 
-            writer
-                .add_node(AddNode {
-                    id: src_id,
-                    ts_millis: TimestampMilli::now(),
-                    name: format!("src_{}", i),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddNode {
+                id: src_id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("src_{}", i),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
 
-            writer
-                .add_node(AddNode {
-                    id: dst_id,
-                    ts_millis: TimestampMilli::now(),
-                    name: format!("dst_{}", i),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddNode {
+                id: dst_id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("dst_{}", i),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         // Create multiple edges with same name prefix
@@ -3073,17 +3074,17 @@ mod tests {
             let src_idx = i % src_ids.len();
             let dst_idx = i % dst_ids.len();
 
-            writer
-                .add_edge(AddEdge {
-                    id: edge_id,
-                    ts_millis: TimestampMilli::now(),
-                    source_node_id: src_ids[src_idx],
-                    target_node_id: dst_ids[dst_idx],
-                    name: format!("test_edge_{}", i),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddEdge {
+                id: edge_id,
+                ts_millis: TimestampMilli::now(),
+                source_node_id: src_ids[src_idx],
+                target_node_id: dst_ids[dst_idx],
+                name: format!("test_edge_{}", i),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         // Give consumer time to process
@@ -3180,7 +3181,7 @@ mod tests {
                 name: "page_node_shared".to_string(), // Same name for all
                 temporal_range: None,
             };
-            writer.add_node(node).await.unwrap();
+            node.run(&writer).await.unwrap();
         }
 
         // Give consumer time to process
@@ -3376,25 +3377,25 @@ mod tests {
             src_ids.push(src_id);
             dst_ids.push(dst_id);
 
-            writer
-                .add_node(AddNode {
-                    id: src_id,
-                    ts_millis: TimestampMilli::now(),
-                    name: format!("src_{}", i),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddNode {
+                id: src_id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("src_{}", i),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
 
-            writer
-                .add_node(AddNode {
-                    id: dst_id,
-                    ts_millis: TimestampMilli::now(),
-                    name: format!("dst_{}", i),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddNode {
+                id: dst_id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("dst_{}", i),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         // Create 20 edges with the SAME name to test pagination
@@ -3407,17 +3408,17 @@ mod tests {
             let src_idx = i % src_ids.len();
             let dst_idx = i % dst_ids.len();
 
-            writer
-                .add_edge(AddEdge {
-                    id: edge_id,
-                    ts_millis: TimestampMilli::now(),
-                    source_node_id: src_ids[src_idx],
-                    target_node_id: dst_ids[dst_idx],
-                    name: "page_edge_shared".to_string(), // Same name for all,
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddEdge {
+                id: edge_id,
+                ts_millis: TimestampMilli::now(),
+                source_node_id: src_ids[src_idx],
+                target_node_id: dst_ids[dst_idx],
+                name: "page_edge_shared".to_string(), // Same name for all,
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         // Give consumer time to process
@@ -3566,15 +3567,15 @@ mod tests {
         let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
 
         let node_id = Id::new();
-        writer
-            .add_node(AddNode {
-                id: node_id,
-                ts_millis: TimestampMilli::now(),
-                name: "test_node".to_string(),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli::now(),
+            name: "test_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(writer);
@@ -3768,15 +3769,15 @@ mod tests {
 
         let start1 = Instant::now();
         for i in 0..num_mutations {
-            writer1
-                .add_node(AddNode {
-                    id: Id::new(),
-                    ts_millis: TimestampMilli::now(),
-                    name: format!("node_{}", i),
-                    temporal_range: None,
-                })
-                .await
-                .unwrap();
+            AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli::now(),
+                name: format!("node_{}", i),
+                temporal_range: None,
+            }
+            .run(&writer1)
+            .await
+            .unwrap();
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         drop(writer1);
@@ -3949,60 +3950,60 @@ mod tests {
         for i in 0..5 {
             let id = Id::new();
             node_ids.push(id);
-            writer
-                .add_node(AddNode {
-                    id,
-                    name: format!("user_{:02}", i),
-                    ts_millis: TimestampMilli::now(),
-                    temporal_range: ValidTemporalRange::valid_between(t1, t3),
-                })
-                .await
-                .unwrap();
+            AddNode {
+                id,
+                name: format!("user_{:02}", i),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_between(t1, t3),
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         // Nodes 5-9: valid_between(t0, t4) - will be VALID at t2
         for i in 5..10 {
             let id = Id::new();
             node_ids.push(id);
-            writer
-                .add_node(AddNode {
-                    id,
-                    name: format!("user_{:02}", i),
-                    ts_millis: TimestampMilli::now(),
-                    temporal_range: ValidTemporalRange::valid_between(t0, t4),
-                })
-                .await
-                .unwrap();
+            AddNode {
+                id,
+                name: format!("user_{:02}", i),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_between(t0, t4),
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         // Nodes 10-14: valid_from(t2) - will be VALID at t2 and after
         for i in 10..15 {
             let id = Id::new();
             node_ids.push(id);
-            writer
-                .add_node(AddNode {
-                    id,
-                    name: format!("user_{:02}", i),
-                    ts_millis: TimestampMilli::now(),
-                    temporal_range: ValidTemporalRange::valid_from(t2),
-                })
-                .await
-                .unwrap();
+            AddNode {
+                id,
+                name: format!("user_{:02}", i),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_from(t2),
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         // Nodes 15-19: valid_until(t1) - will be INVALID at t2 (expired)
         for i in 15..20 {
             let id = Id::new();
             node_ids.push(id);
-            writer
-                .add_node(AddNode {
-                    id,
-                    name: format!("user_{:02}", i),
-                    ts_millis: TimestampMilli::now(),
-                    temporal_range: ValidTemporalRange::valid_until(t1),
-                })
-                .await
-                .unwrap();
+            AddNode {
+                id,
+                name: format!("user_{:02}", i),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_until(t1),
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         drop(writer);
@@ -4118,25 +4119,25 @@ mod tests {
         let src_node = Id::new();
         let dst_node = Id::new();
 
-        writer
-            .add_node(AddNode {
-                id: src_node,
-                name: "source".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddNode {
+            id: src_node,
+            name: "source".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .add_node(AddNode {
-                id: dst_node,
-                name: "destination".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddNode {
+            id: dst_node,
+            name: "destination".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         // Create 20 edges with name "follows" with different temporal ranges
         let mut edge_ids = Vec::new();
@@ -4145,68 +4146,68 @@ mod tests {
         for i in 0..5 {
             let id = Id::new();
             edge_ids.push(id);
-            writer
-                .add_edge(AddEdge {
-                    id,
-                    source_node_id: src_node,
-                    target_node_id: dst_node,
-                    name: format!("follows_{:02}", i),
-                    ts_millis: TimestampMilli::now(),
-                    temporal_range: ValidTemporalRange::valid_between(t1, t3),
-                })
-                .await
-                .unwrap();
+            AddEdge {
+                id,
+                source_node_id: src_node,
+                target_node_id: dst_node,
+                name: format!("follows_{:02}", i),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_between(t1, t3),
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         // Edges 5-9: valid_between(t0, t4) - VALID at t2
         for i in 5..10 {
             let id = Id::new();
             edge_ids.push(id);
-            writer
-                .add_edge(AddEdge {
-                    id,
-                    source_node_id: src_node,
-                    target_node_id: dst_node,
-                    name: format!("follows_{:02}", i),
-                    ts_millis: TimestampMilli::now(),
-                    temporal_range: ValidTemporalRange::valid_between(t0, t4),
-                })
-                .await
-                .unwrap();
+            AddEdge {
+                id,
+                source_node_id: src_node,
+                target_node_id: dst_node,
+                name: format!("follows_{:02}", i),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_between(t0, t4),
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         // Edges 10-14: valid_from(t2) - VALID at t2 and after
         for i in 10..15 {
             let id = Id::new();
             edge_ids.push(id);
-            writer
-                .add_edge(AddEdge {
-                    id,
-                    source_node_id: src_node,
-                    target_node_id: dst_node,
-                    name: format!("follows_{:02}", i),
-                    ts_millis: TimestampMilli::now(),
-                    temporal_range: ValidTemporalRange::valid_from(t2),
-                })
-                .await
-                .unwrap();
+            AddEdge {
+                id,
+                source_node_id: src_node,
+                target_node_id: dst_node,
+                name: format!("follows_{:02}", i),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_from(t2),
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         // Edges 15-19: valid_until(t1) - INVALID at t2 (expired)
         for i in 15..20 {
             let id = Id::new();
             edge_ids.push(id);
-            writer
-                .add_edge(AddEdge {
-                    id,
-                    source_node_id: src_node,
-                    target_node_id: dst_node,
-                    name: format!("follows_{:02}", i),
-                    ts_millis: TimestampMilli::now(),
-                    temporal_range: ValidTemporalRange::valid_until(t1),
-                })
-                .await
-                .unwrap();
+            AddEdge {
+                id,
+                source_node_id: src_node,
+                target_node_id: dst_node,
+                name: format!("follows_{:02}", i),
+                ts_millis: TimestampMilli::now(),
+                temporal_range: ValidTemporalRange::valid_until(t1),
+            }
+            .run(&writer)
+            .await
+            .unwrap();
         }
 
         drop(writer);
@@ -4289,27 +4290,27 @@ mod tests {
 
         // Create node valid_between(t1, t3)
         let node_id = Id::new();
-        writer
-            .add_node(AddNode {
-                id: node_id,
-                name: "temporal_node".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: ValidTemporalRange::valid_between(t1, t3),
-            })
-            .await
-            .unwrap();
+        AddNode {
+            id: node_id,
+            name: "temporal_node".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: ValidTemporalRange::valid_between(t1, t3),
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         // Create node without temporal range (always valid)
         let always_valid_node = Id::new();
-        writer
-            .add_node(AddNode {
-                id: always_valid_node,
-                name: "always_valid_node".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddNode {
+            id: always_valid_node,
+            name: "always_valid_node".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         drop(writer);
         consumer_handle.await.unwrap().unwrap();
@@ -4404,91 +4405,91 @@ mod tests {
         let node_a = Id::new();
         let node_b = Id::new();
 
-        writer
-            .add_node(AddNode {
-                id: node_a,
-                name: "node_a".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddNode {
+            id: node_a,
+            name: "node_a".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
-        writer
-            .add_node(AddNode {
-                id: node_b,
-                name: "node_b".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: None,
-            })
-            .await
-            .unwrap();
+        AddNode {
+            id: node_b,
+            name: "node_b".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         // Create 5 edges from node_a with different temporal ranges
         let edge1 = Id::new();
-        writer
-            .add_edge(AddEdge {
-                id: edge1,
-                source_node_id: node_a,
-                target_node_id: node_b,
-                name: "edge1".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: ValidTemporalRange::valid_between(t1, t3), // Valid at t2
-            })
-            .await
-            .unwrap();
+        AddEdge {
+            id: edge1,
+            source_node_id: node_a,
+            target_node_id: node_b,
+            name: "edge1".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: ValidTemporalRange::valid_between(t1, t3), // Valid at t2
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         let edge2 = Id::new();
-        writer
-            .add_edge(AddEdge {
-                id: edge2,
-                source_node_id: node_a,
-                target_node_id: node_b,
-                name: "edge2".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: ValidTemporalRange::valid_from(t0), // Valid at t2
-            })
-            .await
-            .unwrap();
+        AddEdge {
+            id: edge2,
+            source_node_id: node_a,
+            target_node_id: node_b,
+            name: "edge2".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: ValidTemporalRange::valid_from(t0), // Valid at t2
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         let edge3 = Id::new();
-        writer
-            .add_edge(AddEdge {
-                id: edge3,
-                source_node_id: node_a,
-                target_node_id: node_b,
-                name: "edge3".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: ValidTemporalRange::valid_until(t2), // NOT valid at t2 (exclusive)
-            })
-            .await
-            .unwrap();
+        AddEdge {
+            id: edge3,
+            source_node_id: node_a,
+            target_node_id: node_b,
+            name: "edge3".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: ValidTemporalRange::valid_until(t2), // NOT valid at t2 (exclusive)
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         let edge4 = Id::new();
-        writer
-            .add_edge(AddEdge {
-                id: edge4,
-                source_node_id: node_a,
-                target_node_id: node_b,
-                name: "edge4".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: None, // Always valid
-            })
-            .await
-            .unwrap();
+        AddEdge {
+            id: edge4,
+            source_node_id: node_a,
+            target_node_id: node_b,
+            name: "edge4".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: None, // Always valid
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         let edge5 = Id::new();
-        writer
-            .add_edge(AddEdge {
-                id: edge5,
-                source_node_id: node_a,
-                target_node_id: node_b,
-                name: "edge5".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: ValidTemporalRange::valid_from(t10), // Future, NOT valid at t2
-            })
-            .await
-            .unwrap();
+        AddEdge {
+            id: edge5,
+            source_node_id: node_a,
+            target_node_id: node_b,
+            name: "edge5".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: ValidTemporalRange::valid_from(t10), // Future, NOT valid at t2
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         drop(writer);
         consumer_handle.await.unwrap().unwrap();
@@ -4536,15 +4537,15 @@ mod tests {
         let t_end = TimestampMilli(2000);
 
         let node_id = Id::new();
-        writer
-            .add_node(AddNode {
-                id: node_id,
-                name: "boundary_test".to_string(),
-                ts_millis: TimestampMilli::now(),
-                temporal_range: ValidTemporalRange::valid_between(t_start, t_end),
-            })
-            .await
-            .unwrap();
+        AddNode {
+            id: node_id,
+            name: "boundary_test".to_string(),
+            ts_millis: TimestampMilli::now(),
+            temporal_range: ValidTemporalRange::valid_between(t_start, t_end),
+        }
+        .run(&writer)
+        .await
+        .unwrap();
 
         drop(writer);
         consumer_handle.await.unwrap().unwrap();

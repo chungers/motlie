@@ -585,12 +585,14 @@ async fn shared_readwrite_example() -> anyhow::Result<()> {
     }
 
     // Use writer
-    use motlie_db::{AddNode, Id, TimestampMilli};
-    writer.add_node(AddNode {
+    use motlie_db::{AddNode, Id, TimestampMilli, MutationRunnable};
+    AddNode {
         id: Id::new(),
         ts_millis: TimestampMilli::now(),
         name: "test".to_string(),
-    }).await?;
+    }
+    .run(&writer)
+    .await?;
 
     // Use readers
     // All readers see the write immediately (in memtable)
@@ -853,7 +855,7 @@ async fn main() -> anyhow::Result<()> {
 use motlie_db::{
     Storage, Graph, create_mutation_writer, spawn_graph_consumer_with_graph,
     spawn_query_consumer_with_graph, AddNode, Id, TimestampMilli,
-    WriterConfig, ReaderConfig,
+    MutationRunnable, WriterConfig, ReaderConfig,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -896,11 +898,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Write data
     let node_id = Id::new();
-    writer.add_node(AddNode {
+    AddNode {
         id: node_id,
         ts_millis: TimestampMilli::now(),
         name: "test_node".to_string(),
-    }).await?;
+    }
+    .run(&writer)
+    .await?;
 
     // Read immediately (99%+ will succeed)
     let (reader, _) = &readers[0];

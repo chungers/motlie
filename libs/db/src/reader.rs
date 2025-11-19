@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::time::Duration;
 
 use crate::query::{DstId, EdgeSummaryBySrcDstName, Query, SrcId};
-use crate::schema::{EdgeName, EdgeSummary};
+use crate::schema::EdgeSummary;
 use crate::{Id, TimestampMilli};
 
 /// Configuration for the query reader

@@ -678,25 +678,34 @@ async fn test_edge_by_id_returns_complete_topology() {
     let dst_id = Id::new();
     let edge_id = Id::new();
 
-    writer.add_node(AddNode {
+    AddNode {
         id: src_id,
         name: "Alice".to_string(),
         ts_millis: TimestampMilli::now(),
-    }).await.unwrap();
+    }
+    .run(&writer)
+    .await
+    .unwrap();
 
-    writer.add_node(AddNode {
+    AddNode {
         id: dst_id,
         name: "Bob".to_string(),
         ts_millis: TimestampMilli::now(),
-    }).await.unwrap();
+    }
+    .run(&writer)
+    .await
+    .unwrap();
 
-    writer.add_edge(AddEdge {
+    AddEdge {
         id: edge_id,
         source_node_id: src_id,
         target_node_id: dst_id,
         name: "follows".to_string(),
         ts_millis: TimestampMilli::now(),
-    }).await.unwrap();
+    }
+    .run(&writer)
+    .await
+    .unwrap();
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 

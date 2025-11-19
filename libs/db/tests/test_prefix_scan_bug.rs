@@ -16,7 +16,9 @@
 ///
 /// See: libs/db/docs/prefix-scanning-analysis-final.md
 use motlie_db::{
-    AddEdge, AddNode, EdgesByName, Id, NodesByName, Runnable, TimestampMilli};
+    AddEdge, AddNode, EdgesByName, Id, MutationRunnable, NodesByName, QueryRunnable,
+    TimestampMilli,
+};
 
 use std::time::Duration;
 use tempfile::TempDir;
@@ -60,15 +62,15 @@ async fn test_node_names_prefix_scan_comprehensive() {
 
     // Add all nodes
     for (name, id) in &nodes {
-        writer
-            .add_node(AddNode {
-                id: *id,
-                name: name.to_string(),
-                ts_millis: TimestampMilli(1000),
-                temporal_range: None,
-            })
-            .await
-            .expect("Failed to add node");
+        AddNode {
+            id: *id,
+            name: name.to_string(),
+            ts_millis: TimestampMilli(1000),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .expect("Failed to add node");
     }
 
     // Give time for writes to complete
@@ -152,15 +154,15 @@ async fn test_node_names_edge_cases() {
     ];
 
     for (name, id) in &nodes {
-        writer
-            .add_node(AddNode {
-                id: *id,
-                name: name.to_string(),
-                ts_millis: TimestampMilli(1000),
-                temporal_range: None,
-            })
-            .await
-            .expect("Failed to add node");
+        AddNode {
+            id: *id,
+            name: name.to_string(),
+            ts_millis: TimestampMilli(1000),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .expect("Failed to add node");
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -215,15 +217,15 @@ async fn test_node_names_pagination() {
 
     // Create 20 nodes with same prefix but different names
     for i in 0..20 {
-        writer
-            .add_node(AddNode {
-                id: Id::new(),
-                name: format!("test_{:03}", i),
-                ts_millis: TimestampMilli(1000),
-                temporal_range: None,
-            })
-            .await
-            .expect("Failed to add node");
+        AddNode {
+            id: Id::new(),
+            name: format!("test_{:03}", i),
+            ts_millis: TimestampMilli(1000),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .expect("Failed to add node");
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -316,25 +318,25 @@ async fn test_edge_names_prefix_scan_comprehensive() {
     let src_node = Id::new();
     let dst_node = Id::new();
 
-    writer
-        .add_node(AddNode {
-            id: src_node,
-            name: "Source".to_string(),
-            ts_millis: TimestampMilli(1000),
-            temporal_range: None,
-        })
-        .await
-        .expect("Failed to add node");
+    AddNode {
+        id: src_node,
+        name: "Source".to_string(),
+        ts_millis: TimestampMilli(1000),
+        temporal_range: None,
+    }
+    .run(&writer)
+    .await
+    .expect("Failed to add node");
 
-    writer
-        .add_node(AddNode {
-            id: dst_node,
-            name: "Destination".to_string(),
-            ts_millis: TimestampMilli(1000),
-            temporal_range: None,
-        })
-        .await
-        .expect("Failed to add node");
+    AddNode {
+        id: dst_node,
+        name: "Destination".to_string(),
+        ts_millis: TimestampMilli(1000),
+        temporal_range: None,
+    }
+    .run(&writer)
+    .await
+    .expect("Failed to add node");
 
     // Create edges with various names
     let edges = vec![
@@ -348,17 +350,17 @@ async fn test_edge_names_prefix_scan_comprehensive() {
     ];
 
     for (name, id) in &edges {
-        writer
-            .add_edge(AddEdge {
-                id: *id,
-                source_node_id: src_node,
-                target_node_id: dst_node,
-                name: name.to_string(),
-                ts_millis: TimestampMilli(2000),
-                temporal_range: None,
-            })
-            .await
-            .expect("Failed to add edge");
+        AddEdge {
+            id: *id,
+            source_node_id: src_node,
+            target_node_id: dst_node,
+            name: name.to_string(),
+            ts_millis: TimestampMilli(2000),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .expect("Failed to add edge");
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -475,15 +477,15 @@ async fn test_empty_prefix_returns_all() {
 
     // Add some nodes
     for name in &["apple", "banana", "cherry"] {
-        writer
-            .add_node(AddNode {
-                id: Id::new(),
-                name: name.to_string(),
-                ts_millis: TimestampMilli(1000),
-                temporal_range: None,
-            })
-            .await
-            .expect("Failed to add node");
+        AddNode {
+            id: Id::new(),
+            name: name.to_string(),
+            ts_millis: TimestampMilli(1000),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .expect("Failed to add node");
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -514,15 +516,15 @@ async fn test_nonexistent_prefix_returns_empty() {
 
     // Add some nodes
     for name in &["apple", "banana", "cherry"] {
-        writer
-            .add_node(AddNode {
-                id: Id::new(),
-                name: name.to_string(),
-                ts_millis: TimestampMilli(1000),
-                temporal_range: None,
-            })
-            .await
-            .expect("Failed to add node");
+        AddNode {
+            id: Id::new(),
+            name: name.to_string(),
+            ts_millis: TimestampMilli(1000),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .expect("Failed to add node");
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;

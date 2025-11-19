@@ -4,15 +4,24 @@ use ferroid::id::ULID;
 mod writer;
 use serde::{Deserialize, Serialize};
 pub use writer::*;
+
 mod mutation;
-pub use mutation::*;
+// Re-export mutation types
+pub use mutation::{
+    spawn_consumer as spawn_mutation_consumer, AddEdge, AddFragment, AddNode,
+    Consumer as MutationConsumer, InvalidateArgs, Mutation, MutationBatch, MutationPlanner,
+    Processor as MutationProcessor, Runnable as MutationRunnable,
+};
+// Note: mutations![] macro is automatically available via #[macro_export] in mutation.rs
+
 mod reader;
 pub use reader::*;
+
 mod query;
 // Re-export query types but not Consumer/Processor/spawn_consumer to avoid ambiguity
 pub use query::{
     DstId, EdgeById, EdgeSummaryBySrcDstName, EdgesByName, FragmentsByIdTimeRange, IncomingEdges,
-    NodeById, NodesByName, OutgoingEdges, Query, Runnable, SrcId,
+    NodeById, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable, SrcId,
 };
 pub use schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
 mod graph;
@@ -341,6 +350,7 @@ impl From<Id> for [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mutation::Runnable as MutRunnable;
     use std::path::Path;
     use tokio::time::Duration;
 
@@ -379,11 +389,11 @@ mod tests {
             };
 
             // Send to both consumers
-            writer1.add_node(node_args.clone()).await.unwrap();
-            writer1.add_fragment(fragment_args.clone()).await.unwrap();
+            node_args.clone().run(&writer1).await.unwrap();
+            fragment_args.clone().run(&writer1).await.unwrap();
 
-            writer2.add_node(node_args).await.unwrap();
-            writer2.add_fragment(fragment_args).await.unwrap();
+            node_args.run(&writer2).await.unwrap();
+            fragment_args.run(&writer2).await.unwrap();
         }
 
         // Give consumers time to process
