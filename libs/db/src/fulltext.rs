@@ -71,11 +71,27 @@ impl Processor for FullTextProcessor {
                     // TODO: Update graph-aware search features
                     // TODO: Update BM25 scores considering edge relationships
                 }
-                Mutation::AddFragment(args) => {
-                    // TODO: Implement actual fragment content indexing in full-text search index
+                Mutation::AddNodeFragment(args) => {
+                    // TODO: Implement actual node fragment content indexing in full-text search index
                     log::info!(
-                        "[FullText] Would index fragment content: id={}, body_len={}, k1={}, b={}",
+                        "[FullText] Would index node fragment content: id={}, body_len={}, k1={}, b={}",
                         args.id,
+                        args.content.0.len(),
+                        self.k1,
+                        self.b
+                    );
+                    // TODO: Tokenize fragment body
+                    // TODO: Extract and stem terms
+                    // TODO: Update term frequencies and document frequencies
+                    // TODO: Calculate and store BM25 scores
+                }
+                Mutation::AddEdgeFragment(args) => {
+                    // TODO: Implement actual edge fragment content indexing in full-text search index
+                    log::info!(
+                        "[FullText] Would index edge fragment content: src={}, dst={}, name={}, body_len={}, k1={}, b={}",
+                        args.src_id,
+                        args.dst_id,
+                        args.edge_name,
                         args.content.0.len(),
                         self.k1,
                         self.b
@@ -100,14 +116,29 @@ impl Processor for FullTextProcessor {
                 Mutation::UpdateEdgeValidSinceUntil(args) => {
                     // TODO: Implement actual edge invalidation in full-text search index
                     log::info!(
-                        "[FullText] Would update edge in search index: id={}, reason='{}', k1={}, b={}",
-                        args.id,
+                        "[FullText] Would update edge in search index: src={}, dst={}, name={}, reason='{}', k1={}, b={}",
+                        args.src_id,
+                        args.dst_id,
+                        args.name,
                         args.reason,
                         self.k1,
                         self.b
                     );
                     // TODO: Update temporal range in index
                     // TODO: Recalculate BM25 scores for affected terms if needed
+                }
+                Mutation::UpdateEdgeWeight(args) => {
+                    // TODO: Implement edge weight update in full-text search index if needed
+                    log::info!(
+                        "[FullText] Would update edge weight: src={}, dst={}, name={}, weight={}, k1={}, b={}",
+                        args.src_id,
+                        args.dst_id,
+                        args.name,
+                        args.weight,
+                        self.k1,
+                        self.b
+                    );
+                    // TODO: May affect BM25 scores if edge relationships are considered in ranking
                 }
             }
         }

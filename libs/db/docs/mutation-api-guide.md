@@ -1,6 +1,6 @@
 # Mutation API Guide
 
-**Status**: ✅ Current (as of 2025-11-18)
+**Status**: ✅ Current (as of 2025-11-19)
 
 This guide covers the modern Mutation API introduced in v0.3.0, which provides a clean, type-driven interface for mutating the motlie graph database. The Mutation API follows the same design pattern as the Query API, ensuring consistency across the codebase.
 
@@ -141,7 +141,7 @@ This provides:
 ## Quick Start
 
 ```rust
-use motlie_db::{Writer, AddNode, AddEdge, mutations, MutationRunnable, Id, TimestampMilli};
+use motlie_db::{Writer, AddNode, AddEdge, mutations, MutationRunnable, Id, TimestampMilli, EdgeSummary};
 
 async fn example(writer: &Writer) -> anyhow::Result<()> {
     let alice_id = Id::new();
@@ -166,12 +166,13 @@ async fn example(writer: &Writer) -> anyhow::Result<()> {
             temporal_range: None,
         },
         AddEdge {
-            id: Id::new(),
             source_node_id: alice_id,
             target_node_id: bob_id,
             name: "follows".to_string(),
             ts_millis: TimestampMilli::now(),
             temporal_range: None,
+            summary: EdgeSummary::default(),
+            weight: None,
         },
     ]
     .run(writer)
@@ -297,37 +298,39 @@ AddNode {
 Add a new edge between two nodes:
 
 ```rust
-use motlie_db::{AddEdge, Id, TimestampMilli, MutationRunnable};
+use motlie_db::{AddEdge, Id, TimestampMilli, EdgeSummary, MutationRunnable};
 
 AddEdge {
-    id: Id::new(),
     source_node_id: alice_id,
     target_node_id: bob_id,
     name: "follows".to_string(),
     ts_millis: TimestampMilli::now(),
     temporal_range: None,
+    summary: EdgeSummary::default(),
+    weight: Some(1.0),
 }
 .run(&writer)
 .await?;
 ```
 
 **Fields**:
-- `id: Id` - Unique identifier for the edge
 - `source_node_id: Id` - Source node
 - `target_node_id: Id` - Target node
 - `name: String` - Edge type/name
 - `ts_millis: TimestampMilli` - Creation timestamp
 - `temporal_range: Option<ValidTemporalRange>` - Optional validity period
+- `summary: EdgeSummary` - Summary information for the edge (fragment counts, timestamps)
+- `weight: Option<f64>` - Optional weight for weighted graph algorithms
 
-### 3. AddFragment
+### 3. AddNodeFragment
 
-Add time-series data associated with a node or edge:
+Add time-series data associated with a node:
 
 ```rust
-use motlie_db::{AddFragment, Id, TimestampMilli, DataUrl, MutationRunnable};
+use motlie_db::{AddNodeFragment, Id, TimestampMilli, DataUrl, MutationRunnable};
 
-AddFragment {
-    id: entity_id,  // Node or Edge ID
+AddNodeFragment {
+    id: node_id,
     ts_millis: TimestampMilli::now(),
     content: DataUrl::from_text("Fragment data"),
     temporal_range: None,
@@ -337,31 +340,112 @@ AddFragment {
 ```
 
 **Fields**:
-- `id: Id` - Entity (node/edge) this fragment belongs to
+- `id: Id` - Node ID this fragment belongs to
 - `ts_millis: TimestampMilli` - Fragment timestamp
 - `content: DataUrl` - Fragment content (text, JSON, binary, etc.)
 - `temporal_range: Option<ValidTemporalRange>` - Optional validity period
 
-### 4. Invalidate
+### 4. AddEdgeFragment
 
-Mark an entity as invalid (soft delete):
+Add time-series data associated with an edge:
 
 ```rust
-use motlie_db::{InvalidateArgs, Id, TimestampMilli, MutationRunnable};
+use motlie_db::{AddEdgeFragment, Id, TimestampMilli, DataUrl, MutationRunnable};
 
-InvalidateArgs {
-    id: entity_id,
+AddEdgeFragment {
+    src_id: alice_id,
+    dst_id: bob_id,
+    edge_name: "follows".to_string(),
     ts_millis: TimestampMilli::now(),
-    reason: "Marked as spam".to_string(),
+    content: DataUrl::from_text("Fragment data"),
+    temporal_range: None,
 }
 .run(&writer)
 .await?;
 ```
 
 **Fields**:
-- `id: Id` - Entity to invalidate
-- `ts_millis: TimestampMilli` - Invalidation timestamp
-- `reason: String` - Reason for invalidation
+- `src_id: Id` - Source node ID
+- `dst_id: Id` - Destination node ID
+- `edge_name: String` - Edge name/type
+- `ts_millis: TimestampMilli` - Fragment timestamp
+- `content: DataUrl` - Fragment content (text, JSON, binary, etc.)
+- `temporal_range: Option<ValidTemporalRange>` - Optional validity period
+
+### 5. UpdateNodeValidSinceUntil
+
+Update the temporal validity range of a node:
+
+```rust
+use motlie_db::{UpdateNodeValidSinceUntil, Id, TimestampMilli, ValidTemporalRange, MutationRunnable};
+
+UpdateNodeValidSinceUntil {
+    id: node_id,
+    temporal_range: ValidTemporalRange {
+        valid_from: TimestampMilli::now(),
+        valid_to: Some(future_timestamp),
+    },
+    reason: "Updated validity period".to_string(),
+}
+.run(&writer)
+.await?;
+```
+
+**Fields**:
+- `id: Id` - Node ID to update
+- `temporal_range: ValidTemporalRange` - New temporal validity range
+- `reason: String` - Reason for the update
+
+### 6. UpdateEdgeValidSinceUntil
+
+Update the temporal validity range of an edge (using topology instead of edge ID):
+
+```rust
+use motlie_db::{UpdateEdgeValidSinceUntil, Id, TimestampMilli, ValidTemporalRange, MutationRunnable};
+
+UpdateEdgeValidSinceUntil {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "follows".to_string(),
+    temporal_range: ValidTemporalRange {
+        valid_from: TimestampMilli::now(),
+        valid_to: Some(future_timestamp),
+    },
+    reason: "Updated validity period".to_string(),
+}
+.run(&writer)
+.await?;
+```
+
+**Fields**:
+- `src_id: Id` - Source node ID
+- `dst_id: Id` - Destination node ID
+- `name: String` - Edge name/type
+- `temporal_range: ValidTemporalRange` - New temporal validity range
+- `reason: String` - Reason for the update
+
+### 7. UpdateEdgeWeight
+
+Update the weight of an edge (for weighted graph algorithms):
+
+```rust
+use motlie_db::{UpdateEdgeWeight, Id, MutationRunnable};
+
+UpdateEdgeWeight {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "follows".to_string(),
+    weight: 2.5,
+}
+.run(&writer)
+.await?;
+```
+
+**Fields**:
+- `src_id: Id` - Source node ID
+- `dst_id: Id` - Destination node ID
+- `name: String` - Edge name/type
+- `weight: f64` - New weight value
 
 ## Common Patterns
 
@@ -404,7 +488,7 @@ async fn create_user_with_profile(
             ts_millis: TimestampMilli::now(),
             temporal_range: None,
         },
-        AddFragment {
+        AddNodeFragment {
             id: user_id,
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text(&bio),
@@ -428,20 +512,22 @@ async fn create_friendship(
 ) -> anyhow::Result<()> {
     mutations![
         AddEdge {
-            id: Id::new(),
             source_node_id: user1_id,
             target_node_id: user2_id,
             name: "follows".to_string(),
             ts_millis: TimestampMilli::now(),
             temporal_range: None,
+            summary: EdgeSummary::default(),
+            weight: None,
         },
         AddEdge {
-            id: Id::new(),
             source_node_id: user2_id,
             target_node_id: user1_id,
             name: "follows".to_string(),
             ts_millis: TimestampMilli::now(),
             temporal_range: None,
+            summary: EdgeSummary::default(),
+            weight: None,
         },
     ]
     .run(writer)
@@ -470,7 +556,7 @@ async fn bulk_import_users(
             temporal_range: None,
         });
 
-        batch.push(AddFragment {
+        batch.push(AddNodeFragment {
             id: user_id,
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text(&bio),
@@ -504,7 +590,7 @@ async fn update_user_conditionally(
     }
 
     if let Some(bio) = new_bio {
-        batch.push(AddFragment {
+        batch.push(AddNodeFragment {
             id: user_id,
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text(&bio),
@@ -604,7 +690,7 @@ async fn create_post_with_tags(
     .await?;
 
     // Add content fragment
-    AddFragment {
+    AddNodeFragment {
         id: post_id,
         ts_millis: ts,
         content: DataUrl::from_text(&content),
@@ -617,12 +703,13 @@ async fn create_post_with_tags(
     let mut batch = MutationBatch::new();
 
     batch.push(AddEdge {
-        id: Id::new(),
         source_node_id: author_id,
         target_node_id: post_id,
         name: "authored".to_string(),
         ts_millis: ts,
         temporal_range: None,
+        summary: EdgeSummary::default(),
+        weight: None,
     });
 
     for tag in tags {
@@ -636,12 +723,13 @@ async fn create_post_with_tags(
         });
 
         batch.push(AddEdge {
-            id: Id::new(),
             source_node_id: post_id,
             target_node_id: tag_id,
             name: "tagged".to_string(),
             ts_millis: ts,
             temporal_range: None,
+            summary: EdgeSummary::default(),
+            weight: None,
         });
     }
 
@@ -718,12 +806,13 @@ AddNode {
 .await?;
 
 AddEdge {
-    id: Id::new(),
     source_node_id: alice_id,
     target_node_id: bob_id,
     name: "follows".to_string(),
     ts_millis: TimestampMilli::now(),
     temporal_range: None,
+    summary: EdgeSummary::default(),
+    weight: None,
 }
 .run(&writer)
 .await?;
@@ -754,11 +843,87 @@ batch.push(AddEdge { /* ... */ });
 batch.run(&writer).await?;
 ```
 
+### Fragment Migration
+
+**Before (using generic AddFragment)**:
+```rust
+AddFragment {
+    id: entity_id,  // Could be node or edge
+    ts_millis: TimestampMilli::now(),
+    content: DataUrl::from_text("Fragment data"),
+    temporal_range: None,
+}
+.run(&writer)
+.await?;
+```
+
+**After (separate types for nodes and edges)**:
+```rust
+// For node fragments
+AddNodeFragment {
+    id: node_id,
+    ts_millis: TimestampMilli::now(),
+    content: DataUrl::from_text("Fragment data"),
+    temporal_range: None,
+}
+.run(&writer)
+.await?;
+
+// For edge fragments
+AddEdgeFragment {
+    src_id: alice_id,
+    dst_id: bob_id,
+    edge_name: "follows".to_string(),
+    ts_millis: TimestampMilli::now(),
+    content: DataUrl::from_text("Fragment data"),
+    temporal_range: None,
+}
+.run(&writer)
+.await?;
+```
+
+### Edge Mutation Updates
+
+**AddEdge Changes**:
+- Removed: `id` field (edges no longer have unique IDs)
+- Added: `summary: EdgeSummary` - Summary information for the edge
+- Added: `weight: Option<f64>` - Optional weight for weighted graphs
+
+**UpdateEdgeValidSinceUntil Changes**:
+- Now uses topology (src_id, dst_id, name) instead of edge_id
+- Example:
+```rust
+UpdateEdgeValidSinceUntil {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "follows".to_string(),
+    temporal_range: ValidTemporalRange {
+        valid_from: TimestampMilli::now(),
+        valid_to: Some(future_timestamp),
+    },
+    reason: "Updated validity period".to_string(),
+}
+.run(&writer)
+.await?;
+```
+
+**New Mutation: UpdateEdgeWeight**:
+```rust
+UpdateEdgeWeight {
+    src_id: alice_id,
+    dst_id: bob_id,
+    name: "follows".to_string(),
+    weight: 2.5,
+}
+.run(&writer)
+.await?;
+```
+
 ### Migration Checklist
 
 1. ✅ Import new types:
    ```rust
-   use motlie_db::{mutations, MutationBatch, MutationRunnable};
+   use motlie_db::{mutations, MutationBatch, MutationRunnable, EdgeSummary};
    ```
 
 2. ✅ Update helper method calls:
@@ -770,13 +935,48 @@ batch.run(&writer).await?;
    AddEdge { /* ... */ }.run(&writer).await?
    ```
 
-3. ✅ Update batch sends:
+3. ✅ Update AddEdge to include new required fields:
+   ```rust
+   AddEdge {
+       source_node_id: alice_id,
+       target_node_id: bob_id,
+       name: "follows".to_string(),
+       ts_millis: TimestampMilli::now(),
+       temporal_range: None,
+       summary: EdgeSummary::default(),  // New field
+       weight: None,                     // New field
+   }
+   ```
+
+4. ✅ Replace AddFragment with AddNodeFragment or AddEdgeFragment:
+   ```rust
+   // For nodes:
+   AddNodeFragment { id: node_id, /* ... */ }
+
+   // For edges:
+   AddEdgeFragment { src_id, dst_id, edge_name, /* ... */ }
+   ```
+
+5. ✅ Update UpdateEdgeValidSinceUntil to use topology:
+   ```rust
+   // Old: used edge_id
+   // New: uses src_id, dst_id, and name
+   UpdateEdgeValidSinceUntil {
+       src_id: alice_id,
+       dst_id: bob_id,
+       name: "follows".to_string(),
+       temporal_range: /* ... */,
+       reason: "...".to_string(),
+   }
+   ```
+
+6. ✅ Update batch sends:
    ```rust
    // Old: writer.send(vec![Mutation::AddNode(...), ...]).await?
    mutations![AddNode { /* ... */ }, ...].run(&writer).await?
    ```
 
-4. ✅ Suppress deprecation warnings during migration:
+7. ✅ Suppress deprecation warnings during migration:
    ```rust
    #[allow(deprecated)]
    writer.add_node(AddNode { /* ... */ }).await?;

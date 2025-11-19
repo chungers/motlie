@@ -107,7 +107,7 @@ pub fn create_mutation_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<V
 mod tests {
     use super::*;
     use crate::mutation::Runnable as MutRunnable;
-    use crate::{AddEdge, AddFragment, AddNode, Id, TimestampMilli, UpdateEdgeValidSinceUntil};
+    use crate::{AddEdge, AddNode, AddNodeFragment, EdgeSummary, Id, TimestampMilli, UpdateEdgeValidSinceUntil};
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -139,23 +139,28 @@ mod tests {
         };
 
         let edge_args = AddEdge {
-            id: Id::new(),
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_edge".to_string(),
+            summary: EdgeSummary::from_text("edge summary"),
+            weight: Some(1.0),
             temporal_range: None,
         };
 
-        let fragment_args = AddFragment {
+        let fragment_args = AddNodeFragment {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             content: crate::DataUrl::from_text("test fragment"),
             temporal_range: None,
         };
 
+        let src_id = Id::new();
+        let dst_id = Id::new();
         let invalidate_args = UpdateEdgeValidSinceUntil {
-            id: Id::new(),
+            src_id,
+            dst_id,
+            name: "test_edge".to_string(),
             temporal_range: crate::schema::ValidTemporalRange(None, None),
             reason: "test reason".to_string(),
         };

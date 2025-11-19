@@ -1,9 +1,6 @@
 use anyhow::{Context, Result};
-use std::time::Duration;
 
-use crate::query::{EdgeSummaryBySrcDstName, Query};
-use crate::schema::{DstId, EdgeSummary, SrcId};
-use crate::{Id, TimestampMilli};
+use crate::query::Query;
 
 /// Configuration for the query reader
 #[derive(Debug, Clone)]
@@ -40,44 +37,6 @@ impl Reader {
             .context("Failed to send query to reader queue")
     }
 
-    /// Query an edge by source ID, destination ID, and name
-    /// Returns (edge_id, edge_summary)
-    ///
-    /// # Arguments
-    /// * `source_id` - Source node ID
-    /// * `dest_id` - Destination node ID
-    /// * `name` - Edge name
-    /// * `reference_ts_millis` - Optional reference timestamp for temporal validity checks.
-    ///   If None, defaults to current time in the query executor.
-    /// * `timeout` - Query timeout duration
-    pub async fn edge_by_src_dst_name(
-        &self,
-        source_id: SrcId,
-        dest_id: DstId,
-        name: String,
-        reference_ts_millis: Option<TimestampMilli>,
-        timeout: Duration,
-    ) -> Result<(Id, EdgeSummary)> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        let query = EdgeSummaryBySrcDstName::with_channel(
-            source_id,
-            dest_id,
-            name,
-            reference_ts_millis,
-            timeout,
-            result_tx,
-        );
-
-        self.sender
-            .send_async(Query::EdgeSummaryBySrcDstName(query))
-            .await
-            .context("Failed to send query to reader queue")?;
-
-        // Await result - timeout is handled by the consumer
-        result_rx.await?
-    }
-
     /// Check if the reader is still active (receiver hasn't been dropped)
     pub fn is_closed(&self) -> bool {
         self.sender.is_disconnected()
@@ -94,7 +53,6 @@ pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Que
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::Duration;
 
     #[tokio::test]
     async fn test_reader_closed_detection() {
@@ -107,7 +65,7 @@ mod tests {
         drop(receiver);
 
         // Give tokio time to process the close
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         // Reader should detect channel is closed
         assert!(reader.is_closed());

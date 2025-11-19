@@ -5,7 +5,7 @@ mod tests {
     };
     use crate::mutation::Runnable as MutRunnable;
     use crate::{
-        create_mutation_writer, AddEdge, AddFragment, AddNode, Id, TimestampMilli, WriterConfig,
+        create_mutation_writer, AddEdge, AddNode, AddNodeFragment, EdgeSummary, Id, TimestampMilli, WriterConfig,
     };
     use tokio::time::Duration;
 
@@ -29,7 +29,7 @@ mod tests {
         };
         node_args.run(&writer).await.unwrap();
 
-        let fragment_args = AddFragment {
+        let fragment_args = AddNodeFragment {
             id: Id::new(),
             ts_millis: TimestampMilli(1234567890),
             content: crate::DataUrl::from_text(
@@ -62,7 +62,7 @@ mod tests {
         let consumer_handle = spawn_fulltext_consumer_with_params(receiver, config, k1, b);
 
         // Send a fragment with substantial content
-        let fragment_args = AddFragment {
+        let fragment_args = AddNodeFragment {
             id: Id::new(),
             ts_millis: TimestampMilli(1234567890),
             content: crate::DataUrl::from_text("The quick brown fox jumps over the lazy dog. This is a longer text fragment that would benefit from BM25 scoring with custom parameters."),
@@ -96,18 +96,19 @@ mod tests {
         .unwrap();
 
         AddEdge {
-            id: Id::new(),
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "connects to".to_string(),
+            summary: EdgeSummary::from_text(""),
+            weight: Some(1.0),
             temporal_range: None,
         }
         .run(&writer)
         .await
         .unwrap();
 
-        AddFragment {
+        AddNodeFragment {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             content: crate::DataUrl::from_text("This fragment contains searchable text that should be indexed using BM25 algorithm for effective information retrieval."),
@@ -117,8 +118,12 @@ mod tests {
         .await
         .unwrap();
 
+        let src_id = Id::new();
+        let dst_id = Id::new();
         crate::UpdateEdgeValidSinceUntil {
-            id: Id::new(),
+            src_id,
+            dst_id,
+            name: "test_edge".to_string(),
             temporal_range: crate::schema::ValidTemporalRange(None, None),
             reason: "content removed from search index".to_string(),
         }
@@ -163,7 +168,7 @@ mod tests {
 
         // Send 5 fragments rapidly
         for i in 0..5 {
-            let fragment_args = AddFragment {
+            let fragment_args = AddNodeFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 content: crate::DataUrl::from_text(&format!(

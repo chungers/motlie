@@ -2,7 +2,8 @@ use crate::graph::ColumnFamilyRecord;
 use crate::DataUrl;
 use crate::TimestampMilli;
 use crate::ValidRangePatchable;
-use crate::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Id};
+use crate::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
+use crate::Id;
 use serde::{Deserialize, Serialize};
 
 /// Support for temporal queries
@@ -164,12 +165,11 @@ pub(crate) struct NodeNameCfKey(pub(crate) NodeName, pub(crate) Id);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeNameCfValue(pub(crate) Option<ValidTemporalRange>);
 
-/// Edge names column family.
+/// Edge names column family (index for looking up edges by name).
 pub(crate) struct EdgeNames;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EdgeNameCfKey(
     pub(crate) EdgeName,
-    pub(crate) Id, // edge id
     pub(crate) SrcId,
     pub(crate) DstId,
 );
@@ -287,6 +287,81 @@ impl ColumnFamilyRecord for NodeFragments {
     }
 }
 
+impl ColumnFamilyRecord for EdgeFragments {
+    const CF_NAME: &'static str = "edge_fragments";
+    type Key = EdgeFragmentCfKey;
+    type Value = EdgeFragmentCfValue;
+    type CreateOp = AddEdgeFragment;
+
+    fn record_from(args: &AddEdgeFragment) -> (EdgeFragmentCfKey, EdgeFragmentCfValue) {
+        let key = EdgeFragmentCfKey(
+            args.src_id,
+            args.dst_id,
+            args.edge_name.clone(),
+            args.ts_millis,
+        );
+        let value = EdgeFragmentCfValue(args.temporal_range.clone(), args.content.clone());
+        (key, value)
+    }
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // EdgeFragmentCfKey(SrcId, DstId, EdgeName, TimestampMilli)
+        // Layout: [src_id (16)] + [dst_id (16)] + [edge_name UTF-8 variable] + [timestamp (8)]
+        let name_bytes = key.2.as_bytes();
+        let mut bytes = Vec::with_capacity(40 + name_bytes.len());
+        bytes.extend_from_slice(&key.0.into_bytes());
+        bytes.extend_from_slice(&key.1.into_bytes());
+        bytes.extend_from_slice(name_bytes);
+        bytes.extend_from_slice(&key.3 .0.to_be_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
+        if bytes.len() < 40 {
+            anyhow::bail!(
+                "Invalid EdgeFragmentCfKey length: expected >= 40, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut src_id_bytes = [0u8; 16];
+        src_id_bytes.copy_from_slice(&bytes[0..16]);
+
+        let mut dst_id_bytes = [0u8; 16];
+        dst_id_bytes.copy_from_slice(&bytes[16..32]);
+
+        let name_end = bytes.len() - 8;
+        let name = String::from_utf8(bytes[32..name_end].to_vec())
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
+
+        let mut ts_bytes = [0u8; 8];
+        ts_bytes.copy_from_slice(&bytes[name_end..]);
+        let timestamp = u64::from_be_bytes(ts_bytes);
+
+        Ok(EdgeFragmentCfKey(
+            Id::from_bytes(src_id_bytes),
+            Id::from_bytes(dst_id_bytes),
+            name,
+            TimestampMilli(timestamp),
+        ))
+    }
+
+    fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+
+        // Key layout: [src_id (16)] + [dst_id (16)] + [edge_name (variable)] + [timestamp (8)]
+        // Use 32-byte prefix (src_id + dst_id) to scan all fragments for a given edge topology
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
+
+        // Enable prefix bloom filter for fast prefix existence checks
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
 impl ColumnFamilyRecord for ForwardEdges {
     const CF_NAME: &'static str = "forward_edges";
     type Key = ForwardEdgeCfKey;
@@ -295,7 +370,11 @@ impl ColumnFamilyRecord for ForwardEdges {
 
     fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, args.name.clone());
-        let value = ForwardEdgeCfValue(args.temporal_range.clone(), args.id);
+        let value = ForwardEdgeCfValue(
+            args.temporal_range.clone(),
+            args.weight,
+            args.summary.clone(),
+        );
         (key, value)
     }
 
@@ -359,7 +438,7 @@ impl ColumnFamilyRecord for ReverseEdges {
 
     fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
         let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, args.name.clone());
-        let value = ReverseEdgeCfValue(args.temporal_range.clone(), args.id);
+        let value = ReverseEdgeCfValue(args.temporal_range.clone());
         (key, value)
     }
 
@@ -474,59 +553,53 @@ impl ColumnFamilyRecord for EdgeNames {
     fn record_from(args: &AddEdge) -> (EdgeNameCfKey, EdgeNameCfValue) {
         let key = EdgeNameCfKey(
             args.name.clone(),
-            args.id,
-            args.target_node_id,
             args.source_node_id,
+            args.target_node_id,
         );
         let value = EdgeNameCfValue(args.temporal_range.clone());
         (key, value)
     }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // EdgeNamesCfKey(EdgeName, Id, EdgeDestinationId, EdgeSourceId)
-        // Layout: [name UTF-8 bytes] + [edge_id (16)] + [dst_id (16)] + [src_id (16)]
+        // EdgeNamesCfKey(EdgeName, SrcId, DstId)
+        // Layout: [name UTF-8 bytes] + [src_id (16)] + [dst_id (16)]
         let name_bytes = key.0.as_bytes();
-        let mut bytes = Vec::with_capacity(name_bytes.len() + 48);
+        let mut bytes = Vec::with_capacity(name_bytes.len() + 32);
         bytes.extend_from_slice(name_bytes);
         bytes.extend_from_slice(&key.1.into_bytes());
         bytes.extend_from_slice(&key.2.into_bytes());
-        bytes.extend_from_slice(&key.3.into_bytes());
         bytes
     }
 
     fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
-        if bytes.len() < 48 {
+        if bytes.len() < 32 {
             anyhow::bail!(
-                "Invalid EdgeNamesCfKey length: expected >= 48, got {}",
+                "Invalid EdgeNamesCfKey length: expected >= 32, got {}",
                 bytes.len()
             );
         }
 
-        // The name is everything before the last 48 bytes (which are edge_id + dst_id + src_id)
-        let name_end = bytes.len() - 48;
+        // The name is everything before the last 32 bytes (which are src_id + dst_id)
+        let name_end = bytes.len() - 32;
         let name_bytes = &bytes[0..name_end];
         let name = String::from_utf8(name_bytes.to_vec())
             .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
 
-        let mut edge_id_bytes = [0u8; 16];
-        edge_id_bytes.copy_from_slice(&bytes[name_end..name_end + 16]);
+        let mut src_id_bytes = [0u8; 16];
+        src_id_bytes.copy_from_slice(&bytes[name_end..name_end + 16]);
 
         let mut dst_id_bytes = [0u8; 16];
         dst_id_bytes.copy_from_slice(&bytes[name_end + 16..name_end + 32]);
 
-        let mut src_id_bytes = [0u8; 16];
-        src_id_bytes.copy_from_slice(&bytes[name_end + 32..name_end + 48]);
-
         Ok(EdgeNameCfKey(
             name,
-            Id::from_bytes(edge_id_bytes),
-            Id::from_bytes(dst_id_bytes),
             Id::from_bytes(src_id_bytes),
+            Id::from_bytes(dst_id_bytes),
         ))
     }
 
     fn column_family_options() -> rocksdb::Options {
-        // Key layout: [name (variable)] + [dst_id (16)] + [src_id (16)] + [edge_id (16)]
+        // Key layout: [name (variable)] + [src_id (16)] + [dst_id (16)]
         // No prefix extraction needed for this column family
         // as queries will typically be by name which is variable-length at the start
         rocksdb::Options::default()
@@ -537,8 +610,8 @@ impl ColumnFamilyRecord for EdgeNames {
 /// This is the authoritative list that should be used when opening the database.
 pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     Nodes::CF_NAME,
-    Edges::CF_NAME,
-    Fragments::CF_NAME,
+    NodeFragments::CF_NAME,
+    EdgeFragments::CF_NAME,
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
     NodeNames::CF_NAME,
@@ -557,44 +630,49 @@ mod tests {
         let base_ts = 1700000000000u64; // Fixed base timestamp
         let edges = vec![
             AddEdge {
-                id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts),
                 name: "edge_a".to_string(),
+                summary: EdgeSummary::from_text(""),
+                weight: Some(1.0),
                 temporal_range: None,
             },
             AddEdge {
-                id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([1u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 1000),
                 name: "edge_b".to_string(),
+                summary: EdgeSummary::from_text(""),
+                weight: Some(1.0),
                 temporal_range: None,
             },
             AddEdge {
-                id: Id::new(),
                 source_node_id: Id::from_bytes([1u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 2000),
                 name: "edge_c".to_string(),
+                summary: EdgeSummary::from_text(""),
+                weight: Some(1.0),
                 temporal_range: None,
             },
             AddEdge {
-                id: Id::new(),
                 source_node_id: Id::from_bytes([1u8; 16]),
                 target_node_id: Id::from_bytes([1u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 3000),
                 name: "edge_d".to_string(),
+                summary: EdgeSummary::from_text(""),
+                weight: Some(1.0),
                 temporal_range: None,
             },
             // Add edge with same source and target but different name
             AddEdge {
-                id: Id::new(),
                 source_node_id: Id::from_bytes([0u8; 16]),
                 target_node_id: Id::from_bytes([0u8; 16]),
                 ts_millis: TimestampMilli(base_ts + 4000),
                 name: "edge_z".to_string(),
+                summary: EdgeSummary::from_text(""),
+                weight: Some(1.0),
                 temporal_range: None,
             },
         ];

@@ -19,9 +19,11 @@ pub trait MutationPlanner {
 pub enum Mutation {
     AddNode(AddNode),
     AddEdge(AddEdge),
-    AddFragment(AddFragment),
+    AddNodeFragment(AddNodeFragment),
+    AddEdgeFragment(AddEdgeFragment),
     UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil),
     UpdateEdgeValidSinceUntil(UpdateEdgeValidSinceUntil),
+    UpdateEdgeWeight(UpdateEdgeWeight),
 }
 
 #[derive(Debug, Clone)]
@@ -41,9 +43,6 @@ pub struct AddNode {
 
 #[derive(Debug, Clone)]
 pub struct AddEdge {
-    /// The UUID of the Node, Edge, or Fragment
-    pub id: Id,
-
     /// The UUID of the source Node
     pub source_node_id: Id,
 
@@ -58,12 +57,39 @@ pub struct AddEdge {
 
     /// The temporal validity range for this edge
     pub temporal_range: Option<schema::ValidTemporalRange>,
+
+    /// The summary information for this edge (moved from Edges CF)
+    pub summary: schema::EdgeSummary,
+
+    /// Optional weight for weighted graph algorithms
+    pub weight: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
-pub struct AddFragment {
-    /// The UUID of the Node, Edge, or Fragment
+pub struct AddNodeFragment {
+    /// The UUID of the Node this fragment belongs to
     pub id: Id,
+
+    /// The timestamp as number of milliseconds since the Unix epoch
+    pub ts_millis: TimestampMilli,
+
+    /// The body of the Fragment
+    pub content: crate::DataUrl,
+
+    /// The temporal validity range for this fragment
+    pub temporal_range: Option<schema::ValidTemporalRange>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddEdgeFragment {
+    /// The UUID of the source Node
+    pub src_id: Id,
+
+    /// The UUID of the destination Node
+    pub dst_id: Id,
+
+    /// The name of the Edge
+    pub edge_name: schema::EdgeName,
 
     /// The timestamp as number of milliseconds since the Unix epoch
     pub ts_millis: TimestampMilli,
@@ -89,14 +115,35 @@ pub struct UpdateNodeValidSinceUntil {
 
 #[derive(Debug, Clone)]
 pub struct UpdateEdgeValidSinceUntil {
-    /// The UUID of the Edge
-    pub id: Id,
+    /// The UUID of the source Node
+    pub src_id: Id,
 
-    /// The temporal validity range for this fragment
+    /// The UUID of the destination Node
+    pub dst_id: Id,
+
+    /// The name of the Edge
+    pub name: schema::EdgeName,
+
+    /// The temporal validity range for this edge
     pub temporal_range: schema::ValidTemporalRange,
 
     /// The reason for invalidation
     pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateEdgeWeight {
+    /// The UUID of the source Node
+    pub src_id: Id,
+
+    /// The UUID of the destination Node
+    pub dst_id: Id,
+
+    /// The name of the Edge
+    pub name: schema::EdgeName,
+
+    /// The new weight value
+    pub weight: f64,
 }
 
 impl MutationPlanner for AddNode {
@@ -114,10 +161,9 @@ impl MutationPlanner for AddNode {
 impl MutationPlanner for AddEdge {
     fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
         use crate::graph::{ColumnFamilyRecord, PutCf};
-        use crate::schema::{EdgeNames, Edges, ForwardEdges, ReverseEdges};
+        use crate::schema::{EdgeNames, ForwardEdges, ReverseEdges};
 
         Ok(vec![
-            StorageOperation::PutCf(PutCf(Edges::CF_NAME, Edges::create_bytes(self)?)),
             StorageOperation::PutCf(PutCf(
                 ForwardEdges::CF_NAME,
                 ForwardEdges::create_bytes(self)?,
@@ -131,14 +177,26 @@ impl MutationPlanner for AddEdge {
     }
 }
 
-impl MutationPlanner for AddFragment {
+impl MutationPlanner for AddNodeFragment {
     fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
         use crate::graph::{ColumnFamilyRecord, PutCf};
-        use crate::schema::Fragments;
+        use crate::schema::NodeFragments;
 
         Ok(vec![StorageOperation::PutCf(PutCf(
-            Fragments::CF_NAME,
-            Fragments::create_bytes(self)?,
+            NodeFragments::CF_NAME,
+            NodeFragments::create_bytes(self)?,
+        ))])
+    }
+}
+
+impl MutationPlanner for AddEdgeFragment {
+    fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        use crate::graph::{ColumnFamilyRecord, PutCf};
+        use crate::schema::EdgeFragments;
+
+        Ok(vec![StorageOperation::PutCf(PutCf(
+            EdgeFragments::CF_NAME,
+            EdgeFragments::create_bytes(self)?,
         ))])
     }
 }
@@ -158,8 +216,40 @@ impl MutationPlanner for UpdateEdgeValidSinceUntil {
         use crate::graph::PatchEdgeValidRange;
 
         Ok(vec![StorageOperation::PatchEdgeValidRange(
-            PatchEdgeValidRange(self.id, self.temporal_range),
+            PatchEdgeValidRange(
+                self.src_id,
+                self.dst_id,
+                self.name.clone(),
+                self.temporal_range,
+            ),
         )])
+    }
+}
+
+impl MutationPlanner for UpdateEdgeWeight {
+    fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        use crate::graph::PatchCf;
+        use crate::schema::{ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges};
+        use crate::graph::ColumnFamilyRecord;
+
+        let key = ForwardEdgeCfKey(self.src_id, self.dst_id, self.name.clone());
+        let key_bytes = ForwardEdges::key_to_bytes(&key);
+        let weight = self.weight;
+
+        Ok(vec![StorageOperation::PatchCf(PatchCf(
+            ForwardEdges::CF_NAME,
+            (key_bytes, Box::new(move |old_value: Option<Vec<u8>>| {
+                let mut value: ForwardEdgeCfValue = old_value
+                    .map(|v| ForwardEdges::value_from_bytes(&v))
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))?
+                    .ok_or_else(|| anyhow::anyhow!("Edge not found"))?;
+
+                value.1 = Some(weight);  // Update weight (field 1)
+                ForwardEdges::value_to_bytes(&value)
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))
+            })),
+        ))])
     }
 }
 
@@ -173,9 +263,11 @@ impl Mutation {
         match self {
             Mutation::AddNode(m) => m.plan(),
             Mutation::AddEdge(m) => m.plan(),
-            Mutation::AddFragment(m) => m.plan(),
+            Mutation::AddNodeFragment(m) => m.plan(),
+            Mutation::AddEdgeFragment(m) => m.plan(),
             Mutation::UpdateNodeValidSinceUntil(m) => m.plan(),
             Mutation::UpdateEdgeValidSinceUntil(m) => m.plan(),
+            Mutation::UpdateEdgeWeight(m) => m.plan(),
         }
     }
 }
@@ -223,9 +315,15 @@ impl Runnable for AddEdge {
     }
 }
 
-impl Runnable for AddFragment {
+impl Runnable for AddNodeFragment {
     async fn run(self, writer: &Writer) -> Result<()> {
-        writer.send(vec![Mutation::AddFragment(self)]).await
+        writer.send(vec![Mutation::AddNodeFragment(self)]).await
+    }
+}
+
+impl Runnable for AddEdgeFragment {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::AddEdgeFragment(self)]).await
     }
 }
 
@@ -241,6 +339,14 @@ impl Runnable for UpdateEdgeValidSinceUntil {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer
             .send(vec![Mutation::UpdateEdgeValidSinceUntil(self)])
+            .await
+    }
+}
+
+impl Runnable for UpdateEdgeWeight {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer
+            .send(vec![Mutation::UpdateEdgeWeight(self)])
             .await
     }
 }
@@ -261,9 +367,15 @@ impl From<AddEdge> for Mutation {
     }
 }
 
-impl From<AddFragment> for Mutation {
-    fn from(m: AddFragment) -> Self {
-        Mutation::AddFragment(m)
+impl From<AddNodeFragment> for Mutation {
+    fn from(m: AddNodeFragment) -> Self {
+        Mutation::AddNodeFragment(m)
+    }
+}
+
+impl From<AddEdgeFragment> for Mutation {
+    fn from(m: AddEdgeFragment) -> Self {
+        Mutation::AddEdgeFragment(m)
     }
 }
 
@@ -276,6 +388,12 @@ impl From<UpdateNodeValidSinceUntil> for Mutation {
 impl From<UpdateEdgeValidSinceUntil> for Mutation {
     fn from(m: UpdateEdgeValidSinceUntil) -> Self {
         Mutation::UpdateEdgeValidSinceUntil(m)
+    }
+}
+
+impl From<UpdateEdgeWeight> for Mutation {
+    fn from(m: UpdateEdgeWeight) -> Self {
+        Mutation::UpdateEdgeWeight(m)
     }
 }
 
@@ -517,10 +635,19 @@ impl<P: Processor> Consumer<P> {
                         args.name
                     );
                 }
-                Mutation::AddFragment(args) => {
+                Mutation::AddNodeFragment(args) => {
                     log::debug!(
-                        "Processing AddFragment: id={}, body_len={}",
+                        "Processing AddNodeFragment: id={}, body_len={}",
                         args.id,
+                        args.content.0.len()
+                    );
+                }
+                Mutation::AddEdgeFragment(args) => {
+                    log::debug!(
+                        "Processing AddEdgeFragment: src={}, dst={}, name={}, body_len={}",
+                        args.src_id,
+                        args.dst_id,
+                        args.edge_name,
                         args.content.0.len()
                     );
                 }
@@ -533,9 +660,20 @@ impl<P: Processor> Consumer<P> {
                 }
                 Mutation::UpdateEdgeValidSinceUntil(args) => {
                     log::debug!(
-                        "Processing UpdateEdgeValidSinceUntil: id={}, reason={}",
-                        args.id,
+                        "Processing UpdateEdgeValidSinceUntil: src={}, dst={}, name={}, reason={}",
+                        args.src_id,
+                        args.dst_id,
+                        args.name,
                         args.reason
+                    );
+                }
+                Mutation::UpdateEdgeWeight(args) => {
+                    log::debug!(
+                        "Processing UpdateEdgeWeight: src={}, dst={}, name={}, weight={}",
+                        args.src_id,
+                        args.dst_id,
+                        args.name,
+                        args.weight
                     );
                 }
             }

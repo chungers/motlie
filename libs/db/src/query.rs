@@ -83,9 +83,8 @@ pub trait QueryProcessor: Send {
 #[derive(Debug)]
 pub enum Query {
     NodeById(NodeById),
-    EdgeById(EdgeById),
     EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstName),
-    FragmentsByIdTimeRange(FragmentsByIdTimeRange),
+    FragmentsByIdTimeRange(NodeFragmentsByIdTimeRange),
     OutgoingEdges(OutgoingEdges),
     IncomingEdges(IncomingEdges),
     NodesByName(NodesByName),
@@ -96,7 +95,6 @@ impl std::fmt::Display for Query {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Query::NodeById(q) => write!(f, "NodeById: id={}", q.id),
-            Query::EdgeById(q) => write!(f, "EdgeById: id={}", q.id),
             Query::EdgeSummaryBySrcDstName(q) => write!(
                 f,
                 "EdgeBySrcDstName: source={}, dest={}, name={}",
@@ -105,7 +103,7 @@ impl std::fmt::Display for Query {
             Query::FragmentsByIdTimeRange(q) => {
                 write!(
                     f,
-                    "FragmentsByIdTimeRange: id={}, range={:?}",
+                    "NodeFragmentsByIdTimeRange: id={}, range={:?}",
                     q.id, q.time_range
                 )
             }
@@ -134,9 +132,8 @@ macro_rules! impl_query_processor {
 
 impl_query_processor!(
     NodeById,
-    EdgeById,
     EdgeSummaryBySrcDstName,
-    FragmentsByIdTimeRange,
+    NodeFragmentsByIdTimeRange,
     OutgoingEdges,
     IncomingEdges,
     NodesByName,
@@ -148,7 +145,6 @@ impl QueryProcessor for Query {
     async fn process_and_send<P: Processor>(self, processor: &P) {
         match self {
             Query::NodeById(q) => q.process_and_send(processor).await,
-            Query::EdgeById(q) => q.process_and_send(processor).await,
             Query::EdgeSummaryBySrcDstName(q) => q.process_and_send(processor).await,
             Query::FragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
             Query::OutgoingEdges(q) => q.process_and_send(processor).await,
@@ -171,11 +167,6 @@ pub trait Runnable {
 
 /// Type alias for querying node by ID (returns name and summary)
 pub type NodeById = ByIdQuery<(NodeName, NodeSummary)>;
-/// Type alias for querying edge by ID (returns topology and summary)
-pub type EdgeById = ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>;
-// Note: EdgesFromNodeByIdQuery and EdgesToNodeByIdQuery can't use ByIdQuery<T>
-// because they have the same result type but different processing logic.
-// They are implemented as separate structs below.
 
 /// Generic query to find an entity by its ID
 #[derive(Debug)]
@@ -196,11 +187,11 @@ pub struct ByIdQuery<T: Send + Sync + 'static> {
     result_tx: Option<oneshot::Sender<Result<T>>>,
 }
 
-/// Query to scan fragments by ID with time range filtering
+/// Query to scan node fragments by ID with time range filtering
 /// This is different from ByIdQuery because it requires time range filtering
 /// and returns multiple results (scan operation) rather than a single entity lookup.
 #[derive(Debug)]
-pub struct FragmentsByIdTimeRange {
+pub struct NodeFragmentsByIdTimeRange {
     /// The entity ID to search for
     pub id: Id,
 
@@ -243,7 +234,7 @@ pub struct EdgeSummaryBySrcDstName {
     pub(crate) timeout: Option<Duration>,
 
     /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<(Id, EdgeSummary)>>>,
+    result_tx: Option<oneshot::Sender<Result<(EdgeSummary, Option<f64>)>>>,
 }
 
 /// Query to find all outgoing edges from a node by its ID
@@ -262,7 +253,7 @@ pub struct OutgoingEdges {
     pub(crate) timeout: Option<Duration>,
 
     /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<Vec<(SrcId, EdgeName, DstId)>>>>,
+    result_tx: Option<oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>>,
 }
 
 /// Query to find all incoming edges to a node by its ID
@@ -281,7 +272,7 @@ pub struct IncomingEdges {
     pub(crate) timeout: Option<Duration>,
 
     /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>>,
+    result_tx: Option<oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>>,
 }
 
 /// Query to find nodes by name prefix
@@ -372,7 +363,7 @@ impl<T: Send + Sync + 'static> ByIdQuery<T> {
     }
 }
 
-impl FragmentsByIdTimeRange {
+impl NodeFragmentsByIdTimeRange {
     /// Create a new query request (public API - no channel, no timeout yet)
     /// Use `.run(reader, timeout)` to execute this query
     pub fn new(
@@ -460,7 +451,7 @@ impl EdgeSummaryBySrcDstName {
         name: String,
         reference_ts_millis: Option<TimestampMilli>,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<(Id, EdgeSummary)>>,
+        result_tx: oneshot::Sender<Result<(EdgeSummary, Option<f64>)>>,
     ) -> Self {
         Self {
             source_id,
@@ -472,7 +463,7 @@ impl EdgeSummaryBySrcDstName {
         }
     }
 
-    pub(crate) fn send_result(self, result: Result<(Id, EdgeSummary)>) {
+    pub(crate) fn send_result(self, result: Result<(EdgeSummary, Option<f64>)>) {
         if let Some(tx) = self.result_tx {
             let _ = tx.send(result);
         }
@@ -495,7 +486,7 @@ impl OutgoingEdges {
         id: Id,
         reference_ts_millis: Option<TimestampMilli>,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(SrcId, EdgeName, DstId)>>>,
+        result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
     ) -> Self {
         Self {
             id,
@@ -505,7 +496,7 @@ impl OutgoingEdges {
         }
     }
 
-    pub(crate) fn send_result(self, result: Result<Vec<(SrcId, EdgeName, DstId)>>) {
+    pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>) {
         if let Some(tx) = self.result_tx {
             let _ = tx.send(result);
         }
@@ -528,7 +519,7 @@ impl IncomingEdges {
         id: DstId,
         reference_ts_millis: Option<TimestampMilli>,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(DstId, EdgeName, SrcId)>>>,
+        result_tx: oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>,
     ) -> Self {
         Self {
             id,
@@ -538,7 +529,7 @@ impl IncomingEdges {
         }
     }
 
-    pub(crate) fn send_result(self, result: Result<Vec<(DstId, EdgeName, SrcId)>>) {
+    pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>) {
         if let Some(tx) = self.result_tx {
             let _ = tx.send(result);
         }
@@ -648,30 +639,15 @@ impl Runnable for NodeById {
     }
 }
 
-/// Implement Runnable for EdgeByIdQuery specifically
+/// Implement Runnable for NodeFragmentsByIdTimeRangeQuery
 #[async_trait::async_trait]
-impl Runnable for EdgeById {
-    type Output = (SrcId, DstId, EdgeName, EdgeSummary);
-
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        let query = EdgeById::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
-
-        reader.send_query(Query::EdgeById(query)).await?;
-        result_rx.await?
-    }
-}
-
-/// Implement Runnable for FragmentsByIdTimeRangeQuery
-#[async_trait::async_trait]
-impl Runnable for FragmentsByIdTimeRange {
+impl Runnable for NodeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = FragmentsByIdTimeRange::with_channel(
+        let query = NodeFragmentsByIdTimeRange::with_channel(
             self.id,
             self.time_range,
             self.reference_ts_millis,
@@ -689,7 +665,7 @@ impl Runnable for FragmentsByIdTimeRange {
 /// Implement Runnable for EdgeSummaryBySrcDstNameQuery
 #[async_trait::async_trait]
 impl Runnable for EdgeSummaryBySrcDstName {
-    type Output = (Id, EdgeSummary);
+    type Output = (EdgeSummary, Option<f64>);
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -712,7 +688,7 @@ impl Runnable for EdgeSummaryBySrcDstName {
 
 #[async_trait::async_trait]
 impl Runnable for OutgoingEdges {
-    type Output = Vec<(SrcId, EdgeName, DstId)>;
+    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -725,7 +701,7 @@ impl Runnable for OutgoingEdges {
 
 #[async_trait::async_trait]
 impl Runnable for IncomingEdges {
-    type Output = Vec<(DstId, EdgeName, SrcId)>;
+    type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -827,63 +803,9 @@ impl QueryExecutor for NodeById {
     }
 }
 
-/// Implement QueryExecutor for EdgeByIdQuery
+/// Implement QueryExecutor for NodeFragmentsByIdTimeRangeQuery
 #[async_trait::async_trait]
-impl QueryExecutor for EdgeById {
-    type Output = (SrcId, DstId, EdgeName, EdgeSummary);
-
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        // Default None to current time for temporal validity checks
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
-
-        let id = self.id;
-        let key = schema::EdgeCfKey(id);
-        let key_bytes = schema::Edges::key_to_bytes(&key);
-
-        // Handle both readonly and readwrite modes
-        let value_bytes = if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
-            })?;
-            db.get_cf(cf, key_bytes)?
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let cf = txn_db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
-            })?;
-            txn_db.get_cf(cf, key_bytes)?
-        };
-
-        let value_bytes = value_bytes.ok_or_else(|| anyhow::anyhow!("Edge not found: {}", id))?;
-
-        let value: schema::EdgeCfValue = schema::Edges::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-        // Always check temporal validity
-        if !schema::is_valid_at_time(&value.0, ref_time) {
-            return Err(anyhow::anyhow!(
-                "Edge {} not valid at time {}",
-                id,
-                ref_time.0
-            ));
-        }
-
-        // EdgeCfValue is now (Option<ValidTemporalRange>, SrcId, EdgeName, DstId, EdgeSummary)
-        // Return as: (source_id, dest_id, edge_name, summary)
-        Ok((value.1, value.3, value.2, value.4))
-    }
-
-    fn timeout(&self) -> Duration {
-        self.timeout
-            .expect("Query must have timeout set when executing")
-    }
-}
-
-/// Implement QueryExecutor for FragmentsByIdTimeRangeQuery
-#[async_trait::async_trait]
-impl QueryExecutor for FragmentsByIdTimeRange {
+impl QueryExecutor for NodeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
@@ -906,9 +828,9 @@ impl QueryExecutor for FragmentsByIdTimeRange {
                 key
             }
             Bound::Included(start_ts) => {
-                schema::Fragments::key_to_bytes(&schema::FragmentCfKey(id, *start_ts))
+                schema::NodeFragments::key_to_bytes(&schema::NodeFragmentCfKey(id, *start_ts))
             }
-            Bound::Excluded(start_ts) => schema::Fragments::key_to_bytes(&schema::FragmentCfKey(
+            Bound::Excluded(start_ts) => schema::NodeFragments::key_to_bytes(&schema::NodeFragmentCfKey(
                 id,
                 TimestampMilli(start_ts.0 + 1),
             )),
@@ -918,7 +840,7 @@ impl QueryExecutor for FragmentsByIdTimeRange {
             ($iter:expr) => {{
                 for item in $iter {
                     let (key_bytes, value_bytes) = item?;
-                    let key: schema::FragmentCfKey = schema::Fragments::key_from_bytes(&key_bytes)
+                    let key: schema::NodeFragmentCfKey = schema::NodeFragments::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
                     if key.0 != id {
@@ -941,8 +863,8 @@ impl QueryExecutor for FragmentsByIdTimeRange {
                         }
                     }
 
-                    let value: schema::FragmentCfValue =
-                        schema::Fragments::value_from_bytes(&value_bytes)
+                    let value: schema::NodeFragmentCfValue =
+                        schema::NodeFragments::value_from_bytes(&value_bytes)
                             .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
                     // Always check temporal validity - skip invalid fragments
@@ -956,8 +878,8 @@ impl QueryExecutor for FragmentsByIdTimeRange {
         }
 
         if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::Fragments::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
+            let cf = db.cf_handle(schema::NodeFragments::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::NodeFragments::CF_NAME)
             })?;
 
             let iter = db.iterator_cf(
@@ -968,9 +890,9 @@ impl QueryExecutor for FragmentsByIdTimeRange {
         } else {
             let txn_db = storage.transaction_db()?;
             let cf = txn_db
-                .cf_handle(schema::Fragments::CF_NAME)
+                .cf_handle(schema::NodeFragments::CF_NAME)
                 .ok_or_else(|| {
-                    anyhow::anyhow!("Column family '{}' not found", schema::Fragments::CF_NAME)
+                    anyhow::anyhow!("Column family '{}' not found", schema::NodeFragments::CF_NAME)
                 })?;
 
             let iter = txn_db.iterator_cf(
@@ -992,7 +914,7 @@ impl QueryExecutor for FragmentsByIdTimeRange {
 /// Implement QueryExecutor for EdgeSummaryBySrcDstNameQuery
 #[async_trait::async_trait]
 impl QueryExecutor for EdgeSummaryBySrcDstName {
-    type Output = (Id, EdgeSummary);
+    type Output = (EdgeSummary, Option<f64>);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Default None to current time for temporal validity checks
@@ -1041,7 +963,7 @@ impl QueryExecutor for EdgeSummaryBySrcDstName {
             schema::ForwardEdges::value_from_bytes(&value_bytes)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-        // Always check temporal validity of forward edge index
+        // Always check temporal validity
         if !schema::is_valid_at_time(&value.0, ref_time) {
             return Err(anyhow::anyhow!(
                 "Edge not valid at time {}: source={}, dest={}, name={}",
@@ -1052,41 +974,9 @@ impl QueryExecutor for EdgeSummaryBySrcDstName {
             ));
         }
 
-        let edge_id = value.1;
-
-        // Look up the edge summary from the edges column family
-        let edge_key = schema::EdgeCfKey(edge_id);
-        let edge_key_bytes = schema::Edges::key_to_bytes(&edge_key);
-
-        let edge_value_bytes = if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
-            })?;
-            db.get_cf(cf, edge_key_bytes)?
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let cf = txn_db.cf_handle(schema::Edges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Edges::CF_NAME)
-            })?;
-            txn_db.get_cf(cf, edge_key_bytes)?
-        };
-
-        let edge_value_bytes = edge_value_bytes
-            .ok_or_else(|| anyhow::anyhow!("Edge summary not found for edge_id: {}", edge_id))?;
-
-        let edge_value: schema::EdgeCfValue = schema::Edges::value_from_bytes(&edge_value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
-
-        // Always check temporal validity of edge record
-        if !schema::is_valid_at_time(&edge_value.0, ref_time) {
-            return Err(anyhow::anyhow!(
-                "Edge {} not valid at time {}",
-                edge_id,
-                ref_time.0
-            ));
-        }
-
-        Ok((edge_id, edge_value.4))
+        // ForwardEdgeCfValue is (temporal_range, weight, summary)
+        // Return (summary, weight)
+        Ok((value.2.clone(), value.1))
     }
 
     fn timeout(&self) -> Duration {
@@ -1098,7 +988,7 @@ impl QueryExecutor for EdgeSummaryBySrcDstName {
 /// Implement QueryExecutor for OutgoingEdgesQuery
 #[async_trait::async_trait]
 impl QueryExecutor for OutgoingEdges {
-    type Output = Vec<(SrcId, EdgeName, DstId)>;
+    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Default None to current time for temporal validity checks
@@ -1107,7 +997,7 @@ impl QueryExecutor for OutgoingEdges {
             .unwrap_or_else(|| TimestampMilli::now());
 
         let id = self.id;
-        let mut edges: Vec<(SrcId, EdgeName, DstId)> = Vec::new();
+        let mut edges: Vec<(Option<f64>, SrcId, DstId, EdgeName)> = Vec::new();
         let prefix = id.into_bytes();
 
         if let Ok(db) = storage.db() {
@@ -1146,7 +1036,8 @@ impl QueryExecutor for OutgoingEdges {
 
                 let dest_id = key.1;
                 let edge_name = key.2;
-                edges.push((source_id, edge_name, dest_id));
+                let weight = value.1;
+                edges.push((weight, source_id, dest_id, edge_name));
             }
         } else {
             let txn_db = storage.transaction_db()?;
@@ -1187,7 +1078,8 @@ impl QueryExecutor for OutgoingEdges {
 
                 let dest_id = key.1;
                 let edge_name = key.2;
-                edges.push((source_id, edge_name, dest_id));
+                let weight = value.1;
+                edges.push((weight, source_id, dest_id, edge_name));
             }
         }
 
@@ -1203,7 +1095,7 @@ impl QueryExecutor for OutgoingEdges {
 /// Implement QueryExecutor for IncomingEdgesQuery
 #[async_trait::async_trait]
 impl QueryExecutor for IncomingEdges {
-    type Output = Vec<(DstId, EdgeName, SrcId)>;
+    type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Default None to current time for temporal validity checks
@@ -1212,19 +1104,26 @@ impl QueryExecutor for IncomingEdges {
             .unwrap_or_else(|| TimestampMilli::now());
 
         let id = self.id;
-        let mut edges: Vec<(DstId, EdgeName, SrcId)> = Vec::new();
+        let mut edges: Vec<(Option<f64>, DstId, SrcId, EdgeName)> = Vec::new();
         let prefix = id.into_bytes();
 
         if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::ReverseEdges::CF_NAME).ok_or_else(|| {
+            let reverse_cf = db.cf_handle(schema::ReverseEdges::CF_NAME).ok_or_else(|| {
                 anyhow::anyhow!(
                     "Column family '{}' not found",
                     schema::ReverseEdges::CF_NAME
                 )
             })?;
 
+            let forward_cf = db.cf_handle(schema::ForwardEdges::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ForwardEdges::CF_NAME
+                )
+            })?;
+
             let iter = db.iterator_cf(
-                cf,
+                reverse_cf,
                 rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
             );
 
@@ -1250,12 +1149,28 @@ impl QueryExecutor for IncomingEdges {
                 }
 
                 let source_id = key.1;
-                let edge_name = key.2;
-                edges.push((dest_id, edge_name, source_id));
+                let edge_name = key.2.clone();
+
+                // Lookup weight from ForwardEdges CF
+                // ReverseEdgeCfKey is (dst_id, src_id, edge_name)
+                // ForwardEdgeCfKey is (src_id, dst_id, edge_name)
+                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name.clone());
+                let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
+
+                let weight = if let Some(forward_value_bytes) = db.get_cf(forward_cf, forward_key_bytes)? {
+                    let forward_value: schema::ForwardEdgeCfValue =
+                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes)
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e))?;
+                    forward_value.1 // Extract weight from field 1
+                } else {
+                    None
+                };
+
+                edges.push((weight, dest_id, source_id, edge_name));
             }
         } else {
             let txn_db = storage.transaction_db()?;
-            let cf = txn_db
+            let reverse_cf = txn_db
                 .cf_handle(schema::ReverseEdges::CF_NAME)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1264,8 +1179,17 @@ impl QueryExecutor for IncomingEdges {
                     )
                 })?;
 
+            let forward_cf = txn_db
+                .cf_handle(schema::ForwardEdges::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Column family '{}' not found",
+                        schema::ForwardEdges::CF_NAME
+                    )
+                })?;
+
             let iter = txn_db.iterator_cf(
-                cf,
+                reverse_cf,
                 rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
             );
 
@@ -1291,8 +1215,24 @@ impl QueryExecutor for IncomingEdges {
                 }
 
                 let source_id = key.1;
-                let edge_name = key.2;
-                edges.push((dest_id, edge_name, source_id));
+                let edge_name = key.2.clone();
+
+                // Lookup weight from ForwardEdges CF
+                // ReverseEdgeCfKey is (dst_id, src_id, edge_name)
+                // ForwardEdgeCfKey is (src_id, dst_id, edge_name)
+                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name.clone());
+                let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
+
+                let weight = if let Some(forward_value_bytes) = txn_db.get_cf(forward_cf, forward_key_bytes)? {
+                    let forward_value: schema::ForwardEdgeCfValue =
+                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes)
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e))?;
+                    forward_value.1 // Extract weight from field 1
+                } else {
+                    None
+                };
+
+                edges.push((weight, dest_id, source_id, edge_name));
             }
         }
 
@@ -1756,5 +1696,116 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("timeout") || err_msg.contains("Query timeout"));
+    }
+
+    #[tokio::test]
+    async fn test_edge_summary_by_src_dst_name_query() {
+        use crate::{AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli, WriterConfig};
+        use tempfile::TempDir;
+
+        // Create temporary database
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        // Create writer and spawn graph consumer for mutations
+        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
+        let mutation_consumer_handle = crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+
+        // Create source and destination nodes
+        let source_id = Id::new();
+        let dest_id = Id::new();
+
+        AddNode {
+            id: source_id,
+            ts_millis: TimestampMilli::now(),
+            name: "source_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        AddNode {
+            id: dest_id,
+            ts_millis: TimestampMilli::now(),
+            name: "dest_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Create an edge
+        let edge_name = "test_edge";
+        let edge_summary = EdgeSummary::from_text("This is a test edge");
+        let edge_weight = 2.5;
+
+        AddEdge {
+            source_node_id: source_id,
+            target_node_id: dest_id,
+            ts_millis: TimestampMilli::now(),
+            name: edge_name.to_string(),
+            summary: edge_summary.clone(),
+            weight: Some(edge_weight),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Give time for mutations to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Close writer to ensure all mutations are flushed
+        drop(writer);
+
+        // Wait for mutation consumer to finish
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        // Create reader and query consumer
+        let reader_config = crate::ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = {
+            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
+            let reader = crate::Reader::new(sender);
+            (reader, receiver)
+        };
+
+        let consumer = Consumer::new(receiver, reader_config, graph);
+
+        // Spawn query consumer
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query the edge using EdgeSummaryBySrcDstName with Runnable pattern
+        let (returned_summary, returned_weight) = EdgeSummaryBySrcDstName::new(
+            source_id,
+            dest_id,
+            edge_name.to_string(),
+            None,
+        )
+        .run(&reader, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+        // Verify edge summary content matches
+        assert_eq!(returned_summary.0, edge_summary.0);
+
+        // Verify weight matches
+        assert_eq!(returned_weight, Some(edge_weight));
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
     }
 }

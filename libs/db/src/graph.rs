@@ -107,10 +107,11 @@ pub(crate) type Patcher =
     Box<dyn Fn(Option<Vec<u8>>) -> Result<Vec<u8>, anyhow::Error> + Send + Sync>;
 
 /// Storage operation to patch ValidTemporalRange across edge-related column families.
-/// This operation reads the Edge CF to extract metadata (source_id, target_id, name),
-/// then patches all three CFs: Edges, ForwardEdges, and ReverseEdges.
+/// This operation patches ForwardEdges and ReverseEdges using edge topology (src, dst, name).
 pub(crate) struct PatchEdgeValidRange(
-    pub(crate) crate::Id,                   // Edge ID
+    pub(crate) crate::Id,                   // Source node ID
+    pub(crate) crate::Id,                   // Destination node ID
+    pub(crate) schema::EdgeName,            // Edge name
     pub(crate) schema::ValidTemporalRange,  // New temporal range
 );
 
@@ -352,12 +353,12 @@ impl Storage {
                 schema::Nodes::column_family_options(),
             ),
             ColumnFamilyDescriptor::new(
-                schema::Edges::CF_NAME,
-                schema::Edges::column_family_options(),
+                schema::NodeFragments::CF_NAME,
+                schema::NodeFragments::column_family_options(),
             ),
             ColumnFamilyDescriptor::new(
-                schema::Fragments::CF_NAME,
-                schema::Fragments::column_family_options(),
+                schema::EdgeFragments::CF_NAME,
+                schema::EdgeFragments::column_family_options(),
             ),
             ColumnFamilyDescriptor::new(
                 schema::ForwardEdges::CF_NAME,
@@ -554,41 +555,16 @@ impl Processor for Graph {
                     // Then apply the patch
                     txn.put_cf(cf, key, patcher(Some(current_value))?)?;
                 }
-                StorageOperation::PatchEdgeValidRange(PatchEdgeValidRange(edge_id, new_range)) => {
-                    use schema::{EdgeCfKey, EdgeCfValue, Edges, ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
+                StorageOperation::PatchEdgeValidRange(PatchEdgeValidRange(src_id, dst_id, edge_name, new_range)) => {
+                    use schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
                     use ValidRangePatchable;
 
-                    // Step 1: Read the Edge CF to get metadata
-                    let edge_cf = txn_db
-                        .cf_handle(Edges::CF_NAME)
-                        .ok_or_else(|| anyhow::anyhow!("Edges CF not found"))?;
-
-                    let edge_key = EdgeCfKey(edge_id);
-                    let edge_key_bytes = Edges::key_to_bytes(&edge_key);
-
-                    let edge_value_bytes = txn
-                        .get_cf(edge_cf, &edge_key_bytes)?
-                        .ok_or_else(|| anyhow::anyhow!("Edge not found for id: {}", edge_id))?;
-
-                    let edge_value: EdgeCfValue = Edges::value_from_bytes(&edge_value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize edge: {}", e))?;
-
-                    // Extract metadata: source_id, target_id, name
-                    let source_id = edge_value.1;
-                    let target_id = edge_value.3;
-                    let edge_name = edge_value.2.clone();
-
-                    // Step 2: Patch Edges CF
-                    let edges = Edges;
-                    let patched_edge_bytes = edges.patch_valid_range(&edge_value_bytes, new_range)?;
-                    txn.put_cf(edge_cf, &edge_key_bytes, patched_edge_bytes)?;
-
-                    // Step 3: Patch ForwardEdges CF
+                    // Step 1: Patch ForwardEdges CF
                     let forward_cf = txn_db
                         .cf_handle(ForwardEdges::CF_NAME)
                         .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
 
-                    let forward_key = ForwardEdgeCfKey(source_id, target_id, edge_name.clone());
+                    let forward_key = ForwardEdgeCfKey(src_id, dst_id, edge_name.clone());
                     let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
 
                     let forward_value_bytes = txn
@@ -599,12 +575,12 @@ impl Processor for Graph {
                     let patched_forward_bytes = forward_edges.patch_valid_range(&forward_value_bytes, new_range)?;
                     txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
 
-                    // Step 4: Patch ReverseEdges CF
+                    // Step 2: Patch ReverseEdges CF
                     let reverse_cf = txn_db
                         .cf_handle(ReverseEdges::CF_NAME)
                         .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
 
-                    let reverse_key = ReverseEdgeCfKey(target_id, source_id, edge_name);
+                    let reverse_key = ReverseEdgeCfKey(dst_id, src_id, edge_name);
                     let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
 
                     let reverse_value_bytes = txn
@@ -616,7 +592,7 @@ impl Processor for Graph {
                     txn.put_cf(reverse_cf, &reverse_key_bytes, patched_reverse_bytes)?;
                 }
                 StorageOperation::PatchNodeValidRange(PatchNodeValidRange(node_id, new_range)) => {
-                    use schema::{NodeCfKey, Nodes, ForwardEdges, ForwardEdgeCfValue, ReverseEdges, ReverseEdgeCfValue, Edges, EdgeCfKey};
+                    use schema::{NodeCfKey, Nodes, ForwardEdges, ForwardEdgeCfKey, ReverseEdges, ReverseEdgeCfKey};
                     use ValidRangePatchable;
 
                     // Step 1: Patch the Node CF
@@ -644,17 +620,16 @@ impl Processor for Graph {
                     let forward_prefix = node_id.into_bytes().to_vec();
 
                     let forward_iter = txn.prefix_iterator_cf(forward_cf, &forward_prefix);
-                    let mut outgoing_edges = Vec::new();
+                    let mut edge_topologies = Vec::new();
 
                     for item in forward_iter {
-                        let (_key_bytes, value_bytes) = item?;
+                        let (key_bytes, _value_bytes) = item?;
 
-                        // Deserialize the ForwardEdgeCfValue to get the edge_id
-                        let forward_value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)
-                            .map_err(|e| anyhow::anyhow!("Failed to deserialize ForwardEdge value: {}", e))?;
+                        // Deserialize the key to get topology (src_id, dst_id, edge_name)
+                        let forward_key: ForwardEdgeCfKey = ForwardEdges::key_from_bytes(&key_bytes)
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize ForwardEdge key: {}", e))?;
 
-                        let edge_id = forward_value.1;
-                        outgoing_edges.push(edge_id);
+                        edge_topologies.push((forward_key.0, forward_key.1, forward_key.2));
                     }
 
                     // Step 3: Find and patch all incoming edges (where this node is the destination)
@@ -666,57 +641,27 @@ impl Processor for Graph {
                     let reverse_prefix = node_id.into_bytes().to_vec();
 
                     let reverse_iter = txn.prefix_iterator_cf(reverse_cf, &reverse_prefix);
-                    let mut incoming_edges = Vec::new();
 
                     for item in reverse_iter {
-                        let (_key_bytes, value_bytes) = item?;
+                        let (key_bytes, _value_bytes) = item?;
 
-                        // Deserialize the ReverseEdgeCfValue to get the edge_id
-                        let reverse_value: ReverseEdgeCfValue = ReverseEdges::value_from_bytes(&value_bytes)
-                            .map_err(|e| anyhow::anyhow!("Failed to deserialize ReverseEdge value: {}", e))?;
+                        // Deserialize the key to get topology (dst_id, src_id, edge_name)
+                        let reverse_key: ReverseEdgeCfKey = ReverseEdges::key_from_bytes(&key_bytes)
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize ReverseEdge key: {}", e))?;
 
-                        let edge_id = reverse_value.1;
-                        incoming_edges.push(edge_id);
+                        // ReverseEdgeCfKey is (dst_id, src_id, edge_name), so extract as (src_id, dst_id, name)
+                        edge_topologies.push((reverse_key.1, reverse_key.0, reverse_key.2));
                     }
 
-                    // Step 4: Patch all edges (both incoming and outgoing)
-                    let all_edge_ids: std::collections::HashSet<_> = outgoing_edges.into_iter()
-                        .chain(incoming_edges.into_iter())
-                        .collect();
+                    // Step 4: Deduplicate edge topologies
+                    let unique_edges: std::collections::HashSet<_> = edge_topologies.into_iter().collect();
 
-                    log::info!("[PatchNodeValidRange] Found {} edges to patch for node {}", all_edge_ids.len(), node_id);
+                    log::info!("[PatchNodeValidRange] Found {} edges to patch for node {}", unique_edges.len(), node_id);
 
-                    for edge_id in all_edge_ids {
-                        // Reuse the PatchEdgeValidRange logic inline
-                        use schema::{EdgeCfValue, ForwardEdgeCfKey, ReverseEdgeCfKey};
-
-                        // Read the Edge CF to get metadata
-                        let edge_cf = txn_db
-                            .cf_handle(Edges::CF_NAME)
-                            .ok_or_else(|| anyhow::anyhow!("Edges CF not found"))?;
-
-                        let edge_key = EdgeCfKey(edge_id);
-                        let edge_key_bytes = Edges::key_to_bytes(&edge_key);
-
-                        let edge_value_bytes = txn
-                            .get_cf(edge_cf, &edge_key_bytes)?
-                            .ok_or_else(|| anyhow::anyhow!("Edge not found for id: {}", edge_id))?;
-
-                        let edge_value: EdgeCfValue = Edges::value_from_bytes(&edge_value_bytes)
-                            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge: {}", e))?;
-
-                        // Extract metadata: source_id, target_id, name
-                        let source_id = edge_value.1;
-                        let target_id = edge_value.3;
-                        let edge_name = edge_value.2.clone();
-
-                        // Patch Edges CF
-                        let edges = Edges;
-                        let patched_edge_bytes = edges.patch_valid_range(&edge_value_bytes, new_range)?;
-                        txn.put_cf(edge_cf, &edge_key_bytes, patched_edge_bytes)?;
-
+                    // Step 5: Patch all edges (both incoming and outgoing)
+                    for (src_id, dst_id, edge_name) in unique_edges {
                         // Patch ForwardEdges CF
-                        let forward_key = ForwardEdgeCfKey(source_id, target_id, edge_name.clone());
+                        let forward_key = ForwardEdgeCfKey(src_id, dst_id, edge_name.clone());
                         let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
 
                         let forward_value_bytes = txn
@@ -728,7 +673,7 @@ impl Processor for Graph {
                         txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
 
                         // Patch ReverseEdges CF
-                        let reverse_key = ReverseEdgeCfKey(target_id, source_id, edge_name);
+                        let reverse_key = ReverseEdgeCfKey(dst_id, src_id, edge_name);
                         let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
 
                         let reverse_value_bytes = txn

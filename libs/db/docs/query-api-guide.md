@@ -147,28 +147,12 @@ let (name, summary) = NodeById::new(id, ref_ts)
 - `NodeName` - String name of the node
 - `NodeSummary` - DataUrl containing node data
 
-### 2. EdgeById
-
-Fetch an edge by its ID (includes topology):
-
-```rust
-let (src_id, dst_id, edge_name, summary) = EdgeById::new(id, ref_ts)
-    .run(&reader, timeout)
-    .await?;
-```
-
-**Returns**: `(SrcId, DstId, EdgeName, EdgeSummary)`
-- `SrcId` - Source node ID
-- `DstId` - Destination node ID
-- `EdgeName` - String name of the edge
-- `EdgeSummary` - DataUrl containing edge data
-
-### 3. EdgeSummaryBySrcDstName
+### 2. EdgeSummaryBySrcDstName
 
 Fetch an edge by its topology (source, destination, name):
 
 ```rust
-let (edge_id, summary) = EdgeSummaryBySrcDstName::new(
+let (summary, weight) = EdgeSummaryBySrcDstName::new(
     source_id,
     dest_id,
     edge_name,
@@ -178,9 +162,11 @@ let (edge_id, summary) = EdgeSummaryBySrcDstName::new(
 .await?;
 ```
 
-**Returns**: `(Id, EdgeSummary)`
+**Returns**: `(EdgeSummary, Option<f64>)`
+- `EdgeSummary` - DataUrl containing edge data
+- `Option<f64>` - Optional edge weight (None if not weighted)
 
-### 4. FragmentsByIdTimeRange
+### 3. FragmentsByIdTimeRange
 
 Fetch time-series fragments for an entity:
 
@@ -206,41 +192,53 @@ for (ts, content) in fragments {
 
 **Returns**: `Vec<(TimestampMilli, FragmentContent)>`
 
-### 5. OutgoingEdges
+### 4. OutgoingEdges
 
-Get all outgoing edges from a node:
+Get all outgoing edges from a node with weights:
 
 ```rust
 let outgoing = OutgoingEdges::new(node_id, ref_ts)
     .run(&reader, timeout)
     .await?;
 
-// Returns: Vec<(SrcId, EdgeName, DstId)>
-for (src, edge_name, dst) in outgoing {
-    println!("{} --{}-> {}", src, edge_name, dst);
+// Returns: Vec<(Option<f64>, SrcId, DstId, EdgeName)>
+// Note: Weight comes first (metadata before topology)
+for (weight, src, dst, edge_name) in outgoing {
+    match weight {
+        Some(w) => println!("{} --{}({})-> {}", src, edge_name, w, dst),
+        None => println!("{} --{}-> {}", src, edge_name, dst),
+    }
 }
 ```
 
-**Returns**: `Vec<(SrcId, EdgeName, DstId)>`
+**Returns**: `Vec<(Option<f64>, SrcId, DstId, EdgeName)>`
+- Tuple ordering: weight-first design (metadata before topology)
+- Weight is `None` for unweighted edges
 
-### 6. IncomingEdges
+### 5. IncomingEdges
 
-Get all incoming edges to a node:
+Get all incoming edges to a node with weights:
 
 ```rust
 let incoming = IncomingEdges::new(node_id, ref_ts)
     .run(&reader, timeout)
     .await?;
 
-// Returns: Vec<(DstId, EdgeName, SrcId)>
-for (dst, edge_name, src) in incoming {
-    println!("{} --{}-> {}", src, edge_name, dst);
+// Returns: Vec<(Option<f64>, DstId, SrcId, EdgeName)>
+// Note: Weight comes first (metadata before topology)
+for (weight, dst, src, edge_name) in incoming {
+    match weight {
+        Some(w) => println!("{} --{}({})-> {}", src, edge_name, w, dst),
+        None => println!("{} --{}-> {}", src, edge_name, dst),
+    }
 }
 ```
 
-**Returns**: `Vec<(DstId, EdgeName, SrcId)>`
+**Returns**: `Vec<(Option<f64>, DstId, SrcId, EdgeName)>`
+- Tuple ordering: weight-first design (metadata before topology)
+- Weight is `None` for unweighted edges
 
-### 7. NodesByName
+### 6. NodesByName
 
 Prefix search for nodes with pagination:
 
@@ -290,7 +288,7 @@ loop {
 }
 ```
 
-### 8. EdgesByName
+### 7. EdgesByName
 
 Prefix search for edges with pagination:
 
@@ -431,12 +429,12 @@ async fn get_friends_of_friends(
     let mut fof = Vec::new();
 
     // Get friends of each friend concurrently
-    for (_, _, friend_id) in friends {
+    for (weight, src, friend_id, edge_name) in friends {
         let friend_edges = OutgoingEdges::new(friend_id, None)
             .run(reader, timeout)
             .await?;
 
-        for (_, _, fof_id) in friend_edges {
+        for (_, _, fof_id, _) in friend_edges {
             if fof_id != user_id {  // Skip original user
                 fof.push(fof_id);
             }
@@ -514,32 +512,31 @@ let result = execute_with_retry(query, &reader, 3, timeout).await?;
 ```rust
 async fn get_edge_with_endpoints(
     reader: &Reader,
-    edge_id: Id,
+    src_id: Id,
+    dst_id: Id,
+    edge_name: EdgeName,
     timeout: Duration
 ) -> anyhow::Result<EdgeData> {
-    // Get edge info
-    let (src_id, dst_id, edge_name, edge_summary) =
-        EdgeById::new(edge_id, None).run(reader, timeout).await?;
-
-    // Get endpoint node data concurrently
-    let ((src_name, src_summary), (dst_name, dst_summary)) = try_join!(
+    // Get edge info and endpoint node data concurrently
+    let ((edge_summary, weight), (src_name, src_summary), (dst_name, dst_summary)) = try_join!(
+        EdgeSummaryBySrcDstName::new(src_id, dst_id, edge_name.clone(), None).run(reader, timeout),
         NodeById::new(src_id, None).run(reader, timeout),
         NodeById::new(dst_id, None).run(reader, timeout)
     )?;
 
     Ok(EdgeData {
-        edge_id,
         edge_name,
         edge_summary,
+        weight,
         source: (src_id, src_name, src_summary),
         destination: (dst_id, dst_name, dst_summary),
     })
 }
 
 struct EdgeData {
-    edge_id: Id,
     edge_name: EdgeName,
     edge_summary: EdgeSummary,
+    weight: Option<f64>,
     source: (Id, NodeName, NodeSummary),
     destination: (Id, NodeName, NodeSummary),
 }
@@ -607,7 +604,7 @@ let (name, summary) = NodeById::new(id, Some(ref_time))
 
 1. ✅ Import query types:
    ```rust
-   use motlie_db::{NodeById, EdgeById, Runnable};
+   use motlie_db::{NodeById, EdgeSummaryBySrcDstName, Runnable};
    ```
 
 2. ✅ Update method calls:
@@ -622,9 +619,9 @@ let (name, summary) = NodeById::new(id, Some(ref_time))
    // Old: reader.node_by_id(id, ref_ts, timeout).await?
    NodeById::new(id, ref_ts).run(&reader, timeout).await?
 
-   // EdgeById
-   // Old: reader.edge_by_id(id, ref_ts, timeout).await?
-   EdgeById::new(id, ref_ts).run(&reader, timeout).await?
+   // EdgeSummaryBySrcDstName
+   // Old: reader.edge_summary_by_src_dst_name(src, dst, name, ref_ts, timeout).await?
+   EdgeSummaryBySrcDstName::new(src, dst, name, ref_ts).run(&reader, timeout).await?
 
    // FragmentsByIdTimeRange
    // Old: reader.fragments_by_id_time_range(id, range, ref_ts, timeout).await?
@@ -704,7 +701,7 @@ assert_eq!(result1, result2);
 
 ### Query Performance
 
-- **Point lookups** (`NodeById`, `EdgeById`): O(1) - ~1-10µs
+- **Point lookups** (`NodeById`, `EdgeSummaryBySrcDstName`): O(1) - ~1-10µs
 - **Prefix scans** (`NodesByName`, `EdgesByName`): O(K) where K = results - ~10-100µs per page
 - **Range scans** (`FragmentsByIdTimeRange`): O(K) where K = results - ~10-100µs per page
 - **Topology queries** (`OutgoingEdges`, `IncomingEdges`): O(degree) - ~10µs + 1µs per edge

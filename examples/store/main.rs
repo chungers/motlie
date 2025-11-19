@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use csv::ReaderBuilder;
 use motlie_db::{
     create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdge,
-    AddFragment, AddNode, DataUrl, Id, MutationRunnable, TimestampMilli, WriterConfig,
+    AddEdgeFragment, AddNode, AddNodeFragment, DataUrl, EdgeSummary, Id, MutationRunnable,
+    TimestampMilli, WriterConfig,
 };
 use rocksdb::DB;
 use std::collections::{HashMap, HashSet};
@@ -148,7 +149,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                 };
 
                 // Create fragment
-                let fragment_args = AddFragment {
+                let fragment_args = AddNodeFragment {
                     id: node_id,
                     ts_millis: current_time,
                     content: DataUrl::from_markdown(fragment_text),
@@ -205,23 +206,23 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     .or_insert_with(Id::new)
                     .clone();
 
-                // Generate a unique ID for this edge
-                let edge_id = Id::new();
-
                 let current_time = TimestampMilli::now();
 
                 let edge_args = AddEdge {
-                    id: edge_id.clone(),
-                    source_node_id: source_id,
-                    target_node_id: target_id,
+                    source_node_id: source_id.clone(),
+                    target_node_id: target_id.clone(),
                     ts_millis: current_time,
                     name: edge_name.to_string(),
+                    summary: EdgeSummary::from_markdown(edge_fragment),
+                    weight: Some(1.0), // Default weight
                     temporal_range: None,
                 };
 
                 // Create fragment for the edge
-                let fragment_args = AddFragment {
-                    id: edge_id,
+                let fragment_args = AddEdgeFragment {
+                    src_id: source_id,
+                    dst_id: target_id,
+                    edge_name: edge_name.to_string(),
                     ts_millis: current_time,
                     content: DataUrl::from_markdown(edge_fragment),
                     temporal_range: None,
@@ -440,10 +441,11 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
     let db_open_start = Instant::now();
     let column_families = vec![
         "nodes",
-        "edges",
-        "fragments",
+        "node_fragments",
+        "edge_fragments",
         "forward_edges",
         "reverse_edges",
+        "edge_names",
     ];
     let db = DB::open_cf_for_read_only(
         &rocksdb::Options::default(),
@@ -763,22 +765,36 @@ fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
 }
 
 fn verify_fragments(db: &DB, expected: &ExpectedData) -> Result<bool> {
-    let cf = db
-        .cf_handle("fragments")
-        .context("Fragments CF not found")?;
-
-    // Count fragments in database and collect all content
+    // Collect all fragment content from both node_fragments and edge_fragments CFs
     let mut db_fragment_count = 0;
     let mut db_fragments_content = HashSet::new();
-    let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
 
-    for item in iter {
-        let (_, value) = item.context("Failed to read from fragments CF")?;
+    // Check node_fragments CF
+    let node_cf = db
+        .cf_handle("node_fragments")
+        .context("NodeFragments CF not found")?;
+    let node_iter = db.iterator_cf(node_cf, rocksdb::IteratorMode::Start);
+
+    for item in node_iter {
+        let (_, value) = item.context("Failed to read from node_fragments CF")?;
         db_fragment_count += 1;
 
         if let Ok(content) = deserialize_fragment_value(&value) {
-            // Fragments are stored as markdown, but we want to compare the raw content
-            // The content should match what was in the CSV
+            db_fragments_content.insert(content);
+        }
+    }
+
+    // Check edge_fragments CF
+    let edge_cf = db
+        .cf_handle("edge_fragments")
+        .context("EdgeFragments CF not found")?;
+    let edge_iter = db.iterator_cf(edge_cf, rocksdb::IteratorMode::Start);
+
+    for item in edge_iter {
+        let (_, value) = item.context("Failed to read from edge_fragments CF")?;
+        db_fragment_count += 1;
+
+        if let Ok(content) = deserialize_fragment_value(&value) {
             db_fragments_content.insert(content);
         }
     }

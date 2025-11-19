@@ -8,10 +8,10 @@ pub use writer::*;
 mod mutation;
 // Re-export mutation types
 pub use mutation::{
-    spawn_consumer as spawn_mutation_consumer, AddEdge, AddFragment, AddNode,
+    spawn_consumer as spawn_mutation_consumer, AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
     Consumer as MutationConsumer, Mutation, MutationBatch, MutationPlanner,
     Processor as MutationProcessor, Runnable as MutationRunnable, UpdateEdgeValidSinceUntil,
-    UpdateNodeValidSinceUntil,
+    UpdateEdgeWeight, UpdateNodeValidSinceUntil,
 };
 // Note: mutations![] macro is automatically available via #[macro_export] in mutation.rs
 
@@ -21,8 +21,8 @@ pub use reader::*;
 mod query;
 // Re-export query types but not Consumer/Processor/spawn_consumer to avoid ambiguity
 pub use query::{
-    EdgeById, EdgeSummaryBySrcDstName, EdgesByName, FragmentsByIdTimeRange, IncomingEdges,
-    NodeById, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
+    EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById, NodeFragmentsByIdTimeRange,
+    NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
 };
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 mod graph;
@@ -375,15 +375,16 @@ mod tests {
 
         // Send mutations to both writers (simulating fanout)
         for i in 0..3 {
+            let node_id = Id::new();
             let node_args = AddNode {
-                id: Id::new(),
+                id: node_id.clone(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("integration_test_node_{}", i),
                 temporal_range: None,
             };
 
-            let fragment_args = AddFragment {
-                id: Id::new(),
+            let fragment_args = AddNodeFragment {
+                id: node_id,
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_text(&format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i)),
                 temporal_range: None,
@@ -629,15 +630,16 @@ mod tests {
         };
 
         let edge = AddEdge {
-            id: Id::new(),
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_edge".to_string(),
+            summary: EdgeSummary::from_text("edge summary"),
+            weight: Some(1.0),
             temporal_range: None,
         };
 
-        let fragment = AddFragment {
+        let fragment = AddNodeFragment {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text("test fragment body"),
