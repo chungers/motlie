@@ -2,7 +2,7 @@ use crate::graph::ColumnFamilyRecord;
 use crate::DataUrl;
 use crate::TimestampMilli;
 use crate::ValidRangePatchable;
-use crate::{AddEdge, AddFragment, AddNode, Id};
+use crate::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Id};
 use serde::{Deserialize, Serialize};
 
 /// Support for temporal queries
@@ -91,34 +91,6 @@ pub type SrcId = Id;
 /// Id of edge destination node
 pub type DstId = Id;
 
-/// Edges column family.
-pub(crate) struct Edges;
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeCfKey(pub(crate) Id);
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeCfValue(
-    pub(crate) Option<ValidTemporalRange>, // temporal validity
-    pub(crate) SrcId,                      // source_id
-    pub(crate) EdgeName,                   // edge name
-    pub(crate) DstId,                      // dest_id
-    pub(crate) EdgeSummary,                // edge summary
-);
-
-impl ValidRangePatchable for Edges {
-    fn patch_valid_range(
-        &self,
-        old_value: &[u8],
-        new_range: ValidTemporalRange,
-    ) -> Result<Vec<u8>, anyhow::Error> {
-        use crate::graph::ColumnFamilyRecord;
-
-        let mut value = Edges::value_from_bytes(old_value)
-            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
-        value.0 = Some(new_range);
-        Edges::value_to_bytes(&value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
-    }
-}
 
 impl ValidRangePatchable for ForwardEdges {
     fn patch_valid_range(
@@ -152,29 +124,38 @@ impl ValidRangePatchable for ReverseEdges {
     }
 }
 
-/// Fragments column family.
-pub(crate) struct Fragments;
-#[derive(Serialize, Deserialize)]
-pub(crate) struct FragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
-#[derive(Serialize, Deserialize)]
-pub(crate) struct FragmentCfValue(
-    pub(crate) Option<ValidTemporalRange>,
-    pub(crate) FragmentContent,
-);
-
-/// Forward edges column family.
+/// Forward edges column family (enhanced with weight and summary).
 pub(crate) struct ForwardEdges;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfKey(pub(crate) SrcId, pub(crate) DstId, pub(crate) EdgeName);
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ForwardEdgeCfValue(pub(crate) Option<ValidTemporalRange>, pub(crate) Id);
+pub(crate) struct ForwardEdgeCfValue(
+    pub(crate) Option<ValidTemporalRange>,  // Field 0: Temporal validity
+    pub(crate) Option<f64>,                  // Field 1: Optional weight
+    pub(crate) EdgeSummary,                  // Field 2: Edge summary
+);
 
-/// Reverse edges column family.
+/// Reverse edges column family (index only).
 pub(crate) struct ReverseEdges;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ReverseEdgeCfKey(pub(crate) DstId, pub(crate) SrcId, pub(crate) EdgeName);
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<ValidTemporalRange>, pub(crate) Id);
+pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<ValidTemporalRange>);
+
+/// Edge fragments column family.
+pub(crate) struct EdgeFragments;
+#[derive(Serialize, Deserialize)]
+pub(crate) struct EdgeFragmentCfKey(
+    pub(crate) SrcId,
+    pub(crate) DstId,
+    pub(crate) EdgeName,
+    pub(crate) TimestampMilli,
+);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct EdgeFragmentCfValue(
+    pub(crate) Option<ValidTemporalRange>,
+    pub(crate) FragmentContent,
+);
 
 /// Node names column family.
 pub(crate) struct NodeNames;
@@ -238,59 +219,30 @@ impl ColumnFamilyRecord for Nodes {
     }
 }
 
-impl ColumnFamilyRecord for Edges {
-    const CF_NAME: &'static str = "edges";
-    type Key = EdgeCfKey;
-    type Value = EdgeCfValue;
-    type CreateOp = AddEdge;
+/// Node fragments column family (renamed from Fragments for clarity).
+pub(crate) struct NodeFragments;
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NodeFragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NodeFragmentCfValue(
+    pub(crate) Option<ValidTemporalRange>,
+    pub(crate) FragmentContent,
+);
 
-    fn record_from(args: &AddEdge) -> (EdgeCfKey, EdgeCfValue) {
-        let key = EdgeCfKey(args.id);
-        let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name);
-        let value = EdgeCfValue(
-            args.temporal_range.clone(),
-            args.source_node_id,
-            args.name.clone(),
-            args.target_node_id,
-            DataUrl::from_markdown(markdown),
-        );
+impl ColumnFamilyRecord for NodeFragments {
+    const CF_NAME: &'static str = "node_fragments";
+    type Key = NodeFragmentCfKey;
+    type Value = NodeFragmentCfValue;
+    type CreateOp = AddNodeFragment;
+
+    fn record_from(args: &AddNodeFragment) -> (NodeFragmentCfKey, NodeFragmentCfValue) {
+        let key = NodeFragmentCfKey(args.id, args.ts_millis);
+        let value = NodeFragmentCfValue(args.temporal_range.clone(), args.content.clone());
         (key, value)
     }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // EdgeCfKey(Id) -> just the 16-byte Id
-        key.0.into_bytes().to_vec()
-    }
-
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
-        if bytes.len() != 16 {
-            anyhow::bail!("Invalid EdgeCfKey length: expected 16, got {}", bytes.len());
-        }
-        let mut id_bytes = [0u8; 16];
-        id_bytes.copy_from_slice(bytes);
-        Ok(EdgeCfKey(Id::from_bytes(id_bytes)))
-    }
-
-    fn column_family_options() -> rocksdb::Options {
-        // Point lookups by Id only, no prefix scanning needed
-        rocksdb::Options::default()
-    }
-}
-
-impl ColumnFamilyRecord for Fragments {
-    const CF_NAME: &'static str = "fragments";
-    type Key = FragmentCfKey;
-    type Value = FragmentCfValue;
-    type CreateOp = AddFragment;
-
-    fn record_from(args: &AddFragment) -> (FragmentCfKey, FragmentCfValue) {
-        let key = FragmentCfKey(args.id, args.ts_millis);
-        let value = FragmentCfValue(args.temporal_range.clone(), args.content.clone());
-        (key, value)
-    }
-
-    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // FragmentCfKey(Id, TimestampMilli)
+        // NodeFragmentCfKey(Id, TimestampMilli)
         // Layout: [Id bytes (16)] + [timestamp big-endian (8)]
         let mut bytes = Vec::with_capacity(24);
         bytes.extend_from_slice(&key.0.into_bytes());
@@ -301,7 +253,7 @@ impl ColumnFamilyRecord for Fragments {
     fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
         if bytes.len() != 24 {
             anyhow::bail!(
-                "Invalid FragmentCfKey length: expected 24, got {}",
+                "Invalid NodeFragmentCfKey length: expected 24, got {}",
                 bytes.len()
             );
         }
@@ -313,7 +265,7 @@ impl ColumnFamilyRecord for Fragments {
         ts_bytes.copy_from_slice(&bytes[16..24]);
         let timestamp = u64::from_be_bytes(ts_bytes);
 
-        Ok(FragmentCfKey(
+        Ok(NodeFragmentCfKey(
             Id::from_bytes(id_bytes),
             TimestampMilli(timestamp),
         ))
