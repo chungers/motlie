@@ -2,8 +2,7 @@
 ///
 /// Secondary instances provide dynamic catch-up capability for read replicas,
 /// allowing them to see new writes from the primary database.
-
-use motlie_db::{AddNode, Id, NodeByIdQuery, Runnable, TimestampMilli};
+use motlie_db::{AddNode, Id, NodeById, Runnable, TimestampMilli};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -35,11 +34,16 @@ async fn test_secondary_instance_basic() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     drop(writer);
-    writer_handle.await.expect("Writer task failed").expect("Writer failed");
+    writer_handle
+        .await
+        .expect("Writer task failed")
+        .expect("Writer failed");
 
     // Open secondary instance
     let mut secondary_storage = motlie_db::Storage::secondary(&primary_path, &secondary_path);
-    secondary_storage.ready().expect("Failed to ready secondary");
+    secondary_storage
+        .ready()
+        .expect("Failed to ready secondary");
 
     assert!(secondary_storage.is_secondary());
 
@@ -59,17 +63,22 @@ async fn test_secondary_instance_basic() {
         (reader, receiver)
     };
 
-    let consumer_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &primary_path);
+    let consumer_handle =
+        motlie_db::spawn_query_consumer(reader_rx, Default::default(), &primary_path);
 
     // Query the node from secondary
-    let result = NodeByIdQuery::new(node_id, None).run(&reader, Duration::from_secs(1)).await;
+    let result = NodeById::new(node_id, None).run(
+        &reader, Duration::from_secs(1)).await;
 
     assert!(result.is_ok(), "Should be able to read from secondary");
     let (returned_name, _summary) = result.unwrap();
     assert_eq!(returned_name, node_name);
 
     drop(reader);
-    consumer_handle.await.expect("Consumer failed").expect("Consumer task failed");
+    consumer_handle
+        .await
+        .expect("Consumer failed")
+        .expect("Consumer task failed");
 }
 
 #[tokio::test]
@@ -102,7 +111,9 @@ async fn test_secondary_catch_up_sees_new_writes() {
 
     // Open secondary and catch up
     let mut secondary_storage = motlie_db::Storage::secondary(&primary_path, &secondary_path);
-    secondary_storage.ready().expect("Failed to ready secondary");
+    secondary_storage
+        .ready()
+        .expect("Failed to ready secondary");
     secondary_storage
         .try_catch_up_with_primary()
         .expect("Failed initial catch-up");
@@ -180,5 +191,8 @@ fn test_try_catch_up_on_non_secondary_fails() {
     // try_catch_up_with_primary should fail on readonly instance
     let result = readonly.try_catch_up_with_primary();
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Not a secondary instance"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Not a secondary instance"));
 }

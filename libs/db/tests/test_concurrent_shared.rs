@@ -14,11 +14,12 @@
 /// - Highest success rates (near 100%) since TransactionDB sees all committed writes immediately
 /// - No flush timing issues (all threads see memtable state)
 /// - Validates TransactionDB thread-safety with concurrent reader threads
-
 mod common;
 
 use common::concurrent_test_utils::{Metrics, TestContext};
-use motlie_db::{AddEdge, AddNode, EdgeByIdQuery, Id, NodeByIdQuery, ReaderConfig, Runnable, TimestampMilli, WriterConfig};
+use motlie_db::{
+    AddEdge, AddNode, EdgeById, Id, NodeById, ReaderConfig, Runnable, TimestampMilli, WriterConfig,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -36,11 +37,8 @@ async fn writer_task_shared_graph(
     let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
 
     // Spawn write consumer with SHARED graph
-    let consumer_handle = motlie_db::spawn_graph_consumer_with_graph(
-        writer_rx,
-        WriterConfig::default(),
-        graph,
-    );
+    let consumer_handle =
+        motlie_db::spawn_graph_consumer_with_graph(writer_rx, WriterConfig::default(), graph);
 
     // Insert nodes
     for i in 0..num_nodes {
@@ -157,7 +155,9 @@ async fn reader_task_shared_graph(
             // Query node
             if let Some(node_id) = context.get_random_node_id().await {
                 let start = Instant::now();
-                let result = NodeByIdQuery::new(node_id, None).run(&reader, Duration::from_secs(1)).await;
+                let result = NodeById::new(node_id, None)
+                    .run(&reader, Duration::from_secs(1))
+                    .await;
                 let latency_us = start.elapsed().as_micros() as u64;
 
                 match result {
@@ -169,7 +169,9 @@ async fn reader_task_shared_graph(
             // Query edge
             if let Some(edge_id) = context.get_random_edge_id().await {
                 let start = Instant::now();
-                let result = EdgeByIdQuery::new(edge_id, None).run(&reader, Duration::from_secs(1)).await;
+                let result = EdgeById::new(edge_id, None)
+                    .run(&reader, Duration::from_secs(1))
+                    .await;
                 let latency_us = start.elapsed().as_micros() as u64;
 
                 match result {
@@ -326,7 +328,10 @@ async fn test_concurrent_read_write_with_readwrite_readers() {
 
     // Readers should have some successful reads
     let total_reader_ops = total_read_success + total_read_errors;
-    assert!(total_read_success > 0, "Readers should have some successful reads");
+    assert!(
+        total_read_success > 0,
+        "Readers should have some successful reads"
+    );
 
     let success_rate = total_read_success as f64 / total_reader_ops as f64;
     println!("\n--- Quality Metrics ---");

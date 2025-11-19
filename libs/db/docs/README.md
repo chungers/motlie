@@ -136,7 +136,7 @@ Revised implementation plan using tuple pattern instead of struct.
 
 **Implementation Steps**:
 1. Update schema.rs - EdgeCfValue tuple
-2. Update query.rs - EdgeByIdQuery type
+2. Update query.rs - EdgeById type
 3. Update graph.rs - Processor implementation
 4. Update reader.rs - Public API
 5. Update lib.rs - Public exports

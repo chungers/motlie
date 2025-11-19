@@ -103,10 +103,10 @@ fn record_from(args: &AddEdge) -> (EdgeCfKey, EdgeCfValue) {
 
 ```rust
 // OLD (line ~22):
-pub type EdgeSummaryByIdQuery = ByIdQuery<EdgeSummary>;
+pub type EdgeSummaryById = ByIdQuery<EdgeSummary>;
 
 // NEW:
-pub type EdgeByIdQuery = ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>;
+pub type EdgeById = ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>;
 ```
 
 #### Change 2.2: Update Query enum variant
@@ -114,17 +114,17 @@ pub type EdgeByIdQuery = ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>;
 ```rust
 // OLD (line ~12):
 pub enum Query {
-    NodeById(NodeByIdQuery),
-    EdgeSummaryById(EdgeSummaryByIdQuery),  // OLD
-    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
+    NodeById(NodeById),
+    EdgeSummaryById(EdgeSummaryById),  // OLD
+    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstName),
     // ...
 }
 
 // NEW:
 pub enum Query {
-    NodeById(NodeByIdQuery),
-    EdgeById(EdgeByIdQuery),  // NEW
-    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
+    NodeById(NodeById),
+    EdgeById(EdgeById),  // NEW
+    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstName),
     // ...
 }
 ```
@@ -209,7 +209,7 @@ Query::EdgeById(q) => {
 // OLD (line ~482-488):
 async fn get_edge_summary_by_id(
     &self,
-    query: &EdgeSummaryByIdQuery,
+    query: &EdgeSummaryById,
 ) -> Result<EdgeSummary> {
     tokio::time::sleep(Duration::from_millis(10)).await;
     Ok(EdgeSummary::new(format!("Edge: {:?}", query.id)))
@@ -218,7 +218,7 @@ async fn get_edge_summary_by_id(
 // NEW:
 async fn get_edge_by_id(
     &self,
-    query: &EdgeByIdQuery,
+    query: &EdgeById,
 ) -> Result<(SrcId, DstId, EdgeName, EdgeSummary)> {
     tokio::time::sleep(Duration::from_millis(10)).await;
     Ok((
@@ -242,7 +242,7 @@ Similarly update `SlowProcessor` mock in tests.
 // OLD (line 418-447):
 async fn get_edge_summary_by_id(
     &self,
-    query: &crate::query::EdgeSummaryByIdQuery,
+    query: &crate::query::EdgeSummaryById,
 ) -> Result<EdgeSummary> {
     let id = query.id;
     let key = schema::EdgeCfKey(id);
@@ -253,7 +253,7 @@ async fn get_edge_summary_by_id(
 // NEW:
 async fn get_edge_by_id(
     &self,
-    query: &crate::query::EdgeByIdQuery,
+    query: &crate::query::EdgeById,
 ) -> Result<(SrcId, DstId, EdgeName, EdgeSummary)> {
     let id = query.id;
     let key = schema::EdgeCfKey(id);
@@ -300,7 +300,7 @@ async fn get_edge_by_id(
 /// Query an edge by its ID
 pub async fn edge_summary_by_id(&self, id: Id, timeout: Duration) -> Result<EdgeSummary> {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let query = EdgeSummaryByIdQuery::new(id, timeout, result_tx);
+    let query = EdgeSummaryById::new(id, timeout, result_tx);
 
     self.sender
         .send_async(Query::EdgeSummaryById(query))
@@ -318,7 +318,7 @@ pub async fn edge_by_id(
     timeout: Duration,
 ) -> Result<(SrcId, DstId, EdgeName, EdgeSummary)> {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let query = EdgeByIdQuery::new(id, timeout, result_tx);
+    let query = EdgeById::new(id, timeout, result_tx);
 
     self.sender
         .send_async(Query::EdgeById(query))
@@ -338,14 +338,14 @@ pub async fn edge_by_id(
 ```rust
 // OLD (line ~13-16):
 pub use query::{
-    DstId, EdgeSummaryByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
-    EdgesToNodeByIdQuery, FragmentContentByIdQuery, NodeByIdQuery, Query, SrcId,
+    DstId, EdgeSummaryById, EdgeSummaryBySrcDstName, EdgesFromNodeById,
+    EdgesToNodeById, FragmentContentById, NodeById, Query, SrcId,
 };
 
 // NEW:
 pub use query::{
-    DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
-    EdgesToNodeByIdQuery, FragmentContentByIdQuery, NodeByIdQuery, Query, SrcId,
+    DstId, EdgeById, EdgeSummaryBySrcDstName, EdgesFromNodeById,
+    EdgesToNodeById, FragmentContentById, NodeById, Query, SrcId,
 };
 ```
 
@@ -363,7 +363,7 @@ let summary = reader.edge_summary_by_id(edge_id, Duration::from_secs(5)).await?;
 assert!(summary.content()?.contains("test"));
 
 // NEW:
-let (src_id, dst_id, edge_name, summary) = EdgeByIdQuery::new(edge_id, None)
+let (src_id, dst_id, edge_name, summary) = EdgeById::new(edge_id, None)
     .run(&reader, Duration::from_secs(5))
     .await?;
 assert_eq!(src_id, expected_source_id);
@@ -467,7 +467,7 @@ fn find_edge_topology_in_forward_cf(
        }).await?;
 
        // Query should return topology
-       let (ret_src, ret_dst, ret_name, _summary) = EdgeByIdQuery::new(edge_id, None)
+       let (ret_src, ret_dst, ret_name, _summary) = EdgeById::new(edge_id, None)
            .run(&reader, timeout)
            .await?;
 
@@ -481,7 +481,7 @@ fn find_edge_topology_in_forward_cf(
    ```rust
    #[tokio::test]
    async fn test_edge_by_id_not_found() {
-       let result = EdgeByIdQuery::new(Id::new(), None)
+       let result = EdgeById::new(Id::new(), None)
            .run(&reader, timeout)
            .await;
        assert!(result.is_err());

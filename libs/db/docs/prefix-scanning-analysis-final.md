@@ -37,7 +37,7 @@ struct EdgeNamesCfKey(
 
 ```rust
 // Query: Find all nodes with names starting with "Shop"
-NodesByNameQuery::new("Shop".to_string(), None, Some(100), None)
+NodesByName::new("Shop".to_string(), None, Some(100), None)
     .run(&reader, timeout)
     .await?
 
@@ -205,7 +205,7 @@ From `libs/db/src/graph.rs:791-903`:
 ```rust
 async fn get_nodes_by_name(
     &self,
-    query: &crate::query::NodesByNameQuery,
+    query: &crate::query::NodesByName,
 ) -> Result<Vec<(schema::NodeName, Id)>> {
     let name = &query.name;  // e.g., "Shop"
 
@@ -789,7 +789,7 @@ let nodes = vec![
 // ...
 
 // Query with prefix "Shop"
-let results = NodesByNameQuery::new("Shop".to_string(), None, Some(10), None)
+let results = NodesByName::new("Shop".to_string(), None, Some(10), None)
     .run(&reader, timeout)
     .await?;
 ```

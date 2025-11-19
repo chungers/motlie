@@ -462,8 +462,8 @@ pub struct AddFragment {
 Temporal filtering was integrated into all query execute() methods:
 
 ```rust
-// Example: NodeByIdQuery
-impl QueryExecute for NodeByIdQuery {
+// Example: NodeById
+impl QueryExecute for NodeById {
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // ... fetch from DB ...
         let value = Nodes::value_from_bytes(&value_bytes)?;
@@ -592,12 +592,12 @@ All 5 benchmark groups compile and run successfully:
 **Future:** Expose query time parameter in public API:
 ```rust
 // Current (implicit - uses current time as reference timestamp)
-NodeByIdQuery::new(node_id, None)
+NodeById::new(node_id, None)
     .run(&reader, timeout)
     .await?
 
 // Future (explicit - specify reference timestamp)
-NodeByIdQuery::new(node_id, Some(query_time))
+NodeById::new(node_id, Some(query_time))
     .run(&reader, timeout)
     .await?
 ```

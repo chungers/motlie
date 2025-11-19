@@ -11,9 +11,8 @@ pub use reader::*;
 mod query;
 // Re-export query types but not Consumer/Processor/spawn_consumer to avoid ambiguity
 pub use query::{
-    DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesByNameQuery, IncomingEdgesQuery,
-    NodesByNameQuery, OutgoingEdgesQuery, FragmentsByIdTimeRangeQuery, NodeByIdQuery, Query,
-    Runnable, SrcId,
+    DstId, EdgeById, EdgeSummaryBySrcDstName, EdgesByName, FragmentsByIdTimeRange, IncomingEdges,
+    NodeById, NodesByName, OutgoingEdges, Query, Runnable, SrcId,
 };
 pub use schema::{EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary};
 mod graph;
@@ -360,8 +359,7 @@ mod tests {
         let (writer2, receiver2) = create_mutation_writer(config.clone());
 
         // Spawn both consumer types
-        let graph_handle =
-            spawn_graph_consumer(receiver1, config.clone(), temp_dir.path());
+        let graph_handle = spawn_graph_consumer(receiver1, config.clone(), temp_dir.path());
         let fulltext_handle = spawn_fulltext_consumer(receiver2, config.clone());
 
         // Send mutations to both writers (simulating fanout)
@@ -908,12 +906,10 @@ mod tests {
         let png_data: &[u8] = &[
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
             0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
-            0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, // IDAT chunk
-            0x54, 0x08, 0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F,
-            0x00, 0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59,
-            0xE7, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, // IEND chunk
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+            0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, // IDAT chunk
+            0x54, 0x08, 0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F, 0x00, 0x05, 0xFE, 0x02, 0xFE, 0xDC,
+            0xCC, 0x59, 0xE7, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, // IEND chunk
             0x44, 0xAE, 0x42, 0x60, 0x82,
         ];
 
@@ -947,8 +943,8 @@ mod tests {
         // Minimal valid JPEG file (placeholder - real JPEG would be more complex)
         let jpeg_data: &[u8] = &[
             0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, // SOI + APP0 marker
-            0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
-            0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9, // EOI marker
+            0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF,
+            0xD9, // EOI marker
         ];
 
         std::fs::File::create(&jpeg_path)
@@ -985,7 +981,9 @@ mod tests {
 
         let data_url = DataUrl::from_text_file(&text_path).unwrap();
 
-        assert!(data_url.0.starts_with("data:text/plain;charset=utf-8;base64,"));
+        assert!(data_url
+            .0
+            .starts_with("data:text/plain;charset=utf-8;base64,"));
         assert_eq!(data_url.decode_string().unwrap(), text_content);
         assert_eq!(data_url.mime_type().unwrap(), "text/plain;charset=utf-8");
     }
@@ -1005,7 +1003,9 @@ mod tests {
 
         let data_url = DataUrl::from_markdown_file(&md_path).unwrap();
 
-        assert!(data_url.0.starts_with("data:text/markdown;charset=utf-8;base64,"));
+        assert!(data_url
+            .0
+            .starts_with("data:text/markdown;charset=utf-8;base64,"));
         assert_eq!(data_url.decode_string().unwrap(), md_content);
         assert_eq!(data_url.mime_type().unwrap(), "text/markdown;charset=utf-8");
     }
@@ -1029,7 +1029,9 @@ mod tests {
 
         let data_url = DataUrl::from_html_file(&html_path).unwrap();
 
-        assert!(data_url.0.starts_with("data:text/html;charset=utf-8;base64,"));
+        assert!(data_url
+            .0
+            .starts_with("data:text/html;charset=utf-8;base64,"));
         assert_eq!(data_url.decode_string().unwrap(), html_content);
         assert_eq!(data_url.mime_type().unwrap(), "text/html;charset=utf-8");
     }
@@ -1049,9 +1051,14 @@ mod tests {
 
         let data_url = DataUrl::from_json_file(&json_path).unwrap();
 
-        assert!(data_url.0.starts_with("data:application/json;charset=utf-8;base64,"));
+        assert!(data_url
+            .0
+            .starts_with("data:application/json;charset=utf-8;base64,"));
         assert_eq!(data_url.decode_string().unwrap(), json_content);
-        assert_eq!(data_url.mime_type().unwrap(), "application/json;charset=utf-8");
+        assert_eq!(
+            data_url.mime_type().unwrap(),
+            "application/json;charset=utf-8"
+        );
     }
 
     #[test]

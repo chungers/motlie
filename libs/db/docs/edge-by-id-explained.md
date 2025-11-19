@@ -162,7 +162,7 @@ let (edge_id, summary) = reader.edge_by_src_dst_name(
 
 // ❌ You CANNOT do the reverse (edge ID → topology):
 let edge_id = Id::from_str("...")?;
-let (source_id, dest_id, edge_name, summary) = EdgeByIdQuery::new(edge_id, None)
+let (source_id, dest_id, edge_name, summary) = EdgeById::new(edge_id, None)
     .run(&reader, timeout)
     .await?;
 //                                               ^^^^^^^^^^^^^^
@@ -188,13 +188,13 @@ let summary = reader.edge_summary_by_id(edge_id, timeout).await?;
 // Missing: who's Alice? who's Bob? what's the relationship name?
 
 // Proposed API - CAN DO THIS:
-let (src_id, dst_id, edge_name, summary) = EdgeByIdQuery::new(edge_id, None)
+let (src_id, dst_id, edge_name, summary) = EdgeById::new(edge_id, None)
     .run(&reader, timeout)
     .await?;
-let (src_name, _) = NodeByIdQuery::new(src_id, None)
+let (src_name, _) = NodeById::new(src_id, None)
     .run(&reader, timeout)
     .await?;
-let (dst_name, _) = NodeByIdQuery::new(dst_id, None)
+let (dst_name, _) = NodeById::new(dst_id, None)
     .run(&reader, timeout)
     .await?;
 println!("Edge '{}' from {} to {}", edge_name.0, src_name, dst_name);
@@ -212,7 +212,7 @@ let fragments = reader.fragments_by_id(edge_id, timeout).await?;
 // You know it's an edge (not a node), but that's it
 
 // Proposed API - CAN get context:
-let (src_id, dst_id, edge_name, _) = EdgeByIdQuery::new(edge_id, None)
+let (src_id, dst_id, edge_name, _) = EdgeById::new(edge_id, None)
     .run(&reader, timeout)
     .await?;
 // Now can build contextual UI
@@ -234,7 +234,7 @@ for rec in recommendations {
     // Can show content but not "who → who" or relationship type
 
     // Proposed API - COMPLETE:
-    let (src, dst, name, summary) = EdgeByIdQuery::new(rec.edge_id, None)
+    let (src, dst, name, summary) = EdgeById::new(rec.edge_id, None)
         .run(&reader, timeout)
         .await?;
     println!("{} -{:?}-> {} (score: {})", src, name, dst, rec.score);
@@ -254,14 +254,14 @@ let summary = reader.edge_summary_by_id(edge_id, timeout).await?;
 // Don't know what nodes to check!
 
 // Proposed API - Can validate:
-let (src_id, dst_id, edge_name, summary) = EdgeByIdQuery::new(edge_id, None)
+let (src_id, dst_id, edge_name, summary) = EdgeById::new(edge_id, None)
     .run(&reader, timeout)
     .await?;
-let src_exists = NodeByIdQuery::new(src_id, None)
+let src_exists = NodeById::new(src_id, None)
     .run(&reader, timeout)
     .await
     .is_ok();
-let dst_exists = NodeByIdQuery::new(dst_id, None)
+let dst_exists = NodeById::new(dst_id, None)
     .run(&reader, timeout)
     .await
     .is_ok();
@@ -288,7 +288,7 @@ impl Reader {
     ///
     /// # Example
     /// ```rust
-    /// let (src, dst, name, summary) = EdgeByIdQuery::new(edge_id, None)
+    /// let (src, dst, name, summary) = EdgeById::new(edge_id, None)
     ///     .run(&reader, timeout)
     ///     .await?;
     /// println!("Edge '{}' connects {} to {}", name.0, src, dst);
@@ -497,7 +497,7 @@ forward_edges CF:
 let (node_id, summary) = reader.node_by_name("Alice", timeout).await?;
 
 // ID → Name (already exists):
-let (node_name, summary) = NodeByIdQuery::new(node_id, None)
+let (node_name, summary) = NodeById::new(node_id, None)
     .run(&reader, timeout)
     .await?;
 ```
@@ -518,7 +518,7 @@ let (edge_id, summary) = reader.edge_by_src_dst_name(
 ).await?;
 
 // ID → Topology (MISSING):
-let (src_id, dst_id, name, summary) = EdgeByIdQuery::new(edge_id, None)
+let (src_id, dst_id, name, summary) = EdgeById::new(edge_id, None)
     .run(&reader, timeout)
     .await?;
 //                                    ^^^^^^^^^^^^^^^^^ DOES NOT EXIST

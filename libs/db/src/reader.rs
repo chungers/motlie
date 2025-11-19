@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::time::Duration;
 
-use crate::query::{DstId, EdgeSummaryBySrcDstNameQuery, Query, SrcId};
+use crate::query::{DstId, EdgeSummaryBySrcDstName, Query, SrcId};
 use crate::schema::{EdgeName, EdgeSummary};
 use crate::{Id, TimestampMilli};
 
@@ -60,7 +60,14 @@ impl Reader {
     ) -> Result<(Id, EdgeSummary)> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgeSummaryBySrcDstNameQuery::with_channel(source_id, dest_id, name, reference_ts_millis, timeout, result_tx);
+        let query = EdgeSummaryBySrcDstName::with_channel(
+            source_id,
+            dest_id,
+            name,
+            reference_ts_millis,
+            timeout,
+            result_tx,
+        );
 
         self.sender
             .send_async(Query::EdgeSummaryBySrcDstName(query))

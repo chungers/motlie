@@ -22,8 +22,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use motlie_db::{
     create_mutation_writer, create_query_reader, spawn_graph_consumer, spawn_query_consumer,
-    AddEdge, AddNode, Id, NodeByIdQuery, OutgoingEdgesQuery, ReaderConfig, Runnable,
-    TimestampMilli, WriterConfig,
+    AddEdge, AddNode, Id, NodeById, OutgoingEdges, ReaderConfig, Runnable, TimestampMilli,
+    WriterConfig,
 };
 use std::time::Duration;
 use tempfile::TempDir;
@@ -119,11 +119,7 @@ fn bench_point_lookups(c: &mut Criterion) {
     };
     let (reader, query_receiver) = create_query_reader(reader_config.clone());
     let _guard = rt.enter();
-    let _query_handle = spawn_query_consumer(
-        query_receiver,
-        reader_config,
-        temp_dir.path(),
-    );
+    let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
     let mut group = c.benchmark_group("point_lookups");
     group.measurement_time(Duration::from_secs(10));
@@ -143,7 +139,7 @@ fn bench_point_lookups(c: &mut Criterion) {
             position,
             |b, _| {
                 b.to_async(&rt).iter(|| async {
-                    let result = NodeByIdQuery::new(target_id, None)
+                    let result = NodeById::new(target_id, None)
                         .run(&reader, Duration::from_secs(5))
                         .await
                         .unwrap();
@@ -182,11 +178,7 @@ fn bench_prefix_scans_by_position(c: &mut Criterion) {
         };
         let (reader, query_receiver) = create_query_reader(reader_config.clone());
         let _guard = rt.enter();
-        let _query_handle = spawn_query_consumer(
-            query_receiver,
-            reader_config,
-            temp_dir.path(),
-        );
+        let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
         // Test different positions in the key space
         for position in ["early", "middle", "late"].iter() {
@@ -203,7 +195,7 @@ fn bench_prefix_scans_by_position(c: &mut Criterion) {
                 &(db_size, position),
                 |b, _| {
                     b.to_async(&rt).iter(|| async {
-                        let result = OutgoingEdgesQuery::new(target_id, None)
+                        let result = OutgoingEdges::new(target_id, None)
                             .run(&reader, Duration::from_secs(5))
                             .await
                             .unwrap();
@@ -237,11 +229,7 @@ fn bench_prefix_scans_by_degree(c: &mut Criterion) {
         };
         let (reader, query_receiver) = create_query_reader(reader_config.clone());
         let _guard = rt.enter();
-        let _query_handle = spawn_query_consumer(
-            query_receiver,
-            reader_config,
-            temp_dir.path(),
-        );
+        let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
         // Use a middle node to avoid position effects
         let target_id = node_ids[2_500];
@@ -251,7 +239,7 @@ fn bench_prefix_scans_by_degree(c: &mut Criterion) {
             degree,
             |b, _| {
                 b.to_async(&rt).iter(|| async {
-                    let result = OutgoingEdgesQuery::new(target_id, None)
+                    let result = OutgoingEdges::new(target_id, None)
                         .run(&reader, Duration::from_secs(5))
                         .await
                         .unwrap();
@@ -281,11 +269,7 @@ fn bench_scan_position_independence(c: &mut Criterion) {
     };
     let (reader, query_receiver) = create_query_reader(reader_config.clone());
     let _guard = rt.enter();
-    let _query_handle = spawn_query_consumer(
-        query_receiver,
-        reader_config,
-        temp_dir.path(),
-    );
+    let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
 
     let mut group = c.benchmark_group("scan_position_independence");
     group.measurement_time(Duration::from_secs(10));
@@ -300,7 +284,7 @@ fn bench_scan_position_independence(c: &mut Criterion) {
             position_pct,
             |b, _| {
                 b.to_async(&rt).iter(|| async {
-                    let result = OutgoingEdgesQuery::new(target_id, None)
+                    let result = OutgoingEdges::new(target_id, None)
                         .run(&reader, Duration::from_secs(5))
                         .await
                         .unwrap();

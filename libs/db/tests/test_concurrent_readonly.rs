@@ -16,11 +16,10 @@
 /// - Tests concurrent access patterns
 /// - Provides observability metrics for debugging
 /// - Not intended for performance regression testing
-
 mod common;
 
-use common::concurrent_test_utils::{Metrics, TestContext, writer_task};
-use motlie_db::{EdgeByIdQuery, NodeByIdQuery, ReaderConfig, Runnable};
+use common::concurrent_test_utils::{writer_task, Metrics, TestContext};
+use motlie_db::{EdgeById, NodeById, ReaderConfig, Runnable};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -70,7 +69,7 @@ async fn reader_task(
             // Query node
             if let Some(node_id) = context.get_random_node_id().await {
                 let start = Instant::now();
-                let result = NodeByIdQuery::new(node_id, None)
+                let result = NodeById::new(node_id, None)
                     .run(&reader, Duration::from_secs(1))
                     .await;
                 let latency_us = start.elapsed().as_micros() as u64;
@@ -84,7 +83,7 @@ async fn reader_task(
             // Query edge
             if let Some(edge_id) = context.get_random_edge_id().await {
                 let start = Instant::now();
-                let result = EdgeByIdQuery::new(edge_id, None)
+                let result = EdgeById::new(edge_id, None)
                     .run(&reader, Duration::from_secs(1))
                     .await;
                 let latency_us = start.elapsed().as_micros() as u64;
@@ -126,7 +125,13 @@ async fn test_concurrent_read_write_integration() {
     let writer_context = context.clone();
     let writer_db_path = db_path.clone();
     let writer_handle = tokio::spawn(async move {
-        writer_task(writer_db_path, writer_context, num_nodes, num_edges_per_node).await
+        writer_task(
+            writer_db_path,
+            writer_context,
+            num_nodes,
+            num_edges_per_node,
+        )
+        .await
     });
 
     // Spawn reader tasks
@@ -134,9 +139,10 @@ async fn test_concurrent_read_write_integration() {
     for reader_id in 0..num_readers {
         let reader_context = context.clone();
         let reader_db_path = db_path.clone();
-        let handle = tokio::spawn(async move {
-            reader_task(reader_db_path, reader_context, reader_id).await
-        });
+        let handle =
+            tokio::spawn(
+                async move { reader_task(reader_db_path, reader_context, reader_id).await },
+            );
         reader_handles.push(handle);
     }
 
@@ -161,24 +167,37 @@ async fn test_concurrent_read_write_integration() {
     // Print results
     println!("Test Duration: {:.2}s", test_duration);
     println!("\n--- Writer Metrics ---");
-    println!("  Operations: {} success, {} errors", write_metrics.success_count, write_metrics.error_count);
-    println!("  Latency: avg={:.2}µs, min={}µs, max={}µs",
+    println!(
+        "  Operations: {} success, {} errors",
+        write_metrics.success_count, write_metrics.error_count
+    );
+    println!(
+        "  Latency: avg={:.2}µs, min={}µs, max={}µs",
         write_metrics.avg_latency_us(),
         write_metrics.min_latency_us,
         write_metrics.max_latency_us
     );
-    println!("  Throughput: {:.2} ops/sec", write_metrics.throughput(test_duration));
+    println!(
+        "  Throughput: {:.2} ops/sec",
+        write_metrics.throughput(test_duration)
+    );
 
     println!("\n--- Reader Metrics ---");
     for (i, metrics) in reader_metrics.iter().enumerate() {
-        println!("  Reader {}: {} success, {} errors",
-            i, metrics.success_count, metrics.error_count);
-        println!("    Latency: avg={:.2}µs, min={}µs, max={}µs",
+        println!(
+            "  Reader {}: {} success, {} errors",
+            i, metrics.success_count, metrics.error_count
+        );
+        println!(
+            "    Latency: avg={:.2}µs, min={}µs, max={}µs",
             metrics.avg_latency_us(),
             metrics.min_latency_us,
             metrics.max_latency_us
         );
-        println!("    Throughput: {:.2} ops/sec", metrics.throughput(test_duration));
+        println!(
+            "    Throughput: {:.2} ops/sec",
+            metrics.throughput(test_duration)
+        );
     }
 
     // Aggregate reader stats
@@ -192,9 +211,15 @@ async fn test_concurrent_read_write_integration() {
     };
 
     println!("\n--- Aggregate Reader Stats ---");
-    println!("  Total reads: {} success, {} errors", total_read_success, total_read_errors);
+    println!(
+        "  Total reads: {} success, {} errors",
+        total_read_success, total_read_errors
+    );
     println!("  Average latency: {:.2}µs", avg_read_latency);
-    println!("  Total throughput: {:.2} ops/sec", total_read_success as f64 / test_duration);
+    println!(
+        "  Total throughput: {:.2} ops/sec",
+        total_read_success as f64 / test_duration
+    );
 
     println!("\n--- Data Consistency ---");
     let final_node_count = context.node_count().await;
@@ -215,7 +240,10 @@ async fn test_concurrent_read_write_integration() {
 
     // Readers should have mostly successful reads (some errors are OK if querying before data is written)
     let total_reader_ops = total_read_success + total_read_errors;
-    assert!(total_read_success > 0, "Readers should have some successful reads");
+    assert!(
+        total_read_success > 0,
+        "Readers should have some successful reads"
+    );
 
     // Readers should have reasonable success rate
     // Note: Some failures are expected due to timing (querying IDs before they're flushed to disk)
@@ -228,7 +256,11 @@ async fn test_concurrent_read_write_integration() {
     // 1. Readers may query IDs that are in the write buffer but not yet flushed
     // 2. RocksDB readonly mode may not see latest writes immediately
     // 3. The important thing is that successful reads return correct data
-    assert!(success_rate >= 0.10, "Reader success rate should be at least 10% (got {:.1}%)", success_rate * 100.0);
+    assert!(
+        success_rate >= 0.10,
+        "Reader success rate should be at least 10% (got {:.1}%)",
+        success_rate * 100.0
+    );
 
     println!("\n=== Test Passed ===\n");
 }

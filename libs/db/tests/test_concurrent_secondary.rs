@@ -14,11 +14,10 @@
 /// - Similar success rates to readonly test (depends on flush timing)
 /// - Key advantage: Low catch-up overhead (7-12ms vs 60-1600ms reopen)
 /// - Continuous read availability (no reopen downtime)
-
 mod common;
 
-use common::concurrent_test_utils::{Metrics, TestContext, writer_task};
-use motlie_db::{EdgeByIdQuery, NodeByIdQuery, ReaderConfig, Runnable};
+use common::concurrent_test_utils::{writer_task, Metrics, TestContext};
+use motlie_db::{EdgeById, NodeById, ReaderConfig, Runnable};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -150,7 +149,7 @@ async fn reader_task_with_secondary(
         if iteration % 2 == 0 {
             if let Some(node_id) = context.get_random_node_id().await {
                 let start = Instant::now();
-                let result = NodeByIdQuery::new(node_id, None)
+                let result = NodeById::new(node_id, None)
                     .run(&reader, Duration::from_secs(1))
                     .await;
                 let latency_us = start.elapsed().as_micros() as u64;
@@ -163,7 +162,7 @@ async fn reader_task_with_secondary(
         } else {
             if let Some(edge_id) = context.get_random_edge_id().await {
                 let start = Instant::now();
-                let result = EdgeByIdQuery::new(edge_id, None)
+                let result = EdgeById::new(edge_id, None)
                     .run(&reader, Duration::from_secs(1))
                     .await;
                 let latency_us = start.elapsed().as_micros() as u64;
@@ -207,7 +206,13 @@ async fn test_concurrent_read_write_with_secondary() {
     let writer_context = context.clone();
     let writer_db_path = db_path.clone();
     let writer_handle = tokio::spawn(async move {
-        writer_task(writer_db_path, writer_context, num_nodes, num_edges_per_node).await
+        writer_task(
+            writer_db_path,
+            writer_context,
+            num_nodes,
+            num_edges_per_node,
+        )
+        .await
     });
 
     // Spawn reader tasks with secondary instances
@@ -216,13 +221,8 @@ async fn test_concurrent_read_write_with_secondary() {
         let reader_context = context.clone();
         let reader_db_path = db_path.clone();
         let handle = tokio::spawn(async move {
-            reader_task_with_secondary(
-                reader_db_path,
-                reader_context,
-                reader_id,
-                catch_up_interval,
-            )
-            .await
+            reader_task_with_secondary(reader_db_path, reader_context, reader_id, catch_up_interval)
+                .await
         });
         reader_handles.push(handle);
     }
@@ -313,7 +313,10 @@ async fn test_concurrent_read_write_with_secondary() {
     };
 
     let total_catchups: u64 = catchup_metrics.iter().map(|m| m.total_catchups).sum();
-    let total_catchup_time: u64 = catchup_metrics.iter().map(|m| m.total_catchup_time_us).sum();
+    let total_catchup_time: u64 = catchup_metrics
+        .iter()
+        .map(|m| m.total_catchup_time_us)
+        .sum();
     let avg_catchup_time = if total_catchups > 0 {
         total_catchup_time as f64 / total_catchups as f64
     } else {

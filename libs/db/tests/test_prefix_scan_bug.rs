@@ -15,8 +15,9 @@
 /// 2. Scan matching keys sequentially (O(k))
 ///
 /// See: libs/db/docs/prefix-scanning-analysis-final.md
+use motlie_db::{
+    AddEdge, AddNode, EdgesByName, Id, NodesByName, Runnable, TimestampMilli};
 
-use motlie_db::{AddEdge, AddNode, EdgesByNameQuery, Id, NodesByNameQuery, Runnable, TimestampMilli};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -42,20 +43,19 @@ async fn test_node_names_prefix_scan_comprehensive() {
     let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
 
     // Spawn write consumer
-    let writer_handle =
-        motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
+    let writer_handle = motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
 
     // Create nodes with various name patterns
     let nodes = vec![
-        ("Shop", Id::new()),                // Exact match
-        ("Shop.com", Id::new()),            // With punctuation
-        ("Shopper Johnson", Id::new()),     // Longer with space
-        ("Shopping", Id::new()),            // Simple extension
-        ("Shopping Mall", Id::new()),       // Extension with space
-        ("Shoppify", Id::new()),            // Another variation
-        ("Amazon", Id::new()),              // Different prefix (control)
-        ("Sho", Id::new()),                 // Shorter than prefix (control)
-        ("apple", Id::new()),               // Lowercase, different (control)
+        ("Shop", Id::new()),            // Exact match
+        ("Shop.com", Id::new()),        // With punctuation
+        ("Shopper Johnson", Id::new()), // Longer with space
+        ("Shopping", Id::new()),        // Simple extension
+        ("Shopping Mall", Id::new()),   // Extension with space
+        ("Shoppify", Id::new()),        // Another variation
+        ("Amazon", Id::new()),          // Different prefix (control)
+        ("Sho", Id::new()),             // Shorter than prefix (control)
+        ("apple", Id::new()),           // Lowercase, different (control)
     ];
 
     // Add all nodes
@@ -82,11 +82,10 @@ async fn test_node_names_prefix_scan_comprehensive() {
 
     // Create query consumer
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle =
-        motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query for nodes starting with "Shop"
-    let result = NodesByNameQuery::new("Shop".to_string(), None, Some(100), None)
+    let result = NodesByName::new("Shop".to_string(), None, Some(100), None)
         .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
@@ -135,19 +134,21 @@ async fn test_node_names_edge_cases() {
     let db_path = temp_dir.path().to_path_buf();
 
     let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
-    let writer_handle =
-        motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
+    let writer_handle = motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
 
     // Edge cases
     let nodes = vec![
-        ("a", Id::new()),               // Single character
-        ("ab", Id::new()),              // Two characters
-        ("abc", Id::new()),             // Three characters
-        ("abcd", Id::new()),            // Four characters
-        ("b", Id::new()),               // Different single char (control)
-        ("VeryLongNodeNameWithManyCharactersToTestVariableLengthHandling", Id::new()), // Very long
-        ("UTF8🔥test", Id::new()),      // UTF-8 with emoji
-        ("UTF8🔥test2", Id::new()),     // UTF-8 variant
+        ("a", Id::new()),    // Single character
+        ("ab", Id::new()),   // Two characters
+        ("abc", Id::new()),  // Three characters
+        ("abcd", Id::new()), // Four characters
+        ("b", Id::new()),    // Different single char (control)
+        (
+            "VeryLongNodeNameWithManyCharactersToTestVariableLengthHandling",
+            Id::new(),
+        ), // Very long
+        ("UTF8🔥test", Id::new()), // UTF-8 with emoji
+        ("UTF8🔥test2", Id::new()), // UTF-8 variant
     ];
 
     for (name, id) in &nodes {
@@ -167,11 +168,10 @@ async fn test_node_names_edge_cases() {
     writer_handle.await.unwrap().unwrap();
 
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle =
-        motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Test 1: Single character prefix
-    let result = NodesByNameQuery::new("a".to_string(), None, Some(100), None)
+    let result = NodesByName::new("a".to_string(), None, Some(100), None)
         .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
@@ -184,7 +184,7 @@ async fn test_node_names_edge_cases() {
     assert!(names.contains(&"abcd".to_string()));
 
     // Test 2: Very long name prefix
-    let result = NodesByNameQuery::new("VeryLong".to_string(), None, Some(100), None)
+    let result = NodesByName::new("VeryLong".to_string(), None, Some(100), None)
         .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
@@ -192,12 +192,16 @@ async fn test_node_names_edge_cases() {
     assert_eq!(result.len(), 1, "Should find 1 node with very long name");
 
     // Test 3: UTF-8 with emoji
-    let result = NodesByNameQuery::new("UTF8🔥".to_string(), None, Some(100), None)
+    let result = NodesByName::new("UTF8🔥".to_string(), None, Some(100), None)
         .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
 
-    assert_eq!(result.len(), 2, "Should find 2 nodes with UTF-8 emoji prefix");
+    assert_eq!(
+        result.len(),
+        2,
+        "Should find 2 nodes with UTF-8 emoji prefix"
+    );
 }
 
 /// Test pagination for node name prefix scanning
@@ -207,8 +211,7 @@ async fn test_node_names_pagination() {
     let db_path = temp_dir.path().to_path_buf();
 
     let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
-    let writer_handle =
-        motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
+    let writer_handle = motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
 
     // Create 20 nodes with same prefix but different names
     for i in 0..20 {
@@ -228,11 +231,10 @@ async fn test_node_names_pagination() {
     writer_handle.await.unwrap().unwrap();
 
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle =
-        motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Page 1: Get first 10
-    let page1 = NodesByNameQuery::new("test_".to_string(), None, Some(10), None)
+    let page1 = NodesByName::new("test_".to_string(), None, Some(10), None)
         .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
@@ -248,15 +250,15 @@ async fn test_node_names_pagination() {
     let (last_name, last_id) = page1.last().unwrap().clone();
     println!("\n=== Seeking from: {} - {} ===", last_name, last_id);
 
-    let page2 = NodesByNameQuery::new(
-            "test_".to_string(),
-            Some((last_name.clone(), last_id)),
-            Some(10),
-            None,
-        )
-        .run(&reader, Duration::from_secs(5))
-        .await
-        .expect("Query should succeed");
+    let page2 = NodesByName::new(
+        "test_".to_string(),
+        Some((last_name.clone(), last_id)),
+        Some(10),
+        None,
+    )
+    .run(&reader, Duration::from_secs(5))
+    .await
+    .expect("Query should succeed");
 
     println!("\n=== Page 2 ===");
     for (name, id) in &page2 {
@@ -288,7 +290,7 @@ async fn test_node_names_pagination() {
     );
 
     // Get all in one query to verify total
-    let all = NodesByNameQuery::new("test_".to_string(), None, Some(100), None)
+    let all = NodesByName::new("test_".to_string(), None, Some(100), None)
         .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
@@ -308,8 +310,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
     let db_path = temp_dir.path().to_path_buf();
 
     let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
-    let writer_handle =
-        motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
+    let writer_handle = motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
 
     // Create nodes
     let src_node = Id::new();
@@ -337,13 +338,13 @@ async fn test_edge_names_prefix_scan_comprehensive() {
 
     // Create edges with various names
     let edges = vec![
-        ("payment", Id::new()),             // Exact match
-        ("payment_gateway", Id::new()),     // With underscore
-        ("payment_processing", Id::new()),  // Longer variant
-        ("pay", Id::new()),                 // Shorter than prefix
-        ("payroll_system", Id::new()),      // Different word
-        ("pays", Id::new()),                // Simple extension
-        ("connection", Id::new()),          // Different prefix (control)
+        ("payment", Id::new()),            // Exact match
+        ("payment_gateway", Id::new()),    // With underscore
+        ("payment_processing", Id::new()), // Longer variant
+        ("pay", Id::new()),                // Shorter than prefix
+        ("payroll_system", Id::new()),     // Different word
+        ("pays", Id::new()),               // Simple extension
+        ("connection", Id::new()),         // Different prefix (control)
     ];
 
     for (name, id) in &edges {
@@ -367,11 +368,10 @@ async fn test_edge_names_prefix_scan_comprehensive() {
     println!("\n=== Testing EdgeNames prefix scan with 'pay' ===");
 
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle =
-        motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query for edges starting with "pay"
-    let result = EdgesByNameQuery::new("pay".to_string(), None, Some(100), None)
+    let result = EdgesByName::new("pay".to_string(), None, Some(100), None)
         .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
@@ -471,8 +471,7 @@ async fn test_empty_prefix_returns_all() {
     let db_path = temp_dir.path().to_path_buf();
 
     let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
-    let writer_handle =
-        motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
+    let writer_handle = motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
 
     // Add some nodes
     for name in &["apple", "banana", "cherry"] {
@@ -492,11 +491,10 @@ async fn test_empty_prefix_returns_all() {
     writer_handle.await.unwrap().unwrap();
 
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle =
-        motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query with empty prefix
-    let result = NodesByNameQuery::new("".to_string(), None, Some(100), None)
+    let result = NodesByName::new("".to_string(), None, Some(100), None)
         .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");
@@ -512,8 +510,7 @@ async fn test_nonexistent_prefix_returns_empty() {
     let db_path = temp_dir.path().to_path_buf();
 
     let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
-    let writer_handle =
-        motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
+    let writer_handle = motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
 
     // Add some nodes
     for name in &["apple", "banana", "cherry"] {
@@ -533,11 +530,10 @@ async fn test_nonexistent_prefix_returns_empty() {
     writer_handle.await.unwrap().unwrap();
 
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle =
-        motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query with non-existent prefix
-    let result = NodesByNameQuery::new("zebra".to_string(), None, Some(100), None)
+    let result = NodesByName::new("zebra".to_string(), None, Some(100), None)
         .run(&reader, Duration::from_secs(5))
         .await
         .expect("Query should succeed");

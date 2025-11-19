@@ -80,14 +80,14 @@ pub trait QueryProcessor: Send {
 /// Query enum representing all possible query types
 #[derive(Debug)]
 pub enum Query {
-    NodeById(NodeByIdQuery),
-    EdgeById(EdgeByIdQuery),
-    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
-    FragmentsByIdTimeRange(FragmentsByIdTimeRangeQuery),
-    OutgoingEdges(OutgoingEdgesQuery),
-    IncomingEdges(IncomingEdgesQuery),
-    NodesByName(NodesByNameQuery),
-    EdgesByName(EdgesByNameQuery),
+    NodeById(NodeById),
+    EdgeById(EdgeById),
+    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstName),
+    FragmentsByIdTimeRange(FragmentsByIdTimeRange),
+    OutgoingEdges(OutgoingEdges),
+    IncomingEdges(IncomingEdges),
+    NodesByName(NodesByName),
+    EdgesByName(EdgesByName),
 }
 
 impl std::fmt::Display for Query {
@@ -131,14 +131,14 @@ macro_rules! impl_query_processor {
 }
 
 impl_query_processor!(
-    NodeByIdQuery,
-    EdgeByIdQuery,
-    EdgeSummaryBySrcDstNameQuery,
-    FragmentsByIdTimeRangeQuery,
-    OutgoingEdgesQuery,
-    IncomingEdgesQuery,
-    NodesByNameQuery,
-    EdgesByNameQuery,
+    NodeById,
+    EdgeById,
+    EdgeSummaryBySrcDstName,
+    FragmentsByIdTimeRange,
+    OutgoingEdges,
+    IncomingEdges,
+    NodesByName,
+    EdgesByName,
 );
 
 #[async_trait::async_trait]
@@ -174,9 +174,9 @@ pub trait Runnable {
 }
 
 /// Type alias for querying node by ID (returns name and summary)
-pub type NodeByIdQuery = ByIdQuery<(NodeName, NodeSummary)>;
+pub type NodeById = ByIdQuery<(NodeName, NodeSummary)>;
 /// Type alias for querying edge by ID (returns topology and summary)
-pub type EdgeByIdQuery = ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>;
+pub type EdgeById = ByIdQuery<(SrcId, DstId, EdgeName, EdgeSummary)>;
 // Note: EdgesFromNodeByIdQuery and EdgesToNodeByIdQuery can't use ByIdQuery<T>
 // because they have the same result type but different processing logic.
 // They are implemented as separate structs below.
@@ -204,7 +204,7 @@ pub struct ByIdQuery<T: Send + Sync + 'static> {
 /// This is different from ByIdQuery because it requires time range filtering
 /// and returns multiple results (scan operation) rather than a single entity lookup.
 #[derive(Debug)]
-pub struct FragmentsByIdTimeRangeQuery {
+pub struct FragmentsByIdTimeRange {
     /// The entity ID to search for
     pub id: Id,
 
@@ -227,7 +227,7 @@ pub struct FragmentsByIdTimeRangeQuery {
 
 /// Query to find an edge by source ID, destination ID, and name
 #[derive(Debug)]
-pub struct EdgeSummaryBySrcDstNameQuery {
+pub struct EdgeSummaryBySrcDstName {
     /// Source node ID
     pub source_id: Id,
 
@@ -252,7 +252,7 @@ pub struct EdgeSummaryBySrcDstNameQuery {
 
 /// Query to find all outgoing edges from a node by its ID
 #[derive(Debug)]
-pub struct OutgoingEdgesQuery {
+pub struct OutgoingEdges {
     /// The node ID to search for
     pub id: Id,
 
@@ -271,7 +271,7 @@ pub struct OutgoingEdgesQuery {
 
 /// Query to find all incoming edges to a node by its ID
 #[derive(Debug)]
-pub struct IncomingEdgesQuery {
+pub struct IncomingEdges {
     /// The node ID to search for
     pub id: DstId,
 
@@ -290,7 +290,7 @@ pub struct IncomingEdgesQuery {
 
 /// Query to find nodes by name prefix
 #[derive(Debug)]
-pub struct NodesByNameQuery {
+pub struct NodesByName {
     /// The node name or prefix to search for
     pub name: NodeName,
 
@@ -316,7 +316,7 @@ pub struct NodesByNameQuery {
 
 /// Query to find edges by name prefix
 #[derive(Debug)]
-pub struct EdgesByNameQuery {
+pub struct EdgesByName {
     /// The edge name or prefix to search for
     pub name: String,
 
@@ -378,18 +378,13 @@ impl<T: Send + Sync + 'static> ByIdQuery<T> {
 
 /// Implement Runnable for NodeByIdQuery specifically
 #[async_trait::async_trait]
-impl Runnable for NodeByIdQuery {
+impl Runnable for NodeById {
     type Output = (NodeName, NodeSummary);
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = NodeByIdQuery::with_channel(
-            self.id,
-            self.reference_ts_millis,
-            timeout,
-            result_tx,
-        );
+        let query = NodeById::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
 
         reader.send_query(Query::NodeById(query)).await?;
         result_rx.await?
@@ -398,25 +393,20 @@ impl Runnable for NodeByIdQuery {
 
 /// Implement Runnable for EdgeByIdQuery specifically
 #[async_trait::async_trait]
-impl Runnable for EdgeByIdQuery {
+impl Runnable for EdgeById {
     type Output = (SrcId, DstId, EdgeName, EdgeSummary);
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgeByIdQuery::with_channel(
-            self.id,
-            self.reference_ts_millis,
-            timeout,
-            result_tx,
-        );
+        let query = EdgeById::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
 
         reader.send_query(Query::EdgeById(query)).await?;
         result_rx.await?
     }
 }
 
-impl FragmentsByIdTimeRangeQuery {
+impl FragmentsByIdTimeRange {
     /// Create a new query request (public API - no channel, no timeout yet)
     /// Use `.run(reader, timeout)` to execute this query
     pub fn new(
@@ -480,13 +470,13 @@ impl FragmentsByIdTimeRangeQuery {
 
 /// Implement Runnable for FragmentsByIdTimeRangeQuery
 #[async_trait::async_trait]
-impl Runnable for FragmentsByIdTimeRangeQuery {
+impl Runnable for FragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = FragmentsByIdTimeRangeQuery::with_channel(
+        let query = FragmentsByIdTimeRange::with_channel(
             self.id,
             self.time_range,
             self.reference_ts_millis,
@@ -494,12 +484,14 @@ impl Runnable for FragmentsByIdTimeRangeQuery {
             result_tx,
         );
 
-        reader.send_query(Query::FragmentsByIdTimeRange(query)).await?;
+        reader
+            .send_query(Query::FragmentsByIdTimeRange(query))
+            .await?;
         result_rx.await?
     }
 }
 
-impl EdgeSummaryBySrcDstNameQuery {
+impl EdgeSummaryBySrcDstName {
     /// Create a new query request (public API - no channel, no timeout yet)
     /// Use `.run(reader, timeout)` to execute this query
     pub fn new(
@@ -546,13 +538,13 @@ impl EdgeSummaryBySrcDstNameQuery {
 
 /// Implement Runnable for EdgeSummaryBySrcDstNameQuery
 #[async_trait::async_trait]
-impl Runnable for EdgeSummaryBySrcDstNameQuery {
+impl Runnable for EdgeSummaryBySrcDstName {
     type Output = (Id, EdgeSummary);
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        let query = EdgeSummaryBySrcDstNameQuery::with_channel(
+        let query = EdgeSummaryBySrcDstName::with_channel(
             self.source_id,
             self.dest_id,
             self.name,
@@ -561,12 +553,14 @@ impl Runnable for EdgeSummaryBySrcDstNameQuery {
             result_tx,
         );
 
-        reader.send_query(Query::EdgeSummaryBySrcDstName(query)).await?;
+        reader
+            .send_query(Query::EdgeSummaryBySrcDstName(query))
+            .await?;
         result_rx.await?
     }
 }
 
-impl OutgoingEdgesQuery {
+impl OutgoingEdges {
     /// Create a new query request (public API - no channel, no timeout yet)
     pub fn new(id: Id, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
@@ -600,18 +594,19 @@ impl OutgoingEdgesQuery {
 }
 
 #[async_trait::async_trait]
-impl Runnable for OutgoingEdgesQuery {
+impl Runnable for OutgoingEdges {
     type Output = Vec<(SrcId, EdgeName, DstId)>;
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query = OutgoingEdgesQuery::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
+        let query =
+            OutgoingEdges::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
         reader.send_query(Query::OutgoingEdges(query)).await?;
         result_rx.await?
     }
 }
 
-impl IncomingEdgesQuery {
+impl IncomingEdges {
     /// Create a new query request (public API - no channel, no timeout yet)
     pub fn new(id: DstId, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
@@ -645,18 +640,19 @@ impl IncomingEdgesQuery {
 }
 
 #[async_trait::async_trait]
-impl Runnable for IncomingEdgesQuery {
+impl Runnable for IncomingEdges {
     type Output = Vec<(DstId, EdgeName, SrcId)>;
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query = IncomingEdgesQuery::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
+        let query =
+            IncomingEdges::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
         reader.send_query(Query::IncomingEdges(query)).await?;
         result_rx.await?
     }
 }
 
-impl NodesByNameQuery {
+impl NodesByName {
     /// Create a new query request (public API - no channel, no timeout yet)
     pub fn new(
         name: NodeName,
@@ -701,12 +697,12 @@ impl NodesByNameQuery {
 }
 
 #[async_trait::async_trait]
-impl Runnable for NodesByNameQuery {
+impl Runnable for NodesByName {
     type Output = Vec<(NodeName, Id)>;
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query = NodesByNameQuery::with_channel(
+        let query = NodesByName::with_channel(
             self.name,
             self.start,
             self.limit,
@@ -719,7 +715,7 @@ impl Runnable for NodesByNameQuery {
     }
 }
 
-impl EdgesByNameQuery {
+impl EdgesByName {
     /// Create a new query request (public API - no channel, no timeout yet)
     pub fn new(
         name: String,
@@ -764,12 +760,12 @@ impl EdgesByNameQuery {
 }
 
 #[async_trait::async_trait]
-impl Runnable for EdgesByNameQuery {
+impl Runnable for EdgesByName {
     type Output = Vec<(EdgeName, Id)>;
 
     async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query = EdgesByNameQuery::with_channel(
+        let query = EdgesByName::with_channel(
             self.name,
             self.start,
             self.limit,
@@ -784,12 +780,14 @@ impl Runnable for EdgesByNameQuery {
 
 /// Implement QueryExecutor for NodeByIdQuery
 #[async_trait::async_trait]
-impl QueryExecutor for NodeByIdQuery {
+impl QueryExecutor for NodeById {
     type Output = (NodeName, NodeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Default None to current time for temporal validity checks
-        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
 
         let id = self.id;
 
@@ -828,18 +826,21 @@ impl QueryExecutor for NodeByIdQuery {
     }
 
     fn timeout(&self) -> Duration {
-        self.timeout.expect("Query must have timeout set when executing")
+        self.timeout
+            .expect("Query must have timeout set when executing")
     }
 }
 
 /// Implement QueryExecutor for EdgeByIdQuery
 #[async_trait::async_trait]
-impl QueryExecutor for EdgeByIdQuery {
+impl QueryExecutor for EdgeById {
     type Output = (SrcId, DstId, EdgeName, EdgeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Default None to current time for temporal validity checks
-        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
 
         let id = self.id;
         let key = schema::EdgeCfKey(id);
@@ -879,20 +880,23 @@ impl QueryExecutor for EdgeByIdQuery {
     }
 
     fn timeout(&self) -> Duration {
-        self.timeout.expect("Query must have timeout set when executing")
+        self.timeout
+            .expect("Query must have timeout set when executing")
     }
 }
 
 /// Implement QueryExecutor for FragmentsByIdTimeRangeQuery
 #[async_trait::async_trait]
-impl QueryExecutor for FragmentsByIdTimeRangeQuery {
+impl QueryExecutor for FragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         use std::ops::Bound;
 
         // Default None to current time for temporal validity checks
-        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
 
         let id = self.id;
         let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
@@ -984,18 +988,21 @@ impl QueryExecutor for FragmentsByIdTimeRangeQuery {
     }
 
     fn timeout(&self) -> Duration {
-        self.timeout.expect("Query must have timeout set when executing")
+        self.timeout
+            .expect("Query must have timeout set when executing")
     }
 }
 
 /// Implement QueryExecutor for EdgeSummaryBySrcDstNameQuery
 #[async_trait::async_trait]
-impl QueryExecutor for EdgeSummaryBySrcDstNameQuery {
+impl QueryExecutor for EdgeSummaryBySrcDstName {
     type Output = (Id, EdgeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Default None to current time for temporal validity checks
-        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
 
         let source_id = self.source_id;
         let dest_id = self.dest_id;
@@ -1091,18 +1098,21 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameQuery {
     }
 
     fn timeout(&self) -> Duration {
-        self.timeout.expect("Query must have timeout set when executing")
+        self.timeout
+            .expect("Query must have timeout set when executing")
     }
 }
 
 /// Implement QueryExecutor for OutgoingEdgesQuery
 #[async_trait::async_trait]
-impl QueryExecutor for OutgoingEdgesQuery {
+impl QueryExecutor for OutgoingEdges {
     type Output = Vec<(SrcId, EdgeName, DstId)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Default None to current time for temporal validity checks
-        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
 
         let id = self.id;
         let mut edges: Vec<(SrcId, EdgeName, DstId)> = Vec::new();
@@ -1193,18 +1203,21 @@ impl QueryExecutor for OutgoingEdgesQuery {
     }
 
     fn timeout(&self) -> Duration {
-        self.timeout.expect("Query must have timeout set when executing")
+        self.timeout
+            .expect("Query must have timeout set when executing")
     }
 }
 
 /// Implement QueryExecutor for IncomingEdgesQuery
 #[async_trait::async_trait]
-impl QueryExecutor for IncomingEdgesQuery {
+impl QueryExecutor for IncomingEdges {
     type Output = Vec<(DstId, EdgeName, SrcId)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Default None to current time for temporal validity checks
-        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
 
         let id = self.id;
         let mut edges: Vec<(DstId, EdgeName, SrcId)> = Vec::new();
@@ -1295,18 +1308,21 @@ impl QueryExecutor for IncomingEdgesQuery {
     }
 
     fn timeout(&self) -> Duration {
-        self.timeout.expect("Query must have timeout set when executing")
+        self.timeout
+            .expect("Query must have timeout set when executing")
     }
 }
 
 /// Implement QueryExecutor for NodesByNameQuery
 #[async_trait::async_trait]
-impl QueryExecutor for NodesByNameQuery {
+impl QueryExecutor for NodesByName {
     type Output = Vec<(NodeName, Id)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Default None to current time for temporal validity checks
-        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
 
         let name = &self.name;
         let mut nodes: Vec<(NodeName, Id)> = Vec::new();
@@ -1421,18 +1437,21 @@ impl QueryExecutor for NodesByNameQuery {
     }
 
     fn timeout(&self) -> Duration {
-        self.timeout.expect("Query must have timeout set when executing")
+        self.timeout
+            .expect("Query must have timeout set when executing")
     }
 }
 
 /// Implement QueryExecutor for EdgesByNameQuery
 #[async_trait::async_trait]
-impl QueryExecutor for EdgesByNameQuery {
+impl QueryExecutor for EdgesByName {
     type Output = Vec<(EdgeName, Id)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // Default None to current time for temporal validity checks
-        let ref_time = self.reference_ts_millis.unwrap_or_else(|| TimestampMilli::now());
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
 
         let name = &self.name;
         let mut edges: Vec<(EdgeName, Id)> = Vec::new();
@@ -1547,7 +1566,8 @@ impl QueryExecutor for EdgesByNameQuery {
     }
 
     fn timeout(&self) -> Duration {
-        self.timeout.expect("Query must have timeout set when executing")
+        self.timeout
+            .expect("Query must have timeout set when executing")
     }
 }
 
@@ -1680,7 +1700,7 @@ mod tests {
         let consumer_handle = spawn_consumer(consumer);
 
         // Query the node we just created
-        let (returned_name, returned_summary) = NodeByIdQuery::new(node_id, None)
+        let (returned_name, returned_summary) = NodeById::new(node_id, None)
             .run(&reader, Duration::from_secs(5))
             .await
             .unwrap();

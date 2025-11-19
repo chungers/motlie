@@ -171,42 +171,42 @@ The old query system used a complex design with query-specific trait methods:
 // query.rs - Trait definition
 #[async_trait::async_trait]
 pub trait Processor: Send + Sync {
-    async fn get_node_by_id(&self, query: &NodeByIdQuery)
+    async fn get_node_by_id(&self, query: &NodeById)
         -> Result<(NodeName, NodeSummary)>;
 
-    async fn get_edge_by_id(&self, query: &EdgeByIdQuery)
+    async fn get_edge_by_id(&self, query: &EdgeById)
         -> Result<(SrcId, DstId, EdgeName, EdgeSummary)>;
 
-    async fn get_edge_summary_by_src_dst_name(&self, query: &EdgeSummaryBySrcDstNameQuery)
+    async fn get_edge_summary_by_src_dst_name(&self, query: &EdgeSummaryBySrcDstName)
         -> Result<(Id, EdgeSummary)>;
 
-    async fn get_fragments_by_id_time_range(&self, query: &FragmentsByIdTimeRangeQuery)
+    async fn get_fragments_by_id_time_range(&self, query: &FragmentsByIdTimeRange)
         -> Result<Vec<(TimestampMilli, FragmentContent)>>;
 
-    async fn get_outgoing_edges_by_id(&self, query: &OutgoingEdgesQuery)
+    async fn get_outgoing_edges_by_id(&self, query: &OutgoingEdges)
         -> Result<Vec<(SrcId, EdgeName, DstId)>>;
 
-    async fn get_incoming_edges_by_id(&self, query: &IncomingEdgesQuery)
+    async fn get_incoming_edges_by_id(&self, query: &IncomingEdges)
         -> Result<Vec<(DstId, EdgeName, SrcId)>>;
 
-    async fn get_nodes_by_name(&self, query: &NodesByNameQuery)
+    async fn get_nodes_by_name(&self, query: &NodesByName)
         -> Result<Vec<(NodeName, Id)>>;
 
-    async fn get_edges_by_name(&self, query: &EdgesByNameQuery)
+    async fn get_edges_by_name(&self, query: &EdgesByName)
         -> Result<Vec<(EdgeName, Id)>>;
 }
 
 // query.rs - Enum with 8 variants
 pub enum Query {
-    NodeById(NodeByIdQuery),
-    EdgeById(EdgeByIdQuery),
+    NodeById(NodeById),
+    EdgeById(EdgeById),
     // ... 6 more variants
 }
 
 // graph.rs - Implementation (~300 lines)
 #[async_trait::async_trait]
 impl query::Processor for Graph {
-    async fn get_node_by_id(&self, query: &NodeByIdQuery)
+    async fn get_node_by_id(&self, query: &NodeById)
         -> Result<(NodeName, NodeSummary)> {
         // 30+ lines of RocksDB fetch logic
         let key = schema::NodeCfKey(query.id);
@@ -267,9 +267,9 @@ pub trait QueryExecutor: Send + Sync {
     fn timeout(&self) -> Duration;
 }
 
-// Example: NodeByIdQuery executes itself
+// Example: NodeById executes itself
 #[async_trait::async_trait]
-impl QueryExecutor for NodeByIdQuery {
+impl QueryExecutor for NodeById {
     type Output = (NodeName, NodeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
@@ -343,7 +343,7 @@ impl query::Processor for Graph {
                      │
                      ▼
 ┌──────────────────────────────────────────────────────────┐
-│ NodeByIdQuery::process_and_send()                        │
+│ NodeById::process_and_send()                        │
 │ - Calls processor.get_node_by_id(self)                   │
 │ - Sends result back via oneshot channel                  │
 └────────────────────┬─────────────────────────────────────┘
@@ -362,7 +362,7 @@ impl query::Processor for Graph {
 ┌──────────────────────────────────────────────────────────┐
 │ Graph Implementation (~300 lines)                         │
 │ impl Processor for Graph {                               │
-│   async fn get_node_by_id(&self, query: &NodeByIdQuery) │
+│   async fn get_node_by_id(&self, query: &NodeById) │
 │       -> Result<(NodeName, NodeSummary)> {               │
 │     // 30+ lines of RocksDB access code                  │
 │     let key = schema::NodeCfKey(query.id);               │
@@ -454,7 +454,7 @@ Both now follow the same pattern:
                      │
                      ▼
 ┌──────────────────────────────────────────────────────────┐
-│ NodeByIdQuery::process_and_send() - MODIFIED             │
+│ NodeById::process_and_send() - MODIFIED             │
 │ - Calls self.execute(processor.storage()) ← NEW          │
 │ - Sends result back via oneshot channel                  │
 └────────────────────┬─────────────────────────────────────┘
@@ -471,8 +471,8 @@ Both now follow the same pattern:
                      │
                      ▼
 ┌──────────────────────────────────────────────────────────┐
-│ NodeByIdQuery Implementation - NEW LOCATION              │
-│ impl QueryExecutor for NodeByIdQuery {                   │
+│ NodeById Implementation - NEW LOCATION              │
+│ impl QueryExecutor for NodeById {                   │
 │   type Output = (NodeName, NodeSummary);                 │
 │   async fn execute(&self, storage: &Storage)             │
 │       -> Result<Self::Output> {                          │
@@ -587,9 +587,9 @@ pub trait Processor: Send + Sync {
 Each query struct implements `QueryExecutor`:
 
 ```rust
-// NodeByIdQuery
+// NodeById
 #[async_trait::async_trait]
-impl QueryExecutor for NodeByIdQuery {
+impl QueryExecutor for NodeById {
     type Output = (NodeName, NodeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
@@ -629,9 +629,9 @@ impl QueryExecutor for NodeByIdQuery {
     }
 }
 
-// EdgeByIdQuery
+// EdgeById
 #[async_trait::async_trait]
-impl QueryExecutor for EdgeByIdQuery {
+impl QueryExecutor for EdgeById {
     type Output = (SrcId, DstId, EdgeName, EdgeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
@@ -870,7 +870,7 @@ impl Processor for MyStorage {
 **Before**: Fetch logic scattered across 8 methods in graph.rs
 
 **After**: Each query type is self-contained
-- `NodeByIdQuery` struct + fields + `QueryExecutor` impl in one place
+- `NodeById` struct + fields + `QueryExecutor` impl in one place
 - Easy to find and understand
 - Related code co-located
 
@@ -891,7 +891,7 @@ impl Processor for MockProcessor {
 **After**: Mock storage or test queries directly
 ```rust
 // Test query execution in isolation
-let query = NodeByIdQuery::new(...);
+let query = NodeById::new(...);
 let result = query.execute(&mock_storage).await?;
 assert_eq!(result, expected);
 ```
@@ -1086,7 +1086,7 @@ async fn test_node_by_id() {
 
     #[async_trait::async_trait]
     impl Processor for MockProcessor {
-        async fn get_node_by_id(&self, query: &NodeByIdQuery)
+        async fn get_node_by_id(&self, query: &NodeById)
             -> Result<(NodeName, NodeSummary)> {
             Ok((
                 "test_node".to_string(),
@@ -1095,7 +1095,7 @@ async fn test_node_by_id() {
         }
 
         // Must stub 7 other methods
-        async fn get_edge_by_id(&self, _: &EdgeByIdQuery)
+        async fn get_edge_by_id(&self, _: &EdgeById)
             -> Result<(SrcId, DstId, EdgeName, EdgeSummary)> {
             unimplemented!()
         }
@@ -1103,7 +1103,7 @@ async fn test_node_by_id() {
     }
 
     let processor = MockProcessor;
-    let query = NodeByIdQuery::new(...);
+    let query = NodeById::new(...);
     let result = query.result(&processor).await?;
     assert_eq!(result.0, "test_node");
 }
@@ -1122,7 +1122,7 @@ async fn test_node_by_id() {
     insert_test_node(&storage, node_id, "test_node", "summary").await;
 
     // Execute query
-    let query = NodeByIdQuery {
+    let query = NodeById {
         id: node_id,
         timeout: Duration::from_secs(1),
         result_tx: /* ... */,
@@ -1146,17 +1146,17 @@ struct RedisStorage {
 
 #[async_trait::async_trait]
 impl Processor for RedisStorage {
-    async fn get_node_by_id(&self, query: &NodeByIdQuery)
+    async fn get_node_by_id(&self, query: &NodeById)
         -> Result<(NodeName, NodeSummary)> {
         // Redis-specific fetch logic
     }
 
-    async fn get_edge_by_id(&self, query: &EdgeByIdQuery)
+    async fn get_edge_by_id(&self, query: &EdgeById)
         -> Result<(SrcId, DstId, EdgeName, EdgeSummary)> {
         // Redis-specific fetch logic
     }
 
-    async fn get_edge_summary_by_src_dst_name(&self, query: &EdgeSummaryBySrcDstNameQuery)
+    async fn get_edge_summary_by_src_dst_name(&self, query: &EdgeSummaryBySrcDstName)
         -> Result<(Id, EdgeSummary)> {
         // Redis-specific fetch logic
     }
@@ -1208,7 +1208,7 @@ struct CachedProcessor<P: Processor> {
 
 #[async_trait::async_trait]
 impl<P: Processor> Processor for CachedProcessor<P> {
-    async fn get_node_by_id(&self, query: &NodeByIdQuery)
+    async fn get_node_by_id(&self, query: &NodeById)
         -> Result<(NodeName, NodeSummary)> {
         if let Some(cached) = self.cache.lock().unwrap().get(&query.id) {
             return Ok(cached.clone());

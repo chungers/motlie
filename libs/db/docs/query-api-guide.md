@@ -35,7 +35,7 @@ QueryType::new(...params, reference_timestamp)
 ## Quick Start
 
 ```rust
-use motlie_db::{Reader, NodeByIdQuery, Runnable, Id, TimestampMilli};
+use motlie_db::{Reader, NodeById, Runnable, Id, TimestampMilli};
 use std::time::Duration;
 
 async fn example(reader: &Reader) -> anyhow::Result<()> {
@@ -43,7 +43,7 @@ async fn example(reader: &Reader) -> anyhow::Result<()> {
     let timeout = Duration::from_secs(5);
 
     // Simple query
-    let (name, summary) = NodeByIdQuery::new(node_id, None)
+    let (name, summary) = NodeById::new(node_id, None)
         .run(reader, timeout)
         .await?;
 
@@ -76,7 +76,7 @@ Queries are lightweight value types that describe what data to fetch:
 
 ```rust
 // Construct a query (no I/O, just data)
-let query = NodeByIdQuery::new(node_id, None);
+let query = NodeById::new(node_id, None);
 
 // Execute it (performs I/O)
 let result = query.run(&reader, timeout).await?;
@@ -100,14 +100,14 @@ This enables generic query execution and composability.
 Timeout is an execution parameter, not a query property:
 
 ```rust
-let query = NodeByIdQuery::new(id, None);
+let query = NodeById::new(id, None);
 
 // Try with short timeout
 match query.run(&reader, Duration::from_millis(100)).await {
     Ok(result) => println!("Fast query succeeded"),
     Err(_) => {
         // Retry with longer timeout
-        let query2 = NodeByIdQuery::new(id, None);
+        let query2 = NodeById::new(id, None);
         let result = query2.run(&reader, Duration::from_secs(5)).await?;
     }
 }
@@ -121,24 +121,24 @@ All queries support temporal validity filtering via an optional reference timest
 let ref_time = TimestampMilli::now();
 
 // Query as-of a specific time
-let (name, summary) = NodeByIdQuery::new(node_id, Some(ref_time))
+let (name, summary) = NodeById::new(node_id, Some(ref_time))
     .run(&reader, timeout)
     .await?;
 
 // Query current state (None = current time)
-let (name, summary) = NodeByIdQuery::new(node_id, None)
+let (name, summary) = NodeById::new(node_id, None)
     .run(&reader, timeout)
     .await?;
 ```
 
 ## Query Types
 
-### 1. NodeByIdQuery
+### 1. NodeById
 
 Fetch a node by its ID:
 
 ```rust
-let (name, summary) = NodeByIdQuery::new(id, ref_ts)
+let (name, summary) = NodeById::new(id, ref_ts)
     .run(&reader, timeout)
     .await?;
 ```
@@ -147,12 +147,12 @@ let (name, summary) = NodeByIdQuery::new(id, ref_ts)
 - `NodeName` - String name of the node
 - `NodeSummary` - DataUrl containing node data
 
-### 2. EdgeByIdQuery
+### 2. EdgeById
 
 Fetch an edge by its ID (includes topology):
 
 ```rust
-let (src_id, dst_id, edge_name, summary) = EdgeByIdQuery::new(id, ref_ts)
+let (src_id, dst_id, edge_name, summary) = EdgeById::new(id, ref_ts)
     .run(&reader, timeout)
     .await?;
 ```
@@ -163,12 +163,12 @@ let (src_id, dst_id, edge_name, summary) = EdgeByIdQuery::new(id, ref_ts)
 - `EdgeName` - String name of the edge
 - `EdgeSummary` - DataUrl containing edge data
 
-### 3. EdgeSummaryBySrcDstNameQuery
+### 3. EdgeSummaryBySrcDstName
 
 Fetch an edge by its topology (source, destination, name):
 
 ```rust
-let (edge_id, summary) = EdgeSummaryBySrcDstNameQuery::new(
+let (edge_id, summary) = EdgeSummaryBySrcDstName::new(
     source_id,
     dest_id,
     edge_name,
@@ -180,7 +180,7 @@ let (edge_id, summary) = EdgeSummaryBySrcDstNameQuery::new(
 
 **Returns**: `(Id, EdgeSummary)`
 
-### 4. FragmentsByIdTimeRangeQuery
+### 4. FragmentsByIdTimeRange
 
 Fetch time-series fragments for an entity:
 
@@ -190,7 +190,7 @@ use std::ops::Bound;
 let start = TimestampMilli::now();
 let end = TimestampMilli(start.0 + 86400000); // +24h
 
-let fragments = FragmentsByIdTimeRangeQuery::new(
+let fragments = FragmentsByIdTimeRange::new(
     entity_id,
     (Bound::Included(start), Bound::Excluded(end)),
     ref_ts
@@ -206,12 +206,12 @@ for (ts, content) in fragments {
 
 **Returns**: `Vec<(TimestampMilli, FragmentContent)>`
 
-### 5. OutgoingEdgesQuery
+### 5. OutgoingEdges
 
 Get all outgoing edges from a node:
 
 ```rust
-let outgoing = OutgoingEdgesQuery::new(node_id, ref_ts)
+let outgoing = OutgoingEdges::new(node_id, ref_ts)
     .run(&reader, timeout)
     .await?;
 
@@ -223,12 +223,12 @@ for (src, edge_name, dst) in outgoing {
 
 **Returns**: `Vec<(SrcId, EdgeName, DstId)>`
 
-### 6. IncomingEdgesQuery
+### 6. IncomingEdges
 
 Get all incoming edges to a node:
 
 ```rust
-let incoming = IncomingEdgesQuery::new(node_id, ref_ts)
+let incoming = IncomingEdges::new(node_id, ref_ts)
     .run(&reader, timeout)
     .await?;
 
@@ -240,12 +240,12 @@ for (dst, edge_name, src) in incoming {
 
 **Returns**: `Vec<(DstId, EdgeName, SrcId)>`
 
-### 7. NodesByNameQuery
+### 7. NodesByName
 
 Prefix search for nodes with pagination:
 
 ```rust
-let nodes = NodesByNameQuery::new(
+let nodes = NodesByName::new(
     "user_".to_string(),    // prefix
     None,                    // start cursor (for pagination)
     Some(100),              // page size
@@ -267,7 +267,7 @@ for (name, id) in &nodes {
 let mut cursor = None;
 
 loop {
-    let page = NodesByNameQuery::new(
+    let page = NodesByName::new(
         "user_".to_string(),
         cursor.clone(),
         Some(100),
@@ -290,12 +290,12 @@ loop {
 }
 ```
 
-### 8. EdgesByNameQuery
+### 8. EdgesByName
 
 Prefix search for edges with pagination:
 
 ```rust
-let edges = EdgesByNameQuery::new(
+let edges = EdgesByName::new(
     "follows_".to_string(),  // prefix
     None,                     // start cursor
     Some(100),               // page size
@@ -318,7 +318,7 @@ async fn get_node(
     reader: &Reader,
     node_id: Id
 ) -> anyhow::Result<(NodeName, NodeSummary)> {
-    NodeByIdQuery::new(node_id, None)
+    NodeById::new(node_id, None)
         .run(reader, Duration::from_secs(5))
         .await
 }
@@ -336,9 +336,9 @@ async fn get_node_neighborhood(
 ) -> anyhow::Result<()> {
     // Launch all queries concurrently
     let (node_info, outgoing, incoming) = try_join!(
-        NodeByIdQuery::new(node_id, None).run(reader, timeout),
-        OutgoingEdgesQuery::new(node_id, None).run(reader, timeout),
-        IncomingEdgesQuery::new(node_id, None).run(reader, timeout)
+        NodeById::new(node_id, None).run(reader, timeout),
+        OutgoingEdges::new(node_id, None).run(reader, timeout),
+        IncomingEdges::new(node_id, None).run(reader, timeout)
     )?;
 
     let (name, summary) = node_info;
@@ -361,7 +361,7 @@ async fn get_multiple_nodes(
 ) -> anyhow::Result<Vec<(NodeName, NodeSummary)>> {
     // Create all queries
     let queries = node_ids.into_iter()
-        .map(|id| NodeByIdQuery::new(id, None).run(reader, timeout));
+        .map(|id| NodeById::new(id, None).run(reader, timeout));
 
     // Execute concurrently
     try_join_all(queries).await
@@ -377,7 +377,7 @@ async fn get_historical_state(
     timestamp: TimestampMilli,
     timeout: Duration
 ) -> anyhow::Result<(NodeName, NodeSummary)> {
-    NodeByIdQuery::new(node_id, Some(timestamp))
+    NodeById::new(node_id, Some(timestamp))
         .run(reader, timeout)
         .await
 }
@@ -394,7 +394,7 @@ async fn list_all_users(
     let mut cursor = None;
 
     loop {
-        let page = NodesByNameQuery::new(
+        let page = NodesByName::new(
             "user_".to_string(),
             cursor.clone(),
             Some(100),
@@ -424,7 +424,7 @@ async fn get_friends_of_friends(
     timeout: Duration
 ) -> anyhow::Result<Vec<Id>> {
     // Get immediate friends
-    let friends = OutgoingEdgesQuery::new(user_id, None)
+    let friends = OutgoingEdges::new(user_id, None)
         .run(reader, timeout)
         .await?;
 
@@ -432,7 +432,7 @@ async fn get_friends_of_friends(
 
     // Get friends of each friend concurrently
     for (_, _, friend_id) in friends {
-        let friend_edges = OutgoingEdgesQuery::new(friend_id, None)
+        let friend_edges = OutgoingEdges::new(friend_id, None)
             .run(reader, timeout)
             .await?;
 
@@ -459,13 +459,13 @@ async fn safe_query(
     node_id: Id,
     timeout: Duration
 ) -> anyhow::Result<Option<(NodeName, NodeSummary)>> {
-    match NodeByIdQuery::new(node_id, None).run(reader, timeout).await {
+    match NodeById::new(node_id, None).run(reader, timeout).await {
         Ok(result) => Ok(Some(result)),
         Err(e) if e.to_string().contains("not found") => Ok(None),
         Err(e) if e.to_string().contains("timeout") => {
             eprintln!("Query timed out, retrying...");
             // Retry with longer timeout
-            NodeByIdQuery::new(node_id, None)
+            NodeById::new(node_id, None)
                 .run(reader, Duration::from_secs(30))
                 .await
                 .map(Some)
@@ -505,7 +505,7 @@ where
 }
 
 // Usage
-let query = NodeByIdQuery::new(id, None);
+let query = NodeById::new(id, None);
 let result = execute_with_retry(query, &reader, 3, timeout).await?;
 ```
 
@@ -519,12 +519,12 @@ async fn get_edge_with_endpoints(
 ) -> anyhow::Result<EdgeData> {
     // Get edge info
     let (src_id, dst_id, edge_name, edge_summary) =
-        EdgeByIdQuery::new(edge_id, None).run(reader, timeout).await?;
+        EdgeById::new(edge_id, None).run(reader, timeout).await?;
 
     // Get endpoint node data concurrently
     let ((src_name, src_summary), (dst_name, dst_summary)) = try_join!(
-        NodeByIdQuery::new(src_id, None).run(reader, timeout),
-        NodeByIdQuery::new(dst_id, None).run(reader, timeout)
+        NodeById::new(src_id, None).run(reader, timeout),
+        NodeById::new(dst_id, None).run(reader, timeout)
     )?;
 
     Ok(EdgeData {
@@ -598,7 +598,7 @@ let (name, summary) = reader
 **After (New API)**:
 ```rust
 // New API - timeout in run()
-let (name, summary) = NodeByIdQuery::new(id, Some(ref_time))
+let (name, summary) = NodeById::new(id, Some(ref_time))
     .run(&reader, Duration::from_secs(5))
     .await?;
 ```
@@ -607,44 +607,44 @@ let (name, summary) = NodeByIdQuery::new(id, Some(ref_time))
 
 1. ✅ Import query types:
    ```rust
-   use motlie_db::{NodeByIdQuery, EdgeByIdQuery, Runnable};
+   use motlie_db::{NodeById, EdgeById, Runnable};
    ```
 
 2. ✅ Update method calls:
    ```rust
    // Old (deprecated): reader.node_by_id(id, ref_ts, timeout)
-   // New: NodeByIdQuery::new(id, ref_ts).run(&reader, timeout)
+   // New: NodeById::new(id, ref_ts).run(&reader, timeout)
    ```
 
    **Common method migrations:**
    ```rust
-   // NodeByIdQuery
+   // NodeById
    // Old: reader.node_by_id(id, ref_ts, timeout).await?
-   NodeByIdQuery::new(id, ref_ts).run(&reader, timeout).await?
+   NodeById::new(id, ref_ts).run(&reader, timeout).await?
 
-   // EdgeByIdQuery
+   // EdgeById
    // Old: reader.edge_by_id(id, ref_ts, timeout).await?
-   EdgeByIdQuery::new(id, ref_ts).run(&reader, timeout).await?
+   EdgeById::new(id, ref_ts).run(&reader, timeout).await?
 
-   // FragmentsByIdTimeRangeQuery
+   // FragmentsByIdTimeRange
    // Old: reader.fragments_by_id_time_range(id, range, ref_ts, timeout).await?
-   FragmentsByIdTimeRangeQuery::new(id, range, ref_ts).run(&reader, timeout).await?
+   FragmentsByIdTimeRange::new(id, range, ref_ts).run(&reader, timeout).await?
 
-   // OutgoingEdgesQuery
+   // OutgoingEdges
    // Old: reader.edges_from_node_by_id(node_id, ref_ts, timeout).await?
-   OutgoingEdgesQuery::new(node_id, ref_ts).run(&reader, timeout).await?
+   OutgoingEdges::new(node_id, ref_ts).run(&reader, timeout).await?
 
-   // IncomingEdgesQuery
+   // IncomingEdges
    // Old: reader.edges_to_node_by_id(node_id, ref_ts, timeout).await?
-   IncomingEdgesQuery::new(node_id, ref_ts).run(&reader, timeout).await?
+   IncomingEdges::new(node_id, ref_ts).run(&reader, timeout).await?
 
-   // NodesByNameQuery
+   // NodesByName
    // Old: reader.nodes_by_name(prefix, cursor, limit, ref_ts, timeout).await?
-   NodesByNameQuery::new(prefix, cursor, limit, ref_ts).run(&reader, timeout).await?
+   NodesByName::new(prefix, cursor, limit, ref_ts).run(&reader, timeout).await?
 
-   // EdgesByNameQuery
+   // EdgesByName
    // Old: reader.edges_by_name(prefix, cursor, limit, ref_ts, timeout).await?
-   EdgesByNameQuery::new(prefix, cursor, limit, ref_ts).run(&reader, timeout).await?
+   EdgesByName::new(prefix, cursor, limit, ref_ts).run(&reader, timeout).await?
    ```
 
 3. ✅ Parameter order changed:
@@ -668,7 +668,7 @@ The old Reader methods (`reader.node_by_id()`, etc.) are **deprecated but still 
 let result1 = reader.node_by_id(id, None, timeout).await?;
 
 // New API (recommended)
-let result2 = NodeByIdQuery::new(id, None).run(&reader, timeout).await?;
+let result2 = NodeById::new(id, None).run(&reader, timeout).await?;
 
 assert_eq!(result1, result2);
 ```
@@ -704,10 +704,10 @@ assert_eq!(result1, result2);
 
 ### Query Performance
 
-- **Point lookups** (`NodeByIdQuery`, `EdgeByIdQuery`): O(1) - ~1-10µs
-- **Prefix scans** (`NodesByNameQuery`, `EdgesByNameQuery`): O(K) where K = results - ~10-100µs per page
-- **Range scans** (`FragmentsByIdTimeRangeQuery`): O(K) where K = results - ~10-100µs per page
-- **Topology queries** (`OutgoingEdgesQuery`, `IncomingEdgesQuery`): O(degree) - ~10µs + 1µs per edge
+- **Point lookups** (`NodeById`, `EdgeById`): O(1) - ~1-10µs
+- **Prefix scans** (`NodesByName`, `EdgesByName`): O(K) where K = results - ~10-100µs per page
+- **Range scans** (`FragmentsByIdTimeRange`): O(K) where K = results - ~10-100µs per page
+- **Topology queries** (`OutgoingEdges`, `IncomingEdges`): O(degree) - ~10µs + 1µs per edge
 
 ### Concurrency
 
@@ -741,7 +741,7 @@ impl CachedReader {
         }
 
         // Query database
-        let result = NodeByIdQuery::new(id, None)
+        let result = NodeById::new(id, None)
             .run(&self.reader, timeout)
             .await?;
 

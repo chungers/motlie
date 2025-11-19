@@ -111,10 +111,10 @@ fn record_from(args: &AddEdge) -> (EdgeCfKey, EdgeCfValue) {
 
 ```rust
 // OLD:
-pub type EdgeSummaryByIdQuery = ByIdQuery<EdgeSummary>;
+pub type EdgeSummaryById = ByIdQuery<EdgeSummary>;
 
 // NEW:
-pub type EdgeByIdQuery = ByIdQuery<(Id, Id, EdgeName, EdgeSummary)>;
+pub type EdgeById = ByIdQuery<(Id, Id, EdgeName, EdgeSummary)>;
 ```
 
 **Note:** Using `Id` directly instead of `SrcId`/`DstId` type aliases in the tuple for simplicity. The Reader API will use `SrcId`/`DstId` for clarity.
@@ -128,22 +128,22 @@ pub type EdgeByIdQuery = ByIdQuery<(Id, Id, EdgeName, EdgeSummary)>;
 ```rust
 // OLD:
 pub enum Query {
-    NodeById(NodeByIdQuery),
-    EdgeSummaryById(EdgeSummaryByIdQuery),
-    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
-    FragmentContentById(FragmentContentByIdQuery),
-    EdgesFromNodeById(EdgesFromNodeByIdQuery),
-    EdgesToNodeById(EdgesToNodeByIdQuery),
+    NodeById(NodeById),
+    EdgeSummaryById(EdgeSummaryById),
+    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstName),
+    FragmentContentById(FragmentContentById),
+    EdgesFromNodeById(EdgesFromNodeById),
+    EdgesToNodeById(EdgesToNodeById),
 }
 
 // NEW:
 pub enum Query {
-    NodeById(NodeByIdQuery),
-    EdgeById(EdgeByIdQuery),  // Renamed
-    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameQuery),
-    FragmentContentById(FragmentContentByIdQuery),
-    EdgesFromNodeById(EdgesFromNodeByIdQuery),
-    EdgesToNodeById(EdgesToNodeByIdQuery),
+    NodeById(NodeById),
+    EdgeById(EdgeById),  // Renamed
+    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstName),
+    FragmentContentById(FragmentContentById),
+    EdgesFromNodeById(EdgesFromNodeById),
+    EdgesToNodeById(EdgesToNodeById),
 }
 ```
 
@@ -291,7 +291,7 @@ match query {
 // OLD TestProcessor:
 async fn get_edge_summary_by_id(
     &self,
-    query: &EdgeSummaryByIdQuery,
+    query: &EdgeSummaryById,
 ) -> Result<EdgeSummary> {
     tokio::time::sleep(Duration::from_millis(10)).await;
     Ok(EdgeSummary::new(format!("Edge: {:?}", query.id)))
@@ -300,7 +300,7 @@ async fn get_edge_summary_by_id(
 // NEW TestProcessor:
 async fn get_edge_by_id(
     &self,
-    query: &EdgeByIdQuery,
+    query: &EdgeById,
 ) -> Result<(Id, Id, EdgeName, EdgeSummary)> {
     tokio::time::sleep(Duration::from_millis(10)).await;
     Ok((
@@ -326,7 +326,7 @@ async fn get_edge_by_id(
 // OLD:
 async fn get_edge_summary_by_id(
     &self,
-    query: &crate::query::EdgeSummaryByIdQuery,
+    query: &crate::query::EdgeSummaryById,
 ) -> Result<EdgeSummary> {
     let id = query.id;
     let key = schema::EdgeCfKey(id);
@@ -358,7 +358,7 @@ async fn get_edge_summary_by_id(
 // NEW:
 async fn get_edge_by_id(
     &self,
-    query: &crate::query::EdgeByIdQuery,
+    query: &crate::query::EdgeById,
 ) -> Result<(Id, Id, EdgeName, EdgeSummary)> {
     let id = query.id;
     let key = schema::EdgeCfKey(id);
@@ -406,7 +406,7 @@ pub async fn edge_summary_by_id(&self, id: Id, timeout: Duration)
     -> Result<EdgeSummary>
 {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let query = EdgeSummaryByIdQuery::new(id, timeout, result_tx);
+    let query = EdgeSummaryById::new(id, timeout, result_tx);
 
     self.sender
         .send_async(Query::EdgeSummaryById(query))
@@ -425,7 +425,7 @@ pub async fn edge_by_id(
     timeout: Duration,
 ) -> Result<(SrcId, DstId, EdgeName, EdgeSummary)> {
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let query = EdgeByIdQuery::new(id, timeout, result_tx);
+    let query = EdgeById::new(id, timeout, result_tx);
 
     self.sender
         .send_async(Query::EdgeById(query))
@@ -449,14 +449,14 @@ pub async fn edge_by_id(
 ```rust
 // OLD:
 use crate::query::{
-    DstId, EdgeSummaryByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
-    EdgesToNodeByIdQuery, FragmentContentByIdQuery, NodeByIdQuery, Query, SrcId,
+    DstId, EdgeSummaryById, EdgeSummaryBySrcDstName, EdgesFromNodeById,
+    EdgesToNodeById, FragmentContentById, NodeById, Query, SrcId,
 };
 
 // NEW:
 use crate::query::{
-    DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
-    EdgesToNodeByIdQuery, FragmentContentByIdQuery, NodeByIdQuery, Query, SrcId,
+    DstId, EdgeById, EdgeSummaryBySrcDstName, EdgesFromNodeById,
+    EdgesToNodeById, FragmentContentById, NodeById, Query, SrcId,
 };
 ```
 
@@ -471,14 +471,14 @@ use crate::query::{
 ```rust
 // OLD:
 pub use query::{
-    DstId, EdgeSummaryByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
-    EdgesToNodeByIdQuery, FragmentContentByIdQuery, NodeByIdQuery, Query, SrcId,
+    DstId, EdgeSummaryById, EdgeSummaryBySrcDstName, EdgesFromNodeById,
+    EdgesToNodeById, FragmentContentById, NodeById, Query, SrcId,
 };
 
 // NEW:
 pub use query::{
-    DstId, EdgeByIdQuery, EdgeSummaryBySrcDstNameQuery, EdgesFromNodeByIdQuery,
-    EdgesToNodeByIdQuery, FragmentContentByIdQuery, NodeByIdQuery, Query, SrcId,
+    DstId, EdgeById, EdgeSummaryBySrcDstName, EdgesFromNodeById,
+    EdgesToNodeById, FragmentContentById, NodeById, Query, SrcId,
 };
 ```
 
@@ -726,7 +726,7 @@ async fn test_edge_by_id_returns_complete_topology() {
 async fn test_edge_by_id_not_found() {
     // ... setup ...
 
-    let result = EdgeByIdQuery::new(Id::new(), None)
+    let result = EdgeById::new(Id::new(), None)
         .run(&reader, Duration::from_secs(5))
         .await;
 
@@ -779,7 +779,7 @@ Both use **tuple structs** with ordered fields representing different aspects of
 
 - [ ] 1. Update `EdgeCfValue` tuple in `schema.rs`
 - [ ] 2. Update `Edges::record_from()` in `schema.rs`
-- [ ] 3. Update type alias `EdgeByIdQuery` in `query.rs`
+- [ ] 3. Update type alias `EdgeById` in `query.rs`
 - [ ] 4. Update `Query` enum variant in `query.rs`
 - [ ] 5. Update sealed trait in `query.rs`
 - [ ] 6. Update `ByIdQueryable` impl in `query.rs`
@@ -814,7 +814,7 @@ Both use **tuple structs** with ordered fields representing different aspects of
 - Consumers must update to destructure tuple
 
 ### Type System Level
-- `EdgeSummaryByIdQuery` → `EdgeByIdQuery`
+- `EdgeSummaryById` → `EdgeById`
 - Internal type changes propagate through query system
 
 ---

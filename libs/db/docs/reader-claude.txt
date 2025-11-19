@@ -63,7 +63,7 @@ requirements.
 
   Key components:
   - Query enum with variants:
-    - NodeById(NodeByIdQuery)
+    - NodeById(NodeById)
     - EdgeBySrcDstName(EdgeBySrcDstNameQuery)
     - FragmentById(FragmentByIdQuery)
   - Query struct types with fields:
@@ -78,7 +78,7 @@ requirements.
   - Processor trait with async methods:
   #[async_trait::async_trait]
   pub trait Processor: Send + Sync {
-      async fn process_node_by_id(&self, query: &NodeByIdQuery) -> Result<NodeSummary>;
+      async fn process_node_by_id(&self, query: &NodeById) -> Result<NodeSummary>;
       async fn process_edge_by_src_dst_name(&self, query: &EdgeBySrcDstNameQuery) -> Result<EdgeSummary>;
       async fn process_fragment_by_id(&self, query: &FragmentByIdQuery) -> Result<FragmentContent>;
   }
@@ -217,7 +217,7 @@ be made
 
   #[derive(Clone)]
   pub enum Query {
-      NodeById(NodeByIdQuery),
+      NodeById(NodeById),
       EdgeBySrcDstName(EdgeBySrcDstNameQuery),
       FragmentById(FragmentByIdQuery),
   }
@@ -228,7 +228,7 @@ be made
   type QueryResult<T> = Arc<tokio::sync::Mutex<Option<Result<T>>>>;
 
   #[derive(Clone)]
-  pub struct NodeByIdQuery {
+  pub struct NodeById {
       pub id: Option<Id>,
       pub ts_millis: TimestampMilli,
       pub timeout: Duration,
@@ -262,7 +262,7 @@ be made
   - set_result() - processor calls this to write result
   - await_result() - client calls this to wait for result (with timeout)
 
-  impl NodeByIdQuery {
+  impl NodeById {
       pub fn new(id: Option<Id>, timeout: Duration) -> Self {
           Self {
               id,
@@ -305,7 +305,7 @@ be made
 
   #[async_trait::async_trait]
   pub trait Processor: Send + Sync {
-      async fn process_node_by_id(&self, query: &NodeByIdQuery) -> Result<schema::NodeSummary>;
+      async fn process_node_by_id(&self, query: &NodeById) -> Result<schema::NodeSummary>;
       async fn process_edge_by_src_dst_name(&self, query: &EdgeBySrcDstNameQuery) ->
   Result<schema::EdgeSummary>;
       async fn process_fragment_by_id(&self, query: &FragmentByIdQuery) -> Result<schema::FragmentContent>;
@@ -410,7 +410,7 @@ be made
       }
 
       pub async fn node_by_id(&self, id: Id, timeout: Duration) -> Result<schema::NodeSummary> {
-          let query = NodeByIdQuery::new(Some(id), timeout);
+          let query = NodeById::new(Some(id), timeout);
           let query_handle = self.send_query(Query::NodeById(query)).await?;
 
           // Extract and await result
@@ -466,7 +466,7 @@ be made
 
   #[async_trait::async_trait]
   impl query::Processor for Graph {
-      async fn process_node_by_id(&self, query: &query::NodeByIdQuery) -> Result<schema::NodeSummary> {
+      async fn process_node_by_id(&self, query: &query::NodeById) -> Result<schema::NodeSummary> {
           let id = query.id.ok_or_else(|| anyhow::anyhow!("id is required"))?;
 
           // Use readonly storage
@@ -639,7 +639,7 @@ be made
   Consider this scenario:
 
   // Thread 1: Client
-  let query = NodeByIdQuery::new(Some(id), timeout);
+  let query = NodeById::new(Some(id), timeout);
   let query_handle = self.send_query(Query::NodeById(query)).await?;
   // query is moved into send_query
   // query_handle is a clone
@@ -690,7 +690,7 @@ be made
       tokio::sync::Notify,
   )>;
 
-  impl NodeByIdQuery {
+  impl NodeById {
       pub async fn set_result(&self, result: Result<schema::NodeSummary>) {
           let (mutex, notify) = &*self.result;
           let mut guard = mutex.lock().await;
@@ -798,7 +798,7 @@ channel in terms of resource, cost.
 
   Original Design: oneshot::channel
 
-  pub struct NodeByIdQuery {
+  pub struct NodeById {
       pub id: Option<Id>,
       pub ts_millis: TimestampMilli,
       pub timeout: Duration,
@@ -807,7 +807,7 @@ channel in terms of resource, cost.
 
   // Client code
   let (tx, rx) = oneshot::channel();
-  let query = NodeByIdQuery { id: Some(id), timeout, result_tx: tx, ... };
+  let query = NodeById { id: Some(id), timeout, result_tx: tx, ... };
   sender.send(Query::NodeById(query)).await?;
   let result = tokio::time::timeout(timeout, rx).await??;
 
@@ -831,7 +831,7 @@ channel in terms of resource, cost.
       tokio::sync::Notify,
   )>;
 
-  pub struct NodeByIdQuery {
+  pub struct NodeById {
       pub id: Option<Id>,
       pub ts_millis: TimestampMilli,
       pub timeout: Duration,
@@ -965,7 +965,7 @@ channel in terms of resource, cost.
 
   Revert to oneshot::channel design with this structure:
 
-  pub struct NodeByIdQuery {
+  pub struct NodeById {
       pub id: Option<Id>,
       pub ts_millis: TimestampMilli,
       pub timeout: Duration,
@@ -1027,14 +1027,14 @@ channel in terms of resource, cost.
   /// Query enum representing all possible query types
   #[derive(Debug)]
   pub enum Query {
-      NodeById(NodeByIdQuery),
+      NodeById(NodeById),
       EdgeBySrcDstName(EdgeBySrcDstNameQuery),
       FragmentById(FragmentByIdQuery),
   }
 
   /// Query to find a node by its ID
   #[derive(Debug)]
-  pub struct NodeByIdQuery {
+  pub struct NodeById {
       /// The node ID to search for
       pub id: Option<Id>,
 
@@ -1048,8 +1048,8 @@ channel in terms of resource, cost.
       result_tx: oneshot::Sender<Result<NodeSummary>>,
   }
 
-  impl NodeByIdQuery {
-      /// Create a new NodeByIdQuery
+  impl NodeById {
+      /// Create a new NodeById
       pub fn new(id: Option<Id>, timeout: Duration, result_tx: oneshot::Sender<Result<NodeSummary>>) -> Self
   {
           Self {
@@ -1063,7 +1063,7 @@ channel in terms of resource, cost.
       /// Validate that required fields are present
       pub fn validate(&self) -> Result<()> {
           if self.id.is_none() {
-              return Err(anyhow::anyhow!("id is required for NodeByIdQuery"));
+              return Err(anyhow::anyhow!("id is required for NodeById"));
           }
           Ok(())
       }
@@ -1176,7 +1176,7 @@ channel in terms of resource, cost.
   #[async_trait::async_trait]
   pub trait Processor: Send + Sync {
       /// Process a NodeById query
-      async fn process_node_by_id(&self, query: &NodeByIdQuery) -> Result<NodeSummary>;
+      async fn process_node_by_id(&self, query: &NodeById) -> Result<NodeSummary>;
 
       /// Process an EdgeBySrcDstName query
       async fn process_edge_by_src_dst_name(&self, query: &EdgeBySrcDstNameQuery) -> Result<EdgeSummary>;
@@ -1284,7 +1284,7 @@ channel in terms of resource, cost.
 
       #[async_trait::async_trait]
       impl Processor for TestProcessor {
-          async fn process_node_by_id(&self, query: &NodeByIdQuery) -> Result<NodeSummary> {
+          async fn process_node_by_id(&self, query: &NodeById) -> Result<NodeSummary> {
               tokio::time::sleep(Duration::from_millis(10)).await;
               Ok(NodeSummary::new(format!("Node: {:?}", query.id)))
           }
@@ -1358,7 +1358,7 @@ channel in terms of resource, cost.
   use anyhow::{Context, Result};
   use std::time::Duration;
 
-  use crate::{Id, query::{Query, NodeByIdQuery, EdgeBySrcDstNameQuery, FragmentByIdQuery}};
+  use crate::{Id, query::{Query, NodeById, EdgeBySrcDstNameQuery, FragmentByIdQuery}};
   use crate::schema::{NodeSummary, EdgeSummary, FragmentContent};
 
   /// Configuration for the query reader
@@ -1392,7 +1392,7 @@ channel in terms of resource, cost.
       pub async fn node_by_id(&self, id: Id, timeout: Duration) -> Result<NodeSummary> {
           let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-          let query = NodeByIdQuery::new(Some(id), timeout, result_tx);
+          let query = NodeById::new(Some(id), timeout, result_tx);
 
           self.sender
               .send_async(Query::NodeById(query))
@@ -1498,7 +1498,7 @@ channel in terms of resource, cost.
   /// Implement query processor for Graph
   #[async_trait::async_trait]
   impl crate::query::Processor for Graph {
-      async fn process_node_by_id(&self, query: &crate::query::NodeByIdQuery) -> Result<NodeSummary> {
+      async fn process_node_by_id(&self, query: &crate::query::NodeById) -> Result<NodeSummary> {
           let id = query.id.ok_or_else(|| anyhow::anyhow!("id is required"))?;
 
           // Get DB handle (works with both readonly and readwrite modes)
@@ -1739,7 +1739,7 @@ channel in terms of resource, cost.
   ⎿  Wrote 143 lines to libs/db/src/reader.rs                                           
      use anyhow::{Context, Result};
      use std::time::Duration;
-     use crate::query::{EdgeBySrcDstNameQuery, FragmentByIdQuery, NodeByIdQuery, Query};
+     use crate::query::{EdgeBySrcDstNameQuery, FragmentByIdQuery, NodeById, Query};
      use crate::schema::{EdgeSummary, FragmentContent, NodeSummary};
      use crate::Id;
      /// Configuration for the query reader
@@ -1848,7 +1848,7 @@ channel in terms of resource, cost.
        383 +  impl crate::query::Processor for Graph {
        384 +      async fn process_node_by_id(
        385 +          &self,
-       386 +          query: &crate::query::NodeByIdQuery,
+       386 +          query: &crate::query::NodeById,
        387 +      ) -> Result<NodeSummary> {
        388 +          let id = query
        389 +              .id
@@ -2050,7 +2050,7 @@ channel in terms of resource, cost.
        12 -  pub use query::*;
        12 +  // Re-export query types but not Consumer/Processor/spawn_consumer to avoid ambiguity
        13 +  pub use query::{
-       14 +      EdgeBySrcDstNameQuery, FragmentByIdQuery, NodeByIdQuery, Query,
+       14 +      EdgeBySrcDstNameQuery, FragmentByIdQuery, NodeById, Query,
        15 +  };
        16    mod graph;
        17    pub use graph::*;
