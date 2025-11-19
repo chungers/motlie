@@ -20,6 +20,7 @@ pub enum Mutation {
     AddNode(AddNode),
     AddEdge(AddEdge),
     AddFragment(AddFragment),
+    UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil),
     UpdateEdgeValidSinceUntil(UpdateEdgeValidSinceUntil),
 }
 
@@ -72,6 +73,18 @@ pub struct AddFragment {
 
     /// The temporal validity range for this fragment
     pub temporal_range: Option<schema::ValidTemporalRange>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateNodeValidSinceUntil {
+    /// The UUID of the Node
+    pub id: Id,
+
+    /// The temporal validity range for this fragment
+    pub temporal_range: schema::ValidTemporalRange,
+
+    /// The reason for invalidation
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -130,10 +143,23 @@ impl MutationPlanner for AddFragment {
     }
 }
 
+impl MutationPlanner for UpdateNodeValidSinceUntil {
+    fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
+        use crate::graph::PatchNodeValidRange;
+
+        Ok(vec![StorageOperation::PatchNodeValidRange(
+            PatchNodeValidRange(self.id, self.temporal_range),
+        )])
+    }
+}
+
 impl MutationPlanner for UpdateEdgeValidSinceUntil {
     fn plan(&self) -> Result<Vec<StorageOperation>, rmp_serde::encode::Error> {
-        // TODO: Implement actual invalidation operations when invalidation is ready
-        Ok(vec![])
+        use crate::graph::PatchEdgeValidRange;
+
+        Ok(vec![StorageOperation::PatchEdgeValidRange(
+            PatchEdgeValidRange(self.id, self.temporal_range),
+        )])
     }
 }
 
@@ -148,6 +174,7 @@ impl Mutation {
             Mutation::AddNode(m) => m.plan(),
             Mutation::AddEdge(m) => m.plan(),
             Mutation::AddFragment(m) => m.plan(),
+            Mutation::UpdateNodeValidSinceUntil(m) => m.plan(),
             Mutation::UpdateEdgeValidSinceUntil(m) => m.plan(),
         }
     }
@@ -202,6 +229,14 @@ impl Runnable for AddFragment {
     }
 }
 
+impl Runnable for UpdateNodeValidSinceUntil {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer
+            .send(vec![Mutation::UpdateNodeValidSinceUntil(self)])
+            .await
+    }
+}
+
 impl Runnable for UpdateEdgeValidSinceUntil {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer
@@ -229,6 +264,12 @@ impl From<AddEdge> for Mutation {
 impl From<AddFragment> for Mutation {
     fn from(m: AddFragment) -> Self {
         Mutation::AddFragment(m)
+    }
+}
+
+impl From<UpdateNodeValidSinceUntil> for Mutation {
+    fn from(m: UpdateNodeValidSinceUntil) -> Self {
+        Mutation::UpdateNodeValidSinceUntil(m)
     }
 }
 
@@ -483,9 +524,16 @@ impl<P: Processor> Consumer<P> {
                         args.content.0.len()
                     );
                 }
+                Mutation::UpdateNodeValidSinceUntil(args) => {
+                    log::debug!(
+                        "Processing UpdateNodeValidSinceUntil: id={}, reason={}",
+                        args.id,
+                        args.reason
+                    );
+                }
                 Mutation::UpdateEdgeValidSinceUntil(args) => {
                     log::debug!(
-                        "Processing Invalidate: id={}, reason={}",
+                        "Processing UpdateEdgeValidSinceUntil: id={}, reason={}",
                         args.id,
                         args.reason
                     );

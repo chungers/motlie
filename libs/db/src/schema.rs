@@ -1,11 +1,12 @@
 use crate::graph::ColumnFamilyRecord;
 use crate::DataUrl;
 use crate::TimestampMilli;
+use crate::ValidRangePatchable;
 use crate::{AddEdge, AddFragment, AddNode, Id};
 use serde::{Deserialize, Serialize};
 
 /// Support for temporal queries
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValidTemporalRange(pub Option<StartTimestamp>, pub Option<UntilTimestamp>);
 
 pub type StartTimestamp = TimestampMilli;
@@ -69,6 +70,22 @@ pub(crate) struct NodeCfValue(
     pub(crate) NodeSummary,
 );
 
+impl ValidRangePatchable for Nodes {
+    fn patch_valid_range(
+        &self,
+        old_value: &[u8],
+        new_range: ValidTemporalRange,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        use crate::graph::ColumnFamilyRecord;
+
+        let mut value = Nodes::value_from_bytes(old_value)
+            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+        value.0 = Some(new_range);
+        Nodes::value_to_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+    }
+}
+
 /// Id of edge source node
 pub type SrcId = Id;
 /// Id of edge destination node
@@ -86,6 +103,54 @@ pub(crate) struct EdgeCfValue(
     pub(crate) DstId,                      // dest_id
     pub(crate) EdgeSummary,                // edge summary
 );
+
+impl ValidRangePatchable for Edges {
+    fn patch_valid_range(
+        &self,
+        old_value: &[u8],
+        new_range: ValidTemporalRange,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        use crate::graph::ColumnFamilyRecord;
+
+        let mut value = Edges::value_from_bytes(old_value)
+            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+        value.0 = Some(new_range);
+        Edges::value_to_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+    }
+}
+
+impl ValidRangePatchable for ForwardEdges {
+    fn patch_valid_range(
+        &self,
+        old_value: &[u8],
+        new_range: ValidTemporalRange,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        use crate::graph::ColumnFamilyRecord;
+
+        let mut value = ForwardEdges::value_from_bytes(old_value)
+            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+        value.0 = Some(new_range);
+        ForwardEdges::value_to_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+    }
+}
+
+impl ValidRangePatchable for ReverseEdges {
+    fn patch_valid_range(
+        &self,
+        old_value: &[u8],
+        new_range: ValidTemporalRange,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        use crate::graph::ColumnFamilyRecord;
+
+        let mut value = ReverseEdges::value_from_bytes(old_value)
+            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+        value.0 = Some(new_range);
+        ReverseEdges::value_to_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+    }
+}
 
 /// Fragments column family.
 pub(crate) struct Fragments;

@@ -80,6 +80,8 @@ pub enum StorageOperation {
     PutCf(PutCf),
     DeleteCf(DeleteCf),
     PatchCf(PatchCf),
+    PatchEdgeValidRange(PatchEdgeValidRange),
+    PatchNodeValidRange(PatchNodeValidRange),
 }
 
 /// Storage operation to put a key-value pair into a column family.
@@ -100,8 +102,34 @@ pub(crate) struct PatchCf(
     pub(crate) (Vec<u8>, Patcher), // Key to lookup / update and patcher function
 );
 
-/// Patcher is a simple function that takes original value and returns patched value.
-pub(crate) type Patcher = fn(Option<Vec<u8>>) -> Result<Vec<u8>, anyhow::Error>;
+/// Patcher is a boxed closure that takes original value and returns patched value.
+pub(crate) type Patcher =
+    Box<dyn Fn(Option<Vec<u8>>) -> Result<Vec<u8>, anyhow::Error> + Send + Sync>;
+
+/// Storage operation to patch ValidTemporalRange across edge-related column families.
+/// This operation reads the Edge CF to extract metadata (source_id, target_id, name),
+/// then patches all three CFs: Edges, ForwardEdges, and ReverseEdges.
+pub(crate) struct PatchEdgeValidRange(
+    pub(crate) crate::Id,                   // Edge ID
+    pub(crate) schema::ValidTemporalRange,  // New temporal range
+);
+
+/// Storage operation to patch ValidTemporalRange for a node and all its associated edges.
+/// This operation reads the Node CF, patches it, then finds all incoming and outgoing edges
+/// via ForwardEdges and ReverseEdges CFs, and patches each edge using PatchEdgeValidRange logic.
+pub(crate) struct PatchNodeValidRange(
+    pub(crate) crate::Id,                   // Node ID
+    pub(crate) schema::ValidTemporalRange,  // New temporal range
+);
+
+/// Trait implemented by column families that supports patching of ValidTemporalRange.
+pub(crate) trait ValidRangePatchable {
+    fn patch_valid_range(
+        &self,
+        old_value: &[u8],
+        new_range: schema::ValidTemporalRange,
+    ) -> Result<Vec<u8>, anyhow::Error>;
+}
 
 /// Handle for either a read-only DB or read-write TransactionDB
 enum DatabaseHandle {
@@ -520,10 +548,197 @@ impl Processor for Graph {
                         .cf_handle(cf_name)
                         .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", cf_name))?;
                     // First read the current value
-                    let current_value = txn.get_cf(cf, &key)?
+                    let current_value = txn
+                        .get_cf(cf, &key)?
                         .ok_or_else(|| anyhow::anyhow!("Key not found for patch operation"))?;
                     // Then apply the patch
                     txn.put_cf(cf, key, patcher(Some(current_value))?)?;
+                }
+                StorageOperation::PatchEdgeValidRange(PatchEdgeValidRange(edge_id, new_range)) => {
+                    use schema::{EdgeCfKey, EdgeCfValue, Edges, ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
+                    use ValidRangePatchable;
+
+                    // Step 1: Read the Edge CF to get metadata
+                    let edge_cf = txn_db
+                        .cf_handle(Edges::CF_NAME)
+                        .ok_or_else(|| anyhow::anyhow!("Edges CF not found"))?;
+
+                    let edge_key = EdgeCfKey(edge_id);
+                    let edge_key_bytes = Edges::key_to_bytes(&edge_key);
+
+                    let edge_value_bytes = txn
+                        .get_cf(edge_cf, &edge_key_bytes)?
+                        .ok_or_else(|| anyhow::anyhow!("Edge not found for id: {}", edge_id))?;
+
+                    let edge_value: EdgeCfValue = Edges::value_from_bytes(&edge_value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize edge: {}", e))?;
+
+                    // Extract metadata: source_id, target_id, name
+                    let source_id = edge_value.1;
+                    let target_id = edge_value.3;
+                    let edge_name = edge_value.2.clone();
+
+                    // Step 2: Patch Edges CF
+                    let edges = Edges;
+                    let patched_edge_bytes = edges.patch_valid_range(&edge_value_bytes, new_range)?;
+                    txn.put_cf(edge_cf, &edge_key_bytes, patched_edge_bytes)?;
+
+                    // Step 3: Patch ForwardEdges CF
+                    let forward_cf = txn_db
+                        .cf_handle(ForwardEdges::CF_NAME)
+                        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+
+                    let forward_key = ForwardEdgeCfKey(source_id, target_id, edge_name.clone());
+                    let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
+
+                    let forward_value_bytes = txn
+                        .get_cf(forward_cf, &forward_key_bytes)?
+                        .ok_or_else(|| anyhow::anyhow!("ForwardEdge not found"))?;
+
+                    let forward_edges = ForwardEdges;
+                    let patched_forward_bytes = forward_edges.patch_valid_range(&forward_value_bytes, new_range)?;
+                    txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
+
+                    // Step 4: Patch ReverseEdges CF
+                    let reverse_cf = txn_db
+                        .cf_handle(ReverseEdges::CF_NAME)
+                        .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
+
+                    let reverse_key = ReverseEdgeCfKey(target_id, source_id, edge_name);
+                    let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
+
+                    let reverse_value_bytes = txn
+                        .get_cf(reverse_cf, &reverse_key_bytes)?
+                        .ok_or_else(|| anyhow::anyhow!("ReverseEdge not found"))?;
+
+                    let reverse_edges = ReverseEdges;
+                    let patched_reverse_bytes = reverse_edges.patch_valid_range(&reverse_value_bytes, new_range)?;
+                    txn.put_cf(reverse_cf, &reverse_key_bytes, patched_reverse_bytes)?;
+                }
+                StorageOperation::PatchNodeValidRange(PatchNodeValidRange(node_id, new_range)) => {
+                    use schema::{NodeCfKey, Nodes, ForwardEdges, ForwardEdgeCfValue, ReverseEdges, ReverseEdgeCfValue, Edges, EdgeCfKey};
+                    use ValidRangePatchable;
+
+                    // Step 1: Patch the Node CF
+                    let node_cf = txn_db
+                        .cf_handle(Nodes::CF_NAME)
+                        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+
+                    let node_key = NodeCfKey(node_id);
+                    let node_key_bytes = Nodes::key_to_bytes(&node_key);
+
+                    let node_value_bytes = txn
+                        .get_cf(node_cf, &node_key_bytes)?
+                        .ok_or_else(|| anyhow::anyhow!("Node not found for id: {}", node_id))?;
+
+                    let nodes = Nodes;
+                    let patched_node_bytes = nodes.patch_valid_range(&node_value_bytes, new_range)?;
+                    txn.put_cf(node_cf, &node_key_bytes, patched_node_bytes)?;
+
+                    // Step 2: Find and patch all outgoing edges (where this node is the source)
+                    let forward_cf = txn_db
+                        .cf_handle(ForwardEdges::CF_NAME)
+                        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+
+                    // Create a prefix key for scanning: just the source node_id (raw 16 bytes)
+                    let forward_prefix = node_id.into_bytes().to_vec();
+
+                    let forward_iter = txn.prefix_iterator_cf(forward_cf, &forward_prefix);
+                    let mut outgoing_edges = Vec::new();
+
+                    for item in forward_iter {
+                        let (_key_bytes, value_bytes) = item?;
+
+                        // Deserialize the ForwardEdgeCfValue to get the edge_id
+                        let forward_value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize ForwardEdge value: {}", e))?;
+
+                        let edge_id = forward_value.1;
+                        outgoing_edges.push(edge_id);
+                    }
+
+                    // Step 3: Find and patch all incoming edges (where this node is the destination)
+                    let reverse_cf = txn_db
+                        .cf_handle(ReverseEdges::CF_NAME)
+                        .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
+
+                    // Create a prefix key for scanning: just the destination node_id (raw 16 bytes)
+                    let reverse_prefix = node_id.into_bytes().to_vec();
+
+                    let reverse_iter = txn.prefix_iterator_cf(reverse_cf, &reverse_prefix);
+                    let mut incoming_edges = Vec::new();
+
+                    for item in reverse_iter {
+                        let (_key_bytes, value_bytes) = item?;
+
+                        // Deserialize the ReverseEdgeCfValue to get the edge_id
+                        let reverse_value: ReverseEdgeCfValue = ReverseEdges::value_from_bytes(&value_bytes)
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize ReverseEdge value: {}", e))?;
+
+                        let edge_id = reverse_value.1;
+                        incoming_edges.push(edge_id);
+                    }
+
+                    // Step 4: Patch all edges (both incoming and outgoing)
+                    let all_edge_ids: std::collections::HashSet<_> = outgoing_edges.into_iter()
+                        .chain(incoming_edges.into_iter())
+                        .collect();
+
+                    log::info!("[PatchNodeValidRange] Found {} edges to patch for node {}", all_edge_ids.len(), node_id);
+
+                    for edge_id in all_edge_ids {
+                        // Reuse the PatchEdgeValidRange logic inline
+                        use schema::{EdgeCfValue, ForwardEdgeCfKey, ReverseEdgeCfKey};
+
+                        // Read the Edge CF to get metadata
+                        let edge_cf = txn_db
+                            .cf_handle(Edges::CF_NAME)
+                            .ok_or_else(|| anyhow::anyhow!("Edges CF not found"))?;
+
+                        let edge_key = EdgeCfKey(edge_id);
+                        let edge_key_bytes = Edges::key_to_bytes(&edge_key);
+
+                        let edge_value_bytes = txn
+                            .get_cf(edge_cf, &edge_key_bytes)?
+                            .ok_or_else(|| anyhow::anyhow!("Edge not found for id: {}", edge_id))?;
+
+                        let edge_value: EdgeCfValue = Edges::value_from_bytes(&edge_value_bytes)
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge: {}", e))?;
+
+                        // Extract metadata: source_id, target_id, name
+                        let source_id = edge_value.1;
+                        let target_id = edge_value.3;
+                        let edge_name = edge_value.2.clone();
+
+                        // Patch Edges CF
+                        let edges = Edges;
+                        let patched_edge_bytes = edges.patch_valid_range(&edge_value_bytes, new_range)?;
+                        txn.put_cf(edge_cf, &edge_key_bytes, patched_edge_bytes)?;
+
+                        // Patch ForwardEdges CF
+                        let forward_key = ForwardEdgeCfKey(source_id, target_id, edge_name.clone());
+                        let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
+
+                        let forward_value_bytes = txn
+                            .get_cf(forward_cf, &forward_key_bytes)?
+                            .ok_or_else(|| anyhow::anyhow!("ForwardEdge not found"))?;
+
+                        let forward_edges = ForwardEdges;
+                        let patched_forward_bytes = forward_edges.patch_valid_range(&forward_value_bytes, new_range)?;
+                        txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
+
+                        // Patch ReverseEdges CF
+                        let reverse_key = ReverseEdgeCfKey(target_id, source_id, edge_name);
+                        let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
+
+                        let reverse_value_bytes = txn
+                            .get_cf(reverse_cf, &reverse_key_bytes)?
+                            .ok_or_else(|| anyhow::anyhow!("ReverseEdge not found"))?;
+
+                        let reverse_edges = ReverseEdges;
+                        let patched_reverse_bytes = reverse_edges.patch_valid_range(&reverse_value_bytes, new_range)?;
+                        txn.put_cf(reverse_cf, &reverse_key_bytes, patched_reverse_bytes)?;
+                    }
                 }
             }
         }

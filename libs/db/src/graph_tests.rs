@@ -102,8 +102,9 @@ mod tests {
         let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
 
         // Test all mutation types
+        let node_id = Id::new();
         AddNode {
-            id: Id::new(),
+            id: node_id,
             ts_millis: TimestampMilli::now(),
             name: "node".to_string(),
             temporal_range: None,
@@ -112,8 +113,9 @@ mod tests {
         .await
         .unwrap();
 
+        let edge_id = Id::new();
         AddEdge {
-            id: Id::new(),
+            id: edge_id,
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
@@ -134,10 +136,22 @@ mod tests {
         .await
         .unwrap();
 
-        crate::UpdateEdgeValidSinceUntil {
-            id: Id::new(),
+        // Give consumer time to process the node and edge
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        crate::UpdateNodeValidSinceUntil {
+            id: node_id,
             temporal_range: crate::schema::ValidTemporalRange(None, None),
-            reason: "test invalidation".to_string(),
+            reason: "test node invalidation".to_string(),
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        crate::UpdateEdgeValidSinceUntil {
+            id: edge_id,
+            temporal_range: crate::schema::ValidTemporalRange(None, None),
+            reason: "test edge invalidation".to_string(),
         }
         .run(&writer)
         .await
@@ -4869,5 +4883,725 @@ mod tests {
 
         let v2 = txn.get_cf(cf, &key2).unwrap();
         assert!(v2.is_none(), "Node2 should not exist");
+    }
+
+    #[test]
+    fn test_patch_node_valid_range_using_trait() {
+        use crate::graph::ColumnFamilyRecord;
+        use crate::schema::{NodeCfKey, NodeCfValue, Nodes, ValidTemporalRange};
+        use crate::ValidRangePatchable;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+
+        let node_id = Id::new();
+        let key = NodeCfKey(node_id);
+        let key_bytes = Nodes::key_to_bytes(&key);
+
+        // Transaction 1: Create a node with no temporal range
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+
+            let value = NodeCfValue(
+                None, // No temporal range initially
+                "test_node".to_string(),
+                crate::DataUrl::from_markdown("Node content"),
+            );
+            let value_bytes = Nodes::value_to_bytes(&value).unwrap();
+            txn.put_cf(cf, &key_bytes, &value_bytes).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Transaction 2: Verify node has no temporal range
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+
+            let stored_bytes = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+            let stored_value: NodeCfValue = Nodes::value_from_bytes(&stored_bytes).unwrap();
+            assert_eq!(stored_value.0, None, "Node should have no temporal range");
+            assert_eq!(stored_value.1, "test_node");
+        }
+
+        // Transaction 3: Patch the node with a new temporal range using ValidRangePatchable trait
+        let new_range = ValidTemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+
+            let current_bytes = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+
+            // Use the ValidRangePatchable trait to patch the value
+            let nodes = Nodes;
+            let patched_bytes = nodes.patch_valid_range(&current_bytes, new_range).unwrap();
+
+            txn.put_cf(cf, &key_bytes, patched_bytes).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Transaction 4: Verify the temporal range was updated
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+
+            let stored_bytes = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+            let stored_value: NodeCfValue = Nodes::value_from_bytes(&stored_bytes).unwrap();
+
+            assert_eq!(
+                stored_value.0,
+                Some(new_range),
+                "Temporal range should be updated"
+            );
+            assert_eq!(stored_value.1, "test_node", "Node name should be unchanged");
+        }
+
+        // Transaction 5: Patch again with a different range to verify multiple patches work
+        let updated_range = ValidTemporalRange(Some(TimestampMilli(5000)), None);
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+
+            let current_bytes = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+
+            let nodes = Nodes;
+            let patched_bytes = nodes.patch_valid_range(&current_bytes, updated_range).unwrap();
+
+            txn.put_cf(cf, &key_bytes, patched_bytes).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Transaction 6: Verify the second patch worked
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+
+            let stored_bytes = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+            let stored_value: NodeCfValue = Nodes::value_from_bytes(&stored_bytes).unwrap();
+
+            assert_eq!(
+                stored_value.0,
+                Some(updated_range),
+                "Temporal range should be updated to new values"
+            );
+            assert_eq!(stored_value.1, "test_node", "Node name should still be unchanged");
+        }
+    }
+
+    #[test]
+    fn test_patch_edge_valid_range_across_transactions() {
+        use crate::graph::ColumnFamilyRecord;
+        use crate::schema::{EdgeCfKey, EdgeCfValue, Edges, ValidTemporalRange};
+        use crate::ValidRangePatchable;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+
+        let edge_id = Id::new();
+        let source_id = Id::new();
+        let target_id = Id::new();
+
+        // Transaction 1: Create an edge with no temporal range
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+
+            let key = EdgeCfKey(edge_id);
+            let key_bytes = Edges::key_to_bytes(&key);
+
+            let initial_value = EdgeCfValue(
+                None, // No temporal range initially
+                source_id,
+                "test_edge".to_string(),
+                target_id,
+                crate::DataUrl::from_markdown("Initial edge content"),
+            );
+
+            let value_bytes = Edges::value_to_bytes(&initial_value).unwrap();
+            txn.put_cf(cf, &key_bytes, value_bytes).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Transaction 2: Verify the edge exists with no temporal range
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+
+            let key = EdgeCfKey(edge_id);
+            let key_bytes = Edges::key_to_bytes(&key);
+
+            let stored_bytes = txn.get_cf(cf, &key_bytes).unwrap();
+            assert!(stored_bytes.is_some(), "Edge should exist");
+
+            let stored_value: EdgeCfValue = Edges::value_from_bytes(&stored_bytes.unwrap()).unwrap();
+            assert_eq!(stored_value.0, None, "Initial temporal range should be None");
+            assert_eq!(stored_value.1, source_id);
+            assert_eq!(stored_value.2, "test_edge");
+            assert_eq!(stored_value.3, target_id);
+        }
+
+        // Transaction 3: Patch the edge with a new valid temporal range
+        let start_time = TimestampMilli(1000);
+        let end_time = TimestampMilli(2000);
+        let new_range = ValidTemporalRange(Some(start_time), Some(end_time));
+
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+
+            let key = EdgeCfKey(edge_id);
+            let key_bytes = Edges::key_to_bytes(&key);
+
+            // Read current value
+            let current_bytes = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+
+            // Use the ValidRangePatchable trait to patch the value
+            let edges = Edges;
+            let patched_bytes = edges
+                .patch_valid_range(&current_bytes, new_range)
+                .unwrap();
+
+            // Write patched value back
+            txn.put_cf(cf, &key_bytes, patched_bytes).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Transaction 4: Verify the edge has been patched with the new temporal range
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+
+            let key = EdgeCfKey(edge_id);
+            let key_bytes = Edges::key_to_bytes(&key);
+
+            let stored_bytes = txn.get_cf(cf, &key_bytes).unwrap();
+            assert!(stored_bytes.is_some(), "Edge should still exist");
+
+            let stored_value: EdgeCfValue = Edges::value_from_bytes(&stored_bytes.unwrap()).unwrap();
+
+            // Verify the temporal range was updated
+            assert_eq!(
+                stored_value.0,
+                Some(new_range),
+                "Temporal range should be updated"
+            );
+
+            // Verify other fields remain unchanged
+            assert_eq!(stored_value.1, source_id, "Source ID should be unchanged");
+            assert_eq!(stored_value.2, "test_edge", "Edge name should be unchanged");
+            assert_eq!(stored_value.3, target_id, "Target ID should be unchanged");
+        }
+
+        // Transaction 5: Patch again with different range to ensure multiple patches work
+        let new_start = TimestampMilli(5000);
+        let updated_range = ValidTemporalRange(Some(new_start), None);
+
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+
+            let key = EdgeCfKey(edge_id);
+            let key_bytes = Edges::key_to_bytes(&key);
+
+            let current_bytes = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+
+            let edges = Edges;
+            let patched_bytes = edges
+                .patch_valid_range(&current_bytes, updated_range)
+                .unwrap();
+
+            txn.put_cf(cf, &key_bytes, patched_bytes).unwrap();
+            txn.commit().unwrap();
+        }
+
+        // Transaction 6: Verify the second patch worked
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+            let cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+
+            let key = EdgeCfKey(edge_id);
+            let key_bytes = Edges::key_to_bytes(&key);
+
+            let stored_bytes = txn.get_cf(cf, &key_bytes).unwrap().unwrap();
+            let stored_value: EdgeCfValue = Edges::value_from_bytes(&stored_bytes).unwrap();
+
+            assert_eq!(
+                stored_value.0,
+                Some(updated_range),
+                "Temporal range should be updated to new values"
+            );
+            assert_eq!(stored_value.1, source_id);
+            assert_eq!(stored_value.2, "test_edge");
+            assert_eq!(stored_value.3, target_id);
+        }
+    }
+
+    #[test]
+    fn test_update_edge_valid_range_patches_all_three_cfs() {
+        use crate::graph::ColumnFamilyRecord;
+        use crate::schema::{
+            EdgeCfKey, EdgeCfValue, Edges, ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges,
+            ReverseEdgeCfKey, ReverseEdgeCfValue, ReverseEdges, ValidTemporalRange,
+        };
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+
+        let edge_id = Id::new();
+        let source_id = Id::new();
+        let target_id = Id::new();
+        let edge_name = "test_relationship".to_string();
+
+        // Transaction 1: Create an edge (which creates entries in all 3 CFs)
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+
+            // Create Edge CF entry
+            let edge_cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+            let edge_key = EdgeCfKey(edge_id);
+            let edge_value = EdgeCfValue(
+                None, // No temporal range initially
+                source_id,
+                edge_name.clone(),
+                target_id,
+                crate::DataUrl::from_markdown("Edge content"),
+            );
+            txn.put_cf(
+                edge_cf,
+                Edges::key_to_bytes(&edge_key),
+                Edges::value_to_bytes(&edge_value).unwrap(),
+            )
+            .unwrap();
+
+            // Create ForwardEdges CF entry
+            let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).unwrap();
+            let forward_key = ForwardEdgeCfKey(source_id, target_id, edge_name.clone());
+            let forward_value = ForwardEdgeCfValue(None, edge_id);
+            txn.put_cf(
+                forward_cf,
+                ForwardEdges::key_to_bytes(&forward_key),
+                ForwardEdges::value_to_bytes(&forward_value).unwrap(),
+            )
+            .unwrap();
+
+            // Create ReverseEdges CF entry
+            let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).unwrap();
+            let reverse_key = ReverseEdgeCfKey(target_id, source_id, edge_name.clone());
+            let reverse_value = ReverseEdgeCfValue(None, edge_id);
+            txn.put_cf(
+                reverse_cf,
+                ReverseEdges::key_to_bytes(&reverse_key),
+                ReverseEdges::value_to_bytes(&reverse_value).unwrap(),
+            )
+            .unwrap();
+
+            txn.commit().unwrap();
+        }
+
+        // Transaction 2: Verify all 3 CFs have None temporal range
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+
+            // Check Edges CF
+            let edge_cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+            let edge_key_bytes = Edges::key_to_bytes(&EdgeCfKey(edge_id));
+            let edge_bytes = txn.get_cf(edge_cf, &edge_key_bytes).unwrap().unwrap();
+            let edge_value: EdgeCfValue = Edges::value_from_bytes(&edge_bytes).unwrap();
+            assert_eq!(edge_value.0, None, "Edge CF should have None temporal range");
+
+            // Check ForwardEdges CF
+            let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).unwrap();
+            let forward_key_bytes = ForwardEdges::key_to_bytes(&ForwardEdgeCfKey(
+                source_id,
+                target_id,
+                edge_name.clone(),
+            ));
+            let forward_bytes = txn.get_cf(forward_cf, &forward_key_bytes).unwrap().unwrap();
+            let forward_value: ForwardEdgeCfValue =
+                ForwardEdges::value_from_bytes(&forward_bytes).unwrap();
+            assert_eq!(
+                forward_value.0, None,
+                "ForwardEdges CF should have None temporal range"
+            );
+
+            // Check ReverseEdges CF
+            let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).unwrap();
+            let reverse_key_bytes = ReverseEdges::key_to_bytes(&ReverseEdgeCfKey(
+                target_id,
+                source_id,
+                edge_name.clone(),
+            ));
+            let reverse_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes).unwrap().unwrap();
+            let reverse_value: ReverseEdgeCfValue =
+                ReverseEdges::value_from_bytes(&reverse_bytes).unwrap();
+            assert_eq!(
+                reverse_value.0, None,
+                "ReverseEdges CF should have None temporal range"
+            );
+        }
+
+        // Transaction 3: Use PatchEdgeValidRange to update all 3 CFs atomically
+        let new_range = ValidTemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
+        {
+            use crate::graph::{PatchEdgeValidRange, StorageOperation};
+
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+
+            // Execute the PatchEdgeValidRange operation
+            let operations = vec![StorageOperation::PatchEdgeValidRange(PatchEdgeValidRange(
+                edge_id, new_range,
+            ))];
+
+            for op in operations {
+                match op {
+                    StorageOperation::PatchEdgeValidRange(crate::graph::PatchEdgeValidRange(
+                        eid,
+                        nr,
+                    )) => {
+                        use crate::schema::{EdgeCfKey, EdgeCfValue, Edges, ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
+                        use crate::ValidRangePatchable;
+
+                        // Read Edge CF to get metadata
+                        let edge_cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+                        let edge_key = EdgeCfKey(eid);
+                        let edge_key_bytes = Edges::key_to_bytes(&edge_key);
+                        let edge_value_bytes =
+                            txn.get_cf(edge_cf, &edge_key_bytes).unwrap().unwrap();
+                        let edge_value: EdgeCfValue =
+                            Edges::value_from_bytes(&edge_value_bytes).unwrap();
+
+                        let src_id = edge_value.1;
+                        let dst_id = edge_value.3;
+                        let name = edge_value.2.clone();
+
+                        // Patch Edges CF
+                        let edges = Edges;
+                        let patched_edge_bytes =
+                            edges.patch_valid_range(&edge_value_bytes, nr).unwrap();
+                        txn.put_cf(edge_cf, &edge_key_bytes, patched_edge_bytes)
+                            .unwrap();
+
+                        // Patch ForwardEdges CF
+                        let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).unwrap();
+                        let forward_key = ForwardEdgeCfKey(src_id, dst_id, name.clone());
+                        let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
+                        let forward_value_bytes = txn
+                            .get_cf(forward_cf, &forward_key_bytes)
+                            .unwrap()
+                            .unwrap();
+                        let forward_edges = ForwardEdges;
+                        let patched_forward_bytes = forward_edges
+                            .patch_valid_range(&forward_value_bytes, nr)
+                            .unwrap();
+                        txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)
+                            .unwrap();
+
+                        // Patch ReverseEdges CF
+                        let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).unwrap();
+                        let reverse_key = ReverseEdgeCfKey(dst_id, src_id, name);
+                        let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
+                        let reverse_value_bytes = txn
+                            .get_cf(reverse_cf, &reverse_key_bytes)
+                            .unwrap()
+                            .unwrap();
+                        let reverse_edges = ReverseEdges;
+                        let patched_reverse_bytes = reverse_edges
+                            .patch_valid_range(&reverse_value_bytes, nr)
+                            .unwrap();
+                        txn.put_cf(reverse_cf, &reverse_key_bytes, patched_reverse_bytes)
+                            .unwrap();
+                    }
+                    _ => panic!("Unexpected operation type"),
+                }
+            }
+
+            txn.commit().unwrap();
+        }
+
+        // Transaction 4: Verify all 3 CFs have been updated with the new temporal range
+        {
+            let txn_db = storage.transaction_db().unwrap();
+            let txn = txn_db.transaction();
+
+            // Check Edges CF
+            let edge_cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+            let edge_key_bytes = Edges::key_to_bytes(&EdgeCfKey(edge_id));
+            let edge_bytes = txn.get_cf(edge_cf, &edge_key_bytes).unwrap().unwrap();
+            let edge_value: EdgeCfValue = Edges::value_from_bytes(&edge_bytes).unwrap();
+            assert_eq!(
+                edge_value.0,
+                Some(new_range),
+                "Edges CF should have updated temporal range"
+            );
+            assert_eq!(edge_value.1, source_id);
+            assert_eq!(edge_value.2, edge_name);
+            assert_eq!(edge_value.3, target_id);
+
+            // Check ForwardEdges CF
+            let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).unwrap();
+            let forward_key_bytes = ForwardEdges::key_to_bytes(&ForwardEdgeCfKey(
+                source_id,
+                target_id,
+                edge_name.clone(),
+            ));
+            let forward_bytes = txn.get_cf(forward_cf, &forward_key_bytes).unwrap().unwrap();
+            let forward_value: ForwardEdgeCfValue =
+                ForwardEdges::value_from_bytes(&forward_bytes).unwrap();
+            assert_eq!(
+                forward_value.0,
+                Some(new_range),
+                "ForwardEdges CF should have updated temporal range"
+            );
+            assert_eq!(forward_value.1, edge_id);
+
+            // Check ReverseEdges CF
+            let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).unwrap();
+            let reverse_key_bytes = ReverseEdges::key_to_bytes(&ReverseEdgeCfKey(
+                target_id,
+                source_id,
+                edge_name.clone(),
+            ));
+            let reverse_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes).unwrap().unwrap();
+            let reverse_value: ReverseEdgeCfValue =
+                ReverseEdges::value_from_bytes(&reverse_bytes).unwrap();
+            assert_eq!(
+                reverse_value.0,
+                Some(new_range),
+                "ReverseEdges CF should have updated temporal range"
+            );
+            assert_eq!(reverse_value.1, edge_id);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_patch_node_valid_range_patches_all_associated_edges() {
+    use crate::graph::{ColumnFamilyRecord, Storage};
+    use crate::schema::{
+        EdgeCfKey, EdgeCfValue, Edges, ForwardEdgeCfKey, ForwardEdgeCfValue,
+        ForwardEdges, NodeCfKey, NodeCfValue, Nodes, ReverseEdgeCfKey, ReverseEdgeCfValue,
+        ReverseEdges, ValidTemporalRange,
+    };
+    use crate::{
+        create_mutation_writer, spawn_graph_consumer, AddEdge, AddNode, Id, MutationRunnable,
+        TimestampMilli, UpdateNodeValidSinceUntil, WriterConfig,
+    };
+    use tempfile::TempDir;
+    use tokio::time::Duration;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test_db");
+
+    let config = WriterConfig::default();
+    let (writer, receiver) = create_mutation_writer(config.clone());
+    let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+
+    // Create a central node
+    let central_node_id = Id::new();
+    AddNode {
+        id: central_node_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Central Node".to_string(),
+        temporal_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    // Create 3 other nodes
+    let node1_id = Id::new();
+    AddNode {
+        id: node1_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Node 1".to_string(),
+        temporal_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    let node2_id = Id::new();
+    AddNode {
+        id: node2_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Node 2".to_string(),
+        temporal_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    let node3_id = Id::new();
+    AddNode {
+        id: node3_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Node 3".to_string(),
+        temporal_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    // Create 3 edges:
+    // - 2 outgoing from central_node: central_node -> node1, central_node -> node2
+    // - 1 incoming to central_node: node3 -> central_node
+    let edge1_id = Id::new();
+    AddEdge {
+        id: edge1_id,
+        source_node_id: central_node_id,
+        target_node_id: node1_id,
+        ts_millis: TimestampMilli::now(),
+        name: "outgoing_edge_1".to_string(),
+        temporal_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    let edge2_id = Id::new();
+    AddEdge {
+        id: edge2_id,
+        source_node_id: central_node_id,
+        target_node_id: node2_id,
+        ts_millis: TimestampMilli::now(),
+        name: "outgoing_edge_2".to_string(),
+        temporal_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    let edge3_id = Id::new();
+    AddEdge {
+        id: edge3_id,
+        source_node_id: node3_id,
+        target_node_id: central_node_id,
+        ts_millis: TimestampMilli::now(),
+        name: "incoming_edge_1".to_string(),
+        temporal_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    // Now patch the central node's valid range
+    let new_range = ValidTemporalRange(
+        Some(TimestampMilli(100)),
+        Some(TimestampMilli(200)),
+    );
+
+    UpdateNodeValidSinceUntil {
+        id: central_node_id,
+        temporal_range: new_range,
+        reason: "test patch".to_string(),
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    // Give consumer time to process
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Close writer and wait for consumer to finish
+    drop(writer);
+    consumer_handle.await.unwrap().unwrap();
+
+    // Now verify the node and all edges have been patched
+    {
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+
+        // Verify central node
+        let node_cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+        let node_key = NodeCfKey(central_node_id);
+        let node_key_bytes = Nodes::key_to_bytes(&node_key);
+        let node_bytes = txn.get_cf(node_cf, &node_key_bytes).unwrap().unwrap();
+        let node_value: NodeCfValue = Nodes::value_from_bytes(&node_bytes).unwrap();
+        assert_eq!(
+            node_value.0,
+            Some(new_range),
+            "Central node should have updated temporal range"
+        );
+
+        // Verify all 3 edges in Edges CF
+        for edge_id in [edge1_id, edge2_id, edge3_id] {
+            let edge_cf = txn_db.cf_handle(Edges::CF_NAME).unwrap();
+            let edge_key = EdgeCfKey(edge_id);
+            let edge_key_bytes = Edges::key_to_bytes(&edge_key);
+            let edge_bytes = txn.get_cf(edge_cf, &edge_key_bytes).unwrap().unwrap();
+            let edge_value: EdgeCfValue = Edges::value_from_bytes(&edge_bytes).unwrap();
+            assert_eq!(
+                edge_value.0,
+                Some(new_range),
+                "Edge {} should have updated temporal range in Edges CF",
+                edge_id
+            );
+
+            let src_id = edge_value.1;
+            let dst_id = edge_value.3;
+            let name = edge_value.2.clone();
+
+            // Verify ForwardEdges CF
+            let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).unwrap();
+            let forward_key = ForwardEdgeCfKey(src_id, dst_id, name.clone());
+            let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
+            let forward_bytes = txn
+                .get_cf(forward_cf, &forward_key_bytes)
+                .unwrap()
+                .unwrap();
+            let forward_value: ForwardEdgeCfValue =
+                ForwardEdges::value_from_bytes(&forward_bytes).unwrap();
+            assert_eq!(
+                forward_value.0,
+                Some(new_range),
+                "Edge {} should have updated temporal range in ForwardEdges CF",
+                edge_id
+            );
+
+            // Verify ReverseEdges CF
+            let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).unwrap();
+            let reverse_key = ReverseEdgeCfKey(dst_id, src_id, name);
+            let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
+            let reverse_bytes = txn
+                .get_cf(reverse_cf, &reverse_key_bytes)
+                .unwrap()
+                .unwrap();
+            let reverse_value: ReverseEdgeCfValue =
+                ReverseEdges::value_from_bytes(&reverse_bytes).unwrap();
+            assert_eq!(
+                reverse_value.0,
+                Some(new_range),
+                "Edge {} should have updated temporal range in ReverseEdges CF",
+                edge_id
+            );
+        }
+
+        txn.commit().unwrap();
     }
 }
