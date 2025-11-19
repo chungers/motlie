@@ -11,6 +11,7 @@ pub use mutation::{
     spawn_consumer as spawn_mutation_consumer, AddEdge, AddFragment, AddNode,
     Consumer as MutationConsumer, Mutation, MutationBatch, MutationPlanner,
     Processor as MutationProcessor, Runnable as MutationRunnable, UpdateEdgeValidSinceUntil,
+    UpdateNodeValidSinceUntil,
 };
 // Note: mutations![] macro is automatically available via #[macro_export] in mutation.rs
 

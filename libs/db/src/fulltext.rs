@@ -85,19 +85,29 @@ impl Processor for FullTextProcessor {
                     // TODO: Update term frequencies and document frequencies
                     // TODO: Calculate and store BM25 scores
                 }
-                Mutation::UpdateEdgeValidSinceUntil(args) => {
-                    // TODO: Implement actual invalidation in full-text search index
+                Mutation::UpdateNodeValidSinceUntil(args) => {
+                    // TODO: Implement actual node invalidation in full-text search index
                     log::info!(
-                        "[FullText] Would remove from search index: id={}, reason='{}', k1={}, b={}",
+                        "[FullText] Would update node in search index: id={}, reason='{}', k1={}, b={}",
                         args.id,
                         args.reason,
                         self.k1,
                         self.b
                     );
-                    // TODO: Remove document from index
-                    // TODO: Update document frequencies
-                    // TODO: Recalculate BM25 scores for affected terms
-                    // TODO: Cleanup orphaned index entries
+                    // TODO: Update temporal range in index
+                    // TODO: Recalculate BM25 scores for affected terms if needed
+                }
+                Mutation::UpdateEdgeValidSinceUntil(args) => {
+                    // TODO: Implement actual edge invalidation in full-text search index
+                    log::info!(
+                        "[FullText] Would update edge in search index: id={}, reason='{}', k1={}, b={}",
+                        args.id,
+                        args.reason,
+                        self.k1,
+                        self.b
+                    );
+                    // TODO: Update temporal range in index
+                    // TODO: Recalculate BM25 scores for affected terms if needed
                 }
             }
         }
