@@ -460,7 +460,7 @@ For applications requiring persistence, ACID properties, or graphs too large for
 
 #### Convergence Trends (Memory Ratio: motlie_db / in-memory)
 
-![Memory Ratio Trend](memory_ratio_trend.png)
+![Memory Ratio Trend](images/memory_ratio_trend.png)
 
 | Algorithm | Scale 100 | Scale 1000 | Trend |
 |-----------|-----------|------------|-------|

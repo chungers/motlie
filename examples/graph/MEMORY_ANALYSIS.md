@@ -17,7 +17,7 @@ This document analyzes memory usage patterns for graph algorithms implemented us
 
 ### Convergence Trend Across All Algorithms
 
-![Memory Ratio Trend](memory_ratio_trend.png)
+![Memory Ratio Trend](images/memory_ratio_trend.png)
 
 **Key Observations:**
 - **DFS** (red): Shows dramatic convergence from 18x at scale 10 to 1.95x at scale 1000
@@ -29,7 +29,7 @@ The dashed red line shows the **equal memory point (ratio=1.0)**. PageRank cross
 
 ### Memory Usage Comparison at Scale=1000
 
-![Memory Comparison at Scale 1000](memory_comparison_scale1000.png)
+![Memory Comparison at Scale 1000](images/memory_comparison_scale1000.png)
 
 At scale=1000 (8,000 nodes), the memory differences become much smaller:
 - **DFS**: 1.95x ratio - approaching parity
@@ -40,7 +40,7 @@ At scale=1000 (8,000 nodes), the memory differences become much smaller:
 
 ###  DFS (Depth-First Search)
 
-![DFS Memory Trend](memory_trend_dfs.png)
+![DFS Memory Trend](images/memory_trend_dfs.png)
 
 | Scale | Nodes  | Edges  | petgraph Memory | motlie_db Memory | Ratio      |
 |-------|--------|--------|-----------------|------------------|------------|
@@ -55,7 +55,7 @@ At scale=1000 (8,000 nodes), the memory differences become much smaller:
 
 ### BFS (Breadth-First Search)
 
-![BFS Memory Trend](memory_trend_bfs.png)
+![BFS Memory Trend](images/memory_trend_bfs.png)
 
 | Scale | Nodes  | Edges  | petgraph Memory | motlie_db Memory | Ratio      |
 |-------|--------|--------|-----------------|------------------|------------|
@@ -68,7 +68,7 @@ At scale=1000 (8,000 nodes), the memory differences become much smaller:
 
 ### Topological Sort
 
-![Topological Sort Memory Trend](memory_trend_topological_sort.png)
+![Topological Sort Memory Trend](images/memory_trend_topological_sort.png)
 
 | Scale | Nodes | Edges | petgraph Memory | motlie_db Memory | Trend |
 |-------|-------|-------|-----------------|------------------|-------|
@@ -80,7 +80,7 @@ At scale=1000 (8,000 nodes), the memory differences become much smaller:
 
 ### Dijkstra's Shortest Path
 
-![Dijkstra Memory Trend](memory_trend_dijkstra.png)
+![Dijkstra Memory Trend](images/memory_trend_dijkstra.png)
 
 | Scale | Nodes | Edges | pathfinding Memory | motlie_db Memory | Trend |
 |-------|-------|-------|-------------------|------------------|-------|
@@ -92,7 +92,7 @@ At scale=1000 (8,000 nodes), the memory differences become much smaller:
 
 ### PageRank
 
-![PageRank Memory Trend](memory_trend_pagerank.png)
+![PageRank Memory Trend](images/memory_trend_pagerank.png)
 
 | Scale | Nodes  | Edges  | Reference Memory | motlie_db Memory | Ratio                        |
 |-------|--------|--------|------------------|------------------|------------------------------|
@@ -125,7 +125,7 @@ Based on the comprehensive data from scales 1-1000, we observe clear convergence
 
 #### Memory Ratio Trends (motlie_db / in-memory)
 
-![Memory Comparison at Scale 100](memory_comparison_scale100.png)
+![Memory Comparison at Scale 100](images/memory_comparison_scale100.png)
 
 | Algorithm | Scale 10 | Scale 100 | Scale 1000 | Trend |
 |-----------|----------|-----------|------------|-------|
