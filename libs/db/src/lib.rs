@@ -19,10 +19,11 @@ mod reader;
 pub use reader::*;
 
 mod query;
-// Re-export query types but not Consumer/Processor/spawn_consumer to avoid ambiguity
+// Re-export query types and consumer functions
 pub use query::{
     EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById, NodeFragmentsByIdTimeRange,
     NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
+    Processor as QueryProcessor, Consumer as QueryConsumer, spawn_consumer as spawn_query_consumer,
 };
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 mod graph;
