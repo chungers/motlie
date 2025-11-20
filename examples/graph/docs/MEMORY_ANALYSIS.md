@@ -18,7 +18,7 @@ The data from scales 1-10000 shows distinct memory scaling patterns between motl
 
 ### Convergence Trend Across All Algorithms
 
-![Memory Ratio Trend](images/memory_ratio_trend.png)
+![Memory Ratio Trend](../images/memory_ratio_trend.png)
 
 The chart shows memory ratio trends (motlie_db / in-memory) across scales:
 - **DFS** (red): Decreases from 3.57x at scale 10 to 0.73x at scale 10000
@@ -31,7 +31,7 @@ The dashed red line indicates equal memory point (ratio=1.0).
 
 ### Memory Usage Comparison at Scale=100
 
-![Memory Comparison at Scale 100](images/memory_comparison_scale100.png)
+![Memory Comparison at Scale 100](../images/memory_comparison_scale100.png)
 
 At scale=100 (1,000 nodes), memory usage patterns:
 - **DFS**: 144 KB (reference) vs 112 KB (motlie_db) - 0.78x ratio
@@ -44,7 +44,7 @@ At scale=100 (1,000 nodes), memory usage patterns:
 
 ###  DFS (Depth-First Search)
 
-![DFS Memory Trend](images/memory_trend_dfs.png)
+![DFS Memory Trend](../images/memory_trend_dfs.png)
 
 | Scale   | Nodes       | Edges        | petgraph Memory | motlie_db Memory | Ratio      |
 |---------|-------------|--------------|-----------------|------------------|------------|
@@ -59,7 +59,7 @@ At scale=100 (1,000 nodes), memory usage patterns:
 
 ### BFS (Breadth-First Search)
 
-![BFS Memory Trend](images/memory_trend_bfs.png)
+![BFS Memory Trend](../images/memory_trend_bfs.png)
 
 | Scale   | Nodes       | Edges        | petgraph Memory | motlie_db Memory | Ratio                   |
 |---------|-------------|--------------|-----------------|------------------|-------------------------|
@@ -76,7 +76,7 @@ At scale=100 (1,000 nodes), memory usage patterns:
 
 ### Topological Sort
 
-![Topological Sort Memory Trend](images/memory_trend_topological_sort.png)
+![Topological Sort Memory Trend](../images/memory_trend_topological_sort.png)
 
 | Scale   | Nodes       | Edges        | petgraph Memory | motlie_db Memory | Ratio                        |
 |---------|-------------|--------------|-----------------|------------------|------------------------------|
@@ -91,7 +91,7 @@ At scale=100 (1,000 nodes), memory usage patterns:
 
 ### Dijkstra's Shortest Path
 
-![Dijkstra Memory Trend](images/memory_trend_dijkstra.png)
+![Dijkstra Memory Trend](../images/memory_trend_dijkstra.png)
 
 | Scale   | Nodes       | Edges        | pathfinding Memory | motlie_db Memory | Ratio                              |
 |---------|-------------|--------------|-------------------|------------------|------------------------------------|
@@ -108,7 +108,7 @@ At scale=100 (1,000 nodes), memory usage patterns:
 
 ### PageRank
 
-![PageRank Memory Trend](images/memory_trend_pagerank.png)
+![PageRank Memory Trend](../images/memory_trend_pagerank.png)
 
 | Scale   | Nodes       | Edges        | Reference Memory | motlie_db Memory | Ratio                               |
 |---------|-------------|--------------|------------------|------------------|-------------------------------------|
@@ -141,7 +141,7 @@ At scale=100 (1,000 nodes), memory usage patterns:
 
 Based on the data from scales 1-10000:
 
-![Memory Comparison at Scale 1000](images/memory_comparison_scale1000.png)
+![Memory Comparison at Scale 1000](../images/memory_comparison_scale1000.png)
 
 #### Memory Ratio Trends (motlie_db / in-memory)
 

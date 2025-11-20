@@ -132,7 +132,7 @@ END {
 
 ## Documentation
 
-- **[README.md](README.md)** - Overview and usage instructions
+- **[README.md](../README.md)** - Overview and usage instructions
 - **[DETAILED_ANALYSIS.md](DETAILED_ANALYSIS.md)** - Complete performance analysis
 - **[PERFORMANCE_SUMMARY.md](PERFORMANCE_SUMMARY.md)** - Quick test results summary
 - **[REDESIGN_SUMMARY.md](REDESIGN_SUMMARY.md)** - Technical redesign documentation

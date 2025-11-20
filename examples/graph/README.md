@@ -14,8 +14,8 @@ This directory contains example implementations of classic graph algorithms usin
 - **Trade-off**: 25-1000x slower execution for memory efficiency
 
 **See detailed analysis**:
-- [`DETAILED_ANALYSIS.md`](DETAILED_ANALYSIS.md) - Complete performance analysis with tables and insights
-- [`PERFORMANCE_SUMMARY.md`](PERFORMANCE_SUMMARY.md) - Quick summary of test results
+- [`DETAILED_ANALYSIS.md`](docs/DETAILED_ANALYSIS.md) - Complete performance analysis with tables and insights
+- [`PERFORMANCE_SUMMARY.md`](docs/PERFORMANCE_SUMMARY.md) - Quick summary of test results
 - [`data/performance_metrics.csv`](data/performance_metrics.csv) - Raw performance data (50 test runs)
 
 ## What These Demos Do
@@ -465,7 +465,7 @@ The examples demonstrate that `motlie_db` provides:
 ✅ **Persistence**: Graphs are stored durably in RocksDB
 ✅ **Scalability**: Can handle arbitrarily large graphs (tested up to 8000+ nodes)
 ✅ **Flexibility**: Standard graph API supporting various algorithms
-✅ **Memory Efficiency**: Constant memory usage regardless of graph size (see [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md))
+✅ **Memory Efficiency**: Constant memory usage regardless of graph size (see [MEMORY_ANALYSIS.md](docs/MEMORY_ANALYSIS.md))
 
 The performance overhead compared to in-memory implementations is due to:
 - Persistent storage operations (RocksDB reads/writes)
@@ -501,7 +501,7 @@ For applications requiring persistence, ACID properties, or graphs too large for
 - **Topological Sort at scale 10000**: Rapid convergence to **1.42x** from 15.33x at scale 100
 - **Proven at scale**: For PageRank and DFS, motlie_db provides **memory advantages at 1,000+ nodes**
 
-See [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md) for comprehensive analysis with detailed data tables, visualizations, and trend analysis.
+See [MEMORY_ANALYSIS.md](docs/MEMORY_ANALYSIS.md) for comprehensive analysis with detailed data tables, visualizations, and trend analysis.
 
 ## Graph Generation
 
@@ -626,4 +626,4 @@ Areas for further investigation:
 - **Optimization opportunities** for persistent storage at extreme scales
 - **Cross-platform validation** on different hardware and OS combinations
 
-See [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md) for detailed findings, data tables, and trend analysis.
+See [MEMORY_ANALYSIS.md](docs/MEMORY_ANALYSIS.md) for detailed findings, data tables, and trend analysis.
