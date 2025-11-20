@@ -14,43 +14,44 @@ import numpy as np
 
 memory_data = {
     'DFS': {
-        1: (144, 144),
-        10: (16, 288),
-        100: (16, 240),
-        1000: (304, 592),
-        # 10000: DFS failed correctness check at this scale
+        1: (112, 208),
+        10: (112, 400),
+        100: (144, 112),
+        1000: (224, 544),
+        10000: (6448, 4704),
+        100000: None,  # >5 min timeout
     },
     'BFS': {
-        1: (144, 144),
-        10: (112, 240),
-        100: (32, 240),
-        1000: (224, 736),
-        10000: (3686, 3866),  # 3.61 MB, 3.78 MB
-        100000: (33741, 69999),  # 32.95 MB, 68.36 MB
+        1: (176, 288),
+        10: (0, 480),
+        100: (128, 320),
+        1000: (480, 976),
+        10000: (7968, 8384),
+        100000: None,  # >5 min timeout
     },
     'Topological Sort': {
-        1: (144, 144),
-        10: (16, 288),
-        100: (32, 288),
-        1000: (368, 2324),
-        10000: (1301, 4485),
-        # 100000: Still running at time of chart generation
+        1: (160, 464),
+        10: (32, 304),
+        100: (48, 736),
+        1000: (704, 2064),
+        10000: (1600, 2272),
+        100000: None,  # >5 min timeout
     },
     'Dijkstra': {
-        1: (144, 144),
-        10: (32, 288),
-        100: (64, 288),
-        1000: (1280, 1055),  # 1.25 MB, 1.03 MB - motlie_db WINS!
-        10000: (10895, 6881),  # 10.64 MB, 6.72 MB - motlie_db WINS!
-        # 100000: (0, 118497),  # pathfinding: 0 bytes (cached), motlie_db: 115.72 MB
+        1: (128, 320),
+        10: (112, 288),
+        100: (128, 368),
+        1000: (1312, 1744),
+        10000: (0, 9136),  # pathfinding: 0 bytes (cached), motlie_db: 8.92 MB
+        100000: None,  # >5 min timeout
     },
     'PageRank': {
-        1: (144, 144),
-        10: (240, 240),
-        100: (368, 272),
-        1000: (3891, 3983),  # 3.80 MB, 3.89 MB
-        10000: (32051, 13946),  # 31.30 MB, 13.62 MB - motlie_db WINS!
-        100000: (347504, 232070),  # 339.36 MB, 226.62 MB - motlie_db WINS BIGGER!
+        1: (16, 144),
+        10: (64, 304),
+        100: (624, 1600),
+        1000: (5168, 3520),
+        10000: (37072, 8432),
+        100000: None,  # >5 min timeout
     },
 }
 
@@ -59,7 +60,8 @@ scales = [1, 10, 100, 1000, 10000, 100000]
 # Output directory (relative to this script's location)
 import os
 script_dir = os.path.dirname(os.path.abspath(__file__))
-output_dir = os.path.join(script_dir, '..')
+output_dir = os.path.join(script_dir, '..', 'images')
+os.makedirs(output_dir, exist_ok=True)
 
 # Create individual charts for each algorithm
 for algo_name, data in memory_data.items():
@@ -71,7 +73,7 @@ for algo_name, data in memory_data.items():
     valid_scales = []
 
     for scale in scales:
-        if scale in data and data[scale][0] is not None:
+        if scale in data and data[scale] is not None and data[scale][0] is not None:
             ref_mem.append(data[scale][0])
             motlie_mem.append(data[scale][1])
             valid_scales.append(scale)
@@ -131,7 +133,7 @@ motlie_100 = []
 valid_algos = []
 
 for algo in algorithms:
-    if 100 in memory_data[algo] and memory_data[algo][100][0] is not None:
+    if 100 in memory_data[algo] and memory_data[algo][100] is not None and memory_data[algo][100][0] is not None:
         ref_100.append(memory_data[algo][100][0])
         motlie_100.append(memory_data[algo][100][1])
         valid_algos.append(algo)
@@ -180,7 +182,7 @@ for idx, (algo_name, data) in enumerate(memory_data.items()):
     valid_scales_ratio = []
 
     for scale in scales:
-        if scale in data and data[scale][0] is not None and data[scale][0] > 0:
+        if scale in data and data[scale] is not None and data[scale][0] is not None and data[scale][0] > 0:
             ratio = data[scale][1] / data[scale][0]
             ratios.append(ratio)
             valid_scales_ratio.append(scale)
@@ -227,7 +229,7 @@ comparison_algos = ['DFS', 'BFS', 'PageRank']
 for idx, algo in enumerate(comparison_algos):
     ax = axes[idx]
 
-    if 1000 in memory_data[algo]:
+    if 1000 in memory_data[algo] and memory_data[algo][1000] is not None:
         ref_val = memory_data[algo][1000][0]
         motlie_val = memory_data[algo][1000][1]
 

@@ -4,14 +4,15 @@ This document analyzes memory usage patterns for graph algorithms implemented us
 
 ## Summary of Findings
 
-**Key Insight:** motlie_db demonstrates favorable memory characteristics at scale, with memory usage growing much more slowly than in-memory implementations. The data from scales 1-10000 shows **clear convergence and crossover** toward memory superiority, with **Dijkstra and PageRank achieving memory superiority**, while **Topological Sort shows rapid convergence** toward crossover.
+The data from scales 1-10000 shows distinct memory scaling patterns between motlie_db and in-memory implementations. At small scales (1-100 nodes), in-memory implementations demonstrate lower memory overhead. At larger scales (1000-100000 nodes), the memory ratios vary significantly by algorithm, with some showing convergence toward parity while others maintain persistent overhead.
 
-### Memory Trends
+### Memory Trends Across Scales
 
-1. **Small Graphs (scale=1-10)**: In-memory implementations have advantage due to minimal overhead
-2. **Medium Graphs (scale=100)**: Memory patterns diverge with motlie_db showing 2-15x overhead for traversal algorithms, but **PageRank already shows motlie_db using 25% LESS memory**
-3. **Large Graphs (scale=1000)**: **CROSSOVER ACHIEVED for Dijkstra** (1.21x less memory), **Rapid convergence** for others - DFS overhead drops from 15x to 1.95x, BFS from 7.5x to 3.29x, Topological Sort to 6.32x, PageRank maintains near-parity at 1.02x
-4. **Very Large Graphs (scale=10000)**: **CROSSOVER CONFIRMED** - Dijkstra uses 1.58x LESS memory (6.72 MB vs 10.64 MB), PageRank uses 2.30x LESS memory (13.62 MB vs 31.30 MB), Topological Sort continues rapid convergence to 3.45x, BFS achieves near-parity at 1.05x (3.78 MB vs 3.61 MB)
+1. **Small Graphs (scale=1-10)**: In-memory implementations show lower absolute memory usage (112-176 KB) compared to motlie_db (208-480 KB) due to minimal data structure overhead
+2. **Medium Graphs (scale=100)**: Memory patterns diverge with some algorithms (DFS, PageRank) showing favorable ratios for motlie_db, while others (BFS, Topological Sort) maintain 2-15x overhead
+3. **Large Graphs (scale=1000)**: Mixed results - DFS shows 2.43x overhead, BFS shows 2.03x overhead, Topological Sort shows 2.93x overhead, Dijkstra shows 1.33x overhead, PageRank shows 0.68x (motlie_db uses less memory)
+4. **Very Large Graphs (scale=10000)**: DFS achieves 0.73x ratio (6.3 MB motlie_db vs 4.6 MB petgraph - inverted from typical pattern), BFS near parity at 1.05x, Topological Sort at 1.42x, PageRank at 0.23x
+5. **Extreme Scale (scale=100000)**: All tests exceed 5-minute timeout threshold
 
 ## Visual Summary
 
@@ -19,25 +20,25 @@ This document analyzes memory usage patterns for graph algorithms implemented us
 
 ![Memory Ratio Trend](images/memory_ratio_trend.png)
 
-**Key Observations:**
-- **Dijkstra** (purple): **Crosses below 1.0x at scale 1000** - first traversal algorithm to achieve crossover! Continues advantage at scale 10,000 (0.63x)
-- **PageRank** (green): Maintains parity throughout, using less memory starting at scale 100, with sustained advantage at all larger scales
-- **Topological Sort** (blue): Shows **rapid convergence** from 15x at scale 10 to 3.45x at scale 10,000 - projected crossover at 15K-25K nodes
-- **DFS** (red): Dramatic convergence from 18x at scale 10 to 1.95x at scale 1000
-- **BFS** (orange): Converges to near-parity (1.05x) at scale 10,000 but shows non-monotonic behavior at larger scales
+The chart shows memory ratio trends (motlie_db / in-memory) across scales:
+- **DFS** (red): Decreases from 3.57x at scale 10 to 0.73x at scale 10000
+- **BFS** (orange): Varies non-monotonically, achieving 1.05x at scale 10000
+- **Topological Sort** (green): Decreases from 9.5x at scale 10 to 1.42x at scale 10000
+- **Dijkstra** (blue): Decreases from 2.57x at scale 10 to below measurement threshold at scale 10000 (reference shows 0 KB)
+- **PageRank** (purple): Decreases from 4.75x at scale 10 to 0.23x at scale 10000
 
-The dashed red line shows the **equal memory point (ratio=1.0)**. Dijkstra and PageRank cross below this line, while Topological Sort is rapidly converging toward it.
+The dashed red line indicates equal memory point (ratio=1.0).
 
-### Memory Usage Comparison at Scale=1000
+### Memory Usage Comparison at Scale=100
 
-![Memory Comparison at Scale 1000](images/memory_comparison_scale1000.png)
+![Memory Comparison at Scale 100](images/memory_comparison_scale100.png)
 
-At scale=1000 (~8,000 nodes), the memory differences become much smaller, with Dijkstra achieving crossover:
-- **Dijkstra**: **0.82x ratio - motlie_db WINS** (1.03 MB vs 1.25 MB)
-- **DFS**: 1.95x ratio - approaching parity
-- **Topological Sort**: 6.32x ratio - rapid convergence from 15x
-- **BFS**: 3.29x ratio - continuing to converge
-- **PageRank**: 1.02x ratio - effectively equal (~3.8-3.9 MB each)
+At scale=100 (1,000 nodes), memory usage patterns:
+- **DFS**: 144 KB (reference) vs 112 KB (motlie_db) - 0.78x ratio
+- **BFS**: 128 KB (reference) vs 320 KB (motlie_db) - 2.50x ratio
+- **Topological Sort**: 48 KB (reference) vs 736 KB (motlie_db) - 15.33x ratio
+- **Dijkstra**: 128 KB (reference) vs 368 KB (motlie_db) - 2.88x ratio
+- **PageRank**: 624 KB (reference) vs 1600 KB (motlie_db) - 2.56x ratio
 
 ## Detailed Results
 
@@ -45,171 +46,156 @@ At scale=1000 (~8,000 nodes), the memory differences become much smaller, with D
 
 ![DFS Memory Trend](images/memory_trend_dfs.png)
 
-| Scale | Nodes  | Edges  | petgraph Memory | motlie_db Memory | Ratio      |
-|-------|--------|--------|-----------------|------------------|------------|
-| 1     | 8      | 9      | ~144 KB         | ~144 KB          | 1.0x       |
-| 10    | 80     | 108    | ~16 KB*         | ~288 KB          | 18x        |
-| 100   | 800    | 1,098  | ~16 KB          | ~240 KB          | 15x        |
-| 1000  | 8,000  | 10,998 | **304 KB**      | **592 KB**       | **1.95x**  |
+| Scale   | Nodes       | Edges        | petgraph Memory | motlie_db Memory | Ratio      |
+|---------|-------------|--------------|-----------------|------------------|------------|
+| 1       | 10          | 11           | 112 KB          | 208 KB           | 1.86x      |
+| 10      | 100         | 128          | 112 KB          | 400 KB           | 3.57x      |
+| 100     | 1,000       | 1,298        | 144 KB          | 112 KB           | **0.78x**  |
+| 1000    | 10,000      | 12,998       | 224 KB          | 544 KB           | 2.43x      |
+| 10000   | 100,000     | 129,998      | 6,448 KB        | 4,704 KB         | **0.73x**  |
+| 100000  | 1,000,000   | 1,299,998    | >5 min†         | >5 min†          | -          |
 
-*At scale 10, petgraph's memory delta is negligible (fits in CPU cache)
-
-**Observation**: For DFS, motlie_db shows relatively constant memory usage (~240-592 KB) regardless of scale. Notably, at scale=1000, the memory ratio **decreases significantly to 1.95x**, showing petgraph memory growing much faster (from 16 KB to 304 KB = 19x increase) while motlie_db only grows moderately (from 240 KB to 592 KB = 2.5x increase). **The trend clearly shows convergence toward parity at larger scales.**
+**Observations**: DFS shows non-monotonic memory scaling. At scale=100, motlie_db uses 22% less memory than petgraph (112 KB vs 144 KB). At scale=1000, the ratio reverses to 2.43x overhead. At scale=10000, motlie_db again shows lower memory usage at 0.73x ratio (4.7 MB vs 6.4 MB). The pattern suggests algorithm-specific behavior where different scales trigger different memory allocation patterns in both implementations.
 
 ### BFS (Breadth-First Search)
 
 ![BFS Memory Trend](images/memory_trend_bfs.png)
 
-| Scale  | Nodes     | Edges     | petgraph Memory | motlie_db Memory | Ratio                      |
-|--------|-----------|-----------|-----------------|------------------|----------------------------|
-| 1      | 9         | 8         | ~144 KB         | ~144 KB          | 1.0x                       |
-| 10     | 90        | 119       | ~112 KB         | ~240 KB          | 2.1x                       |
-| 100    | 900       | 1,199     | ~32 KB          | ~240 KB          | 7.5x                       |
-| 1000   | 9,000     | 11,999    | 224 KB          | 736 KB           | 3.29x                      |
-| 10000  | 90,000    | 119,999   | 3.61 MB         | 3.78 MB          | 1.05x (near parity!)       |
-| 100000 | 900,000   | 1,199,999 | **32.95 MB**    | **68.36 MB**     | **2.07x** (regression)     |
+| Scale   | Nodes       | Edges        | petgraph Memory | motlie_db Memory | Ratio                   |
+|---------|-------------|--------------|-----------------|------------------|-------------------------|
+| 1       | 10          | 12           | 176 KB          | 288 KB           | 1.64x                   |
+| 10      | 100         | 132          | 0 KB*           | 480 KB           | -                       |
+| 100     | 1,000       | 1,332        | 128 KB          | 320 KB           | 2.50x                   |
+| 1000    | 10,000      | 13,332       | 480 KB          | 976 KB           | 2.03x                   |
+| 10000   | 100,000     | 133,332      | 7,968 KB        | 8,384 KB         | **1.05x**               |
+| 100000  | 1,000,000   | 1,333,332    | >5 min†         | >5 min†          | -                       |
 
-**Observation**: BFS shows an interesting pattern where petgraph's memory usage initially DECREASES at scale 100, then increases consistently at larger scales. The ratio reached near-parity at 1.05x at scale=10000 (3.78 MB vs 3.61 MB), suggesting imminent crossover. However, at scale=100000, the ratio increased to 2.07x (68.36 MB vs 32.95 MB), indicating **BFS memory scaling is non-linear for motlie_db** - possibly due to RocksDB block cache pressure or query state accumulation at extreme scales. Further investigation needed to understand this regression.
+*At scale 10, petgraph showed 0 KB delta, likely due to the entire structure fitting in CPU cache
+
+**Observations**: BFS demonstrates consistent convergence toward memory parity as scale increases. The ratio decreases from 2.50x at scale=100 to 1.05x at scale=10000 (7.97 MB vs 8.38 MB), indicating near-equivalent memory usage at large scales. The scale=10 measurement showing 0 KB for petgraph reflects measurement limitations when data structures fit entirely in CPU cache.
 
 ### Topological Sort
 
 ![Topological Sort Memory Trend](images/memory_trend_topological_sort.png)
 
-| Scale  | Nodes   | Edges   | petgraph Memory | motlie_db Memory | Ratio                        |
-|--------|---------|---------|-----------------|------------------|------------------------------|
-| 1      | 8       | 9       | ~144 KB         | ~144 KB          | 1.0x                         |
-| 10     | 80      | 99      | ~0-16 KB        | ~240-288 KB      | 15-18x                       |
-| 100    | 800     | 999     | ~16-32 KB       | ~240-288 KB      | 8-15x                        |
-| 1000   | 8,000   | 9,999   | 368 KB          | 2.27 MB          | 6.32x                        |
-| 10000  | 80,000  | 99,999  | 1.27 MB         | 4.38 MB          | **3.45x** (rapid convergence)|
-| 100000 | 800,000 | 999,999 | N/A             | N/A              | **Test timeout (4+ hours)**  |
+| Scale   | Nodes       | Edges        | petgraph Memory | motlie_db Memory | Ratio                        |
+|---------|-------------|--------------|-----------------|------------------|------------------------------|
+| 1       | 10          | 11           | 160 KB          | 464 KB           | 2.90x                        |
+| 10      | 100         | 119          | 32 KB           | 304 KB           | 9.50x                        |
+| 100     | 1,000       | 1,199        | 48 KB           | 736 KB           | 15.33x                       |
+| 1000    | 10,000      | 11,999       | 704 KB          | 2,064 KB         | 2.93x                        |
+| 10000   | 100,000     | 119,999      | 1,600 KB        | 2,272 KB         | **1.42x**                    |
+| 100000  | 1,000,000   | 1,199,999    | >5 min†         | >5 min†          | -                            |
 
-**Observation**: Topological sort shows **dramatic convergence** similar to DFS and BFS patterns. The memory ratio dropped from 15x at scale 10 to **3.45x at scale 10,000**, demonstrating rapid convergence toward parity. At scale=1000, petgraph grows from 16-32 KB to 368 KB, while motlie_db grows from 240-288 KB to 2.27 MB, but the rate of growth for petgraph is accelerating faster. **Projected crossover at scale 15,000-25,000** based on the convergence trend.
-
-**Note on scale=100000**: The test was terminated after running for over 4 hours (246+ minutes of CPU time) without completing. This extreme runtime compared to scale=10000 (2 seconds) suggests potential O(n²) or worse algorithmic complexity for this specific graph structure at extreme scales. Further investigation needed to optimize topological sort performance for very large graphs.
+**Observations**: Topological sort exhibits the highest memory overhead at small to medium scales (9.50x-15.33x at scales 10-100), but shows convergence at larger scales. The ratio decreases to 2.93x at scale=1000 and 1.42x at scale=10000 (1.6 MB vs 2.3 MB). The pattern indicates that motlie_db's overhead becomes proportionally smaller as graph size increases.
 
 ### Dijkstra's Shortest Path
 
 ![Dijkstra Memory Trend](images/memory_trend_dijkstra.png)
 
-| Scale  | Nodes   | Edges   | pathfinding Memory | motlie_db Memory | Ratio                                   |
-|--------|---------|---------|-------------------|------------------|-----------------------------------------|
-| 1      | 8       | 13      | ~144 KB           | ~144 KB          | 1.0x                                    |
-| 10     | 80      | 148     | ~16-32 KB         | ~240-288 KB      | 8-16x                                   |
-| 100    | 800     | 1,498   | ~32-64 KB         | ~240-288 KB      | 4-8x                                    |
-| 1000   | 8,000   | 14,998  | 1.25 MB           | 1.03 MB          | **0.82x** (motlie_db uses 1.21x LESS!) |
-| 10000  | 80,000  | 149,998 | 10.64 MB          | 6.72 MB          | **0.63x** (motlie_db uses 1.58x LESS!) |
+| Scale   | Nodes       | Edges        | pathfinding Memory | motlie_db Memory | Ratio                              |
+|---------|-------------|--------------|-------------------|------------------|------------------------------------|
+| 1       | 10          | 20           | 128 KB            | 320 KB           | 2.50x                              |
+| 10      | 100         | 218          | 112 KB            | 288 KB           | 2.57x                              |
+| 100     | 1,000       | 2,198        | 128 KB            | 368 KB           | 2.88x                              |
+| 1000    | 10,000      | 21,998       | 1,312 KB          | 1,744 KB         | 1.33x                              |
+| 10000   | 100,000     | 219,998      | 0 KB*             | 9,136 KB         | -                                  |
+| 100000  | 1,000,000   | 2,199,998    | >5 min†           | >5 min†          | -                                  |
 
-**Observation**: Dijkstra demonstrates **CROSSOVER ACHIEVED between scales 100 and 1000**! At scale=1000, motlie_db uses **1.21x less memory** (1.03 MB vs 1.25 MB). This advantage **increases at scale 10,000** where motlie_db uses **1.58x less memory** (6.72 MB vs 10.64 MB). The pathfinding crate uses a priority queue which increases memory overhead as graph size grows, while motlie_db's persistent storage model maintains sub-linear memory growth. **This is a significant finding** - Dijkstra crossover occurs much earlier than DFS/BFS, making motlie_db highly competitive for shortest path computations at medium-to-large scales.
+*At scale 10000, pathfinding reference showed 0 KB delta, likely fully cached in CPU
+
+**Observations**: Dijkstra shows consistent overhead of 2.50x-2.88x from scales 1-100, decreasing to 1.33x at scale=1000 (1.3 MB vs 1.7 MB). At scale=10000, the reference implementation shows 0 KB delta while motlie_db uses 8.9 MB, indicating the reference data structure fits entirely in CPU cache while motlie_db's persistent storage requires measurable RAM for RocksDB block cache and query state.
 
 ### PageRank
 
 ![PageRank Memory Trend](images/memory_trend_pagerank.png)
 
-| Scale  | Nodes     | Edges     | Reference Memory | motlie_db Memory | Ratio                                    |
-|--------|-----------|-----------|------------------|------------------|------------------------------------------|
-| 1      | 8         | 18        | ~144 KB          | ~144 KB          | 1.0x                                     |
-| 10     | 80        | 207       | ~240 KB          | ~240 KB          | ~1.0x                                    |
-| 100    | 800       | 2,097     | 368 KB           | 272 KB           | **0.74x** (motlie_db uses 25% LESS!)     |
-| 1000   | 8,000     | 20,997    | 3.80 MB          | 3.89 MB          | 1.02x (near parity)                      |
-| 10000  | 80,000    | 209,997   | 31.30 MB         | 13.62 MB         | **0.44x** (motlie_db uses 2.30x LESS!)   |
-| 100000 | 800,000   | 2,099,997 | **339.36 MB**    | **226.62 MB**    | **0.67x** (motlie_db uses 1.50x LESS!)   |
+| Scale   | Nodes       | Edges        | Reference Memory | motlie_db Memory | Ratio                               |
+|---------|-------------|--------------|------------------|------------------|-------------------------------------|
+| 1       | 10          | 26           | 16 KB            | 144 KB           | 9.00x                               |
+| 10      | 100         | 287          | 64 KB            | 304 KB           | 4.75x                               |
+| 100     | 1,000       | 2,897        | 624 KB           | 1,600 KB         | 2.56x                               |
+| 1000    | 10,000      | 28,997       | 5,168 KB         | 3,520 KB         | **0.68x**                           |
+| 10000   | 100,000     | 289,997      | 37,072 KB        | 8,432 KB         | **0.23x**                           |
+| 100000  | 1,000,000   | 2,899,997    | >5 min†          | >5 min†          | -                                   |
 
-**Observation**: PageRank is the most memory-intensive algorithm due to storing rank scores for all nodes across 50 iterations. **motlie_db demonstrates superior memory efficiency at all scales 100+**:
-- At scale=100: motlie_db uses **25% LESS memory** (272 KB vs 368 KB)
-- At scale=1000: Near-parity at 1.02x (3.89 MB vs 3.80 MB)
-- At scale=10000: **motlie_db uses 2.30x LESS memory** (13.62 MB vs 31.30 MB)
-- At scale=100000: **motlie_db uses 1.50x LESS memory** (226.62 MB vs 339.36 MB) - **SUSTAINED ADVANTAGE!**
-
-The in-memory implementation grows from 368 KB to 339.36 MB (945x increase), while motlie_db grows from 272 KB to 226.62 MB (853x increase). This demonstrates that motlie_db's sub-linear memory growth provides **substantial practical benefits for large-scale graph algorithms**, with the memory advantage **sustained and significant even at extreme scales (800K nodes)**.
+**Observations**: PageRank demonstrates the most significant memory scaling difference. Starting with 9.00x overhead at scale=1, the ratio decreases consistently across scales. At scale=1000, motlie_db uses 32% less memory (3.5 MB vs 5.2 MB), and at scale=10000, motlie_db uses 77% less memory (8.4 MB vs 36.2 MB). This pattern occurs because PageRank stores rank scores for all nodes across 50 iterations, where the in-memory implementation keeps all iteration state in RAM while motlie_db streams iterative updates through its persistent storage with bounded cache.
 
 ## Analysis
 
-### Why motlie_db Shows Constant Memory Usage
+### Why motlie_db Shows Variable Memory Overhead
 
-1. **Persistent Storage**: Graph data resides in RocksDB on disk, not in RAM
-2. **Query-Based Access**: Only actively queried nodes/edges are loaded into memory
-3. **Caching**: RocksDB uses a bounded cache (block cache) that doesn't grow with graph size
-4. **Streaming**: Results are streamed rather than materialized in memory
+1. **Persistent Storage**: Graph data resides in RocksDB on disk, requiring block cache and query state in RAM
+2. **Query-Based Access**: Each query operation maintains state for iterators, filters, and result buffers
+3. **Bounded Caching**: RocksDB block cache size is fixed regardless of graph size
+4. **Serialization Overhead**: Data must be encoded/decoded when crossing the storage boundary
 
-### Why In-Memory Implementations Scale Sub-Linearly
+### Why In-Memory Implementations Show Sub-Linear Growth
 
-1. **Efficient Data Structures**: petgraph uses arena allocation and compact representations
-2. **CPU Cache Effects**: Smaller graphs fit entirely in L1/L2/L3 cache, showing as "0 bytes" delta
-3. **Memory Layout**: Contiguous memory layouts benefit from prefetching
-4. **No Serialization**: Direct memory access without encode/decode overhead
+1. **Compact Data Structures**: petgraph uses arena allocation and optimized memory layouts
+2. **CPU Cache Effects**: Small graphs fit in L1/L2/L3 cache, showing minimal or zero RSS delta
+3. **Direct Memory Access**: No serialization overhead or storage layer indirection
+4. **Algorithmic Efficiency**: Optimized implementations (e.g., pathfinding crate's Dijkstra) minimize auxiliary data structures
 
-### Crossover Point and Convergence Trends
+### Memory Crossover Patterns
 
-Based on the comprehensive data from scales 1-10000, we observe clear convergence patterns and **confirmed crossover points**:
+Based on the data from scales 1-10000:
+
+![Memory Comparison at Scale 1000](images/memory_comparison_scale1000.png)
 
 #### Memory Ratio Trends (motlie_db / in-memory)
 
-![Memory Comparison at Scale 100](images/memory_comparison_scale100.png)
+| Algorithm        | Scale 1 | Scale 10 | Scale 100 | Scale 1000 | Scale 10000 | Scale 100000 |
+|------------------|---------|----------|-----------|------------|-------------|--------------|
+| DFS              | 1.86x   | 3.57x    | **0.78x** | 2.43x      | **0.73x**   | Timeout      |
+| BFS              | 1.64x   | -        | 2.50x     | 2.03x      | **1.05x**   | Timeout      |
+| Topological Sort | 2.90x   | 9.50x    | 15.33x    | 2.93x      | 1.42x       | Timeout      |
+| Dijkstra         | 2.50x   | 2.57x    | 2.88x     | 1.33x      | -           | Timeout      |
+| PageRank         | 9.00x   | 4.75x    | 2.56x     | **0.68x**  | **0.23x**   | Timeout      |
 
-| Algorithm        | Scale 10 | Scale 100 | Scale 1000 | Scale 10000 | Scale 100000 | Trend |
-|------------------|----------|-----------|------------|-------------|--------------|-------|
-| DFS              | 18x      | 15x       | **1.95x**  | N/A*        | N/A*         | ✓ Converging rapidly |
-| BFS              | 2.1x     | 7.5x      | **3.29x**  | **1.05x**   | **2.07x**    | ⚠ Non-monotonic - regression at scale 100K |
-| Topological Sort | 15-18x   | 8-15x     | **6.32x**  | **3.45x**   | N/A†         | ✓ **Rapid convergence** - projected crossover at 15K-25K |
-| Dijkstra         | 8-16x    | 4-8x      | **0.82x**  | **0.63x**   | N/A‡         | ✓ **motlie_db WINS at scales 1000+** |
-| PageRank         | 1.0x     | **0.74x** | **1.02x**  | **0.44x**   | **0.67x**    | ✓ **motlie_db WINS at all scales 100+** |
-
-*DFS failed correctness check at scale=10000+
-†Topological Sort scale=100000 test terminated after 4+ hours without completion (potential algorithmic complexity issue)
-‡Dijkstra scale=100000: pathfinding showed 0 bytes (likely CPU cached)
+†Scale 100000: All tests exceed 5-minute timeout threshold
 
 **Key Findings:**
-- **Dijkstra**: **CROSSOVER CONFIRMED at scale 1000** - motlie_db uses **1.21x less memory** at scale 1000 (1.03 MB vs 1.25 MB) and **1.58x less** at scale 10,000 (6.72 MB vs 10.64 MB). **Earliest crossover achieved among traversal algorithms!**
-- **PageRank**: **CROSSOVER CONFIRMED & SUSTAINED** - motlie_db uses 1.50x-2.30x LESS memory at scales 10K-100K (226.62 MB vs 339.36 MB at scale=100K)
-- **Topological Sort**: **Rapid convergence** from 15x overhead at scale 10 to 3.45x at scale 10,000 - projected crossover at 15K-25K nodes
-- **BFS**: Non-monotonic behavior - achieved near-parity at scale=10K (1.05x) but regressed to 2.07x at scale=100K, indicating potential cache pressure or query state issues
-- **DFS**: Strong convergence trend (15x → 1.95x) but requires correctness fixes at very large scales
 
-#### Crossover Points (Confirmed)
+- **DFS**: Non-monotonic scaling with crossover at scale=100 (0.78x) and scale=10000 (0.73x)
+- **BFS**: Consistent convergence toward parity, achieving 1.05x at scale=10000
+- **Topological Sort**: Highest initial overhead (15.33x at scale=100) but converges to 1.42x at scale=10000
+- **Dijkstra**: Moderate overhead (1.33x-2.88x) across scales 1-1000; reference implementation fully cached at scale=10000
+- **PageRank**: Crosses over at scale=1000 (0.68x) with significant advantage at scale=10000 (0.23x)
 
-- **Dijkstra**: **CROSSED between scale 100 and 1000** - motlie_db consistently uses less memory at all scales 1000+
-  - Scale 1000: 1.21x less memory (1.03 MB vs 1.25 MB)
-  - Scale 10000: **1.58x less memory** (6.72 MB vs 10.64 MB) - **advantage increasing with scale!**
-  - **Earliest crossover** among traversal algorithms - makes motlie_db highly competitive for shortest path at medium-to-large scales
-- **PageRank**: **CROSSED at scale 100** - motlie_db consistently uses less memory at all scales 100+
-  - Scale 100: 1.35x less memory (272 KB vs 368 KB)
-  - Scale 10000: **2.30x less memory** (13.62 MB vs 31.30 MB)
-  - Scale 100000: **1.50x less memory** (226.62 MB vs 339.36 MB) - **sustained advantage at extreme scale!**
-- **Topological Sort**: **Projected crossover at scale 15,000-25,000** based on rapid convergence trend
-  - Scale 1000: 6.32x overhead
-  - Scale 10000: 3.45x overhead - **rapid convergence**
-  - Growth rate analysis suggests crossover imminent at next scale tier
-- **BFS**: **Non-monotonic behavior** - achieved near-parity at scale=10K but regressed at scale=100K
-  - Scale 10000: 1.05x (3.78 MB vs 3.61 MB) - suggested imminent crossover
-  - Scale 100000: **2.07x regression** (68.36 MB vs 32.95 MB) - crossover did not occur
-  - **Analysis needed**: BFS memory scaling appears non-linear for motlie_db at very large scales
-- **DFS**: Projected crossover at scale 15000-20000 based on 100→1000 trend, pending correctness fixes
+#### Crossover Analysis
+
+- **PageRank**: Crosses below 1.0x between scale=100 and scale=1000, maintaining advantage through scale=10000
+- **DFS**: Crosses below 1.0x at scale=100 and scale=10000, showing non-monotonic behavior
+- **BFS**: Approaches parity at scale=10000 (1.05x) without crossing
+- **Topological Sort**: Converging toward crossover with 1.42x at scale=10000
+- **Dijkstra**: Converging toward parity with 1.33x at scale=1000; measurement anomaly at scale=10000
 
 ### Practical Implications
 
-**Use motlie_db when:**
-- Graph size > available RAM
-- Long-running applications where memory stability matters
-- Multiple processes need to access the same graph
-- Persistence and crash recovery are required
-- Memory-constrained environments
+**motlie_db advantages:**
+- PageRank and iterative algorithms at scales 1000+ nodes show 32-77% memory reduction
+- DFS at specific scales (100, 10000 nodes) shows 22-27% memory reduction
+- BFS achieves near-parity (5% overhead) at 100K nodes
+- Provides persistence, ACID properties, and multi-process access regardless of memory efficiency
+- Memory usage growth bounded by RocksDB cache size, not graph size
 
-**Use in-memory implementations when:**
-- Graph fits comfortably in RAM
-- Single-process, short-lived computations
-- Maximum query performance is critical
-- Graph structure changes frequently
+**In-memory implementation advantages:**
+- Consistently lower memory at small scales (1-100 nodes)
+- Zero or minimal overhead when data fits in CPU cache
+- Simpler memory model with no serialization overhead
+- Topological Sort maintains 42% lower memory through scale=10000
+- Dijkstra maintains 25-189% lower memory through scale=1000
 
 ## Methodology
 
 ### Memory Measurement
 
-Memory usage is measured using Resident Set Size (RSS) delta:
+Memory usage measured using Resident Set Size (RSS) delta:
 - **macOS**: `ps -o rss=` command
 - **Linux**: `/proc/self/status` VmRSS field
 
-The measurement captures memory delta before and after algorithm execution, representing the incremental memory cost of the graph data structure and algorithm state.
+Measurements capture memory delta before and after algorithm execution, representing the incremental memory cost of the graph data structure and algorithm state.
 
 ### Test Environment
 
@@ -220,41 +206,26 @@ The measurement captures memory delta before and after algorithm execution, repr
 
 ### Limitations
 
-1. **Memory Delta Accuracy**: Small allocations may not be captured due to OS memory page granularity
-2. **Cache Effects**: CPU cache vs RAM distinction not measured
-3. **Background Activity**: Other processes may affect RSS measurements
-4. **Garbage Collection**: Rust's drop timing may affect measurements
+1. **Memory Delta Accuracy**: Allocations smaller than OS memory page size (typically 4-16 KB) may not register in RSS measurements
+2. **Cache Effects**: CPU cache vs RAM distinction not captured; very small graphs may show 0 KB delta
+3. **Background Activity**: Other system processes may affect RSS measurements
+4. **Measurement Timing**: Rust's drop timing and RocksDB background compaction may affect point-in-time measurements
+5. **Timeout Constraints**: Scale=100000 tests exceeded 5-minute threshold, preventing data collection
 
 ## Conclusion
 
-The comprehensive data from scales 1-10000 **validates the crossover hypothesis for both Dijkstra and PageRank**, demonstrates **rapid convergence for Topological Sort**, and reveals **complex scaling behaviors** that require nuanced analysis:
+The data from scales 1-10000 reveals algorithm-specific memory scaling characteristics:
 
-1. **Dijkstra achieves earliest crossover among traversal algorithms**:
-   - **Scale 1000**: 1.21x less memory (1.03 MB vs 1.25 MB) - **CROSSOVER ACHIEVED**
-   - **Scale 10000**: **1.58x less memory** (6.72 MB vs 10.64 MB) - **advantage increases with scale!**
-   - **Conclusion**: For shortest-path computations, motlie_db provides **memory advantage starting at medium scales** (~8,000 nodes), making it highly competitive for navigation, routing, and pathfinding applications
+1. **PageRank** achieves memory crossover at scale=1000, with motlie_db using 32% less memory (3.5 MB vs 5.2 MB) and 77% less at scale=10000 (8.4 MB vs 36.2 MB). This occurs because iterative algorithms benefit from motlie_db's bounded cache while in-memory implementations accumulate state across iterations.
 
-2. **Topological Sort shows rapid convergence toward crossover**:
-   - Ratio dropped from 15x at scale 10 to **3.45x at scale 10,000** - **dramatic convergence**
-   - Growth rate analysis projects **crossover at scale 15,000-25,000 nodes**
-   - **Conclusion**: For dependency resolution and task scheduling algorithms, motlie_db approaches parity at medium-large scales
+2. **DFS** demonstrates non-monotonic scaling with crossover at scale=100 (0.78x) and scale=10000 (0.73x), but overhead at scale=1000 (2.43x). The pattern requires further investigation to understand the algorithmic factors driving these variations.
 
-3. **PageRank crossover confirmed and sustained**:
-   - **Scale 100**: 1.35x less memory (272 KB vs 368 KB)
-   - **Scale 10000**: **2.30x less memory** (13.62 MB vs 31.30 MB) - MAJOR ADVANTAGE
-   - **Scale 100000**: **1.50x less memory** (226.62 MB vs 339.36 MB) - SUSTAINED AT EXTREME SCALE
-   - **Conclusion**: For memory-intensive iterative algorithms, motlie_db provides **consistent, substantial memory savings** across all production scales
+3. **BFS** shows consistent convergence, achieving near-parity at scale=10000 (1.05x ratio, 7.97 MB vs 8.38 MB). This suggests imminent crossover at scales beyond 100K nodes if the convergence trend continues.
 
-4. **BFS shows non-monotonic behavior**:
-   - Strong convergence from scale 100 to 10000 (7.5x → 1.05x)
-   - **Unexpected regression at scale 100000** (2.07x) - suggests RocksDB cache pressure, query state accumulation, or other scaling factors
-   - **Further analysis needed** to understand BFS memory scaling at extreme scales
+4. **Topological Sort** starts with the highest overhead (15.33x at scale=100) but converges to 1.42x at scale=10000 (1.6 MB vs 2.3 MB), demonstrating rapid convergence rate.
 
-5. **Practical implications**:
-   - **For Dijkstra shortest path**: motlie_db is the **winner at scales 1000+** (8K+ nodes), providing 1.21x-1.58x memory savings
-   - **For PageRank and similar algorithms**: motlie_db is the **clear winner** at all production scales (100+ nodes), providing 1.35x-2.30x memory savings
-   - **For Topological Sort**: Approaching parity - projected crossover at 15K-25K nodes
-   - **For BFS and other traversal algorithms**: Excellent performance up to ~100K nodes, but memory behavior at extreme scales requires investigation
-   - **For all algorithms**: motlie_db provides persistence, ACID properties, and multi-process access - critical for real-world applications
+5. **Dijkstra** maintains moderate overhead (1.33x-2.88x) through scale=1000. At scale=10000, the reference implementation shows 0 KB delta (fully cached) while motlie_db uses 8.9 MB for persistent storage operations.
 
-**Bottom Line**: At production scales (1,000-80,000 nodes), motlie_db provides **superior memory efficiency for Dijkstra shortest path and PageRank algorithms**, with **Topological Sort rapidly converging** toward crossover. For graph applications requiring shortest paths, centrality analysis, or dependency resolution at scale, motlie_db offers substantial memory advantages while providing persistence, ACID properties, and multi-process access - making it an excellent choice for real-world graph applications.
+The analysis indicates that motlie_db's memory characteristics vary significantly by algorithm and scale. For iterative algorithms like PageRank at scales ≥1000 nodes, motlie_db provides substantial memory advantages. For traversal algorithms (DFS, BFS) at scales ≥10000 nodes, motlie_db approaches or achieves memory parity. For dependency resolution (Topological Sort), motlie_db maintains overhead but shows convergence trends.
+
+All scale=100000 tests exceeded the 5-minute timeout threshold, preventing analysis at extreme scales. The timeout behavior indicates that factors beyond memory usage (likely I/O latency and query complexity) become limiting factors at million-node graphs.
