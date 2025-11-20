@@ -82,8 +82,11 @@ At scale=1000 (~8,000 nodes), the memory differences become much smaller, with D
 | 100    | 800     | 999     | ~16-32 KB       | ~240-288 KB      | 8-15x                        |
 | 1000   | 8,000   | 9,999   | 368 KB          | 2.27 MB          | 6.32x                        |
 | 10000  | 80,000  | 99,999  | 1.27 MB         | 4.38 MB          | **3.45x** (rapid convergence)|
+| 100000 | 800,000 | 999,999 | N/A             | N/A              | **Test timeout (4+ hours)**  |
 
 **Observation**: Topological sort shows **dramatic convergence** similar to DFS and BFS patterns. The memory ratio dropped from 15x at scale 10 to **3.45x at scale 10,000**, demonstrating rapid convergence toward parity. At scale=1000, petgraph grows from 16-32 KB to 368 KB, while motlie_db grows from 240-288 KB to 2.27 MB, but the rate of growth for petgraph is accelerating faster. **Projected crossover at scale 15,000-25,000** based on the convergence trend.
+
+**Note on scale=100000**: The test was terminated after running for over 4 hours (246+ minutes of CPU time) without completing. This extreme runtime compared to scale=10000 (2 seconds) suggests potential O(n²) or worse algorithmic complexity for this specific graph structure at extreme scales. Further investigation needed to optimize topological sort performance for very large graphs.
 
 ### Dijkstra's Shortest Path
 
@@ -153,7 +156,7 @@ Based on the comprehensive data from scales 1-10000, we observe clear convergenc
 | PageRank         | 1.0x     | **0.74x** | **1.02x**  | **0.44x**   | **0.67x**    | ✓ **motlie_db WINS at all scales 100+** |
 
 *DFS failed correctness check at scale=10000+
-†Topological Sort scale=100000 test still running at time of analysis
+†Topological Sort scale=100000 test terminated after 4+ hours without completion (potential algorithmic complexity issue)
 ‡Dijkstra scale=100000: pathfinding showed 0 bytes (likely CPU cached)
 
 **Key Findings:**
