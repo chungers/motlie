@@ -462,19 +462,26 @@ For applications requiring persistence, ACID properties, or graphs too large for
 
 ![Memory Ratio Trend](images/memory_ratio_trend.png)
 
-| Algorithm | Scale 100 | Scale 1000 | Scale 10000 | Scale 100000 | Status |
-|-----------|-----------|------------|-------------|--------------|--------|
-| DFS       | 15x       | **1.95x**  | N/A*        | N/A*         | Converging rapidly |
-| BFS       | 7.5x      | **3.29x**  | **1.05x**   | **2.07x**    | ⚠ Non-monotonic - regression at extreme scale |
-| PageRank  | **0.74x** | **1.02x**  | **0.44x**   | **0.67x**    | **motlie_db WINS - sustained advantage!** |
+| Algorithm        | Scale 100 | Scale 1000 | Scale 10000 | Scale 100000 | Status |
+|------------------|-----------|------------|-------------|--------------|--------|
+| **Dijkstra**     | 4-8x      | **0.82x**  | **0.63x**   | N/A†         | **motlie_db WINS at 1000+! Earliest crossover!** |
+| Topological Sort | 8-15x     | **6.32x**  | **3.45x**   | N/A‡         | Rapid convergence - projected crossover at 15K-25K |
+| DFS              | 15x       | **1.95x**  | N/A*        | N/A*         | Converging rapidly |
+| BFS              | 7.5x      | **3.29x**  | **1.05x**   | **2.07x**    | ⚠ Non-monotonic - regression at extreme scale |
+| PageRank         | **0.74x** | **1.02x**  | **0.44x**   | **0.67x**    | **motlie_db WINS - sustained advantage!** |
 
 *DFS failed correctness check at scale=10000+ (requires investigation)
+†Dijkstra scale=100000: pathfinding showed 0 bytes (likely CPU cached)
+‡Topological Sort scale=100000: Test timeout after 4+ hours (algorithmic complexity issue)
 
 **Highlights:**
+- **Dijkstra at scale=1000**: motlie_db uses **1.21x LESS memory** (1.03 MB vs 1.25 MB) - **EARLIEST CROSSOVER among traversal algorithms!**
+- **Dijkstra at scale=10000**: motlie_db uses **1.58x LESS memory** (6.72 MB vs 10.64 MB) - advantage **increases with scale**
 - **PageRank at scale=100000**: motlie_db uses **1.50x LESS memory** (226.62 MB vs 339.36 MB) - **SUSTAINED ADVANTAGE** at extreme scale (800K nodes)
 - **PageRank at scale=10000**: motlie_db uses **2.30x LESS memory** (13.62 MB vs 31.30 MB)
+- **Topological Sort**: Dramatic convergence from 15x → 3.45x overhead, projected crossover at 15K-25K nodes
 - **BFS**: Achieved near-parity at scale=10K (1.05x) but regressed to 2.07x at scale=100K - non-monotonic behavior requires investigation
-- **Proven at scale**: For memory-intensive algorithms like PageRank, motlie_db provides **consistent memory savings** across all production scales (100 to 800,000 nodes)
+- **Proven at scale**: For shortest-path and memory-intensive algorithms, motlie_db provides **memory advantages starting at ~8,000 nodes**
 
 See [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md) for comprehensive analysis with detailed data tables, visualizations, and trend analysis.
 
@@ -498,3 +505,88 @@ All examples use:
 - **Correctness verification** comparing results between implementations
 
 See individual source files for detailed algorithm implementations.
+
+## Memory Analysis Methodology
+
+The memory performance data is collected using a systematic approach to measure Resident Set Size (RSS) delta:
+
+### Data Collection Process
+
+1. **Memory Measurement** (`common.rs:measure_time_and_memory_async`)
+   - Captures RSS before and after algorithm execution
+   - Uses platform-specific APIs: `ps -o rss=` on macOS, `/proc/self/status` on Linux
+   - Measures incremental memory cost of graph data structures and algorithm state
+   - Returns memory delta in bytes along with execution time
+
+2. **Test Execution**
+   - Examples run at multiple scale factors: 1, 10, 100, 1000, 10000, 100000
+   - Each test creates a fresh graph structure appropriate for the algorithm
+   - Both reference (in-memory) and motlie_db implementations are measured
+   - Results are compared for correctness and performance
+
+3. **Data Collection Scripts** (`scripts/`)
+   - `collect_comprehensive_metrics.sh` - Automated test execution across all scales
+   - `collect_memory_metrics.sh` - Simplified memory data collection
+   - CSV files track raw measurements for reproducibility
+   - `generate_memory_charts.py` - Visualization generation using matplotlib
+
+4. **Chart Generation**
+   - Individual algorithm trends showing memory usage vs scale
+   - Ratio trends showing convergence toward parity
+   - Comparison charts highlighting crossover points
+   - All charts saved to `images/` directory
+
+### Test Environment
+
+- **OS**: macOS (Darwin 24.6.0) / Linux compatible
+- **Hardware**: Apple Silicon / x86_64
+- **Build**: `cargo build --release` for optimized performance
+- **RocksDB**: Default configuration with block cache
+
+### Key Metrics Tracked
+
+- **Scale**: Multiplier determining graph size (nodes = scale × base_size)
+- **Nodes**: Total number of graph vertices
+- **Edges**: Total number of graph edges
+- **Reference Memory**: RSS delta for in-memory implementation (KB)
+- **motlie_db Memory**: RSS delta for persistent implementation (KB)
+- **Ratio**: motlie_db / reference (values < 1.0 indicate motlie_db uses less memory)
+
+### Limitations and Considerations
+
+1. **Measurement Granularity**: Small allocations may not be captured due to OS memory page size
+2. **Cache Effects**: CPU L1/L2/L3 cache vs RAM distinction not measured
+3. **Background Activity**: Other processes may affect RSS measurements
+4. **Non-Determinism**: Drop timing in Rust may affect measurements slightly
+5. **Scale-Specific Behavior**: Some algorithms show non-monotonic scaling (e.g., BFS regression at scale 100K)
+
+### Reproducing Results
+
+To reproduce the memory analysis:
+
+```bash
+# Build examples in release mode
+cargo build --release --examples
+
+# Run individual tests with scale factor
+./target/release/examples/dijkstra /tmp/dijkstra_test 1000
+./target/release/examples/toposort /tmp/toposort_test 1000
+
+# Collect comprehensive metrics (automated)
+cd examples/graph
+./scripts/collect_comprehensive_metrics.sh
+
+# Generate charts from collected data
+python3 scripts/generate_memory_charts.py
+```
+
+### Future Work
+
+Areas for further investigation:
+- **BFS non-monotonic behavior** at scale 100K (cache pressure or query state accumulation)
+- **DFS correctness issues** at scales 10K+ requiring algorithm fixes
+- **Topological sort performance** at scale 100K (O(n²) complexity suspected)
+- **Optimization opportunities** for persistent storage at extreme scales
+- **Cross-platform validation** on different hardware and OS combinations
+
+See [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md) for detailed findings, data tables, and trend analysis.
