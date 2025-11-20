@@ -501,8 +501,27 @@ The scale factor multiplies a base structure to create larger coherent graphs th
 All examples use:
 - **motlie_db** for persistent graph storage and queries
 - **Common utilities** in `common.rs` for graph building and timing
-- **Reference implementations** from established crates (petgraph, pathfinding)
+- **Reference implementations** from established crates or custom implementations
 - **Correctness verification** comparing results between implementations
+
+### Reference Implementation Libraries
+
+Each example compares motlie_db against a reference implementation for correctness validation and performance benchmarking:
+
+| Algorithm        | File          | Reference Library/Implementation | Function/API Used | Source |
+|------------------|---------------|----------------------------------|-------------------|--------|
+| **DFS**          | `dfs.rs`      | **petgraph 0.6** | `petgraph::visit::Dfs` | [crates.io/petgraph](https://crates.io/crates/petgraph) |
+| **BFS**          | `bfs.rs`      | **petgraph 0.6** | `petgraph::visit::Bfs` | [crates.io/petgraph](https://crates.io/crates/petgraph) |
+| **Topological Sort** | `toposort.rs` | **petgraph 0.6** | `petgraph::algo::toposort` | [crates.io/petgraph](https://crates.io/crates/petgraph) |
+| **Dijkstra**     | `dijkstra.rs` | **pathfinding 4.0** | `pathfinding::prelude::dijkstra` | [crates.io/pathfinding](https://crates.io/crates/pathfinding) |
+| **PageRank**     | `pagerank.rs` | **Custom implementation** | `pagerank_reference()` (bespoke) | In-file at `pagerank.rs:210` |
+
+**Notes:**
+- **petgraph**: Industry-standard Rust graph data structure library, widely used for in-memory graph algorithms
+- **pathfinding**: Popular Rust pathfinding and graph algorithm library with optimized implementations
+- **PageRank**: Uses a custom reference implementation since there's no standard PageRank crate; implements the classic algorithm with damping factor 0.85 over 50 iterations
+- All reference implementations use standard, well-tested algorithms appropriate for correctness comparison
+- Reference implementations are optimized for in-memory performance and serve as the baseline for memory usage comparisons
 
 See individual source files for detailed algorithm implementations.
 
