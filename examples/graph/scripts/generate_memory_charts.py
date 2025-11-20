@@ -32,11 +32,17 @@ memory_data = {
         1: (144, 144),
         10: (16, 288),
         100: (32, 288),
+        1000: (368, 2324),
+        10000: (1301, 4485),
+        # 100000: Still running at time of chart generation
     },
     'Dijkstra': {
         1: (144, 144),
         10: (32, 288),
         100: (64, 288),
+        1000: (1280, 1055),  # 1.25 MB, 1.03 MB - motlie_db WINS!
+        10000: (10895, 6881),  # 10.64 MB, 6.72 MB - motlie_db WINS!
+        # 100000: (0, 118497),  # pathfinding: 0 bytes (cached), motlie_db: 115.72 MB
     },
     'PageRank': {
         1: (144, 144),

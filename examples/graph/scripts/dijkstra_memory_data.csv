@@ -1,0 +1,7 @@
+algorithm,scale,nodes,edges,reference_memory_kb,motlie_memory_kb,ratio,trend
+Dijkstra,1,8,13,~144,~144,1.0x,Equal
+Dijkstra,10,80,148,16-32,240-288,8-16x,motlie_db higher
+Dijkstra,100,800,1498,32-64,240-288,4-8x,motlie_db higher
+Dijkstra,1000,8000,14998,1280,1055,0.82x,motlie_db WINS
+Dijkstra,10000,80000,149998,10895,6881,0.63x,motlie_db WINS
+Dijkstra,100000,800000,1499998,0,118497,N/A,pathfinding cached

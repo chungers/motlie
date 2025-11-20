@@ -23,7 +23,7 @@ use common::{build_graph, measure_time_and_memory, measure_time_and_memory_async
 use motlie_db::{Id, OutgoingEdges, QueryRunnable};
 use pathfinding::prelude::dijkstra as pathfinding_dijkstra;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 use std::env;
 use std::path::Path;
 use tokio::time::Duration;
@@ -367,8 +367,8 @@ async fn main() -> Result<()> {
     let end_id = name_to_id[&end_name];
     let timeout = Duration::from_secs(60); // Longer timeout for large graphs
 
-    let (motlie_result, motlie_time) =
-        measure_time_async(|| dijkstra_motlie(start_id, end_id, &reader, timeout)).await;
+    let (motlie_result, motlie_time, motlie_result_memory) =
+        measure_time_and_memory_async(|| dijkstra_motlie(start_id, end_id, &reader, timeout)).await;
     let motlie_result = motlie_result?;
 
     match &motlie_result {

@@ -1,0 +1,7 @@
+algorithm,scale,nodes,edges,reference_memory_kb,motlie_memory_kb,ratio,trend
+Topological Sort,1,8,9,~144,~144,1.0x,Equal
+Topological Sort,10,80,99,0-16,240-288,15-18x,motlie_db higher
+Topological Sort,100,800,999,16-32,240-288,8-15x,motlie_db higher
+Topological Sort,1000,8000,9999,368,2324,6.32x,Converging
+Topological Sort,10000,80000,99999,1301,4485,3.45x,Converging rapidly
+Topological Sort,100000,800000,999999,TBD,TBD,TBD,Running

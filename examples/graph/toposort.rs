@@ -17,10 +17,10 @@ mod common;
 
 use anyhow::Result;
 use common::{build_graph, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode};
-use motlie_db::{Id, IncomingEdges, OutgoingEdges, QueryRunnable};
+use motlie_db::{Id, OutgoingEdges, QueryRunnable};
 use petgraph::algo::toposort as petgraph_toposort;
-use petgraph::graph::{DiGraph, NodeIndex};
-use std::collections::{HashMap, HashSet, VecDeque};
+use petgraph::graph::DiGraph;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::path::Path;
 use tokio::time::Duration;
@@ -315,8 +315,8 @@ async fn main() -> Result<()> {
     let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
     let timeout = Duration::from_secs(30);
 
-    let (motlie_result, motlie_time) =
-        measure_time_async(|| toposort_motlie(&node_ids, &reader, timeout)).await;
+    let (motlie_result, motlie_time, motlie_result_memory) =
+        measure_time_and_memory_async(|| toposort_motlie(&node_ids, &reader, timeout)).await;
     let motlie_result = motlie_result?;
 
     if num_nodes <= 20 {
