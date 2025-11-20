@@ -234,8 +234,8 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run BFS with motlie_db
-            let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
-            let start_name = if scale == 1 { "Root".to_string() } else { "N0".to_string() };
+            let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes.clone(), edges).await?;
+            let start_name = nodes[0].name.clone();
             let start_id = name_to_id[&start_name];
             let timeout = Duration::from_secs(60); // Longer timeout for large graphs
 

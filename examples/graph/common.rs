@@ -185,6 +185,7 @@ impl GraphMetrics {
 }
 
 /// Node and edge structures for graph construction
+#[derive(Clone)]
 pub struct GraphNode {
     pub id: Id,
     pub name: String,
