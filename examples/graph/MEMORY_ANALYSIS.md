@@ -13,9 +13,34 @@ This document analyzes memory usage patterns for graph algorithms implemented us
 3. **Large Graphs (scale=1000)**: **Rapid convergence** - DFS overhead drops from 15x to 1.95x, BFS from 7.5x to 3.29x, PageRank maintains near-parity at 1.02x
 4. **Very Large Graphs (scale=5000+)**: **Projected crossover point** where motlie_db becomes more memory-efficient than in-memory implementations across all algorithms
 
+## Visual Summary
+
+### Convergence Trend Across All Algorithms
+
+![Memory Ratio Trend](memory_ratio_trend.png)
+
+**Key Observations:**
+- **DFS** (red): Shows dramatic convergence from 18x at scale 10 to 1.95x at scale 1000
+- **BFS** (orange): Follows similar trend, converging from 7.5x to 3.29x
+- **PageRank** (green): Maintains parity throughout, actually using less memory at scale 100
+- **Topological Sort** (blue) and **Dijkstra** (dark blue): Follow DFS/BFS patterns at tested scales
+
+The dashed red line shows the **equal memory point (ratio=1.0)**. PageRank crosses this line, while DFS and BFS are clearly trending toward it.
+
+### Memory Usage Comparison at Scale=1000
+
+![Memory Comparison at Scale 1000](memory_comparison_scale1000.png)
+
+At scale=1000 (8,000 nodes), the memory differences become much smaller:
+- **DFS**: 1.95x ratio - approaching parity
+- **BFS**: 3.29x ratio - continuing to converge
+- **PageRank**: 1.02x ratio - effectively equal (~3.8-3.9 MB each)
+
 ## Detailed Results
 
 ###  DFS (Depth-First Search)
+
+![DFS Memory Trend](memory_trend_dfs.png)
 
 | Scale | Nodes  | Edges  | petgraph Memory | motlie_db Memory | Ratio      |
 |-------|--------|--------|-----------------|------------------|------------|
@@ -30,6 +55,8 @@ This document analyzes memory usage patterns for graph algorithms implemented us
 
 ### BFS (Breadth-First Search)
 
+![BFS Memory Trend](memory_trend_bfs.png)
+
 | Scale | Nodes  | Edges  | petgraph Memory | motlie_db Memory | Ratio      |
 |-------|--------|--------|-----------------|------------------|------------|
 | 1     | 9      | 8      | ~144 KB         | ~144 KB          | 1.0x       |
@@ -41,6 +68,8 @@ This document analyzes memory usage patterns for graph algorithms implemented us
 
 ### Topological Sort
 
+![Topological Sort Memory Trend](memory_trend_topological_sort.png)
+
 | Scale | Nodes | Edges | petgraph Memory | motlie_db Memory | Trend |
 |-------|-------|-------|-----------------|------------------|-------|
 | 1     | 8     | 9     | ~144 KB         | ~144 KB          | Equal |
@@ -51,6 +80,8 @@ This document analyzes memory usage patterns for graph algorithms implemented us
 
 ### Dijkstra's Shortest Path
 
+![Dijkstra Memory Trend](memory_trend_dijkstra.png)
+
 | Scale | Nodes | Edges | pathfinding Memory | motlie_db Memory | Trend |
 |-------|-------|-------|-------------------|------------------|-------|
 | 1     | 8     | 13    | ~144 KB           | ~144 KB          | Equal |
@@ -60,6 +91,8 @@ This document analyzes memory usage patterns for graph algorithms implemented us
 **Observation**: Dijkstra shows pathfinding crate using slightly more memory than DFS/BFS (due to priority queue), but still scaling sub-linearly.
 
 ### PageRank
+
+![PageRank Memory Trend](memory_trend_pagerank.png)
 
 | Scale | Nodes  | Edges  | Reference Memory | motlie_db Memory | Ratio                        |
 |-------|--------|--------|------------------|------------------|------------------------------|
@@ -91,6 +124,8 @@ This document analyzes memory usage patterns for graph algorithms implemented us
 Based on the comprehensive data from scales 1-1000, we observe clear convergence patterns:
 
 #### Memory Ratio Trends (motlie_db / in-memory)
+
+![Memory Comparison at Scale 100](memory_comparison_scale100.png)
 
 | Algorithm | Scale 10 | Scale 100 | Scale 1000 | Trend |
 |-----------|----------|-----------|------------|-------|

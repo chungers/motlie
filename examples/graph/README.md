@@ -460,6 +460,8 @@ For applications requiring persistence, ACID properties, or graphs too large for
 
 #### Convergence Trends (Memory Ratio: motlie_db / in-memory)
 
+![Memory Ratio Trend](memory_ratio_trend.png)
+
 | Algorithm | Scale 100 | Scale 1000 | Trend |
 |-----------|-----------|------------|-------|
 | DFS       | 15x       | **1.95x**  | Converging rapidly |
@@ -471,7 +473,7 @@ For applications requiring persistence, ACID properties, or graphs too large for
 - **DFS**: Overhead drops dramatically from 15x to 1.95x (scale 100 → 1000)
 - **Projected crossover**: All algorithms expected to reach memory parity at scale 2000-5000
 
-See [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md) for comprehensive analysis with detailed data tables and trend analysis.
+See [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md) for comprehensive analysis with detailed data tables, visualizations, and trend analysis.
 
 ## Graph Generation
 
