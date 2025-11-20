@@ -1,10 +1,15 @@
 # Option 2: Direct Byte Concatenation for Keys - Implementation Outline
 
+**Status**: ✅ **IMPLEMENTED** (as of 2025-11-19)
+
+This document describes the implementation of direct byte concatenation for RocksDB keys, which has been successfully deployed to enable efficient prefix scanning.
+
 ## Overview
 
 Replace MessagePack serialization with direct byte concatenation for **keys only** in all column families. This enables RocksDB prefix extractors for O(1) prefix seek performance.
 
 **Scope**: Keys only (values remain MessagePack-encoded)
+**Current Status**: Fully implemented in `libs/db/src/schema.rs` (lines 275-450)
 
 **Key Insight**: MessagePack introduces variable-length headers that make constant-length prefix extraction impossible, preventing RocksDB prefix optimization.
 

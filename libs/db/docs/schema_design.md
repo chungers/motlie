@@ -1,5 +1,9 @@
 # Motlie Database Schema Design
 
+**Status**: ✅ **CURRENT** (as of 2025-11-19)
+
+This document describes the complete schema for all column families in the motlie graph database.
+
 ## Overview
 
 Motlie is a temporal graph database built on RocksDB, using column families for efficient storage and querying of nodes, edges, and fragments with temporal validity tracking and optional edge weights.

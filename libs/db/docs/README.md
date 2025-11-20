@@ -39,16 +39,17 @@ This directory contains design documentation, analysis, and implementation notes
 
 ---
 
-#### [reader.md](reader.md)
-Legacy reference for the deprecated Reader API (v0.1.x).
+#### [mutation-api-guide.md](mutation-api-guide.md) ⭐
+**ESSENTIAL**: Complete guide to the modern Mutation API (v0.3.0+).
 
 **Contents**:
-- Query operations (node_by_id, edge_by_id, etc.) - **DEPRECATED**
-- Timeout handling
-- Return types and semantics
-- Example usage patterns
+- Type-driven mutation construction
+- All mutation types with examples
+- Batching patterns
+- Design rationale and migration guide
+- Performance considerations
 
-**Status**: 📋 Historical - Use [query-api-guide.md](query-api-guide.md) instead
+**Status**: ✅ Current - **Start here for mutation operations**
 
 ---
 
@@ -82,67 +83,30 @@ The following documents capture design discussions, analyses, and decisions made
 
 ---
 
-#### [reader-api-completeness-analysis.md](reader-api-completeness-analysis.md)
-Comprehensive analysis of API gaps for a complete point-query interface.
+#### [schema_design.md](schema_design.md) ⭐
+**ESSENTIAL**: Complete schema documentation for all column families.
 
-**Identified Gaps**:
-1. **Critical**: `node_by_name()` - lookup nodes by name
-2. **Critical**: `edge_by_id()` - get full edge topology (NOW IMPLEMENTED ✅)
-3. **Nice-to-have**: `entity_type()` - determine if ID is node or edge
-4. Additional convenience methods
+**Contents**:
+- Node, Edge, and Fragment column families
+- Key and value layouts
+- Edge weights (Optional<f64>)
+- Temporal validity support
+- Query patterns and performance characteristics
 
-**Status**: ✅ Primary gap (`edge_by_id`) implemented
-
----
-
-#### [edge-by-id-explained.md](edge-by-id-explained.md)
-Detailed explanation of the `edge_by_id()` API and the problem it solves.
-
-**Problem**:
-- Original API: `edge_summary_by_id()` returned only `EdgeSummary`
-- Topology (source, dest, name) was inaccessible by edge ID alone
-- Created API asymmetry with `node_by_id()`
-
-**Solution**:
-- New API: `edge_by_id()` returns `(SrcId, DstId, EdgeName, EdgeSummary)`
-- Denormalize EdgeCfValue to include topology
-- Single O(1) lookup, no joins required
-
-**Status**: ✅ Implemented
+**Status**: ✅ Current - **Required reading for schema understanding**
 
 ---
 
-#### [edge-by-id-implementation-plan.md](edge-by-id-implementation-plan.md)
-Initial implementation plan for transforming `edge_summary_by_id()` → `edge_by_id()`.
+#### [graph_algorithm_api_analysis.md](graph_algorithm_api_analysis.md)
+Analysis of motlie_db's API capabilities for implementing graph algorithms.
 
-**Options Considered**:
-1. **Option A**: Scan forward_edges CF (O(n), inefficient)
-2. **Option B**: Add EdgeTopology CF (requires new index)
-3. **Option C**: Denormalize EdgeCfValue (CHOSEN)
+**Contents**:
+- Support for popular algorithms (Dijkstra, BFS, DFS, etc.)
+- Edge weight support evaluation
+- API gaps and recommendations
+- Comparison with Petgraph and pathfinding crates
 
-**Recommendation**: Denormalize EdgeCfValue with struct pattern
-
-**Status**: 📋 Superseded by tuple implementation
-
----
-
-#### [edge-by-id-tuple-implementation.md](edge-by-id-tuple-implementation.md)
-Revised implementation plan using tuple pattern instead of struct.
-
-**Design Decision**:
-- Use tuple: `EdgeCfValue(SrcId, DstId, EdgeName, EdgeSummary)`
-- Matches existing pattern: `NodeCfValue(NodeName, NodeSummary)`
-- Maintains consistency across schema
-
-**Implementation Steps**:
-1. Update schema.rs - EdgeCfValue tuple
-2. Update query.rs - EdgeById type
-3. Update graph.rs - Processor implementation
-4. Update reader.rs - Public API
-5. Update lib.rs - Public exports
-6. Update tests - Field access patterns
-
-**Status**: ✅ Implemented (later revised to different field order)
+**Status**: 📋 Requirements analysis - **Useful for future development**
 
 ---
 
@@ -177,31 +141,6 @@ Revised implementation plan using tuple pattern instead of struct.
 
 ---
 
-#### [msgpack-tuple-ordering-impact.md](msgpack-tuple-ordering-impact.md)
-Analysis of how tuple field ordering affects MessagePack serialization and storage.
-
-**Key Findings**:
-
-1. **Storage Impact**: NONE
-   - Both orderings serialize to identical byte size
-   - No fragmentation or padding
-   - MessagePack is tightly packed
-
-2. **Parsing Impact**: MINIMAL
-   - Sequential parsing required (no random access)
-   - To access position N, must parse 0..N-1
-   - Impact only matters if accessing middle fields without later fields
-
-3. **For EdgeCfValue**:
-   - Old: `(SrcId, DstId, EdgeName, EdgeSummary)`
-   - New: `(SrcId, EdgeName, DstId, EdgeSummary)`
-   - No significant performance difference (both queries parse all fields)
-
-**Conclusion**: Field ordering choice should prioritize semantic clarity over performance (minimal impact).
-
-**Status**: ✅ Analyzed - No action needed
-
----
 
 #### [rocksdb-prefix-scan-bug-analysis.md](rocksdb-prefix-scan-bug-analysis.md) ⚡
 **CRITICAL**: MessagePack variable-length headers break RocksDB prefix optimization.
@@ -254,7 +193,22 @@ Executive summary of the MessagePack analysis and direct encoding solution.
 - Implementation phases overview
 - Next steps guide
 
-**Status**: ✅ Current
+**Status**: ✅ IMPLEMENTED - Direct encoding for keys is live
+
+---
+
+#### [temporal-range-design.md](temporal-range-design.md) 🌟
+**COMPREHENSIVE**: Complete design and implementation documentation for temporal validity support.
+
+**Contents**:
+- Design options evaluation (4 approaches considered)
+- Selected design: Option C with detailed rationale
+- Cost analysis (storage overhead, performance impact)
+- Implementation details and schema changes
+- Testing and verification (187 tests passing)
+- Future considerations
+
+**Status**: ✅ IMPLEMENTED - Excellent historical record and reference
 
 ---
 
@@ -276,19 +230,28 @@ Comprehensive benchmark strategy to measure performance improvements.
 
 ### 1. API Reference
 - `query-api-guide.md` ⭐ - **Current Query API** (v0.2.0+)
+- `mutation-api-guide.md` ⭐ - **Current Mutation API** (v0.3.0+)
 
 ### 2. Design Evolution
 Documents tracking the evolution of API design:
 - `query-and-mutation-processor-simplification.md` ⭐ - **IMPLEMENTED**: Unified trait-based execution for queries and mutations
-- `edge-by-id-explained.md` - Problem statement
-- `edge-by-id-implementation-plan.md` - Initial plan (struct approach)
-- `edge-by-id-tuple-implementation.md` - Revised plan (tuple approach)
+- `temporal-range-design.md` 🌟 - **IMPLEMENTED**: Temporal validity support
 
 ### 3. Schema & Performance
 Critical documents for understanding database internals:
 - ⭐ `variable-length-fields-in-keys.md` - **MUST READ** for schema design
-- `msgpack-tuple-ordering-impact.md` - Serialization analysis
-- `rocksdb-prefix-scan-bug-analysis.md` - Prefix scanning verification
+- `schema_design.md` ⭐ - Complete schema documentation
+- `rocksdb-prefix-scan-bug-analysis.md` - Prefix scanning fix (✅ FIXED)
+- `option2-implementation-outline.md` - Direct encoding implementation (✅ IMPLEMENTED)
+- `implementation-summary.md` - Executive summary (✅ IMPLEMENTED)
+
+### 4. Concurrency & Operations
+- ⭐ `concurrency-and-storage-modes.md` - **ESSENTIAL** guide to threading patterns
+- `benchmark-plan.md` - Performance measurement strategy
+- `prefix-scanning-analysis-final.md` - NodeNames/EdgeNames analysis
+
+### 5. Future Development
+- `graph_algorithm_api_analysis.md` - API gaps and requirements
 
 ## Reading Guide
 
@@ -317,9 +280,9 @@ Critical documents for understanding database internals:
 Understanding the design process:
 
 1. [`query-api-guide.md`](query-api-guide.md) - **Current Query API** (v0.2.0+) ⭐
-2. [`query-and-mutation-processor-simplification.md`](query-and-mutation-processor-simplification.md) - Trait-based refactoring
-3. [`edge-by-id-explained.md`](edge-by-id-explained.md) - Problem deep-dive (edge topology implementation)
-4. [`edge-by-id-tuple-implementation.md`](edge-by-id-tuple-implementation.md) - Solution
+2. [`mutation-api-guide.md`](mutation-api-guide.md) - **Current Mutation API** (v0.3.0+) ⭐
+3. [`query-and-mutation-processor-simplification.md`](query-and-mutation-processor-simplification.md) - Trait-based refactoring ✅
+4. [`temporal-range-design.md`](temporal-range-design.md) - Temporal validity implementation ✅
 
 Shows the iterative refinement process and decision rationale.
 

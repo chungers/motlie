@@ -1,10 +1,15 @@
-# CRITICAL: RocksDB Prefix Scanning Bug Analysis
+# RocksDB Prefix Scanning Bug Analysis
+
+**Status**: ✅ **FIXED** (as of 2025-11-19)
+
+This document analyzes the MessagePack variable-length header issue that broke RocksDB prefix scanning. The problem has been resolved by implementing direct byte concatenation for keys.
 
 ## Summary
 
-**Status**: 🔴 **CRITICAL BUG FOUND**
+**Original Status**: 🔴 **CRITICAL BUG FOUND**
+**Current Status**: ✅ **RESOLVED** - Direct encoding implemented
 
-The current `ForwardEdgeCfKey` and `ReverseEdgeCfKey` schemas have **variable-length strings in the middle** of the key tuple, which **breaks the assumptions** made in the query implementation.
+The original `ForwardEdgeCfKey` and `ReverseEdgeCfKey` schemas had **variable-length strings** that, when serialized with MessagePack, created non-constant prefix lengths and broke RocksDB prefix optimization.
 
 ## Current Schema
 
