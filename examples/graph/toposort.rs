@@ -16,7 +16,7 @@
 mod common;
 
 use anyhow::Result;
-use common::{build_graph, measure_time, measure_time_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode};
+use common::{build_graph, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode};
 use motlie_db::{Id, IncomingEdges, OutgoingEdges, QueryRunnable};
 use petgraph::algo::toposort as petgraph_toposort;
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -274,7 +274,7 @@ async fn main() -> Result<()> {
     }
 
     // Run topological sort
-    let (pg_result, pg_time) = measure_time(|| {
+    let (pg_result, pg_time, pg_result_memory) = measure_time_and_memory(|| {
         petgraph_toposort(&pg_graph, None)
             .map(|sorted| {
                 sorted
@@ -306,7 +306,7 @@ async fn main() -> Result<()> {
         num_nodes,
         num_edges,
         execution_time_ms: pg_time,
-        memory_usage_bytes: None,
+        memory_usage_bytes: pg_result_memory,
     };
 
     // Pass 2: Topological sort with motlie_db
@@ -338,7 +338,7 @@ async fn main() -> Result<()> {
         num_nodes,
         num_edges,
         execution_time_ms: motlie_time,
-        memory_usage_bytes: None,
+        memory_usage_bytes: motlie_result_memory,
     };
 
     // Verify correctness

@@ -48,15 +48,29 @@ impl GraphMetrics {
         }
 
         if let (Some(motlie_mem), Some(ref_mem)) = (motlie.memory_usage_bytes, reference.memory_usage_bytes) {
-            println!("\n💾 Memory Usage:");
-            println!("  motlie_db:  {:.2} KB", motlie_mem as f64 / 1024.0);
-            println!("  {}:  {:.2} KB", reference.algorithm_name, ref_mem as f64 / 1024.0);
+            println!("\n💾 Memory Usage (delta):");
 
-            let ratio = motlie_mem as f64 / ref_mem as f64;
-            if ratio > 1.0 {
-                println!("  Overhead:   {:.2}x", ratio);
-            } else {
-                println!("  Savings:    {:.2}x", 1.0 / ratio);
+            // Format memory in appropriate units
+            fn format_bytes(bytes: usize) -> String {
+                if bytes >= 1024 * 1024 {
+                    format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+                } else if bytes >= 1024 {
+                    format!("{:.2} KB", bytes as f64 / 1024.0)
+                } else {
+                    format!("{} bytes", bytes)
+                }
+            }
+
+            println!("  motlie_db:  {}", format_bytes(motlie_mem));
+            println!("  {}:  {}", reference.algorithm_name, format_bytes(ref_mem));
+
+            if ref_mem > 0 {
+                let ratio = motlie_mem as f64 / ref_mem as f64;
+                if ratio < 1.0 {
+                    println!("  Savings:    {:.2}x less memory used by motlie_db", 1.0 / ratio);
+                } else {
+                    println!("  Overhead:   {:.2}x more memory used by motlie_db", ratio);
+                }
             }
         }
 
@@ -177,4 +191,89 @@ where
     let result = f().await;
     let elapsed = start.elapsed();
     (result, elapsed.as_secs_f64() * 1000.0)
+}
+
+/// Get current memory usage in bytes (RSS - Resident Set Size)
+#[cfg(target_os = "linux")]
+pub fn get_memory_usage() -> Option<usize> {
+    use std::fs;
+
+    // Read /proc/self/status for VmRSS (Resident Set Size)
+    if let Ok(status) = fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if line.starts_with("VmRSS:") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Ok(kb) = parts[1].parse::<usize>() {
+                        return Some(kb * 1024); // Convert KB to bytes
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+pub fn get_memory_usage() -> Option<usize> {
+    use std::process::Command;
+
+    // Use ps to get RSS (in KB)
+    let output = Command::new("ps")
+        .args(&["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+
+    let rss_str = String::from_utf8(output.stdout).ok()?;
+    let rss_kb = rss_str.trim().parse::<usize>().ok()?;
+    Some(rss_kb * 1024) // Convert KB to bytes
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn get_memory_usage() -> Option<usize> {
+    None
+}
+
+/// Measure execution time and memory usage of a closure
+pub fn measure_time_and_memory<F, R>(f: F) -> (R, f64, Option<usize>)
+where
+    F: FnOnce() -> R,
+{
+    let mem_before = get_memory_usage();
+    let start = Instant::now();
+    let result = f();
+    let elapsed = start.elapsed();
+    let mem_after = get_memory_usage();
+
+    let mem_delta = match (mem_before, mem_after) {
+        (Some(before), Some(after)) => {
+            // Memory might decrease due to GC, so take max of 0
+            Some(after.saturating_sub(before))
+        }
+        _ => None,
+    };
+
+    (result, elapsed.as_secs_f64() * 1000.0, mem_delta)
+}
+
+/// Measure execution time and memory usage of an async closure
+pub async fn measure_time_and_memory_async<F, Fut, R>(f: F) -> (R, f64, Option<usize>)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = R>,
+{
+    let mem_before = get_memory_usage();
+    let start = Instant::now();
+    let result = f().await;
+    let elapsed = start.elapsed();
+    let mem_after = get_memory_usage();
+
+    let mem_delta = match (mem_before, mem_after) {
+        (Some(before), Some(after)) => {
+            Some(after.saturating_sub(before))
+        }
+        _ => None,
+    };
+
+    (result, elapsed.as_secs_f64() * 1000.0, mem_delta)
 }

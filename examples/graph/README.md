@@ -445,6 +445,7 @@ The examples demonstrate that `motlie_db` provides:
 ✅ **Persistence**: Graphs are stored durably in RocksDB
 ✅ **Scalability**: Can handle arbitrarily large graphs (tested up to 8000+ nodes)
 ✅ **Flexibility**: Standard graph API supporting various algorithms
+✅ **Memory Efficiency**: Constant memory usage regardless of graph size (see [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md))
 
 The performance overhead compared to in-memory implementations is due to:
 - Persistent storage operations (RocksDB reads/writes)
@@ -452,6 +453,16 @@ The performance overhead compared to in-memory implementations is due to:
 - Serialization/deserialization overhead
 
 For applications requiring persistence, ACID properties, or graphs too large for memory, this tradeoff provides significant value.
+
+### Memory Usage Trends
+
+**Key Finding**: motlie_db memory usage remains **constant (~240-288 KB)** regardless of graph size, while in-memory implementations scale linearly with graph size.
+
+- **Scale 1-10**: In-memory implementations have slight advantage
+- **Scale 100**: Memory usage becomes competitive; PageRank shows **motlie_db using 1.35x LESS memory**
+- **Scale 1000+**: motlie_db provides significant memory savings for large graphs
+
+See [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md) for detailed analysis.
 
 ## Graph Generation
 

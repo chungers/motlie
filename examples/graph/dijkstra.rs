@@ -19,7 +19,7 @@
 mod common;
 
 use anyhow::Result;
-use common::{build_graph, measure_time, measure_time_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode};
+use common::{build_graph, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode};
 use motlie_db::{Id, OutgoingEdges, QueryRunnable};
 use pathfinding::prelude::dijkstra as pathfinding_dijkstra;
 use std::cmp::Ordering;
@@ -328,7 +328,7 @@ async fn main() -> Result<()> {
             .push((dst_name, weight));
     }
 
-    let (pf_result, pf_time) = measure_time(|| {
+    let (pf_result, pf_time, pf_result_memory) = measure_time_and_memory(|| {
         pathfinding_dijkstra(
             &start_name,
             |n| adjacency[n].iter().cloned(),
@@ -356,7 +356,7 @@ async fn main() -> Result<()> {
         num_nodes,
         num_edges,
         execution_time_ms: pf_time,
-        memory_usage_bytes: None,
+        memory_usage_bytes: pf_result_memory,
     };
 
     // Pass 2: Dijkstra with motlie_db
@@ -391,7 +391,7 @@ async fn main() -> Result<()> {
         num_nodes,
         num_edges,
         execution_time_ms: motlie_time,
-        memory_usage_bytes: None,
+        memory_usage_bytes: motlie_result_memory,
     };
 
     // Verify correctness

@@ -22,7 +22,7 @@
 mod common;
 
 use anyhow::Result;
-use common::{build_graph, measure_time_async, parse_scale_factor, GraphEdge, GraphNode};
+use common::{build_graph, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphNode};
 use motlie_db::{Id, IncomingEdges, OutgoingEdges, QueryRunnable};
 use std::collections::HashMap;
 use std::env;
@@ -309,7 +309,7 @@ async fn main() -> Result<()> {
     println!("  Damping factor: {}", damping_factor);
     println!("  Iterations: {}", iterations);
 
-    let (ref_result, ref_time) = common::measure_time(|| {
+    let (ref_result, ref_time, ref_result_memory) = measure_time_and_memory(|| {
         pagerank_reference(&adjacency, damping_factor, iterations)
     });
 
@@ -337,7 +337,7 @@ async fn main() -> Result<()> {
     let (reader, _name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
     let timeout = Duration::from_secs(120); // PageRank needs more time for iterations and large graphs
 
-    let (motlie_result, motlie_time) = measure_time_async(|| {
+    let (motlie_result, motlie_time, motlie_result_memory) = measure_time_and_memory_async(|| {
         pagerank_motlie(&node_ids, &reader, timeout, damping_factor, iterations)
     })
     .await;
@@ -412,6 +412,34 @@ async fn main() -> Result<()> {
         println!("  Slowdown:   {:.2}x (reference is faster)", 1.0 / speedup);
     }
 
+    // Memory comparison
+    if let (Some(ref_mem), Some(motlie_mem)) = (ref_result_memory, motlie_result_memory) {
+        println!("\n💾 Memory Usage (delta):");
+
+        fn format_bytes(bytes: usize) -> String {
+            if bytes >= 1024 * 1024 {
+                format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+            } else if bytes >= 1024 {
+                format!("{:.2} KB", bytes as f64 / 1024.0)
+            } else {
+                format!("{} bytes", bytes)
+            }
+        }
+
+        println!("  Reference:  {}", format_bytes(ref_mem));
+        println!("  motlie_db:  {}", format_bytes(motlie_mem));
+
+        if ref_mem > 0 {
+            let ratio = motlie_mem as f64 / ref_mem as f64;
+            if ratio < 1.0 {
+                println!("  Savings:    {:.2}x less memory used by motlie_db", 1.0 / ratio);
+            } else {
+                println!("  Overhead:   {:.2}x more memory used by motlie_db", ratio);
+            }
+        }
+    }
+
+    println!("\n{:=<80}", "");
     println!("\n✅ PageRank example completed successfully!");
     Ok(())
 }

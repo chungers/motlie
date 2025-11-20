@@ -16,7 +16,7 @@
 mod common;
 
 use anyhow::Result;
-use common::{build_graph, measure_time, measure_time_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode};
+use common::{build_graph, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode};
 use motlie_db::{Id, OutgoingEdges, QueryRunnable};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Dfs;
@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
     // Run DFS starting from first node
     let start_name = nodes[0].name.clone();
     let start_idx = pg_node_map[&start_name];
-    let (pg_result, pg_time) = measure_time(|| dfs_petgraph(start_idx, &pg_graph));
+    let (pg_result, pg_time, pg_memory) = measure_time_and_memory(|| dfs_petgraph(start_idx, &pg_graph));
 
     // For large graphs, only show first few nodes
     if num_nodes <= 20 {
@@ -231,7 +231,7 @@ async fn main() -> Result<()> {
         num_nodes,
         num_edges,
         execution_time_ms: pg_time,
-        memory_usage_bytes: None, // Could estimate with std::mem::size_of_val
+        memory_usage_bytes: pg_memory,
     };
 
     // Pass 2: DFS with motlie_db
@@ -241,7 +241,7 @@ async fn main() -> Result<()> {
     let start_id = name_to_id[&start_name];
     let timeout = Duration::from_secs(30); // Longer timeout for large graphs
 
-    let (motlie_result, motlie_time) = measure_time_async(|| dfs_motlie(start_id, &reader, timeout)).await;
+    let (motlie_result, motlie_time, motlie_memory) = measure_time_and_memory_async(|| dfs_motlie(start_id, &reader, timeout)).await;
     let motlie_result = motlie_result?;
 
     // For large graphs, only show first few nodes
@@ -257,7 +257,7 @@ async fn main() -> Result<()> {
         num_nodes,
         num_edges,
         execution_time_ms: motlie_time,
-        memory_usage_bytes: None,
+        memory_usage_bytes: motlie_memory,
     };
 
     // Verify correctness
