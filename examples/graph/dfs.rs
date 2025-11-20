@@ -16,7 +16,7 @@
 mod common;
 
 use anyhow::Result;
-use common::{build_graph, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode};
+use common::{build_graph, compute_hash, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
 use motlie_db::{Id, OutgoingEdges, QueryRunnable};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Dfs;
@@ -33,7 +33,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     let mut edges = Vec::new();
     let mut all_node_ids = Vec::new();
 
-    let base_names = vec!["A", "B", "C", "D", "E", "F", "G", "H"];
+    let base_names = vec!["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
     let total_nodes = scale * base_names.len();
 
     // Create all nodes
@@ -62,6 +62,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         let base_edge_pattern = vec![
             (0, 1), (0, 2), (1, 3), (1, 4),
             (2, 4), (3, 5), (3, 6), (4, 6), (6, 7),
+            (5, 8), (7, 9),
         ];
 
         for (src_offset, dst_offset) in base_edge_pattern {
@@ -152,138 +153,96 @@ async fn dfs_motlie(
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() != 3 {
-        eprintln!("Usage: {} <db_path> <scale_factor>", args[0]);
+    if args.len() != 4 {
+        eprintln!("Usage: {} <implementation> <db_path> <scale_factor>", args[0]);
         eprintln!();
         eprintln!("Arguments:");
-        eprintln!("  db_path       - Path to RocksDB directory");
-        eprintln!("  scale_factor  - Positive integer to scale the graph size");
+        eprintln!("  implementation - 'reference' or 'motlie_db'");
+        eprintln!("  db_path        - Path to RocksDB directory");
+        eprintln!("  scale_factor   - Positive integer to scale the graph size");
         eprintln!();
-        eprintln!("Example:");
-        eprintln!("  {} /tmp/dfs_test_db 1      # Base graph (8 nodes, 9 edges)", args[0]);
-        eprintln!("  {} /tmp/dfs_test_db 10     # 10x larger (80 nodes, 90 edges)", args[0]);
-        eprintln!("  {} /tmp/dfs_test_db 100    # 100x larger (800 nodes, 900 edges)", args[0]);
-        eprintln!("  {} /tmp/dfs_test_db 1000   # 1000x larger (8000 nodes, 9000 edges)", args[0]);
+        eprintln!("Examples:");
+        eprintln!("  {} reference /tmp/dfs_test_db 1      # petgraph, 8 nodes", args[0]);
+        eprintln!("  {} motlie_db /tmp/dfs_test_db 1      # motlie_db, 8 nodes", args[0]);
+        eprintln!("  {} reference /tmp/dfs_test_db 1000   # petgraph, 8000 nodes", args[0]);
+        eprintln!("  {} motlie_db /tmp/dfs_test_db 1000   # motlie_db, 8000 nodes", args[0]);
         std::process::exit(1);
     }
 
-    let db_path = Path::new(&args[1]);
-    let scale = parse_scale_factor(&args[2])?;
-
-    println!("🌲 Depth-First Search (DFS) Comparison");
-    println!("{:=<80}", "");
-    println!("\n📏 Scale factor: {}x", scale);
+    let implementation = Implementation::from_str(&args[1])?;
+    let db_path = Path::new(&args[2]);
+    let scale = parse_scale_factor(&args[3])?;
 
     // Generate test graph
-    println!("\n📊 Generating test graph...");
-    let start_gen = std::time::Instant::now();
     let (nodes, edges) = create_test_graph(scale);
-    let gen_time = start_gen.elapsed();
     let num_nodes = nodes.len();
     let num_edges = edges.len();
 
-    println!("  Nodes: {}", num_nodes);
-    println!("  Edges: {}", num_edges);
-    println!("  Generation time: {:.2} ms", gen_time.as_secs_f64() * 1000.0);
+    match implementation {
+        Implementation::Reference => {
+            // Run DFS with petgraph (reference implementation)
+            let mut pg_graph = DiGraph::new();
+            let mut pg_node_map = HashMap::new();
 
-    // Store node name mapping for later
-    let node_name_map: HashMap<String, Id> = nodes
-        .iter()
-        .map(|n| (n.name.clone(), n.id))
-        .collect();
+            // Add nodes to petgraph
+            for node in &nodes {
+                let idx = pg_graph.add_node(node.name.clone());
+                pg_node_map.insert(node.name.clone(), idx);
+            }
 
-    // Pass 1: DFS with petgraph
-    println!("\n🔹 Pass 1: DFS with petgraph (in-memory)");
+            // Add edges to petgraph
+            for edge in &edges {
+                let src_name = nodes.iter().find(|n| n.id == edge.source).unwrap().name.as_str();
+                let dst_name = nodes.iter().find(|n| n.id == edge.target).unwrap().name.as_str();
+                let src_idx = pg_node_map[src_name];
+                let dst_idx = pg_node_map[dst_name];
+                pg_graph.add_edge(src_idx, dst_idx, edge.weight.unwrap_or(1.0));
+            }
 
-    let mut pg_graph = DiGraph::new();
-    let mut pg_node_map = HashMap::new();
+            // Run DFS starting from first node
+            let start_name = nodes[0].name.clone();
+            let start_idx = pg_node_map[&start_name];
+            let (result, time_ms, memory) = measure_time_and_memory(|| dfs_petgraph(start_idx, &pg_graph));
+            let result_hash = Some(compute_hash(&result));
 
-    // Add nodes to petgraph
-    for node in &nodes {
-        let idx = pg_graph.add_node(node.name.clone());
-        pg_node_map.insert(node.name.clone(), idx);
-    }
+            let metrics = GraphMetrics {
+                algorithm_name: "DFS".to_string(),
+                implementation: Implementation::Reference,
+                scale,
+                num_nodes,
+                num_edges,
+                execution_time_ms: time_ms,
+                memory_usage_bytes: memory,
+                result_hash,
+            };
 
-    // Add edges to petgraph
-    for edge in &edges {
-        let src_name = nodes.iter().find(|n| n.id == edge.source).unwrap().name.as_str();
-        let dst_name = nodes.iter().find(|n| n.id == edge.target).unwrap().name.as_str();
-        let src_idx = pg_node_map[src_name];
-        let dst_idx = pg_node_map[dst_name];
-        pg_graph.add_edge(src_idx, dst_idx, edge.weight.unwrap_or(1.0));
-    }
+            metrics.print_csv();
+        }
+        Implementation::MotlieDb => {
+            // Run DFS with motlie_db
+            let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
+            let start_name = if scale == 1 { "A".to_string() } else { "N0".to_string() };
+            let start_id = name_to_id[&start_name];
+            let timeout = Duration::from_secs(60); // Longer timeout for large graphs
 
-    // Run DFS starting from first node
-    let start_name = nodes[0].name.clone();
-    let start_idx = pg_node_map[&start_name];
-    let (pg_result, pg_time, pg_memory) = measure_time_and_memory(|| dfs_petgraph(start_idx, &pg_graph));
+            let (result, time_ms, memory) = measure_time_and_memory_async(|| dfs_motlie(start_id, &reader, timeout)).await;
+            let result = result?;
+            let result_hash = Some(compute_hash(&result));
 
-    // For large graphs, only show first few nodes
-    if num_nodes <= 20 {
-        println!("  Visited order: {:?}", pg_result);
-    } else {
-        println!("  Visited nodes: {} (showing first 10: {:?}...)", pg_result.len(), &pg_result[..10.min(pg_result.len())]);
-    }
-    println!("  Execution time: {:.2} ms", pg_time);
+            let metrics = GraphMetrics {
+                algorithm_name: "DFS".to_string(),
+                implementation: Implementation::MotlieDb,
+                scale,
+                num_nodes,
+                num_edges,
+                execution_time_ms: time_ms,
+                memory_usage_bytes: memory,
+                result_hash,
+            };
 
-    let petgraph_metrics = GraphMetrics {
-        algorithm_name: "petgraph".to_string(),
-        num_nodes,
-        num_edges,
-        execution_time_ms: pg_time,
-        memory_usage_bytes: pg_memory,
-    };
-
-    // Pass 2: DFS with motlie_db
-    println!("\n🔹 Pass 2: DFS with motlie_db (persistent)");
-
-    let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
-    let start_id = name_to_id[&start_name];
-    let timeout = Duration::from_secs(30); // Longer timeout for large graphs
-
-    let (motlie_result, motlie_time, motlie_memory) = measure_time_and_memory_async(|| dfs_motlie(start_id, &reader, timeout)).await;
-    let motlie_result = motlie_result?;
-
-    // For large graphs, only show first few nodes
-    if num_nodes <= 20 {
-        println!("  Visited order: {:?}", motlie_result);
-    } else {
-        println!("  Visited nodes: {} (showing first 10: {:?}...)", motlie_result.len(), &motlie_result[..10.min(motlie_result.len())]);
-    }
-    println!("  Execution time: {:.2} ms", motlie_time);
-
-    let motlie_metrics = GraphMetrics {
-        algorithm_name: "DFS".to_string(),
-        num_nodes,
-        num_edges,
-        execution_time_ms: motlie_time,
-        memory_usage_bytes: motlie_memory,
-    };
-
-    // Verify correctness
-    println!("\n✅ Correctness Check:");
-    if pg_result == motlie_result {
-        println!("  ✓ Results match! Both implementations visited {} nodes in the same order.", pg_result.len());
-    } else {
-        println!("  ✗ Results differ!");
-        println!("    petgraph: {:?}", pg_result);
-        println!("    motlie_db: {:?}", motlie_result);
-        println!("    Note: DFS order can vary based on edge iteration order, which is acceptable.");
-        println!("    Checking if the same nodes were visited...");
-
-        let pg_set: HashSet<_> = pg_result.iter().collect();
-        let motlie_set: HashSet<_> = motlie_result.iter().collect();
-
-        if pg_set == motlie_set {
-            println!("  ✓ Same nodes visited, different order (both valid DFS traversals)");
-        } else {
-            println!("  ✗ Different nodes visited - this indicates an error!");
+            metrics.print_csv();
         }
     }
 
-    // Print performance comparison
-    GraphMetrics::print_comparison(&motlie_metrics, &petgraph_metrics);
-
-    println!("\n✅ DFS example completed successfully!");
     Ok(())
 }

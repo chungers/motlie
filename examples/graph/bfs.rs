@@ -15,7 +15,7 @@
 mod common;
 
 use anyhow::Result;
-use common::{build_graph, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode};
+use common::{build_graph, compute_hash, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
 use motlie_db::{Id, OutgoingEdges, QueryRunnable};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Bfs;
@@ -32,14 +32,14 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     let mut edges = Vec::new();
     let mut all_node_ids = Vec::new();
 
-    let base_size = 9; // Base tree structure size
-    let total_nodes = scale * base_size;
+    let base_names = vec!["Root", "L1_A", "L1_B", "L2_A", "L2_B", "L2_C", "L2_D", "L3_A", "L3_B", "L3_C"];
+    let total_nodes = scale * base_names.len();
 
     // Create all nodes
     for i in 0..total_nodes {
         let id = Id::new();
         let node_name = if scale == 1 {
-            vec!["A", "B", "C", "D", "E", "F", "G", "H", "I"][i].to_string()
+            base_names[i % base_names.len()].to_string()
         } else {
             format!("N{}", i)
         };
@@ -167,146 +167,96 @@ async fn bfs_with_levels(
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() != 3 {
-        eprintln!("Usage: {} <db_path> <scale_factor>", args[0]);
+    if args.len() != 4 {
+        eprintln!("Usage: {} <implementation> <db_path> <scale_factor>", args[0]);
         eprintln!();
         eprintln!("Arguments:");
-        eprintln!("  db_path       - Path to RocksDB directory");
-        eprintln!("  scale_factor  - Positive integer to scale the graph size");
+        eprintln!("  implementation - 'reference' or 'motlie_db'");
+        eprintln!("  db_path        - Path to RocksDB directory");
+        eprintln!("  scale_factor   - Positive integer to scale the graph size");
         eprintln!();
-        eprintln!("Example:");
-        eprintln!("  {} /tmp/bfs_test_db 1      # Base graph (9 nodes, 8 edges)", args[0]);
-        eprintln!("  {} /tmp/bfs_test_db 10     # 10x larger (90 nodes, 80 edges)", args[0]);
-        eprintln!("  {} /tmp/bfs_test_db 100    # 100x larger (900 nodes, 800 edges)", args[0]);
+        eprintln!("Examples:");
+        eprintln!("  {} reference /tmp/bfs_test_db 1      # petgraph, 9 nodes", args[0]);
+        eprintln!("  {} motlie_db /tmp/bfs_test_db 1      # motlie_db, 9 nodes", args[0]);
+        eprintln!("  {} reference /tmp/bfs_test_db 1000   # petgraph, 9000 nodes", args[0]);
+        eprintln!("  {} motlie_db /tmp/bfs_test_db 1000   # motlie_db, 9000 nodes", args[0]);
         std::process::exit(1);
     }
 
-    let db_path = Path::new(&args[1]);
-    let scale = parse_scale_factor(&args[2])?;
-
-    println!("🔍 Breadth-First Search (BFS) Comparison");
-    println!("{:=<80}", "");
-    println!("\n📏 Scale factor: {}x", scale);
+    let implementation = Implementation::from_str(&args[1])?;
+    let db_path = Path::new(&args[2]);
+    let scale = parse_scale_factor(&args[3])?;
 
     // Generate test graph
-    println!("\n📊 Generating test graph (tree-like structure)...");
-    let start_gen = std::time::Instant::now();
     let (nodes, edges) = create_test_graph(scale);
-    let gen_time = start_gen.elapsed();
     let num_nodes = nodes.len();
     let num_edges = edges.len();
 
-    println!("  Nodes: {}", num_nodes);
-    println!("  Edges: {}", num_edges);
-    println!("  Generation time: {:.2} ms", gen_time.as_secs_f64() * 1000.0);
+    match implementation {
+        Implementation::Reference => {
+            // Run BFS with petgraph (reference implementation)
+            let mut pg_graph = DiGraph::new();
+            let mut pg_node_map = HashMap::new();
 
-    // Pass 1: BFS with petgraph
-    println!("\n🔹 Pass 1: BFS with petgraph (in-memory)");
+            // Add nodes to petgraph
+            for node in &nodes {
+                let idx = pg_graph.add_node(node.name.clone());
+                pg_node_map.insert(node.name.clone(), idx);
+            }
 
-    let mut pg_graph = DiGraph::new();
-    let mut pg_node_map = HashMap::new();
+            // Add edges to petgraph
+            for edge in &edges {
+                let src_name = nodes.iter().find(|n| n.id == edge.source).unwrap().name.as_str();
+                let dst_name = nodes.iter().find(|n| n.id == edge.target).unwrap().name.as_str();
+                let src_idx = pg_node_map[src_name];
+                let dst_idx = pg_node_map[dst_name];
+                pg_graph.add_edge(src_idx, dst_idx, edge.weight.unwrap_or(1.0));
+            }
 
-    // Add nodes to petgraph
-    for node in &nodes {
-        let idx = pg_graph.add_node(node.name.clone());
-        pg_node_map.insert(node.name.clone(), idx);
-    }
+            // Run BFS starting from first node
+            let start_name = nodes[0].name.clone();
+            let start_idx = pg_node_map[&start_name];
+            let (result, time_ms, memory) = measure_time_and_memory(|| bfs_petgraph(start_idx, &pg_graph));
+            let result_hash = Some(compute_hash(&result));
 
-    // Add edges to petgraph
-    for edge in &edges {
-        let src_name = nodes.iter().find(|n| n.id == edge.source).unwrap().name.as_str();
-        let dst_name = nodes.iter().find(|n| n.id == edge.target).unwrap().name.as_str();
-        let src_idx = pg_node_map[src_name];
-        let dst_idx = pg_node_map[dst_name];
-        pg_graph.add_edge(src_idx, dst_idx, edge.weight.unwrap_or(1.0));
-    }
+            let metrics = GraphMetrics {
+                algorithm_name: "BFS".to_string(),
+                implementation: Implementation::Reference,
+                scale,
+                num_nodes,
+                num_edges,
+                execution_time_ms: time_ms,
+                memory_usage_bytes: memory,
+                result_hash,
+            };
 
-    // Run BFS starting from first node
-    let start_name = nodes[0].name.clone();
-    let start_idx = pg_node_map[&start_name];
-    let (pg_result, pg_time, pg_result_memory) = measure_time_and_memory(|| bfs_petgraph(start_idx, &pg_graph));
+            metrics.print_csv();
+        }
+        Implementation::MotlieDb => {
+            // Run BFS with motlie_db
+            let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
+            let start_name = if scale == 1 { "Root".to_string() } else { "N0".to_string() };
+            let start_id = name_to_id[&start_name];
+            let timeout = Duration::from_secs(60); // Longer timeout for large graphs
 
-    if num_nodes <= 20 {
-        println!("  Visited order: {:?}", pg_result);
-    } else {
-        println!("  Visited nodes: {} (showing first 10: {:?}...)", pg_result.len(), &pg_result[..10.min(pg_result.len())]);
-    }
-    println!("  Execution time: {:.2} ms", pg_time);
+            let (result, time_ms, memory) = measure_time_and_memory_async(|| bfs_motlie(start_id, &reader, timeout)).await;
+            let result = result?;
+            let result_hash = Some(compute_hash(&result));
 
-    let petgraph_metrics = GraphMetrics {
-        algorithm_name: "petgraph".to_string(),
-        num_nodes,
-        num_edges,
-        execution_time_ms: pg_time,
-        memory_usage_bytes: pg_result_memory,
-    };
+            let metrics = GraphMetrics {
+                algorithm_name: "BFS".to_string(),
+                implementation: Implementation::MotlieDb,
+                scale,
+                num_nodes,
+                num_edges,
+                execution_time_ms: time_ms,
+                memory_usage_bytes: memory,
+                result_hash,
+            };
 
-    // Pass 2: BFS with motlie_db
-    println!("\n🔹 Pass 2: BFS with motlie_db (persistent)");
-
-    let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
-    let start_id = name_to_id[&start_name];
-    let timeout = Duration::from_secs(30);
-
-    let (motlie_result, motlie_time, motlie_result_memory) = measure_time_and_memory_async(|| bfs_motlie(start_id, &reader, timeout)).await;
-    let motlie_result = motlie_result?;
-
-    if num_nodes <= 20 {
-        println!("  Visited order: {:?}", motlie_result);
-    } else {
-        println!("  Visited nodes: {} (showing first 10: {:?}...)", motlie_result.len(), &motlie_result[..10.min(motlie_result.len())]);
-    }
-    println!("  Execution time: {:.2} ms", motlie_time);
-
-    let motlie_metrics = GraphMetrics {
-        algorithm_name: "BFS".to_string(),
-        num_nodes,
-        num_edges,
-        execution_time_ms: motlie_time,
-        memory_usage_bytes: motlie_result_memory,
-    };
-
-    // Verify correctness
-    println!("\n✅ Correctness Check:");
-    if pg_result == motlie_result {
-        println!("  ✓ Results match! Both implementations visited {} nodes in the same order.", pg_result.len());
-    } else {
-        println!("  ⚠ Results differ in order (checking level-order consistency):");
-        println!("    petgraph:  {:?}", pg_result);
-        println!("    motlie_db: {:?}", motlie_result);
-
-        let pg_set: HashSet<_> = pg_result.iter().collect();
-        let motlie_set: HashSet<_> = motlie_result.iter().collect();
-
-        if pg_set == motlie_set {
-            println!("  ✓ Same nodes visited (order differences acceptable for nodes at same level)");
-        } else {
-            println!("  ✗ Different nodes visited - this indicates an error!");
+            metrics.print_csv();
         }
     }
 
-    // Demonstrate BFS levels
-    println!("\n🔹 BFS Level Analysis (using motlie_db):");
-    let levels = bfs_with_levels(start_id, &reader, timeout).await?;
-
-    let mut max_level = 0;
-    for level in levels.values() {
-        max_level = max_level.max(*level);
-    }
-
-    for current_level in 0..=max_level {
-        let mut nodes_at_level: Vec<_> = levels
-            .iter()
-            .filter(|(_, &l)| l == current_level)
-            .map(|(n, _)| n.as_str())
-            .collect();
-        nodes_at_level.sort();
-        println!("  Level {}: {:?}", current_level, nodes_at_level);
-    }
-
-    // Print performance comparison
-    GraphMetrics::print_comparison(&motlie_metrics, &petgraph_metrics);
-
-    println!("\n✅ BFS example completed successfully!");
     Ok(())
 }

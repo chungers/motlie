@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 use tokio::time::Duration;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// Parse scale factor from command line argument
 pub fn parse_scale_factor(s: &str) -> Result<usize> {
@@ -18,12 +20,89 @@ pub fn parse_scale_factor(s: &str) -> Result<usize> {
     Ok(scale)
 }
 
+/// Compute hash of a result for correctness comparison
+pub fn compute_hash<T: Hash>(data: &T) -> String {
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Compute hash of f64 result for Dijkstra reference (path, cost_u32) -> consistent f64 hash
+pub fn compute_hash_f64(data: &Option<(Vec<String>, u32)>) -> String {
+    match data {
+        Some((path, cost)) => {
+            let mut hasher = DefaultHasher::new();
+            path.hash(&mut hasher);
+            // Convert u32 cost to f64 and hash as integer bits to avoid floating point issues
+            let cost_f64 = (*cost as f64) / 10.0; // Reverse the *10.0 conversion from dijkstra
+            cost_f64.to_bits().hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        }
+        None => "none".to_string(),
+    }
+}
+
+/// Compute hash of f64 result for Dijkstra motlie (cost, path) -> consistent f64 hash
+pub fn compute_hash_f64_motlie(data: &Option<(f64, Vec<String>)>) -> String {
+    match data {
+        Some((cost, path)) => {
+            let mut hasher = DefaultHasher::new();
+            path.hash(&mut hasher);
+            // Hash cost as integer bits to avoid floating point issues
+            cost.to_bits().hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        }
+        None => "none".to_string(),
+    }
+}
+
+/// Compute hash of PageRank results (HashMap<String, f64>)
+pub fn compute_hash_pagerank(data: &HashMap<String, f64>) -> String {
+    // Sort by key for deterministic hashing
+    let mut sorted: Vec<_> = data.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut hasher = DefaultHasher::new();
+    for (key, value) in sorted {
+        key.hash(&mut hasher);
+        value.to_bits().hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// Implementation type for graph algorithms
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Implementation {
+    Reference,
+    MotlieDb,
+}
+
+impl Implementation {
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "reference" => Ok(Implementation::Reference),
+            "motlie_db" | "motlie-db" | "motliedb" => Ok(Implementation::MotlieDb),
+            _ => anyhow::bail!("Invalid implementation type. Must be 'reference' or 'motlie_db'"),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Implementation::Reference => "reference",
+            Implementation::MotlieDb => "motlie_db",
+        }
+    }
+}
+
 pub struct GraphMetrics {
     pub algorithm_name: String,
+    pub implementation: Implementation,
+    pub scale: usize,
     pub num_nodes: usize,
     pub num_edges: usize,
     pub execution_time_ms: f64,
     pub memory_usage_bytes: Option<usize>,
+    pub result_hash: Option<String>,  // For comparing correctness across implementations
 }
 
 impl GraphMetrics {
@@ -75,6 +154,33 @@ impl GraphMetrics {
         }
 
         println!("\n{:=<80}", "");
+    }
+
+    /// Print metrics as CSV row (for data collection)
+    pub fn print_csv(&self) {
+        let memory_kb = self.memory_usage_bytes
+            .map(|b| (b as f64 / 1024.0).to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+
+        let result_hash = self.result_hash
+            .clone()
+            .unwrap_or_else(|| "N/A".to_string());
+
+        println!("{},{},{},{},{},{:.4},{},{}",
+            self.algorithm_name,
+            self.implementation.as_str(),
+            self.scale,
+            self.num_nodes,
+            self.num_edges,
+            self.execution_time_ms,
+            memory_kb,
+            result_hash
+        );
+    }
+
+    /// Print CSV header
+    pub fn print_csv_header() {
+        println!("algorithm,implementation,scale,nodes,edges,time_ms,memory_kb,result_hash");
     }
 }
 

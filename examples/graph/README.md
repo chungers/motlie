@@ -2,6 +2,21 @@
 
 This directory contains example implementations of classic graph algorithms using `motlie_db`, a persistent graph database built on RocksDB. Each example compares the `motlie_db` implementation against a reference in-memory implementation to demonstrate correctness and performance characteristics.
 
+## Performance Analysis Results
+
+**Comprehensive testing completed**: 50 test runs across 5 algorithms, 2 implementations, and 5 scale factors (10 to 100,000 nodes).
+
+**Key findings:**
+- **PageRank**: motlie_db uses **77% less memory** than reference at 100K nodes (8.4 MB vs 37 MB)
+- **Memory crossover** achieved for PageRank and DFS at large scales
+- **BFS and Topological Sort** approaching crossover (1.05x and 1.42x ratios at 100K nodes)
+- **Trade-off**: 25-1000x slower execution for memory efficiency
+
+**See detailed analysis**:
+- [`DETAILED_ANALYSIS.md`](DETAILED_ANALYSIS.md) - Complete performance analysis with tables and insights
+- [`PERFORMANCE_SUMMARY.md`](PERFORMANCE_SUMMARY.md) - Quick summary of test results
+- [`data/performance_metrics.csv`](data/performance_metrics.csv) - Raw performance data (50 test runs)
+
 ## What These Demos Do
 
 These examples demonstrate how to use `motlie_db` for implementing standard graph algorithms on persistent, scalable graphs:
