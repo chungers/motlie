@@ -456,13 +456,22 @@ For applications requiring persistence, ACID properties, or graphs too large for
 
 ### Memory Usage Trends
 
-**Key Finding**: motlie_db memory usage remains **constant (~240-288 KB)** regardless of graph size, while in-memory implementations scale linearly with graph size.
+**Key Finding**: motlie_db memory usage grows **sub-linearly** with graph size, showing **rapid convergence** toward parity with in-memory implementations at larger scales.
 
-- **Scale 1-10**: In-memory implementations have slight advantage
-- **Scale 100**: Memory usage becomes competitive; PageRank shows **motlie_db using 1.35x LESS memory**
-- **Scale 1000+**: motlie_db provides significant memory savings for large graphs
+#### Convergence Trends (Memory Ratio: motlie_db / in-memory)
 
-See [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md) for detailed analysis.
+| Algorithm | Scale 100 | Scale 1000 | Trend |
+|-----------|-----------|------------|-------|
+| DFS       | 15x       | **1.95x**  | Converging rapidly |
+| BFS       | 7.5x      | **3.29x**  | Converging |
+| PageRank  | **0.74x** | **1.02x**  | **Already at parity** |
+
+**Highlights:**
+- **PageRank**: motlie_db uses **25% LESS memory** at scale=100, maintains parity at scale=1000
+- **DFS**: Overhead drops dramatically from 15x to 1.95x (scale 100 → 1000)
+- **Projected crossover**: All algorithms expected to reach memory parity at scale 2000-5000
+
+See [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md) for comprehensive analysis with detailed data tables and trend analysis.
 
 ## Graph Generation
 
