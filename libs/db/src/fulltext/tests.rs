@@ -1,7 +1,12 @@
 //! Tests for fulltext indexing using Tantivy
 
 use super::*;
-use crate::{DataUrl, Id, TimestampMilli};
+use crate::{
+    mutation::{
+        AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, UpdateNodeValidSinceUntil,
+    },
+    DataUrl, Id, Mutation, TimestampMilli,
+};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 
