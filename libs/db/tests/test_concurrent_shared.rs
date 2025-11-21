@@ -18,7 +18,7 @@ mod common;
 
 use common::concurrent_test_utils::{Metrics, TestContext};
 use motlie_db::{
-    AddEdge, AddNode, EdgeById, Id, MutationRunnable, NodeById, QueryRunnable, ReaderConfig,
+    AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, NodeById, QueryRunnable, ReaderConfig,
     TimestampMilli, WriterConfig,
 };
 use std::sync::Arc;
@@ -69,18 +69,18 @@ async fn writer_task_shared_graph(
 
                 // Insert edges from this node
                 for j in 0..num_edges_per_node {
-                    let edge_id = Id::new();
                     let target_id = Id::new(); // Random target for now
                     let edge_name = format!("edge_{}_{}", i, j);
 
                     let start = Instant::now();
                     let result = AddEdge {
-                        id: edge_id,
                         source_node_id: node_id,
                         target_node_id: target_id,
                         ts_millis: TimestampMilli::now(),
-                        name: edge_name,
+                        name: edge_name.clone(),
                         temporal_range: None,
+                        summary: EdgeSummary::from_text(&format!("Edge summary {}", edge_name)),
+                        weight: None,
                     }
                     .run(&writer)
                     .await;
@@ -90,7 +90,7 @@ async fn writer_task_shared_graph(
                     match result {
                         Ok(_) => {
                             metrics.record_success(latency_us);
-                            context.add_written_edge(edge_id).await;
+                            // Note: edges don't have their own ID anymore
                         }
                         Err(_) => metrics.record_error(),
                     }
@@ -157,20 +157,6 @@ async fn reader_task_shared_graph(
             if let Some(node_id) = context.get_random_node_id().await {
                 let start = Instant::now();
                 let result = NodeById::new(node_id, None)
-                    .run(&reader, Duration::from_secs(1))
-                    .await;
-                let latency_us = start.elapsed().as_micros() as u64;
-
-                match result {
-                    Ok(_) => metrics.record_success(latency_us),
-                    Err(_) => metrics.record_error(),
-                }
-            }
-        } else {
-            // Query edge
-            if let Some(edge_id) = context.get_random_edge_id().await {
-                let start = Instant::now();
-                let result = EdgeById::new(edge_id, None)
                     .run(&reader, Duration::from_secs(1))
                     .await;
                 let latency_us = start.elapsed().as_micros() as u64;
@@ -312,19 +298,18 @@ async fn test_concurrent_read_write_with_readwrite_readers() {
 
     println!("\n--- Data Consistency ---");
     let final_node_count = context.node_count().await;
-    let final_edge_count = context.edge_count().await;
     println!("  Nodes written: {}", final_node_count);
-    println!("  Edges written: {}", final_edge_count);
     println!("  Expected nodes: {}", num_nodes);
-    println!("  Expected edges: {}", num_nodes * num_edges_per_node);
+    println!("  Write operations: {}", write_metrics.success_count);
+    println!("  Expected operations: {}", num_nodes * (1 + num_edges_per_node));
 
     // Assertions for correctness
     assert_eq!(write_metrics.error_count, 0, "Writer should have no errors");
     assert_eq!(final_node_count, num_nodes, "All nodes should be written");
     assert_eq!(
-        final_edge_count,
-        num_nodes * num_edges_per_node,
-        "All edges should be written"
+        write_metrics.success_count,
+        (num_nodes * (1 + num_edges_per_node)) as u64,
+        "All write operations (nodes + edges) should succeed"
     );
 
     // Readers should have some successful reads

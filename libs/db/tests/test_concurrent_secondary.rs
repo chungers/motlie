@@ -17,7 +17,7 @@
 mod common;
 
 use common::concurrent_test_utils::{writer_task, Metrics, TestContext};
-use motlie_db::{EdgeById, NodeById, QueryRunnable, ReaderConfig};
+use motlie_db::{NodeById, QueryRunnable, ReaderConfig};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -150,19 +150,6 @@ async fn reader_task_with_secondary(
             if let Some(node_id) = context.get_random_node_id().await {
                 let start = Instant::now();
                 let result = NodeById::new(node_id, None)
-                    .run(&reader, Duration::from_secs(1))
-                    .await;
-                let latency_us = start.elapsed().as_micros() as u64;
-
-                match result {
-                    Ok(_) => read_metrics.record_success(latency_us),
-                    Err(_) => read_metrics.record_error(),
-                }
-            }
-        } else {
-            if let Some(edge_id) = context.get_random_edge_id().await {
-                let start = Instant::now();
-                let result = EdgeById::new(edge_id, None)
                     .run(&reader, Duration::from_secs(1))
                     .await;
                 let latency_us = start.elapsed().as_micros() as u64;
@@ -340,17 +327,17 @@ async fn test_concurrent_read_write_with_secondary() {
     let final_node_count = context.node_count().await;
     let final_edge_count = context.edge_count().await;
     println!("  Nodes written: {}", final_node_count);
-    println!("  Edges written: {}", final_edge_count);
     println!("  Expected nodes: {}", num_nodes);
-    println!("  Expected edges: {}", num_nodes * num_edges_per_node);
+    println!("  Write operations: {}", write_metrics.success_count);
+    println!("  Expected operations: {}", num_nodes * (1 + num_edges_per_node));
 
     // Assertions
     assert_eq!(write_metrics.error_count, 0, "Writer should have no errors");
     assert_eq!(final_node_count, num_nodes, "All nodes should be written");
     assert_eq!(
-        final_edge_count,
-        num_nodes * num_edges_per_node,
-        "All edges should be written"
+        write_metrics.success_count,
+        (num_nodes * (1 + num_edges_per_node)) as u64,
+        "All write operations (nodes + edges) should succeed"
     );
 
     assert!(

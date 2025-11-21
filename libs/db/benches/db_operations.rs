@@ -64,12 +64,13 @@ async fn create_test_db(
             let dst_id = node_ids[dst_idx];
 
             let edge = AddEdge {
-                id: Id::new(),
                 source_node_id: src_id,
                 target_node_id: dst_id,
                 name: format!("edge_{}", j),
                 ts_millis: TimestampMilli::now(),
                 temporal_range: None,
+                summary: motlie_db::EdgeSummary::from_text(&format!("Benchmark edge {}", j)),
+                weight: None,
             };
 
             edge.run(&writer).await.unwrap();

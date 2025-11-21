@@ -349,14 +349,15 @@ async fn test_edge_names_prefix_scan_comprehensive() {
         ("connection", Id::new()),         // Different prefix (control)
     ];
 
-    for (name, id) in &edges {
+    for (name, _id) in &edges {
         AddEdge {
-            id: *id,
             source_node_id: src_node,
             target_node_id: dst_node,
             name: name.to_string(),
             ts_millis: TimestampMilli(2000),
             temporal_range: None,
+            summary: motlie_db::EdgeSummary::from_text(&format!("Edge {}", name)),
+            weight: None,
         }
         .run(&writer)
         .await

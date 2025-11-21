@@ -9,7 +9,7 @@ mod mutation;
 // Re-export mutation types
 pub use mutation::{
     spawn_consumer as spawn_mutation_consumer, AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
-    Consumer as MutationConsumer, Mutation, MutationBatch, MutationPlanner,
+    Consumer as MutationConsumer, Mutation, MutationBatch, MutationExecutor,
     Processor as MutationProcessor, Runnable as MutationRunnable, UpdateEdgeValidSinceUntil,
     UpdateEdgeWeight, UpdateNodeValidSinceUntil,
 };
@@ -23,8 +23,9 @@ mod query;
 pub use query::{
     EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById, NodeFragmentsByIdTimeRange,
     NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
-    Processor as QueryProcessor, Consumer as QueryConsumer, spawn_consumer as spawn_query_consumer,
+    Processor as QueryProcessor, Consumer as QueryConsumer,
 };
+// Note: spawn_query_consumer is exported from graph module via `pub use graph::*`
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 mod graph;
 pub use graph::*;

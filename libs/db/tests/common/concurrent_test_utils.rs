@@ -189,18 +189,18 @@ pub async fn writer_task(
 
                 // Insert edges from this node
                 for j in 0..num_edges_per_node {
-                    let edge_id = Id::new();
                     let target_id = Id::new(); // Random target for now
                     let edge_name = format!("edge_{}_{}", i, j);
 
                     let start = Instant::now();
                     let result = AddEdge {
-                        id: edge_id,
                         source_node_id: node_id,
                         target_node_id: target_id,
                         ts_millis: TimestampMilli::now(),
-                        name: edge_name,
+                        name: edge_name.clone(),
                         temporal_range: None,
+                        summary: motlie_db::EdgeSummary::from_text(&format!("Edge summary {}", edge_name)),
+                        weight: None,
                     }
                     .run(&writer)
                     .await;
@@ -210,7 +210,8 @@ pub async fn writer_task(
                     match result {
                         Ok(_) => {
                             metrics.record_success(latency_us);
-                            context.add_written_edge(edge_id).await;
+                            // Note: edges don't have their own ID, they're identified by (src, dst, name)
+                            // so we can't track edge_id anymore
                         }
                         Err(_) => metrics.record_error(),
                     }
