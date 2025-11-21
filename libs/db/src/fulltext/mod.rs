@@ -1,5 +1,11 @@
 //! Provides the full-text search implementation using Tantivy for processing mutations
 //! from the MPSC queue and updating the full-text search index.
+//!
+//! This module includes support for:
+//! - Basic fulltext indexing with BM25 scoring
+//! - Faceted search for filtering by categories
+//! - Fuzzy search for typo-tolerant queries
+//! - Tag-based user-defined facets extracted from content
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -10,6 +16,14 @@ use tokio::task::JoinHandle;
 
 use tantivy::schema::*;
 use tantivy::{doc, Index, IndexWriter, Term};
+
+// Submodules
+pub mod search;
+pub mod fuzzy;
+
+// Re-export commonly used types
+pub use search::{SearchOptions, SearchResults, FacetCounts};
+pub use fuzzy::{FuzzySearchOptions, FuzzyLevel};
 
 use crate::{
     mutation::{
@@ -56,6 +70,12 @@ pub struct FulltextFields {
 
     // Edge-specific fields
     pub weight_field: Field,
+
+    // Facet fields (for categorical filtering)
+    pub doc_type_facet: Field,        // Document type as facet
+    pub time_bucket_facet: Field,     // Time buckets (hour/day/week/month)
+    pub weight_range_facet: Field,    // Weight ranges for edges
+    pub tags_facet: Field,            // User-defined tags from #hashtags
 }
 
 /// Build the Tantivy schema for fulltext indexing
@@ -93,6 +113,12 @@ fn build_fulltext_schema() -> (Schema, FulltextFields) {
     // Weight field for edges
     let weight_field = schema_builder.add_f64_field("weight", INDEXED | STORED | FAST);
 
+    // Facet fields (for categorical filtering and aggregation)
+    let doc_type_facet = schema_builder.add_facet_field("doc_type_facet", INDEXED | STORED);
+    let time_bucket_facet = schema_builder.add_facet_field("time_bucket_facet", INDEXED | STORED);
+    let weight_range_facet = schema_builder.add_facet_field("weight_range_facet", INDEXED | STORED);
+    let tags_facet = schema_builder.add_facet_field("tags", INDEXED | STORED);
+
     let schema = schema_builder.build();
 
     let fields = FulltextFields {
@@ -107,9 +133,87 @@ fn build_fulltext_schema() -> (Schema, FulltextFields) {
         valid_until_field,
         doc_type_field,
         weight_field,
+        doc_type_facet,
+        time_bucket_facet,
+        weight_range_facet,
+        tags_facet,
     };
 
     (schema, fields)
+}
+
+// ============================================================================
+// Tag Extraction for User-Defined Facets
+// ============================================================================
+
+/// Extract hashtags from content for user-defined facets
+///
+/// Supports formats:
+/// - #tag
+/// - #multi_word_tag
+/// - #CamelCaseTag
+///
+/// Example: "This is about #rust and #systems_programming"
+/// Returns: ["rust", "systems_programming"]
+fn extract_tags(content: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut chars = content.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '#' {
+            let mut tag = String::new();
+
+            // Collect tag characters (alphanumeric and underscore)
+            while let Some(&next_ch) = chars.peek() {
+                if next_ch.is_alphanumeric() || next_ch == '_' {
+                    tag.push(chars.next().unwrap());
+                } else {
+                    break;
+                }
+            }
+
+            if !tag.is_empty() {
+                tags.push(tag.to_lowercase());
+            }
+        }
+    }
+
+    tags
+}
+
+// ============================================================================
+// Facet Helper Functions
+// ============================================================================
+
+/// Convert timestamp to time bucket facet
+fn compute_time_bucket(ts: crate::TimestampMilli) -> Facet {
+    let now = crate::TimestampMilli::now().0;
+    let diff = now.saturating_sub(ts.0);
+
+    if diff < 3600_000 {
+        Facet::from("/time/last_hour")
+    } else if diff < 86400_000 {
+        Facet::from("/time/last_day")
+    } else if diff < 604800_000 {
+        Facet::from("/time/last_week")
+    } else if diff < 2592000_000 {
+        Facet::from("/time/last_month")
+    } else {
+        Facet::from("/time/older")
+    }
+}
+
+/// Convert edge weight to range facet
+fn weight_to_facet(weight: f64) -> Facet {
+    if weight < 0.5 {
+        Facet::from("/weight/0-0.5")
+    } else if weight < 1.0 {
+        Facet::from("/weight/0.5-1.0")
+    } else if weight < 2.0 {
+        Facet::from("/weight/1.0-2.0")
+    } else {
+        Facet::from("/weight/2.0+")
+    }
 }
 
 // ============================================================================
@@ -118,12 +222,16 @@ fn build_fulltext_schema() -> (Schema, FulltextFields) {
 
 impl FulltextIndexExecutor for AddNode {
     fn index(&self, index_writer: &IndexWriter, fields: &FulltextFields) -> Result<()> {
-        let doc = doc!(
+        let mut doc = doc!(
             fields.id_field => self.id.as_bytes().to_vec(),
             fields.node_name_field => self.name.clone(),
             fields.doc_type_field => "node",
             fields.timestamp_field => self.ts_millis.0,
         );
+
+        // Add facets
+        doc.add_facet(fields.doc_type_facet, Facet::from("/type/node"));
+        doc.add_facet(fields.time_bucket_facet, compute_time_bucket(self.ts_millis));
 
         index_writer
             .add_document(doc)
@@ -142,6 +250,9 @@ impl FulltextIndexExecutor for AddEdge {
             .decode_string()
             .unwrap_or_else(|_| String::new());
 
+        // Extract tags from summary
+        let tags = extract_tags(&summary_text);
+
         let mut doc = doc!(
             fields.src_id_field => self.source_node_id.as_bytes().to_vec(),
             fields.dst_id_field => self.target_node_id.as_bytes().to_vec(),
@@ -151,9 +262,19 @@ impl FulltextIndexExecutor for AddEdge {
             fields.timestamp_field => self.ts_millis.0,
         );
 
+        // Add facets
+        doc.add_facet(fields.doc_type_facet, Facet::from("/type/edge"));
+        doc.add_facet(fields.time_bucket_facet, compute_time_bucket(self.ts_millis));
+
         // Add weight if present
         if let Some(weight) = self.weight {
             doc.add_f64(fields.weight_field, weight);
+            doc.add_facet(fields.weight_range_facet, weight_to_facet(weight));
+        }
+
+        // Add user-defined tags as facets
+        for tag in tags {
+            doc.add_facet(fields.tags_facet, Facet::from(&format!("/tag/{}", tag)));
         }
 
         index_writer
@@ -178,12 +299,24 @@ impl FulltextIndexExecutor for AddNodeFragment {
             .decode_string()
             .context("Failed to decode fragment content")?;
 
-        let doc = doc!(
+        // Extract user-defined tags from content
+        let tags = extract_tags(&content_text);
+
+        let mut doc = doc!(
             fields.id_field => self.id.as_bytes().to_vec(),
             fields.content_field => content_text,
             fields.doc_type_field => "node_fragment",
             fields.timestamp_field => self.ts_millis.0,
         );
+
+        // Add facets
+        doc.add_facet(fields.doc_type_facet, Facet::from("/type/node_fragment"));
+        doc.add_facet(fields.time_bucket_facet, compute_time_bucket(self.ts_millis));
+
+        // Add user-defined tags as facets
+        for tag in tags {
+            doc.add_facet(fields.tags_facet, Facet::from(&format!("/tag/{}", tag)));
+        }
 
         index_writer
             .add_document(doc)
@@ -206,7 +339,10 @@ impl FulltextIndexExecutor for AddEdgeFragment {
             .decode_string()
             .context("Failed to decode edge fragment content")?;
 
-        let doc = doc!(
+        // Extract user-defined tags from content
+        let tags = extract_tags(&content_text);
+
+        let mut doc = doc!(
             fields.src_id_field => self.src_id.as_bytes().to_vec(),
             fields.dst_id_field => self.dst_id.as_bytes().to_vec(),
             fields.edge_name_field => self.edge_name.clone(),
@@ -214,6 +350,15 @@ impl FulltextIndexExecutor for AddEdgeFragment {
             fields.doc_type_field => "edge_fragment",
             fields.timestamp_field => self.ts_millis.0,
         );
+
+        // Add facets
+        doc.add_facet(fields.doc_type_facet, Facet::from("/type/edge_fragment"));
+        doc.add_facet(fields.time_bucket_facet, compute_time_bucket(self.ts_millis));
+
+        // Add user-defined tags as facets
+        for tag in tags {
+            doc.add_facet(fields.tags_facet, Facet::from(&format!("/tag/{}", tag)));
+        }
 
         index_writer
             .add_document(doc)
@@ -514,5 +659,5 @@ pub fn spawn_fulltext_consumer_with_params_and_next(
 }
 
 #[cfg(test)]
-#[path = "fulltext_tests.rs"]
-mod fulltext_tests;
+#[path = "tests.rs"]
+mod tests;

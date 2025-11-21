@@ -29,12 +29,16 @@ pub use query::{
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 mod graph;
 pub use graph::*;
-mod fulltext;
-pub use fulltext::*;
+pub mod fulltext;
+pub use fulltext::{
+    create_fulltext_consumer, create_fulltext_consumer_with_next,
+    create_fulltext_consumer_with_params, create_fulltext_consumer_with_params_and_next,
+    spawn_fulltext_consumer, spawn_fulltext_consumer_with_next, spawn_fulltext_consumer_with_params,
+    spawn_fulltext_consumer_with_params_and_next, FullTextProcessor, FulltextFields,
+    FulltextIndexExecutor,
+};
 mod schema;
 
-#[cfg(test)]
-mod fulltext_tests;
 #[cfg(test)]
 mod graph_tests;
 
