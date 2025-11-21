@@ -19,6 +19,8 @@ Added standardized CSV output format with the following fields:
 - `time_ms`: Execution time in milliseconds
 - `memory_kb`: Memory usage in kilobytes
 - `result_hash`: Hash of algorithm result for correctness verification
+- `disk_files`: Number of RocksDB files (motlie_db only, N/A for reference)
+- `disk_kb`: RocksDB disk size in kilobytes (motlie_db only, N/A for reference)
 
 ### 2. Command Line Interface Redesign
 

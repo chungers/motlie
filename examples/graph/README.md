@@ -18,6 +18,55 @@ This directory contains example implementations of classic graph algorithms usin
 - [`PERFORMANCE_SUMMARY.md`](docs/PERFORMANCE_SUMMARY.md) - Quick summary of test results
 - [`data/performance_metrics.csv`](data/performance_metrics.csv) - Raw performance data (50 test runs)
 
+## RocksDB Disk Usage
+
+The `motlie_db` implementation persists graph data to disk using RocksDB. Disk usage scales with graph size and varies by algorithm due to different access patterns:
+
+### Disk Usage by Algorithm and Scale
+
+| Algorithm | Scale | Nodes | Files | Disk Size | Notes |
+|-----------|-------|-------|-------|-----------|-------|
+| **DFS** | 1 | 10 | 8 | 0.3 MB | Base case |
+| | 10 | 100 | 8 | 0.3 MB | |
+| | 100 | 1,000 | 8 | 0.7 MB | |
+| | 1000 | 10,000 | 8 | 5.1 MB | |
+| | 10000 | 100,000 | 8 | 49.7 MB | |
+| | 100000 | 1,000,000 | 21 | 627.2 MB | File compaction at scale |
+| **BFS** | 1 | 10 | 8 | 0.3 MB | Base case |
+| | 10 | 100 | 8 | 0.3 MB | |
+| | 100 | 1,000 | 8 | 0.8 MB | |
+| | 1000 | 10,000 | 8 | 5.2 MB | |
+| | 10000 | 100,000 | 8 | 50.9 MB | |
+| | 100000 | 1,000,000 | 24 | 678.9 MB | File compaction at scale |
+| **Topological Sort** | 1 | 10 | 8 | 0.3 MB | Base case |
+| | 10 | 100 | 8 | 0.3 MB | |
+| | 100 | 1,000 | 8 | 0.7 MB | |
+| | 1000 | 10,000 | 8 | 5.0 MB | |
+| | 10000 | 100,000 | 8 | 48.3 MB | |
+| | 100000 | 1,000,000 | 20 | 611.6 MB | File compaction at scale |
+
+### Key Observations
+
+**Scaling Pattern**:
+- Small scales (1-1000): Disk usage grows linearly, ~0.3-5 MB per graph
+- Medium scales (10,000): ~50 MB disk footprint, still single-file SST structure (8 files)
+- Large scales (100,000): RocksDB compaction creates additional SST files (20-24 files), ~600-680 MB
+
+**File Count**:
+- Typical case: 8 RocksDB files (MANIFEST, CURRENT, LOG, SST files, etc.)
+- Large graphs: 20-24 files after compaction and level-based organization
+- File structure managed automatically by RocksDB
+
+**Storage Efficiency**:
+- Disk usage is ~6-10 bytes per edge (includes node metadata, edge weights, indexes)
+- RocksDB compression (Snappy) reduces storage overhead
+- Graph structure (nodes + edges) stored persistently; algorithm state is transient (in-memory)
+
+**Comparison to In-Memory**:
+- Reference implementations: 0 bytes disk (pure in-memory)
+- motlie_db: Persistent storage enables graphs larger than RAM
+- Trade-off: Disk I/O overhead vs. ability to handle massive graphs
+
 ## What These Demos Do
 
 These examples demonstrate how to use `motlie_db` for implementing standard graph algorithms on persistent, scalable graphs:
