@@ -85,6 +85,10 @@ python3 scripts/analyze_metrics.py
 | time_ms         | Execution time (milliseconds)         | 0.0213         |
 | memory_kb       | Memory usage (kilobytes, RSS delta)   | 144            |
 | result_hash     | Result hash for correctness check     | cf6b627a...    |
+| disk_files      | RocksDB file count (motlie_db only)   | 8              |
+| disk_kb         | RocksDB disk size in KB (motlie_db)   | 5255.4         |
+
+**Note**: `disk_files` and `disk_kb` are only populated for motlie_db runs (N/A for reference implementations).
 
 ### Key Metrics
 
