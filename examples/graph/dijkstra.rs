@@ -19,7 +19,7 @@
 mod common;
 
 use anyhow::Result;
-use common::{build_graph, compute_hash_f64, compute_hash_f64_motlie, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
+use common::{build_graph, compute_hash_f64, compute_hash_f64_motlie, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
 use motlie_db::{Id, OutgoingEdges, QueryRunnable};
 use pathfinding::prelude::dijkstra as pathfinding_dijkstra;
 use std::cmp::Ordering;
@@ -277,6 +277,8 @@ async fn main() -> Result<()> {
                 execution_time_ms: time_ms,
                 memory_usage_bytes: memory,
                 result_hash,
+                disk_files: None,       // Reference implementation doesn't use disk
+                disk_size_bytes: None,
             };
 
             metrics.print_csv();
@@ -292,6 +294,9 @@ async fn main() -> Result<()> {
             let result = result?;
             let result_hash = Some(compute_hash_f64_motlie(&result));
 
+            // Measure disk usage after algorithm completes
+            let (disk_files, disk_size) = get_disk_metrics(db_path).unwrap_or((0, 0));
+
             let metrics = GraphMetrics {
                 algorithm_name: "Dijkstra".to_string(),
                 implementation: Implementation::MotlieDb,
@@ -301,6 +306,8 @@ async fn main() -> Result<()> {
                 execution_time_ms: time_ms,
                 memory_usage_bytes: memory,
                 result_hash,
+                disk_files: Some(disk_files),
+                disk_size_bytes: Some(disk_size),
             };
 
             metrics.print_csv();
