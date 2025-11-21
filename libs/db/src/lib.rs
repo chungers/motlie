@@ -373,7 +373,8 @@ mod tests {
 
         // Spawn both consumer types
         let graph_handle = spawn_graph_consumer(receiver1, config.clone(), temp_dir.path());
-        let fulltext_handle = spawn_fulltext_consumer(receiver2, config.clone());
+        let fulltext_index_path = temp_dir.path().join("fulltext_index");
+        let fulltext_handle = spawn_fulltext_consumer(receiver2, config.clone(), &fulltext_index_path);
 
         // Send mutations to both writers (simulating fanout)
         for i in 0..3 {

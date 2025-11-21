@@ -181,7 +181,8 @@ mod tests {
 
         // Create the FullText consumer (end of chain)
         let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
-        let fulltext_handle = crate::spawn_fulltext_consumer(fulltext_receiver, config.clone());
+        let fulltext_index_path = temp_dir.path().join("fulltext_index");
+        let fulltext_handle = crate::spawn_fulltext_consumer(fulltext_receiver, config.clone(), &fulltext_index_path);
 
         // Create the Graph consumer that forwards to FullText
         let (writer, graph_receiver) = create_mutation_writer(config.clone());
