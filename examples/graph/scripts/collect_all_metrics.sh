@@ -28,7 +28,7 @@ IMPLEMENTATIONS=("reference" "motlie_db")
 SCALES=(1 10 100 1000 10000 100000)
 
 # Initialize CSV file with header
-echo "algorithm,implementation,scale,nodes,edges,time_ms,memory_kb,result_hash" > "$OUTPUT_FILE"
+echo "algorithm,implementation,scale,nodes,edges,time_ms,memory_kb,result_hash,disk_files,disk_kb" > "$OUTPUT_FILE"
 
 echo "=========================================="
 echo "Graph Algorithm Performance Data Collection"
@@ -60,21 +60,13 @@ for algo in "${ALGORITHMS[@]}"; do
 
             echo "[$current_run/$total_runs] Running: $algo | $impl | scale=$scale"
 
-            # Set timeout (5 minutes = 300 seconds)
-            TIMEOUT=300
-
-            # Run the algorithm with timeout and append output to CSV
-            if timeout $TIMEOUT "$BINARY_DIR/$algo" "$impl" "$db_path" "$scale" >> "$OUTPUT_FILE" 2>/dev/null; then
+            # Run the algorithm and append output to CSV
+            if "$BINARY_DIR/$algo" "$impl" "$db_path" "$scale" >> "$OUTPUT_FILE" 2>/dev/null; then
                 echo "  ✓ Success"
             else
                 exit_code=$?
-                if [ $exit_code -eq 124 ]; then
-                    echo "  ⏱ Timeout (>5 minutes)"
-                    echo "$algo,$impl,$scale,TIMEOUT,TIMEOUT,TIMEOUT,TIMEOUT,TIMEOUT" >> "$OUTPUT_FILE"
-                else
-                    echo "  ✗ Failed (error code: $exit_code)"
-                    echo "$algo,$impl,$scale,ERROR,ERROR,ERROR,ERROR,ERROR" >> "$OUTPUT_FILE"
-                fi
+                echo "  ✗ Failed (error code: $exit_code)"
+                echo "$algo,$impl,$scale,ERROR,ERROR,ERROR,ERROR,ERROR,ERROR,ERROR" >> "$OUTPUT_FILE"
             fi
 
             # Clean up database to save disk space

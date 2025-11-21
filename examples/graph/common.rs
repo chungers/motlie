@@ -103,6 +103,8 @@ pub struct GraphMetrics {
     pub execution_time_ms: f64,
     pub memory_usage_bytes: Option<usize>,
     pub result_hash: Option<String>,  // For comparing correctness across implementations
+    pub disk_files: Option<usize>,     // Number of files in RocksDB directory
+    pub disk_size_bytes: Option<usize>, // Total size of RocksDB directory in bytes
 }
 
 impl GraphMetrics {
@@ -166,7 +168,15 @@ impl GraphMetrics {
             .clone()
             .unwrap_or_else(|| "N/A".to_string());
 
-        println!("{},{},{},{},{},{:.4},{},{}",
+        let disk_files = self.disk_files
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+
+        let disk_kb = self.disk_size_bytes
+            .map(|b| (b as f64 / 1024.0).to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+
+        println!("{},{},{},{},{},{:.4},{},{},{},{}",
             self.algorithm_name,
             self.implementation.as_str(),
             self.scale,
@@ -174,13 +184,15 @@ impl GraphMetrics {
             self.num_edges,
             self.execution_time_ms,
             memory_kb,
-            result_hash
+            result_hash,
+            disk_files,
+            disk_kb
         );
     }
 
     /// Print CSV header
     pub fn print_csv_header() {
-        println!("algorithm,implementation,scale,nodes,edges,time_ms,memory_kb,result_hash");
+        println!("algorithm,implementation,scale,nodes,edges,time_ms,memory_kb,result_hash,disk_files,disk_kb");
     }
 }
 
@@ -267,12 +279,11 @@ pub async fn build_graph(
     let mut storage = Storage::readonly(db_path);
     storage.ready()?;
     let storage = Arc::new(storage);
-    let graph = Graph::new(storage);
+    let graph = Arc::new(Graph::new(storage));
 
     // Create query reader and spawn consumer
     let (reader, receiver) = motlie_db::create_query_reader(reader_config.clone());
-    let consumer = motlie_db::QueryConsumer::new(receiver, reader_config, graph);
-    let query_handle = motlie_db::spawn_query_consumer(consumer);
+    let query_handle = motlie_db::spawn_query_consumer_with_graph(receiver, reader_config, graph);
 
     Ok((reader, name_to_id, query_handle))
 }
@@ -383,4 +394,36 @@ where
     };
 
     (result, elapsed.as_secs_f64() * 1000.0, mem_delta)
+}
+
+/// Get RocksDB disk usage metrics (file count and total size in bytes)
+pub fn get_disk_metrics(db_path: &Path) -> Result<(usize, usize)> {
+    use std::fs;
+
+    if !db_path.exists() {
+        return Ok((0, 0));
+    }
+
+    let mut file_count = 0;
+    let mut total_size = 0;
+
+    // Recursively walk the directory tree
+    fn walk_dir(path: &Path, file_count: &mut usize, total_size: &mut usize) -> Result<()> {
+        if path.is_dir() {
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    *file_count += 1;
+                    *total_size += entry.metadata()?.len() as usize;
+                } else if path.is_dir() {
+                    walk_dir(&path, file_count, total_size)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    walk_dir(db_path, &mut file_count, &mut total_size)?;
+    Ok((file_count, total_size))
 }
