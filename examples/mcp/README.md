@@ -313,36 +313,287 @@ Once connected, the following tools are available:
 | `query_edges_by_name` | Search edges by name prefix |
 | `query_node_fragments` | Get node fragments in time range |
 
+## Getting Started: Your First MCP Session
+
+This section walks you through setting up and using the Motlie MCP server with Claude Desktop from scratch.
+
+### Step 1: Build the Server
+
+```bash
+# Navigate to the project root
+cd /path/to/motlie
+
+# Build the MCP server in release mode
+cargo build --release --example mcp
+
+# The binary will be at: target/release/examples/mcp
+```
+
+### Step 2: Choose a Database Location
+
+```bash
+# Create a directory for your database
+mkdir -p ~/motlie-databases/my-first-graph
+
+# Note the full path - you'll need it for the config
+echo ~/motlie-databases/my-first-graph
+```
+
+### Step 3: Configure Claude Desktop
+
+1. **Open Claude Desktop**
+2. **Click the Settings icon** (gear in lower-left corner)
+3. **Go to the Developer tab**
+4. **Click "Edit Config"** to open `claude_desktop_config.json`
+
+Add this configuration (update paths for your system):
+
+```json
+{
+  "mcpServers": {
+    "motlie-graph": {
+      "command": "/Users/yourname/motlie/target/release/examples/mcp",
+      "args": [
+        "--db-path",
+        "/Users/yourname/motlie-databases/my-first-graph"
+      ],
+      "env": {
+        "RUST_LOG": "info"
+      }
+    }
+  }
+}
+```
+
+**Important**: Replace `/Users/yourname` with your actual home directory path!
+
+4. **Save the file**
+5. **Completely quit and restart Claude Desktop** (not just close the window)
+
+### Step 4: Verify Connection
+
+After Claude Desktop restarts:
+
+1. **Start a new conversation**
+2. **Ask Claude**: "What MCP tools do you have available?"
+3. **You should see** a list including tools like `add_node`, `query_node_by_id`, etc.
+
+If you see the Motlie tools, you're connected! 🎉
+
+### Step 5: Build Your First Graph
+
+Let's create a simple knowledge graph about a team:
+
+**Step 5.1: Create Nodes for Team Members**
+
+```
+You: "I want to create a knowledge graph about my team. First, add a node for Alice
+with ID 01HQEWRKZGPVX8Q9M7NKJT5W2E. Then add a node for Bob with ID
+01HQEWRKZGPVX8Q9M7NKJT5W2F."
+```
+
+Claude will use the `add_node` tool twice to create these nodes.
+
+**What happens behind the scenes:**
+```json
+Tool: add_node
+Arguments: {
+  "id": "01HQEWRKZGPVX8Q9M7NKJT5W2E",
+  "name": "Alice"
+}
+
+Tool: add_node
+Arguments: {
+  "id": "01HQEWRKZGPVX8Q9M7NKJT5W2F",
+  "name": "Bob"
+}
+```
+
+**Step 5.2: Create Relationships**
+
+```
+You: "Create a 'reports_to' edge from Alice to Bob with weight 1.0"
+```
+
+Claude will use `add_edge`:
+```json
+Tool: add_edge
+Arguments: {
+  "src_id": "01HQEWRKZGPVX8Q9M7NKJT5W2E",
+  "dst_id": "01HQEWRKZGPVX8Q9M7NKJT5W2F",
+  "name": "reports_to",
+  "weight": 1.0
+}
+```
+
+**Step 5.3: Query the Graph**
+
+```
+You: "Show me all outgoing edges from Alice"
+```
+
+Claude will use `query_outgoing_edges` and show you that Alice reports to Bob.
+
+**Step 5.4: Add Rich Content**
+
+```
+You: "Add a note to Alice's node saying 'Senior Software Engineer, joined 2023'"
+```
+
+Claude will use `add_node_fragment`:
+```json
+Tool: add_node_fragment
+Arguments: {
+  "node_id": "01HQEWRKZGPVX8Q9M7NKJT5W2E",
+  "content": "Senior Software Engineer, joined 2023"
+}
+```
+
+### Step 6: Advanced Example - Build a Complete Project Graph
+
+Let's build a more complex graph representing a software project:
+
+```
+You: "Help me create a knowledge graph for a web application project. Create nodes for:
+- The project itself (name: WebApp)
+- Three developers: Alice, Bob, and Carol
+- Two features: Authentication and Dashboard
+
+Then create these relationships:
+- Alice and Bob work_on Authentication
+- Carol works_on Dashboard
+- Authentication depends_on Dashboard (because auth needs the dashboard framework)
+
+Use meaningful IDs and add notes about each developer's role."
+```
+
+**Claude will orchestrate multiple tool calls:**
+
+1. Creates 6 nodes (project + 3 developers + 2 features)
+2. Creates 5 edges for the relationships
+3. Adds fragments with role descriptions
+
+**Then you can query:**
+```
+You: "What features does Alice work on?"
+You: "What are all the dependencies in this project?"
+You: "Show me the complete graph structure"
+```
+
+## Example Usage Patterns
+
+### Pattern 1: Building a Knowledge Graph from Conversation
+
+```
+You: "I'm going to tell you about my organization's structure, and I want you
+to build a graph as we talk. Ready?"
+
+[Claude confirms]
+
+You: "Our company has three departments: Engineering, Sales, and Marketing.
+Alice heads Engineering, Bob heads Sales, and Carol heads Marketing.
+Under Alice, there are two teams: Frontend led by Dave and Backend led by Eve."
+
+[Claude automatically creates nodes and edges representing this hierarchy]
+
+You: "Now show me everyone who reports to Alice"
+
+[Claude queries and displays the organizational structure]
+```
+
+### Pattern 2: Temporal Knowledge Tracking
+
+```
+You: "Create a node for our Product Roadmap with ID 01HQEX... and add today's
+features as fragments with timestamps. Each feature should be a separate fragment."
+
+[Claude adds multiple fragments with automatic timestamps]
+
+You: "Now query all fragments from the last 7 days"
+
+[Claude retrieves recent roadmap updates]
+```
+
+### Pattern 3: Research and Connection Discovery
+
+```
+You: "I'm researching connections between different technologies. Create nodes
+for: React, Vue, Angular, TypeScript, and JavaScript. Then create edges showing
+that React, Vue, and Angular all 'use' TypeScript, and TypeScript 'compiles_to'
+JavaScript."
+
+[Claude builds the tech graph]
+
+You: "What are all the technologies that ultimately depend on JavaScript?"
+
+[Claude traverses the graph to find all connections]
+```
+
+### Pattern 4: Iterative Graph Building
+
+```
+You: "Let's build a recipe graph. Start by creating a node for 'Chocolate Cake'"
+
+[Claude creates the node]
+
+You: "Good. Now add edges to ingredient nodes: flour, sugar, cocoa, eggs, butter.
+Create those ingredient nodes if they don't exist."
+
+[Claude creates nodes and edges]
+
+You: "For each ingredient, add a fragment noting the quantity needed"
+
+[Claude adds detailed fragments]
+
+You: "Show me all recipes that use flour"
+
+[Claude queries for connections]
+```
+
 ## Example Usage in Claude
 
 Once the MCP server is connected, you can interact with your graph database naturally:
 
 **Creating nodes:**
 ```
-User: "Add a new node to the database named 'Alice' with ID 01ARZ3NDEKTSV4RRFFQ69G5FAV"
+You: "Add a new node to the database named 'Alice' with ID 01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
-Claude: [Uses add_node tool to create the node]
+Claude: I'll add a node for Alice to the graph database.
+[Uses add_node tool]
+✓ Successfully added node 'Alice' with ID 01ARZ3NDEKTSV4RRFFQ69G5FAV
 ```
 
 **Creating edges:**
 ```
-User: "Create a 'knows' edge from Alice to Bob with weight 0.8"
+You: "Create a 'knows' edge from Alice to Bob with weight 0.8"
 
-Claude: [Uses add_edge tool to create the relationship]
+Claude: I'll create a relationship showing that Alice knows Bob.
+[Uses add_edge tool]
+✓ Successfully created 'knows' edge from Alice to Bob with weight 0.8
 ```
 
 **Querying:**
 ```
-User: "Show me all outgoing edges from Alice"
+You: "Show me all outgoing edges from Alice"
 
-Claude: [Uses query_outgoing_edges to fetch and display the edges]
+Claude: Let me query Alice's outgoing connections.
+[Uses query_outgoing_edges tool]
+
+Alice has the following outgoing edges:
+- knows → Bob (weight: 0.8)
+- works_with → Carol (weight: 1.0)
 ```
 
 **Complex workflows:**
 ```
-User: "Create a social network with 5 people and random friendships between them"
+You: "Create a social network with 5 people and random friendships between them"
 
-Claude: [Uses multiple add_node and add_edge calls to build the network]
+Claude: I'll create a small social network for you.
+[Uses multiple add_node and add_edge calls to build the network]
+
+Created 5 people: Alice, Bob, Carol, Dave, Eve
+Created 7 friendships with varying strengths
+Would you like me to visualize the connections?
 ```
 
 ## Authentication
@@ -392,57 +643,261 @@ Claude will automatically include the token if configured in the connection sett
 
 ## Troubleshooting
 
-### Server Won't Start
+### Common Issues and Solutions
 
-**Error: Database not found**
-```
-Solution: Ensure the database path exists and has been initialized
-```
+#### Issue 1: "MCP server failed to connect"
 
-**Error: Port already in use**
-```
-Solution: Choose a different port with --port option
-```
+**Symptoms:** Claude Desktop shows the server as "failed" or doesn't list your tools
 
-### Claude Can't Connect
+**Solutions:**
 
-**"MCP server failed" in Claude Code**
+1. **Verify the binary path is correct**
+   ```bash
+   # Test that the binary exists and runs
+   /Users/yourname/motlie/target/release/examples/mcp --help
 
-1. Check the server is running: `ps aux | grep motlie-mcp`
-2. Check Claude Code logs: `tail -f ~/Library/Logs/Claude/mcp.log` (macOS)
-3. Verify JSON config is valid: Use a JSON validator
-4. Try running the command manually to see error output
+   # If you get "command not found", rebuild:
+   cd /path/to/motlie
+   cargo build --release --example mcp
+   ```
 
-**"Tool not available" errors**
+2. **Check the database path exists**
+   ```bash
+   # Create the directory if it doesn't exist
+   mkdir -p ~/motlie-databases/my-first-graph
 
-1. Restart Claude Code/Desktop completely
-2. Verify server is in "connected" state with `/mcp` command
-3. Check server logs for errors
+   # Verify permissions
+   ls -la ~/motlie-databases/
+   ```
 
-### Permission Issues
+3. **Verify JSON configuration is valid**
+   ```bash
+   # On macOS, validate the JSON
+   python3 -m json.tool ~/Library/Application\ Support/Claude/claude_desktop_config.json
 
-**Error: Permission denied**
+   # Should print the JSON without errors
+   ```
+
+4. **Test the server manually**
+   ```bash
+   # Try running the server directly
+   /Users/yourname/motlie/target/release/examples/mcp \
+     --db-path ~/motlie-databases/my-first-graph
+
+   # You should see:
+   # [INFO] Initializing database...
+   # [INFO] Starting Motlie MCP server...
+   # [WARN] Running without authentication...
+
+   # Press Ctrl+C to stop
+   ```
+
+5. **Check Claude Desktop logs**
+   ```bash
+   # On macOS
+   tail -f ~/Library/Logs/Claude/mcp.log
+
+   # On Windows
+   # Check: %APPDATA%\Claude\logs\mcp.log
+
+   # Look for errors related to "motlie-graph"
+   ```
+
+6. **Restart Claude Desktop completely**
+   - Don't just close the window
+   - Quit the application (Cmd+Q on macOS)
+   - Wait 5 seconds
+   - Reopen Claude Desktop
+
+#### Issue 2: "Tools appear but don't work"
+
+**Symptoms:** Claude sees the tools but gets errors when trying to use them
+
+**Solutions:**
+
+1. **Check if database is writable**
+   ```bash
+   # Verify you can write to the database directory
+   touch ~/motlie-databases/my-first-graph/test.txt
+   rm ~/motlie-databases/my-first-graph/test.txt
+   ```
+
+2. **Look for RocksDB errors in logs**
+   ```bash
+   # Run server with debug logging
+   RUST_LOG=debug /Users/yourname/motlie/target/release/examples/mcp \
+     --db-path ~/motlie-databases/my-first-graph
+   ```
+
+3. **Try a fresh database**
+   ```bash
+   # Rename the old database
+   mv ~/motlie-databases/my-first-graph ~/motlie-databases/my-first-graph.backup
+
+   # Create a new one
+   mkdir -p ~/motlie-databases/my-first-graph
+
+   # Restart Claude Desktop and try again
+   ```
+
+#### Issue 3: "Invalid node ID" errors
+
+**Symptoms:** Error messages about invalid IDs when creating nodes
+
+**Solutions:**
+
+1. **Use proper ULID format**
+   - IDs must be 26 characters, base32 encoded
+   - Valid characters: 0-9, A-Z (excluding I, L, O, U)
+   - Example valid ID: `01ARZ3NDEKTSV4RRFFQ69G5FAV`
+
+2. **Let Claude generate IDs**
+   ```
+   You: "Create a node for Alice - generate an appropriate ID for me"
+
+   [Claude will generate a valid ULID]
+   ```
+
+3. **Generate IDs online**
+   - Visit: https://www.ulidgenerator.com/
+   - Copy the generated ID into your request
+
+#### Issue 4: Server crashes or stops responding
+
+**Solutions:**
+
+1. **Check for database corruption**
+   ```bash
+   # Back up and recreate database
+   mv ~/motlie-databases/my-first-graph ~/motlie-databases/backup
+   mkdir -p ~/motlie-databases/my-first-graph
+   ```
+
+2. **Increase channel buffer sizes**
+   ```json
+   {
+     "mcpServers": {
+       "motlie-graph": {
+         "command": "/path/to/mcp",
+         "args": [
+           "--db-path", "/path/to/db",
+           "--mutation-buffer-size", "1000",
+           "--query-buffer-size", "1000"
+         ]
+       }
+     }
+   }
+   ```
+
+3. **Monitor system resources**
+   ```bash
+   # Check if you're running out of memory
+   top -l 1 | grep -E "^PhysMem"
+   ```
+
+### Verification Checklist
+
+Before asking for help, verify:
+
+- [ ] Server binary exists at the configured path
+- [ ] Database directory exists and is writable
+- [ ] JSON config is valid (use a JSON validator)
+- [ ] Claude Desktop has been completely restarted
+- [ ] Server can run manually without errors
+- [ ] Logs don't show RocksDB or permission errors
+- [ ] IDs are valid 26-character ULIDs
+
+## Common Questions
+
+### Q: Do I need to generate IDs myself?
+
+**A:** You can ask Claude to generate valid ULIDs for you. Just say "create a node for Alice, generate an appropriate ID" and Claude will create a valid ULID.
+
+### Q: Can I use the same database from multiple Claude conversations?
+
+**A:** Yes! All conversations using the same MCP server configuration will access the same database. This means you can build a graph in one conversation and query it in another.
+
+### Q: What happens if I restart Claude Desktop?
+
+**A:** The MCP server process restarts, but your database persists on disk. All your nodes, edges, and fragments remain intact.
+
+### Q: Can I inspect the database outside of Claude?
+
+**A:** Yes! You can use RocksDB tools or write a simple Rust program using the `motlie-db` library to read and query your database directly.
+
+### Q: How do I back up my graph database?
+
+**A:** Simply copy the database directory:
 ```bash
-# Fix database permissions
-chmod -R 755 /path/to/database
+# Create a backup
+cp -r ~/motlie-databases/my-first-graph ~/motlie-databases/backup-$(date +%Y%m%d)
 
-# Fix binary permissions
-chmod +x /usr/local/bin/motlie-mcp
+# Restore from backup
+cp -r ~/motlie-databases/backup-20250101 ~/motlie-databases/my-first-graph
 ```
 
-### JSON Configuration Errors
+### Q: Can I run multiple MCP servers for different databases?
 
-**Malformed JSON**
+**A:** Yes! Add multiple server configurations to your `claude_desktop_config.json`:
 
-Use a JSON validator before restarting Claude:
-
-```bash
-# Validate JSON on macOS
-python3 -m json.tool ~/Library/Application\ Support/Claude/claude_desktop_config.json
-
-# Validate JSON on Linux
-python3 -m json.tool ~/.config/Claude/claude_desktop_config.json
+```json
+{
+  "mcpServers": {
+    "motlie-personal": {
+      "command": "/path/to/mcp",
+      "args": ["--db-path", "/path/to/personal-graph"]
+    },
+    "motlie-work": {
+      "command": "/path/to/mcp",
+      "args": ["--db-path", "/path/to/work-graph"]
+    }
+  }
+}
 ```
+
+Claude will have access to both databases simultaneously.
+
+### Q: How do I enable authentication?
+
+**A:** Add the `--auth-token` argument:
+
+```json
+{
+  "mcpServers": {
+    "motlie-graph": {
+      "command": "/path/to/mcp",
+      "args": [
+        "--db-path", "/path/to/db",
+        "--auth-token", "your-secret-token"
+      ]
+    }
+  }
+}
+```
+
+**Note:** Store the token securely! Don't commit it to version control.
+
+### Q: What's the difference between nodes and fragments?
+
+**A:**
+- **Nodes** represent entities (people, concepts, things)
+- **Edges** represent relationships between nodes
+- **Fragments** are pieces of content attached to nodes or edges (notes, documents, data)
+
+Think of nodes as objects, edges as connections, and fragments as attributes or documentation.
+
+### Q: Can I delete nodes or edges?
+
+**A:** The current version supports adding and updating, but not deleting. Deletion will be added in a future release. For now, you can use temporal validity ranges to mark nodes/edges as no longer valid.
+
+### Q: How do I visualize my graph?
+
+**A:** Currently, visualization is not built into the MCP server. You can:
+1. Ask Claude to describe the structure in text/markdown
+2. Export the data and use tools like Graphviz
+3. Build a custom visualization using the query tools
+
+A built-in visualization feature is planned for a future release.
 
 ## Environment Variables
 
