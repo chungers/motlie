@@ -5,6 +5,21 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "MCP library for motlie"
+description = "MCP server library for motlie graph database"
 
 [dependencies]
+motlie-db = { path = "../db" }
+rust-mcp-sdk = { version = "0.7", features = ["server", "stdio", "macros"] }
+rust-mcp-schema = "0.7"
+schemars = { version = "0.8", features = ["derive"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = "1.0"
+anyhow = { workspace = true }
+log = "0.4"
+async-trait = "0.1"
+
+[dev-dependencies]
+env_logger = "0.10"
+tempfile = "3.0"
+tokio-test = "0.4"

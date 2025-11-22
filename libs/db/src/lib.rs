@@ -26,7 +26,7 @@ pub use query::{
     Processor as QueryProcessor, Consumer as QueryConsumer,
 };
 // Note: spawn_query_consumer is exported from graph module via `pub use graph::*`
-pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
+pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId, ValidTemporalRange};
 mod graph;
 pub use graph::*;
 mod fulltext;

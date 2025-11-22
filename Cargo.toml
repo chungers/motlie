@@ -35,6 +35,7 @@ description = "Motlie workspace with examples"
 
 [dependencies]
 motlie-db = { path = "libs/db" }
+motlie-mcp = { path = "libs/mcp" }
 csv.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
@@ -46,6 +47,10 @@ data-url = "0.3"
 lz4 = "1.28"
 petgraph = "0.6"
 pathfinding = "4.0"
+clap = { version = "4.0", features = ["derive"] }
+rust-mcp-sdk = { version = "0.7", features = ["server", "stdio", "macros"] }
+rust-mcp-schema = "0.7"
+log = "0.4"
 
 [[example]]
 name = "store"
@@ -70,3 +75,7 @@ path = "examples/graph/dijkstra.rs"
 [[example]]
 name = "pagerank"
 path = "examples/graph/pagerank.rs"
+
+[[example]]
+name = "mcp"
+path = "examples/mcp/main.rs"
