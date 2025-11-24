@@ -1,7 +1,8 @@
 //! MCP tool parameter types for Motlie graph database operations
 //!
 //! All parameter types derive Serialize, Deserialize, and JsonSchema for automatic
-//! schema generation via the rmcp SDK.
+//! schema generation via the pmcp SDK. Authentication is handled at the protocol
+//! level by pmcp and does not need to be included in tool parameters.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,10 +22,6 @@ pub struct TemporalRangeParam {
 /// Parameters for adding a new node to the graph
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AddNodeParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Node UUID in base32 format
     #[schemars(description = "Unique identifier for the node (base32-encoded ULID)")]
     pub id: String,
@@ -45,10 +42,6 @@ pub struct AddNodeParams {
 /// Parameters for adding an edge between two nodes
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AddEdgeParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Source node UUID
     #[schemars(description = "Source node identifier (base32-encoded ULID)")]
     pub source_node_id: String,
@@ -81,10 +74,6 @@ pub struct AddEdgeParams {
 /// Parameters for adding a fragment to a node
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AddNodeFragmentParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Node UUID
     #[schemars(description = "Node identifier to attach fragment to")]
     pub id: String,
@@ -107,10 +96,6 @@ pub struct AddNodeFragmentParams {
 /// Parameters for adding a fragment to an edge
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AddEdgeFragmentParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Source node UUID
     #[schemars(description = "Source node identifier")]
     pub src_id: String,
@@ -141,10 +126,6 @@ pub struct AddEdgeFragmentParams {
 /// Parameters for updating node temporal validity
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UpdateNodeValidRangeParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Node UUID
     #[schemars(description = "Node identifier to update")]
     pub id: String,
@@ -161,10 +142,6 @@ pub struct UpdateNodeValidRangeParams {
 /// Parameters for updating edge temporal validity
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UpdateEdgeValidRangeParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Source node UUID
     #[schemars(description = "Source node identifier")]
     pub src_id: String,
@@ -189,10 +166,6 @@ pub struct UpdateEdgeValidRangeParams {
 /// Parameters for updating edge weight
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct UpdateEdgeWeightParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Source node UUID
     #[schemars(description = "Source node identifier")]
     pub src_id: String,
@@ -213,10 +186,6 @@ pub struct UpdateEdgeWeightParams {
 /// Parameters for querying a node by ID
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct QueryNodeByIdParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Node UUID
     #[schemars(description = "Node identifier to query")]
     pub id: String,
@@ -229,10 +198,6 @@ pub struct QueryNodeByIdParams {
 /// Parameters for querying an edge by endpoints and name
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct QueryEdgeParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Source node UUID
     #[schemars(description = "Source node identifier")]
     pub source_id: String,
@@ -253,10 +218,6 @@ pub struct QueryEdgeParams {
 /// Parameters for querying outgoing edges from a node
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct QueryOutgoingEdgesParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Node UUID
     #[schemars(description = "Node identifier to query outgoing edges from")]
     pub id: String,
@@ -269,10 +230,6 @@ pub struct QueryOutgoingEdgesParams {
 /// Parameters for querying incoming edges to a node
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct QueryIncomingEdgesParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Node UUID
     #[schemars(description = "Node identifier to query incoming edges to")]
     pub id: String,
@@ -285,10 +242,6 @@ pub struct QueryIncomingEdgesParams {
 /// Parameters for querying nodes by name prefix
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct QueryNodesByNameParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Name or prefix to search for
     #[schemars(description = "Node name or prefix to search for")]
     pub name: String,
@@ -305,10 +258,6 @@ pub struct QueryNodesByNameParams {
 /// Parameters for querying edges by name prefix
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct QueryEdgesByNameParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Name or prefix to search for
     #[schemars(description = "Edge name or prefix to search for")]
     pub name: String,
@@ -325,10 +274,6 @@ pub struct QueryEdgesByNameParams {
 /// Parameters for querying node fragments by time range
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct QueryNodeFragmentsParams {
-    /// Authentication token (optional)
-    #[schemars(description = "Bearer token for authentication")]
-    pub auth_token: Option<String>,
-
     /// Node UUID
     #[schemars(description = "Node identifier to query fragments from")]
     pub id: String,

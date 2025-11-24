@@ -1,6 +1,14 @@
-# Motlie MCP Server
+# Motlie MCP Server (pmcp SDK)
 
-This example demonstrates how to run the Motlie graph database as an MCP (Model Context Protocol) server, enabling AI assistants like Claude to interact with your graph database.
+This example demonstrates how to run the Motlie graph database as an MCP (Model Context Protocol) server using the **pmcp** (Pragmatic Model Context Protocol) SDK, enabling AI assistants like Claude to interact with your graph database.
+
+**Key Features**:
+- Built with pmcp SDK v1.8 (Pragmatic AI Labs)
+- Type-safe tools with automatic JSON schema generation via `schemars`
+- Built-in authentication via pmcp's auth context
+- **Dual transport support**: stdio (local) and HTTP (remote)
+- **Multi-threaded query processing**: Worker pool with shared TransactionDB for 99%+ consistency
+- 14 tools: 7 mutations + 7 queries
 
 ## Quick Start
 
@@ -14,38 +22,88 @@ cargo build --release --example mcp
 ### Run with stdio Transport (Local)
 
 ```bash
-# Basic usage with stdio transport
+# Basic usage with stdio transport (no authentication)
+# stdio is the default transport, --transport flag is optional
+cargo run --release --example mcp -- \
+    --db-path /path/to/your/database
+
+# Explicitly specify stdio transport
 cargo run --release --example mcp -- \
     --db-path /path/to/your/database \
     --transport stdio
 
-# With authentication
+# With Bearer token authentication
 cargo run --release --example mcp -- \
     --db-path /path/to/your/database \
     --transport stdio \
     --auth-token "your-secret-token"
 ```
 
+**Note**: Authentication is handled by pmcp at the protocol level via `RequestHandlerExtra.auth_context`. Tool parameters do NOT include `auth_token` fields.
+
 ### Run with HTTP Transport (Remote)
 
-**Note:** HTTP transport is planned for future implementation. Currently, only stdio transport is supported.
+The server now supports HTTP transport with Server-Sent Events (SSE) for remote access:
 
 ```bash
-# Future: HTTP server on port 8080
-# cargo run --release --example mcp -- \
-#     --db-path /path/to/your/database \
-#     --transport http \
-#     --port 8080
+# HTTP server on default port 8080
+cargo run --release --example mcp -- \
+    --db-path /path/to/your/database \
+    --transport http
+
+# HTTP server on custom port
+cargo run --release --example mcp -- \
+    --db-path /path/to/your/database \
+    --transport http \
+    --port 3000
+
+# HTTP server with custom host and port
+cargo run --release --example mcp -- \
+    --db-path /path/to/your/database \
+    --transport http \
+    --host 0.0.0.0 \
+    --port 8080
+
+# HTTP server with authentication
+cargo run --release --example mcp -- \
+    --db-path /path/to/your/database \
+    --transport http \
+    --port 8080 \
+    --auth-token "your-secret-token"
 ```
+
+The HTTP server uses pmcp's `StreamableHttpServer` which provides:
+- **Stateless mode** by default (no session management)
+- **JSON-RPC over HTTP** for tool calls
+- **Standard HTTP headers** for authentication
+- **Compatible** with any HTTP MCP client
 
 ## Command-Line Options
 
 | Option | Description | Default | Required |
 |--------|-------------|---------|----------|
-| `--db-path` | Path to RocksDB database directory | - | Yes |
-| `--auth-token` | Authentication token for secure access | None (no auth) | No |
+| `--db-path` / `-d` | Path to RocksDB database directory | - | Yes |
+| `--transport` / `-t` | Transport protocol: `stdio` or `http` | `stdio` | No |
+| `--port` / `-p` | Port for HTTP transport (ignored for stdio) | `8080` | No |
+| `--host` | Host address for HTTP transport (ignored for stdio) | `127.0.0.1` | No |
+| `--auth-token` / `-a` | Bearer token for authentication (pmcp auth context) | None (no auth) | No |
+| `--mutation-buffer-size` | Mutation channel buffer size | `100` | No |
+| `--query-buffer-size` | Query channel buffer size | `100` | No |
+| `--query-workers` | Number of concurrent query worker threads | CPU cores | No |
 
-Note: `--transport` and `--port` options are planned for future implementation.
+**Transport Options**:
+- **stdio**: Standard input/output for local MCP clients (Claude Desktop, Claude Code, etc.)
+- **http**: HTTP server with JSON-RPC for remote access
+
+**Query Workers**:
+- Controls parallel query processing across multiple CPU cores
+- All workers share a single readwrite TransactionDB via Arc<Graph>
+- Provides **99%+ read-after-write consistency** (vs 25-30% with separate readonly instances)
+- Uses RocksDB's native MVCC for thread-safe concurrent access
+- Default is the number of CPU cores for optimal throughput
+- Example: `--query-workers 4` uses 4 worker threads
+
+**Authentication Note**: When `--auth-token` is provided, pmcp validates the token at the protocol level via `RequestHandlerExtra.auth_context`. Tools do not need `auth_token` in their parameters.
 
 ## Integration with Claude Code
 
@@ -92,16 +150,16 @@ For more control, you can directly edit Claude Code's configuration file:
         "mcp",
         "--",
         "--db-path",
-        "/Users/yourname/data/motlie.db",
-        "--transport",
-        "stdio"
+        "/Users/yourname/data/motlie.db"
       ]
     }
   }
 }
 ```
 
-**Example configuration (stdio transport, with auth):**
+**Note**: The `--transport stdio` argument is no longer needed - pmcp uses stdio by default when running with `server.run_stdio()`.
+
+**Example configuration (stdio transport, with authentication):**
 
 ```json
 {
@@ -117,8 +175,6 @@ For more control, you can directly edit Claude Code's configuration file:
         "--",
         "--db-path",
         "/Users/yourname/data/motlie.db",
-        "--transport",
-        "stdio",
         "--auth-token",
         "your-secret-token-here"
       ],
@@ -130,7 +186,11 @@ For more control, you can directly edit Claude Code's configuration file:
 }
 ```
 
+**Authentication with pmcp**: The Bearer token is validated at the protocol level. pmcp's `RequestHandlerExtra.auth_context` provides the authentication info to tool handlers. No need for `auth_token` in tool parameters!
+
 **Example configuration (HTTP transport for remote access):**
+
+The MCP server now supports HTTP transport! Configure your MCP client to connect to the HTTP endpoint:
 
 ```json
 {
@@ -145,6 +205,13 @@ For more control, you can directly edit Claude Code's configuration file:
   }
 }
 ```
+
+**How it works**:
+1. Start the server with `--transport http --port 8080 --auth-token "your-token"`
+2. pmcp's `StreamableHttpServer` handles all HTTP protocol details
+3. MCP clients send JSON-RPC requests via HTTP POST
+4. Authentication headers are validated and populate `RequestHandlerExtra.auth_context`
+5. Tools execute exactly the same way as stdio transport
 
 ### Method 3: Using Pre-built Binary
 

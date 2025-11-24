@@ -48,9 +48,9 @@ lz4 = "1.28"
 petgraph = "0.6"
 pathfinding = "4.0"
 clap = { version = "4.0", features = ["derive"] }
-rust-mcp-sdk = { version = "0.7", features = ["server", "stdio", "macros"] }
-rust-mcp-schema = "0.7"
+pmcp = { version = "1.8", features = ["schema-generation", "validation", "streamable-http"] }
 log = "0.4"
+num_cpus = "1.16"
 
 [[example]]
 name = "store"
