@@ -9,6 +9,70 @@ use crate::schema::{
 };
 use crate::{Id, ReaderConfig, Storage, TimestampMilli};
 
+/// Helper function to check if a timestamp falls within a time range
+fn timestamp_in_range(
+    ts: TimestampMilli,
+    time_range: &(Bound<TimestampMilli>, Bound<TimestampMilli>),
+) -> bool {
+    let (start_bound, end_bound) = time_range;
+
+    let start_ok = match start_bound {
+        Bound::Unbounded => true,
+        Bound::Included(start) => ts.0 >= start.0,
+        Bound::Excluded(start) => ts.0 > start.0,
+    };
+
+    let end_ok = match end_bound {
+        Bound::Unbounded => true,
+        Bound::Included(end) => ts.0 <= end.0,
+        Bound::Excluded(end) => ts.0 < end.0,
+    };
+
+    start_ok && end_ok
+}
+
+/// Macro to iterate over a column family in both readonly and readwrite storage modes
+/// This reduces boilerplate for the common pattern of handling both DB and TransactionDB
+/// The process_body should be a block of code that can access variables from the enclosing scope
+macro_rules! iterate_cf {
+    ($storage:expr, $cf_type:ty, $start_key:expr, |$item:ident| $process_body:block) => {{
+        if let Ok(db) = $storage.db() {
+            let cf = db
+                .cf_handle(<$cf_type>::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Column family '{}' not found",
+                        <$cf_type>::CF_NAME
+                    )
+                })?;
+
+            let iter = db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&$start_key, rocksdb::Direction::Forward),
+            );
+
+            for $item in iter $process_body
+        } else {
+            let txn_db = $storage.transaction_db()?;
+            let cf = txn_db
+                .cf_handle(<$cf_type>::CF_NAME)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Column family '{}' not found",
+                        <$cf_type>::CF_NAME
+                    )
+                })?;
+
+            let iter = txn_db.iterator_cf(
+                cf,
+                rocksdb::IteratorMode::From(&$start_key, rocksdb::Direction::Forward),
+            );
+
+            for $item in iter $process_body
+        }
+    }};
+}
+
 /// Trait that all query types implement to execute themselves.
 ///
 /// This trait defines HOW to fetch the result from storage.
@@ -84,7 +148,8 @@ pub trait QueryProcessor: Send {
 pub enum Query {
     NodeById(NodeById),
     EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstName),
-    FragmentsByIdTimeRange(NodeFragmentsByIdTimeRange),
+    NodeFragmentsByIdTimeRange(NodeFragmentsByIdTimeRange),
+    EdgeFragmentsByIdTimeRange(EdgeFragmentsByIdTimeRange),
     OutgoingEdges(OutgoingEdges),
     IncomingEdges(IncomingEdges),
     NodesByName(NodesByName),
@@ -100,11 +165,18 @@ impl std::fmt::Display for Query {
                 "EdgeBySrcDstName: source={}, dest={}, name={}",
                 q.source_id, q.dest_id, q.name
             ),
-            Query::FragmentsByIdTimeRange(q) => {
+            Query::NodeFragmentsByIdTimeRange(q) => {
                 write!(
                     f,
                     "NodeFragmentsByIdTimeRange: id={}, range={:?}",
                     q.id, q.time_range
+                )
+            }
+            Query::EdgeFragmentsByIdTimeRange(q) => {
+                write!(
+                    f,
+                    "EdgeFragmentsByIdTimeRange: source={}, dest={}, name={}, range={:?}",
+                    q.source_id, q.dest_id, q.edge_name, q.time_range
                 )
             }
             Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.id),
@@ -134,6 +206,7 @@ impl_query_processor!(
     NodeById,
     EdgeSummaryBySrcDstName,
     NodeFragmentsByIdTimeRange,
+    EdgeFragmentsByIdTimeRange,
     OutgoingEdges,
     IncomingEdges,
     NodesByName,
@@ -146,7 +219,8 @@ impl QueryProcessor for Query {
         match self {
             Query::NodeById(q) => q.process_and_send(processor).await,
             Query::EdgeSummaryBySrcDstName(q) => q.process_and_send(processor).await,
-            Query::FragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
+            Query::NodeFragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
+            Query::EdgeFragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
             Query::OutgoingEdges(q) => q.process_and_send(processor).await,
             Query::IncomingEdges(q) => q.process_and_send(processor).await,
             Query::NodesByName(q) => q.process_and_send(processor).await,
@@ -194,6 +268,36 @@ pub struct ByIdQuery<T: Send + Sync + 'static> {
 pub struct NodeFragmentsByIdTimeRange {
     /// The entity ID to search for
     pub id: Id,
+
+    /// Time range bounds (start_bound, end_bound)
+    /// Use std::ops::Bound for idiomatic Rust range specification
+    pub time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
+
+    /// Reference timestamp for temporal validity checks
+    /// If None, defaults to current time in the query executor
+    /// Temporal validity is always checked against the ValidTemporalRange in the record
+    /// Records without a ValidTemporalRange (None) are considered always valid
+    pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Timeout for this query execution (only set when query has channel)
+    pub(crate) timeout: Option<Duration>,
+
+    /// Channel to send the result back to the client (only set when ready to execute)
+    result_tx: Option<oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>>,
+}
+
+/// Query to scan edge fragments by source ID, destination ID, edge name, and time range
+/// Similar to NodeFragmentsByIdTimeRange but for edge fragments
+#[derive(Debug)]
+pub struct EdgeFragmentsByIdTimeRange {
+    /// Source node ID
+    pub source_id: SrcId,
+
+    /// Destination node ID
+    pub dest_id: DstId,
+
+    /// Edge name
+    pub edge_name: EdgeName,
 
     /// Time range bounds (start_bound, end_bound)
     /// Use std::ops::Bound for idiomatic Rust range specification
@@ -407,21 +511,63 @@ impl NodeFragmentsByIdTimeRange {
 
     /// Check if a timestamp falls within this range
     pub fn contains(&self, ts: TimestampMilli) -> bool {
-        let (start_bound, end_bound) = &self.time_range;
+        timestamp_in_range(ts, &self.time_range)
+    }
+}
 
-        let start_ok = match start_bound {
-            Bound::Unbounded => true,
-            Bound::Included(start) => ts.0 >= start.0,
-            Bound::Excluded(start) => ts.0 > start.0,
-        };
+impl EdgeFragmentsByIdTimeRange {
+    /// Create a new query request (public API - no channel, no timeout yet)
+    /// Use `.run(reader, timeout)` to execute this query
+    pub fn new(
+        source_id: SrcId,
+        dest_id: DstId,
+        edge_name: EdgeName,
+        time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
+        reference_ts_millis: Option<TimestampMilli>,
+    ) -> Self {
+        Self {
+            source_id,
+            dest_id,
+            edge_name,
+            time_range,
+            reference_ts_millis,
+            timeout: None,
+            result_tx: None,
+        }
+    }
 
-        let end_ok = match end_bound {
-            Bound::Unbounded => true,
-            Bound::Included(end) => ts.0 <= end.0,
-            Bound::Excluded(end) => ts.0 < end.0,
-        };
+    /// Internal constructor used by the query execution machinery (has the channel)
+    pub(crate) fn with_channel(
+        source_id: SrcId,
+        dest_id: DstId,
+        edge_name: EdgeName,
+        time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
+        reference_ts_millis: Option<TimestampMilli>,
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
+    ) -> Self {
+        Self {
+            source_id,
+            dest_id,
+            edge_name,
+            time_range,
+            reference_ts_millis,
+            timeout: Some(timeout),
+            result_tx: Some(result_tx),
+        }
+    }
 
-        start_ok && end_ok
+    /// Send the result back to the client (consumes self)
+    pub(crate) fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
+        // Ignore error if receiver was dropped (client timeout/cancellation)
+        if let Some(tx) = self.result_tx {
+            let _ = tx.send(result);
+        }
+    }
+
+    /// Check if a timestamp falls within this range
+    pub fn contains(&self, ts: TimestampMilli) -> bool {
+        timestamp_in_range(ts, &self.time_range)
     }
 }
 
@@ -656,7 +802,32 @@ impl Runnable for NodeFragmentsByIdTimeRange {
         );
 
         reader
-            .send_query(Query::FragmentsByIdTimeRange(query))
+            .send_query(Query::NodeFragmentsByIdTimeRange(query))
+            .await?;
+        result_rx.await?
+    }
+}
+
+/// Implement Runnable for EdgeFragmentsByIdTimeRange
+#[async_trait::async_trait]
+impl Runnable for EdgeFragmentsByIdTimeRange {
+    type Output = Vec<(TimestampMilli, FragmentContent)>;
+
+    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        let query = EdgeFragmentsByIdTimeRange::with_channel(
+            self.source_id,
+            self.dest_id,
+            self.edge_name,
+            self.time_range,
+            self.reference_ts_millis,
+            timeout,
+            result_tx,
+        );
+
+        reader
+            .send_query(Query::EdgeFragmentsByIdTimeRange(query))
             .await?;
         result_rx.await?
     }
@@ -830,77 +1001,137 @@ impl QueryExecutor for NodeFragmentsByIdTimeRange {
             Bound::Included(start_ts) => {
                 schema::NodeFragments::key_to_bytes(&schema::NodeFragmentCfKey(id, *start_ts))
             }
-            Bound::Excluded(start_ts) => schema::NodeFragments::key_to_bytes(&schema::NodeFragmentCfKey(
-                id,
-                TimestampMilli(start_ts.0 + 1),
-            )),
+            Bound::Excluded(start_ts) => schema::NodeFragments::key_to_bytes(
+                &schema::NodeFragmentCfKey(id, TimestampMilli(start_ts.0 + 1)),
+            ),
         };
 
-        macro_rules! process_items {
-            ($iter:expr) => {{
-                for item in $iter {
-                    let (key_bytes, value_bytes) = item?;
-                    let key: schema::NodeFragmentCfKey = schema::NodeFragments::key_from_bytes(&key_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+        iterate_cf!(storage, schema::NodeFragments, start_key, |item| {
+            let (key_bytes, value_bytes) = item?;
+            let key: schema::NodeFragmentCfKey = schema::NodeFragments::key_from_bytes(&key_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                    if key.0 != id {
+            if key.0 != id {
+                break;
+            }
+
+            let timestamp = key.1;
+
+            match &self.time_range.1 {
+                Bound::Unbounded => { /* continue scanning */ }
+                Bound::Included(end_ts) => {
+                    if timestamp.0 > end_ts.0 {
                         break;
                     }
-
-                    let timestamp = key.1;
-
-                    match &self.time_range.1 {
-                        Bound::Unbounded => { /* continue scanning */ }
-                        Bound::Included(end_ts) => {
-                            if timestamp.0 > end_ts.0 {
-                                break;
-                            }
-                        }
-                        Bound::Excluded(end_ts) => {
-                            if timestamp.0 >= end_ts.0 {
-                                break;
-                            }
-                        }
-                    }
-
-                    let value: schema::NodeFragmentCfValue =
-                        schema::NodeFragments::value_from_bytes(&value_bytes)
-                            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-                    // Always check temporal validity - skip invalid fragments
-                    if !schema::is_valid_at_time(&value.0, ref_time) {
-                        continue;
-                    }
-
-                    fragments.push((timestamp, value.1));
                 }
-            }};
-        }
+                Bound::Excluded(end_ts) => {
+                    if timestamp.0 >= end_ts.0 {
+                        break;
+                    }
+                }
+            }
 
-        if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::NodeFragments::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::NodeFragments::CF_NAME)
-            })?;
+            let value: schema::NodeFragmentCfValue =
+                schema::NodeFragments::value_from_bytes(&value_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-            let iter = db.iterator_cf(
-                cf,
-                rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
-            );
-            process_items!(iter);
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let cf = txn_db
-                .cf_handle(schema::NodeFragments::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Column family '{}' not found", schema::NodeFragments::CF_NAME)
-                })?;
+            // Always check temporal validity - skip invalid fragments
+            if !schema::is_valid_at_time(&value.0, ref_time) {
+                continue;
+            }
 
-            let iter = txn_db.iterator_cf(
-                cf,
-                rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
-            );
-            process_items!(iter);
-        }
+            fragments.push((timestamp, value.1));
+        });
+
+        Ok(fragments)
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+            .expect("Query must have timeout set when executing")
+    }
+}
+
+/// Implement QueryExecutor for EdgeFragmentsByIdTimeRange
+#[async_trait::async_trait]
+impl QueryExecutor for EdgeFragmentsByIdTimeRange {
+    type Output = Vec<(TimestampMilli, FragmentContent)>;
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        use std::ops::Bound;
+
+        // Default None to current time for temporal validity checks
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        let source_id = self.source_id;
+        let dest_id = self.dest_id;
+        let edge_name = &self.edge_name;
+        let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
+
+        // Construct optimal starting key based on start bound
+        // EdgeFragmentCfKey: (SrcId, DstId, EdgeName, TimestampMilli)
+        let start_key = match &self.time_range.0 {
+            Bound::Unbounded => {
+                let name_bytes = edge_name.as_bytes();
+                let mut key = Vec::with_capacity(32 + name_bytes.len() + 8);
+                key.extend_from_slice(&source_id.into_bytes());
+                key.extend_from_slice(&dest_id.into_bytes());
+                key.extend_from_slice(name_bytes);
+                key.extend_from_slice(&0u64.to_be_bytes());
+                key
+            }
+            Bound::Included(start_ts) => schema::EdgeFragments::key_to_bytes(
+                &schema::EdgeFragmentCfKey(source_id, dest_id, edge_name.clone(), *start_ts),
+            ),
+            Bound::Excluded(start_ts) => {
+                schema::EdgeFragments::key_to_bytes(&schema::EdgeFragmentCfKey(
+                    source_id,
+                    dest_id,
+                    edge_name.clone(),
+                    TimestampMilli(start_ts.0 + 1),
+                ))
+            }
+        };
+
+        iterate_cf!(storage, schema::EdgeFragments, start_key, |item| {
+            let (key_bytes, value_bytes) = item?;
+            let key: schema::EdgeFragmentCfKey = schema::EdgeFragments::key_from_bytes(&key_bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
+
+            // Check if we're still in the same edge (source_id, dest_id, edge_name)
+            if key.0 != source_id || key.1 != dest_id || key.2 != *edge_name {
+                break;
+            }
+
+            let timestamp = key.3;
+
+            match &self.time_range.1 {
+                Bound::Unbounded => { /* continue scanning */ }
+                Bound::Included(end_ts) => {
+                    if timestamp.0 > end_ts.0 {
+                        break;
+                    }
+                }
+                Bound::Excluded(end_ts) => {
+                    if timestamp.0 >= end_ts.0 {
+                        break;
+                    }
+                }
+            }
+
+            let value: schema::EdgeFragmentCfValue =
+                schema::EdgeFragments::value_from_bytes(&value_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+            // Always check temporal validity - skip invalid fragments
+            if !schema::is_valid_at_time(&value.0, ref_time) {
+                continue;
+            }
+
+            fragments.push((timestamp, value.1));
+        });
 
         Ok(fragments)
     }
@@ -1157,10 +1388,13 @@ impl QueryExecutor for IncomingEdges {
                 let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name.clone());
                 let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
 
-                let weight = if let Some(forward_value_bytes) = db.get_cf(forward_cf, forward_key_bytes)? {
+                let weight = if let Some(forward_value_bytes) =
+                    db.get_cf(forward_cf, forward_key_bytes)?
+                {
                     let forward_value: schema::ForwardEdgeCfValue =
-                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes)
-                            .map_err(|e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e))?;
+                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes).map_err(
+                            |e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e),
+                        )?;
                     forward_value.1 // Extract weight from field 1
                 } else {
                     None
@@ -1223,10 +1457,13 @@ impl QueryExecutor for IncomingEdges {
                 let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name.clone());
                 let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
 
-                let weight = if let Some(forward_value_bytes) = txn_db.get_cf(forward_cf, forward_key_bytes)? {
+                let weight = if let Some(forward_value_bytes) =
+                    txn_db.get_cf(forward_cf, forward_key_bytes)?
+                {
                     let forward_value: schema::ForwardEdgeCfValue =
-                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes)
-                            .map_err(|e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e))?;
+                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes).map_err(
+                            |e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e),
+                        )?;
                     forward_value.1 // Extract weight from field 1
                 } else {
                     None
@@ -1700,7 +1937,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_summary_by_src_dst_name_query() {
-        use crate::{AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli, WriterConfig};
+        use crate::{
+            AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli, WriterConfig,
+        };
         use tempfile::TempDir;
 
         // Create temporary database
@@ -1713,7 +1952,8 @@ mod tests {
 
         // Create writer and spawn graph consumer for mutations
         let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle = crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let mutation_consumer_handle =
+            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes
         let source_id = Id::new();
@@ -1788,21 +2028,655 @@ mod tests {
         let consumer_handle = spawn_consumer(consumer);
 
         // Query the edge using EdgeSummaryBySrcDstName with Runnable pattern
-        let (returned_summary, returned_weight) = EdgeSummaryBySrcDstName::new(
-            source_id,
-            dest_id,
-            edge_name.to_string(),
-            None,
-        )
-        .run(&reader, Duration::from_secs(5))
-        .await
-        .unwrap();
+        let (returned_summary, returned_weight) =
+            EdgeSummaryBySrcDstName::new(source_id, dest_id, edge_name.to_string(), None)
+                .run(&reader, Duration::from_secs(5))
+                .await
+                .unwrap();
 
         // Verify edge summary content matches
         assert_eq!(returned_summary.0, edge_summary.0);
 
         // Verify weight matches
         assert_eq!(returned_weight, Some(edge_weight));
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_edge_fragments_by_id_time_range_basic() {
+        use crate::{
+            AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli,
+            WriterConfig,
+        };
+        use std::ops::Bound;
+        use tempfile::TempDir;
+
+        // Create temporary database
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        // Create writer and spawn graph consumer for mutations
+        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
+        let mutation_consumer_handle =
+            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+
+        // Create source and destination nodes
+        let source_id = Id::new();
+        let dest_id = Id::new();
+        let edge_name = "test_edge";
+
+        crate::AddNode {
+            id: source_id,
+            ts_millis: TimestampMilli::now(),
+            name: "source_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        crate::AddNode {
+            id: dest_id,
+            ts_millis: TimestampMilli::now(),
+            name: "dest_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Create an edge
+        let edge_summary = EdgeSummary::from_text("Test edge for fragments");
+        crate::AddEdge {
+            source_node_id: source_id,
+            target_node_id: dest_id,
+            ts_millis: TimestampMilli::now(),
+            name: edge_name.to_string(),
+            summary: edge_summary.clone(),
+            weight: Some(1.0),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Add edge fragments at different timestamps
+        let base_time = TimestampMilli::now();
+        let fragment1_time = TimestampMilli(base_time.0 + 1000);
+        let fragment2_time = TimestampMilli(base_time.0 + 2000);
+        let fragment3_time = TimestampMilli(base_time.0 + 3000);
+
+        crate::AddEdgeFragment {
+            src_id: source_id,
+            dst_id: dest_id,
+            edge_name: edge_name.to_string(),
+            ts_millis: fragment1_time,
+            content: DataUrl::from_markdown("Fragment 1 content"),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        crate::AddEdgeFragment {
+            src_id: source_id,
+            dst_id: dest_id,
+            edge_name: edge_name.to_string(),
+            ts_millis: fragment2_time,
+            content: DataUrl::from_markdown("Fragment 2 content"),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        crate::AddEdgeFragment {
+            src_id: source_id,
+            dst_id: dest_id,
+            edge_name: edge_name.to_string(),
+            ts_millis: fragment3_time,
+            content: DataUrl::from_markdown("Fragment 3 content"),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Give time for mutations to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Close writer to ensure all mutations are flushed
+        drop(writer);
+
+        // Wait for mutation consumer to finish
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        // Create reader and query consumer
+        let reader_config = crate::ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = {
+            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
+            let reader = crate::Reader::new(sender);
+            (reader, receiver)
+        };
+
+        let consumer = Consumer::new(receiver, reader_config, graph);
+
+        // Spawn query consumer
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query all fragments (unbounded range)
+        let fragments = EdgeFragmentsByIdTimeRange::new(
+            source_id,
+            dest_id,
+            edge_name.to_string(),
+            (Bound::Unbounded, Bound::Unbounded),
+            None,
+        )
+        .run(&reader, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+        // Verify we got all 3 fragments
+        assert_eq!(fragments.len(), 3);
+        assert_eq!(fragments[0].0, fragment1_time);
+        assert_eq!(fragments[1].0, fragment2_time);
+        assert_eq!(fragments[2].0, fragment3_time);
+
+        // Verify content
+        assert!(fragments[0]
+            .1
+            .decode_string()
+            .unwrap()
+            .contains("Fragment 1 content"));
+        assert!(fragments[1]
+            .1
+            .decode_string()
+            .unwrap()
+            .contains("Fragment 2 content"));
+        assert!(fragments[2]
+            .1
+            .decode_string()
+            .unwrap()
+            .contains("Fragment 3 content"));
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_edge_fragments_by_id_time_range_with_bounds() {
+        use crate::{
+            AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli,
+            WriterConfig,
+        };
+        use std::ops::Bound;
+        use tempfile::TempDir;
+
+        // Create temporary database
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        // Create writer and spawn graph consumer for mutations
+        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
+        let mutation_consumer_handle =
+            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+
+        // Create source and destination nodes
+        let source_id = Id::new();
+        let dest_id = Id::new();
+        let edge_name = "bounded_edge";
+
+        crate::AddNode {
+            id: source_id,
+            ts_millis: TimestampMilli::now(),
+            name: "source_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        crate::AddNode {
+            id: dest_id,
+            ts_millis: TimestampMilli::now(),
+            name: "dest_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Create an edge
+        crate::AddEdge {
+            source_node_id: source_id,
+            target_node_id: dest_id,
+            ts_millis: TimestampMilli::now(),
+            name: edge_name.to_string(),
+            summary: EdgeSummary::from_text("Bounded test edge"),
+            weight: Some(1.0),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Add edge fragments at specific timestamps
+        let t1 = TimestampMilli(1000);
+        let t2 = TimestampMilli(2000);
+        let t3 = TimestampMilli(3000);
+        let t4 = TimestampMilli(4000);
+        let t5 = TimestampMilli(5000);
+
+        for (ts, content) in [
+            (t1, "Fragment at t1"),
+            (t2, "Fragment at t2"),
+            (t3, "Fragment at t3"),
+            (t4, "Fragment at t4"),
+            (t5, "Fragment at t5"),
+        ] {
+            crate::AddEdgeFragment {
+                src_id: source_id,
+                dst_id: dest_id,
+                edge_name: edge_name.to_string(),
+                ts_millis: ts,
+                content: DataUrl::from_markdown(content),
+                temporal_range: None,
+            }
+            .run(&writer)
+            .await
+            .unwrap();
+        }
+
+        // Give time for mutations to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Close writer
+        drop(writer);
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        let reader_config = crate::ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = {
+            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
+            let reader = crate::Reader::new(sender);
+            (reader, receiver)
+        };
+
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Test 1: Query with inclusive bounds [t2, t4]
+        let fragments = EdgeFragmentsByIdTimeRange::new(
+            source_id,
+            dest_id,
+            edge_name.to_string(),
+            (Bound::Included(t2), Bound::Included(t4)),
+            None,
+        )
+        .run(&reader, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+        assert_eq!(fragments.len(), 3); // t2, t3, t4
+        assert_eq!(fragments[0].0, t2);
+        assert_eq!(fragments[1].0, t3);
+        assert_eq!(fragments[2].0, t4);
+
+        // Test 2: Query with exclusive bounds (t2, t4)
+        let fragments = EdgeFragmentsByIdTimeRange::new(
+            source_id,
+            dest_id,
+            edge_name.to_string(),
+            (Bound::Excluded(t2), Bound::Excluded(t4)),
+            None,
+        )
+        .run(&reader, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+        assert_eq!(fragments.len(), 1); // Only t3
+        assert_eq!(fragments[0].0, t3);
+
+        // Test 3: Query with unbounded start
+        let fragments = EdgeFragmentsByIdTimeRange::new(
+            source_id,
+            dest_id,
+            edge_name.to_string(),
+            (Bound::Unbounded, Bound::Included(t2)),
+            None,
+        )
+        .run(&reader, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+        assert_eq!(fragments.len(), 2); // t1, t2
+        assert_eq!(fragments[0].0, t1);
+        assert_eq!(fragments[1].0, t2);
+
+        // Test 4: Query with unbounded end
+        let fragments = EdgeFragmentsByIdTimeRange::new(
+            source_id,
+            dest_id,
+            edge_name.to_string(),
+            (Bound::Included(t4), Bound::Unbounded),
+            None,
+        )
+        .run(&reader, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+        assert_eq!(fragments.len(), 2); // t4, t5
+        assert_eq!(fragments[0].0, t4);
+        assert_eq!(fragments[1].0, t5);
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_edge_fragments_by_id_time_range_with_temporal_validity() {
+        use crate::{
+            schema::ValidTemporalRange, AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id,
+            MutationRunnable, TimestampMilli, WriterConfig,
+        };
+        use std::ops::Bound;
+        use tempfile::TempDir;
+
+        // Create temporary database
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
+        let mutation_consumer_handle =
+            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+
+        // Create source and destination nodes
+        let source_id = Id::new();
+        let dest_id = Id::new();
+        let edge_name = "temporal_edge";
+
+        crate::AddNode {
+            id: source_id,
+            ts_millis: TimestampMilli::now(),
+            name: "source_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        crate::AddNode {
+            id: dest_id,
+            ts_millis: TimestampMilli::now(),
+            name: "dest_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Create an edge
+        crate::AddEdge {
+            source_node_id: source_id,
+            target_node_id: dest_id,
+            ts_millis: TimestampMilli::now(),
+            name: edge_name.to_string(),
+            summary: EdgeSummary::from_text("Temporal validity test edge"),
+            weight: Some(1.0),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Add edge fragments with different temporal ranges
+        // Fragment 1: Valid from 1000 to 3000
+        crate::AddEdgeFragment {
+            src_id: source_id,
+            dst_id: dest_id,
+            edge_name: edge_name.to_string(),
+            ts_millis: TimestampMilli(1000),
+            content: DataUrl::from_markdown("Valid from 1000 to 3000"),
+            temporal_range: ValidTemporalRange::valid_between(
+                TimestampMilli(1000),
+                TimestampMilli(3000),
+            ),
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Fragment 2: Valid from 2000 to 5000
+        crate::AddEdgeFragment {
+            src_id: source_id,
+            dst_id: dest_id,
+            edge_name: edge_name.to_string(),
+            ts_millis: TimestampMilli(2000),
+            content: DataUrl::from_markdown("Valid from 2000 to 5000"),
+            temporal_range: ValidTemporalRange::valid_between(
+                TimestampMilli(2000),
+                TimestampMilli(5000),
+            ),
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Fragment 3: No temporal range (always valid)
+        crate::AddEdgeFragment {
+            src_id: source_id,
+            dst_id: dest_id,
+            edge_name: edge_name.to_string(),
+            ts_millis: TimestampMilli(3000),
+            content: DataUrl::from_markdown("Always valid"),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        let reader_config = crate::ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = {
+            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
+            let reader = crate::Reader::new(sender);
+            (reader, receiver)
+        };
+
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query at reference time 2500 - should see fragments 1, 2, and 3
+        let fragments = EdgeFragmentsByIdTimeRange::new(
+            source_id,
+            dest_id,
+            edge_name.to_string(),
+            (Bound::Unbounded, Bound::Unbounded),
+            Some(TimestampMilli(2500)),
+        )
+        .run(&reader, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+        assert_eq!(fragments.len(), 3);
+
+        // Query at reference time 500 - should see only fragment 3 (always valid)
+        let fragments = EdgeFragmentsByIdTimeRange::new(
+            source_id,
+            dest_id,
+            edge_name.to_string(),
+            (Bound::Unbounded, Bound::Unbounded),
+            Some(TimestampMilli(500)),
+        )
+        .run(&reader, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].0, TimestampMilli(3000));
+        assert!(fragments[0]
+            .1
+            .decode_string()
+            .unwrap()
+            .contains("Always valid"));
+
+        // Query at reference time 3500 - should see fragments 2 and 3
+        let fragments = EdgeFragmentsByIdTimeRange::new(
+            source_id,
+            dest_id,
+            edge_name.to_string(),
+            (Bound::Unbounded, Bound::Unbounded),
+            Some(TimestampMilli(3500)),
+        )
+        .run(&reader, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+        assert_eq!(fragments.len(), 2);
+        assert_eq!(fragments[0].0, TimestampMilli(2000));
+        assert_eq!(fragments[1].0, TimestampMilli(3000));
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_edge_fragments_empty_result() {
+        use crate::{
+            AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli, WriterConfig,
+        };
+        use std::ops::Bound;
+        use tempfile::TempDir;
+
+        // Create temporary database
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
+        let mutation_consumer_handle =
+            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+
+        // Create source and destination nodes and edge but NO fragments
+        let source_id = Id::new();
+        let dest_id = Id::new();
+        let edge_name = "empty_edge";
+
+        crate::AddNode {
+            id: source_id,
+            ts_millis: TimestampMilli::now(),
+            name: "source_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        crate::AddNode {
+            id: dest_id,
+            ts_millis: TimestampMilli::now(),
+            name: "dest_node".to_string(),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        crate::AddEdge {
+            source_node_id: source_id,
+            target_node_id: dest_id,
+            ts_millis: TimestampMilli::now(),
+            name: edge_name.to_string(),
+            summary: EdgeSummary::from_text("Edge with no fragments"),
+            weight: Some(1.0),
+            temporal_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        let reader_config = crate::ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = {
+            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
+            let reader = crate::Reader::new(sender);
+            (reader, receiver)
+        };
+
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query should return empty vector
+        let fragments = EdgeFragmentsByIdTimeRange::new(
+            source_id,
+            dest_id,
+            edge_name.to_string(),
+            (Bound::Unbounded, Bound::Unbounded),
+            None,
+        )
+        .run(&reader, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+        assert_eq!(fragments.len(), 0);
 
         // Cleanup
         drop(reader);

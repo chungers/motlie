@@ -21,8 +21,8 @@ pub use reader::*;
 mod query;
 // Re-export query types and consumer functions
 pub use query::{
-    EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById, NodeFragmentsByIdTimeRange,
-    NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
+    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById,
+    NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
     Processor as QueryProcessor, Consumer as QueryConsumer,
 };
 // Note: spawn_query_consumer is exported from graph module via `pub use graph::*`
