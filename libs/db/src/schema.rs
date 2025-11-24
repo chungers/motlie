@@ -1,7 +1,6 @@
-use crate::graph::ColumnFamilyRecord;
+use crate::graph::{ColumnFamilyRecord, ValidRangePatchable};
 use crate::DataUrl;
 use crate::TimestampMilli;
-use crate::ValidRangePatchable;
 use crate::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
 use crate::Id;
 use serde::{Deserialize, Serialize};

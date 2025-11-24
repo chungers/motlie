@@ -28,7 +28,12 @@ pub use query::{
 // Note: spawn_query_consumer is exported from graph module via `pub use graph::*`
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId, ValidTemporalRange};
 mod graph;
-pub use graph::*;
+pub use graph::{
+    create_graph_consumer, create_query_consumer, create_query_consumer_readwrite,
+    spawn_graph_consumer, spawn_query_consumer, spawn_query_consumer_pool,
+    spawn_query_consumer_readwrite, spawn_query_consumer_with_graph,
+    Graph, Storage,
+};
 mod fulltext;
 pub use fulltext::*;
 mod schema;

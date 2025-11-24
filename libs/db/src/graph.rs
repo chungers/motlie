@@ -11,6 +11,8 @@ use tokio::task::JoinHandle;
 
 use rocksdb::{Options, TransactionDB, TransactionDBOptions, DB};
 
+use crate::query::QueryProcessor;
+
 use crate::schema;
 use crate::{
     mutation::{Consumer, Processor},
@@ -685,6 +687,97 @@ pub fn spawn_query_consumer_with_graph(
 ) -> JoinHandle<Result<()>> {
     let consumer = crate::query::Consumer::new(receiver, config, (*graph).clone());
     crate::query::spawn_consumer(consumer)
+}
+
+/// Spawn N query consumer workers that share the same Storage instance.
+///
+/// This creates a worker pool where multiple threads process queries concurrently
+/// from the same channel, leveraging RocksDB's thread-safe concurrent read capabilities.
+///
+/// # Arguments
+/// * `receiver` - Shared flume receiver (MPMC channel supports multiple receivers)
+/// * `config` - Reader configuration
+/// * `db_path` - Path to the database
+/// * `num_workers` - Number of worker threads to spawn
+///
+/// # Returns
+/// Vector of JoinHandles for all worker threads
+///
+/// # Thread Safety
+/// RocksDB is fully thread-safe for concurrent reads. Each worker opens the same
+/// database in read-only mode, and RocksDB handles concurrent access internally
+/// via lock-free data structures and immutable SST tables.
+///
+/// # Performance
+/// This design provides:
+/// - Parallel query processing across N CPU cores
+/// - Shared block cache for better memory efficiency
+/// - Linear throughput scaling up to N workers
+///
+/// # Example
+/// ```no_run
+/// use motlie_db::{ReaderConfig, spawn_query_consumer_pool};
+/// use std::path::Path;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let config = ReaderConfig { channel_buffer_size: 100 };
+/// let (reader, receiver) = motlie_db::create_query_reader(config.clone());
+///
+/// // Spawn worker pool (e.g., one per CPU core)
+/// let num_workers = num_cpus::get();
+/// let handles = spawn_query_consumer_pool(
+///     receiver,
+///     config,
+///     Path::new("/path/to/db"),
+///     num_workers,
+/// );
+///
+/// // All workers share the same Storage via Arc, processing queries concurrently
+/// # Ok(())
+/// # }
+/// ```
+pub fn spawn_query_consumer_pool(
+    receiver: flume::Receiver<crate::query::Query>,
+    config: crate::ReaderConfig,
+    db_path: &Path,
+    num_workers: usize,
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(num_workers);
+
+    for worker_id in 0..num_workers {
+        let receiver = receiver.clone();
+        let config = config.clone();
+        let db_path = db_path.to_path_buf();
+
+        let handle = tokio::spawn(async move {
+            log::info!("Query worker {} starting", worker_id);
+
+            // Each worker opens the same DB in readonly mode
+            // RocksDB handles concurrent access safely
+            let mut storage = Storage::readonly(&db_path);
+            if let Err(e) = storage.ready() {
+                log::error!("Query worker {} failed to ready storage: {}", worker_id, e);
+                return;
+            }
+
+            let storage = Arc::new(storage);
+            let graph = Graph::new(storage);
+
+            // Process queries from shared channel
+            // Multiple workers can receive from the same flume channel (MPMC)
+            while let Ok(query) = receiver.recv_async().await {
+                log::debug!("Worker {} processing {}", worker_id, query);
+                query.process_and_send(&graph).await;
+            }
+
+            log::info!("Query worker {} shutting down", worker_id);
+        });
+
+        handles.push(handle);
+    }
+
+    log::info!("Spawned {} query consumer workers", num_workers);
+    handles
 }
 
 #[cfg(test)]
