@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use motlie_db::{create_mutation_writer, create_query_reader, Graph, ReaderConfig, Storage, WriterConfig, spawn_graph_consumer, spawn_query_consumer_pool_shared};
+use motlie_db::{create_mutation_writer, create_query_reader, Graph, ReaderConfig, Storage, WriterConfig, spawn_graph_consumer_with_graph, spawn_query_consumer_pool_shared};
 use motlie_mcp::MotlieMcpServer;
 use pmcp::server::streamable_http_server::StreamableHttpServer;
 use std::net::SocketAddr;
@@ -97,19 +97,24 @@ async fn main() -> Result<()> {
         channel_buffer_size: args.query_buffer_size,
     };
 
-    // Create writer with background consumer for mutations
-    let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
-    let _mutation_handle = spawn_graph_consumer(mutation_receiver, writer_config, db_path);
-
-    // Create shared readwrite Storage for query workers (99%+ consistency)
-    log::info!("Opening readwrite Storage for query worker pool");
+    // Create ONE shared readwrite Storage for both mutations and queries
+    // RocksDB TransactionDB acquires exclusive lock - cannot have multiple instances
+    log::info!("Opening shared readwrite Storage for mutations and queries");
     let mut storage = Storage::readwrite(db_path);
     storage.ready()?;
     let storage = Arc::new(storage);
     let graph = Arc::new(Graph::new(storage));
 
+    // Create writer with background consumer using shared graph
+    let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+    let _mutation_handle = spawn_graph_consumer_with_graph(
+        mutation_receiver,
+        writer_config,
+        graph.clone(),
+    );
+
     // Create reader with background consumer pool for queries
-    // Uses shared TransactionDB via Arc<Graph> for high consistency
+    // Uses same shared TransactionDB via Arc<Graph> for high consistency
     let (reader, query_receiver) = create_query_reader(reader_config.clone());
     let _query_handles = spawn_query_consumer_pool_shared(
         query_receiver,
@@ -139,7 +144,7 @@ async fn main() -> Result<()> {
         log::warn!("Authentication: DISABLED (not recommended for production)");
     }
 
-    log::info!("Available tools: 14 (7 mutations + 7 queries)");
+    log::info!("Available tools: 15 (7 mutations + 8 queries)");
     log::info!("Transport: {}", args.transport);
 
     // Start the server with the selected transport
