@@ -143,6 +143,18 @@ mod tests {
     }
 
     #[test]
+    fn test_http_config_new() {
+        let addr: SocketAddr = "192.168.1.1:3000".parse().unwrap();
+        let config = HttpConfig::new(addr);
+
+        // Should use provided address but defaults for other fields
+        assert_eq!(config.addr, addr);
+        assert_eq!(config.sse_keep_alive, Some(Duration::from_secs(30)));
+        assert_eq!(config.mcp_path, "/mcp");
+        assert!(config.stateful_mode);
+    }
+
+    #[test]
     fn test_http_config_builder() {
         let config = HttpConfig::new("0.0.0.0:9000".parse().unwrap())
             .with_sse_keep_alive(Some(Duration::from_secs(60)))
@@ -153,5 +165,58 @@ mod tests {
         assert_eq!(config.sse_keep_alive, Some(Duration::from_secs(60)));
         assert_eq!(config.mcp_path, "/api/mcp");
         assert!(!config.stateful_mode);
+    }
+
+    #[test]
+    fn test_http_config_disable_sse_keep_alive() {
+        let config = HttpConfig::default().with_sse_keep_alive(None);
+        assert!(config.sse_keep_alive.is_none());
+    }
+
+    #[test]
+    fn test_http_config_custom_mcp_path() {
+        let config = HttpConfig::default().with_mcp_path("/v1/mcp");
+        assert_eq!(config.mcp_path, "/v1/mcp");
+
+        // Test with String
+        let config2 = HttpConfig::default().with_mcp_path(String::from("/v2/mcp"));
+        assert_eq!(config2.mcp_path, "/v2/mcp");
+    }
+
+    #[test]
+    fn test_http_config_clone() {
+        let config = HttpConfig::new("127.0.0.1:9090".parse().unwrap())
+            .with_mcp_path("/custom")
+            .with_stateful_mode(false);
+
+        let cloned = config.clone();
+        assert_eq!(config.addr, cloned.addr);
+        assert_eq!(config.mcp_path, cloned.mcp_path);
+        assert_eq!(config.stateful_mode, cloned.stateful_mode);
+    }
+
+    #[test]
+    fn test_http_config_debug() {
+        let config = HttpConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("HttpConfig"));
+        assert!(debug_str.contains("127.0.0.1:8080"));
+        assert!(debug_str.contains("/mcp"));
+    }
+
+    #[test]
+    fn test_http_config_various_addresses() {
+        // IPv4 localhost
+        let config = HttpConfig::new("127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.addr.port(), 8080);
+
+        // IPv4 all interfaces
+        let config = HttpConfig::new("0.0.0.0:3000".parse().unwrap());
+        assert_eq!(config.addr.port(), 3000);
+
+        // IPv6 localhost
+        let config = HttpConfig::new("[::1]:8080".parse().unwrap());
+        assert_eq!(config.addr.port(), 8080);
+        assert!(config.addr.is_ipv6());
     }
 }
