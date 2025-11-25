@@ -30,8 +30,8 @@ pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSu
 mod graph;
 pub use graph::{
     create_graph_consumer, create_query_consumer, create_query_consumer_readwrite,
-    spawn_graph_consumer, spawn_graph_consumer_with_graph, spawn_query_consumer,
-    spawn_query_consumer_pool_shared, spawn_query_consumer_pool_readonly,
+    spawn_graph_consumer, spawn_graph_consumer_with_graph, spawn_graph_consumer_with_next,
+    spawn_query_consumer, spawn_query_consumer_pool_readonly, spawn_query_consumer_pool_shared,
     spawn_query_consumer_readwrite, spawn_query_consumer_with_graph, Graph, Storage,
 };
 mod fulltext;

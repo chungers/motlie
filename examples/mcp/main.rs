@@ -1,20 +1,18 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use motlie_db::{create_mutation_writer, create_query_reader, Graph, ReaderConfig, Storage, WriterConfig, spawn_graph_consumer_with_graph, spawn_query_consumer_pool_shared};
-use motlie_mcp::{build_server_lazy, LazyDatabase};
-use pmcp::server::streamable_http_server::StreamableHttpServer;
+use motlie_mcp::{LazyDatabase, MotlieMcpServer, ServiceExt, stdio};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 /// Transport protocol for MCP server
 #[derive(Debug, Clone, ValueEnum)]
 enum Transport {
     /// Standard input/output (for local process communication)
     Stdio,
-    /// HTTP with Server-Sent Events (for remote access)
+    /// HTTP with Server-Sent Events (for remote access) - NOT YET IMPLEMENTED
     Http,
 }
 
@@ -29,24 +27,16 @@ impl std::fmt::Display for Transport {
 
 #[derive(Parser, Debug)]
 #[command(name = "motlie-mcp-server")]
-#[command(about = "Motlie graph database MCP server using pmcp SDK", long_about = None)]
+#[command(about = "Motlie graph database MCP server using rmcp SDK", long_about = None)]
 struct Args {
     /// Path to the RocksDB database directory
     #[arg(short, long)]
     db_path: String,
 
-    /// Optional authentication token for secure access (Bearer token)
-    ///
-    /// When provided, all MCP tool requests must include authentication via
-    /// pmcp's built-in auth context mechanism. The token is validated at the
-    /// protocol level by pmcp.
-    #[arg(short, long)]
-    auth_token: Option<String>,
-
     /// Transport protocol (stdio or http)
     ///
     /// - stdio: Standard input/output for local process communication (default)
-    /// - http: HTTP with Server-Sent Events for remote access
+    /// - http: HTTP with Server-Sent Events for remote access (not yet implemented)
     #[arg(short, long, value_enum, default_value = "stdio")]
     transport: Transport,
 
@@ -78,12 +68,12 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging with tracing (pmcp uses tracing, not log)
+    // Initialize logging with tracing
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info,pmcp=debug".into()))
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .unwrap_or_else(|_| "info,rmcp=debug".into()))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr).with_ansi(false))
         .init();
 
     // Parse command-line arguments FIRST (this is fast)
@@ -98,7 +88,7 @@ async fn main() -> Result<()> {
     // Create lazy database initializer
     // The actual database initialization will happen on first tool use
     let lazy_db = Arc::new(LazyDatabase::new(Box::new(move || {
-        log::info!("Initializing database at: {:?}", db_path);
+        tracing::info!("Initializing database at: {:?}", db_path);
 
         let writer_config = WriterConfig {
             channel_buffer_size: mutation_buffer_size,
@@ -108,7 +98,7 @@ async fn main() -> Result<()> {
         };
 
         // Create ONE shared readwrite Storage for both mutations and queries
-        log::info!("Opening shared readwrite Storage for mutations and queries");
+        tracing::info!("Opening shared readwrite Storage for mutations and queries");
         let mut storage = Storage::readwrite(&db_path);
         storage.ready()?;
         let storage = Arc::new(storage);
@@ -130,7 +120,7 @@ async fn main() -> Result<()> {
             query_workers,
         );
 
-        log::info!(
+        tracing::info!(
             "Started {} query worker threads (shared TransactionDB, 99%+ consistency)",
             query_workers
         );
@@ -138,61 +128,37 @@ async fn main() -> Result<()> {
         Ok((writer, reader))
     })));
 
-    // Build the pmcp server with lazy database - this is FAST
+    // Build the MCP server with lazy database - this is FAST
     // The server can start listening immediately
     let query_timeout = Duration::from_secs(5);
-    let server = build_server_lazy(lazy_db, query_timeout, args.auth_token.clone())?;
+    let server = MotlieMcpServer::new(lazy_db, query_timeout);
 
-    log::info!("Starting Motlie MCP server using pmcp SDK...");
-    log::info!("Server: motlie-mcp-server");
-    log::info!("Version: {}", env!("CARGO_PKG_VERSION"));
-    log::info!("Database will be initialized on first tool use (lazy initialization)");
-
-    if args.auth_token.is_some() {
-        log::info!("Authentication: ENABLED (Bearer token required)");
-    } else {
-        log::warn!("Authentication: DISABLED (not recommended for production)");
-    }
-
-    log::info!("Available tools: 15 (7 mutations + 8 queries)");
-    log::info!("Transport: {}", args.transport);
+    tracing::info!("Starting Motlie MCP server using rmcp SDK...");
+    tracing::info!("Server: motlie-mcp-server");
+    tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Database will be initialized on first tool use (lazy initialization)");
+    tracing::info!("Available tools: 15 (7 mutations + 8 queries)");
+    tracing::info!("Transport: {}", args.transport);
 
     // Start the server with the selected transport
     match args.transport {
         Transport::Stdio => {
-            log::info!("Listening on stdio (standard input/output)");
-            log::info!("Ready for MCP client connections via stdin/stdout");
+            tracing::info!("Listening on stdio (standard input/output)");
+            tracing::info!("Ready for MCP client connections via stdin/stdout");
 
             // Start the server with stdio transport IMMEDIATELY
             // No database initialization blocking this!
-            server.run_stdio().await?;
+            let service = server.serve(stdio()).await.inspect_err(|e| {
+                tracing::error!("serving error: {:?}", e);
+            })?;
+
+            service.waiting().await?;
         }
         Transport::Http => {
             let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
-            log::info!("Starting HTTP server on {}", addr);
-            log::info!("MCP endpoint: http://{}", addr);
-            log::info!("Ready for remote MCP client connections");
-
-            // Wrap server in Arc<Mutex<>> for HTTP transport
-            let server = Arc::new(Mutex::new(server));
-
-            // Create the streamable HTTP server (stateless mode by default)
-            let http_server = StreamableHttpServer::new(addr, server);
-
-            // Start the server
-            let (bound_addr, server_handle) = http_server
-                .start()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to start HTTP server: {}", e))?;
-
-            log::info!("✓ HTTP server started successfully");
-            log::info!("  Bound to: http://{}", bound_addr);
-            log::info!("  Press Ctrl+C to stop the server");
-
-            // Keep the server running until interrupted
-            server_handle
-                .await
-                .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+            tracing::info!("HTTP transport not yet implemented for rmcp");
+            tracing::info!("Would bind to: {}", addr);
+            return Err(anyhow::anyhow!("HTTP transport not yet implemented"));
         }
     }
 
