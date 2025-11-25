@@ -2,8 +2,15 @@
 //!
 //! This library provides an MCP (Model Context Protocol) server that exposes
 //! the Motlie graph database mutation and query APIs as MCP tools using the rmcp SDK.
+//!
+//! # Transports
+//!
+//! The server supports two transport modes:
+//! - **stdio**: Standard input/output for local process communication
+//! - **http**: HTTP with Streamable HTTP protocol (using axum)
 
 pub mod types;
+pub mod http;
 
 use motlie_db::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, DataUrl, EdgeFragmentsByIdTimeRange,
@@ -751,3 +758,4 @@ impl ServerHandler for MotlieMcpServer {
 
 /// Re-export for convenience
 pub use rmcp::{ServiceExt, transport::stdio};
+pub use http::{serve_http, HttpConfig};

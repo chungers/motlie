@@ -12,7 +12,7 @@ use std::time::Duration;
 enum Transport {
     /// Standard input/output (for local process communication)
     Stdio,
-    /// HTTP with Server-Sent Events (for remote access) - NOT YET IMPLEMENTED
+    /// HTTP with Streamable HTTP protocol (for remote access)
     Http,
 }
 
@@ -36,7 +36,7 @@ struct Args {
     /// Transport protocol (stdio or http)
     ///
     /// - stdio: Standard input/output for local process communication (default)
-    /// - http: HTTP with Server-Sent Events for remote access (not yet implemented)
+    /// - http: HTTP with Streamable HTTP protocol for remote access
     #[arg(short, long, value_enum, default_value = "stdio")]
     transport: Transport,
 
@@ -47,6 +47,10 @@ struct Args {
     /// Host address for HTTP transport (only used when transport=http)
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
+
+    /// MCP endpoint path for HTTP transport (only used when transport=http)
+    #[arg(long, default_value = "/mcp")]
+    mcp_path: String,
 
     /// Mutation channel buffer size
     #[arg(long, default_value = "100")]
@@ -156,9 +160,13 @@ async fn main() -> Result<()> {
         }
         Transport::Http => {
             let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
-            tracing::info!("HTTP transport not yet implemented for rmcp");
-            tracing::info!("Would bind to: {}", addr);
-            return Err(anyhow::anyhow!("HTTP transport not yet implemented"));
+            tracing::info!("Ready for MCP client connections via HTTP");
+
+            let http_config = motlie_mcp::HttpConfig::new(addr)
+                .with_mcp_path(&args.mcp_path)
+                .with_sse_keep_alive(Some(Duration::from_secs(30)));
+
+            motlie_mcp::serve_http(server, http_config).await?;
         }
     }
 
