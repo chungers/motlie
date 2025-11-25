@@ -48,8 +48,10 @@ lz4 = "1.28"
 petgraph = "0.6"
 pathfinding = "4.0"
 clap = { version = "4.0", features = ["derive"] }
-pmcp = { version = "1.8", features = ["schema-generation", "validation", "streamable-http"] }
+pmcp = { version = "1.8.4", features = ["schema-generation", "validation", "streamable-http"] }
 log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 num_cpus = "1.16"
 
 [[example]]

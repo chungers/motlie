@@ -77,10 +77,18 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
+    // Initialize logging with tracing (pmcp uses tracing, not log)
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "debug,pmcp=trace".into()))
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
+
+    // Also init env_logger for our code that uses log crate
+    let _ = env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .try_init();
 
     // Parse command-line arguments
     let args = Args::parse();

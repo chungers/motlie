@@ -9,7 +9,7 @@ description = "MCP server library for motlie graph database"
 
 [dependencies]
 motlie-db = { path = "../db" }
-pmcp = { version = "1.8", features = ["schema-generation", "validation"] }
+pmcp = { version = "1.8.4", features = ["schema-generation", "validation"] }
 schemars = { version = "1.0", features = ["derive"] }
 tokio = { workspace = true }
 serde = { workspace = true }
