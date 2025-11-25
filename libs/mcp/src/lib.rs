@@ -6,8 +6,8 @@
 pub mod types;
 
 use motlie_db::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, DataUrl, EdgeSummary,
-    EdgesByName, EdgeSummaryBySrcDstName, Id, IncomingEdges, MutationRunnable,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, DataUrl, EdgeFragmentsByIdTimeRange,
+    EdgeSummary, EdgesByName, EdgeSummaryBySrcDstName, Id, IncomingEdges, MutationRunnable,
     NodeById, NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges,
     QueryRunnable, Reader, TimestampMilli, UpdateEdgeValidSinceUntil,
     UpdateEdgeWeight, UpdateNodeValidSinceUntil, ValidTemporalRange, Writer,
@@ -96,9 +96,7 @@ impl MotlieMcpServer {
                         Box::pin(async move {
                             Self::authenticate(&extra)?;
 
-                            let id = Id::from_str(&args.id).map_err(|e| {
-                                pmcp::Error::validation(format!("Invalid node ID: {}", e))
-                            })?;
+                            let id = Id::new();
 
                             let mutation = AddNode {
                                 id,
@@ -117,8 +115,8 @@ impl MotlieMcpServer {
 
                             Ok(json!({
                                 "success": true,
-                                "message": format!("Successfully added node '{}' with ID {}", args.name, args.id),
-                                "node_id": args.id,
+                                "message": format!("Successfully added node '{}' with ID {}", args.name, id.as_str()),
+                                "node_id": id.as_str(),
                                 "node_name": args.name
                             }))
                         })
@@ -751,6 +749,77 @@ impl MotlieMcpServer {
                     }
                 })
                 .with_description("Get content fragments for a node within a time range"),
+            )
+            .tool(
+                "query_edge_fragments",
+                TypedTool::new("query_edge_fragments", {
+                    let server = Arc::clone(&server_self);
+                    move |args: QueryEdgeFragmentsParams, extra| {
+                        let server = Arc::clone(&server);
+                        Box::pin(async move {
+                            Self::authenticate(&extra)?;
+
+                            let src_id = Id::from_str(&args.src_id).map_err(|e| {
+                                pmcp::Error::validation(format!("Invalid source node ID: {}", e))
+                            })?;
+                            let dst_id = Id::from_str(&args.dst_id).map_err(|e| {
+                                pmcp::Error::validation(format!("Invalid destination node ID: {}", e))
+                            })?;
+
+                            let start_bound = args
+                                .start_ts_millis
+                                .map_or(Bound::Unbounded, |ts| Bound::Included(TimestampMilli(ts)));
+                            let end_bound = args
+                                .end_ts_millis
+                                .map_or(Bound::Unbounded, |ts| Bound::Included(TimestampMilli(ts)));
+
+                            let query = EdgeFragmentsByIdTimeRange::new(
+                                src_id,
+                                dst_id,
+                                args.edge_name.clone(),
+                                (start_bound, end_bound),
+                                args.reference_ts_millis.map(TimestampMilli),
+                            );
+
+                            let fragments = query
+                                .run(&server.reader, server.query_timeout)
+                                .await
+                                .map_err(|e| {
+                                    pmcp::Error::internal(format!("Failed to query edge fragments: {}", e))
+                                })?;
+
+                            log::info!(
+                                "Queried edge fragments for edge {} -> {} '{}' (found {})",
+                                args.src_id,
+                                args.dst_id,
+                                args.edge_name,
+                                fragments.len()
+                            );
+
+                            let fragments_list: Vec<JsonValue> = fragments
+                                .into_iter()
+                                .map(|(ts, content)| {
+                                    let content_text = content
+                                        .decode_string()
+                                        .unwrap_or_else(|_| "Unable to decode content".to_string());
+                                    json!({
+                                        "timestamp_millis": ts.0,
+                                        "content": content_text
+                                    })
+                                })
+                                .collect();
+
+                            Ok(json!({
+                                "src_id": args.src_id,
+                                "dst_id": args.dst_id,
+                                "edge_name": args.edge_name,
+                                "fragments": fragments_list,
+                                "count": fragments_list.len()
+                            }))
+                        })
+                    }
+                })
+                .with_description("Get content fragments for an edge within a time range"),
             );
 
         builder.build()

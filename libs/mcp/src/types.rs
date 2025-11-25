@@ -22,10 +22,6 @@ pub struct TemporalRangeParam {
 /// Parameters for adding a new node to the graph
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AddNodeParams {
-    /// Node UUID in base32 format
-    #[schemars(description = "Unique identifier for the node (base32-encoded ULID)")]
-    pub id: String,
-
     /// Human-readable node name
     #[schemars(description = "Human-readable name for the node")]
     pub name: String,
@@ -277,6 +273,34 @@ pub struct QueryNodeFragmentsParams {
     /// Node UUID
     #[schemars(description = "Node identifier to query fragments from")]
     pub id: String,
+
+    /// Start of time range (optional, unbounded if not specified)
+    #[schemars(description = "Start timestamp in milliseconds (inclusive)")]
+    pub start_ts_millis: Option<u64>,
+
+    /// End of time range (optional, unbounded if not specified)
+    #[schemars(description = "End timestamp in milliseconds (inclusive)")]
+    pub end_ts_millis: Option<u64>,
+
+    /// Reference timestamp for temporal validity checks
+    #[schemars(description = "Timestamp to check validity against (defaults to current time)")]
+    pub reference_ts_millis: Option<u64>,
+}
+
+/// Parameters for querying edge fragments by time range
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct QueryEdgeFragmentsParams {
+    /// Source node UUID
+    #[schemars(description = "Source node identifier")]
+    pub src_id: String,
+
+    /// Destination node UUID
+    #[schemars(description = "Destination node identifier")]
+    pub dst_id: String,
+
+    /// Edge name
+    #[schemars(description = "Name of the edge")]
+    pub edge_name: String,
 
     /// Start of time range (optional, unbounded if not specified)
     #[schemars(description = "Start timestamp in milliseconds (inclusive)")]

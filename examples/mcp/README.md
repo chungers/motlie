@@ -379,6 +379,7 @@ Once connected, the following tools are available:
 | `query_nodes_by_name` | Search nodes by name prefix |
 | `query_edges_by_name` | Search edges by name prefix |
 | `query_node_fragments` | Get node fragments in time range |
+| `query_edge_fragments` | Get edge fragments in time range |
 
 ## Getting Started: Your First MCP Session
 
