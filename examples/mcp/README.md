@@ -8,7 +8,7 @@ This example demonstrates how to run the Motlie graph database as an MCP (Model 
 - Built-in authentication via pmcp's auth context
 - **Dual transport support**: stdio (local) and HTTP (remote)
 - **Multi-threaded query processing**: Worker pool with shared TransactionDB for 99%+ consistency
-- 14 tools: 7 mutations + 7 queries
+- 15 tools: 7 mutations + 8 queries
 
 ## Quick Start
 
@@ -360,7 +360,7 @@ Once connected, the following tools are available:
 
 | Tool Name | Description |
 |-----------|-------------|
-| `add_node` | Create a new node with ID, name, and optional temporal range |
+| `add_node` | Create a new node with name and optional temporal range (ID auto-generated) |
 | `add_edge` | Create an edge between two nodes with optional weight |
 | `add_node_fragment` | Add content fragment to a node |
 | `add_edge_fragment` | Add content fragment to an edge |
@@ -373,7 +373,7 @@ Once connected, the following tools are available:
 | Tool Name | Description |
 |-----------|-------------|
 | `query_node_by_id` | Retrieve node by UUID |
-| `query_edge_by_src_dst_name` | Retrieve edge by endpoints and name |
+| `query_edge` | Retrieve edge by source, destination, and name |
 | `query_outgoing_edges` | Get all outgoing edges from a node |
 | `query_incoming_edges` | Get all incoming edges to a node |
 | `query_nodes_by_name` | Search nodes by name prefix |
@@ -455,27 +455,35 @@ Let's create a simple knowledge graph about a team:
 **Step 5.1: Create Nodes for Team Members**
 
 ```
-You: "I want to create a knowledge graph about my team. First, add a node for Alice
-with ID 01HQEWRKZGPVX8Q9M7NKJT5W2E. Then add a node for Bob with ID
-01HQEWRKZGPVX8Q9M7NKJT5W2F."
+You: "I want to create a knowledge graph about my team. Create nodes for Alice and Bob."
 ```
 
-Claude will use the `add_node` tool twice to create these nodes.
+Claude will use the `add_node` tool twice to create these nodes. IDs are auto-generated.
 
 **What happens behind the scenes:**
 ```json
 Tool: add_node
 Arguments: {
-  "id": "01HQEWRKZGPVX8Q9M7NKJT5W2E",
   "name": "Alice"
+}
+Response: {
+  "success": true,
+  "node_id": "01HQEWRKZGPVX8Q9M7NKJT5W2E",
+  "node_name": "Alice"
 }
 
 Tool: add_node
 Arguments: {
-  "id": "01HQEWRKZGPVX8Q9M7NKJT5W2F",
   "name": "Bob"
 }
+Response: {
+  "success": true,
+  "node_id": "01HQEWRKZGPVX8Q9M7NKJT5W2F",
+  "node_name": "Bob"
+}
 ```
+
+**Note:** The returned `node_id` values are used for subsequent operations like creating edges.
 
 **Step 5.2: Create Relationships**
 
@@ -483,13 +491,14 @@ Arguments: {
 You: "Create a 'reports_to' edge from Alice to Bob with weight 1.0"
 ```
 
-Claude will use `add_edge`:
+Claude will use `add_edge` with the node IDs returned from Step 5.1:
 ```json
 Tool: add_edge
 Arguments: {
-  "src_id": "01HQEWRKZGPVX8Q9M7NKJT5W2E",
-  "dst_id": "01HQEWRKZGPVX8Q9M7NKJT5W2F",
+  "source_node_id": "01HQEWRKZGPVX8Q9M7NKJT5W2E",
+  "target_node_id": "01HQEWRKZGPVX8Q9M7NKJT5W2F",
   "name": "reports_to",
+  "summary": "Alice reports to Bob",
   "weight": 1.0
 }
 ```
@@ -512,7 +521,7 @@ Claude will use `add_node_fragment`:
 ```json
 Tool: add_node_fragment
 Arguments: {
-  "node_id": "01HQEWRKZGPVX8Q9M7NKJT5W2E",
+  "id": "01HQEWRKZGPVX8Q9M7NKJT5W2E",
   "content": "Senior Software Engineer, joined 2023"
 }
 ```
@@ -572,14 +581,14 @@ You: "Now show me everyone who reports to Alice"
 ### Pattern 2: Temporal Knowledge Tracking
 
 ```
-You: "Create a node for our Product Roadmap with ID 01HQEX... and add today's
-features as fragments with timestamps. Each feature should be a separate fragment."
+You: "Create a node for our Product Roadmap and add today's features as fragments
+with timestamps. Each feature should be a separate fragment."
 
-[Claude adds multiple fragments with automatic timestamps]
+[Claude creates the node and adds multiple fragments with automatic timestamps]
 
 You: "Now query all fragments from the last 7 days"
 
-[Claude retrieves recent roadmap updates]
+[Claude retrieves recent roadmap updates using the node ID from the creation step]
 ```
 
 ### Pattern 3: Research and Connection Discovery
@@ -624,19 +633,21 @@ Once the MCP server is connected, you can interact with your graph database natu
 
 **Creating nodes:**
 ```
-You: "Add a new node to the database named 'Alice' with ID 01ARZ3NDEKTSV4RRFFQ69G5FAV"
+You: "Add a new node to the database named 'Alice'"
 
 Claude: I'll add a node for Alice to the graph database.
-[Uses add_node tool]
+[Uses add_node tool with name: "Alice"]
 ✓ Successfully added node 'Alice' with ID 01ARZ3NDEKTSV4RRFFQ69G5FAV
 ```
+
+Note: The ID is auto-generated and returned by the server. You don't need to provide one.
 
 **Creating edges:**
 ```
 You: "Create a 'knows' edge from Alice to Bob with weight 0.8"
 
 Claude: I'll create a relationship showing that Alice knows Bob.
-[Uses add_edge tool]
+[Uses add_edge tool with the node IDs from previous add_node calls]
 ✓ Successfully created 'knows' edge from Alice to Bob with weight 0.8
 ```
 
@@ -692,22 +703,20 @@ cargo run --release --example mcp -- \
     --auth-token "$MOTLIE_AUTH_TOKEN"
 ```
 
-**Client configuration with auth:**
+**How authentication works:**
 
-When using authentication, each tool call must include the `auth_token` parameter:
+Authentication is handled at the protocol level by pmcp, NOT in tool parameters. When you configure the server with `--auth-token`, pmcp validates the Bearer token from HTTP headers (for HTTP transport) or the auth context (for stdio transport). Tool calls do NOT need an `auth_token` parameter:
 
 ```json
 {
   "tool": "add_node",
   "arguments": {
-    "auth_token": "your-secret-token",
-    "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
     "name": "Alice"
   }
 }
 ```
 
-Claude will automatically include the token if configured in the connection settings.
+Claude Desktop and Claude Code automatically handle auth headers when configured in connection settings.
 
 ## Troubleshooting
 
@@ -810,25 +819,28 @@ Claude will automatically include the token if configured in the connection sett
 
 #### Issue 3: "Invalid node ID" errors
 
-**Symptoms:** Error messages about invalid IDs when creating nodes
+**Symptoms:** Error messages about invalid IDs when creating edges, querying, or adding fragments
+
+**Context:** Node IDs are auto-generated when you call `add_node`. The returned `node_id` must be used for subsequent operations (edges, fragments, queries). Invalid ID errors occur when referencing nodes that don't exist or using malformed IDs.
 
 **Solutions:**
 
-1. **Use proper ULID format**
+1. **Capture node IDs from add_node responses**
+   - When you create a node, the response includes `node_id`
+   - Use this ID for all subsequent operations on that node
+   - Example: Create Alice → get ID `01ARZ3NDEKTSV4RRFFQ69G5FAV` → use it for edges
+
+2. **Use query_nodes_by_name to find existing nodes**
+   ```
+   You: "Find all nodes named 'Alice'"
+
+   [Claude uses query_nodes_by_name to retrieve the node ID]
+   ```
+
+3. **Verify ULID format for manual IDs**
    - IDs must be 26 characters, base32 encoded
    - Valid characters: 0-9, A-Z (excluding I, L, O, U)
    - Example valid ID: `01ARZ3NDEKTSV4RRFFQ69G5FAV`
-
-2. **Let Claude generate IDs**
-   ```
-   You: "Create a node for Alice - generate an appropriate ID for me"
-
-   [Claude will generate a valid ULID]
-   ```
-
-3. **Generate IDs online**
-   - Visit: https://www.ulidgenerator.com/
-   - Copy the generated ID into your request
 
 #### Issue 4: Server crashes or stops responding
 
@@ -873,13 +885,13 @@ Before asking for help, verify:
 - [ ] Claude Desktop has been completely restarted
 - [ ] Server can run manually without errors
 - [ ] Logs don't show RocksDB or permission errors
-- [ ] IDs are valid 26-character ULIDs
+- [ ] For edge/query operations: IDs from previous add_node calls are being used correctly
 
 ## Common Questions
 
 ### Q: Do I need to generate IDs myself?
 
-**A:** You can ask Claude to generate valid ULIDs for you. Just say "create a node for Alice, generate an appropriate ID" and Claude will create a valid ULID.
+**A:** No! When you create a node with `add_node`, the ID is auto-generated by the server and returned in the response. Just say "create a node for Alice" and you'll get back the generated ID (e.g., `01ARZ3NDEKTSV4RRFFQ69G5FAV`). Use this ID for subsequent operations like creating edges or adding fragments.
 
 ### Q: Can I use the same database from multiple Claude conversations?
 
