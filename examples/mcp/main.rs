@@ -1,11 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use motlie_db::{create_mutation_writer, create_query_reader, Graph, ReaderConfig, Storage, WriterConfig, spawn_graph_consumer_with_graph, spawn_query_consumer_pool_shared};
-use motlie_mcp::MotlieMcpServer;
+use motlie_mcp::{build_server_lazy, LazyDatabase};
 use pmcp::server::streamable_http_server::StreamableHttpServer;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// Transport protocol for MCP server
@@ -81,73 +82,74 @@ async fn main() -> Result<()> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "debug,pmcp=trace".into()))
+            .unwrap_or_else(|_| "info,pmcp=debug".into()))
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
-    // Also init env_logger for our code that uses log crate
-    let _ = env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .try_init();
-
-    // Parse command-line arguments
+    // Parse command-line arguments FIRST (this is fast)
     let args = Args::parse();
 
-    // Initialize storage and database components
-    log::info!("Initializing database at: {}", args.db_path);
-    let db_path = Path::new(&args.db_path);
+    // Capture configuration for lazy initialization
+    let db_path = PathBuf::from(&args.db_path);
+    let mutation_buffer_size = args.mutation_buffer_size;
+    let query_buffer_size = args.query_buffer_size;
+    let query_workers = args.query_workers;
 
-    // Create writer and reader configurations
-    let writer_config = WriterConfig {
-        channel_buffer_size: args.mutation_buffer_size,
-    };
-    let reader_config = ReaderConfig {
-        channel_buffer_size: args.query_buffer_size,
-    };
+    // Create lazy database initializer
+    // The actual database initialization will happen on first tool use
+    let lazy_db = Arc::new(LazyDatabase::new(Box::new(move || {
+        log::info!("Initializing database at: {:?}", db_path);
 
-    // Create ONE shared readwrite Storage for both mutations and queries
-    // RocksDB TransactionDB acquires exclusive lock - cannot have multiple instances
-    log::info!("Opening shared readwrite Storage for mutations and queries");
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready()?;
-    let storage = Arc::new(storage);
-    let graph = Arc::new(Graph::new(storage));
+        let writer_config = WriterConfig {
+            channel_buffer_size: mutation_buffer_size,
+        };
+        let reader_config = ReaderConfig {
+            channel_buffer_size: query_buffer_size,
+        };
 
-    // Create writer with background consumer using shared graph
-    let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
-    let _mutation_handle = spawn_graph_consumer_with_graph(
-        mutation_receiver,
-        writer_config,
-        graph.clone(),
-    );
+        // Create ONE shared readwrite Storage for both mutations and queries
+        log::info!("Opening shared readwrite Storage for mutations and queries");
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready()?;
+        let storage = Arc::new(storage);
+        let graph = Arc::new(Graph::new(storage));
 
-    // Create reader with background consumer pool for queries
-    // Uses same shared TransactionDB via Arc<Graph> for high consistency
-    let (reader, query_receiver) = create_query_reader(reader_config.clone());
-    let _query_handles = spawn_query_consumer_pool_shared(
-        query_receiver,
-        graph.clone(),
-        args.query_workers,
-    );
+        // Create writer with background consumer using shared graph
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let _mutation_handle = spawn_graph_consumer_with_graph(
+            mutation_receiver,
+            writer_config,
+            graph.clone(),
+        );
 
-    log::info!(
-        "Started {} query worker threads (shared TransactionDB, 99%+ consistency)",
-        args.query_workers
-    );
+        // Create reader with background consumer pool for queries
+        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let _query_handles = spawn_query_consumer_pool_shared(
+            query_receiver,
+            graph.clone(),
+            query_workers,
+        );
 
-    // Create the MCP server handler
-    let mcp_server = MotlieMcpServer::new(writer, reader);
+        log::info!(
+            "Started {} query worker threads (shared TransactionDB, 99%+ consistency)",
+            query_workers
+        );
 
-    // Build the pmcp server with all tools
-    let server = mcp_server.build_server(args.auth_token.clone())?;
+        Ok((writer, reader))
+    })));
+
+    // Build the pmcp server with lazy database - this is FAST
+    // The server can start listening immediately
+    let query_timeout = Duration::from_secs(5);
+    let server = build_server_lazy(lazy_db, query_timeout, args.auth_token.clone())?;
 
     log::info!("Starting Motlie MCP server using pmcp SDK...");
     log::info!("Server: motlie-mcp-server");
     log::info!("Version: {}", env!("CARGO_PKG_VERSION"));
+    log::info!("Database will be initialized on first tool use (lazy initialization)");
 
     if args.auth_token.is_some() {
         log::info!("Authentication: ENABLED (Bearer token required)");
-        log::info!("  pmcp will validate authentication at the protocol level");
     } else {
         log::warn!("Authentication: DISABLED (not recommended for production)");
     }
@@ -161,7 +163,8 @@ async fn main() -> Result<()> {
             log::info!("Listening on stdio (standard input/output)");
             log::info!("Ready for MCP client connections via stdin/stdout");
 
-            // Start the server with stdio transport
+            // Start the server with stdio transport IMMEDIATELY
+            // No database initialization blocking this!
             server.run_stdio().await?;
         }
         Transport::Http => {

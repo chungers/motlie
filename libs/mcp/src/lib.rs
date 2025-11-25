@@ -17,7 +17,66 @@ use serde_json::{json, Value as JsonValue};
 use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::OnceCell;
 use types::*;
+
+/// Database initialization function type
+pub type DbInitFn = Box<dyn FnOnce() -> anyhow::Result<(Writer, Reader)> + Send + Sync>;
+
+/// Lazy database holder for deferred initialization
+pub struct LazyDatabase {
+    init_fn: std::sync::Mutex<Option<DbInitFn>>,
+    writer: OnceCell<Writer>,
+    reader: OnceCell<Reader>,
+}
+
+impl LazyDatabase {
+    /// Create a new lazy database with an initialization function
+    pub fn new(init_fn: DbInitFn) -> Self {
+        Self {
+            init_fn: std::sync::Mutex::new(Some(init_fn)),
+            writer: OnceCell::new(),
+            reader: OnceCell::new(),
+        }
+    }
+
+    /// Get or initialize the writer
+    pub async fn writer(&self) -> Result<&Writer, pmcp::Error> {
+        self.ensure_initialized().await?;
+        self.writer.get().ok_or_else(|| pmcp::Error::internal("Writer not initialized"))
+    }
+
+    /// Get or initialize the reader
+    pub async fn reader(&self) -> Result<&Reader, pmcp::Error> {
+        self.ensure_initialized().await?;
+        self.reader.get().ok_or_else(|| pmcp::Error::internal("Reader not initialized"))
+    }
+
+    async fn ensure_initialized(&self) -> Result<(), pmcp::Error> {
+        // Check if already initialized
+        if self.writer.initialized() && self.reader.initialized() {
+            return Ok(());
+        }
+
+        // Take the init function (only runs once)
+        let init_fn = {
+            let mut guard = self.init_fn.lock().unwrap();
+            guard.take()
+        };
+
+        if let Some(init_fn) = init_fn {
+            log::info!("Initializing database (lazy initialization on first tool use)...");
+            let (writer, reader) = init_fn().map_err(|e| {
+                pmcp::Error::internal(format!("Database initialization failed: {}", e))
+            })?;
+            let _ = self.writer.set(writer);
+            let _ = self.reader.set(reader);
+            log::info!("Database initialization complete");
+        }
+
+        Ok(())
+    }
+}
 
 /// MCP Server for Motlie graph database
 ///
@@ -849,4 +908,570 @@ impl MotlieMcpServer {
         // No auth required
         Ok(())
     }
+}
+
+/// Build a pmcp server with lazy database initialization
+///
+/// This allows the MCP server to start immediately and respond to the
+/// initialize request, while the database is initialized on first tool use.
+pub fn build_server_lazy(
+    db: Arc<LazyDatabase>,
+    query_timeout: Duration,
+    auth_token: Option<String>,
+) -> pmcp::Result<pmcp::Server> {
+    let mut builder = ServerBuilder::new()
+        .name("motlie-mcp-server")
+        .version(env!("CARGO_PKG_VERSION"))
+        .capabilities(ServerCapabilities {
+            tools: Some(pmcp::types::ToolCapabilities::default()),
+            ..Default::default()
+        });
+
+    // If auth token is provided, tools will check it via RequestHandlerExtra.auth_context
+    if let Some(token) = auth_token {
+        log::info!("Authentication enabled with Bearer token");
+        std::env::set_var("MOTLIE_MCP_AUTH_TOKEN", token);
+    }
+
+    // Helper function for authentication
+    fn authenticate(extra: &pmcp::RequestHandlerExtra) -> pmcp::Result<()> {
+        if let Ok(expected_token) = std::env::var("MOTLIE_MCP_AUTH_TOKEN") {
+            if let Some(auth_ctx) = &extra.auth_context {
+                if let Some(provided_token) = &auth_ctx.token {
+                    if provided_token == &expected_token {
+                        return Ok(());
+                    }
+                }
+                return Err(pmcp::Error::validation("Invalid authentication token"));
+            }
+            return Err(pmcp::Error::validation("Authentication required"));
+        }
+        Ok(())
+    }
+
+    fn to_schema_temporal_range(param: TemporalRangeParam) -> ValidTemporalRange {
+        ValidTemporalRange(
+            Some(TimestampMilli(param.valid_since)),
+            Some(TimestampMilli(param.valid_until)),
+        )
+    }
+
+    // Register mutation tools with lazy database
+    builder = builder
+        .tool(
+            "add_node",
+            TypedTool::new("add_node", {
+                let db = Arc::clone(&db);
+                move |args: AddNodeParams, extra| {
+                    let db = Arc::clone(&db);
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let writer = db.writer().await?;
+                        let id = Id::new();
+                        let mutation = AddNode {
+                            id,
+                            name: args.name.clone(),
+                            ts_millis: TimestampMilli(
+                                args.ts_millis.unwrap_or_else(|| TimestampMilli::now().0),
+                            ),
+                            temporal_range: args.temporal_range.map(to_schema_temporal_range),
+                        };
+                        mutation.run(writer).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to add node: {}", e))
+                        })?;
+                        log::info!("Added node: {} ({})", args.name, id);
+                        Ok(json!({
+                            "success": true,
+                            "message": format!("Successfully added node '{}' with ID {}", args.name, id.as_str()),
+                            "node_id": id.as_str(),
+                            "node_name": args.name
+                        }))
+                    })
+                }
+            })
+            .with_description("Create a new node in the graph with name and optional temporal validity range (ID is auto-generated)"),
+        )
+        .tool(
+            "add_edge",
+            TypedTool::new("add_edge", {
+                let db = Arc::clone(&db);
+                move |args: AddEdgeParams, extra| {
+                    let db = Arc::clone(&db);
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let writer = db.writer().await?;
+                        let source_id = Id::from_str(&args.source_node_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid source node ID: {}", e))
+                        })?;
+                        let target_id = Id::from_str(&args.target_node_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid target node ID: {}", e))
+                        })?;
+                        let mutation = AddEdge {
+                            source_node_id: source_id,
+                            target_node_id: target_id,
+                            ts_millis: TimestampMilli(
+                                args.ts_millis.unwrap_or_else(|| TimestampMilli::now().0),
+                            ),
+                            name: args.name.clone(),
+                            temporal_range: args.temporal_range.map(to_schema_temporal_range),
+                            summary: EdgeSummary::from_text(&args.summary),
+                            weight: args.weight,
+                        };
+                        mutation.run(writer).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to add edge: {}", e))
+                        })?;
+                        log::info!("Added edge: {} -> {} ({})", args.source_node_id, args.target_node_id, args.name);
+                        Ok(json!({
+                            "success": true,
+                            "message": format!("Successfully added edge '{}' from {} to {}", args.name, args.source_node_id, args.target_node_id),
+                            "edge_name": args.name,
+                            "source_id": args.source_node_id,
+                            "target_id": args.target_node_id
+                        }))
+                    })
+                }
+            })
+            .with_description("Create an edge between two nodes with optional weight and temporal validity"),
+        )
+        .tool(
+            "add_node_fragment",
+            TypedTool::new("add_node_fragment", {
+                let db = Arc::clone(&db);
+                move |args: AddNodeFragmentParams, extra| {
+                    let db = Arc::clone(&db);
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let writer = db.writer().await?;
+                        let id = Id::from_str(&args.id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid node ID: {}", e))
+                        })?;
+                        let mutation = AddNodeFragment {
+                            id,
+                            ts_millis: TimestampMilli(
+                                args.ts_millis.unwrap_or_else(|| TimestampMilli::now().0),
+                            ),
+                            content: DataUrl::from_text(&args.content),
+                            temporal_range: args.temporal_range.map(to_schema_temporal_range),
+                        };
+                        mutation.run(writer).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to add node fragment: {}", e))
+                        })?;
+                        log::info!("Added fragment to node: {}", args.id);
+                        Ok(json!({
+                            "success": true,
+                            "message": format!("Successfully added fragment to node {}", args.id),
+                            "node_id": args.id
+                        }))
+                    })
+                }
+            })
+            .with_description("Add a content fragment to an existing node"),
+        )
+        .tool(
+            "add_edge_fragment",
+            TypedTool::new("add_edge_fragment", {
+                let db = Arc::clone(&db);
+                move |args: AddEdgeFragmentParams, extra| {
+                    let db = Arc::clone(&db);
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let writer = db.writer().await?;
+                        let src_id = Id::from_str(&args.src_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid source node ID: {}", e))
+                        })?;
+                        let dst_id = Id::from_str(&args.dst_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid destination node ID: {}", e))
+                        })?;
+                        let mutation = AddEdgeFragment {
+                            src_id,
+                            dst_id,
+                            edge_name: args.edge_name.clone(),
+                            ts_millis: TimestampMilli(
+                                args.ts_millis.unwrap_or_else(|| TimestampMilli::now().0),
+                            ),
+                            content: DataUrl::from_text(&args.content),
+                            temporal_range: args.temporal_range.map(to_schema_temporal_range),
+                        };
+                        mutation.run(writer).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to add edge fragment: {}", e))
+                        })?;
+                        log::info!("Added fragment to edge: {} -> {} ({})", args.src_id, args.dst_id, args.edge_name);
+                        Ok(json!({
+                            "success": true,
+                            "message": format!("Successfully added fragment to edge {} -> {} ({})", args.src_id, args.dst_id, args.edge_name),
+                            "src_id": args.src_id,
+                            "dst_id": args.dst_id,
+                            "edge_name": args.edge_name
+                        }))
+                    })
+                }
+            })
+            .with_description("Add a content fragment to an existing edge"),
+        )
+        .tool(
+            "update_node_valid_range",
+            TypedTool::new("update_node_valid_range", {
+                let db = Arc::clone(&db);
+                move |args: UpdateNodeValidRangeParams, extra| {
+                    let db = Arc::clone(&db);
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let writer = db.writer().await?;
+                        let id = Id::from_str(&args.id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid node ID: {}", e))
+                        })?;
+                        let mutation = UpdateNodeValidSinceUntil {
+                            id,
+                            temporal_range: to_schema_temporal_range(args.temporal_range),
+                            reason: args.reason.clone(),
+                        };
+                        mutation.run(writer).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to update node validity: {}", e))
+                        })?;
+                        log::info!("Updated validity range for node: {} ({})", args.id, args.reason);
+                        Ok(json!({
+                            "success": true,
+                            "message": format!("Successfully updated validity range for node {}", args.id),
+                            "node_id": args.id
+                        }))
+                    })
+                }
+            })
+            .with_description("Update the temporal validity range of a node"),
+        )
+        .tool(
+            "update_edge_valid_range",
+            TypedTool::new("update_edge_valid_range", {
+                let db = Arc::clone(&db);
+                move |args: UpdateEdgeValidRangeParams, extra| {
+                    let db = Arc::clone(&db);
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let writer = db.writer().await?;
+                        let src_id = Id::from_str(&args.src_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid source node ID: {}", e))
+                        })?;
+                        let dst_id = Id::from_str(&args.dst_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid destination node ID: {}", e))
+                        })?;
+                        let mutation = UpdateEdgeValidSinceUntil {
+                            src_id,
+                            dst_id,
+                            name: args.name.clone(),
+                            temporal_range: to_schema_temporal_range(args.temporal_range),
+                            reason: args.reason.clone(),
+                        };
+                        mutation.run(writer).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to update edge validity: {}", e))
+                        })?;
+                        log::info!("Updated validity range for edge: {} -> {} ({}, {})", args.src_id, args.dst_id, args.name, args.reason);
+                        Ok(json!({
+                            "success": true,
+                            "message": format!("Successfully updated validity range for edge {} -> {} ({})", args.src_id, args.dst_id, args.name),
+                            "src_id": args.src_id,
+                            "dst_id": args.dst_id,
+                            "edge_name": args.name
+                        }))
+                    })
+                }
+            })
+            .with_description("Update the temporal validity range of an edge"),
+        )
+        .tool(
+            "update_edge_weight",
+            TypedTool::new("update_edge_weight", {
+                let db = Arc::clone(&db);
+                move |args: UpdateEdgeWeightParams, extra| {
+                    let db = Arc::clone(&db);
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let writer = db.writer().await?;
+                        let src_id = Id::from_str(&args.src_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid source node ID: {}", e))
+                        })?;
+                        let dst_id = Id::from_str(&args.dst_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid destination node ID: {}", e))
+                        })?;
+                        let mutation = UpdateEdgeWeight {
+                            src_id,
+                            dst_id,
+                            name: args.name.clone(),
+                            weight: args.weight,
+                        };
+                        mutation.run(writer).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to update edge weight: {}", e))
+                        })?;
+                        log::info!("Updated weight for edge: {} -> {} ({}) = {}", args.src_id, args.dst_id, args.name, args.weight);
+                        Ok(json!({
+                            "success": true,
+                            "message": format!("Successfully updated weight for edge {} -> {} ({}) to {}", args.src_id, args.dst_id, args.name, args.weight),
+                            "src_id": args.src_id,
+                            "dst_id": args.dst_id,
+                            "edge_name": args.name,
+                            "weight": args.weight
+                        }))
+                    })
+                }
+            })
+            .with_description("Update the weight of an edge for graph algorithms"),
+        );
+
+    // Register query tools with lazy database
+    builder = builder
+        .tool(
+            "query_node_by_id",
+            TypedTool::new("query_node_by_id", {
+                let db = Arc::clone(&db);
+                move |args: QueryNodeByIdParams, extra| {
+                    let db = Arc::clone(&db);
+                    let query_timeout = query_timeout;
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let reader = db.reader().await?;
+                        let id = Id::from_str(&args.id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid node ID: {}", e))
+                        })?;
+                        let query = NodeById::new(id, args.reference_ts_millis.map(TimestampMilli));
+                        let (name, summary) = query.run(reader, query_timeout).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to query node: {}", e))
+                        })?;
+                        let summary_text = summary.decode_string().unwrap_or_else(|_| "Unable to decode summary".to_string());
+                        log::info!("Queried node: {} ({})", args.id, name);
+                        Ok(json!({
+                            "node_id": args.id,
+                            "name": name,
+                            "summary": summary_text
+                        }))
+                    })
+                }
+            })
+            .with_description("Retrieve a node by its ID"),
+        )
+        .tool(
+            "query_edge",
+            TypedTool::new("query_edge", {
+                let db = Arc::clone(&db);
+                move |args: QueryEdgeParams, extra| {
+                    let db = Arc::clone(&db);
+                    let query_timeout = query_timeout;
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let reader = db.reader().await?;
+                        let source_id = Id::from_str(&args.source_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid source node ID: {}", e))
+                        })?;
+                        let dest_id = Id::from_str(&args.dest_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid destination node ID: {}", e))
+                        })?;
+                        let query = EdgeSummaryBySrcDstName::new(source_id, dest_id, args.name.clone(), args.reference_ts_millis.map(TimestampMilli));
+                        let (summary, weight) = query.run(reader, query_timeout).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to query edge: {}", e))
+                        })?;
+                        let summary_text = summary.decode_string().unwrap_or_else(|_| "Unable to decode summary".to_string());
+                        log::info!("Queried edge: {} -> {} ({})", args.source_id, args.dest_id, args.name);
+                        Ok(json!({
+                            "source_id": args.source_id,
+                            "dest_id": args.dest_id,
+                            "name": args.name,
+                            "summary": summary_text,
+                            "weight": weight
+                        }))
+                    })
+                }
+            })
+            .with_description("Retrieve an edge by its source, destination, and name"),
+        )
+        .tool(
+            "query_outgoing_edges",
+            TypedTool::new("query_outgoing_edges", {
+                let db = Arc::clone(&db);
+                move |args: QueryOutgoingEdgesParams, extra| {
+                    let db = Arc::clone(&db);
+                    let query_timeout = query_timeout;
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let reader = db.reader().await?;
+                        let id = Id::from_str(&args.id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid node ID: {}", e))
+                        })?;
+                        let query = OutgoingEdges::new(id, args.reference_ts_millis.map(TimestampMilli));
+                        let edges = query.run(reader, query_timeout).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to query outgoing edges: {}", e))
+                        })?;
+                        log::info!("Queried outgoing edges from node: {} (found {})", args.id, edges.len());
+                        let edges_list: Vec<JsonValue> = edges.into_iter().map(|(weight, _src, dst, name)| {
+                            json!({ "target_id": dst.as_str(), "name": name, "weight": weight })
+                        }).collect();
+                        Ok(json!({
+                            "node_id": args.id,
+                            "edges": edges_list,
+                            "count": edges_list.len()
+                        }))
+                    })
+                }
+            })
+            .with_description("Get all outgoing edges from a node"),
+        )
+        .tool(
+            "query_incoming_edges",
+            TypedTool::new("query_incoming_edges", {
+                let db = Arc::clone(&db);
+                move |args: QueryIncomingEdgesParams, extra| {
+                    let db = Arc::clone(&db);
+                    let query_timeout = query_timeout;
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let reader = db.reader().await?;
+                        let id = Id::from_str(&args.id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid node ID: {}", e))
+                        })?;
+                        let query = IncomingEdges::new(id, args.reference_ts_millis.map(TimestampMilli));
+                        let edges = query.run(reader, query_timeout).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to query incoming edges: {}", e))
+                        })?;
+                        log::info!("Queried incoming edges to node: {} (found {})", args.id, edges.len());
+                        let edges_list: Vec<JsonValue> = edges.into_iter().map(|(weight, _dst, src, name)| {
+                            json!({ "source_id": src.as_str(), "name": name, "weight": weight })
+                        }).collect();
+                        Ok(json!({
+                            "node_id": args.id,
+                            "edges": edges_list,
+                            "count": edges_list.len()
+                        }))
+                    })
+                }
+            })
+            .with_description("Get all incoming edges to a node"),
+        )
+        .tool(
+            "query_nodes_by_name",
+            TypedTool::new("query_nodes_by_name", {
+                let db = Arc::clone(&db);
+                move |args: QueryNodesByNameParams, extra| {
+                    let db = Arc::clone(&db);
+                    let query_timeout = query_timeout;
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let reader = db.reader().await?;
+                        let query = NodesByName::new(args.name.clone(), None, args.limit, args.reference_ts_millis.map(TimestampMilli));
+                        let nodes = query.run(reader, query_timeout).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to query nodes by name: {}", e))
+                        })?;
+                        log::info!("Queried nodes by name: '{}' (found {})", args.name, nodes.len());
+                        let nodes_list: Vec<JsonValue> = nodes.into_iter().map(|(name, id)| {
+                            json!({ "name": name, "id": id.as_str() })
+                        }).collect();
+                        Ok(json!({
+                            "search_name": args.name,
+                            "nodes": nodes_list,
+                            "count": nodes_list.len()
+                        }))
+                    })
+                }
+            })
+            .with_description("Search for nodes by name or name prefix"),
+        )
+        .tool(
+            "query_edges_by_name",
+            TypedTool::new("query_edges_by_name", {
+                let db = Arc::clone(&db);
+                move |args: QueryEdgesByNameParams, extra| {
+                    let db = Arc::clone(&db);
+                    let query_timeout = query_timeout;
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let reader = db.reader().await?;
+                        let query = EdgesByName::new(args.name.clone(), None, args.limit, args.reference_ts_millis.map(TimestampMilli));
+                        let edges = query.run(reader, query_timeout).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to query edges by name: {}", e))
+                        })?;
+                        log::info!("Queried edges by name: '{}' (found {})", args.name, edges.len());
+                        let edges_list: Vec<JsonValue> = edges.into_iter().map(|(name, id)| {
+                            json!({ "name": name, "id": id.as_str() })
+                        }).collect();
+                        Ok(json!({
+                            "search_name": args.name,
+                            "edges": edges_list,
+                            "count": edges_list.len()
+                        }))
+                    })
+                }
+            })
+            .with_description("Search for edges by name or name prefix"),
+        )
+        .tool(
+            "query_node_fragments",
+            TypedTool::new("query_node_fragments", {
+                let db = Arc::clone(&db);
+                move |args: QueryNodeFragmentsParams, extra| {
+                    let db = Arc::clone(&db);
+                    let query_timeout = query_timeout;
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let reader = db.reader().await?;
+                        let id = Id::from_str(&args.id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid node ID: {}", e))
+                        })?;
+                        let start_bound = args.start_ts_millis.map_or(Bound::Unbounded, |ts| Bound::Included(TimestampMilli(ts)));
+                        let end_bound = args.end_ts_millis.map_or(Bound::Unbounded, |ts| Bound::Included(TimestampMilli(ts)));
+                        let query = NodeFragmentsByIdTimeRange::new(id, (start_bound, end_bound), args.reference_ts_millis.map(TimestampMilli));
+                        let fragments = query.run(reader, query_timeout).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to query node fragments: {}", e))
+                        })?;
+                        log::info!("Queried node fragments for node: {} (found {})", args.id, fragments.len());
+                        let fragments_list: Vec<JsonValue> = fragments.into_iter().map(|(ts, content)| {
+                            let content_text = content.decode_string().unwrap_or_else(|_| "Unable to decode content".to_string());
+                            json!({ "timestamp_millis": ts.0, "content": content_text })
+                        }).collect();
+                        Ok(json!({
+                            "node_id": args.id,
+                            "fragments": fragments_list,
+                            "count": fragments_list.len()
+                        }))
+                    })
+                }
+            })
+            .with_description("Get content fragments for a node within a time range"),
+        )
+        .tool(
+            "query_edge_fragments",
+            TypedTool::new("query_edge_fragments", {
+                let db = Arc::clone(&db);
+                move |args: QueryEdgeFragmentsParams, extra| {
+                    let db = Arc::clone(&db);
+                    let query_timeout = query_timeout;
+                    Box::pin(async move {
+                        authenticate(&extra)?;
+                        let reader = db.reader().await?;
+                        let src_id = Id::from_str(&args.src_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid source node ID: {}", e))
+                        })?;
+                        let dst_id = Id::from_str(&args.dst_id).map_err(|e| {
+                            pmcp::Error::validation(format!("Invalid destination node ID: {}", e))
+                        })?;
+                        let start_bound = args.start_ts_millis.map_or(Bound::Unbounded, |ts| Bound::Included(TimestampMilli(ts)));
+                        let end_bound = args.end_ts_millis.map_or(Bound::Unbounded, |ts| Bound::Included(TimestampMilli(ts)));
+                        let query = EdgeFragmentsByIdTimeRange::new(src_id, dst_id, args.edge_name.clone(), (start_bound, end_bound), args.reference_ts_millis.map(TimestampMilli));
+                        let fragments = query.run(reader, query_timeout).await.map_err(|e| {
+                            pmcp::Error::internal(format!("Failed to query edge fragments: {}", e))
+                        })?;
+                        log::info!("Queried edge fragments for edge {} -> {} '{}' (found {})", args.src_id, args.dst_id, args.edge_name, fragments.len());
+                        let fragments_list: Vec<JsonValue> = fragments.into_iter().map(|(ts, content)| {
+                            let content_text = content.decode_string().unwrap_or_else(|_| "Unable to decode content".to_string());
+                            json!({ "timestamp_millis": ts.0, "content": content_text })
+                        }).collect();
+                        Ok(json!({
+                            "src_id": args.src_id,
+                            "dst_id": args.dst_id,
+                            "edge_name": args.edge_name,
+                            "fragments": fragments_list,
+                            "count": fragments_list.len()
+                        }))
+                    })
+                }
+            })
+            .with_description("Get content fragments for an edge within a time range"),
+        );
+
+    builder.build()
 }
