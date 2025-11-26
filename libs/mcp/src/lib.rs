@@ -107,6 +107,24 @@ impl MotlieMcpServer {
             Some(TimestampMilli(param.valid_until)),
         )
     }
+
+    /// Convert content with optional MIME type and base64 flag to DataUrl
+    fn content_to_dataurl(content: &str, mime_type: Option<&str>, base64_encoded: bool) -> DataUrl {
+        let mime = mime_type.unwrap_or("text/plain");
+
+        if base64_encoded {
+            // Content is already base64-encoded, construct data URL directly
+            DataUrl::from_raw(format!("data:{};base64,{}", mime, content))
+        } else {
+            // Plain text content - use appropriate constructor based on MIME type
+            match mime {
+                "text/markdown" => DataUrl::from_markdown(content),
+                "application/json" => DataUrl::from_json(content),
+                "text/html" => DataUrl::from_html(content),
+                _ => DataUrl::from_text(content),
+            }
+        }
+    }
 }
 
 #[tool_router]
@@ -196,7 +214,7 @@ impl MotlieMcpServer {
         )]))
     }
 
-    #[tool(description = "Add a content fragment to an existing node")]
+    #[tool(description = "Add a content fragment to an existing node. For text content, pass the text directly. For binary content (images), base64-encode the data and set base64_encoded=true with the appropriate mime_type (e.g., 'image/png').")]
     async fn add_node_fragment(
         &self,
         Parameters(params): Parameters<AddNodeFragmentParams>,
@@ -207,12 +225,18 @@ impl MotlieMcpServer {
             McpError::invalid_params(format!("Invalid node ID: {}", e), None)
         })?;
 
+        let content = Self::content_to_dataurl(
+            &params.content,
+            params.mime_type.as_deref(),
+            params.base64_encoded.unwrap_or(false),
+        );
+
         let mutation = AddNodeFragment {
             id,
             ts_millis: TimestampMilli(
                 params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0),
             ),
-            content: DataUrl::from_text(&params.content),
+            content,
             temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
         };
 
@@ -220,18 +244,19 @@ impl MotlieMcpServer {
             McpError::internal_error(format!("Failed to add node fragment: {}", e), None)
         })?;
 
-        tracing::info!("Added fragment to node: {}", params.id);
+        tracing::info!("Added fragment to node: {} (mime_type: {:?})", params.id, params.mime_type);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&json!({
                 "success": true,
                 "message": format!("Successfully added fragment to node {}", params.id),
-                "node_id": params.id
+                "node_id": params.id,
+                "mime_type": params.mime_type.unwrap_or_else(|| "text/plain".to_string())
             })).unwrap()
         )]))
     }
 
-    #[tool(description = "Add a content fragment to an existing edge")]
+    #[tool(description = "Add a content fragment to an existing edge. For text content, pass the text directly. For binary content (images), base64-encode the data and set base64_encoded=true with the appropriate mime_type (e.g., 'image/png').")]
     async fn add_edge_fragment(
         &self,
         Parameters(params): Parameters<AddEdgeFragmentParams>,
@@ -245,6 +270,12 @@ impl MotlieMcpServer {
             McpError::invalid_params(format!("Invalid destination node ID: {}", e), None)
         })?;
 
+        let content = Self::content_to_dataurl(
+            &params.content,
+            params.mime_type.as_deref(),
+            params.base64_encoded.unwrap_or(false),
+        );
+
         let mutation = AddEdgeFragment {
             src_id,
             dst_id,
@@ -252,7 +283,7 @@ impl MotlieMcpServer {
             ts_millis: TimestampMilli(
                 params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0),
             ),
-            content: DataUrl::from_text(&params.content),
+            content,
             temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
         };
 
@@ -260,7 +291,7 @@ impl MotlieMcpServer {
             McpError::internal_error(format!("Failed to add edge fragment: {}", e), None)
         })?;
 
-        tracing::info!("Added fragment to edge: {} -> {} ({})", params.src_id, params.dst_id, params.edge_name);
+        tracing::info!("Added fragment to edge: {} -> {} ({}) (mime_type: {:?})", params.src_id, params.dst_id, params.edge_name, params.mime_type);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&json!({
@@ -268,7 +299,8 @@ impl MotlieMcpServer {
                 "message": format!("Successfully added fragment to edge {} -> {} ({})", params.src_id, params.dst_id, params.edge_name),
                 "src_id": params.src_id,
                 "dst_id": params.dst_id,
-                "edge_name": params.edge_name
+                "edge_name": params.edge_name,
+                "mime_type": params.mime_type.unwrap_or_else(|| "text/plain".to_string())
             })).unwrap()
         )]))
     }
@@ -750,7 +782,10 @@ impl ServerHandler for MotlieMcpServer {
                 and 8 query operations (query_node_by_id, query_edge, query_outgoing_edges, \
                 query_incoming_edges, query_nodes_by_name, query_edges_by_name, query_node_fragments, \
                 query_edge_fragments). All IDs are base32-encoded ULIDs. Timestamps are in milliseconds \
-                since Unix epoch.".to_string()
+                since Unix epoch. Fragment content supports multiple MIME types including text/plain \
+                (default), text/markdown, application/json, text/html, and binary formats like image/png \
+                and image/jpeg. For binary content, base64-encode the data and set base64_encoded=true \
+                with the appropriate mime_type.".to_string()
             ),
         }
     }

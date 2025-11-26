@@ -125,6 +125,16 @@ impl DataUrl {
         DataUrl(data_url)
     }
 
+    /// Create a DataUrl from a pre-formed data URL string.
+    ///
+    /// This is useful when the caller has already constructed a valid
+    /// RFC 2397 data URL (e.g., "data:image/png;base64,iVBORw0KGgo...").
+    ///
+    /// Note: This does not validate the data URL format.
+    pub fn from_raw(data_url: String) -> Self {
+        DataUrl(data_url)
+    }
+
     /// Create a DataUrl for markdown content
     pub fn from_markdown(content: impl AsRef<str>) -> Self {
         Self::new(content.as_ref().as_bytes(), "text/markdown;charset=utf-8")

@@ -60,8 +60,17 @@ pub struct AddNodeFragmentParams {
     /// Node UUID
     pub id: String,
 
-    /// Fragment content (text)
+    /// Fragment content - plain text or base64-encoded binary data
     pub content: String,
+
+    /// MIME type of the content (defaults to "text/plain")
+    /// Common values: "text/plain", "text/markdown", "application/json",
+    /// "text/html", "image/png", "image/jpeg"
+    pub mime_type: Option<String>,
+
+    /// Set to true if content is base64-encoded (required for binary data like images)
+    #[serde(default)]
+    pub base64_encoded: Option<bool>,
 
     /// Optional timestamp (defaults to current time)
     pub ts_millis: Option<u64>,
@@ -82,8 +91,17 @@ pub struct AddEdgeFragmentParams {
     /// Edge name
     pub edge_name: String,
 
-    /// Fragment content (text)
+    /// Fragment content - plain text or base64-encoded binary data
     pub content: String,
+
+    /// MIME type of the content (defaults to "text/plain")
+    /// Common values: "text/plain", "text/markdown", "application/json",
+    /// "text/html", "image/png", "image/jpeg"
+    pub mime_type: Option<String>,
+
+    /// Set to true if content is base64-encoded (required for binary data like images)
+    #[serde(default)]
+    pub base64_encoded: Option<bool>,
 
     /// Optional timestamp (defaults to current time)
     pub ts_millis: Option<u64>,
