@@ -10,6 +10,32 @@ This example demonstrates how to run the Motlie graph database as an MCP (Model 
 - **Multi-threaded query processing**: Worker pool with shared TransactionDB for 99%+ consistency
 - 15 tools: 7 mutations + 8 queries
 
+## Known Issues / SDK Compatibility
+
+This section documents the compatibility status of different MCP SDK implementations with various transport modes. All testing was performed with both **Claude Desktop** and **Claude Code**.
+
+### PMCP SDK (Pragmatic AI Labs)
+
+| Transport | Status | Notes |
+|-----------|--------|-------|
+| **stdio** | :x: Not Working | Does not work even with lazy database initialization. The server fails to properly communicate over stdio transport. |
+| **HTTP** | :white_check_mark: Working | Fully functional with HTTP transport. Recommended for use with Claude Desktop and Claude Code. |
+
+**Recommendation**: Use HTTP transport (`--transport http`) when using the PMCP-based MCP server.
+
+### RMP SDK (modelcontextprotocol/)
+
+| Transport | Status | Notes |
+|-----------|--------|-------|
+| **stdio** | :white_check_mark: Working | Works correctly with lazy database initialization. |
+| **HTTP** | :white_check_mark: Working | Works correctly with lazy database initialization. |
+
+The RMP implementation (standard SDK from `modelcontextprotocol/`) works reliably in both stdio and HTTP modes.
+
+### Summary
+
+If you need **stdio transport** (e.g., for simpler local setups), consider using the RMP-based implementation instead of PMCP. For **HTTP transport**, both implementations work correctly.
+
 ## Quick Start
 
 ### Build the Server
@@ -258,39 +284,51 @@ After adding the configuration:
 
 ## Integration with Claude Desktop App
 
-Claude Desktop (version 2025.x) supports local MCP servers through a configuration file.
+Claude Desktop (version 2025.x) supports MCP servers through a configuration file.
+
+**Important**: The HTTP transport is recommended for Claude Desktop as it provides more reliable communication than stdio transport.
 
 ### Configuration Steps
 
-1. **Open Claude Desktop**
-2. **Click Settings** (gear icon in lower-left corner)
-3. **Select the Developer tab**
-4. **Click "Edit Config"** - this opens `claude_desktop_config.json`
+1. **Build the MCP server binary**
+   ```bash
+   cd /path/to/motlie
+   cargo build --release --example mcp
+   ```
+
+2. **Start the HTTP server** (in a terminal that stays open, or as a background service)
+   ```bash
+   ./target/release/examples/mcp \
+       --db-path /path/to/your/database \
+       --transport http \
+       --port 8080
+   ```
+
+   You should see output like:
+   ```
+   INFO mcp: Starting HTTP server on 127.0.0.1:8080
+   INFO mcp: ✓ HTTP server started successfully
+   INFO mcp:   Bound to: http://127.0.0.1:8080
+   ```
+
+3. **Open Claude Desktop**
+4. **Click Settings** (gear icon in lower-left corner)
+5. **Select the Developer tab**
+6. **Click "Edit Config"** - this opens `claude_desktop_config.json`
 
 **Configuration file location:**
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-### Example Configuration
+### Example Configuration (HTTP Transport - Recommended)
 
-**Basic setup (stdio, no auth):**
+**Basic setup (HTTP, no auth):**
 
 ```json
 {
   "mcpServers": {
     "motlie-db": {
-      "command": "cargo",
-      "args": [
-        "run",
-        "--release",
-        "--example",
-        "mcp",
-        "--",
-        "--db-path",
-        "/Users/yourname/data/motlie.db",
-        "--transport",
-        "stdio"
-      ]
+      "url": "http://127.0.0.1:8080/"
     }
   }
 }
@@ -302,55 +340,115 @@ Claude Desktop (version 2025.x) supports local MCP servers through a configurati
 {
   "mcpServers": {
     "motlie-db": {
-      "command": "/usr/local/bin/motlie-mcp",
-      "args": [
-        "--db-path",
-        "/Users/yourname/data/motlie.db",
-        "--transport",
-        "stdio",
-        "--auth-token",
-        "your-secret-token"
-      ],
-      "env": {
-        "RUST_LOG": "info"
+      "url": "http://127.0.0.1:8080/",
+      "headers": {
+        "Authorization": "Bearer your-secret-token"
       }
     }
   }
 }
 ```
 
-**Production setup with binary:**
+Start the server with authentication:
+```bash
+./target/release/examples/mcp \
+    --db-path /path/to/your/database \
+    --transport http \
+    --port 8080 \
+    --auth-token "your-secret-token"
+```
+
+**Remote server setup:**
 
 ```json
 {
   "mcpServers": {
-    "motlie-db": {
-      "command": "/usr/local/bin/motlie-mcp",
-      "args": [
-        "--db-path",
-        "/var/lib/motlie/production.db",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "RUST_LOG": "warn",
-        "RUST_BACKTRACE": "1"
+    "motlie-db-remote": {
+      "url": "http://your-server.example.com:8080/",
+      "headers": {
+        "Authorization": "Bearer your-secret-token"
       }
     }
   }
 }
 ```
 
+### Running the Server as a Background Service (macOS)
+
+For persistent operation, create a launchd service:
+
+1. Create `~/Library/LaunchAgents/com.motlie.mcp.plist`:
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+       <key>Label</key>
+       <string>com.motlie.mcp</string>
+       <key>ProgramArguments</key>
+       <array>
+           <string>/path/to/motlie/target/release/examples/mcp</string>
+           <string>--db-path</string>
+           <string>/path/to/your/database</string>
+           <string>--transport</string>
+           <string>http</string>
+           <string>--port</string>
+           <string>8080</string>
+       </array>
+       <key>RunAtLoad</key>
+       <true/>
+       <key>KeepAlive</key>
+       <true/>
+       <key>StandardOutPath</key>
+       <string>/tmp/motlie-mcp.log</string>
+       <key>StandardErrorPath</key>
+       <string>/tmp/motlie-mcp.err</string>
+   </dict>
+   </plist>
+   ```
+
+2. Load the service:
+   ```bash
+   launchctl load ~/Library/LaunchAgents/com.motlie.mcp.plist
+   ```
+
+3. Check status:
+   ```bash
+   launchctl list | grep motlie
+   ```
+
 ### Verification
 
-1. **Save the configuration file**
-2. **Restart Claude Desktop** completely (quit and reopen)
-3. **Start a new conversation**
-4. **Test the connection** by asking Claude:
+1. **Ensure the HTTP server is running** (check with `curl http://127.0.0.1:8080/` or look at the terminal)
+2. **Save the configuration file**
+3. **Restart Claude Desktop** completely (quit and reopen)
+4. **Start a new conversation**
+5. **Test the connection** by asking Claude:
    - "What MCP tools are available?"
    - "Can you add a node to the graph database?"
 
 If configured correctly, Claude will list the Motlie MCP tools and be able to interact with your database.
+
+### Troubleshooting HTTP Transport
+
+1. **Server not responding**: Ensure the MCP server is running in a separate terminal
+   ```bash
+   curl -X POST http://127.0.0.1:8080/ \
+       -H "Content-Type: application/json" \
+       -H "Accept: application/json" \
+       -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+   ```
+   You should receive a JSON response with server info.
+
+2. **Port already in use**: Change the port with `--port 8081` or another available port
+
+3. **Check server logs**: Run with `RUST_LOG=debug` for detailed output
+   ```bash
+   RUST_LOG=debug ./target/release/examples/mcp \
+       --db-path /path/to/database \
+       --transport http \
+       --port 8080
+   ```
 
 ## Available MCP Tools
 
@@ -407,38 +505,47 @@ mkdir -p ~/motlie-databases/my-first-graph
 echo ~/motlie-databases/my-first-graph
 ```
 
-### Step 3: Configure Claude Desktop
+### Step 3: Start the HTTP Server
+
+Start the MCP server with HTTP transport (keep this terminal open):
+
+```bash
+./target/release/examples/mcp \
+    --db-path ~/motlie-databases/my-first-graph \
+    --transport http \
+    --port 8080
+```
+
+You should see:
+```
+INFO mcp: Starting HTTP server on 127.0.0.1:8080
+INFO mcp: ✓ HTTP server started successfully
+INFO mcp:   Bound to: http://127.0.0.1:8080
+```
+
+### Step 4: Configure Claude Desktop
 
 1. **Open Claude Desktop**
 2. **Click the Settings icon** (gear in lower-left corner)
 3. **Go to the Developer tab**
 4. **Click "Edit Config"** to open `claude_desktop_config.json`
 
-Add this configuration (update paths for your system):
+Add this configuration:
 
 ```json
 {
   "mcpServers": {
     "motlie-graph": {
-      "command": "/Users/yourname/motlie/target/release/examples/mcp",
-      "args": [
-        "--db-path",
-        "/Users/yourname/motlie-databases/my-first-graph"
-      ],
-      "env": {
-        "RUST_LOG": "info"
-      }
+      "url": "http://127.0.0.1:8080/"
     }
   }
 }
 ```
 
-**Important**: Replace `/Users/yourname` with your actual home directory path!
+5. **Save the file**
+6. **Completely quit and restart Claude Desktop** (not just close the window)
 
-4. **Save the file**
-5. **Completely quit and restart Claude Desktop** (not just close the window)
-
-### Step 4: Verify Connection
+### Step 5: Verify Connection
 
 After Claude Desktop restarts:
 
@@ -448,11 +555,11 @@ After Claude Desktop restarts:
 
 If you see the Motlie tools, you're connected! 🎉
 
-### Step 5: Build Your First Graph
+### Step 6: Build Your First Graph
 
 Let's create a simple knowledge graph about a team:
 
-**Step 5.1: Create Nodes for Team Members**
+**Step 6.1: Create Nodes for Team Members**
 
 ```
 You: "I want to create a knowledge graph about my team. Create nodes for Alice and Bob."
@@ -485,13 +592,13 @@ Response: {
 
 **Note:** The returned `node_id` values are used for subsequent operations like creating edges.
 
-**Step 5.2: Create Relationships**
+**Step 6.2: Create Relationships**
 
 ```
 You: "Create a 'reports_to' edge from Alice to Bob with weight 1.0"
 ```
 
-Claude will use `add_edge` with the node IDs returned from Step 5.1:
+Claude will use `add_edge` with the node IDs returned from Step 6.1:
 ```json
 Tool: add_edge
 Arguments: {
@@ -503,7 +610,7 @@ Arguments: {
 }
 ```
 
-**Step 5.3: Query the Graph**
+**Step 6.3: Query the Graph**
 
 ```
 You: "Show me all outgoing edges from Alice"
@@ -511,7 +618,7 @@ You: "Show me all outgoing edges from Alice"
 
 Claude will use `query_outgoing_edges` and show you that Alice reports to Bob.
 
-**Step 5.4: Add Rich Content**
+**Step 6.4: Add Rich Content**
 
 ```
 You: "Add a note to Alice's node saying 'Senior Software Engineer, joined 2023'"
@@ -526,7 +633,7 @@ Arguments: {
 }
 ```
 
-### Step 6: Advanced Example - Build a Complete Project Graph
+### Step 7: Advanced Example - Build a Complete Project Graph
 
 Let's build a more complex graph representing a software project:
 
