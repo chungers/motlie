@@ -51,6 +51,37 @@ motlie/
   - All mutation types (`AddNode`, `AddEdge`, etc.)
   - All query types (`NodeById`, `OutgoingEdges`, etc.)
 
+## Key Design Decisions
+
+### Text-Only Fragments (No Binary Content via MCP)
+
+Fragment content in `add_node_fragment` and `add_edge_fragment` is intentionally **text-only**. This is a deliberate design decision to prevent context window bloat when AI agents interact with the graph.
+
+**The Problem with Binary Content in MCP Tools:**
+
+When an AI agent (like Claude Code) needs to store binary content (e.g., an image), it would need to:
+1. Fetch the content from a URL into its context window
+2. Base64 encode it (~33% size increase)
+3. Pass the entire encoded blob as an MCP tool parameter
+4. The MCP tool call becomes part of the conversation context
+
+This creates several issues:
+- **Context window exhaustion**: A 1MB image becomes ~1.33MB of text in context
+- **Inefficient data flow**: The agent becomes an unnecessary middleman for binary data
+- **No streaming**: The entire blob must be present in memory for the tool call
+- **Cumulative impact**: Multiple images quickly exhaust the context window
+
+**The Solution:**
+
+Fragment tools accept only text content. The underlying `DataUrl` type in `motlie-db` supports various content types internally, but the MCP API intentionally restricts input to text.
+
+For binary content, use one of these patterns:
+1. **URL references**: Store the binary externally and reference it by URL in text fragments
+2. **External storage**: Use a separate upload mechanism outside the MCP/chat flow
+3. **Direct programmatic access**: Use `motlie-db` directly (not via MCP) for binary content
+
+**Note**: The internal helper functions (`content_to_dataurl`, `DataUrl::from_raw`) remain available for direct library usage where context windows are not a concern.
+
 ## Core Design Patterns
 
 ### 1. ServerBuilder Pattern (pmcp)
@@ -214,10 +245,10 @@ Error types:
 
 | MCP Tool | Mutation Type | Description | Parameters |
 |----------|---------------|-------------|------------|
-| `add_node` | `AddNode` | Create a new node | `id`, `name`, `ts_millis?`, `temporal_range?` |
+| `add_node` | `AddNode` | Create a new node | `name`, `ts_millis?`, `temporal_range?` |
 | `add_edge` | `AddEdge` | Create an edge | `source_node_id`, `target_node_id`, `name`, `summary`, `weight?`, `ts_millis?`, `temporal_range?` |
-| `add_node_fragment` | `AddNodeFragment` | Add content fragment to a node | `id`, `content`, `ts_millis?`, `temporal_range?` |
-| `add_edge_fragment` | `AddEdgeFragment` | Add content fragment to an edge | `src_id`, `dst_id`, `edge_name`, `content`, `ts_millis?`, `temporal_range?` |
+| `add_node_fragment` | `AddNodeFragment` | Add text content fragment to a node | `id`, `content`, `ts_millis?`, `temporal_range?` |
+| `add_edge_fragment` | `AddEdgeFragment` | Add text content fragment to an edge | `src_id`, `dst_id`, `edge_name`, `content`, `ts_millis?`, `temporal_range?` |
 | `update_node_valid_range` | `UpdateNodeValidSinceUntil` | Update temporal validity of a node | `id`, `temporal_range`, `reason` |
 | `update_edge_valid_range` | `UpdateEdgeValidSinceUntil` | Update temporal validity of an edge | `src_id`, `dst_id`, `name`, `temporal_range`, `reason` |
 | `update_edge_weight` | `UpdateEdgeWeight` | Update the weight of an edge | `src_id`, `dst_id`, `name`, `weight` |

@@ -560,6 +560,19 @@ Run multiple MCP servers for different databases:
 
 **A:** Not in the current version. Use temporal validity ranges to mark items as no longer valid.
 
+### Q: Why are fragments text-only? Can I store images or binary data?
+
+**A:** Fragments are intentionally **text-only** to prevent context window bloat.
+
+When an AI agent (like Claude Code) fetches binary content (e.g., an image from a URL), it would need to:
+1. Fetch the content into its context
+2. Base64 encode it (~33% size increase)
+3. Pass the entire encoded blob through the MCP tool call
+
+This encoded content becomes part of the agent's conversation context, which is precious and limited. A 1MB image would consume ~1.33MB of context window space, and multiple images would quickly exhaust it.
+
+The MCP tool API is designed for **structured data exchange**, not binary data transport. If you need to reference binary content, store it externally and reference it by URL or ID in your text fragments.
+
 ## References
 
 ### MCP Protocol Documentation
