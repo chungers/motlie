@@ -121,6 +121,7 @@ pub async fn serve_http(server: MotlieMcpServer, config: HttpConfig) -> Result<(
     // Serve with graceful shutdown on Ctrl+C
     axum::serve(listener, router)
         .with_graceful_shutdown(async {
+            // kill -2 <PID> to gracefully shutdown the server.
             tokio::signal::ctrl_c().await.ok();
             tracing::info!("Graceful shutdown initiated");
         })

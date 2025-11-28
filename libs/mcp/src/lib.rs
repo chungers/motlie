@@ -9,22 +9,19 @@
 //! - **stdio**: Standard input/output for local process communication
 //! - **http**: HTTP with Streamable HTTP protocol (using axum)
 
-pub mod types;
 pub mod http;
+pub mod types;
 
 use motlie_db::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, DataUrl, EdgeFragmentsByIdTimeRange,
-    EdgeSummary, EdgesByName, EdgeSummaryBySrcDstName, Id, IncomingEdges, MutationRunnable,
-    NodeById, NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges,
-    QueryRunnable, Reader, TimestampMilli, UpdateEdgeValidSinceUntil,
-    UpdateEdgeWeight, UpdateNodeValidSinceUntil, ValidTemporalRange, Writer,
+    EdgeSummary, EdgeSummaryBySrcDstName, EdgesByName, Id, IncomingEdges, MutationRunnable,
+    NodeById, NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, QueryRunnable, Reader,
+    TimestampMilli, UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
+    ValidTemporalRange, Writer,
 };
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
-    handler::server::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router,
+    handler::server::tool::ToolRouter, handler::server::wrapper::Parameters, model::*, tool,
+    tool_handler, tool_router, ErrorData as McpError, ServerHandler,
 };
 use serde_json::json;
 use std::ops::Bound;
@@ -56,13 +53,17 @@ impl LazyDatabase {
     /// Get or initialize the writer
     pub async fn writer(&self) -> Result<&Writer, McpError> {
         self.ensure_initialized().await?;
-        self.writer.get().ok_or_else(|| McpError::internal_error("Writer not initialized", None))
+        self.writer
+            .get()
+            .ok_or_else(|| McpError::internal_error("Writer not initialized", None))
     }
 
     /// Get or initialize the reader
     pub async fn reader(&self) -> Result<&Reader, McpError> {
         self.ensure_initialized().await?;
-        self.reader.get().ok_or_else(|| McpError::internal_error("Reader not initialized", None))
+        self.reader
+            .get()
+            .ok_or_else(|| McpError::internal_error("Reader not initialized", None))
     }
 
     async fn ensure_initialized(&self) -> Result<(), McpError> {
@@ -138,7 +139,9 @@ impl MotlieMcpServer {
         }
     }
 
-    #[tool(description = "Create a new node in the graph with name and optional temporal validity range (ID is auto-generated)")]
+    #[tool(
+        description = "Create a new node in the graph with name and optional temporal validity range (ID is auto-generated)"
+    )]
     async fn add_node(
         &self,
         Parameters(params): Parameters<AddNodeParams>,
@@ -149,15 +152,14 @@ impl MotlieMcpServer {
         let mutation = AddNode {
             id,
             name: params.name.clone(),
-            ts_millis: TimestampMilli(
-                params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0),
-            ),
+            ts_millis: TimestampMilli(params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0)),
             temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
         };
 
-        mutation.run(writer).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to add node: {}", e), None)
-        })?;
+        mutation
+            .run(writer)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Failed to add node: {}", e), None))?;
 
         tracing::info!("Added node: {} ({})", params.name, id);
 
@@ -171,7 +173,9 @@ impl MotlieMcpServer {
         )]))
     }
 
-    #[tool(description = "Create an edge between two nodes with optional weight and temporal validity")]
+    #[tool(
+        description = "Create an edge between two nodes with optional weight and temporal validity"
+    )]
     async fn add_edge(
         &self,
         Parameters(params): Parameters<AddEdgeParams>,
@@ -188,20 +192,24 @@ impl MotlieMcpServer {
         let mutation = AddEdge {
             source_node_id: source_id,
             target_node_id: target_id,
-            ts_millis: TimestampMilli(
-                params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0),
-            ),
+            ts_millis: TimestampMilli(params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0)),
             name: params.name.clone(),
             temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
             summary: EdgeSummary::from_text(&params.summary),
             weight: params.weight,
         };
 
-        mutation.run(writer).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to add edge: {}", e), None)
-        })?;
+        mutation
+            .run(writer)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Failed to add edge: {}", e), None))?;
 
-        tracing::info!("Added edge: {} -> {} ({})", params.source_node_id, params.target_node_id, params.name);
+        tracing::info!(
+            "Added edge: {} -> {} ({})",
+            params.source_node_id,
+            params.target_node_id,
+            params.name
+        );
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&json!({
@@ -221,15 +229,12 @@ impl MotlieMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let writer = self.db.writer().await?;
 
-        let id = Id::from_str(&params.id).map_err(|e| {
-            McpError::invalid_params(format!("Invalid node ID: {}", e), None)
-        })?;
+        let id = Id::from_str(&params.id)
+            .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
 
         let mutation = AddNodeFragment {
             id,
-            ts_millis: TimestampMilli(
-                params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0),
-            ),
+            ts_millis: TimestampMilli(params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0)),
             content: DataUrl::from_text(&params.content),
             temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
         };
@@ -245,7 +250,8 @@ impl MotlieMcpServer {
                 "success": true,
                 "message": format!("Successfully added fragment to node {}", params.id),
                 "node_id": params.id
-            })).unwrap()
+            }))
+            .unwrap(),
         )]))
     }
 
@@ -267,9 +273,7 @@ impl MotlieMcpServer {
             src_id,
             dst_id,
             edge_name: params.edge_name.clone(),
-            ts_millis: TimestampMilli(
-                params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0),
-            ),
+            ts_millis: TimestampMilli(params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0)),
             content: DataUrl::from_text(&params.content),
             temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
         };
@@ -278,7 +282,12 @@ impl MotlieMcpServer {
             McpError::internal_error(format!("Failed to add edge fragment: {}", e), None)
         })?;
 
-        tracing::info!("Added fragment to edge: {} -> {} ({})", params.src_id, params.dst_id, params.edge_name);
+        tracing::info!(
+            "Added fragment to edge: {} -> {} ({})",
+            params.src_id,
+            params.dst_id,
+            params.edge_name
+        );
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&json!({
@@ -298,9 +307,8 @@ impl MotlieMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let writer = self.db.writer().await?;
 
-        let id = Id::from_str(&params.id).map_err(|e| {
-            McpError::invalid_params(format!("Invalid node ID: {}", e), None)
-        })?;
+        let id = Id::from_str(&params.id)
+            .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
 
         let mutation = UpdateNodeValidSinceUntil {
             id,
@@ -312,14 +320,19 @@ impl MotlieMcpServer {
             McpError::internal_error(format!("Failed to update node validity: {}", e), None)
         })?;
 
-        tracing::info!("Updated validity range for node: {} ({})", params.id, params.reason);
+        tracing::info!(
+            "Updated validity range for node: {} ({})",
+            params.id,
+            params.reason
+        );
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&json!({
                 "success": true,
                 "message": format!("Successfully updated validity range for node {}", params.id),
                 "node_id": params.id
-            })).unwrap()
+            }))
+            .unwrap(),
         )]))
     }
 
@@ -349,7 +362,13 @@ impl MotlieMcpServer {
             McpError::internal_error(format!("Failed to update edge validity: {}", e), None)
         })?;
 
-        tracing::info!("Updated validity range for edge: {} -> {} ({}, {})", params.src_id, params.dst_id, params.name, params.reason);
+        tracing::info!(
+            "Updated validity range for edge: {} -> {} ({}, {})",
+            params.src_id,
+            params.dst_id,
+            params.name,
+            params.reason
+        );
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&json!({
@@ -387,7 +406,13 @@ impl MotlieMcpServer {
             McpError::internal_error(format!("Failed to update edge weight: {}", e), None)
         })?;
 
-        tracing::info!("Updated weight for edge: {} -> {} ({}) = {}", params.src_id, params.dst_id, params.name, params.weight);
+        tracing::info!(
+            "Updated weight for edge: {} -> {} ({}) = {}",
+            params.src_id,
+            params.dst_id,
+            params.name,
+            params.weight
+        );
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&json!({
@@ -408,9 +433,8 @@ impl MotlieMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let reader = self.db.reader().await?;
 
-        let id = Id::from_str(&params.id).map_err(|e| {
-            McpError::invalid_params(format!("Invalid node ID: {}", e), None)
-        })?;
+        let id = Id::from_str(&params.id)
+            .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
 
         let query = NodeById::new(id, params.reference_ts_millis.map(TimestampMilli));
 
@@ -430,7 +454,8 @@ impl MotlieMcpServer {
                 "node_id": params.id,
                 "name": name,
                 "summary": summary_text
-            })).unwrap()
+            }))
+            .unwrap(),
         )]))
     }
 
@@ -464,7 +489,12 @@ impl MotlieMcpServer {
             .decode_string()
             .unwrap_or_else(|_| "Unable to decode summary".to_string());
 
-        tracing::info!("Queried edge: {} -> {} ({})", params.source_id, params.dest_id, params.name);
+        tracing::info!(
+            "Queried edge: {} -> {} ({})",
+            params.source_id,
+            params.dest_id,
+            params.name
+        );
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&json!({
@@ -473,7 +503,8 @@ impl MotlieMcpServer {
                 "name": params.name,
                 "summary": summary_text,
                 "weight": weight
-            })).unwrap()
+            }))
+            .unwrap(),
         )]))
     }
 
@@ -484,18 +515,20 @@ impl MotlieMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let reader = self.db.reader().await?;
 
-        let id = Id::from_str(&params.id).map_err(|e| {
-            McpError::invalid_params(format!("Invalid node ID: {}", e), None)
-        })?;
+        let id = Id::from_str(&params.id)
+            .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
 
         let query = OutgoingEdges::new(id, params.reference_ts_millis.map(TimestampMilli));
 
-        let edges = query
-            .run(reader, self.query_timeout)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to query outgoing edges: {}", e), None))?;
+        let edges = query.run(reader, self.query_timeout).await.map_err(|e| {
+            McpError::internal_error(format!("Failed to query outgoing edges: {}", e), None)
+        })?;
 
-        tracing::info!("Queried outgoing edges from node: {} (found {})", params.id, edges.len());
+        tracing::info!(
+            "Queried outgoing edges from node: {} (found {})",
+            params.id,
+            edges.len()
+        );
 
         let edges_list: Vec<serde_json::Value> = edges
             .into_iter()
@@ -513,7 +546,8 @@ impl MotlieMcpServer {
                 "node_id": params.id,
                 "edges": edges_list,
                 "count": edges_list.len()
-            })).unwrap()
+            }))
+            .unwrap(),
         )]))
     }
 
@@ -524,18 +558,20 @@ impl MotlieMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let reader = self.db.reader().await?;
 
-        let id = Id::from_str(&params.id).map_err(|e| {
-            McpError::invalid_params(format!("Invalid node ID: {}", e), None)
-        })?;
+        let id = Id::from_str(&params.id)
+            .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
 
         let query = IncomingEdges::new(id, params.reference_ts_millis.map(TimestampMilli));
 
-        let edges = query
-            .run(reader, self.query_timeout)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to query incoming edges: {}", e), None))?;
+        let edges = query.run(reader, self.query_timeout).await.map_err(|e| {
+            McpError::internal_error(format!("Failed to query incoming edges: {}", e), None)
+        })?;
 
-        tracing::info!("Queried incoming edges to node: {} (found {})", params.id, edges.len());
+        tracing::info!(
+            "Queried incoming edges to node: {} (found {})",
+            params.id,
+            edges.len()
+        );
 
         let edges_list: Vec<serde_json::Value> = edges
             .into_iter()
@@ -553,7 +589,8 @@ impl MotlieMcpServer {
                 "node_id": params.id,
                 "edges": edges_list,
                 "count": edges_list.len()
-            })).unwrap()
+            }))
+            .unwrap(),
         )]))
     }
 
@@ -571,12 +608,15 @@ impl MotlieMcpServer {
             params.reference_ts_millis.map(TimestampMilli),
         );
 
-        let nodes = query
-            .run(reader, self.query_timeout)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to query nodes by name: {}", e), None))?;
+        let nodes = query.run(reader, self.query_timeout).await.map_err(|e| {
+            McpError::internal_error(format!("Failed to query nodes by name: {}", e), None)
+        })?;
 
-        tracing::info!("Queried nodes by name: '{}' (found {})", params.name, nodes.len());
+        tracing::info!(
+            "Queried nodes by name: '{}' (found {})",
+            params.name,
+            nodes.len()
+        );
 
         let nodes_list: Vec<serde_json::Value> = nodes
             .into_iter()
@@ -593,7 +633,8 @@ impl MotlieMcpServer {
                 "search_name": params.name,
                 "nodes": nodes_list,
                 "count": nodes_list.len()
-            })).unwrap()
+            }))
+            .unwrap(),
         )]))
     }
 
@@ -611,12 +652,15 @@ impl MotlieMcpServer {
             params.reference_ts_millis.map(TimestampMilli),
         );
 
-        let edges = query
-            .run(reader, self.query_timeout)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to query edges by name: {}", e), None))?;
+        let edges = query.run(reader, self.query_timeout).await.map_err(|e| {
+            McpError::internal_error(format!("Failed to query edges by name: {}", e), None)
+        })?;
 
-        tracing::info!("Queried edges by name: '{}' (found {})", params.name, edges.len());
+        tracing::info!(
+            "Queried edges by name: '{}' (found {})",
+            params.name,
+            edges.len()
+        );
 
         let edges_list: Vec<serde_json::Value> = edges
             .into_iter()
@@ -633,7 +677,8 @@ impl MotlieMcpServer {
                 "search_name": params.name,
                 "edges": edges_list,
                 "count": edges_list.len()
-            })).unwrap()
+            }))
+            .unwrap(),
         )]))
     }
 
@@ -644,9 +689,8 @@ impl MotlieMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let reader = self.db.reader().await?;
 
-        let id = Id::from_str(&params.id).map_err(|e| {
-            McpError::invalid_params(format!("Invalid node ID: {}", e), None)
-        })?;
+        let id = Id::from_str(&params.id)
+            .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
 
         let start_bound = params
             .start_ts_millis
@@ -661,12 +705,15 @@ impl MotlieMcpServer {
             params.reference_ts_millis.map(TimestampMilli),
         );
 
-        let fragments = query
-            .run(reader, self.query_timeout)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to query node fragments: {}", e), None))?;
+        let fragments = query.run(reader, self.query_timeout).await.map_err(|e| {
+            McpError::internal_error(format!("Failed to query node fragments: {}", e), None)
+        })?;
 
-        tracing::info!("Queried node fragments for node: {} (found {})", params.id, fragments.len());
+        tracing::info!(
+            "Queried node fragments for node: {} (found {})",
+            params.id,
+            fragments.len()
+        );
 
         let fragments_list: Vec<serde_json::Value> = fragments
             .into_iter()
@@ -686,7 +733,8 @@ impl MotlieMcpServer {
                 "node_id": params.id,
                 "fragments": fragments_list,
                 "count": fragments_list.len()
-            })).unwrap()
+            }))
+            .unwrap(),
         )]))
     }
 
@@ -719,12 +767,17 @@ impl MotlieMcpServer {
             params.reference_ts_millis.map(TimestampMilli),
         );
 
-        let fragments = query
-            .run(reader, self.query_timeout)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Failed to query edge fragments: {}", e), None))?;
+        let fragments = query.run(reader, self.query_timeout).await.map_err(|e| {
+            McpError::internal_error(format!("Failed to query edge fragments: {}", e), None)
+        })?;
 
-        tracing::info!("Queried edge fragments for edge {} -> {} '{}' (found {})", params.src_id, params.dst_id, params.edge_name, fragments.len());
+        tracing::info!(
+            "Queried edge fragments for edge {} -> {} '{}' (found {})",
+            params.src_id,
+            params.dst_id,
+            params.edge_name,
+            fragments.len()
+        );
 
         let fragments_list: Vec<serde_json::Value> = fragments
             .into_iter()
@@ -746,7 +799,8 @@ impl MotlieMcpServer {
                 "edge_name": params.edge_name,
                 "fragments": fragments_list,
                 "count": fragments_list.len()
-            })).unwrap()
+            }))
+            .unwrap(),
         )]))
     }
 }
@@ -757,24 +811,77 @@ impl ServerHandler for MotlieMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
-            instructions: Some(
-                "This server provides tools to interact with the Motlie graph database. \
-                It supports 15 tools: 7 mutation operations (add_node, add_edge, add_node_fragment, \
-                add_edge_fragment, update_node_valid_range, update_edge_valid_range, update_edge_weight) \
-                and 8 query operations (query_node_by_id, query_edge, query_outgoing_edges, \
-                query_incoming_edges, query_nodes_by_name, query_edges_by_name, query_node_fragments, \
-                query_edge_fragments). All IDs are base32-encoded ULIDs. Timestamps are in milliseconds \
-                since Unix epoch. Fragment content is text-only to avoid context window bloat from \
-                large binary payloads.".to_string()
-            ),
+            instructions: Some(INFO_TEXT.to_string()),
         }
     }
 }
 
-/// Re-export for convenience
-pub use rmcp::{ServiceExt, transport::stdio};
+pub const INFO_TEXT: &str = INFO_TEXT_V2;
+
+const INFO_TEXT_V1: &str = "
+This server provides tools to interact with the Motlie graph database. \
+It supports 15 tools:
+  - 7 mutation operations (add_node, add_edge, add_node_fragment,
+  add_edge_fragment, update_node_valid_range, update_edge_valid_range, update_edge_weight
+  - 8 query operations (query_node_by_id, query_edge, query_outgoing_edges,
+  query_incoming_edges, query_nodes_by_name, query_edges_by_name, query_node_fragments,
+  query_edge_fragments). \
+  - The database does not support deletion of nodes or edges but allows setting validity
+  time range (since and until timestamps). For example, if a node should disappear after
+  a certain time, set its 'valid until' timestamp via the update_node_valid_range tool.\
+  - Timestamps are in milliseconds since Unix epoch. \
+  - To avoid duplication, it's useful to query an object by name first and confirm with the
+  user before calling the add_node or add_edge tools.
+  - Useful contexts about a node or edge can be added by calling the add_node_fragment or
+  add_edge_fragment tools.
+  - The fragments for a node or edge serve as a chronological history or a log of
+  useful tidbits, events, or state changes associated with the node or edge.
+  - If the content of a fragment is long and contains concepts and topics outside the scope
+  of the node or edge, it's recommended to create a new node and a new edge as the
+  relationship between the two. \
+";
+
+const INFO_TEXT_V2: &str = "
+This server provides tools to interact with the Motlie graph database.
+  - Timestamps are in milliseconds since Unix epoch. \
+  - Nodes are entities, Edges are relationships.
+    - To avoid duplication, ALWAYS query an object by name first (if its ID is not in the context).
+    Confirm with theuser before calling the add_node tool to model a new entity unseen before.  Nodes
+    cannot be deleted after creation.
+    - Relationships (edges) can have different names but similar meanings. Reuse string names when possible.
+  - Fragments model the properties, attributes, and state changes of entities (nodes) and relationships (edges).
+  - Properties, attributes, state changes of an entity or relationship can be added as fragments,
+  by calling the add_node_fragment or add_edge_fragment tools.
+    - A node or edge's fragments form a queryable history by time range.
+    - Fragments are ONLY for contexts, properties, and attributes about an entity or
+    a relationship.v
+  - No deletion of nodes or edges. ONLY invalidation by setting a validity time range (since and until timestamps).
+    - For example, if an event as a node (NeurIPS 2023) should disappear after a certain time
+    (e.g. 2024-01-01), set its 'valid until' timestamp via the update_node_valid_range tool.\
+ IMPORTANT RULES ABOUT GRAPH MODEL
+  - Think hard about how you model the user's text.  Consider the RDF model in analyzing the user's text:
+  subject, predicate, object. Subject and object are entities (nodes), while predicate / action forms
+  a relationship (edge) between them.
+  - Fragments are ONLY for contexts, properties, and attributes (for example, age, location,
+  time became active, time became inactive, etc.).
+  - A fragment MUST NOT be used to store content that contains concepts outside the scope of
+  the entity or relationship.  Prefer creating a new node and edge as the relationship
+  between the two, over using fragments.
+  - Example: Johnny Rabbit loves ice cream in the summer.  He is 7 years old. He started Reed Elementary School in Sept 2025.
+      - [BEST] Graph 1
+        - Node1 = Johnny, NodeFragment1_1 = 7 years old. NodeFragment1_2 = Last name is Rabbit,
+        - Node2 = Ice Cream, Edge2 = Johnny --[ loves ]--> Ice Cream.  EdgeFragment2_1 = in the summer
+        - Node3 = Reed Elementary School, Edge3 = Johnny -- [Started] --> Reed Elementary School, EdgeFragment3_1 = started in 09/2025
+      - [ACCEPTABLE] Graph 2
+        - Node1 = Johnny Rabbit, NodeFragment1_1 = 7 years old,
+        - Node2 = Ice Cream, Edge2 = Johnny Rabbit --[ loves ]--> Ice Cream.  EdgeFragment2_1 = in the summer
+        - Node3 = Reed Elementary School, Edge3 = Johnny Rabbit -- [Started] --> Reed Elementary School, EdgeFragment3_1 = 2025
+      - [BAD] Graph 3
+        - Node1 = Johnny Rabbit, NodeFragment1_1 = 7 years old. Loves ice cream and started Reed Elementary School in 2025,
+  ";
+
 pub use http::{serve_http, HttpConfig};
+/// Re-export for convenience
+pub use rmcp::{transport::stdio, ServiceExt};

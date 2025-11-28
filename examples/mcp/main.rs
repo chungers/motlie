@@ -1,7 +1,11 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use motlie_db::{create_mutation_writer, create_query_reader, Graph, ReaderConfig, Storage, WriterConfig, spawn_graph_consumer_with_graph, spawn_query_consumer_pool_shared};
-use motlie_mcp::{LazyDatabase, MotlieMcpServer, ServiceExt, stdio};
+use motlie_db::{
+    create_mutation_writer, create_query_reader, spawn_graph_consumer_with_graph,
+    spawn_query_consumer_pool_shared, Graph, ReaderConfig, Storage, WriterConfig,
+};
+use motlie_mcp::{stdio, LazyDatabase, MotlieMcpServer, ServiceExt, INFO_TEXT};
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -75,9 +79,15 @@ async fn main() -> Result<()> {
     // Initialize logging with tracing
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info,rmcp=debug".into()))
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr).with_ansi(false))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,rmcp=debug".into()),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(false),
+        )
         .init();
 
     // Parse command-line arguments FIRST (this is fast)
@@ -110,19 +120,13 @@ async fn main() -> Result<()> {
 
         // Create writer with background consumer using shared graph
         let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
-        let _mutation_handle = spawn_graph_consumer_with_graph(
-            mutation_receiver,
-            writer_config,
-            graph.clone(),
-        );
+        let _mutation_handle =
+            spawn_graph_consumer_with_graph(mutation_receiver, writer_config, graph.clone());
 
         // Create reader with background consumer pool for queries
         let (reader, query_receiver) = create_query_reader(reader_config.clone());
-        let _query_handles = spawn_query_consumer_pool_shared(
-            query_receiver,
-            graph.clone(),
-            query_workers,
-        );
+        let _query_handles =
+            spawn_query_consumer_pool_shared(query_receiver, graph.clone(), query_workers);
 
         tracing::info!(
             "Started {} query worker threads (shared TransactionDB, 99%+ consistency)",
@@ -143,6 +147,7 @@ async fn main() -> Result<()> {
     tracing::info!("Database will be initialized on first tool use (lazy initialization)");
     tracing::info!("Available tools: 15 (7 mutations + 8 queries)");
     tracing::info!("Transport: {}", args.transport);
+    tracing::info!("Instructions: {}", INFO_TEXT);
 
     // Start the server with the selected transport
     match args.transport {
