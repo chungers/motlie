@@ -46,6 +46,9 @@ data-url = "0.3"
 lz4 = "1.28"
 petgraph = "0.6"
 pathfinding = "4.0"
+clap = { version = "4.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 [[example]]
 name = "store"
@@ -70,3 +73,7 @@ path = "examples/graph/dijkstra.rs"
 [[example]]
 name = "pagerank"
 path = "examples/graph/pagerank.rs"
+
+[[bin]]
+name = "motlie"
+path = "bins/motlie/main.rs"

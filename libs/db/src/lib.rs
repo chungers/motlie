@@ -33,6 +33,9 @@ mod fulltext;
 pub use fulltext::*;
 mod schema;
 
+/// Scan API for iterating over column families with pagination support.
+pub mod scan;
+
 #[cfg(test)]
 mod fulltext_tests;
 #[cfg(test)]
