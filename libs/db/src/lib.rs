@@ -21,8 +21,8 @@ pub use reader::*;
 mod query;
 // Re-export query types and consumer functions
 pub use query::{
-    EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById, NodeFragmentsByIdTimeRange,
-    NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
+    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById,
+    NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
     Processor as QueryProcessor, Consumer as QueryConsumer,
 };
 // Note: spawn_query_consumer is exported from graph module via `pub use graph::*`
@@ -38,6 +38,9 @@ pub use fulltext::{
     FulltextIndexExecutor,
 };
 mod schema;
+
+/// Scan API for iterating over column families with pagination support.
+pub mod scan;
 
 #[cfg(test)]
 mod graph_tests;
@@ -121,6 +124,16 @@ impl DataUrl {
         use base64::{engine::general_purpose, Engine as _};
         let encoded = general_purpose::STANDARD.encode(content.as_ref());
         let data_url = format!("data:{};base64,{}", mime_type, encoded);
+        DataUrl(data_url)
+    }
+
+    /// Create a DataUrl from a pre-formed data URL string.
+    ///
+    /// This is useful when the caller has already constructed a valid
+    /// RFC 2397 data URL (e.g., "data:image/png;base64,iVBORw0KGgo...").
+    ///
+    /// Note: This does not validate the data URL format.
+    pub fn from_raw(data_url: String) -> Self {
         DataUrl(data_url)
     }
 
