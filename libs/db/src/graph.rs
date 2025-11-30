@@ -747,7 +747,7 @@ pub fn spawn_query_consumer_with_graph(
 /// let (reader, receiver) = motlie_db::create_query_reader(config.clone());
 ///
 /// // Spawn worker pool sharing the graph
-/// let num_workers = num_cpus::get();
+/// let num_workers = 4; // Or use num_cpus::get() if you have that dependency
 /// let handles = spawn_query_consumer_pool_shared(
 ///     receiver,
 ///     graph.clone(),
