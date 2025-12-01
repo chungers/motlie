@@ -32,22 +32,43 @@ pub trait FulltextIndexExecutor: Send + Sync {
 
 impl FulltextIndexExecutor for AddNode {
     fn index(&self, index_writer: &IndexWriter, fields: &FulltextFields) -> Result<()> {
+        // Decode edge summary content
+        let summary_text = self
+            .summary
+            .decode_string()
+            .unwrap_or_else(|_| String::new());
+
+        // Extract tags from summary
+        let tags = extract_tags(&summary_text);
         let mut doc = doc!(
             fields.id_field => self.id.as_bytes().to_vec(),
             fields.node_name_field => self.name.clone(),
             fields.doc_type_field => "node",
             fields.timestamp_field => self.ts_millis.0,
+            fields.content_field => summary_text,
         );
 
         // Add facets
         doc.add_facet(fields.doc_type_facet, Facet::from("/type/node"));
-        doc.add_facet(fields.time_bucket_facet, compute_time_bucket(self.ts_millis));
+        doc.add_facet(
+            fields.time_bucket_facet,
+            compute_time_bucket(self.ts_millis),
+        );
+
+        // Add user-defined tags as facets
+        for tag in tags {
+            doc.add_facet(fields.tags_facet, Facet::from(&format!("/tag/{}", tag)));
+        }
 
         index_writer
             .add_document(doc)
             .context("Failed to index AddNode")?;
 
-        log::debug!("[FullText] Indexed node: id={}, name={}", self.id, self.name);
+        log::debug!(
+            "[FullText] Indexed node: id={}, name={}",
+            self.id,
+            self.name
+        );
         Ok(())
     }
 }
@@ -74,7 +95,10 @@ impl FulltextIndexExecutor for AddEdge {
 
         // Add facets
         doc.add_facet(fields.doc_type_facet, Facet::from("/type/edge"));
-        doc.add_facet(fields.time_bucket_facet, compute_time_bucket(self.ts_millis));
+        doc.add_facet(
+            fields.time_bucket_facet,
+            compute_time_bucket(self.ts_millis),
+        );
 
         // Add weight if present
         if let Some(weight) = self.weight {
@@ -121,7 +145,10 @@ impl FulltextIndexExecutor for AddNodeFragment {
 
         // Add facets
         doc.add_facet(fields.doc_type_facet, Facet::from("/type/node_fragment"));
-        doc.add_facet(fields.time_bucket_facet, compute_time_bucket(self.ts_millis));
+        doc.add_facet(
+            fields.time_bucket_facet,
+            compute_time_bucket(self.ts_millis),
+        );
 
         // Add user-defined tags as facets
         for tag in tags {
@@ -163,7 +190,10 @@ impl FulltextIndexExecutor for AddEdgeFragment {
 
         // Add facets
         doc.add_facet(fields.doc_type_facet, Facet::from("/type/edge_fragment"));
-        doc.add_facet(fields.time_bucket_facet, compute_time_bucket(self.ts_millis));
+        doc.add_facet(
+            fields.time_bucket_facet,
+            compute_time_bucket(self.ts_millis),
+        );
 
         // Add user-defined tags as facets
         for tag in tags {

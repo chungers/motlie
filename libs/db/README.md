@@ -329,7 +329,7 @@ pub trait Processor: Send + Sync {
 
 **Implementations**:
 - `Graph`: Processes all mutations in a single RocksDB transaction
-- `FullTextProcessor`: Indexes all mutations in batch
+- `Backend`: Indexes all mutations in batch
 - Test processors for mocking
 
 ### Consumer Pattern
@@ -519,12 +519,12 @@ let reader2 = Storage::new_readonly("/path/to/db")?;
 
 ## Full-Text Search
 
-### FullTextProcessor
+### Backend
 
 Maintains a Tantivy search index synchronized with graph mutations:
 
 ```rust
-pub struct FullTextProcessor {
+pub struct Backend {
     index: Index,
     schema: Schema,
     // Fields: id, entity_type, content, timestamp

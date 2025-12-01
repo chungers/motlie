@@ -37,6 +37,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
 
@@ -80,6 +81,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("summary {}", i)),
             };
             node_args.run(&writer).await.unwrap();
         }
@@ -108,6 +110,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("node summary"),
         }
         .run(&writer)
         .await
@@ -200,6 +203,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("chained_node_{}", i),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("chained summary {}", i)),
             };
             let fragment_args = AddNodeFragment {
                 id: Id::new(),
@@ -1145,6 +1149,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("test summary"),
         };
 
         node_args.clone().run(&writer).await.unwrap();
@@ -1191,8 +1196,8 @@ mod tests {
         let content = value.2.decode_string().expect("Failed to decode DataUrl"); // NodeSummary is field 2
         assert_eq!(node_name, "test_node", "Node name should match");
         assert!(
-            content.contains("test_node"),
-            "Node value should contain the node name"
+            content.contains("test summary"),
+            "Node value should contain the node summary"
         );
     }
 
@@ -1215,6 +1220,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "alice".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("alice summary"),
         };
 
         let node_b_id = Id::new();
@@ -1223,6 +1229,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "bob".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("bob summary"),
         };
 
         let node_c_id = Id::new();
@@ -1231,6 +1238,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "alice".to_string(), // Same name as node_a
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("alice2 summary"),
         };
 
         let node_d_id = Id::new();
@@ -1239,6 +1247,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "charlie".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("charlie summary"),
         };
 
         node_a.clone().run(&writer).await.unwrap();

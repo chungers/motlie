@@ -46,6 +46,7 @@ async fn test_fulltext_search_integration() {
         ts_millis: TimestampMilli::now(),
         name: "Rust".to_string(),
         temporal_range: None,
+        summary: motlie_db::NodeSummary::from_text("Rust programming language"),
     };
 
     let python_id = Id::new();
@@ -54,6 +55,7 @@ async fn test_fulltext_search_integration() {
         ts_millis: TimestampMilli::now(),
         name: "Python".to_string(),
         temporal_range: None,
+        summary: motlie_db::NodeSummary::from_text("Python programming language"),
     };
 
     let javascript_id = Id::new();
@@ -62,6 +64,7 @@ async fn test_fulltext_search_integration() {
         ts_millis: TimestampMilli::now(),
         name: "JavaScript".to_string(),
         temporal_range: None,
+        summary: motlie_db::NodeSummary::from_text("JavaScript programming language"),
     };
 
     // Send to both graph and fulltext

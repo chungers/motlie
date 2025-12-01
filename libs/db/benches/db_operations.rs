@@ -22,8 +22,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use motlie_db::{
     create_mutation_writer, create_query_reader, spawn_graph_consumer, spawn_query_consumer,
-    AddEdge, AddNode, Id, MutationRunnable, NodeById, OutgoingEdges, QueryRunnable, ReaderConfig,
-    TimestampMilli, WriterConfig,
+    AddEdge, AddNode, Id, MutationRunnable, NodeById, NodeSummary, OutgoingEdges, QueryRunnable,
+    ReaderConfig, TimestampMilli, WriterConfig,
 };
 use std::time::Duration;
 use tempfile::TempDir;
@@ -51,6 +51,7 @@ async fn create_test_db(
             name: format!("node_{}", i),
             ts_millis: TimestampMilli::now(),
             temporal_range: None,
+            summary: NodeSummary::from_text(&format!("Benchmark node {}", i)),
         };
 
         node.run(&writer).await.unwrap();

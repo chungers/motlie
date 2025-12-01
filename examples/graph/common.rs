@@ -1,6 +1,6 @@
 /// Common utilities for graph algorithm examples
 use anyhow::Result;
-use motlie_db::{create_mutation_writer, spawn_graph_consumer, AddEdge, AddNode, DataUrl, EdgeSummary, Id, MutationRunnable, Reader, ReaderConfig, TimestampMilli, WriterConfig};
+use motlie_db::{create_mutation_writer, spawn_graph_consumer, AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, NodeSummary, Reader, ReaderConfig, TimestampMilli, WriterConfig};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
@@ -241,8 +241,9 @@ pub async fn build_graph(
         AddNode {
             id: node.id,
             ts_millis: TimestampMilli::now(),
-            name: node.name,
+            name: node.name.clone(),
             temporal_range: None,
+            summary: NodeSummary::from_text(&node.name),
         }
         .run(&writer)
         .await?;
