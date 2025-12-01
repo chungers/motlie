@@ -67,6 +67,7 @@ async fn test_node_names_prefix_scan_comprehensive() {
             name: name.to_string(),
             ts_millis: TimestampMilli(1000),
             temporal_range: None,
+            summary: motlie_db::NodeSummary::from_text(&format!("{} summary", name)),
         }
         .run(&writer)
         .await
@@ -159,6 +160,7 @@ async fn test_node_names_edge_cases() {
             name: name.to_string(),
             ts_millis: TimestampMilli(1000),
             temporal_range: None,
+            summary: motlie_db::NodeSummary::from_text(&format!("{} summary", name)),
         }
         .run(&writer)
         .await
@@ -222,6 +224,7 @@ async fn test_node_names_pagination() {
             name: format!("test_{:03}", i),
             ts_millis: TimestampMilli(1000),
             temporal_range: None,
+            summary: motlie_db::NodeSummary::from_text(&format!("test summary {}", i)),
         }
         .run(&writer)
         .await
@@ -323,6 +326,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
         name: "Source".to_string(),
         ts_millis: TimestampMilli(1000),
         temporal_range: None,
+        summary: motlie_db::NodeSummary::from_text("Source summary"),
     }
     .run(&writer)
     .await
@@ -333,6 +337,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
         name: "Destination".to_string(),
         ts_millis: TimestampMilli(1000),
         temporal_range: None,
+        summary: motlie_db::NodeSummary::from_text("Destination summary"),
     }
     .run(&writer)
     .await
@@ -483,6 +488,7 @@ async fn test_empty_prefix_returns_all() {
             name: name.to_string(),
             ts_millis: TimestampMilli(1000),
             temporal_range: None,
+            summary: motlie_db::NodeSummary::from_text(&format!("{} summary", name)),
         }
         .run(&writer)
         .await
@@ -522,6 +528,7 @@ async fn test_nonexistent_prefix_returns_empty() {
             name: name.to_string(),
             ts_millis: TimestampMilli(1000),
             temporal_range: None,
+            summary: motlie_db::NodeSummary::from_text(&format!("{} summary", name)),
         }
         .run(&writer)
         .await

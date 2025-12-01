@@ -13,7 +13,11 @@ use crate::{schema, Id, TimestampMilli, Writer, WriterConfig};
 pub trait MutationExecutor: Send + Sync {
     /// Execute this mutation directly against a RocksDB transaction.
     /// Each mutation type knows how to write itself to storage.
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()>;
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()>;
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +44,9 @@ pub struct AddNode {
 
     /// The temporal validity range for this node
     pub temporal_range: Option<schema::ValidTemporalRange>,
+
+    /// The summary information for this node
+    pub summary: schema::NodeSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -158,16 +165,18 @@ fn update_node_valid_range(
     node_id: Id,
     new_range: schema::ValidTemporalRange,
 ) -> Result<()> {
-    use crate::schema::{NodeCfKey, Nodes};
     use crate::graph::{ColumnFamilyRecord, ValidRangePatchable};
+    use crate::schema::{NodeCfKey, Nodes};
 
-    let cf = txn_db.cf_handle(Nodes::CF_NAME)
+    let cf = txn_db
+        .cf_handle(Nodes::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
 
     let key = NodeCfKey(node_id);
     let key_bytes = Nodes::key_to_bytes(&key);
 
-    let value_bytes = txn.get_cf(cf, &key_bytes)?
+    let value_bytes = txn
+        .get_cf(cf, &key_bytes)?
         .ok_or_else(|| anyhow::anyhow!("Node not found for id: {}", node_id))?;
 
     let nodes = Nodes;
@@ -187,32 +196,46 @@ fn update_edge_valid_range(
     edge_name: &schema::EdgeName,
     new_range: schema::ValidTemporalRange,
 ) -> Result<()> {
-    use crate::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
     use crate::graph::{ColumnFamilyRecord, ValidRangePatchable};
+    use crate::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
 
     // Patch ForwardEdges CF
-    let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME)
+    let forward_cf = txn_db
+        .cf_handle(ForwardEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
 
     let forward_key = ForwardEdgeCfKey(src_id, dst_id, edge_name.clone());
     let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
 
-    let forward_value_bytes = txn.get_cf(forward_cf, &forward_key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdge not found: src={}, dst={}, name={}", src_id, dst_id, edge_name))?;
+    let forward_value_bytes = txn.get_cf(forward_cf, &forward_key_bytes)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "ForwardEdge not found: src={}, dst={}, name={}",
+            src_id,
+            dst_id,
+            edge_name
+        )
+    })?;
 
     let forward_edges = ForwardEdges;
     let patched_forward_bytes = forward_edges.patch_valid_range(&forward_value_bytes, new_range)?;
     txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
 
     // Patch ReverseEdges CF
-    let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME)
+    let reverse_cf = txn_db
+        .cf_handle(ReverseEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
 
     let reverse_key = ReverseEdgeCfKey(dst_id, src_id, edge_name.clone());
     let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
 
-    let reverse_value_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("ReverseEdge not found: src={}, dst={}, name={}", src_id, dst_id, edge_name))?;
+    let reverse_value_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "ReverseEdge not found: src={}, dst={}, name={}",
+            src_id,
+            dst_id,
+            edge_name
+        )
+    })?;
 
     let reverse_edges = ReverseEdges;
     let patched_reverse_bytes = reverse_edges.patch_valid_range(&reverse_value_bytes, new_range)?;
@@ -228,13 +251,14 @@ fn find_connected_edges(
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
 ) -> Result<Vec<(Id, Id, schema::EdgeName)>> {
-    use crate::schema::{ForwardEdges, ForwardEdgeCfKey, ReverseEdges, ReverseEdgeCfKey};
     use crate::graph::ColumnFamilyRecord;
+    use crate::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
 
     let mut edge_topologies = Vec::new();
 
     // Find outgoing edges (where this node is the source)
-    let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME)
+    let forward_cf = txn_db
+        .cf_handle(ForwardEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
     let forward_prefix = node_id.into_bytes().to_vec();
     let forward_iter = txn.prefix_iterator_cf(forward_cf, &forward_prefix);
@@ -247,7 +271,8 @@ fn find_connected_edges(
     }
 
     // Find incoming edges (where this node is the destination)
-    let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME)
+    let reverse_cf = txn_db
+        .cf_handle(ReverseEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
     let reverse_prefix = node_id.into_bytes().to_vec();
     let reverse_iter = txn.prefix_iterator_cf(reverse_cf, &reverse_prefix);
@@ -270,18 +295,24 @@ fn find_connected_edges(
 // ============================================================================
 
 impl MutationExecutor for AddNode {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         use crate::graph::ColumnFamilyRecord;
-        use crate::schema::{Nodes, NodeNames};
+        use crate::schema::{NodeNames, Nodes};
 
         // Write to Nodes CF
-        let nodes_cf = txn_db.cf_handle(Nodes::CF_NAME)
+        let nodes_cf = txn_db
+            .cf_handle(Nodes::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
         let (node_key, node_value) = Nodes::create_bytes(self)?;
         txn.put_cf(nodes_cf, node_key, node_value)?;
 
         // Write to NodeNames CF
-        let names_cf = txn_db.cf_handle(NodeNames::CF_NAME)
+        let names_cf = txn_db
+            .cf_handle(NodeNames::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeNames::CF_NAME))?;
         let (name_key, name_value) = NodeNames::create_bytes(self)?;
         txn.put_cf(names_cf, name_key, name_value)?;
@@ -291,24 +322,31 @@ impl MutationExecutor for AddNode {
 }
 
 impl MutationExecutor for AddEdge {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         use crate::graph::ColumnFamilyRecord;
-        use crate::schema::{ForwardEdges, ReverseEdges, EdgeNames};
+        use crate::schema::{EdgeNames, ForwardEdges, ReverseEdges};
 
         // Write to ForwardEdges CF
-        let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME))?;
+        let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
+        })?;
         let (forward_key, forward_value) = ForwardEdges::create_bytes(self)?;
         txn.put_cf(forward_cf, forward_key, forward_value)?;
 
         // Write to ReverseEdges CF
-        let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", ReverseEdges::CF_NAME))?;
+        let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", ReverseEdges::CF_NAME)
+        })?;
         let (reverse_key, reverse_value) = ReverseEdges::create_bytes(self)?;
         txn.put_cf(reverse_cf, reverse_key, reverse_value)?;
 
         // Write to EdgeNames CF
-        let names_cf = txn_db.cf_handle(EdgeNames::CF_NAME)
+        let names_cf = txn_db
+            .cf_handle(EdgeNames::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeNames::CF_NAME))?;
         let (name_key, name_value) = EdgeNames::create_bytes(self)?;
         txn.put_cf(names_cf, name_key, name_value)?;
@@ -318,12 +356,17 @@ impl MutationExecutor for AddEdge {
 }
 
 impl MutationExecutor for AddNodeFragment {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         use crate::graph::ColumnFamilyRecord;
         use crate::schema::NodeFragments;
 
-        let cf = txn_db.cf_handle(NodeFragments::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeFragments::CF_NAME))?;
+        let cf = txn_db.cf_handle(NodeFragments::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", NodeFragments::CF_NAME)
+        })?;
         let (key, value) = NodeFragments::create_bytes(self)?;
         txn.put_cf(cf, key, value)?;
 
@@ -332,12 +375,17 @@ impl MutationExecutor for AddNodeFragment {
 }
 
 impl MutationExecutor for AddEdgeFragment {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         use crate::graph::ColumnFamilyRecord;
         use crate::schema::EdgeFragments;
 
-        let cf = txn_db.cf_handle(EdgeFragments::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME))?;
+        let cf = txn_db.cf_handle(EdgeFragments::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME)
+        })?;
         let (key, value) = EdgeFragments::create_bytes(self)?;
         txn.put_cf(cf, key, value)?;
 
@@ -346,7 +394,11 @@ impl MutationExecutor for AddEdgeFragment {
 }
 
 impl MutationExecutor for UpdateNodeValidSinceUntil {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         let node_id = self.id;
         let new_range = self.temporal_range;
 
@@ -372,7 +424,11 @@ impl MutationExecutor for UpdateNodeValidSinceUntil {
 }
 
 impl MutationExecutor for UpdateEdgeValidSinceUntil {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         // Simply delegate to the helper
         update_edge_valid_range(
             txn,
@@ -386,25 +442,31 @@ impl MutationExecutor for UpdateEdgeValidSinceUntil {
 }
 
 impl MutationExecutor for UpdateEdgeWeight {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
-        use crate::schema::{ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges};
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         use crate::graph::ColumnFamilyRecord;
+        use crate::schema::{ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges};
 
-        let cf = txn_db.cf_handle(ForwardEdges::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME))?;
+        let cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
+        })?;
 
         let key = ForwardEdgeCfKey(self.src_id, self.dst_id, self.name.clone());
         let key_bytes = ForwardEdges::key_to_bytes(&key);
 
         // Read current value
-        let current_value_bytes = txn.get_cf(cf, &key_bytes)?
+        let current_value_bytes = txn
+            .get_cf(cf, &key_bytes)?
             .ok_or_else(|| anyhow::anyhow!("Edge not found for update"))?;
 
         // Deserialize, modify weight field, reserialize
         let mut value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&current_value_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))?;
 
-        value.1 = Some(self.weight);  // Update weight (field 1)
+        value.1 = Some(self.weight); // Update weight (field 1)
 
         let new_value_bytes = ForwardEdges::value_to_bytes(&value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))?;
@@ -418,7 +480,11 @@ impl MutationExecutor for UpdateEdgeWeight {
 impl Mutation {
     /// Execute this mutation directly against storage.
     /// Delegates to the specific mutation type's executor.
-    pub fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
+    pub fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         match self {
             Mutation::AddNode(m) => m.execute(txn, txn_db),
             Mutation::AddEdge(m) => m.execute(txn, txn_db),
@@ -504,9 +570,7 @@ impl Runnable for UpdateEdgeValidSinceUntil {
 
 impl Runnable for UpdateEdgeWeight {
     async fn run(self, writer: &Writer) -> Result<()> {
-        writer
-            .send(vec![Mutation::UpdateEdgeWeight(self)])
-            .await
+        writer.send(vec![Mutation::UpdateEdgeWeight(self)]).await
     }
 }
 
@@ -934,6 +998,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
 
@@ -998,6 +1063,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("summary {}", i)),
             };
             node_args.run(&writer).await.unwrap();
         }

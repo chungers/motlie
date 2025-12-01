@@ -56,6 +56,7 @@ async fn writer_task_shared_graph(
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
             temporal_range: None,
+            summary: motlie_db::NodeSummary::from_text(&format!("summary {}", i)),
         }
         .run(&writer)
         .await;

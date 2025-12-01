@@ -1836,6 +1836,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
 
@@ -1964,6 +1965,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -1974,6 +1976,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -2077,6 +2080,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -2087,6 +2091,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -2251,6 +2256,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -2261,6 +2267,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -2432,6 +2439,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -2442,6 +2450,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -2614,6 +2623,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -2624,6 +2634,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             temporal_range: None,
+            summary: crate::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await

@@ -1,9 +1,9 @@
 use crate::graph::ColumnFamilyRecord;
+use crate::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
 use crate::DataUrl;
+use crate::Id;
 use crate::TimestampMilli;
 use crate::ValidRangePatchable;
-use crate::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
-use crate::Id;
 use serde::{Deserialize, Serialize};
 
 /// Support for temporal queries
@@ -92,7 +92,6 @@ pub type SrcId = Id;
 /// Id of edge destination node
 pub type DstId = Id;
 
-
 impl ValidRangePatchable for ForwardEdges {
     fn patch_valid_range(
         &self,
@@ -131,9 +130,9 @@ pub(crate) struct ForwardEdges;
 pub(crate) struct ForwardEdgeCfKey(pub(crate) SrcId, pub(crate) DstId, pub(crate) EdgeName);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<ValidTemporalRange>,  // Field 0: Temporal validity
-    pub(crate) Option<f64>,                  // Field 1: Optional weight
-    pub(crate) EdgeSummary,                  // Field 2: Edge summary
+    pub(crate) Option<ValidTemporalRange>, // Field 0: Temporal validity
+    pub(crate) Option<f64>,                // Field 1: Optional weight
+    pub(crate) EdgeSummary,                // Field 2: Edge summary
 );
 
 /// Reverse edges column family (index only).
@@ -168,11 +167,7 @@ pub(crate) struct NodeNameCfValue(pub(crate) Option<ValidTemporalRange>);
 /// Edge names column family (index for looking up edges by name).
 pub(crate) struct EdgeNames;
 #[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeNameCfKey(
-    pub(crate) EdgeName,
-    pub(crate) SrcId,
-    pub(crate) DstId,
-);
+pub(crate) struct EdgeNameCfKey(pub(crate) EdgeName, pub(crate) SrcId, pub(crate) DstId);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EdgeNameCfValue(pub(crate) Option<ValidTemporalRange>);
 
@@ -190,11 +185,10 @@ impl ColumnFamilyRecord for Nodes {
 
     fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
-        let markdown = format!("<!-- id={} -->]\n# {}\n# Summary\n", args.id, args.name);
         let value = NodeCfValue(
             args.temporal_range.clone(),
             args.name.clone(),
-            DataUrl::from_markdown(markdown),
+            args.summary.clone(),
         );
         (key, value)
     }
@@ -551,11 +545,7 @@ impl ColumnFamilyRecord for EdgeNames {
     type CreateOp = AddEdge;
 
     fn record_from(args: &AddEdge) -> (EdgeNameCfKey, EdgeNameCfValue) {
-        let key = EdgeNameCfKey(
-            args.name.clone(),
-            args.source_node_id,
-            args.target_node_id,
-        );
+        let key = EdgeNameCfKey(args.name.clone(), args.source_node_id, args.target_node_id);
         let value = EdgeNameCfValue(args.temporal_range.clone());
         (key, value)
     }

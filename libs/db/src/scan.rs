@@ -771,6 +771,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
         }
@@ -824,6 +825,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -894,6 +896,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
         }
@@ -947,6 +950,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("{} summary", name)),
             };
             node.run(&writer).await.unwrap();
         }
@@ -1018,6 +1022,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("{} summary", name)),
             };
             node.run(&writer).await.unwrap();
         }
@@ -1094,6 +1099,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("node {} summary", i)),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -1183,6 +1189,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -1255,6 +1262,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
+                summary: crate::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;

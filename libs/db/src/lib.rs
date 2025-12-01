@@ -21,9 +21,9 @@ pub use reader::*;
 mod query;
 // Re-export query types and consumer functions
 pub use query::{
-    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById,
-    NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
-    Processor as QueryProcessor, Consumer as QueryConsumer,
+    Consumer as QueryConsumer, EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName,
+    IncomingEdges, NodeById, NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges,
+    Processor as QueryProcessor, Query, Runnable as QueryRunnable,
 };
 // Note: spawn_query_consumer is exported from graph module via `pub use graph::*`
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
@@ -31,11 +31,26 @@ mod graph;
 pub use graph::*;
 pub mod fulltext;
 pub use fulltext::{
-    create_fulltext_consumer, create_fulltext_consumer_with_next,
-    create_fulltext_consumer_with_params, create_fulltext_consumer_with_params_and_next,
-    spawn_fulltext_consumer, spawn_fulltext_consumer_with_next, spawn_fulltext_consumer_with_params,
-    spawn_fulltext_consumer_with_params_and_next, FullTextProcessor, FulltextFields,
-    FulltextIndexExecutor,
+    create_fulltext_consumer,
+    create_fulltext_consumer_with_next,
+    create_fulltext_consumer_with_params,
+    create_fulltext_consumer_with_params_and_next,
+    // Query types
+    create_fulltext_query_consumer,
+    create_fulltext_query_reader,
+    // Mutation consumer spawn functions
+    spawn_fulltext_consumer,
+    spawn_fulltext_consumer_with_next, // deprecated alias
+    spawn_fulltext_consumer_with_params,
+    spawn_fulltext_consumer_with_params_and_next,
+    spawn_fulltext_mutation_consumer_with_next,
+    // Query consumer spawn functions
+    spawn_fulltext_query_consumer,
+    spawn_fulltext_query_consumer_pool_readonly,
+    spawn_fulltext_query_consumer_pool_shared,
+    FulltextFields, FulltextIndexExecutor, FulltextNodes, FulltextQuery, FulltextQueryConsumer,
+    FulltextQueryExecutor, FulltextQueryProcessor, FulltextQueryRunnable, FulltextReader,
+    FulltextReaderConfig, Index as FulltextIndex, NodeSearchResult, Storage as FulltextStorage,
 };
 mod schema;
 
@@ -391,7 +406,8 @@ mod tests {
         // Spawn both consumer types
         let graph_handle = spawn_graph_consumer(receiver1, config.clone(), temp_dir.path());
         let fulltext_index_path = temp_dir.path().join("fulltext_index");
-        let fulltext_handle = spawn_fulltext_consumer(receiver2, config.clone(), &fulltext_index_path);
+        let fulltext_handle =
+            spawn_fulltext_consumer(receiver2, config.clone(), &fulltext_index_path);
 
         // Send mutations to both writers (simulating fanout)
         for i in 0..3 {
@@ -401,6 +417,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("integration_test_node_{}", i),
                 temporal_range: None,
+                summary: NodeSummary::from_text(&format!("integration test summary {}", i)),
             };
 
             let fragment_args = AddNodeFragment {
@@ -647,6 +664,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             temporal_range: None,
+            summary: NodeSummary::from_text("test summary"),
         };
 
         let edge = AddEdge {

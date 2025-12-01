@@ -25,6 +25,7 @@ async fn test_secondary_instance_basic() {
         ts_millis: TimestampMilli::now(),
         name: node_name.clone(),
         temporal_range: None,
+        summary: motlie_db::NodeSummary::from_text("test node summary"),
     }
     .run(&writer)
     .await
@@ -99,6 +100,7 @@ async fn test_secondary_catch_up_sees_new_writes() {
             ts_millis: TimestampMilli::now(),
             name: "node1".to_string(),
             temporal_range: None,
+            summary: motlie_db::NodeSummary::from_text("node1 summary"),
         }
         .run(&writer)
         .await
@@ -130,6 +132,7 @@ async fn test_secondary_catch_up_sees_new_writes() {
             ts_millis: TimestampMilli::now(),
             name: "node2".to_string(),
             temporal_range: None,
+            summary: motlie_db::NodeSummary::from_text("node2 summary"),
         }
         .run(&writer)
         .await
