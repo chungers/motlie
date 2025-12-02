@@ -1,36 +1,25 @@
 //! Fulltext indexing mutation executor implementations
 //!
 //! This module defines how mutations index themselves into the Tantivy fulltext search index.
-//! Mirrors the pattern in `crate::mutation::MutationExecutor` for graph storage.
+//! Contains only business logic - the trait and infrastructure are in the `writer` module.
 
 use anyhow::{Context, Result};
 use tantivy::schema::*;
 use tantivy::{doc, IndexWriter};
 
-use crate::mutation::{
+use crate::graph::mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, UpdateEdgeValidSinceUntil,
     UpdateEdgeWeight, UpdateNodeValidSinceUntil,
 };
 
+use super::writer::MutationExecutor;
 use super::{compute_time_bucket, extract_tags, weight_to_facet, FulltextFields};
 
-/// Trait for mutations to index themselves into Tantivy.
-///
-/// This trait defines HOW to index the mutation into the fulltext search index.
-/// Each mutation type knows how to extract and index its own searchable content.
-///
-/// Following the same pattern as MutationExecutor for graph storage.
-pub trait FulltextIndexExecutor: Send + Sync {
-    /// Index this mutation into the Tantivy index writer.
-    /// Each mutation type knows how to extract and index its searchable content.
-    fn index(&self, index_writer: &IndexWriter, fields: &FulltextFields) -> Result<()>;
-}
-
 // ============================================================================
-// FulltextIndexExecutor Implementations
+// MutationExecutor Implementations
 // ============================================================================
 
-impl FulltextIndexExecutor for AddNode {
+impl MutationExecutor for AddNode {
     fn index(&self, index_writer: &IndexWriter, fields: &FulltextFields) -> Result<()> {
         // Decode edge summary content
         let summary_text = self
@@ -73,7 +62,7 @@ impl FulltextIndexExecutor for AddNode {
     }
 }
 
-impl FulltextIndexExecutor for AddEdge {
+impl MutationExecutor for AddEdge {
     fn index(&self, index_writer: &IndexWriter, fields: &FulltextFields) -> Result<()> {
         // Decode edge summary content
         let summary_text = self
@@ -125,7 +114,7 @@ impl FulltextIndexExecutor for AddEdge {
     }
 }
 
-impl FulltextIndexExecutor for AddNodeFragment {
+impl MutationExecutor for AddNodeFragment {
     fn index(&self, index_writer: &IndexWriter, fields: &FulltextFields) -> Result<()> {
         // Decode DataUrl content
         let content_text = self
@@ -168,7 +157,7 @@ impl FulltextIndexExecutor for AddNodeFragment {
     }
 }
 
-impl FulltextIndexExecutor for AddEdgeFragment {
+impl MutationExecutor for AddEdgeFragment {
     fn index(&self, index_writer: &IndexWriter, fields: &FulltextFields) -> Result<()> {
         // Decode DataUrl content
         let content_text = self
@@ -215,7 +204,7 @@ impl FulltextIndexExecutor for AddEdgeFragment {
     }
 }
 
-impl FulltextIndexExecutor for UpdateNodeValidSinceUntil {
+impl MutationExecutor for UpdateNodeValidSinceUntil {
     fn index(&self, index_writer: &IndexWriter, fields: &FulltextFields) -> Result<()> {
         // Delete existing documents for this node ID
         let id_term = tantivy::Term::from_field_bytes(fields.id_field, self.id.as_bytes());
@@ -230,7 +219,7 @@ impl FulltextIndexExecutor for UpdateNodeValidSinceUntil {
     }
 }
 
-impl FulltextIndexExecutor for UpdateEdgeValidSinceUntil {
+impl MutationExecutor for UpdateEdgeValidSinceUntil {
     fn index(&self, index_writer: &IndexWriter, fields: &FulltextFields) -> Result<()> {
         // Delete existing documents for this edge
         // We need to delete by composite key (src_id + dst_id + edge_name)
@@ -250,7 +239,7 @@ impl FulltextIndexExecutor for UpdateEdgeValidSinceUntil {
     }
 }
 
-impl FulltextIndexExecutor for UpdateEdgeWeight {
+impl MutationExecutor for UpdateEdgeWeight {
     fn index(&self, _index_writer: &IndexWriter, _fields: &FulltextFields) -> Result<()> {
         // For weight updates, we'd need to delete and re-index
         // For now, just log as this is primarily a graph operation
