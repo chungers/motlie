@@ -1,23 +1,70 @@
-//! Provides the graph-specific implementation for processing mutations from the MPSC queue
-//! and writing them to the graph store.
+//! Graph module - RocksDB-based graph storage.
+//!
+//! This module provides the graph-specific implementation for processing mutations from
+//! the MPSC queue and writing them to the graph store.
+//!
+//! ## Module Structure
+//!
+//! - `mod.rs` - Storage, Graph struct, and module exports
+//! - `schema.rs` - RocksDB schema definitions (column families)
+//! - `mutation.rs` - Mutation types (AddNode, AddEdge, etc.)
+//! - `writer.rs` - Writer infrastructure and mutation consumers
+//! - `query.rs` - Query types (NodeById, EdgesByName, etc.)
+//! - `reader.rs` - Reader infrastructure and query consumers
+//! - `scan.rs` - Scan API for pagination
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use rocksdb::{Options, TransactionDB, TransactionDBOptions, DB};
 
-use crate::schema;
-use crate::{
-    mutation::{Consumer, Processor},
-    query::QueryProcessor,
-    schema::ALL_COLUMN_FAMILIES,
-    Mutation, WriterConfig,
+// Submodules
+pub mod mutation;
+pub mod query;
+pub mod reader;
+pub mod schema;
+pub mod writer;
+
+/// Scan API for iterating over column families with pagination support.
+pub mod scan;
+
+#[cfg(test)]
+mod tests;
+
+// Re-export commonly used types from submodules
+pub use mutation::{
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
+    Runnable, UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
 };
+pub use query::{
+    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById,
+    NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
+};
+pub use reader::{
+    create_query_reader, spawn_consumer as spawn_query_consumer, Consumer as QueryConsumer,
+    Processor as ReaderProcessor, QueryExecutor, QueryProcessor, QueryWithTimeout, Reader, ReaderConfig,
+    // Graph-specific query consumer functions
+    create_graph_query_consumer, create_graph_query_consumer_readwrite,
+    spawn_graph_query_consumer, spawn_graph_query_consumer_readwrite,
+    spawn_graph_query_consumer_with_graph, spawn_graph_query_consumer_pool_shared,
+    spawn_graph_query_consumer_pool_readonly,
+};
+pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
+pub use writer::{
+    create_mutation_writer, spawn_consumer as spawn_mutation_consumer,
+    Consumer as MutationConsumer, MutationExecutor, Processor as MutationProcessor,
+    Writer, WriterConfig,
+    // Graph-specific mutation consumer functions
+    create_graph_consumer, create_graph_consumer_with_next,
+    spawn_graph_consumer, spawn_graph_consumer_with_next, spawn_graph_consumer_with_graph,
+};
+
+// Internal imports
+use schema::ALL_COLUMN_FAMILIES;
+use writer::Processor;
 
 /// Trait for column family record types that can create and serialize key-value pairs.
 ///
@@ -495,408 +542,8 @@ impl Processor for Graph {
 }
 
 /// Implement query processor for Graph
-impl crate::query::Processor for Graph {
+impl reader::Processor for Graph {
     fn storage(&self) -> &Storage {
         &self.storage
     }
 }
-
-/// Create a new graph mutation consumer
-pub fn create_graph_consumer(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    db_path: &Path,
-) -> Consumer<Graph> {
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready().expect("Failed to ready storage");
-    let storage = Arc::new(storage);
-    let processor = Graph::new(storage);
-    Consumer::new(receiver, config, processor)
-}
-
-/// Create a new graph mutation consumer that chains to another processor
-pub fn create_graph_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    db_path: &Path,
-    next: mpsc::Sender<Vec<crate::Mutation>>,
-) -> Consumer<Graph> {
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready().expect("Failed to ready storage");
-    let storage = Arc::new(storage);
-    let processor = Graph::new(storage);
-    Consumer::with_next(receiver, config, processor, next)
-}
-
-/// Spawn the graph mutation consumer as a background task
-pub fn spawn_graph_consumer(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    db_path: &Path,
-) -> JoinHandle<Result<()>> {
-    let consumer = create_graph_consumer(receiver, config, db_path);
-    crate::mutation::spawn_consumer(consumer)
-}
-
-/// Spawn the graph mutation consumer as a background task with chaining to next processor
-pub fn spawn_graph_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    db_path: &Path,
-    next: mpsc::Sender<Vec<crate::Mutation>>,
-) -> JoinHandle<Result<()>> {
-    let consumer = create_graph_consumer_with_next(receiver, config, db_path, next);
-    crate::mutation::spawn_consumer(consumer)
-}
-
-/// Spawn a graph mutation consumer using an existing Graph instance
-///
-/// This allows using a shared Storage/TransactionDB instance for writes.
-/// Use this when you want the writer to share the same TransactionDB as readers.
-///
-/// # Arguments
-/// * `receiver` - Channel to receive mutation batches from
-/// * `config` - Writer configuration
-/// * `graph` - Shared Graph instance (wrapping the Storage/TransactionDB)
-///
-/// # Returns
-/// A JoinHandle for the spawned consumer task
-pub fn spawn_graph_consumer_with_graph(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    graph: Arc<Graph>,
-) -> JoinHandle<Result<()>> {
-    let consumer = Consumer::new(receiver, config, (*graph).clone());
-    crate::mutation::spawn_consumer(consumer)
-}
-
-/// Create a new query consumer for the graph
-pub fn create_query_consumer(
-    receiver: flume::Receiver<crate::query::Query>,
-    config: crate::ReaderConfig,
-    db_path: &Path,
-) -> crate::query::Consumer<Graph> {
-    let mut storage = Storage::readonly(db_path);
-    storage.ready().expect("Failed to ready storage");
-    let storage = Arc::new(storage);
-    let processor = Graph::new(storage);
-    crate::query::Consumer::new(receiver, config, processor)
-}
-
-/// Spawn a query consumer as a background task
-pub fn spawn_query_consumer(
-    receiver: flume::Receiver<crate::query::Query>,
-    config: crate::ReaderConfig,
-    db_path: &Path,
-) -> JoinHandle<Result<()>> {
-    let consumer = create_query_consumer(receiver, config, db_path);
-    crate::query::spawn_consumer(consumer)
-}
-
-/// Create a query consumer with readwrite storage (for testing TransactionDB concurrency)
-///
-/// Unlike `create_query_consumer` which opens readonly storage, this opens readwrite storage.
-/// This allows testing whether RocksDB TransactionDB supports multiple instances accessing
-/// the same database path concurrently.
-///
-/// # Arguments
-/// * `receiver` - Channel to receive queries from
-/// * `config` - Reader configuration
-/// * `db_path` - Path to the database
-///
-/// # Returns
-/// A Consumer configured with readwrite storage
-pub fn create_query_consumer_readwrite(
-    receiver: flume::Receiver<crate::query::Query>,
-    config: crate::ReaderConfig,
-    db_path: &Path,
-) -> crate::query::Consumer<Graph> {
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready().expect("Failed to ready readwrite storage");
-    let storage = Arc::new(storage);
-    let processor = Graph::new(storage);
-    crate::query::Consumer::new(receiver, config, processor)
-}
-
-/// Spawn a query consumer with readwrite storage as a background task
-///
-/// This is the readwrite variant of `spawn_query_consumer`.
-/// Use this to test concurrent access patterns with TransactionDB.
-///
-/// # Arguments
-/// * `receiver` - Channel to receive queries from
-/// * `config` - Reader configuration
-/// * `db_path` - Path to the database
-///
-/// # Returns
-/// A JoinHandle for the spawned consumer task
-pub fn spawn_query_consumer_readwrite(
-    receiver: flume::Receiver<crate::query::Query>,
-    config: crate::ReaderConfig,
-    db_path: &Path,
-) -> JoinHandle<Result<()>> {
-    let consumer = create_query_consumer_readwrite(receiver, config, db_path);
-    crate::query::spawn_consumer(consumer)
-}
-
-/// Spawn a query consumer using an existing Graph instance
-///
-/// This allows multiple query consumers to share a single Storage/TransactionDB instance.
-/// Use this when you want multiple readers to access the same readwrite TransactionDB
-/// without opening multiple database instances (which RocksDB doesn't support).
-///
-/// This is the correct way to have concurrent readers on readwrite storage, since
-/// RocksDB TransactionDB:
-/// - Does NOT support multiple instances on the same path (lock file prevents this)
-/// - DOES support thread-safe access from multiple threads to a single instance
-///
-/// # Arguments
-/// * `receiver` - Channel to receive queries from
-/// * `config` - Reader configuration
-/// * `graph` - Shared Graph instance (wrapping the Storage/TransactionDB)
-///
-/// # Example
-/// ```no_run
-/// use motlie_db::{Graph, Storage, ReaderConfig};
-/// use std::sync::Arc;
-/// use std::time::Duration;
-///
-/// # async fn example() -> anyhow::Result<()> {
-/// let mut storage = Storage::readwrite(&std::path::PathBuf::from("/tmp/db"));
-/// storage.ready()?;
-/// let graph = Arc::new(Graph::new(Arc::new(storage)));
-///
-/// // Spawn multiple readers sharing the same graph/TransactionDB
-/// for _ in 0..4 {
-///     let (reader, rx) = {
-///         let config = ReaderConfig { channel_buffer_size: 10 };
-///         let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-///         let reader = motlie_db::Reader::new(sender);
-///         (reader, receiver)
-///     };
-///     motlie_db::spawn_query_consumer_with_graph(rx, ReaderConfig { channel_buffer_size: 10 }, graph.clone());
-/// }
-/// # Ok(())
-/// # }
-/// ```
-pub fn spawn_query_consumer_with_graph(
-    receiver: flume::Receiver<crate::query::Query>,
-    config: crate::ReaderConfig,
-    graph: Arc<Graph>,
-) -> JoinHandle<Result<()>> {
-    let consumer = crate::query::Consumer::new(receiver, config, (*graph).clone());
-    crate::query::spawn_consumer(consumer)
-}
-
-/// Spawn N query consumer workers sharing a single readwrite TransactionDB.
-///
-/// **This is the RECOMMENDED approach for multi-threaded query processing** in
-/// single-process applications requiring high consistency.
-///
-/// All workers share the same TransactionDB instance via `Arc<Graph>`, providing:
-/// - ✅ **99%+ read-after-write consistency** (vs 25-30% for readonly mode)
-/// - ✅ **Immediate visibility** - All threads see same memtable
-/// - ✅ **Thread-safe** - TransactionDB has internal MVCC locking
-/// - ✅ **No reopen/catch-up overhead** - Direct memtable access
-/// - ✅ **Memory efficient** - Single DB instance shared across workers
-///
-/// # Storage Mode
-///
-/// **CONFIRMED**: This uses **readwrite Storage** (TransactionDB mode).
-/// The Graph must be created from `Storage::readwrite()` and wrapped in `Arc`.
-///
-/// # Arguments
-/// * `receiver` - Shared flume receiver (MPMC channel supports multiple receivers)
-/// * `graph` - Shared Graph wrapping readwrite TransactionDB (via Arc)
-/// * `num_workers` - Number of worker threads to spawn
-///
-/// # Returns
-/// Vector of JoinHandles for all worker threads
-///
-/// # Thread Safety
-///
-/// RocksDB TransactionDB is fully thread-safe for concurrent access. The constraint
-/// is that you CANNOT open multiple TransactionDB instances on the same path (lock
-/// file prevents this). Instead, you MUST share one instance via Arc.
-///
-/// # Performance
-///
-/// From `libs/db/docs/concurrency-and-storage-modes.md`:
-/// - **Success Rate**: 99%+ (vs 25-30% for readonly, 40-45% for secondary)
-/// - **Query Latency**: Same as other modes
-/// - **Memory**: Single instance footprint (vs N× instances for readonly)
-/// - **Consistency**: Immediate (vs eventually consistent for readonly/secondary)
-///
-/// # Example
-/// ```no_run
-/// use motlie_db::{Storage, Graph, ReaderConfig, spawn_query_consumer_pool_shared};
-/// use std::sync::Arc;
-/// use std::path::Path;
-///
-/// # async fn example() -> anyhow::Result<()> {
-/// let db_path = Path::new("/path/to/db");
-///
-/// // Create ONE shared readwrite Storage (TransactionDB)
-/// let mut storage = Storage::readwrite(db_path);
-/// storage.ready()?;
-/// let storage = Arc::new(storage);
-/// let graph = Arc::new(Graph::new(storage));
-///
-/// // Create reader channel
-/// let config = ReaderConfig { channel_buffer_size: 100 };
-/// let (reader, receiver) = motlie_db::create_query_reader(config.clone());
-///
-/// // Spawn worker pool sharing the graph
-/// let num_workers = 4; // Or use num_cpus::get() if you have that dependency
-/// let handles = spawn_query_consumer_pool_shared(
-///     receiver,
-///     graph.clone(),
-///     num_workers,
-/// );
-///
-/// // All workers share the same TransactionDB via Arc<Graph>
-/// # Ok(())
-/// # }
-/// ```
-pub fn spawn_query_consumer_pool_shared(
-    receiver: flume::Receiver<crate::query::Query>,
-    graph: Arc<Graph>,
-    num_workers: usize,
-) -> Vec<JoinHandle<()>> {
-    let mut handles = Vec::with_capacity(num_workers);
-
-    for worker_id in 0..num_workers {
-        let receiver = receiver.clone();
-        let graph = graph.clone();  // Cheap Arc clone - shares TransactionDB
-
-        let handle = tokio::spawn(async move {
-            log::info!("Query worker {} starting (shared TransactionDB mode)", worker_id);
-
-            // Process queries from shared channel
-            // All workers share the same TransactionDB via Arc<Graph>
-            while let Ok(query) = receiver.recv_async().await {
-                log::debug!("Worker {} processing {} (shared mode)", worker_id, query);
-                query.process_and_send(&*graph).await;
-            }
-
-            log::info!("Query worker {} shutting down", worker_id);
-        });
-
-        handles.push(handle);
-    }
-
-    log::info!(
-        "Spawned {} query consumer workers (shared TransactionDB mode)",
-        num_workers
-    );
-    handles
-}
-
-/// Spawn N query consumer workers with READONLY Storage instances.
-///
-/// ⚠️ **WARNING**: This creates separate readonly DB instances per worker.
-///
-/// Readonly instances have poor consistency (25-30% success rate) because they:
-/// - Only see SST files on disk (not active memtable)
-/// - Never update after opening (static snapshot)
-/// - Require reopening to see new writes (60-1600ms overhead)
-///
-/// # Use Cases
-/// - Historical/archival data analysis
-/// - Point-in-time snapshots
-/// - Static data where immediate consistency is not needed
-///
-/// # NOT Recommended For
-/// - MCP servers or APIs needing read-after-write consistency
-/// - Real-time applications
-/// - Use `spawn_query_consumer_pool_shared` instead for 99%+ consistency
-///
-/// # Arguments
-/// * `receiver` - Shared flume receiver (MPMC channel)
-/// * `config` - Reader configuration
-/// * `db_path` - Path to the database
-/// * `num_workers` - Number of worker threads to spawn
-///
-/// # Returns
-/// Vector of JoinHandles for all worker threads
-pub fn spawn_query_consumer_pool_readonly(
-    receiver: flume::Receiver<crate::query::Query>,
-    config: crate::ReaderConfig,
-    db_path: &Path,
-    num_workers: usize,
-) -> Vec<JoinHandle<()>> {
-    let mut handles = Vec::with_capacity(num_workers);
-
-    for worker_id in 0..num_workers {
-        let receiver = receiver.clone();
-        let config = config.clone();
-        let db_path = db_path.to_path_buf();
-
-        let handle = tokio::spawn(async move {
-            log::info!("Query worker {} starting (readonly mode)", worker_id);
-
-            // Each worker opens its own readonly Storage
-            let mut storage = Storage::readonly(&db_path);
-            if let Err(e) = storage.ready() {
-                log::error!("Query worker {} failed to ready storage: {}", worker_id, e);
-                return;
-            }
-
-            let storage = Arc::new(storage);
-            let graph = Graph::new(storage);
-
-            // Process queries from shared channel
-            while let Ok(query) = receiver.recv_async().await {
-                log::debug!("Worker {} processing {} (readonly mode)", worker_id, query);
-                query.process_and_send(&graph).await;
-            }
-
-            log::info!("Query worker {} shutting down", worker_id);
-        });
-
-        handles.push(handle);
-    }
-
-    log::info!(
-        "Spawned {} query consumer workers (readonly mode - 25-30%% consistency)",
-        num_workers
-    );
-    handles
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::schema::{NodeCfValue, NodeSummary, Nodes};
-    use crate::DataUrl;
-
-    #[test]
-    fn test_lz4_compression_round_trip() {
-        // Create a simple test value
-        let test_value = NodeCfValue(
-            None,
-            "test_node".to_string(),
-            DataUrl::from_markdown("test content"),
-        );
-
-        // Serialize and compress
-        let compressed_bytes = Nodes::value_to_bytes(&test_value).expect("Failed to compress");
-
-        println!("Compressed size: {} bytes", compressed_bytes.len());
-        println!(
-            "First 20 bytes: {:?}",
-            &compressed_bytes[..20.min(compressed_bytes.len())]
-        );
-
-        // Decompress and deserialize
-        let decompressed_value: NodeCfValue =
-            Nodes::value_from_bytes(&compressed_bytes).expect("Failed to decompress");
-
-        // Verify
-        assert_eq!(test_value.0, decompressed_value.0, "Node name should match");
-    }
-}
-
-#[cfg(test)]
-#[path = "graph_tests.rs"]
-mod graph_tests;

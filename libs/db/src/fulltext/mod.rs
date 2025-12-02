@@ -10,8 +10,6 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use tantivy::schema::*;
 use tantivy::IndexWriter;
@@ -20,27 +18,33 @@ use tantivy::IndexWriter;
 pub mod fuzzy;
 pub mod mutation;
 pub mod query;
+pub mod reader;
 pub mod search;
+pub mod writer;
 
 // Re-export commonly used types
 pub use fuzzy::{FuzzyLevel, FuzzySearchOptions};
-pub use mutation::FulltextIndexExecutor;
 pub use query::{
+    NodeSearchResult, Nodes as FulltextNodes, Query as FulltextQuery,
+    Runnable as FulltextQueryRunnable,
+};
+pub use reader::{
     create_query_consumer as create_fulltext_query_consumer,
     create_query_reader as create_fulltext_query_reader,
     spawn_query_consumer as spawn_fulltext_query_consumer,
     spawn_query_consumer_pool_readonly as spawn_fulltext_query_consumer_pool_readonly,
     spawn_query_consumer_pool_shared as spawn_fulltext_query_consumer_pool_shared,
-    Consumer as FulltextQueryConsumer, NodeSearchResult, Nodes as FulltextNodes,
-    Query as FulltextQuery, QueryExecutor as FulltextQueryExecutor,
-    QueryProcessor as FulltextQueryProcessor, Reader as FulltextReader,
-    ReaderConfig as FulltextReaderConfig, Runnable as FulltextQueryRunnable,
+    Consumer as FulltextQueryConsumer, Processor as FulltextQueryProcessor,
+    QueryExecutor as FulltextQueryExecutor, Reader as FulltextReader,
+    ReaderConfig as FulltextReaderConfig,
 };
 pub use search::{FacetCounts, SearchOptions, SearchResults};
-
-use crate::{
-    mutation::{Consumer, Mutation, Processor},
-    WriterConfig,
+pub use writer::{
+    create_fulltext_consumer, create_fulltext_consumer_with_next,
+    create_fulltext_consumer_with_params, create_fulltext_consumer_with_params_and_next,
+    spawn_fulltext_consumer, spawn_fulltext_consumer_with_params,
+    spawn_fulltext_consumer_with_params_and_next, spawn_fulltext_mutation_consumer_with_next,
+    MutationExecutor as FulltextIndexExecutor,
 };
 
 /// Field handles for efficient access to the Tantivy schema fields
@@ -419,7 +423,7 @@ impl Storage {
 /// - The IndexWriter inside Storage is behind a Mutex for thread-safe mutation access
 /// - Tantivy's Index is inherently thread-safe (Send + Sync)
 pub struct Index {
-    storage: Arc<Storage>,
+    pub(crate) storage: Arc<Storage>,
 }
 
 impl Index {
@@ -472,259 +476,24 @@ impl Clone for Index {
     }
 }
 
-#[async_trait::async_trait]
-impl Processor for Index {
-    /// Process a batch of mutations - index content for full-text search.
-    ///
-    /// Requires the Index to be in readwrite mode.
-    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-        if mutations.is_empty() {
-            return Ok(());
-        }
-
-        log::info!(
-            "[FullText] Processing {} mutations for indexing",
-            mutations.len()
-        );
-
-        // Get the writer (requires readwrite mode)
-        let writer_mutex = self
-            .storage
-            .writer()
-            .ok_or_else(|| anyhow::anyhow!("[FullText] Index not in readwrite mode"))?;
-
-        let fields = self.storage.fields()?;
-        let mut writer = writer_mutex.lock().await;
-
-        // Index each mutation
-        for mutation in mutations {
-            match mutation {
-                Mutation::AddNode(m) => m.index(&mut writer, fields)?,
-                Mutation::AddEdge(m) => m.index(&mut writer, fields)?,
-                Mutation::AddNodeFragment(m) => m.index(&mut writer, fields)?,
-                Mutation::AddEdgeFragment(m) => m.index(&mut writer, fields)?,
-                Mutation::UpdateNodeValidSinceUntil(m) => m.index(&mut writer, fields)?,
-                Mutation::UpdateEdgeValidSinceUntil(m) => m.index(&mut writer, fields)?,
-                Mutation::UpdateEdgeWeight(m) => m.index(&mut writer, fields)?,
-            }
-        }
-
-        // Commit the batch atomically
-        writer.commit().context("Failed to commit batch to index")?;
-
-        log::info!(
-            "[FullText] Successfully indexed {} mutations",
-            mutations.len()
-        );
-        Ok(())
-    }
-}
-
 // ============================================================================
-// Helper Functions for Creating Storage and Index
+// Tests
 // ============================================================================
-
-/// Create a readwrite Index from a path (convenience function).
-///
-/// This handles the full setup: Storage::readwrite -> ready -> Arc -> Index.
-/// Use this for mutation consumers.
-fn create_readwrite_index(index_path: &Path) -> Index {
-    let mut storage = Storage::readwrite(index_path);
-    storage.ready().expect("Failed to ready storage");
-    Index::new(Arc::new(storage))
-}
-
-/// Create a readonly Index from a path (convenience function).
-///
-/// This handles the full setup: Storage::readonly -> ready -> Arc -> Index.
-/// Use this for query consumers.
-#[allow(dead_code)]
-fn create_readonly_index(index_path: &Path) -> Index {
-    let mut storage = Storage::readonly(index_path);
-    storage.ready().expect("Failed to ready storage");
-    Index::new(Arc::new(storage))
-}
-
-// ============================================================================
-// Consumer Creation Functions
-// ============================================================================
-
-/// Create a new full-text mutation consumer with default parameters
-pub fn create_fulltext_consumer(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    index_path: &Path,
-) -> Consumer<Index> {
-    let processor = create_readwrite_index(index_path);
-    Consumer::new(receiver, config, processor)
-}
-
-/// Create a new full-text mutation consumer with default parameters that chains to another processor
-pub fn create_fulltext_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    index_path: &Path,
-    next: mpsc::Sender<Vec<crate::Mutation>>,
-) -> Consumer<Index> {
-    let processor = create_readwrite_index(index_path);
-    Consumer::with_next(receiver, config, processor, next)
-}
-
-/// Create a new full-text mutation consumer with custom BM25 parameters
-pub fn create_fulltext_consumer_with_params(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    index_path: &Path,
-    _k1: f32,
-    _b: f32,
-) -> Consumer<Index> {
-    // Note: BM25 params not currently used - Tantivy uses defaults
-    let processor = create_readwrite_index(index_path);
-    Consumer::new(receiver, config, processor)
-}
-
-/// Create a new full-text mutation consumer with custom BM25 parameters that chains to another processor
-pub fn create_fulltext_consumer_with_params_and_next(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    index_path: &Path,
-    _k1: f32,
-    _b: f32,
-    next: mpsc::Sender<Vec<crate::Mutation>>,
-) -> Consumer<Index> {
-    // Note: BM25 params not currently used - Tantivy uses defaults
-    let processor = create_readwrite_index(index_path);
-    Consumer::with_next(receiver, config, processor, next)
-}
-
-/// Spawn the full-text mutation consumer as a background task with default parameters
-pub fn spawn_fulltext_consumer(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    index_path: &Path,
-) -> JoinHandle<Result<()>> {
-    let consumer = create_fulltext_consumer(receiver, config, index_path);
-    crate::mutation::spawn_consumer(consumer)
-}
-
-/// Spawn the full-text mutation consumer as a background task with default parameters and chaining.
-///
-/// This follows the same pattern as `spawn_graph_consumer_with_next` - the consumer processes
-/// mutations and then forwards them to the next consumer in the chain.
-///
-/// # Example
-/// ```no_run
-/// use motlie_db::{create_mutation_writer, WriterConfig};
-/// use motlie_db::fulltext::spawn_fulltext_mutation_consumer_with_next;
-/// use std::path::Path;
-///
-/// # async fn example() -> anyhow::Result<()> {
-/// let config = WriterConfig { channel_buffer_size: 100 };
-/// let (writer, mutation_rx) = create_mutation_writer(config.clone());
-///
-/// // Create channel for next consumer in chain
-/// let (next_tx, next_rx) = tokio::sync::mpsc::channel(100);
-///
-/// // Fulltext consumer processes mutations then forwards to next_tx
-/// let handle = spawn_fulltext_mutation_consumer_with_next(
-///     mutation_rx,
-///     config,
-///     Path::new("/data/fulltext"),
-///     next_tx,
-/// );
-/// # Ok(())
-/// # }
-/// ```
-pub fn spawn_fulltext_mutation_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    index_path: &Path,
-    next: mpsc::Sender<Vec<crate::Mutation>>,
-) -> JoinHandle<Result<()>> {
-    let consumer = create_fulltext_consumer_with_next(receiver, config, index_path, next);
-    crate::mutation::spawn_consumer(consumer)
-}
-
-/// Alias for `spawn_fulltext_mutation_consumer_with_next` for backward compatibility.
-#[deprecated(
-    since = "0.2.0",
-    note = "Use spawn_fulltext_mutation_consumer_with_next instead"
-)]
-pub fn spawn_fulltext_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    index_path: &Path,
-    next: mpsc::Sender<Vec<crate::Mutation>>,
-) -> JoinHandle<Result<()>> {
-    spawn_fulltext_mutation_consumer_with_next(receiver, config, index_path, next)
-}
-
-/// Spawn the full-text mutation consumer as a background task with custom BM25 parameters
-pub fn spawn_fulltext_consumer_with_params(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    index_path: &Path,
-    k1: f32,
-    b: f32,
-) -> JoinHandle<Result<()>> {
-    let consumer = create_fulltext_consumer_with_params(receiver, config, index_path, k1, b);
-    crate::mutation::spawn_consumer(consumer)
-}
-
-/// Spawn the full-text mutation consumer as a background task with custom BM25 parameters and chaining
-pub fn spawn_fulltext_consumer_with_params_and_next(
-    receiver: mpsc::Receiver<Vec<crate::Mutation>>,
-    config: WriterConfig,
-    index_path: &Path,
-    k1: f32,
-    b: f32,
-    next: mpsc::Sender<Vec<crate::Mutation>>,
-) -> JoinHandle<Result<()>> {
-    let consumer =
-        create_fulltext_consumer_with_params_and_next(receiver, config, index_path, k1, b, next);
-    crate::mutation::spawn_consumer(consumer)
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        mutation::{
-            AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, UpdateNodeValidSinceUntil,
-        },
-        DataUrl, Id, Mutation, TimestampMilli,
-    };
+    use crate::graph::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, UpdateNodeValidSinceUntil};
+    use crate::graph::writer::Processor;
+    use crate::{DataUrl, Id, TimestampMilli};
     use tantivy::collector::TopDocs;
     use tantivy::query::QueryParser;
-
-    #[test]
-    fn test_fulltext_processor_creation() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let index_path = temp_dir.path().join("test_index");
-
-        let processor = create_readwrite_index(&index_path);
-
-        assert_eq!(processor.index_path(), index_path);
-        assert!(index_path.exists());
-    }
-
-    #[test]
-    fn test_fulltext_processor_with_custom_params() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let index_path = temp_dir.path().join("test_index");
-
-        // BM25 params don't affect creation - just verify setup works
-        let processor = create_readwrite_index(&index_path);
-
-        // Just verify it creates successfully
-        assert!(processor.index_path().exists());
-    }
 
     #[tokio::test]
     async fn test_index_add_node() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("test_index");
-        let processor = create_readwrite_index(&index_path);
+        let processor = writer::create_readwrite_index(&index_path);
 
         let node = AddNode {
             id: Id::new(),
@@ -754,7 +523,7 @@ mod tests {
     async fn test_index_add_node_fragment() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("test_index");
-        let processor = create_readwrite_index(&index_path);
+        let processor = writer::create_readwrite_index(&index_path);
 
         let node_id = Id::new();
         let fragment = AddNodeFragment {
@@ -784,14 +553,14 @@ mod tests {
     async fn test_index_add_edge() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("test_index");
-        let processor = create_readwrite_index(&index_path);
+        let processor = writer::create_readwrite_index(&index_path);
 
         let edge = AddEdge {
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "depends_on".to_string(),
-            summary: crate::schema::EdgeSummary::from_text("dependency relationship"),
+            summary: crate::graph::schema::EdgeSummary::from_text("dependency relationship"),
             weight: Some(1.0),
             temporal_range: None,
         };
@@ -816,7 +585,7 @@ mod tests {
     async fn test_index_add_edge_fragment() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("test_index");
-        let processor = create_readwrite_index(&index_path);
+        let processor = writer::create_readwrite_index(&index_path);
 
         let edge_fragment = AddEdgeFragment {
             src_id: Id::new(),
@@ -849,7 +618,7 @@ mod tests {
     async fn test_batch_indexing() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("test_index");
-        let processor = create_readwrite_index(&index_path);
+        let processor = writer::create_readwrite_index(&index_path);
 
         // Create a batch of mutations
         let mutations = vec![
@@ -903,7 +672,7 @@ mod tests {
     async fn test_update_node_valid_since_until() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("test_index");
-        let processor = create_readwrite_index(&index_path);
+        let processor = writer::create_readwrite_index(&index_path);
 
         let node_id = Id::new();
 
@@ -932,7 +701,7 @@ mod tests {
         // Now update its temporal range (which should delete the document)
         let update = Mutation::UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil {
             id: node_id,
-            temporal_range: crate::schema::ValidTemporalRange(
+            temporal_range: crate::ValidTemporalRange(
                 Some(TimestampMilli(0)),
                 Some(TimestampMilli(1000)),
             ),
@@ -951,7 +720,7 @@ mod tests {
     async fn test_multiple_fragments_for_same_node() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("test_index");
-        let processor = create_readwrite_index(&index_path);
+        let processor = writer::create_readwrite_index(&index_path);
 
         let node_id = Id::new();
 
@@ -996,7 +765,7 @@ mod tests {
     async fn test_search_with_different_mime_types() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("test_index");
-        let processor = create_readwrite_index(&index_path);
+        let processor = writer::create_readwrite_index(&index_path);
 
         let mutations = vec![
             Mutation::AddNodeFragment(AddNodeFragment {
@@ -1038,14 +807,14 @@ mod tests {
     async fn test_edge_with_weight() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let index_path = temp_dir.path().join("test_index");
-        let processor = create_readwrite_index(&index_path);
+        let processor = writer::create_readwrite_index(&index_path);
 
         let edge_with_weight = AddEdge {
             source_node_id: Id::new(),
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "weighted_edge".to_string(),
-            summary: crate::schema::EdgeSummary::from_text("weighted connection"),
+            summary: crate::graph::schema::EdgeSummary::from_text("weighted connection"),
             weight: Some(2.5),
             temporal_range: None,
         };
@@ -1055,7 +824,7 @@ mod tests {
             target_node_id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "unweighted_edge".to_string(),
-            summary: crate::schema::EdgeSummary::from_text("unweighted connection"),
+            summary: crate::graph::schema::EdgeSummary::from_text("unweighted connection"),
             weight: None,
             temporal_range: None,
         };
@@ -1079,121 +848,5 @@ mod tests {
         let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
 
         assert_eq!(top_docs.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_empty_mutations_batch() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let index_path = temp_dir.path().join("test_index");
-        let processor = create_readwrite_index(&index_path);
-
-        // Processing empty batch should not error
-        let result = processor.process_mutations(&[]).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_index_persistence() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let index_path = temp_dir.path().join("test_index");
-
-        // Create processor and add a document
-        {
-            let processor = create_readwrite_index(&index_path);
-            let node = AddNode {
-                id: Id::new(),
-                ts_millis: TimestampMilli::now(),
-                name: "persistent_node".to_string(),
-                temporal_range: None,
-                summary: crate::NodeSummary::from_text("persistent summary"),
-            };
-            processor
-                .process_mutations(&[Mutation::AddNode(node)])
-                .await
-                .unwrap();
-        } // Drop processor to close the index
-
-        // Open again and verify the document is still there
-        let processor = create_readwrite_index(&index_path);
-        let reader = processor.tantivy_index().reader().unwrap();
-        let searcher = reader.searcher();
-        let query_parser = QueryParser::for_index(
-            processor.tantivy_index(),
-            vec![processor.fields().node_name_field],
-        );
-        let query = query_parser.parse_query("persistent_node").unwrap();
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
-
-        assert_eq!(top_docs.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_fulltext_consumer_integration() {
-        use crate::mutation::Runnable as MutRunnable;
-        use crate::{create_mutation_writer, WriterConfig};
-        use tokio::time::Duration;
-
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let index_path = temp_dir.path().join("test_index");
-
-        let config = WriterConfig {
-            channel_buffer_size: 10,
-        };
-
-        let (writer, receiver) = create_mutation_writer(config.clone());
-
-        // Spawn consumer
-        let consumer_handle = spawn_fulltext_consumer(receiver, config, &index_path);
-
-        // Send some mutations
-        let node_args = AddNode {
-            id: Id::new(),
-            ts_millis: TimestampMilli::now(),
-            name: "test_node".to_string(),
-            temporal_range: None,
-            summary: crate::NodeSummary::from_text("test summary"),
-        };
-        node_args.run(&writer).await.unwrap();
-
-        let fragment_args = AddNodeFragment {
-            id: Id::new(),
-            ts_millis: TimestampMilli(1234567890),
-            content: crate::DataUrl::from_text(
-                "This is a test fragment with some searchable content",
-            ),
-            temporal_range: None,
-        };
-        fragment_args.run(&writer).await.unwrap();
-
-        // Give consumer time to process
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // Drop writer to close channel
-        drop(writer);
-
-        // Wait for consumer to finish
-        consumer_handle.await.unwrap().unwrap();
-
-        // Verify the documents are indexed
-        let processor = create_readwrite_index(&index_path);
-        let reader = processor.tantivy_index().reader().unwrap();
-        let searcher = reader.searcher();
-        let query_parser = QueryParser::for_index(
-            processor.tantivy_index(),
-            vec![
-                processor.fields().node_name_field,
-                processor.fields().content_field,
-            ],
-        );
-
-        // Search for node
-        let query = query_parser.parse_query("test_node").unwrap();
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
-        assert_eq!(top_docs.len(), 1);
-
-        // Search for fragment content
-        let query = query_parser.parse_query("searchable").unwrap();
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
-        assert_eq!(top_docs.len(), 1);
     }
 }

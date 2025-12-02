@@ -6,7 +6,7 @@
 
 use motlie_db::{
     create_fulltext_query_reader, create_mutation_writer, create_query_reader,
-    spawn_fulltext_query_consumer_pool_shared, spawn_query_consumer_pool_shared, AddEdge, AddNode,
+    spawn_fulltext_query_consumer_pool_shared, spawn_graph_query_consumer_pool_shared, AddEdge, AddNode,
     AddNodeFragment, DataUrl, EdgeSummary, FulltextIndex, FulltextNodes, FulltextQueryRunnable,
     FulltextReaderConfig, FulltextStorage, Graph, Id, MutationRunnable, NodeById, NodeSummary,
     NodesByName, OutgoingEdges, QueryRunnable, ReaderConfig, Storage, TimestampMilli, WriterConfig,
@@ -230,7 +230,7 @@ async fn test_multi_consumer_query_channels() {
 
     // Spawn 2 graph query consumers sharing the same channel
     let graph_consumer_handles =
-        spawn_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
+        spawn_graph_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
     println!("  Spawned 2 graph query consumers");
 
     // FullText: Create 2 query consumers sharing the same channel
@@ -398,7 +398,7 @@ async fn test_concurrent_mixed_queries() {
     };
     let (graph_reader, graph_query_receiver) = create_query_reader(reader_config.clone());
     let graph_consumer_handles =
-        spawn_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
+        spawn_graph_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
 
     let fulltext_reader_config = FulltextReaderConfig {
         channel_buffer_size: 100,
@@ -588,7 +588,7 @@ async fn test_complete_pipeline_architecture() {
     let (graph_reader, graph_query_receiver) = create_query_reader(ReaderConfig {
         channel_buffer_size: 100,
     });
-    let graph_query_handles = spawn_query_consumer_pool_shared(graph_query_receiver, graph, 2);
+    let graph_query_handles = spawn_graph_query_consumer_pool_shared(graph_query_receiver, graph, 2);
 
     // FullText query consumers (2 - using readonly Index)
     let (fulltext_reader, fulltext_query_receiver) =
