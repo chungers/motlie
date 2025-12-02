@@ -65,7 +65,7 @@ async fn test_secondary_instance_basic() {
     };
 
     let consumer_handle =
-        motlie_db::spawn_query_consumer(reader_rx, Default::default(), &primary_path);
+        motlie_db::spawn_graph_query_consumer(reader_rx, Default::default(), &primary_path);
 
     // Query the node from secondary
     let result = NodeById::new(node_id, None).run(

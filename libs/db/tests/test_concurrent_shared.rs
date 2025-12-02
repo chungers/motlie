@@ -139,7 +139,7 @@ async fn reader_task_shared_graph(
 
     // Spawn query consumer with SHARED graph
     // All readers share the same Arc<Graph> which wraps the single TransactionDB
-    let consumer_handle = motlie_db::spawn_query_consumer_with_graph(
+    let consumer_handle = motlie_db::spawn_graph_query_consumer_with_graph(
         reader_rx,
         ReaderConfig {
             channel_buffer_size: 10,

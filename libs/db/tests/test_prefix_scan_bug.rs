@@ -85,7 +85,7 @@ async fn test_node_names_prefix_scan_comprehensive() {
 
     // Create query consumer
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_graph_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query for nodes starting with "Shop"
     let result = NodesByName::new("Shop".to_string(), None, Some(100), None)
@@ -172,7 +172,7 @@ async fn test_node_names_edge_cases() {
     writer_handle.await.unwrap().unwrap();
 
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_graph_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Test 1: Single character prefix
     let result = NodesByName::new("a".to_string(), None, Some(100), None)
@@ -236,7 +236,7 @@ async fn test_node_names_pagination() {
     writer_handle.await.unwrap().unwrap();
 
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_graph_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Page 1: Get first 10
     let page1 = NodesByName::new("test_".to_string(), None, Some(10), None)
@@ -376,7 +376,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
     println!("\n=== Testing EdgeNames prefix scan with 'pay' ===");
 
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_graph_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query for edges starting with "pay"
     let result = EdgesByName::new("pay".to_string(), None, Some(100), None)
@@ -500,7 +500,7 @@ async fn test_empty_prefix_returns_all() {
     writer_handle.await.unwrap().unwrap();
 
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_graph_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query with empty prefix
     let result = NodesByName::new("".to_string(), None, Some(100), None)
@@ -540,7 +540,7 @@ async fn test_nonexistent_prefix_returns_empty() {
     writer_handle.await.unwrap().unwrap();
 
     let (reader, reader_rx) = motlie_db::create_query_reader(Default::default());
-    let _reader_handle = motlie_db::spawn_query_consumer(reader_rx, Default::default(), &db_path);
+    let _reader_handle = motlie_db::spawn_graph_query_consumer(reader_rx, Default::default(), &db_path);
 
     // Query with non-existent prefix
     let result = NodesByName::new("zebra".to_string(), None, Some(100), None)

@@ -51,7 +51,7 @@ async fn reader_task(
     };
 
     // Spawn query consumer (it will open its own readonly storage)
-    let consumer_handle = motlie_db::spawn_query_consumer(
+    let consumer_handle = motlie_db::spawn_graph_query_consumer(
         reader_rx,
         ReaderConfig {
             channel_buffer_size: 10,

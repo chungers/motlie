@@ -47,6 +47,29 @@ Basic API tests for secondary instance functionality (4 tests):
 - `test_secondary_instance_creation()` - Instance creation validation
 - `test_try_catch_up_on_non_secondary_fails()` - Error handling
 
+### Fulltext Integration Tests
+
+#### `test_fulltext_integration.rs`
+Tests for fulltext search functionality (3 tests):
+- Basic indexing and search
+- Fuzzy search with typo tolerance
+- Multi-document search and ranking
+
+#### `test_fulltext_chaining.rs`
+Tests for graph-to-fulltext consumer chaining (3 tests):
+- Mutation flow from graph to fulltext
+- Index consistency after chained writes
+- Shutdown and flush behavior
+
+### Pipeline Integration Tests
+
+#### `test_pipeline_integration.rs`
+End-to-end pipeline tests (4 tests):
+- Complete mutation pipeline with consumers
+- Query processing across graph and fulltext
+- Concurrent client scenarios
+- Mixed query workloads
+
 ### Validation Tests
 
 #### `test_prefix_scan_bug.rs`
@@ -99,7 +122,7 @@ cargo test test_concurrent_read_write_integration -- --nocapture
 - **Correct pattern**: Share `Arc<Graph>` (wrapping `Arc<Storage>`) across threads
 
 ### API Functions for Shared Storage
-- `spawn_query_consumer_with_graph()` - Share Storage across query consumers
+- `spawn_graph_query_consumer_with_graph()` - Share Storage across query consumers
 - `spawn_graph_consumer_with_graph()` - Share Storage for mutation consumer
 - Both require `Graph` to implement `Clone` (shallow clone of Arc)
 

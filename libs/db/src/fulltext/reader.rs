@@ -1,0 +1,424 @@
+//! Fulltext reader module providing query consumers and reader infrastructure.
+//!
+//! This module follows the same pattern as the top-level reader.rs:
+//! - Reader - handle for sending queries
+//! - ReaderConfig - configuration
+//! - Consumer - processes queries from channel
+//! - Spawn functions for creating consumers
+//!
+//! Also contains the query executor traits (QueryExecutor, Processor, QueryProcessor)
+//! which define how queries execute against the storage layer.
+
+use anyhow::Result;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::{Index, Storage};
+
+// ============================================================================
+// QueryExecutor Trait
+// ============================================================================
+
+/// Trait that fulltext query types implement to execute themselves.
+///
+/// This follows the same pattern as graph queries (db::query::QueryExecutor):
+/// - Each query type knows how to fetch its own data from Storage
+/// - Logic lives with types, not in central implementation
+/// - Easier to extend (add query = impl QueryExecutor)
+#[async_trait::async_trait]
+pub trait QueryExecutor: Send + Sync {
+    /// The type of result this query produces
+    type Output: Send;
+
+    /// Execute this query against the fulltext storage layer.
+    /// Each query type knows how to fetch its own data.
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output>;
+
+    /// Get the timeout for this query
+    fn timeout(&self) -> Duration;
+}
+
+// ============================================================================
+// Processor Trait - bridges Index to QueryExecutor
+// ============================================================================
+
+/// Trait for fulltext query processors (mirrors graph::query::Processor).
+/// Allows queries to access the underlying Storage.
+pub trait Processor {
+    /// Get a reference to the underlying Storage
+    fn storage(&self) -> &Storage;
+}
+
+/// Implement Processor for Index (mirrors graph::Graph implementing query::Processor)
+impl Processor for Index {
+    fn storage(&self) -> &Storage {
+        Index::storage(self)
+    }
+}
+
+// ============================================================================
+// QueryWithTimeout Trait - Blanket implementation for QueryExecutor
+// ============================================================================
+
+/// Trait that adds timeout-wrapped execution to QueryExecutor types.
+/// This provides a blanket implementation so query types don't need to
+/// implement the timeout handling themselves.
+#[async_trait::async_trait]
+pub trait QueryWithTimeout: Send + Sync {
+    /// The result type this query produces
+    type ResultType: Send;
+
+    /// Execute the query with timeout and return the result
+    async fn result<P: Processor + Sync>(&self, processor: &P) -> Result<Self::ResultType>;
+
+    /// Get the timeout for this query
+    fn timeout(&self) -> Duration;
+}
+
+/// Blanket implementation: any QueryExecutor automatically gets QueryWithTimeout
+#[async_trait::async_trait]
+impl<T: QueryExecutor> QueryWithTimeout for T {
+    type ResultType = T::Output;
+
+    async fn result<P: Processor + Sync>(&self, processor: &P) -> Result<Self::ResultType> {
+        let result = tokio::time::timeout(self.timeout(), self.execute(processor.storage())).await;
+
+        match result {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout())),
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        QueryExecutor::timeout(self)
+    }
+}
+
+// ============================================================================
+// QueryProcessor Trait
+// ============================================================================
+
+/// Trait for processing queries without needing to know the result type.
+/// Allows the Consumer to process queries polymorphically.
+#[async_trait::async_trait]
+pub trait QueryProcessor: Send {
+    /// Process the query and send the result (consumes self)
+    async fn process_and_send<P: Processor + Sync>(self, processor: &P);
+}
+
+/// Macro to implement QueryProcessor for query types.
+/// Reduces boilerplate by using the QueryWithTimeout::result method.
+#[macro_export]
+macro_rules! impl_fulltext_query_processor {
+    ($($query_type:ty),+ $(,)?) => {
+        $(
+            #[async_trait::async_trait]
+            impl $crate::fulltext::reader::QueryProcessor for $query_type {
+                async fn process_and_send<P: $crate::fulltext::reader::Processor + Sync>(self, processor: &P) {
+                    use $crate::fulltext::reader::QueryWithTimeout;
+                    let result = self.result(processor).await;
+                    self.send_result(result);
+                }
+            }
+        )+
+    };
+}
+
+// ============================================================================
+// Reader
+// ============================================================================
+
+/// Handle for sending fulltext queries to the reader queue.
+/// This is the fulltext equivalent of the graph Reader.
+#[derive(Debug, Clone)]
+pub struct Reader {
+    sender: flume::Sender<super::query::Query>,
+}
+
+impl Reader {
+    /// Create a new Reader with the given sender
+    pub fn new(sender: flume::Sender<super::query::Query>) -> Self {
+        Reader { sender }
+    }
+
+    /// Send a query to the reader queue
+    pub async fn send_query(&self, query: super::query::Query) -> Result<()> {
+        self.sender
+            .send_async(query)
+            .await
+            .map_err(|_| anyhow::anyhow!("Failed to send query to fulltext reader queue"))
+    }
+
+    /// Check if the reader is still active
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_disconnected()
+    }
+}
+
+/// Configuration for the fulltext query reader
+#[derive(Debug, Clone)]
+pub struct ReaderConfig {
+    /// Size of the MPMC channel buffer
+    pub channel_buffer_size: usize,
+}
+
+impl Default for ReaderConfig {
+    fn default() -> Self {
+        Self {
+            channel_buffer_size: 1000,
+        }
+    }
+}
+
+/// Create a new fulltext query reader and receiver pair
+pub fn create_query_reader(
+    config: ReaderConfig,
+) -> (Reader, flume::Receiver<super::query::Query>) {
+    let (sender, receiver) = flume::bounded(config.channel_buffer_size);
+    let reader = Reader::new(sender);
+    (reader, receiver)
+}
+
+// ============================================================================
+// Consumer
+// ============================================================================
+
+/// Consumer that processes fulltext queries using an Index.
+/// This is the fulltext equivalent of the graph query Consumer.
+pub struct Consumer {
+    receiver: flume::Receiver<super::query::Query>,
+    config: ReaderConfig,
+    processor: Index,
+}
+
+impl Consumer {
+    /// Create a new Consumer
+    pub fn new(
+        receiver: flume::Receiver<super::query::Query>,
+        config: ReaderConfig,
+        processor: Index,
+    ) -> Self {
+        Self {
+            receiver,
+            config,
+            processor,
+        }
+    }
+
+    /// Process queries continuously until the channel is closed
+    pub async fn run(self) -> Result<()> {
+        log::info!(
+            "Starting fulltext query consumer with config: {:?}",
+            self.config
+        );
+
+        loop {
+            match self.receiver.recv_async().await {
+                Ok(query) => {
+                    log::debug!("Processing fulltext query: {}", query);
+                    query.process_and_send(&self.processor).await;
+                }
+                Err(_) => {
+                    log::info!("Fulltext query consumer shutting down - channel closed");
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Spawn a fulltext query consumer as a background task
+pub fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move { consumer.run().await })
+}
+
+/// Create a fulltext query consumer
+pub fn create_query_consumer(
+    receiver: flume::Receiver<super::query::Query>,
+    config: ReaderConfig,
+    processor: Index,
+) -> Consumer {
+    Consumer::new(receiver, config, processor)
+}
+
+/// Spawn a fulltext query consumer with a new readonly Index
+///
+/// Uses readonly Storage since query consumers only need read access.
+/// Multiple consumers can share the same index path.
+pub fn spawn_query_consumer(
+    receiver: flume::Receiver<super::query::Query>,
+    config: ReaderConfig,
+    index_path: &Path,
+) -> tokio::task::JoinHandle<Result<()>> {
+    // Use readonly mode for query consumers - they don't need write access
+    let mut storage = Storage::readonly(index_path);
+    storage.ready().expect("Failed to ready readonly storage");
+    let processor = Index::new(Arc::new(storage));
+    let consumer = create_query_consumer(receiver, config, processor);
+    spawn_consumer(consumer)
+}
+
+/// Spawn a pool of fulltext query consumers sharing an Arc<Index>.
+///
+/// This is the recommended approach for multiple query consumers because
+/// all workers share the same underlying Tantivy Index via `Arc<Index>`.
+///
+/// # Example
+/// ```no_run
+/// use motlie_db::{
+///     FulltextStorage, FulltextIndex, FulltextReaderConfig,
+///     create_fulltext_query_reader, spawn_fulltext_query_consumer_pool_shared,
+/// };
+/// use std::sync::Arc;
+/// use std::path::Path;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let index_path = Path::new("/path/to/fulltext_index");
+///
+/// // Create a shared readonly Index (follows graph::Graph pattern)
+/// let mut storage = FulltextStorage::readonly(index_path);
+/// storage.ready()?;
+/// let index = FulltextIndex::new(Arc::new(storage));
+///
+/// // Create reader channel
+/// let config = FulltextReaderConfig { channel_buffer_size: 100 };
+/// let (reader, receiver) = create_fulltext_query_reader(config);
+///
+/// // Spawn multiple consumers sharing the same Index
+/// let num_workers = 4;
+/// let handles = spawn_fulltext_query_consumer_pool_shared(
+///     receiver,
+///     Arc::new(index),
+///     num_workers,
+/// );
+///
+/// // All workers share the same Tantivy Index via Arc<Index>
+/// # Ok(())
+/// # }
+/// ```
+pub fn spawn_query_consumer_pool_shared(
+    receiver: flume::Receiver<super::query::Query>,
+    index: Arc<Index>,
+    num_workers: usize,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(num_workers);
+
+    for worker_id in 0..num_workers {
+        let receiver = receiver.clone();
+        let index = index.clone(); // Cheap Arc clone - shares Tantivy Index
+
+        let handle = tokio::spawn(async move {
+            log::info!(
+                "Fulltext query worker {} starting (shared Index mode)",
+                worker_id
+            );
+
+            // Process queries from shared channel
+            // All workers share the same Tantivy Index via Arc<Index>
+            while let Ok(query) = receiver.recv_async().await {
+                log::debug!("Worker {} processing query: {}", worker_id, query);
+                query.process_and_send(&*index).await;
+            }
+
+            log::info!("Fulltext query worker {} shutting down", worker_id);
+        });
+
+        handles.push(handle);
+    }
+
+    handles
+}
+
+/// Spawn a pool of fulltext query consumers, each with their own readonly Index.
+///
+/// Each worker creates its own readonly Storage and Index.
+/// This allows independent instances but they all read from the same index.
+///
+/// Note: For most use cases, `spawn_query_consumer_pool_shared` is preferred
+/// since it shares memory more efficiently via Arc.
+pub fn spawn_query_consumer_pool_readonly(
+    receiver: flume::Receiver<super::query::Query>,
+    config: ReaderConfig,
+    index_path: &Path,
+    num_workers: usize,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(num_workers);
+    let index_path = index_path.to_path_buf();
+
+    for worker_id in 0..num_workers {
+        let receiver = receiver.clone();
+        let _config = config.clone(); // Reserved for future use
+        let index_path = index_path.clone();
+
+        let handle = tokio::spawn(async move {
+            log::info!(
+                "Fulltext query worker {} starting (individual readonly mode)",
+                worker_id
+            );
+
+            // Each worker creates its own readonly Storage and Index
+            let mut storage = Storage::readonly(&index_path);
+            if let Err(e) = storage.ready() {
+                log::error!("Worker {} failed to ready storage: {}", worker_id, e);
+                return;
+            }
+            let index = Index::new(Arc::new(storage));
+
+            // Process queries from shared channel
+            while let Ok(query) = receiver.recv_async().await {
+                log::debug!("Worker {} processing query: {}", worker_id, query);
+                query.process_and_send(&index).await;
+            }
+
+            log::info!("Fulltext query worker {} shutting down", worker_id);
+        });
+
+        handles.push(handle);
+    }
+
+    handles
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_reader_closed_detection() {
+        let config = ReaderConfig::default();
+        let (reader, receiver) = create_query_reader(config);
+
+        assert!(!reader.is_closed());
+
+        // Drop receiver to close channel
+        drop(receiver);
+
+        // Give tokio time to process the close
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Reader should detect channel is closed
+        assert!(reader.is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_reader_config_default() {
+        let config = ReaderConfig::default();
+        assert_eq!(config.channel_buffer_size, 1000);
+    }
+
+    #[tokio::test]
+    async fn test_reader_creation() {
+        let config = ReaderConfig {
+            channel_buffer_size: 50,
+        };
+        let (reader, _receiver) = create_query_reader(config);
+
+        // Reader should not be closed when receiver exists
+        assert!(!reader.is_closed());
+    }
+}

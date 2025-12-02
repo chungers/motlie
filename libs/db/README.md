@@ -334,7 +334,7 @@ pub trait Processor: Send + Sync {
 
 ### Consumer Pattern
 
-The `spawn_query_consumer()` function creates an async task that:
+The `spawn_graph_query_consumer()` function creates an async task that:
 
 1. Receives queries from MPMC channel (flume)
 2. Executes query via `Processor`
@@ -558,15 +558,16 @@ cargo test --lib test_forward_edges_keys_lexicographically_sortable
 
 ### Test Coverage
 
-- ✅ **159 passing tests**
+- ✅ **161 passing tests** (137 unit + 24 integration)
 - Storage lifecycle (open, close, reopen)
-- ReadOnly/ReadWrite concurrency
+- ReadOnly/ReadWrite/Secondary concurrency
 - Query processing with timeouts
 - **Transaction batching** (single, multi, large batches, atomicity)
 - Mutation processing and chaining
 - Schema serialization and ordering
 - Full-text indexing
 - Graph topology queries
+- Concurrent readonly and secondary access
 
 ## Examples
 
