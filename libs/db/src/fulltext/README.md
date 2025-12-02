@@ -74,10 +74,12 @@ impl QueryExecutor for Nodes {
 | **Mutation Consumers** | |
 | `spawn_graph_consumer(receiver, config, path)` | Single mutation consumer |
 | `spawn_graph_consumer_with_next(receiver, config, path, next_tx)` | Mutation consumer that chains to next |
+| `spawn_graph_consumer_with_graph(receiver, config, graph)` | Mutation consumer with existing Graph |
 | **Query Consumers** | |
-| `spawn_query_consumer(receiver, config, path)` | Single query consumer with new Graph |
-| `spawn_query_consumer_pool_shared(receiver, Arc<Graph>, n)` | Pool sharing one Graph |
-| `spawn_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual Graphs |
+| `spawn_graph_query_consumer(receiver, config, path)` | Single query consumer with new Graph |
+| `spawn_graph_query_consumer_with_graph(receiver, config, graph)` | Query consumer with existing Graph |
+| `spawn_graph_query_consumer_pool_shared(receiver, graph, n)` | Pool sharing one Arc\<Graph\> |
+| `spawn_graph_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual readonly Graphs |
 
 ### Fulltext Module
 
@@ -86,10 +88,12 @@ impl QueryExecutor for Nodes {
 | **Mutation Consumers** | |
 | `spawn_fulltext_consumer(receiver, config, path)` | Single mutation consumer |
 | `spawn_fulltext_mutation_consumer_with_next(receiver, config, path, next_tx)` | Mutation consumer that chains to next |
+| `spawn_fulltext_consumer_with_params(receiver, config, path, params)` | Mutation consumer with index params |
+| `spawn_fulltext_consumer_with_params_and_next(receiver, config, path, params, next_tx)` | Mutation consumer with params and chaining |
 | **Query Consumers** | |
 | `spawn_fulltext_query_consumer(receiver, config, path)` | Single query consumer with new Index |
-| `spawn_fulltext_query_consumer_pool_shared(receiver, Arc<Index>, n)` | Pool sharing one Index |
-| `spawn_fulltext_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual Indexes |
+| `spawn_fulltext_query_consumer_pool_shared(receiver, index, n)` | Pool sharing one Arc\<Index\> |
+| `spawn_fulltext_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual readonly Indexes |
 
 ## Usage Examples
 
@@ -98,7 +102,7 @@ impl QueryExecutor for Nodes {
 ```rust
 use motlie_db::{
     create_mutation_writer, create_query_reader, create_fulltext_query_reader,
-    spawn_query_consumer_pool_shared, spawn_fulltext_query_consumer_pool_shared,
+    spawn_graph_query_consumer_pool_shared, spawn_fulltext_query_consumer_pool_shared,
     Graph, Storage, FulltextIndex, FulltextStorage,
     WriterConfig, ReaderConfig, FulltextReaderConfig,
 };
@@ -158,7 +162,7 @@ storage.ready()?;
 let graph = Arc::new(Graph::new(Arc::new(storage)));
 
 // Spawn 2 graph query consumers sharing the same Graph
-let graph_handles = spawn_query_consumer_pool_shared(
+let graph_handles = spawn_graph_query_consumer_pool_shared(
     graph_query_receiver,
     graph,
     2,  // 2 workers
@@ -587,11 +591,25 @@ let similar = MoreLikeThis::new(node_id)
 - [ ] Custom scoring/boosting per field
 - [ ] Temporal filtering (valid_since/valid_until support)
 
+## File Organization
+
+```
+fulltext/
+├── mod.rs       # Storage, Index struct, module exports
+├── mutation.rs  # Mutation processing for index updates
+├── writer.rs    # Writer/MutationConsumer infrastructure
+├── query.rs     # Query types (Nodes fulltext search)
+├── reader.rs    # Reader/QueryConsumer infrastructure
+├── search.rs    # Low-level search utilities
+├── fuzzy.rs     # Fuzzy search implementation
+└── README.md    # This file
+```
+
 ## See Also
 
 - `tests/test_pipeline_integration.rs` - Complete integration tests demonstrating all patterns
-- `src/graph.rs` - Graph module with parallel design
-- `src/fulltext/query.rs` - Fulltext query implementation
-- `src/fulltext/search.rs` - Low-level search utilities
-- `src/fulltext/fuzzy.rs` - Fuzzy search implementation
+- `tests/test_fulltext_integration.rs` - Fulltext-specific integration tests
+- `tests/test_fulltext_chaining.rs` - Graph-to-fulltext chaining tests
+- `src/graph/` - Graph module with parallel design
+- `src/README.md` - Module design patterns overview
 - [Tantivy Query Parser Documentation](https://docs.rs/tantivy/latest/tantivy/query/struct.QueryParser.html)

@@ -21,7 +21,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use motlie_db::{
-    create_mutation_writer, create_query_reader, spawn_graph_consumer, spawn_query_consumer,
+    create_mutation_writer, create_query_reader, spawn_graph_consumer, spawn_graph_query_consumer,
     AddEdge, AddNode, Id, MutationRunnable, NodeById, NodeSummary, OutgoingEdges, QueryRunnable,
     ReaderConfig, TimestampMilli, WriterConfig,
 };
@@ -121,7 +121,7 @@ fn bench_point_lookups(c: &mut Criterion) {
     };
     let (reader, query_receiver) = create_query_reader(reader_config.clone());
     let _guard = rt.enter();
-    let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+    let _query_handle = spawn_graph_query_consumer(query_receiver, reader_config, temp_dir.path());
 
     let mut group = c.benchmark_group("point_lookups");
     group.measurement_time(Duration::from_secs(10));
@@ -180,7 +180,7 @@ fn bench_prefix_scans_by_position(c: &mut Criterion) {
         };
         let (reader, query_receiver) = create_query_reader(reader_config.clone());
         let _guard = rt.enter();
-        let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+        let _query_handle = spawn_graph_query_consumer(query_receiver, reader_config, temp_dir.path());
 
         // Test different positions in the key space
         for position in ["early", "middle", "late"].iter() {
@@ -231,7 +231,7 @@ fn bench_prefix_scans_by_degree(c: &mut Criterion) {
         };
         let (reader, query_receiver) = create_query_reader(reader_config.clone());
         let _guard = rt.enter();
-        let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+        let _query_handle = spawn_graph_query_consumer(query_receiver, reader_config, temp_dir.path());
 
         // Use a middle node to avoid position effects
         let target_id = node_ids[2_500];
@@ -271,7 +271,7 @@ fn bench_scan_position_independence(c: &mut Criterion) {
     };
     let (reader, query_receiver) = create_query_reader(reader_config.clone());
     let _guard = rt.enter();
-    let _query_handle = spawn_query_consumer(query_receiver, reader_config, temp_dir.path());
+    let _query_handle = spawn_graph_query_consumer(query_receiver, reader_config, temp_dir.path());
 
     let mut group = c.benchmark_group("scan_position_independence");
     group.measurement_time(Duration::from_secs(10));

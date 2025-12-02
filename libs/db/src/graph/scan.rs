@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use motlie_db::{Storage, scan::{AllNodes, Visitable}};
+//! use motlie_db::{Storage, graph::scan::{AllNodes, Visitable}};
 //!
 //! let mut storage = Storage::readonly(db_path);
 //! storage.ready()?;
@@ -22,15 +22,16 @@
 use anyhow::Result;
 use rocksdb::{Direction, IteratorMode};
 
-use crate::graph::ColumnFamilyRecord;
-use crate::schema::{
+use super::ColumnFamilyRecord;
+use super::schema::{
     self, is_valid_at_time, DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary,
     SrcId, ValidTemporalRange,
 };
-use crate::{Id, Storage, TimestampMilli};
+use super::Storage;
+use crate::{Id, TimestampMilli};
 
 // Re-export ValidTemporalRange for use in record types
-pub use crate::schema::ValidTemporalRange as TemporalRange;
+pub use crate::ValidTemporalRange as TemporalRange;
 
 // ============================================================================
 // Visitor Trait
@@ -747,8 +748,10 @@ impl Visitable for AllEdgeNames {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mutation::Runnable;
-    use crate::{create_mutation_writer, spawn_graph_consumer, AddEdge, AddNode, DataUrl, WriterConfig};
+    use super::super::mutation::Runnable;
+    use super::super::writer::{create_mutation_writer, spawn_graph_consumer, WriterConfig};
+    use super::super::mutation::{AddEdge, AddNode};
+    use crate::DataUrl;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
@@ -771,7 +774,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
-                summary: crate::NodeSummary::from_text(&format!("test summary {}", i)),
+                summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
         }
@@ -825,7 +828,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
-                summary: crate::NodeSummary::from_text(&format!("test summary {}", i)),
+                summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -896,7 +899,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
-                summary: crate::NodeSummary::from_text(&format!("test summary {}", i)),
+                summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
         }
@@ -950,7 +953,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
                 temporal_range: None,
-                summary: crate::NodeSummary::from_text(&format!("{} summary", name)),
+                summary: super::super::schema::NodeSummary::from_text(&format!("{} summary", name)),
             };
             node.run(&writer).await.unwrap();
         }
@@ -1022,7 +1025,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
                 temporal_range: None,
-                summary: crate::NodeSummary::from_text(&format!("{} summary", name)),
+                summary: super::super::schema::NodeSummary::from_text(&format!("{} summary", name)),
             };
             node.run(&writer).await.unwrap();
         }
@@ -1099,7 +1102,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
                 temporal_range: None,
-                summary: crate::NodeSummary::from_text(&format!("node {} summary", i)),
+                summary: super::super::schema::NodeSummary::from_text(&format!("node {} summary", i)),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -1189,7 +1192,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
-                summary: crate::NodeSummary::from_text(&format!("test summary {}", i)),
+                summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -1262,7 +1265,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
-                summary: crate::NodeSummary::from_text(&format!("test summary {}", i)),
+                summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;

@@ -284,7 +284,7 @@ pub async fn build_graph(
 
     // Create query reader and spawn consumer
     let (reader, receiver) = motlie_db::create_query_reader(reader_config.clone());
-    let query_handle = motlie_db::spawn_query_consumer_with_graph(receiver, reader_config, graph);
+    let query_handle = motlie_db::spawn_graph_query_consumer_with_graph(receiver, reader_config, graph);
 
     Ok((reader, name_to_id, query_handle))
 }

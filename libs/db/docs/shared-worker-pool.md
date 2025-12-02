@@ -20,12 +20,12 @@ In contrast, when each worker opens a separate readonly Storage instance:
 
 ## API
 
-### `spawn_query_consumer_pool_shared`
+### `spawn_graph_query_consumer_pool_shared`
 
 Creates a pool of worker threads that share a single Graph instance via Arc.
 
 ```rust
-pub fn spawn_query_consumer_pool_shared(
+pub fn spawn_graph_query_consumer_pool_shared(
     receiver: flume::Receiver<crate::query::Query>,
     graph: Arc<Graph>,
     num_workers: usize,
@@ -45,7 +45,7 @@ pub fn spawn_query_consumer_pool_shared(
 **Usage:**
 ```rust
 use std::sync::Arc;
-use motlie_db::{Graph, spawn_query_consumer_pool_shared};
+use motlie_db::{Graph, spawn_graph_query_consumer_pool_shared};
 
 // Create a Graph with readwrite storage
 let graph = Arc::new(Graph::with_storage(
@@ -56,7 +56,7 @@ let graph = Arc::new(Graph::with_storage(
 let (query_sender, query_receiver) = flume::unbounded();
 
 // Spawn worker pool with shared Graph
-let handles = spawn_query_consumer_pool_shared(
+let handles = spawn_graph_query_consumer_pool_shared(
     query_receiver,
     graph.clone(),
     num_cpus::get()
@@ -72,12 +72,12 @@ for handle in handles {
 }
 ```
 
-### `spawn_query_consumer_pool_readonly`
+### `spawn_graph_query_consumer_pool_readonly`
 
 Creates a pool of worker threads where each opens its own readonly Storage instance.
 
 ```rust
-pub fn spawn_query_consumer_pool_readonly(
+pub fn spawn_graph_query_consumer_pool_readonly(
     receiver: flume::Receiver<crate::query::Query>,
     config: crate::ReaderConfig,
     db_path: &Path,
@@ -96,7 +96,7 @@ pub fn spawn_query_consumer_pool_readonly(
 
 **Consistency:** 25-30% - Each worker has separate readonly Storage instance
 
-**⚠️ Warning:** This function is provided for archival/historical use cases only. For production workloads requiring high consistency, use `spawn_query_consumer_pool_shared` instead.
+**⚠️ Warning:** This function is provided for archival/historical use cases only. For production workloads requiring high consistency, use `spawn_graph_query_consumer_pool_shared` instead.
 
 ## Architecture Comparison
 
@@ -186,7 +186,7 @@ pub fn spawn_query_consumer_pool_readonly(
 **Before:**
 ```rust
 let graph = Graph::with_storage(Storage::readonly(&db_path, &config)?);
-let handle = spawn_query_consumer(receiver, graph);
+let handle = spawn_graph_query_consumer(receiver, graph);
 ```
 
 **After:**
@@ -197,7 +197,7 @@ let graph = Arc::new(Graph::with_storage(
 ));
 
 // Use shared worker pool
-let handles = spawn_query_consumer_pool_shared(
+let handles = spawn_graph_query_consumer_pool_shared(
     receiver,
     graph.clone(),
     num_cpus::get()
@@ -208,7 +208,7 @@ let handles = spawn_query_consumer_pool_shared(
 
 **Before:**
 ```rust
-let handles = spawn_query_consumer_pool_readonly(
+let handles = spawn_graph_query_consumer_pool_readonly(
     receiver,
     config,
     &db_path,
@@ -224,7 +224,7 @@ let graph = Arc::new(Graph::with_storage(
 ));
 
 // Use shared worker pool
-let handles = spawn_query_consumer_pool_shared(
+let handles = spawn_graph_query_consumer_pool_shared(
     receiver,
     graph.clone(),
     num_workers

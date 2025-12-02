@@ -1,64 +1,13 @@
-use crate::graph::ColumnFamilyRecord;
-use crate::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
+use super::ColumnFamilyRecord;
+use super::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
+use super::ValidRangePatchable;
 use crate::DataUrl;
 use crate::Id;
 use crate::TimestampMilli;
-use crate::ValidRangePatchable;
 use serde::{Deserialize, Serialize};
 
-/// Support for temporal queries
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ValidTemporalRange(pub Option<StartTimestamp>, pub Option<UntilTimestamp>);
-
-pub type StartTimestamp = TimestampMilli;
-pub type UntilTimestamp = TimestampMilli;
-
-impl ValidTemporalRange {
-    /// Create a new temporal range with no constraints (always valid)
-    pub fn always_valid() -> Option<Self> {
-        None
-    }
-
-    /// Create a temporal range valid from a start time (inclusive)
-    pub fn valid_from(start: TimestampMilli) -> Option<Self> {
-        Some(ValidTemporalRange(Some(start), None))
-    }
-
-    /// Create a temporal range valid until an end time (exclusive)
-    pub fn valid_until(until: TimestampMilli) -> Option<Self> {
-        Some(ValidTemporalRange(None, Some(until)))
-    }
-
-    /// Create a temporal range valid between start (inclusive) and until (exclusive)
-    pub fn valid_between(start: TimestampMilli, until: TimestampMilli) -> Option<Self> {
-        Some(ValidTemporalRange(Some(start), Some(until)))
-    }
-
-    /// Check if a timestamp is valid according to this temporal range
-    pub fn is_valid_at(&self, query_time: TimestampMilli) -> bool {
-        let after_start = match self.0 {
-            None => true,
-            Some(start) => query_time.0 >= start.0,
-        };
-        let before_until = match self.1 {
-            None => true,
-            Some(until) => query_time.0 < until.0,
-        };
-        after_start && before_until
-    }
-}
-
-/// Helper function to check if a record is valid at a given time
-/// Returns true if temporal_range is None (always valid) or if query_time falls within range
-pub fn is_valid_at_time(
-    temporal_range: &Option<ValidTemporalRange>,
-    query_time: TimestampMilli,
-) -> bool {
-    match temporal_range {
-        None => true, // No temporal constraint = always valid
-        Some(range) => range.is_valid_at(query_time),
-    }
-}
+// Re-export ValidTemporalRange and related types from crate root for convenience
+pub use crate::{is_valid_at_time, StartTimestamp, UntilTimestamp, ValidTemporalRange};
 
 /// Nodes column family.
 pub(crate) struct Nodes;
