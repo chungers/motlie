@@ -81,3 +81,7 @@ path = "examples/graph/pagerank.rs"
 [[example]]
 name = "mcp"
 path = "examples/mcp/main.rs"
+
+[[bin]]
+name = "motlie"
+path = "bins/motlie/main.rs"

@@ -1,47 +1,64 @@
 use ferroid::base32::Base32UlidExt;
 use ferroid::id::ULID;
-
-mod writer;
 use serde::{Deserialize, Serialize};
-pub use writer::*;
 
-mod mutation;
-// Re-export mutation types
-pub use mutation::{
-    spawn_consumer as spawn_mutation_consumer, AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
-    Consumer as MutationConsumer, Mutation, MutationBatch, MutationExecutor,
-    Processor as MutationProcessor, Runnable as MutationRunnable, UpdateEdgeValidSinceUntil,
-    UpdateEdgeWeight, UpdateNodeValidSinceUntil,
-};
-// Note: mutations![] macro is automatically available via #[macro_export] in mutation.rs
-
-mod reader;
-pub use reader::*;
-
-mod query;
-// Re-export query types and consumer functions
-pub use query::{
-    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById,
-    NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
-    Processor as QueryProcessor, Consumer as QueryConsumer,
-};
-// Note: spawn_query_consumer is exported from graph module via `pub use graph::*`
-pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId, ValidTemporalRange};
-mod graph;
+// Graph module - RocksDB-based graph storage
+pub mod graph;
 pub use graph::{
-    create_graph_consumer, create_query_consumer, create_query_consumer_readwrite,
-    spawn_graph_consumer, spawn_graph_consumer_with_graph, spawn_graph_consumer_with_next,
-    spawn_query_consumer, spawn_query_consumer_pool_readonly, spawn_query_consumer_pool_shared,
-    spawn_query_consumer_readwrite, spawn_query_consumer_with_graph, Graph, Storage,
+    // Storage and Graph types
+    Graph, Storage,
+    // Writer infrastructure
+    create_mutation_writer, spawn_mutation_consumer,
+    MutationConsumer, MutationExecutor, MutationProcessor,
+    Writer, WriterConfig,
+    // Graph-specific mutation consumer functions
+    create_graph_consumer, create_graph_consumer_with_next,
+    spawn_graph_consumer, spawn_graph_consumer_with_next, spawn_graph_consumer_with_graph,
+    // Mutation types
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
+    Runnable as MutationRunnable, UpdateEdgeValidSinceUntil, UpdateEdgeWeight,
+    UpdateNodeValidSinceUntil,
+    // Reader infrastructure
+    create_query_reader, spawn_query_consumer as spawn_generic_query_consumer,
+    QueryConsumer, ReaderProcessor as QueryProcessor, QueryExecutor,
+    QueryProcessor as QueryProcessorTrait, QueryWithTimeout, Reader, ReaderConfig,
+    // Graph-specific query consumer functions
+    create_graph_query_consumer, create_graph_query_consumer_readwrite,
+    spawn_graph_query_consumer, spawn_graph_query_consumer_readwrite,
+    spawn_graph_query_consumer_with_graph, spawn_graph_query_consumer_pool_shared,
+    spawn_graph_query_consumer_pool_readonly,
+    // Query types and trait
+    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById,
+    NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, Query, QueryRunnable,
+    // Schema types
+    DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
+    // Scan module re-exports
+    scan,
 };
-mod fulltext;
-pub use fulltext::*;
-mod schema;
 
-#[cfg(test)]
-mod fulltext_tests;
-#[cfg(test)]
-mod graph_tests;
+// Fulltext module - Tantivy-based fulltext search
+pub mod fulltext;
+pub use fulltext::{
+    create_fulltext_consumer,
+    create_fulltext_consumer_with_next,
+    create_fulltext_consumer_with_params,
+    create_fulltext_consumer_with_params_and_next,
+    // Query types
+    create_fulltext_query_consumer,
+    create_fulltext_query_reader,
+    // Mutation consumer spawn functions
+    spawn_fulltext_consumer,
+    spawn_fulltext_consumer_with_params,
+    spawn_fulltext_consumer_with_params_and_next,
+    spawn_fulltext_mutation_consumer_with_next,
+    // Query consumer spawn functions
+    spawn_fulltext_query_consumer,
+    spawn_fulltext_query_consumer_pool_readonly,
+    spawn_fulltext_query_consumer_pool_shared,
+    FulltextFields, FulltextIndexExecutor, FulltextNodes, FulltextQuery, FulltextQueryConsumer,
+    FulltextQueryExecutor, FulltextQueryProcessor, FulltextQueryRunnable, FulltextReader,
+    FulltextReaderConfig, Index as FulltextIndex, NodeSearchResult, Storage as FulltextStorage,
+};
 
 /// Custom error type for Id parsing
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +78,79 @@ pub struct Id([u8; 16]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TimestampMilli(pub u64);
+
+/// Type alias for the start timestamp of a valid temporal range
+pub type StartTimestamp = TimestampMilli;
+
+/// Type alias for the until timestamp of a valid temporal range
+pub type UntilTimestamp = TimestampMilli;
+
+/// Support for temporal queries - defines when a record is valid
+///
+/// A `ValidTemporalRange` specifies the time window during which a record
+/// (node, edge, fragment) is considered valid:
+/// - `(Some(start), None)` - Valid from `start` onwards (inclusive)
+/// - `(None, Some(until))` - Valid until `until` (exclusive)
+/// - `(Some(start), Some(until))` - Valid between `start` (inclusive) and `until` (exclusive)
+/// - `(None, None)` - Always valid (no time constraints)
+///
+/// # Example
+/// ```
+/// use motlie_db::{ValidTemporalRange, TimestampMilli};
+///
+/// // Create a range valid from a specific time
+/// let range = ValidTemporalRange::valid_from(TimestampMilli(1000));
+///
+/// // Check if a timestamp is within the range
+/// let ts = TimestampMilli(1500);
+/// assert!(range.unwrap().is_valid_at(ts));
+/// ```
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidTemporalRange(pub Option<StartTimestamp>, pub Option<UntilTimestamp>);
+
+impl ValidTemporalRange {
+    /// Create a new temporal range with no constraints (always valid)
+    pub fn always_valid() -> Option<Self> {
+        None
+    }
+
+    /// Create a temporal range valid from a start time (inclusive)
+    pub fn valid_from(start: TimestampMilli) -> Option<Self> {
+        Some(ValidTemporalRange(Some(start), None))
+    }
+
+    /// Create a temporal range valid until an end time (exclusive)
+    pub fn valid_until(until: TimestampMilli) -> Option<Self> {
+        Some(ValidTemporalRange(None, Some(until)))
+    }
+
+    /// Create a temporal range valid between start (inclusive) and until (exclusive)
+    pub fn valid_between(start: TimestampMilli, until: TimestampMilli) -> Option<Self> {
+        Some(ValidTemporalRange(Some(start), Some(until)))
+    }
+
+    /// Check if a timestamp is valid according to this temporal range
+    pub fn is_valid_at(&self, query_time: TimestampMilli) -> bool {
+        let after_start = match self.0 {
+            None => true,
+            Some(start) => query_time.0 >= start.0,
+        };
+        let before_until = match self.1 {
+            None => true,
+            Some(until) => query_time.0 < until.0,
+        };
+        after_start && before_until
+    }
+}
+
+/// Helper function to check if a record is valid at a given time
+/// Returns true if temporal_range is None (always valid) or if query_time falls within range
+pub fn is_valid_at_time(temporal_range: &Option<ValidTemporalRange>, query_time: TimestampMilli) -> bool {
+    match temporal_range {
+        None => true, // No temporal constraint = always valid
+        Some(range) => range.is_valid_at(query_time),
+    }
+}
 
 impl TimestampMilli {
     /// Create a new timestamp from the current time
@@ -368,7 +458,7 @@ impl From<Id> for [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mutation::Runnable as MutRunnable;
+    use crate::graph::mutation::Runnable as MutRunnable;
     use std::path::Path;
     use tokio::time::Duration;
 
@@ -388,7 +478,9 @@ mod tests {
 
         // Spawn both consumer types
         let graph_handle = spawn_graph_consumer(receiver1, config.clone(), temp_dir.path());
-        let fulltext_handle = spawn_fulltext_consumer(receiver2, config.clone());
+        let fulltext_index_path = temp_dir.path().join("fulltext_index");
+        let fulltext_handle =
+            spawn_fulltext_consumer(receiver2, config.clone(), &fulltext_index_path);
 
         // Send mutations to both writers (simulating fanout)
         for i in 0..3 {
@@ -398,6 +490,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("integration_test_node_{}", i),
                 temporal_range: None,
+                summary: NodeSummary::from_text(&format!("integration test summary {}", i)),
             };
 
             let fragment_args = AddNodeFragment {
@@ -644,6 +737,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             temporal_range: None,
+            summary: NodeSummary::from_text("test summary"),
         };
 
         let edge = AddEdge {

@@ -3,7 +3,7 @@ use csv::ReaderBuilder;
 use motlie_db::{
     create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdge,
     AddEdgeFragment, AddNode, AddNodeFragment, DataUrl, EdgeSummary, Id, MutationRunnable,
-    TimestampMilli, WriterConfig,
+    NodeSummary, TimestampMilli, WriterConfig,
 };
 use rocksdb::DB;
 use std::collections::{HashMap, HashSet};
@@ -82,7 +82,8 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
     println!("  1. Creating FullText consumer (end of chain)");
     let setup_start = Instant::now();
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
-    let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone());
+    let fulltext_index_path = Path::new(db_path).join("fulltext_index");
+    let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone(), &fulltext_index_path);
 
     // Create the Graph consumer that forwards to FullText with batching
     println!("  2. Creating Batched Graph consumer (forwards to FullText)");
@@ -146,6 +147,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     ts_millis: current_time,
                     name: node_name.to_string(),
                     temporal_range: None,
+                    summary: NodeSummary::from_text(fragment_text),
                 };
 
                 // Create fragment

@@ -15,8 +15,8 @@ pub mod types;
 use motlie_db::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, DataUrl, EdgeFragmentsByIdTimeRange,
     EdgeSummary, EdgeSummaryBySrcDstName, EdgesByName, Id, IncomingEdges, MutationRunnable,
-    NodeById, NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, QueryRunnable, Reader,
-    TimestampMilli, UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
+    NodeById, NodeFragmentsByIdTimeRange, NodesByName, NodeSummary, OutgoingEdges, QueryRunnable,
+    Reader, TimestampMilli, UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
     ValidTemporalRange, Writer,
 };
 use rmcp::{
@@ -154,6 +154,7 @@ impl MotlieMcpServer {
             name: params.name.clone(),
             ts_millis: TimestampMilli(params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0)),
             temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
+            summary: NodeSummary::from_text(&params.summary),
         };
 
         mutation
