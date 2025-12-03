@@ -480,7 +480,7 @@ mod tests {
             src_id,
             dst_id,
             name: "test_edge".to_string(),
-            temporal_range: crate::ValidTemporalRange(None, None),
+            temporal_range: crate::TemporalRange(None, None),
             reason: "test reason".to_string(),
         };
 

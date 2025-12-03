@@ -33,7 +33,7 @@ pub struct AddNode {
     pub name: schema::NodeName,
 
     /// The temporal validity range for this node
-    pub temporal_range: Option<schema::ValidTemporalRange>,
+    pub temporal_range: Option<schema::TemporalRange>,
 
     /// The summary information for this node
     pub summary: schema::NodeSummary,
@@ -54,7 +54,7 @@ pub struct AddEdge {
     pub name: schema::EdgeName,
 
     /// The temporal validity range for this edge
-    pub temporal_range: Option<schema::ValidTemporalRange>,
+    pub temporal_range: Option<schema::TemporalRange>,
 
     /// The summary information for this edge (moved from Edges CF)
     pub summary: schema::EdgeSummary,
@@ -75,7 +75,7 @@ pub struct AddNodeFragment {
     pub content: crate::DataUrl,
 
     /// The temporal validity range for this fragment
-    pub temporal_range: Option<schema::ValidTemporalRange>,
+    pub temporal_range: Option<schema::TemporalRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +96,7 @@ pub struct AddEdgeFragment {
     pub content: crate::DataUrl,
 
     /// The temporal validity range for this fragment
-    pub temporal_range: Option<schema::ValidTemporalRange>,
+    pub temporal_range: Option<schema::TemporalRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,7 +105,7 @@ pub struct UpdateNodeValidSinceUntil {
     pub id: Id,
 
     /// The temporal validity range for this fragment
-    pub temporal_range: schema::ValidTemporalRange,
+    pub temporal_range: schema::TemporalRange,
 
     /// The reason for invalidation
     pub reason: String,
@@ -123,7 +123,7 @@ pub struct UpdateEdgeValidSinceUntil {
     pub name: schema::EdgeName,
 
     /// The temporal validity range for this edge
-    pub temporal_range: schema::ValidTemporalRange,
+    pub temporal_range: schema::TemporalRange,
 
     /// The reason for invalidation
     pub reason: String,
@@ -148,12 +148,12 @@ pub struct UpdateEdgeWeight {
 // Helper Functions - Shared logic for mutation execution
 // ============================================================================
 
-/// Helper function to update ValidTemporalRange for a single node.
+/// Helper function to update TemporalRange for a single node.
 fn update_node_valid_range(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
-    new_range: schema::ValidTemporalRange,
+    new_range: schema::TemporalRange,
 ) -> Result<()> {
     use super::{ColumnFamilyRecord, ValidRangePatchable};
     use super::schema::{NodeCfKey, Nodes};
@@ -176,7 +176,7 @@ fn update_node_valid_range(
     Ok(())
 }
 
-/// Helper function to update ValidTemporalRange for a single edge in both ForwardEdges and ReverseEdges CFs.
+/// Helper function to update TemporalRange for a single edge in both ForwardEdges and ReverseEdges CFs.
 /// This is the core logic shared by UpdateEdgeValidSinceUntil and UpdateNodeValidSinceUntil.
 fn update_edge_valid_range(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -184,7 +184,7 @@ fn update_edge_valid_range(
     src_id: Id,
     dst_id: Id,
     edge_name: &schema::EdgeName,
-    new_range: schema::ValidTemporalRange,
+    new_range: schema::TemporalRange,
 ) -> Result<()> {
     use super::{ColumnFamilyRecord, ValidRangePatchable};
     use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};

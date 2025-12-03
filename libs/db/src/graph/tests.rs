@@ -139,7 +139,7 @@ use tokio::time::Duration;
 
         crate::UpdateNodeValidSinceUntil {
             id: node_id,
-            temporal_range: crate::ValidTemporalRange(None, None),
+            temporal_range: crate::TemporalRange(None, None),
             reason: "test node invalidation".to_string(),
         }
         .run(&writer)
@@ -150,7 +150,7 @@ use tokio::time::Duration;
             src_id: edge_src_id,
             dst_id: edge_dst_id,
             name: edge_name,
-            temporal_range: crate::ValidTemporalRange(None, None),
+            temporal_range: crate::TemporalRange(None, None),
             reason: "test edge invalidation".to_string(),
         }
         .run(&writer)
