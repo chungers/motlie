@@ -143,6 +143,9 @@ impl QueryExecutor for Nodes {
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         use std::collections::HashMap;
+        use tantivy::query::{BooleanQuery, Occur, TermQuery};
+        use tantivy::schema::IndexRecordOption;
+        use tantivy::Term;
 
         let index = storage.index()?;
         let fields = storage.fields()?;
@@ -153,17 +156,38 @@ impl QueryExecutor for Nodes {
             .map_err(|e| anyhow::anyhow!("Failed to create index reader: {}", e))?;
         let searcher = reader.searcher();
 
-        // Parse and execute the query
+        // Parse the user's text query
         let query_parser =
             QueryParser::for_index(index, vec![fields.content_field, fields.node_name_field]);
 
-        let parsed_query = query_parser
+        let text_query = query_parser
             .parse_query(&self.query)
             .map_err(|e| anyhow::anyhow!("Failed to parse query '{}': {}", self.query, e))?;
 
+        // Build doc_type filter: (doc_type = "nodes" OR doc_type = "node_fragments")
+        let nodes_term = Term::from_field_text(fields.doc_type_field, "nodes");
+        let fragments_term = Term::from_field_text(fields.doc_type_field, "node_fragments");
+
+        let doc_type_filter = BooleanQuery::new(vec![
+            (
+                Occur::Should,
+                Box::new(TermQuery::new(nodes_term, IndexRecordOption::Basic)),
+            ),
+            (
+                Occur::Should,
+                Box::new(TermQuery::new(fragments_term, IndexRecordOption::Basic)),
+            ),
+        ]);
+
+        // Combine: text_query AND doc_type_filter
+        let combined_query = BooleanQuery::new(vec![
+            (Occur::Must, text_query),
+            (Occur::Must, Box::new(doc_type_filter)),
+        ]);
+
         // Search with TopDocs collector - get extra results since we'll dedupe by node ID
         let top_docs = searcher
-            .search(&parsed_query, &TopDocs::with_limit(self.k * 3))
+            .search(&combined_query, &TopDocs::with_limit(self.k * 3))
             .map_err(|e| anyhow::anyhow!("Search failed: {}", e))?;
 
         // Collect results, deduplicating by node ID and keeping best score
@@ -175,40 +199,21 @@ impl QueryExecutor for Nodes {
                 .doc::<tantivy::TantivyDocument>(doc_address)
                 .map_err(|e| anyhow::anyhow!("Failed to retrieve document: {}", e))?;
 
-            // Check doc_type - only process nodes and node_fragments
-            let doc_type = if let Some(doc_type_value) = doc.get_first(fields.doc_type_field) {
-                doc_type_value.as_str().unwrap_or("")
-            } else {
-                ""
-            };
-
-            if doc_type != "node" && doc_type != "node_fragment" {
-                continue; // Skip edges and edge_fragments
-            }
-
             // Extract node ID
-            let id = if let Some(id_value) = doc.get_first(fields.id_field) {
-                if let Some(bytes) = id_value.as_bytes() {
-                    if bytes.len() == 16 {
-                        let mut id_bytes = [0u8; 16];
-                        id_bytes.copy_from_slice(bytes);
-                        Id::from_bytes(id_bytes)
-                    } else {
-                        continue; // Invalid ID format
-                    }
-                } else {
-                    continue; // No ID bytes
-                }
-            } else {
-                continue; // No ID field
+            let id = match doc.get_first(fields.id_field).and_then(|v| v.as_bytes()) {
+                Some(bytes) => match Id::from_slice(bytes) {
+                    Ok(id) => id,
+                    Err(_) => continue, // Invalid ID format
+                },
+                None => continue, // No ID field
             };
 
             // Extract node name (only present on node documents, not fragments)
-            let name = if let Some(name_value) = doc.get_first(fields.node_name_field) {
-                name_value.as_str().unwrap_or("").to_string()
-            } else {
-                String::new()
-            };
+            let name = doc
+                .get_first(fields.node_name_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
 
             // Update with best score, preferring entries with a name
             node_scores
