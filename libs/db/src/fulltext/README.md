@@ -320,9 +320,10 @@ let (r1, r2, r3) = tokio::join!(client1, client2, client3);
 ## Fulltext-Specific Features
 
 - **BM25 Scoring**: Results ranked by relevance using BM25 algorithm
-- **Faceted Search**: Filter by document type, time buckets, weight ranges, and user-defined tags
+- **Faceted Search**: Filter by document type, validity structure, and user-defined tags
 - **Fuzzy Search**: Typo-tolerant queries with configurable edit distance
 - **Tag Extraction**: Automatic extraction of `#hashtags` from content as facets
+- **Temporal Filtering**: Range queries on creation_timestamp and validity fields
 
 ## Tantivy Query Syntax
 
@@ -441,18 +442,23 @@ The fulltext index uses the following schema:
 | `node_name_field` | TEXT | Node name (tokenized, searchable) |
 | `edge_name_field` | TEXT | Edge name (tokenized, searchable) |
 | `content_field` | TEXT | Main content field (summaries, fragments) |
-| `doc_type_field` | TEXT | Document type: "node", "edge", "node_fragment", "edge_fragment" |
-| `timestamp_field` | I64 | Timestamp in milliseconds |
+| `doc_type_field` | TEXT | Document type: "nodes", "forward_edges", "node_fragments", "edge_fragments" |
+| `creation_timestamp_field` | U64 | Creation timestamp in milliseconds |
+| `valid_since_field` | U64 | Validity start timestamp (optional) |
+| `valid_until_field` | U64 | Validity end timestamp (optional) |
 | `weight_field` | F64 | Edge weight (optional) |
 
 ### Facet Fields
 
 | Facet | Path Pattern | Description |
 |-------|--------------|-------------|
-| `doc_type_facet` | `/type/node`, `/type/edge`, etc. | Document type categorization |
-| `time_bucket_facet` | `/time/2024/01`, `/time/2024/02`, etc. | Monthly time buckets |
-| `weight_range_facet` | `/weight/0.0-0.5`, `/weight/0.5-1.0`, etc. | Weight range buckets |
+| `doc_type_facet` | `/type/nodes`, `/type/forward_edges`, etc. | Document type categorization |
+| `validity_facet` | `/validity/unbounded`, `/validity/bounded`, etc. | Temporal validity structure |
 | `tags_facet` | `/tag/rust`, `/tag/programming`, etc. | User-defined hashtags |
+
+### Note on Temporal Queries
+
+Time-based filtering should use **range queries** on `creation_timestamp`, `valid_since`, and `valid_until` fields at query time, not facets. This allows proper comparison against the query timestamp rather than the index timestamp. See `mod.rs` tests for examples.
 
 ## Current Query Types
 
@@ -495,23 +501,17 @@ let tag_counts = FacetCounts::by_tag()
     .await?;
 // Returns: [("rust", 42), ("programming", 38), ("database", 25), ...]
 
-// Count documents by time bucket
-let time_counts = FacetCounts::by_time_bucket()
-    .run(&reader, Duration::from_secs(5))
-    .await?;
-// Returns: [("2024/01", 150), ("2024/02", 200), ("2024/03", 175), ...]
-
 // Count documents by type
 let type_counts = FacetCounts::by_doc_type()
     .run(&reader, Duration::from_secs(5))
     .await?;
-// Returns: [("node", 500), ("edge", 1200), ("node_fragment", 300), ...]
+// Returns: [("nodes", 500), ("forward_edges", 1200), ("node_fragments", 300), ...]
 
-// Count by weight range (for edges)
-let weight_counts = FacetCounts::by_weight_range()
+// Count by validity structure
+let validity_counts = FacetCounts::by_validity()
     .run(&reader, Duration::from_secs(5))
     .await?;
-// Returns: [("0.0-0.5", 100), ("0.5-1.0", 250), ("1.0-2.0", 75), ...]
+// Returns: [("unbounded", 400), ("bounded", 100), ("since_only", 50), ...]
 ```
 
 ### `NodesWithFacets` Query
@@ -521,19 +521,18 @@ Search nodes with facet filtering:
 // TODO: Not yet implemented
 let results = NodesWithFacets::new("machine learning".to_string(), 10)
     .filter_tag("ai")
-    .filter_time_range("2024/01", "2024/06")
+    .filter_validity("bounded")  // Only temporally bounded documents
     .run(&reader, Duration::from_secs(5))
     .await?;
 ```
 
 ### `EdgesWithFacets` Query
-Search edges with facet filtering and weight constraints:
+Search edges with facet filtering:
 
 ```rust
 // TODO: Not yet implemented
 let results = EdgesWithFacets::new("collaboration".to_string(), 10)
-    .filter_weight_range(0.5, 1.0)
-    .filter_time_range("2024/01", "2024/12")
+    .filter_tag("partnership")
     .run(&reader, Duration::from_secs(5))
     .await?;
 ```
@@ -545,14 +544,13 @@ Aggregate statistics over search results:
 // TODO: Not yet implemented
 let stats = Aggregations::new("programming".to_string())
     .count_by_tag()
-    .count_by_time_bucket()
-    .avg_weight()  // For edges
+    .count_by_validity()
     .run(&reader, Duration::from_secs(5))
     .await?;
 
 println!("Total matches: {}", stats.total_count);
 println!("Tag distribution: {:?}", stats.tag_counts);
-println!("Monthly distribution: {:?}", stats.time_bucket_counts);
+println!("Validity distribution: {:?}", stats.validity_counts);
 ```
 
 ### `MoreLikeThis` Query
@@ -572,10 +570,12 @@ let similar = MoreLikeThis::new(node_id)
 ### Completed
 - [x] Basic `Nodes` query with BM25 ranking
 - [x] Node and node fragment deduplication
-- [x] Facet indexing (doc_type, time_bucket, weight_range, tags)
+- [x] Facet indexing (doc_type, validity, tags)
 - [x] Fuzzy search support via `FuzzySearchOptions`
 - [x] Multiple query consumers with shared Index
 - [x] Readonly/Readwrite storage modes
+- [x] Temporal validity fields (valid_since, valid_until)
+- [x] Time range queries on creation_timestamp and validity fields
 
 ### In Progress
 - [ ] `Edges` query (search edges and edge fragments)
@@ -589,19 +589,19 @@ let similar = MoreLikeThis::new(node_id)
 - [ ] Highlight support (return matching snippets)
 - [ ] Pagination with search_after for deep pagination
 - [ ] Custom scoring/boosting per field
-- [ ] Temporal filtering (valid_since/valid_until support)
 
 ## File Organization
 
 ```
 fulltext/
 ├── mod.rs       # Storage, Index struct, module exports
-├── mutation.rs  # Mutation processing for index updates
+├── schema.rs    # Tantivy schema definition and field handles
+├── mutation.rs  # MutationExecutor impls for index updates
 ├── writer.rs    # Writer/MutationConsumer infrastructure
 ├── query.rs     # Query types (Nodes fulltext search)
 ├── reader.rs    # Reader/QueryConsumer infrastructure
-├── search.rs    # Low-level search utilities
-├── fuzzy.rs     # Fuzzy search implementation
+├── search.rs    # Search result types and facet counts
+├── fuzzy.rs     # Fuzzy search options
 └── README.md    # This file
 ```
 

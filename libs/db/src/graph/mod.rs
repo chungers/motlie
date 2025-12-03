@@ -36,30 +36,47 @@ mod tests;
 
 // Re-export commonly used types from submodules
 pub use mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
-    Runnable, UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch, Runnable,
+    UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
 };
 pub use query::{
     EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById,
     NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
 };
 pub use reader::{
-    create_query_reader, spawn_consumer as spawn_query_consumer, Consumer as QueryConsumer,
-    Processor as ReaderProcessor, QueryExecutor, QueryProcessor, QueryWithTimeout, Reader, ReaderConfig,
     // Graph-specific query consumer functions
-    create_graph_query_consumer, create_graph_query_consumer_readwrite,
-    spawn_graph_query_consumer, spawn_graph_query_consumer_readwrite,
-    spawn_graph_query_consumer_with_graph, spawn_graph_query_consumer_pool_shared,
+    create_graph_query_consumer,
+    create_graph_query_consumer_readwrite,
+    create_query_reader,
+    spawn_consumer as spawn_query_consumer,
+    spawn_graph_query_consumer,
     spawn_graph_query_consumer_pool_readonly,
+    spawn_graph_query_consumer_pool_shared,
+    spawn_graph_query_consumer_readwrite,
+    spawn_graph_query_consumer_with_graph,
+    Consumer as QueryConsumer,
+    Processor as ReaderProcessor,
+    QueryExecutor,
+    QueryProcessor,
+    QueryWithTimeout,
+    Reader,
+    ReaderConfig,
 };
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 pub use writer::{
-    create_mutation_writer, spawn_consumer as spawn_mutation_consumer,
-    Consumer as MutationConsumer, MutationExecutor, Processor as MutationProcessor,
-    Writer, WriterConfig,
     // Graph-specific mutation consumer functions
-    create_graph_consumer, create_graph_consumer_with_next,
-    spawn_graph_consumer, spawn_graph_consumer_with_next, spawn_graph_consumer_with_graph,
+    create_graph_consumer,
+    create_graph_consumer_with_next,
+    create_mutation_writer,
+    spawn_consumer as spawn_mutation_consumer,
+    spawn_graph_consumer,
+    spawn_graph_consumer_with_graph,
+    spawn_graph_consumer_with_next,
+    Consumer as MutationConsumer,
+    MutationExecutor,
+    Processor as MutationProcessor,
+    Writer,
+    WriterConfig,
 };
 
 // Internal imports
