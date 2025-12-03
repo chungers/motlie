@@ -55,7 +55,7 @@ pub use fulltext::{
     spawn_fulltext_query_consumer,
     spawn_fulltext_query_consumer_pool_readonly,
     spawn_fulltext_query_consumer_pool_shared,
-    FulltextFields, FulltextIndexExecutor, FulltextNodes, FulltextQuery, FulltextQueryConsumer,
+    DocumentFields, FulltextIndexExecutor, FulltextNodes, FulltextQuery, FulltextQueryConsumer,
     FulltextQueryExecutor, FulltextQueryProcessor, FulltextQueryRunnable, FulltextReader,
     FulltextReaderConfig, Index as FulltextIndex, NodeSearchResult, Storage as FulltextStorage,
 };
@@ -362,9 +362,36 @@ impl Id {
         TimestampMilli(ULID::from_raw(u128::from_be_bytes(self.0)).timestamp() as u64)
     }
 
-    /// Create from a byte slice
+    /// Create from a fixed-size byte array
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
         Id(bytes)
+    }
+
+    /// Parse from a byte slice, returning an error if the slice is not exactly 16 bytes.
+    ///
+    /// This is useful when parsing IDs from sources that provide variable-length byte slices
+    /// (e.g., Tantivy document fields, network protocols).
+    ///
+    /// # Example
+    /// ```
+    /// use motlie_db::Id;
+    ///
+    /// let bytes = [0u8; 16];
+    /// let id = Id::from_slice(&bytes).unwrap();
+    ///
+    /// // Wrong size returns error
+    /// assert!(Id::from_slice(&[0u8; 8]).is_err());
+    /// ```
+    pub fn from_slice(bytes: &[u8]) -> Result<Self, IdError> {
+        if bytes.len() != 16 {
+            return Err(IdError(format!(
+                "expected 16 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(bytes);
+        Ok(Id(id_bytes))
     }
 
     /// Parse from a string, returning an error if invalid

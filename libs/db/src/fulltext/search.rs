@@ -66,26 +66,22 @@ pub struct SearchResult {
 /// Aggregated facet counts
 #[derive(Debug)]
 pub struct FacetCounts {
-    /// Document types: [("node", 45), ("edge", 23), ...]
+    /// Document types: [("nodes", 45), ("forward_edges", 23), ...]
     pub doc_types: HashMap<String, u64>,
-
-    /// Time buckets: [("last_hour", 12), ("last_day", 34), ...]
-    pub time_buckets: HashMap<String, u64>,
-
-    /// Weight ranges: [("0-0.5", 5), ("1.0-2.0", 8), ...]
-    pub weight_ranges: HashMap<String, u64>,
 
     /// User-defined tags: [("rust", 15), ("systems_programming", 8), ...]
     pub tags: HashMap<String, u64>,
+
+    /// Validity structure: [("unbounded", 50), ("bounded", 10), ...]
+    pub validity: HashMap<String, u64>,
 }
 
 impl Default for FacetCounts {
     fn default() -> Self {
         Self {
             doc_types: HashMap::new(),
-            time_buckets: HashMap::new(),
-            weight_ranges: HashMap::new(),
             tags: HashMap::new(),
+            validity: HashMap::new(),
         }
     }
 }
@@ -98,7 +94,7 @@ impl FacetCounts {
 
     /// Get total count across all facets
     pub fn total_facets(&self) -> usize {
-        self.doc_types.len() + self.time_buckets.len() + self.weight_ranges.len() + self.tags.len()
+        self.doc_types.len() + self.tags.len() + self.validity.len()
     }
 }
 
