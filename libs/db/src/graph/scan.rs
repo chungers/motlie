@@ -25,13 +25,10 @@ use rocksdb::{Direction, IteratorMode};
 use super::ColumnFamilyRecord;
 use super::schema::{
     self, is_valid_at_time, DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary,
-    SrcId, ValidTemporalRange,
+    SrcId, TemporalRange,
 };
 use super::Storage;
 use crate::{Id, TimestampMilli};
-
-// Re-export ValidTemporalRange for use in record types
-pub use crate::ValidTemporalRange as TemporalRange;
 
 // ============================================================================
 // Visitor Trait
@@ -85,7 +82,7 @@ pub struct NodeRecord {
     pub id: Id,
     pub name: NodeName,
     pub summary: NodeSummary,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// A forward edge record as seen by scan visitors.
@@ -96,7 +93,7 @@ pub struct EdgeRecord {
     pub name: EdgeName,
     pub summary: EdgeSummary,
     pub weight: Option<f64>,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// A reverse edge record as seen by scan visitors (index only, no summary/weight).
@@ -105,7 +102,7 @@ pub struct ReverseEdgeRecord {
     pub dst_id: DstId,
     pub src_id: SrcId,
     pub name: EdgeName,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// A node fragment record as seen by scan visitors.
@@ -114,7 +111,7 @@ pub struct NodeFragmentRecord {
     pub node_id: Id,
     pub timestamp: TimestampMilli,
     pub content: FragmentContent,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// An edge fragment record as seen by scan visitors.
@@ -125,7 +122,7 @@ pub struct EdgeFragmentRecord {
     pub edge_name: EdgeName,
     pub timestamp: TimestampMilli,
     pub content: FragmentContent,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// A node name index record as seen by scan visitors.
@@ -133,7 +130,7 @@ pub struct EdgeFragmentRecord {
 pub struct NodeNameRecord {
     pub name: NodeName,
     pub node_id: Id,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// An edge name index record as seen by scan visitors.
@@ -142,7 +139,7 @@ pub struct EdgeNameRecord {
     pub name: EdgeName,
     pub src_id: SrcId,
     pub dst_id: DstId,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 // ============================================================================
@@ -276,7 +273,7 @@ where
     CF: ColumnFamilyRecord,
     V: Visitor<R>,
     F: Fn(&[u8], &[u8]) -> Result<R>,
-    G: Fn(&R) -> &Option<ValidTemporalRange>,
+    G: Fn(&R) -> &Option<TemporalRange>,
 {
     let direction = if reverse {
         Direction::Reverse

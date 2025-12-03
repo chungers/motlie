@@ -178,8 +178,8 @@ pub struct ByIdQuery<T: Send + Sync + 'static> {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ValidTemporalRange in the record
-    /// Records without a ValidTemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the TemporalRange in the record
+    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 
     /// Timeout for this query execution (only set when query has channel)
@@ -203,8 +203,8 @@ pub struct NodeFragmentsByIdTimeRange {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ValidTemporalRange in the record
-    /// Records without a ValidTemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the TemporalRange in the record
+    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 
     /// Timeout for this query execution (only set when query has channel)
@@ -233,8 +233,8 @@ pub struct EdgeFragmentsByIdTimeRange {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ValidTemporalRange in the record
-    /// Records without a ValidTemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the TemporalRange in the record
+    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 
     /// Timeout for this query execution (only set when query has channel)
@@ -258,8 +258,8 @@ pub struct EdgeSummaryBySrcDstName {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ValidTemporalRange in the record
-    /// Records without a ValidTemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the TemporalRange in the record
+    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 
     /// Timeout for this query execution (only set when query has channel)
@@ -277,8 +277,8 @@ pub struct OutgoingEdges {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ValidTemporalRange in the record
-    /// Records without a ValidTemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the TemporalRange in the record
+    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 
     /// Timeout for this query execution (only set when query has channel)
@@ -296,8 +296,8 @@ pub struct IncomingEdges {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ValidTemporalRange in the record
-    /// Records without a ValidTemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the TemporalRange in the record
+    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 
     /// Timeout for this query execution (only set when query has channel)
@@ -322,8 +322,8 @@ pub struct NodesByName {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ValidTemporalRange in the record
-    /// Records without a ValidTemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the TemporalRange in the record
+    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 
     /// Timeout for this query execution (only set when query has channel)
@@ -348,8 +348,8 @@ pub struct EdgesByName {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ValidTemporalRange in the record
-    /// Records without a ValidTemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the TemporalRange in the record
+    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 
     /// Timeout for this query execution (only set when query has channel)
@@ -2282,7 +2282,7 @@ mod tests {
             AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id,
             MutationRunnable, TimestampMilli, WriterConfig,
         };
-        use crate::ValidTemporalRange;
+        use crate::TemporalRange;
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -2347,7 +2347,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(1000),
             content: DataUrl::from_markdown("Valid from 1000 to 3000"),
-            temporal_range: ValidTemporalRange::valid_between(
+            temporal_range: TemporalRange::valid_between(
                 TimestampMilli(1000),
                 TimestampMilli(3000),
             ),
@@ -2363,7 +2363,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(2000),
             content: DataUrl::from_markdown("Valid from 2000 to 5000"),
-            temporal_range: ValidTemporalRange::valid_between(
+            temporal_range: TemporalRange::valid_between(
                 TimestampMilli(2000),
                 TimestampMilli(5000),
             ),
