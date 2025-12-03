@@ -11,7 +11,6 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tantivy::schema::*;
 use tantivy::IndexWriter;
 
 // Submodules
@@ -19,6 +18,7 @@ pub mod fuzzy;
 pub mod mutation;
 pub mod query;
 pub mod reader;
+pub mod schema;
 pub mod search;
 pub mod writer;
 
@@ -38,6 +38,7 @@ pub use reader::{
     QueryExecutor as FulltextQueryExecutor, Reader as FulltextReader,
     ReaderConfig as FulltextReaderConfig,
 };
+pub use schema::{compute_validity_facet, extract_tags, DocumentFields};
 pub use search::{FacetCounts, SearchOptions, SearchResults};
 pub use writer::{
     create_fulltext_consumer, create_fulltext_consumer_with_next,
@@ -46,177 +47,6 @@ pub use writer::{
     spawn_fulltext_consumer_with_params_and_next, spawn_fulltext_mutation_consumer_with_next,
     MutationExecutor as FulltextIndexExecutor,
 };
-
-/// Field handles for efficient access to the Tantivy schema fields
-#[derive(Clone)]
-pub struct FulltextFields {
-    // ID fields
-    pub id_field: Field,
-    pub src_id_field: Field,
-    pub dst_id_field: Field,
-
-    // Name fields
-    pub node_name_field: Field,
-    pub edge_name_field: Field,
-
-    // Content field (main searchable text)
-    pub content_field: Field,
-
-    // Temporal fields
-    pub timestamp_field: Field,
-    pub valid_since_field: Field,
-    pub valid_until_field: Field,
-
-    // Document type discriminator
-    pub doc_type_field: Field,
-
-    // Edge-specific fields
-    pub weight_field: Field,
-
-    // Facet fields (for categorical filtering)
-    pub doc_type_facet: Field,     // Document type as facet
-    pub time_bucket_facet: Field,  // Time buckets (hour/day/week/month)
-    pub weight_range_facet: Field, // Weight ranges for edges
-    pub tags_facet: Field,         // User-defined tags from #hashtags
-}
-
-/// Build the Tantivy schema for fulltext indexing
-fn build_fulltext_schema() -> (Schema, FulltextFields) {
-    let mut schema_builder = Schema::builder();
-
-    // ID fields (stored as bytes, not tokenized)
-    let id_field = schema_builder.add_bytes_field("id", STORED | FAST);
-    let src_id_field = schema_builder.add_bytes_field("src_id", STORED | FAST);
-    let dst_id_field = schema_builder.add_bytes_field("dst_id", STORED | FAST);
-
-    // Name fields (tokenized and stored)
-    let text_options = TextOptions::default()
-        .set_indexing_options(
-            TextFieldIndexing::default()
-                .set_tokenizer("default")
-                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-        )
-        .set_stored();
-
-    let node_name_field = schema_builder.add_text_field("node_name", text_options.clone());
-    let edge_name_field = schema_builder.add_text_field("edge_name", text_options.clone());
-
-    // Content field (main searchable text with BM25)
-    let content_field = schema_builder.add_text_field("content", text_options);
-
-    // Temporal fields (for range queries)
-    let timestamp_field = schema_builder.add_u64_field("timestamp", INDEXED | STORED | FAST);
-    let valid_since_field = schema_builder.add_u64_field("valid_since", INDEXED | FAST);
-    let valid_until_field = schema_builder.add_u64_field("valid_until", INDEXED | FAST);
-
-    // Document type (node, edge, node_fragment, edge_fragment)
-    let doc_type_field = schema_builder.add_text_field("doc_type", STRING | STORED);
-
-    // Weight field for edges
-    let weight_field = schema_builder.add_f64_field("weight", INDEXED | STORED | FAST);
-
-    // Facet fields (for categorical filtering and aggregation)
-    let doc_type_facet = schema_builder.add_facet_field("doc_type_facet", INDEXED | STORED);
-    let time_bucket_facet = schema_builder.add_facet_field("time_bucket_facet", INDEXED | STORED);
-    let weight_range_facet = schema_builder.add_facet_field("weight_range_facet", INDEXED | STORED);
-    let tags_facet = schema_builder.add_facet_field("tags", INDEXED | STORED);
-
-    let schema = schema_builder.build();
-
-    let fields = FulltextFields {
-        id_field,
-        src_id_field,
-        dst_id_field,
-        node_name_field,
-        edge_name_field,
-        content_field,
-        timestamp_field,
-        valid_since_field,
-        valid_until_field,
-        doc_type_field,
-        weight_field,
-        doc_type_facet,
-        time_bucket_facet,
-        weight_range_facet,
-        tags_facet,
-    };
-
-    (schema, fields)
-}
-
-// ============================================================================
-// Tag Extraction for User-Defined Facets
-// ============================================================================
-
-/// Extract hashtags from content for user-defined facets
-///
-/// Supports formats:
-/// - #tag
-/// - #multi_word_tag
-/// - #CamelCaseTag
-///
-/// Example: "This is about #rust and #systems_programming"
-/// Returns: ["rust", "systems_programming"]
-pub(crate) fn extract_tags(content: &str) -> Vec<String> {
-    let mut tags = Vec::new();
-    let mut chars = content.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '#' {
-            let mut tag = String::new();
-
-            // Collect tag characters (alphanumeric and underscore)
-            while let Some(&next_ch) = chars.peek() {
-                if next_ch.is_alphanumeric() || next_ch == '_' {
-                    tag.push(chars.next().unwrap());
-                } else {
-                    break;
-                }
-            }
-
-            if !tag.is_empty() {
-                tags.push(tag.to_lowercase());
-            }
-        }
-    }
-
-    tags
-}
-
-// ============================================================================
-// Facet Helper Functions
-// ============================================================================
-
-/// Convert timestamp to time bucket facet
-pub(crate) fn compute_time_bucket(ts: crate::TimestampMilli) -> Facet {
-    let now = crate::TimestampMilli::now().0;
-    let diff = now.saturating_sub(ts.0);
-
-    if diff < 3600_000 {
-        Facet::from("/time/last_hour")
-    } else if diff < 86400_000 {
-        Facet::from("/time/last_day")
-    } else if diff < 604800_000 {
-        Facet::from("/time/last_week")
-    } else if diff < 2592000_000 {
-        Facet::from("/time/last_month")
-    } else {
-        Facet::from("/time/older")
-    }
-}
-
-/// Convert edge weight to range facet
-pub(crate) fn weight_to_facet(weight: f64) -> Facet {
-    if weight < 0.5 {
-        Facet::from("/weight/0-0.5")
-    } else if weight < 1.0 {
-        Facet::from("/weight/0.5-1.0")
-    } else if weight < 2.0 {
-        Facet::from("/weight/1.0-2.0")
-    } else {
-        Facet::from("/weight/2.0+")
-    }
-}
 
 // ============================================================================
 // Storage - Readonly/Readwrite Tantivy Index Access
@@ -263,7 +93,7 @@ pub struct Storage {
     /// The index writer - only present in readwrite mode, behind Mutex for thread-safe access
     writer: Option<tokio::sync::Mutex<IndexWriter>>,
     /// Field handles for the schema
-    fields: Option<FulltextFields>,
+    fields: Option<DocumentFields>,
 }
 
 impl Storage {
@@ -305,7 +135,7 @@ impl Storage {
             return Ok(());
         }
 
-        let (schema, fields) = build_fulltext_schema();
+        let (schema, fields) = schema::build_schema();
 
         match self.mode {
             StorageMode::ReadOnly => {
@@ -366,7 +196,7 @@ impl Storage {
     }
 
     /// Get the field handles.
-    pub fn fields(&self) -> Result<&FulltextFields> {
+    pub fn fields(&self) -> Result<&DocumentFields> {
         self.fields
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("[FullText Storage] Not ready"))
@@ -452,7 +282,7 @@ impl Index {
     ///
     /// # Panics
     /// Panics if the storage is not ready.
-    pub fn fields(&self) -> &FulltextFields {
+    pub fn fields(&self) -> &DocumentFields {
         self.storage.fields().expect("Storage not ready")
     }
 
@@ -848,5 +678,342 @@ mod tests {
         let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
 
         assert_eq!(top_docs.len(), 2);
+    }
+
+    // ========================================================================
+    // Time Range Query Tests
+    // ========================================================================
+    //
+    // These tests demonstrate how to query documents by timestamp ranges.
+    // Instead of using facets (which would be stale since they're computed at index time),
+    // we use Tantivy's range queries on the indexed timestamp fields.
+    //
+    // Key timestamp fields:
+    // - creation_timestamp_field: When the document was created
+    // - valid_since_field: Start of validity period (optional)
+    // - valid_until_field: End of validity period (optional)
+
+    #[tokio::test]
+    async fn test_query_by_creation_timestamp_range() {
+        use tantivy::query::RangeQuery;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("test_index");
+        let processor = writer::create_readwrite_index(&index_path);
+
+        // Create nodes with different timestamps
+        let now = TimestampMilli::now().0;
+        let one_hour_ago = now - 3600_000;
+        let one_day_ago = now - 86400_000;
+        let one_week_ago = now - 604800_000;
+
+        let mutations = vec![
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(now),
+                name: "recent_node".to_string(),
+                temporal_range: None,
+                summary: crate::NodeSummary::from_text("created just now"),
+            }),
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(one_hour_ago),
+                name: "hourly_node".to_string(),
+                temporal_range: None,
+                summary: crate::NodeSummary::from_text("created one hour ago"),
+            }),
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(one_day_ago),
+                name: "daily_node".to_string(),
+                temporal_range: None,
+                summary: crate::NodeSummary::from_text("created one day ago"),
+            }),
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(one_week_ago),
+                name: "weekly_node".to_string(),
+                temporal_range: None,
+                summary: crate::NodeSummary::from_text("created one week ago"),
+            }),
+        ];
+
+        processor.process_mutations(&mutations).await.unwrap();
+
+        let reader = processor.tantivy_index().reader().unwrap();
+        let searcher = reader.searcher();
+
+        // Query: Find nodes created in the last 2 hours (two_hours_ago <= ts < now+1)
+        let two_hours_ago = now - 7200_000;
+        let range_query = RangeQuery::new_u64(
+            "creation_timestamp".to_string(),
+            two_hours_ago..(now + 1),
+        );
+        let top_docs = searcher
+            .search(&range_query, &TopDocs::with_limit(10))
+            .unwrap();
+        assert_eq!(top_docs.len(), 2, "Should find recent_node and hourly_node");
+
+        // Query: Find nodes created more than 12 hours ago (0 <= ts <= twelve_hours_ago)
+        let twelve_hours_ago = now - 43200_000;
+        let range_query = RangeQuery::new_u64(
+            "creation_timestamp".to_string(),
+            0..(twelve_hours_ago + 1),
+        );
+        let top_docs = searcher
+            .search(&range_query, &TopDocs::with_limit(10))
+            .unwrap();
+        assert_eq!(top_docs.len(), 2, "Should find daily_node and weekly_node");
+
+        // Query: Find nodes created between 6 hours ago and 2 days ago
+        let six_hours_ago = now - 21600_000;
+        let two_days_ago = now - 172800_000;
+        let range_query = RangeQuery::new_u64(
+            "creation_timestamp".to_string(),
+            two_days_ago..(six_hours_ago + 1),
+        );
+        let top_docs = searcher
+            .search(&range_query, &TopDocs::with_limit(10))
+            .unwrap();
+        assert_eq!(top_docs.len(), 1, "Should find only daily_node");
+    }
+
+    #[tokio::test]
+    async fn test_query_combining_text_and_timestamp() {
+        use tantivy::query::{BooleanQuery, Occur, RangeQuery};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("test_index");
+        let processor = writer::create_readwrite_index(&index_path);
+
+        let now = TimestampMilli::now().0;
+        let one_hour_ago = now - 3600_000;
+        let one_week_ago = now - 604800_000;
+
+        let mutations = vec![
+            Mutation::AddNodeFragment(AddNodeFragment {
+                id: Id::new(),
+                ts_millis: TimestampMilli(now),
+                content: DataUrl::from_text("Rust programming is awesome"),
+                temporal_range: None,
+            }),
+            Mutation::AddNodeFragment(AddNodeFragment {
+                id: Id::new(),
+                ts_millis: TimestampMilli(one_hour_ago),
+                content: DataUrl::from_text("Rust language features"),
+                temporal_range: None,
+            }),
+            Mutation::AddNodeFragment(AddNodeFragment {
+                id: Id::new(),
+                ts_millis: TimestampMilli(one_week_ago),
+                content: DataUrl::from_text("Old Rust documentation"),
+                temporal_range: None,
+            }),
+        ];
+
+        processor.process_mutations(&mutations).await.unwrap();
+
+        let reader = processor.tantivy_index().reader().unwrap();
+        let searcher = reader.searcher();
+        let fields = processor.fields();
+
+        // Combined query: "Rust" AND created in the last 2 hours
+        let query_parser = QueryParser::for_index(
+            processor.tantivy_index(),
+            vec![fields.content_field],
+        );
+        let text_query = query_parser.parse_query("Rust").unwrap();
+
+        let two_hours_ago = now - 7200_000;
+        let time_query = RangeQuery::new_u64(
+            "creation_timestamp".to_string(),
+            two_hours_ago..(now + 1),
+        );
+
+        let combined_query = BooleanQuery::new(vec![
+            (Occur::Must, text_query),
+            (Occur::Must, Box::new(time_query)),
+        ]);
+
+        let top_docs = searcher
+            .search(&combined_query, &TopDocs::with_limit(10))
+            .unwrap();
+        assert_eq!(
+            top_docs.len(),
+            2,
+            "Should find 2 recent Rust documents (excludes week-old one)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_by_validity_range() {
+        use tantivy::query::{BooleanQuery, Occur, RangeQuery};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("test_index");
+        let processor = writer::create_readwrite_index(&index_path);
+
+        let now = TimestampMilli::now().0;
+        let past = now - 86400_000; // 1 day ago
+        let future = now + 86400_000; // 1 day from now
+
+        let mutations = vec![
+            // Always valid (no temporal range)
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(now),
+                name: "always_valid".to_string(),
+                temporal_range: None,
+                summary: crate::NodeSummary::from_text("no temporal constraints"),
+            }),
+            // Currently valid (past..future)
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(now),
+                name: "currently_valid".to_string(),
+                temporal_range: Some(crate::ValidTemporalRange(
+                    Some(TimestampMilli(past)),
+                    Some(TimestampMilli(future)),
+                )),
+                summary: crate::NodeSummary::from_text("valid now"),
+            }),
+            // Expired (past start, past end)
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(now),
+                name: "expired".to_string(),
+                temporal_range: Some(crate::ValidTemporalRange(
+                    Some(TimestampMilli(past - 86400_000)),
+                    Some(TimestampMilli(past)),
+                )),
+                summary: crate::NodeSummary::from_text("no longer valid"),
+            }),
+            // Future (future start)
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(now),
+                name: "future".to_string(),
+                temporal_range: Some(crate::ValidTemporalRange(
+                    Some(TimestampMilli(future)),
+                    None,
+                )),
+                summary: crate::NodeSummary::from_text("not yet valid"),
+            }),
+        ];
+
+        processor.process_mutations(&mutations).await.unwrap();
+
+        let reader = processor.tantivy_index().reader().unwrap();
+        let searcher = reader.searcher();
+
+        // Query: Find documents that are currently valid
+        // This means: valid_since <= now AND (valid_until > now OR valid_until not set)
+        //
+        // For documents with temporal ranges:
+        // - valid_since must be <= now
+        // - valid_until must be > now (or not set)
+        //
+        // Note: Documents without valid_since/valid_until are always valid
+        // but they don't have these fields indexed, so we need a different approach.
+
+        // Find documents with valid_since <= now (0 <= valid_since < now+1)
+        let valid_since_query = RangeQuery::new_u64("valid_since".to_string(), 0..(now + 1));
+
+        // Find documents with valid_until > now (now < valid_until)
+        let valid_until_query = RangeQuery::new_u64("valid_until".to_string(), (now + 1)..u64::MAX);
+
+        // Documents that have valid_since <= now AND valid_until > now
+        let currently_valid_with_range = BooleanQuery::new(vec![
+            (Occur::Must, Box::new(valid_since_query)),
+            (Occur::Must, Box::new(valid_until_query)),
+        ]);
+
+        let top_docs = searcher
+            .search(&currently_valid_with_range, &TopDocs::with_limit(10))
+            .unwrap();
+
+        // Should find only "currently_valid" (the one with past..future range)
+        // "expired" has valid_until in the past, "future" has valid_since in the future
+        assert_eq!(
+            top_docs.len(),
+            1,
+            "Should find 1 document with active validity range"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_documents_created_after_timestamp() {
+        use tantivy::query::RangeQuery;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("test_index");
+        let processor = writer::create_readwrite_index(&index_path);
+
+        // Use fixed timestamps for predictable testing
+        let base_time: u64 = 1700000000000; // Some fixed point in time
+        let ts1 = base_time;
+        let ts2 = base_time + 1000;
+        let ts3 = base_time + 2000;
+        let ts4 = base_time + 3000;
+
+        let mutations = vec![
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(ts1),
+                name: "first".to_string(),
+                temporal_range: None,
+                summary: crate::NodeSummary::from_text("first document"),
+            }),
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(ts2),
+                name: "second".to_string(),
+                temporal_range: None,
+                summary: crate::NodeSummary::from_text("second document"),
+            }),
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(ts3),
+                name: "third".to_string(),
+                temporal_range: None,
+                summary: crate::NodeSummary::from_text("third document"),
+            }),
+            Mutation::AddNode(AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli(ts4),
+                name: "fourth".to_string(),
+                temporal_range: None,
+                summary: crate::NodeSummary::from_text("fourth document"),
+            }),
+        ];
+
+        processor.process_mutations(&mutations).await.unwrap();
+
+        let reader = processor.tantivy_index().reader().unwrap();
+        let searcher = reader.searcher();
+
+        // Query: Documents created after ts2 (ts > ts2, i.e., ts >= ts2+1)
+        let after_ts2 = RangeQuery::new_u64(
+            "creation_timestamp".to_string(),
+            (ts2 + 1)..u64::MAX,
+        );
+        let top_docs = searcher
+            .search(&after_ts2, &TopDocs::with_limit(10))
+            .unwrap();
+        assert_eq!(top_docs.len(), 2, "Should find third and fourth");
+
+        // Query: Documents created before ts3 (ts < ts3)
+        let before_ts3 = RangeQuery::new_u64("creation_timestamp".to_string(), 0..ts3);
+        let top_docs = searcher
+            .search(&before_ts3, &TopDocs::with_limit(10))
+            .unwrap();
+        assert_eq!(top_docs.len(), 2, "Should find first and second");
+
+        // Query: Documents created at exactly ts2 (ts2 <= ts < ts2+1)
+        let exact_ts2 = RangeQuery::new_u64("creation_timestamp".to_string(), ts2..(ts2 + 1));
+        let top_docs = searcher
+            .search(&exact_ts2, &TopDocs::with_limit(10))
+            .unwrap();
+        assert_eq!(top_docs.len(), 1, "Should find only second");
     }
 }
