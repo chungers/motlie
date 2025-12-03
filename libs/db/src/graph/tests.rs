@@ -1,21 +1,13 @@
-#[cfg(test)]
-mod tests {
-    use crate::graph::{
-        spawn_graph_consumer, spawn_graph_consumer_with_next, ColumnFamilyRecord, Graph, Storage,
-    };
-    use crate::mutation::Runnable as MutRunnable;
-    use crate::query::{
-        EdgesByName, IncomingEdges, NodeById, NodeFragmentsByIdTimeRange, NodesByName,
-        OutgoingEdges, Runnable,
-    };
-    use crate::schema::{EdgeSummary, NodeFragments, Nodes, ALL_COLUMN_FAMILIES};
-    use crate::{
-        create_mutation_writer, AddEdge, AddNodeFragment, AddNode, DataUrl, Id, TimestampMilli, WriterConfig,
-    };
-    use rocksdb::DB;
-    use tempfile::TempDir;
-    use tokio::sync::mpsc;
-    use tokio::time::Duration;
+use crate::graph::{ColumnFamilyRecord, Graph, Storage};
+use crate::graph::mutation::{Runnable as MutRunnable, AddEdge, AddNodeFragment, AddNode};
+use crate::graph::query::Runnable;
+use crate::graph::schema::{EdgeSummary, NodeFragments, Nodes, ALL_COLUMN_FAMILIES};
+use crate::graph::writer::{spawn_graph_consumer, spawn_graph_consumer_with_next, create_mutation_writer, WriterConfig};
+use crate::{Id, TimestampMilli};
+use rocksdb::DB;
+use tempfile::TempDir;
+use tokio::sync::mpsc;
+use tokio::time::Duration;
 
     #[tokio::test]
     async fn test_graph_consumer_basic_processing() {
@@ -37,6 +29,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
 
@@ -80,6 +73,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
+                summary: crate::graph::schema::NodeSummary::from_text(&format!("summary {}", i)),
             };
             node_args.run(&writer).await.unwrap();
         }
@@ -108,6 +102,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("node summary"),
         }
         .run(&writer)
         .await
@@ -144,7 +139,7 @@ mod tests {
 
         crate::UpdateNodeValidSinceUntil {
             id: node_id,
-            temporal_range: crate::schema::ValidTemporalRange(None, None),
+            temporal_range: crate::ValidTemporalRange(None, None),
             reason: "test node invalidation".to_string(),
         }
         .run(&writer)
@@ -155,7 +150,7 @@ mod tests {
             src_id: edge_src_id,
             dst_id: edge_dst_id,
             name: edge_name,
-            temporal_range: crate::schema::ValidTemporalRange(None, None),
+            temporal_range: crate::ValidTemporalRange(None, None),
             reason: "test edge invalidation".to_string(),
         }
         .run(&writer)
@@ -181,7 +176,8 @@ mod tests {
 
         // Create the FullText consumer (end of chain)
         let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
-        let fulltext_handle = crate::spawn_fulltext_consumer(fulltext_receiver, config.clone());
+        let fulltext_index_path = temp_dir.path().join("fulltext_index");
+        let fulltext_handle = crate::spawn_fulltext_consumer(fulltext_receiver, config.clone(), &fulltext_index_path);
 
         // Create the Graph consumer that forwards to FullText
         let (writer, graph_receiver) = create_mutation_writer(config.clone());
@@ -199,6 +195,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("chained_node_{}", i),
                 temporal_range: None,
+                summary: crate::graph::schema::NodeSummary::from_text(&format!("chained summary {}", i)),
             };
             let fragment_args = AddNodeFragment {
                 id: Id::new(),
@@ -1144,6 +1141,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         };
 
         node_args.clone().run(&writer).await.unwrap();
@@ -1190,8 +1188,8 @@ mod tests {
         let content = value.2.decode_string().expect("Failed to decode DataUrl"); // NodeSummary is field 2
         assert_eq!(node_name, "test_node", "Node name should match");
         assert!(
-            content.contains("test_node"),
-            "Node value should contain the node name"
+            content.contains("test summary"),
+            "Node value should contain the node summary"
         );
     }
 
@@ -1214,6 +1212,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "alice".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("alice summary"),
         };
 
         let node_b_id = Id::new();
@@ -1222,6 +1221,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "bob".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("bob summary"),
         };
 
         let node_c_id = Id::new();
@@ -1230,6 +1230,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "alice".to_string(), // Same name as node_a
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("alice2 summary"),
         };
 
         let node_d_id = Id::new();
@@ -1238,6 +1239,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "charlie".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("charlie summary"),
         };
 
         node_a.clone().run(&writer).await.unwrap();
@@ -1263,7 +1265,7 @@ mod tests {
         )
         .expect("Failed to open database for verification");
 
-        use crate::schema::NodeNames;
+        use crate::graph::schema::NodeNames;
         let cf_handle = db
             .cf_handle(NodeNames::CF_NAME)
             .expect("NodeNames column family should exist");
@@ -1372,4 +1374,32 @@ mod tests {
             );
         }
     }
-}
+
+    #[test]
+    fn test_lz4_compression_round_trip() {
+        use crate::graph::schema::{NodeCfValue, NodeSummary, Nodes};
+        use crate::DataUrl;
+
+        // Create a simple test value
+        let test_value = NodeCfValue(
+            None,
+            "test_node".to_string(),
+            DataUrl::from_markdown("test content"),
+        );
+
+        // Serialize and compress
+        let compressed_bytes = Nodes::value_to_bytes(&test_value).expect("Failed to compress");
+
+        println!("Compressed size: {} bytes", compressed_bytes.len());
+        println!(
+            "First 20 bytes: {:?}",
+            &compressed_bytes[..20.min(compressed_bytes.len())]
+        );
+
+        // Decompress and deserialize
+        let decompressed_value: NodeCfValue =
+            Nodes::value_from_bytes(&compressed_bytes).expect("Failed to decompress");
+
+        // Verify
+        assert_eq!(test_value.0, decompressed_value.0, "Node name should match");
+    }

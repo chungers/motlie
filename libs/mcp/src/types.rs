@@ -22,6 +22,9 @@ pub struct AddNodeParams {
     /// Human-readable node name
     pub name: String,
 
+    /// Node summary/description
+    pub summary: String,
+
     /// Optional timestamp (defaults to current time)
     pub ts_millis: Option<u64>,
 

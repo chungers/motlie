@@ -1,13 +1,21 @@
+//! Query module providing query types and their business logic implementations.
+//!
+//! This module contains only business logic - query type definitions and their
+//! QueryExecutor implementations. Infrastructure (traits, Reader, Consumer, spawn
+//! functions) is in the `reader` module.
+
 use anyhow::Result;
 use std::ops::Bound;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-use crate::graph::ColumnFamilyRecord;
-use crate::schema::{
+use super::ColumnFamilyRecord;
+use super::reader::{Processor, QueryExecutor, QueryProcessor};
+use super::schema::{
     self, DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
 };
-use crate::{Id, ReaderConfig, Storage, TimestampMilli};
+use super::Storage;
+use crate::{Id, TimestampMilli};
 
 /// Helper function to check if a timestamp falls within a time range
 fn timestamp_in_range(
@@ -73,75 +81,9 @@ macro_rules! iterate_cf {
     }};
 }
 
-/// Trait that all query types implement to execute themselves.
-///
-/// This trait defines HOW to fetch the result from storage.
-/// Each query type knows how to execute its own data fetching logic.
-///
-/// # Design Philosophy
-///
-/// This follows the same pattern as mutations:
-/// - Mutations: Each mutation type implements `MutationPlanner::plan()` to generate storage operations
-/// - Queries: Each query type implements `QueryExecutor::execute()` to fetch results
-///
-/// Benefits:
-/// - Logic lives with types, not in central implementation
-/// - Easier to extend (add query = impl QueryExecutor, not modify Processor trait)
-/// - Better testability (can test query.execute(storage) in isolation)
-/// - Consistent with mutation pattern
-#[async_trait::async_trait]
-pub trait QueryExecutor: Send + Sync {
-    /// The type of result this query produces
-    type Output: Send;
-
-    /// Execute this query against the storage layer
-    /// Each query type knows how to fetch its own data
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output>;
-
-    /// Get the timeout for this query
-    fn timeout(&self) -> Duration;
-}
-
-/// Blanket implementation of QueryWithTimeout for types that implement QueryExecutor
-/// This is the new way - query types execute themselves
-#[async_trait::async_trait]
-impl<T: QueryExecutor> QueryWithTimeout for T {
-    type ResultType = T::Output;
-
-    async fn result<P: Processor>(&self, processor: &P) -> Result<Self::ResultType> {
-        let result = tokio::time::timeout(self.timeout(), self.execute(processor.storage())).await;
-
-        match result {
-            Ok(r) => r,
-            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", self.timeout())),
-        }
-    }
-
-    fn timeout(&self) -> Duration {
-        QueryExecutor::timeout(self)
-    }
-}
-
-/// Trait for queries that produce results with timeout handling
-/// Note: This trait is now automatically implemented for all QueryExecutor types
-#[async_trait::async_trait]
-pub trait QueryWithTimeout: Send + Sync {
-    /// The type of result this query produces
-    type ResultType: Send;
-
-    /// Execute the query with timeout and return the result
-    async fn result<P: Processor>(&self, processor: &P) -> Result<Self::ResultType>;
-
-    /// Get the timeout for this query
-    fn timeout(&self) -> Duration;
-}
-
-/// Trait for processing queries without needing to know the result type
-#[async_trait::async_trait]
-pub trait QueryProcessor: Send {
-    /// Process the query and send the result (consumes self)
-    async fn process_and_send<P: Processor>(self, processor: &P);
-}
+// ============================================================================
+// Query Enum
+// ============================================================================
 
 /// Query enum representing all possible query types
 #[derive(Debug)]
@@ -187,22 +129,8 @@ impl std::fmt::Display for Query {
     }
 }
 
-/// Macro to implement QueryProcessor for query types
-macro_rules! impl_query_processor {
-    ($($query_type:ty),+ $(,)?) => {
-        $(
-            #[async_trait::async_trait]
-            impl QueryProcessor for $query_type {
-                async fn process_and_send<P: Processor>(self, processor: &P) {
-                    let result = self.result(processor).await;
-                    self.send_result(result);
-                }
-            }
-        )+
-    };
-}
-
-impl_query_processor!(
+// Use macro to implement QueryProcessor for query types
+crate::impl_query_processor!(
     NodeById,
     EdgeSummaryBySrcDstName,
     NodeFragmentsByIdTimeRange,
@@ -1740,76 +1668,20 @@ impl QueryExecutor for EdgesByName {
     }
 }
 
-/// Trait for processing different types of queries
-///
-/// This trait provides access to storage. Query types implement QueryExecutor
-/// to execute themselves against storage, following the same pattern as mutations.
-pub trait Processor: Send + Sync {
-    /// Get access to the underlying storage
-    /// Query types use this to execute themselves via QueryExecutor::execute()
-    fn storage(&self) -> &Storage;
-}
-
-/// Generic consumer that processes queries using a Processor
-pub struct Consumer<P: Processor> {
-    receiver: flume::Receiver<Query>,
-    config: ReaderConfig,
-    processor: P,
-}
-
-impl<P: Processor> Consumer<P> {
-    /// Create a new Consumer
-    pub fn new(receiver: flume::Receiver<Query>, config: ReaderConfig, processor: P) -> Self {
-        Self {
-            receiver,
-            config,
-            processor,
-        }
-    }
-
-    /// Process queries continuously until the channel is closed
-    pub async fn run(self) -> Result<()> {
-        log::info!("Starting query consumer with config: {:?}", self.config);
-
-        loop {
-            // Wait for the next query (MPMC semantics via flume)
-            match self.receiver.recv_async().await {
-                Ok(query) => {
-                    // Process the query immediately
-                    self.process_query(query).await;
-                }
-                Err(_) => {
-                    // Channel closed
-                    log::info!("Query consumer shutting down - channel closed");
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    /// Process a single query
-    async fn process_query(&self, query: Query) {
-        log::debug!("Processing {}", query);
-        query.process_and_send(&self.processor).await;
-    }
-}
-
-/// Spawn a query consumer as a background task
-pub fn spawn_consumer<P: Processor + 'static>(
-    consumer: Consumer<P>,
-) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move { consumer.run().await })
-}
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{spawn_graph_consumer, Graph};
-    use crate::mutation::AddNode;
-    use crate::mutation::Runnable as MutRunnable;
-    use crate::schema::NodeSummary;
-    use crate::writer::{create_mutation_writer, WriterConfig};
-    use crate::{DataUrl, Id, Storage, TimestampMilli};
+    use super::super::{Graph, Storage};
+    use super::super::mutation::{AddNode, Runnable as MutRunnable};
+    use super::super::writer::{spawn_graph_consumer, create_mutation_writer, WriterConfig};
+    use super::super::reader::{
+        create_query_reader, spawn_consumer, Consumer, QueryWithTimeout, ReaderConfig,
+    };
+    use crate::{DataUrl, Id, TimestampMilli};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::time::Duration;
@@ -1836,6 +1708,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
 
@@ -1854,15 +1727,11 @@ mod tests {
         let graph = Graph::new(Arc::new(storage));
 
         // Create reader and query consumer
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
-        let (reader, receiver) = {
-            let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
-            (reader, receiver)
-        };
+        let (reader, receiver) = create_query_reader(reader_config.clone());
 
         let consumer = Consumer::new(receiver, reader_config, graph);
 
@@ -1964,6 +1833,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -1974,6 +1844,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -2077,6 +1948,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -2087,6 +1959,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -2251,6 +2124,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -2261,6 +2135,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -2404,9 +2279,10 @@ mod tests {
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_with_temporal_validity() {
         use crate::{
-            schema::ValidTemporalRange, AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id,
+            AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id,
             MutationRunnable, TimestampMilli, WriterConfig,
         };
+        use crate::ValidTemporalRange;
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -2432,6 +2308,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -2442,6 +2319,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -2614,6 +2492,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -2624,6 +2503,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             temporal_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await

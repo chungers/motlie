@@ -20,6 +20,7 @@ data-url = "0.3"
 base64 = "0.22"
 flume = "0.11"
 lz4 = "1.28"
+tantivy = "0.22"
 
 [dev-dependencies]
 tempfile = "3.14"

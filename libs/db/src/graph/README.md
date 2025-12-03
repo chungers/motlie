@@ -1,0 +1,223 @@
+# Graph Module
+
+This module provides RocksDB-based graph storage with async query/mutation processing.
+
+## File Organization
+
+```
+graph/
+├── mod.rs       # Storage, Graph struct, module exports
+├── schema.rs    # Column family definitions, key/value types
+├── mutation.rs  # Mutation types (AddNode, AddEdge, etc.)
+├── writer.rs    # Writer/MutationConsumer infrastructure
+├── query.rs     # Query types (NodeById, OutgoingEdges, etc.)
+├── reader.rs    # Reader/QueryConsumer infrastructure
+├── scan.rs      # Pagination/iteration API
+├── tests.rs     # Module-level integration tests
+└── README.md    # This file
+```
+
+## Core Types
+
+### Storage
+
+`Storage` manages the RocksDB connection with support for multiple access modes:
+
+```rust
+use motlie_db::graph::Storage;
+
+// ReadWrite mode (exclusive write access)
+let mut storage = Storage::readwrite(&db_path);
+storage.ready()?;
+
+// ReadOnly mode (concurrent read access)
+let mut storage = Storage::readonly(&db_path);
+storage.ready()?;
+
+// Secondary mode (follows primary)
+let mut storage = Storage::secondary(&db_path, &secondary_path);
+storage.ready()?;
+storage.try_catch_up_with_primary()?;
+```
+
+### Graph
+
+`Graph` wraps `Arc<Storage>` and provides the execution interface:
+
+```rust
+use motlie_db::{Graph, Storage};
+use std::sync::Arc;
+
+let mut storage = Storage::readwrite(&db_path);
+storage.ready()?;
+let graph = Graph::new(Arc::new(storage));
+```
+
+## Mutation Types
+
+Defined in `mutation.rs`:
+
+| Type | Description |
+|------|-------------|
+| `AddNode` | Create a new node with name and summary |
+| `AddEdge` | Create an edge between two nodes |
+| `AddNodeFragment` | Add timestamped content fragment to a node |
+| `AddEdgeFragment` | Add timestamped content fragment to an edge |
+| `UpdateNodeValidSinceUntil` | Update node's temporal validity range |
+| `UpdateEdgeValidSinceUntil` | Update edge's temporal validity range |
+| `UpdateEdgeWeight` | Update edge weight |
+
+### Runnable Trait
+
+All mutations implement `mutation::Runnable`:
+
+```rust
+use motlie_db::{AddNode, MutationRunnable, Writer, Id, TimestampMilli, NodeSummary};
+
+let node = AddNode {
+    id: Id::new(),
+    ts_millis: TimestampMilli::now(),
+    name: "Alice".to_string(),
+    summary: NodeSummary::from_text("A person"),
+    temporal_range: None,
+};
+
+// Execute via writer
+node.run(&writer).await?;
+```
+
+## Query Types
+
+Defined in `query.rs`:
+
+| Type | Description |
+|------|-------------|
+| `NodeById` | Get node by ID |
+| `NodesByName` | Get nodes by name prefix |
+| `OutgoingEdges` | Get edges from a node |
+| `IncomingEdges` | Get edges to a node |
+| `EdgesByName` | Get edges by name prefix |
+| `EdgeSummaryBySrcDstName` | Get edge by (src, dst, name) |
+| `NodeFragmentsByIdTimeRange` | Get node fragments in time range |
+| `EdgeFragmentsByIdTimeRange` | Get edge fragments in time range |
+
+### Runnable Trait
+
+All queries implement `query::Runnable`:
+
+```rust
+use motlie_db::{NodeById, QueryRunnable, Reader};
+use std::time::Duration;
+
+let result = NodeById::new(node_id, None)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+```
+
+## Spawn Functions
+
+### Mutation Consumers
+
+| Function | Description |
+|----------|-------------|
+| `spawn_graph_consumer(receiver, config, path)` | Creates storage and processes mutations |
+| `spawn_graph_consumer_with_next(receiver, config, path, next_tx)` | Chains to next consumer |
+| `spawn_graph_consumer_with_graph(receiver, config, graph)` | Uses existing Arc\<Graph\> |
+
+### Query Consumers
+
+| Function | Description |
+|----------|-------------|
+| `spawn_graph_query_consumer(receiver, config, path)` | Creates storage and processes queries |
+| `spawn_graph_query_consumer_with_graph(receiver, config, graph)` | Uses existing Arc\<Graph\> |
+| `spawn_graph_query_consumer_pool_shared(receiver, graph, n)` | N workers sharing one Graph |
+| `spawn_graph_query_consumer_pool_readonly(receiver, config, path, n)` | N workers with own readonly storage |
+
+## Schema
+
+Defined in `schema.rs`. The graph uses 7 column families:
+
+| Column Family | Key | Value | Purpose |
+|---------------|-----|-------|---------|
+| `nodes` | `(Id)` | `(ValidTemporalRange?, NodeName, NodeSummary)` | Node metadata |
+| `node-fragments` | `(Id, TimestampMilli)` | `(ValidTemporalRange?, FragmentContent)` | Node content fragments |
+| `outgoing-edges` | `(SrcId, DstId, EdgeName)` | `(ValidTemporalRange?, Weight?, EdgeSummary)` | Edges by source |
+| `incoming-edges` | `(DstId, SrcId, EdgeName)` | `()` | Reverse edge index |
+| `edge-fragments` | `(SrcId, DstId, EdgeName, TimestampMilli)` | `(ValidTemporalRange?, FragmentContent)` | Edge content fragments |
+| `node-names` | `(NodeName, Id)` | `()` | Name-to-node index |
+| `edge-names` | `(EdgeName, SrcId, DstId)` | `()` | Name-to-edge index |
+
+### Key Encoding
+
+Keys use direct byte concatenation (not MessagePack) for efficient prefix scanning:
+- Fixed-length fields (Id, TimestampMilli) are serialized as big-endian bytes
+- Variable-length fields (names) are placed at the end of keys
+- This enables RocksDB's prefix bloom filters and O(1) prefix seek
+
+### Value Encoding
+
+Values use MessagePack serialization with LZ4 compression for space efficiency.
+
+## Scan API
+
+Defined in `scan.rs`. Provides pagination for iterating over column families:
+
+```rust
+use motlie_db::scan::{AllNodes, Visitable};
+
+let scanner = AllNodes::new();
+let mut visitor = MyVisitor::new();
+
+scanner.visit(&graph.storage(), &mut visitor)?;
+```
+
+### Record Types
+
+| Type | Fields |
+|------|--------|
+| `NodeRecord` | `id, name, summary, valid_range` |
+| `EdgeRecord` | `src_id, dst_id, name, weight, summary, valid_range` |
+| `NodeFragmentRecord` | `node_id, timestamp, content, valid_range` |
+| `EdgeFragmentRecord` | `src_id, dst_id, edge_name, timestamp, content, valid_range` |
+| `NodeNameRecord` | `name, node_id, valid_range` |
+| `EdgeNameRecord` | `name, src_id, dst_id, valid_range` |
+
+## Consumer Chaining
+
+The graph consumer can forward mutations to other consumers (e.g., fulltext):
+
+```rust
+use motlie_db::{
+    create_mutation_writer, spawn_graph_consumer_with_next,
+    spawn_fulltext_consumer, WriterConfig,
+};
+use tokio::sync::mpsc;
+
+let config = WriterConfig { channel_buffer_size: 1000 };
+
+// Create fulltext consumer (end of chain)
+let (fulltext_tx, fulltext_rx) = mpsc::channel(config.channel_buffer_size);
+let fulltext_handle = spawn_fulltext_consumer(fulltext_rx, config.clone(), &index_path);
+
+// Create graph consumer that chains to fulltext
+let (writer, graph_rx) = create_mutation_writer(config.clone());
+let graph_handle = spawn_graph_consumer_with_next(
+    graph_rx,
+    config,
+    &db_path,
+    fulltext_tx,
+);
+
+// Mutations flow: writer -> graph -> fulltext
+```
+
+## See Also
+
+- `tests/test_pipeline_integration.rs` - Complete pipeline tests
+- `tests/test_prefix_scan_bug.rs` - Prefix scanning tests
+- `tests/test_secondary_api.rs` - Secondary storage tests
+- `src/fulltext/` - Fulltext module with parallel design
+- `src/README.md` - Module design patterns overview
+- `docs/schema_design.md` - Detailed schema documentation
+- `docs/query-api-guide.md` - Query API guide
+- `docs/mutation-api-guide.md` - Mutation API guide

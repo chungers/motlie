@@ -1,20 +1,14 @@
-use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+//! Mutation module providing mutation types and their business logic implementations.
+//!
+//! This module contains only business logic - mutation type definitions and their
+//! MutationExecutor implementations. Infrastructure (traits, Writer, Consumer, spawn
+//! functions) is in the `writer` module.
 
-use crate::{schema, Id, TimestampMilli, Writer, WriterConfig};
+use anyhow::Result;
 
-/// Trait for mutations to execute themselves directly against storage.
-///
-/// This trait defines HOW to write the mutation to the database.
-/// Each mutation type knows how to execute its own database write operations.
-///
-/// Following the same pattern as QueryExecutor for queries.
-/// Note: This is synchronous because RocksDB operations are blocking.
-pub trait MutationExecutor: Send + Sync {
-    /// Execute this mutation directly against a RocksDB transaction.
-    /// Each mutation type knows how to write itself to storage.
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()>;
-}
+use super::schema;
+use super::writer::{MutationExecutor, Writer};
+use crate::{Id, TimestampMilli};
 
 #[derive(Debug, Clone)]
 pub enum Mutation {
@@ -40,6 +34,9 @@ pub struct AddNode {
 
     /// The temporal validity range for this node
     pub temporal_range: Option<schema::ValidTemporalRange>,
+
+    /// The summary information for this node
+    pub summary: schema::NodeSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -158,16 +155,18 @@ fn update_node_valid_range(
     node_id: Id,
     new_range: schema::ValidTemporalRange,
 ) -> Result<()> {
-    use crate::schema::{NodeCfKey, Nodes};
-    use crate::graph::{ColumnFamilyRecord, ValidRangePatchable};
+    use super::{ColumnFamilyRecord, ValidRangePatchable};
+    use super::schema::{NodeCfKey, Nodes};
 
-    let cf = txn_db.cf_handle(Nodes::CF_NAME)
+    let cf = txn_db
+        .cf_handle(Nodes::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
 
     let key = NodeCfKey(node_id);
     let key_bytes = Nodes::key_to_bytes(&key);
 
-    let value_bytes = txn.get_cf(cf, &key_bytes)?
+    let value_bytes = txn
+        .get_cf(cf, &key_bytes)?
         .ok_or_else(|| anyhow::anyhow!("Node not found for id: {}", node_id))?;
 
     let nodes = Nodes;
@@ -187,32 +186,46 @@ fn update_edge_valid_range(
     edge_name: &schema::EdgeName,
     new_range: schema::ValidTemporalRange,
 ) -> Result<()> {
-    use crate::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
-    use crate::graph::{ColumnFamilyRecord, ValidRangePatchable};
+    use super::{ColumnFamilyRecord, ValidRangePatchable};
+    use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
 
     // Patch ForwardEdges CF
-    let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME)
+    let forward_cf = txn_db
+        .cf_handle(ForwardEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
 
     let forward_key = ForwardEdgeCfKey(src_id, dst_id, edge_name.clone());
     let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
 
-    let forward_value_bytes = txn.get_cf(forward_cf, &forward_key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdge not found: src={}, dst={}, name={}", src_id, dst_id, edge_name))?;
+    let forward_value_bytes = txn.get_cf(forward_cf, &forward_key_bytes)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "ForwardEdge not found: src={}, dst={}, name={}",
+            src_id,
+            dst_id,
+            edge_name
+        )
+    })?;
 
     let forward_edges = ForwardEdges;
     let patched_forward_bytes = forward_edges.patch_valid_range(&forward_value_bytes, new_range)?;
     txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
 
     // Patch ReverseEdges CF
-    let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME)
+    let reverse_cf = txn_db
+        .cf_handle(ReverseEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
 
     let reverse_key = ReverseEdgeCfKey(dst_id, src_id, edge_name.clone());
     let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
 
-    let reverse_value_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("ReverseEdge not found: src={}, dst={}, name={}", src_id, dst_id, edge_name))?;
+    let reverse_value_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "ReverseEdge not found: src={}, dst={}, name={}",
+            src_id,
+            dst_id,
+            edge_name
+        )
+    })?;
 
     let reverse_edges = ReverseEdges;
     let patched_reverse_bytes = reverse_edges.patch_valid_range(&reverse_value_bytes, new_range)?;
@@ -228,13 +241,14 @@ fn find_connected_edges(
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
 ) -> Result<Vec<(Id, Id, schema::EdgeName)>> {
-    use crate::schema::{ForwardEdges, ForwardEdgeCfKey, ReverseEdges, ReverseEdgeCfKey};
-    use crate::graph::ColumnFamilyRecord;
+    use super::ColumnFamilyRecord;
+    use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
 
     let mut edge_topologies = Vec::new();
 
     // Find outgoing edges (where this node is the source)
-    let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME)
+    let forward_cf = txn_db
+        .cf_handle(ForwardEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
     let forward_prefix = node_id.into_bytes().to_vec();
     let forward_iter = txn.prefix_iterator_cf(forward_cf, &forward_prefix);
@@ -247,7 +261,8 @@ fn find_connected_edges(
     }
 
     // Find incoming edges (where this node is the destination)
-    let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME)
+    let reverse_cf = txn_db
+        .cf_handle(ReverseEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
     let reverse_prefix = node_id.into_bytes().to_vec();
     let reverse_iter = txn.prefix_iterator_cf(reverse_cf, &reverse_prefix);
@@ -270,18 +285,24 @@ fn find_connected_edges(
 // ============================================================================
 
 impl MutationExecutor for AddNode {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
-        use crate::graph::ColumnFamilyRecord;
-        use crate::schema::{Nodes, NodeNames};
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        use super::ColumnFamilyRecord;
+        use super::schema::{NodeNames, Nodes};
 
         // Write to Nodes CF
-        let nodes_cf = txn_db.cf_handle(Nodes::CF_NAME)
+        let nodes_cf = txn_db
+            .cf_handle(Nodes::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
         let (node_key, node_value) = Nodes::create_bytes(self)?;
         txn.put_cf(nodes_cf, node_key, node_value)?;
 
         // Write to NodeNames CF
-        let names_cf = txn_db.cf_handle(NodeNames::CF_NAME)
+        let names_cf = txn_db
+            .cf_handle(NodeNames::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeNames::CF_NAME))?;
         let (name_key, name_value) = NodeNames::create_bytes(self)?;
         txn.put_cf(names_cf, name_key, name_value)?;
@@ -291,24 +312,31 @@ impl MutationExecutor for AddNode {
 }
 
 impl MutationExecutor for AddEdge {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
-        use crate::graph::ColumnFamilyRecord;
-        use crate::schema::{ForwardEdges, ReverseEdges, EdgeNames};
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        use super::ColumnFamilyRecord;
+        use super::schema::{EdgeNames, ForwardEdges, ReverseEdges};
 
         // Write to ForwardEdges CF
-        let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME))?;
+        let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
+        })?;
         let (forward_key, forward_value) = ForwardEdges::create_bytes(self)?;
         txn.put_cf(forward_cf, forward_key, forward_value)?;
 
         // Write to ReverseEdges CF
-        let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", ReverseEdges::CF_NAME))?;
+        let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", ReverseEdges::CF_NAME)
+        })?;
         let (reverse_key, reverse_value) = ReverseEdges::create_bytes(self)?;
         txn.put_cf(reverse_cf, reverse_key, reverse_value)?;
 
         // Write to EdgeNames CF
-        let names_cf = txn_db.cf_handle(EdgeNames::CF_NAME)
+        let names_cf = txn_db
+            .cf_handle(EdgeNames::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeNames::CF_NAME))?;
         let (name_key, name_value) = EdgeNames::create_bytes(self)?;
         txn.put_cf(names_cf, name_key, name_value)?;
@@ -318,12 +346,17 @@ impl MutationExecutor for AddEdge {
 }
 
 impl MutationExecutor for AddNodeFragment {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
-        use crate::graph::ColumnFamilyRecord;
-        use crate::schema::NodeFragments;
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        use super::ColumnFamilyRecord;
+        use super::schema::NodeFragments;
 
-        let cf = txn_db.cf_handle(NodeFragments::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeFragments::CF_NAME))?;
+        let cf = txn_db.cf_handle(NodeFragments::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", NodeFragments::CF_NAME)
+        })?;
         let (key, value) = NodeFragments::create_bytes(self)?;
         txn.put_cf(cf, key, value)?;
 
@@ -332,12 +365,17 @@ impl MutationExecutor for AddNodeFragment {
 }
 
 impl MutationExecutor for AddEdgeFragment {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
-        use crate::graph::ColumnFamilyRecord;
-        use crate::schema::EdgeFragments;
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        use super::ColumnFamilyRecord;
+        use super::schema::EdgeFragments;
 
-        let cf = txn_db.cf_handle(EdgeFragments::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME))?;
+        let cf = txn_db.cf_handle(EdgeFragments::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME)
+        })?;
         let (key, value) = EdgeFragments::create_bytes(self)?;
         txn.put_cf(cf, key, value)?;
 
@@ -346,7 +384,11 @@ impl MutationExecutor for AddEdgeFragment {
 }
 
 impl MutationExecutor for UpdateNodeValidSinceUntil {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         let node_id = self.id;
         let new_range = self.temporal_range;
 
@@ -372,7 +414,11 @@ impl MutationExecutor for UpdateNodeValidSinceUntil {
 }
 
 impl MutationExecutor for UpdateEdgeValidSinceUntil {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         // Simply delegate to the helper
         update_edge_valid_range(
             txn,
@@ -386,25 +432,31 @@ impl MutationExecutor for UpdateEdgeValidSinceUntil {
 }
 
 impl MutationExecutor for UpdateEdgeWeight {
-    fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
-        use crate::schema::{ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges};
-        use crate::graph::ColumnFamilyRecord;
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        use super::ColumnFamilyRecord;
+        use super::schema::{ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges};
 
-        let cf = txn_db.cf_handle(ForwardEdges::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME))?;
+        let cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
+        })?;
 
         let key = ForwardEdgeCfKey(self.src_id, self.dst_id, self.name.clone());
         let key_bytes = ForwardEdges::key_to_bytes(&key);
 
         // Read current value
-        let current_value_bytes = txn.get_cf(cf, &key_bytes)?
+        let current_value_bytes = txn
+            .get_cf(cf, &key_bytes)?
             .ok_or_else(|| anyhow::anyhow!("Edge not found for update"))?;
 
         // Deserialize, modify weight field, reserialize
         let mut value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&current_value_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))?;
 
-        value.1 = Some(self.weight);  // Update weight (field 1)
+        value.1 = Some(self.weight); // Update weight (field 1)
 
         let new_value_bytes = ForwardEdges::value_to_bytes(&value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))?;
@@ -418,7 +470,11 @@ impl MutationExecutor for UpdateEdgeWeight {
 impl Mutation {
     /// Execute this mutation directly against storage.
     /// Delegates to the specific mutation type's executor.
-    pub fn execute(&self, txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>, txn_db: &rocksdb::TransactionDB) -> Result<()> {
+    pub fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
         match self {
             Mutation::AddNode(m) => m.execute(txn, txn_db),
             Mutation::AddEdge(m) => m.execute(txn, txn_db),
@@ -504,9 +560,7 @@ impl Runnable for UpdateEdgeValidSinceUntil {
 
 impl Runnable for UpdateEdgeWeight {
     async fn run(self, writer: &Writer) -> Result<()> {
-        writer
-            .send(vec![Mutation::UpdateEdgeWeight(self)])
-            .await
+        writer.send(vec![Mutation::UpdateEdgeWeight(self)]).await
     }
 }
 
@@ -669,207 +723,20 @@ macro_rules! mutations {
     };
 }
 
-/// Trait for processing batches of mutations.
-///
-/// This trait defines a single method that processes mutations in batches,
-/// enabling efficient transaction batching in RocksDB and other storage backends.
-///
-/// # Batching Strategy
-///
-/// The `process_mutations` method receives a slice of mutations, which can be:
-/// - A single mutation (slice of length 1) - wrapped automatically by the Writer
-/// - Multiple mutations (slice of length N) - sent explicitly as a batch
-///
-/// Implementations should process all mutations atomically when possible.
-///
-/// # Example Implementation
-///
-/// ```rust,ignore
-/// #[async_trait::async_trait]
-/// impl Processor for Graph {
-///     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-///         // Each mutation generates its own storage operations
-///         let mut operations = Vec::new();
-///         for mutation in mutations {
-///             operations.extend(mutation.plan()?);
-///         }
-///
-///         // Execute all operations in a single RocksDB transaction
-///         let txn = self.storage.transaction();
-///         for op in operations {
-///             txn.put_cf(cf, key, value)?;
-///         }
-///         txn.commit()?;  // Single commit for entire batch
-///         Ok(())
-///     }
-/// }
-/// ```
-#[async_trait::async_trait]
-pub trait Processor: Send + Sync {
-    /// Process a batch of mutations atomically.
-    ///
-    /// # Arguments
-    /// * `mutations` - Slice of mutations to process. Can be a single mutation or many.
-    ///
-    /// # Returns
-    /// * `Ok(())` if all mutations were processed successfully
-    /// * `Err(_)` if processing failed (implementations should rollback on error)
-    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()>;
-}
-
-/// Generic consumer that processes mutations using a Processor
-pub struct Consumer<P: Processor> {
-    receiver: mpsc::Receiver<Vec<Mutation>>,
-    config: WriterConfig,
-    processor: P,
-    /// Optional sender to forward mutations to the next consumer in the chain
-    next: Option<mpsc::Sender<Vec<Mutation>>>,
-}
-
-impl<P: Processor> Consumer<P> {
-    /// Create a new Consumer
-    pub fn new(
-        receiver: mpsc::Receiver<Vec<Mutation>>,
-        config: WriterConfig,
-        processor: P,
-    ) -> Self {
-        Self {
-            receiver,
-            config,
-            processor,
-            next: None,
-        }
-    }
-
-    /// Create a new Consumer that forwards mutations to the next consumer in the chain
-    pub fn with_next(
-        receiver: mpsc::Receiver<Vec<Mutation>>,
-        config: WriterConfig,
-        processor: P,
-        next: mpsc::Sender<Vec<Mutation>>,
-    ) -> Self {
-        Self {
-            receiver,
-            config,
-            processor,
-            next: Some(next),
-        }
-    }
-
-    /// Process mutations continuously until the channel is closed
-    pub async fn run(mut self) -> Result<()> {
-        log::info!("Starting mutation consumer with config: {:?}", self.config);
-
-        loop {
-            // Wait for the next batch of mutations
-            match self.receiver.recv().await {
-                Some(mutations) => {
-                    // Process the batch immediately
-                    self.process_batch(&mutations)
-                        .await
-                        .with_context(|| format!("Failed to process mutations: {:?}", mutations))?;
-                }
-                None => {
-                    // Channel closed
-                    log::info!("Mutation consumer shutting down - channel closed");
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    /// Process a batch of mutations
-    async fn process_batch(&self, mutations: &[Mutation]) -> Result<()> {
-        // Log what we're processing
-        for mutation in mutations {
-            match mutation {
-                Mutation::AddNode(args) => {
-                    log::debug!("Processing AddNode: id={}, name={}", args.id, args.name);
-                }
-                Mutation::AddEdge(args) => {
-                    log::debug!(
-                        "Processing AddEdge: source={}, target={}, name={}",
-                        args.source_node_id,
-                        args.target_node_id,
-                        args.name
-                    );
-                }
-                Mutation::AddNodeFragment(args) => {
-                    log::debug!(
-                        "Processing AddNodeFragment: id={}, body_len={}",
-                        args.id,
-                        args.content.0.len()
-                    );
-                }
-                Mutation::AddEdgeFragment(args) => {
-                    log::debug!(
-                        "Processing AddEdgeFragment: src={}, dst={}, name={}, body_len={}",
-                        args.src_id,
-                        args.dst_id,
-                        args.edge_name,
-                        args.content.0.len()
-                    );
-                }
-                Mutation::UpdateNodeValidSinceUntil(args) => {
-                    log::debug!(
-                        "Processing UpdateNodeValidSinceUntil: id={}, reason={}",
-                        args.id,
-                        args.reason
-                    );
-                }
-                Mutation::UpdateEdgeValidSinceUntil(args) => {
-                    log::debug!(
-                        "Processing UpdateEdgeValidSinceUntil: src={}, dst={}, name={}, reason={}",
-                        args.src_id,
-                        args.dst_id,
-                        args.name,
-                        args.reason
-                    );
-                }
-                Mutation::UpdateEdgeWeight(args) => {
-                    log::debug!(
-                        "Processing UpdateEdgeWeight: src={}, dst={}, name={}, weight={}",
-                        args.src_id,
-                        args.dst_id,
-                        args.name,
-                        args.weight
-                    );
-                }
-            }
-        }
-
-        // Process all mutations in a single call
-        self.processor.process_mutations(mutations).await?;
-
-        // Forward the batch to the next consumer in the chain if configured
-        // This is a best-effort send - if the buffer is full, we log and continue
-        if let Some(sender) = &self.next {
-            if let Err(e) = sender.try_send(mutations.to_vec()) {
-                log::warn!(
-                    "[BUFFER FULL] Next consumer busy, dropping mutations: err={} count={}",
-                    e,
-                    mutations.len()
-                );
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Spawn a mutation consumer as a background task
-pub fn spawn_consumer<P: Processor + 'static>(
-    consumer: Consumer<P>,
-) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move { consumer.run().await })
-}
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::writer::{
+        create_mutation_writer, spawn_consumer, Consumer, Processor, WriterConfig,
+    };
     use crate::Id;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use tokio::sync::mpsc;
     use tokio::time::Duration;
 
     // Mock processor for testing
@@ -912,13 +779,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_generic_consumer_basic() {
-        let config = crate::WriterConfig {
+        let config = WriterConfig {
             channel_buffer_size: 10,
         };
 
         let (writer, receiver) = {
             let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
-            let writer = crate::Writer::new(sender);
+            let writer = super::super::writer::Writer::new(sender);
             (writer, receiver)
         };
 
@@ -934,6 +801,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             temporal_range: None,
+            summary: super::schema::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
 
@@ -952,11 +820,11 @@ mod tests {
         // This test verifies that the graph processor can continue processing mutations
         // even when the fulltext consumer isn't keeping up and the MPSC buffer is full.
 
-        let graph_config = crate::WriterConfig {
+        let graph_config = WriterConfig {
             channel_buffer_size: 100,
         };
 
-        let fulltext_config = crate::WriterConfig {
+        let fulltext_config = WriterConfig {
             channel_buffer_size: 2, // Very small buffer to force overflow
         };
 
@@ -966,7 +834,7 @@ mod tests {
             mpsc::channel(fulltext_config.channel_buffer_size);
 
         // Create writer
-        let writer = crate::Writer::new(graph_sender);
+        let writer = super::super::writer::Writer::new(graph_sender);
 
         // Create graph processor (fast, no delay)
         let graph_counter = Arc::new(AtomicUsize::new(0));
@@ -998,6 +866,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
                 temporal_range: None,
+                summary: super::schema::NodeSummary::from_text(&format!("summary {}", i)),
             };
             node_args.run(&writer).await.unwrap();
         }

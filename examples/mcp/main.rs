@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use motlie_db::{
     create_mutation_writer, create_query_reader, spawn_graph_consumer_with_graph,
-    spawn_query_consumer_pool_shared, Graph, ReaderConfig, Storage, WriterConfig,
+    spawn_graph_query_consumer_pool_shared, Graph, ReaderConfig, Storage, WriterConfig,
 };
 use motlie_mcp::{stdio, LazyDatabase, MotlieMcpServer, ServiceExt, INFO_TEXT};
 
@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
         // Create reader with background consumer pool for queries
         let (reader, query_receiver) = create_query_reader(reader_config.clone());
         let _query_handles =
-            spawn_query_consumer_pool_shared(query_receiver, graph.clone(), query_workers);
+            spawn_graph_query_consumer_pool_shared(query_receiver, graph.clone(), query_workers);
 
         tracing::info!(
             "Started {} query worker threads (shared TransactionDB, 99%+ consistency)",
