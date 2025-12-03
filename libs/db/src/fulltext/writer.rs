@@ -16,7 +16,8 @@ use tokio::task::JoinHandle;
 
 use tantivy::IndexWriter;
 
-use super::{FulltextFields, Index, Storage};
+use super::schema::DocumentFields;
+use super::{Index, Storage};
 use crate::graph::mutation::Mutation;
 use crate::graph::writer::{Consumer, Processor, WriterConfig};
 
@@ -33,7 +34,7 @@ use crate::graph::writer::{Consumer, Processor, WriterConfig};
 pub trait MutationExecutor: Send + Sync {
     /// Index this mutation into the Tantivy index writer.
     /// Each mutation type knows how to extract and index its searchable content.
-    fn index(&self, index_writer: &IndexWriter, fields: &FulltextFields) -> Result<()>;
+    fn index(&self, index_writer: &IndexWriter, fields: &DocumentFields) -> Result<()>;
 }
 
 // ============================================================================
