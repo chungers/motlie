@@ -16,8 +16,8 @@ use motlie_db::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, DataUrl, EdgeFragmentsByIdTimeRange,
     EdgeSummary, EdgeSummaryBySrcDstName, EdgesByName, Id, IncomingEdges, MutationRunnable,
     NodeById, NodeFragmentsByIdTimeRange, NodesByName, NodeSummary, OutgoingEdges, QueryRunnable,
-    Reader, TimestampMilli, UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
-    ValidTemporalRange, Writer,
+    Reader, TemporalRange, TimestampMilli, UpdateEdgeValidSinceUntil, UpdateEdgeWeight,
+    UpdateNodeValidSinceUntil, Writer,
 };
 use rmcp::{
     handler::server::tool::ToolRouter, handler::server::wrapper::Parameters, model::*, tool,
@@ -102,8 +102,8 @@ pub struct MotlieMcpServer {
 
 impl MotlieMcpServer {
     /// Convert temporal range parameter to schema type
-    fn to_schema_temporal_range(param: TemporalRangeParam) -> ValidTemporalRange {
-        ValidTemporalRange(
+    fn to_schema_temporal_range(param: TemporalRangeParam) -> TemporalRange {
+        TemporalRange(
             Some(TimestampMilli(param.valid_since)),
             Some(TimestampMilli(param.valid_until)),
         )
@@ -153,7 +153,7 @@ impl MotlieMcpServer {
             id,
             name: params.name.clone(),
             ts_millis: TimestampMilli(params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0)),
-            temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
+            valid_range: params.temporal_range.map(Self::to_schema_temporal_range),
             summary: NodeSummary::from_text(&params.summary),
         };
 
@@ -195,7 +195,7 @@ impl MotlieMcpServer {
             target_node_id: target_id,
             ts_millis: TimestampMilli(params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0)),
             name: params.name.clone(),
-            temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
+            valid_range: params.temporal_range.map(Self::to_schema_temporal_range),
             summary: EdgeSummary::from_text(&params.summary),
             weight: params.weight,
         };
@@ -237,7 +237,7 @@ impl MotlieMcpServer {
             id,
             ts_millis: TimestampMilli(params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0)),
             content: DataUrl::from_text(&params.content),
-            temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
+            valid_range: params.temporal_range.map(Self::to_schema_temporal_range),
         };
 
         mutation.run(writer).await.map_err(|e| {
@@ -276,7 +276,7 @@ impl MotlieMcpServer {
             edge_name: params.edge_name.clone(),
             ts_millis: TimestampMilli(params.ts_millis.unwrap_or_else(|| TimestampMilli::now().0)),
             content: DataUrl::from_text(&params.content),
-            temporal_range: params.temporal_range.map(Self::to_schema_temporal_range),
+            valid_range: params.temporal_range.map(Self::to_schema_temporal_range),
         };
 
         mutation.run(writer).await.map_err(|e| {
