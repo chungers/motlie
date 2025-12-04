@@ -181,10 +181,10 @@ pub fn extract_tags(content: &str) -> Vec<String> {
 /// - `/validity/since_only` - Has start time but no end time (valid from X onwards)
 /// - `/validity/until_only` - Has end time but no start time (valid until X)
 /// - `/validity/bounded` - Has both start and end times (valid from X to Y)
-pub fn compute_validity_facet(temporal_range: &Option<crate::ValidTemporalRange>) -> Facet {
+pub fn compute_validity_facet(temporal_range: &Option<crate::TemporalRange>) -> Facet {
     match temporal_range {
         None => Facet::from("/validity/unbounded"),
-        Some(crate::ValidTemporalRange(since, until)) => match (since, until) {
+        Some(crate::TemporalRange(since, until)) => match (since, until) {
             (None, None) => Facet::from("/validity/unbounded"),
             (Some(_), None) => Facet::from("/validity/since_only"),
             (None, Some(_)) => Facet::from("/validity/until_only"),
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_compute_validity_facet_empty_range() {
-        let range = Some(crate::ValidTemporalRange(None, None));
+        let range = Some(crate::TemporalRange(None, None));
         assert_eq!(
             compute_validity_facet(&range).to_string(),
             "/validity/unbounded"
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn test_compute_validity_facet_since_only() {
         let ts = crate::TimestampMilli(1000);
-        let range = Some(crate::ValidTemporalRange(Some(ts), None));
+        let range = Some(crate::TemporalRange(Some(ts), None));
         assert_eq!(
             compute_validity_facet(&range).to_string(),
             "/validity/since_only"
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn test_compute_validity_facet_until_only() {
         let ts = crate::TimestampMilli(1000);
-        let range = Some(crate::ValidTemporalRange(None, Some(ts)));
+        let range = Some(crate::TemporalRange(None, Some(ts)));
         assert_eq!(
             compute_validity_facet(&range).to_string(),
             "/validity/until_only"
@@ -385,7 +385,7 @@ mod tests {
     fn test_compute_validity_facet_bounded() {
         let start = crate::TimestampMilli(1000);
         let end = crate::TimestampMilli(2000);
-        let range = Some(crate::ValidTemporalRange(Some(start), Some(end)));
+        let range = Some(crate::TemporalRange(Some(start), Some(end)));
         assert_eq!(
             compute_validity_facet(&range).to_string(),
             "/validity/bounded"

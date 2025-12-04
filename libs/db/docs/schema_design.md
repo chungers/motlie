@@ -22,7 +22,7 @@ Motlie is a temporal graph database built on RocksDB, using column families for 
 **Value Layout (MessagePack + LZ4):**
 ```rust
 NodeCfValue(
-    Option<ValidTemporalRange>,  // Temporal validity
+    Option<TemporalRange>,  // Temporal validity
     NodeName,                     // String name
     NodeSummary,                  // DataUrl (markdown content)
 )
@@ -49,14 +49,14 @@ NodeCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 ForwardEdgeCfValue(
-    Option<ValidTemporalRange>,  // Field 0: Temporal validity
+    Option<TemporalRange>,  // Field 0: Temporal validity
     Option<f64>,                  // Field 1: Optional weight
     EdgeSummary,                  // Field 2: Edge summary (DataUrl)
 )
 ```
 
 **Field Ordering Rationale:**
-1. `Option<ValidTemporalRange>` - Small, frequently accessed for temporal filtering
+1. `Option<TemporalRange>` - Small, frequently accessed for temporal filtering
 2. `Option<f64>` - Small (9 bytes), frequently accessed by graph algorithms
 3. `EdgeSummary` - Large (100-1000 bytes), accessed when edge details needed
 
@@ -87,7 +87,7 @@ This ordering optimizes deserialization: algorithms can read temporal range + we
 **Value Layout (MessagePack + LZ4):**
 ```rust
 ReverseEdgeCfValue(
-    Option<ValidTemporalRange>,  // Temporal validity only
+    Option<TemporalRange>,  // Temporal validity only
 )
 ```
 
@@ -118,7 +118,7 @@ ReverseEdgeCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 NodeFragmentCfValue(
-    Option<ValidTemporalRange>,  // Temporal validity
+    Option<TemporalRange>,  // Temporal validity
     FragmentContent,              // DataUrl (markdown/text/etc)
 )
 ```
@@ -146,7 +146,7 @@ NodeFragmentCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 EdgeFragmentCfValue(
-    Option<ValidTemporalRange>,  // Temporal validity
+    Option<TemporalRange>,  // Temporal validity
     FragmentContent,              // DataUrl (markdown/text/etc)
 )
 ```
@@ -176,7 +176,7 @@ EdgeFragmentCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 NodeNamesCfValue(
-    Option<ValidTemporalRange>,  // Temporal validity
+    Option<TemporalRange>,  // Temporal validity
 )
 ```
 
@@ -203,7 +203,7 @@ NodeNamesCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 EdgeNamesCfValue(
-    Option<ValidTemporalRange>,  // Temporal validity
+    Option<TemporalRange>,  // Temporal validity
 )
 ```
 
@@ -250,7 +250,7 @@ EdgeNamesCfValue(
 All column families support optional temporal validity ranges:
 
 ```rust
-pub struct ValidTemporalRange(
+pub struct TemporalRange(
     pub Option<TimestampMilli>,  // valid_since (None = beginning of time)
     pub Option<TimestampMilli>,  // valid_until (None = end of time)
 );
@@ -373,7 +373,7 @@ AddNode {
     id: Id::new(),
     ts_millis: TimestampMilli::now(),
     name: "node_name".to_string(),
-    temporal_range: None,
+    valid_range: None,
 }.run(&writer).await
 ```
 
@@ -386,7 +386,7 @@ AddEdge {
     name: "edge_name".to_string(),
     summary: EdgeSummary::from_text("Edge description"),
     weight: Some(1.5),
-    temporal_range: None,
+    valid_range: None,
 }.run(&writer).await
 ```
 
@@ -396,7 +396,7 @@ AddNodeFragment {
     id: node_id,
     ts_millis: TimestampMilli::now(),
     content: DataUrl::from_markdown("Fragment content"),
-    temporal_range: None,
+    valid_range: None,
 }.run(&writer).await
 ```
 
@@ -408,7 +408,7 @@ AddEdgeFragment {
     edge_name: "edge_name".to_string(),
     ts_millis: TimestampMilli::now(),
     content: DataUrl::from_markdown("Fragment content"),
-    temporal_range: None,
+    valid_range: None,
 }.run(&writer).await
 ```
 
@@ -430,7 +430,7 @@ UpdateEdgeValidSinceUntil {
     src_id,
     dst_id,
     name: "edge_name".to_string(),
-    temporal_range: ValidTemporalRange(Some(start), Some(end)),
+    temporal_range: TemporalRange(Some(start), Some(end)),
     reason: "Invalidating old edge".to_string(),
 }.run(&writer).await
 ```
@@ -439,7 +439,7 @@ UpdateEdgeValidSinceUntil {
 ```rust
 UpdateNodeValidSinceUntil {
     id: node_id,
-    temporal_range: ValidTemporalRange(Some(start), Some(end)),
+    temporal_range: TemporalRange(Some(start), Some(end)),
     reason: "Invalidating old node".to_string(),
 }.run(&writer).await
 ```

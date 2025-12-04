@@ -56,7 +56,7 @@ Four main design options were evaluated for representing temporal validity:
 ```rust
 // Global configuration per CF (not per-record)
 struct ColumnFamilyMetadata {
-    temporal_range: ValidTemporalRange,
+    temporal_range: TemporalRange,
 }
 ```
 
@@ -72,12 +72,12 @@ struct ColumnFamilyMetadata {
 **Structure:**
 ```rust
 pub struct NodeCfValue(
-    ValidTemporalRange,  // Always present
+    TemporalRange,  // Always present
     NodeName,
     NodeSummary,
 );
 
-pub struct ValidTemporalRange(
+pub struct TemporalRange(
     Option<StartTimestamp>,  // Inner Options
     Option<UntilTimestamp>,
 );
@@ -100,12 +100,12 @@ pub struct ValidTemporalRange(
 **Structure:**
 ```rust
 pub struct NodeCfValue(
-    Option<ValidTemporalRange>,  // Outer Option
+    Option<TemporalRange>,  // Outer Option
     NodeName,
     NodeSummary,
 );
 
-pub struct ValidTemporalRange(
+pub struct TemporalRange(
     Option<StartTimestamp>,
     Option<UntilTimestamp>,
 );
@@ -132,7 +132,7 @@ pub struct ValidTemporalRange(
 pub struct NodeCfValue(
     NodeName,
     NodeSummary,
-    Option<ValidTemporalRange>,  // Last position
+    Option<TemporalRange>,  // Last position
 );
 ```
 
@@ -154,12 +154,12 @@ A comprehensive test program was created to measure actual MessagePack serializa
 ```rust
 // Test program: /tmp/temporal_overhead_test/
 // Measured: MessagePack + LZ4 compression
-// Compared: With vs. without Option<ValidTemporalRange>
+// Compared: With vs. without Option<TemporalRange>
 ```
 
 #### Results for Option C (Selected Design)
 
-| Scenario | ValidTemporalRange Value | Serialized Size | Overhead |
+| Scenario | TemporalRange Value | Serialized Size | Overhead |
 |----------|-------------------------|-----------------|----------|
 | **None** | `None` | 1 byte | **+1 byte** |
 | **Some(None, None)** | `Some((None, None))` | 4 bytes | +4 bytes |
@@ -240,7 +240,7 @@ Temporal range adds <10% to deserialization, which is <5% of total query time.
 ```rust
 /// Temporal validity range with optional start and end timestamps
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ValidTemporalRange(
+pub struct TemporalRange(
     pub Option<StartTimestamp>,  // Inclusive
     pub Option<UntilTimestamp>,  // Exclusive
 );
@@ -261,7 +261,7 @@ pub type UntilTimestamp = TimestampMilli;
 
 **Example:**
 ```rust
-let range = ValidTemporalRange(Some(1000), Some(2000));
+let range = TemporalRange(Some(1000), Some(2000));
 range.is_valid_at(999)  // false (before start)
 range.is_valid_at(1000) // true  (at start, inclusive)
 range.is_valid_at(1500) // true  (within range)
@@ -280,16 +280,16 @@ range.is_valid_at(2000) // false (at end, exclusive)
 **Example:**
 ```rust
 // Always valid
-let always_valid: Option<ValidTemporalRange> = None;
+let always_valid: Option<TemporalRange> = None;
 
 // Valid from timestamp onward
-let from_ts = Some(ValidTemporalRange(Some(1000), None));
+let from_ts = Some(TemporalRange(Some(1000), None));
 
 // Valid until timestamp
-let until_ts = Some(ValidTemporalRange(None, Some(2000)));
+let until_ts = Some(TemporalRange(None, Some(2000)));
 
 // Valid between timestamps
-let between = Some(ValidTemporalRange(Some(1000), Some(2000)));
+let between = Some(TemporalRange(Some(1000), Some(2000)));
 ```
 
 #### 3. Temporal Range Positioned First in Tuples
@@ -303,7 +303,7 @@ let between = Some(ValidTemporalRange(Some(1000), Some(2000)));
 **Structure:**
 ```rust
 pub struct NodeCfValue(
-    pub Option<ValidTemporalRange>,  // Position 0: temporal validity
+    pub Option<TemporalRange>,  // Position 0: temporal validity
     pub NodeName,                     // Position 1: identity
     pub NodeSummary,                  // Position 2: content
 );
@@ -314,7 +314,7 @@ pub struct NodeCfValue(
 #### Constructor Methods
 
 ```rust
-impl ValidTemporalRange {
+impl TemporalRange {
     /// Create a temporal range with no constraints (returns None)
     pub fn always_valid() -> Option<Self> {
         None
@@ -322,12 +322,12 @@ impl ValidTemporalRange {
 
     /// Create a temporal range valid from a start time (inclusive)
     pub fn valid_from(start: TimestampMilli) -> Option<Self> {
-        Some(ValidTemporalRange(Some(start), None))
+        Some(TemporalRange(Some(start), None))
     }
 
     /// Create a temporal range valid until an end time (exclusive)
     pub fn valid_until(until: TimestampMilli) -> Option<Self> {
-        Some(ValidTemporalRange(None, Some(until)))
+        Some(TemporalRange(None, Some(until)))
     }
 
     /// Create a temporal range valid between start and until
@@ -335,7 +335,7 @@ impl ValidTemporalRange {
         start: TimestampMilli,
         until: TimestampMilli
     ) -> Option<Self> {
-        Some(ValidTemporalRange(Some(start), Some(until)))
+        Some(TemporalRange(Some(start), Some(until)))
     }
 }
 ```
@@ -343,7 +343,7 @@ impl ValidTemporalRange {
 #### Validation Method
 
 ```rust
-impl ValidTemporalRange {
+impl TemporalRange {
     /// Check if a timestamp is valid according to this temporal range
     pub fn is_valid_at(&self, query_time: TimestampMilli) -> bool {
         let after_start = match self.0 {
@@ -364,7 +364,7 @@ impl ValidTemporalRange {
 ```rust
 /// Helper function to check if a record is valid at a given time
 pub fn is_valid_at_time(
-    temporal_range: &Option<ValidTemporalRange>,
+    temporal_range: &Option<TemporalRange>,
     query_time: TimestampMilli,
 ) -> bool {
     match temporal_range {
@@ -385,14 +385,14 @@ All 7 Column Family value types were updated:
 ```rust
 // Nodes CF
 pub struct NodeCfValue(
-    pub Option<ValidTemporalRange>,
+    pub Option<TemporalRange>,
     pub NodeName,
     pub NodeSummary,
 );
 
 // Edges CF
 pub struct EdgeCfValue(
-    pub Option<ValidTemporalRange>,
+    pub Option<TemporalRange>,
     pub SrcId,
     pub EdgeName,
     pub DstId,
@@ -401,31 +401,31 @@ pub struct EdgeCfValue(
 
 // Fragments CF
 pub struct FragmentCfValue(
-    pub Option<ValidTemporalRange>,
+    pub Option<TemporalRange>,
     pub FragmentContent,
 );
 
 // ForwardEdges CF
 pub struct ForwardEdgeCfValue(
-    pub Option<ValidTemporalRange>,
+    pub Option<TemporalRange>,
     pub EdgeId,
 );
 
 // ReverseEdges CF
 pub struct ReverseEdgeCfValue(
-    pub Option<ValidTemporalRange>,
+    pub Option<TemporalRange>,
     pub EdgeId,
 );
 
 // NodeNames CF
 pub struct NodeNameCfValue(
-    pub Option<ValidTemporalRange>,
+    pub Option<TemporalRange>,
     pub NodeId,
 );
 
 // EdgeNames CF
 pub struct EdgeNameCfValue(
-    pub Option<ValidTemporalRange>,
+    pub Option<TemporalRange>,
     pub EdgeId,
 );
 ```
@@ -437,7 +437,7 @@ pub struct AddNode {
     pub id: Id,
     pub ts_millis: TimestampMilli,
     pub name: NodeName,
-    pub temporal_range: Option<ValidTemporalRange>,  // New field
+    pub valid_range: Option<TemporalRange>,  // New field
 }
 
 pub struct AddEdge {
@@ -446,14 +446,14 @@ pub struct AddEdge {
     pub target_node_id: Id,
     pub ts_millis: TimestampMilli,
     pub name: EdgeName,
-    pub temporal_range: Option<ValidTemporalRange>,  // New field
+    pub valid_range: Option<TemporalRange>,  // New field
 }
 
 pub struct AddFragment {
     pub id: Id,
     pub ts_millis: TimestampMilli,
     pub content: DataUrl,
-    pub temporal_range: Option<ValidTemporalRange>,  // New field
+    pub valid_range: Option<TemporalRange>,  // New field
 }
 ```
 
@@ -483,8 +483,8 @@ impl QueryExecute for NodeById {
 ### Migration Strategy
 
 **Backward Compatibility:**
-- Existing databases: Records will deserialize with `temporal_range = None`
-- New records: Default to `temporal_range = None` (always valid)
+- Existing databases: Records will deserialize with `valid_range = None`
+- New records: Default to `valid_range = None` (always valid)
 - No migration needed: MessagePack's flexibility handles schema evolution
 
 **Forward Strategy:**
@@ -622,7 +622,7 @@ NodesValidDuringQuery::new(start_time, end_time)
 **Future:** Explicit versioning with causal relationships:
 ```rust
 pub struct VersionedRecord {
-    temporal_range: Option<ValidTemporalRange>,
+    temporal_range: Option<TemporalRange>,
     supersedes: Option<Id>,  // Previous version
     version: u64,
 }
@@ -686,12 +686,12 @@ The implementation is production-ready and provides a solid foundation for time-
 Test program location: `/tmp/temporal_overhead_test/`
 
 ```rust
-// Measured sizes for Option<ValidTemporalRange>
+// Measured sizes for Option<TemporalRange>
 None:                              1 byte
-Some(ValidTemporalRange(None, None)):           4 bytes
-Some(ValidTemporalRange(Some(1000), None)):    11 bytes
-Some(ValidTemporalRange(None, Some(2000))):    11 bytes
-Some(ValidTemporalRange(Some(1000), Some(2000))): 19 bytes
+Some(TemporalRange(None, None)):           4 bytes
+Some(TemporalRange(Some(1000), None)):    11 bytes
+Some(TemporalRange(None, Some(2000))):    11 bytes
+Some(TemporalRange(Some(1000), Some(2000))): 19 bytes
 
 // LZ4 compression results
 Uncompressed: 19 bytes → LZ4: 19 bytes (0% compression ratio)
@@ -699,7 +699,7 @@ Uncompressed: 19 bytes → LZ4: 19 bytes (0% compression ratio)
 
 ### Actual Database Overhead (Example Test)
 
-**Test database:** 3 items (2 nodes + 1 edge), all with `temporal_range: None`
+**Test database:** 3 items (2 nodes + 1 edge), all with `valid_range: None`
 
 ```
 Total database size: 261.93 KB

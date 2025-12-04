@@ -122,7 +122,7 @@ impl Default for WriterConfig {
 ///     id: Id::new(),
 ///     name: "Alice".to_string(),
 ///     ts_millis: TimestampMilli::now(),
-///     temporal_range: None,
+///     valid_range: None,
 /// }
 /// .run(&writer)
 /// .await?;
@@ -453,7 +453,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: NodeSummary::from_text("test node summary"),
         };
 
@@ -464,14 +464,14 @@ mod tests {
             name: "test_edge".to_string(),
             summary: EdgeSummary::from_text("edge summary"),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         };
 
         let fragment_args = AddNodeFragment {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text("test fragment"),
-            temporal_range: None,
+            valid_range: None,
         };
 
         let src_id = Id::new();
@@ -480,7 +480,7 @@ mod tests {
             src_id,
             dst_id,
             name: "test_edge".to_string(),
-            temporal_range: crate::ValidTemporalRange(None, None),
+            temporal_range: crate::TemporalRange(None, None),
             reason: "test reason".to_string(),
         };
 

@@ -301,7 +301,7 @@ mod tests {
             id: node1_id,
             ts_millis: TimestampMilli::now(),
             name: "RustLang".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::NodeSummary::from_text("Rust language summary"),
         };
         node1.run(&writer).await.unwrap();
@@ -310,7 +310,7 @@ mod tests {
             id: node1_id,
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text("Rust is a systems programming language"),
-            temporal_range: None,
+            valid_range: None,
         };
         fragment1.run(&writer).await.unwrap();
 
@@ -319,7 +319,7 @@ mod tests {
             id: node2_id,
             ts_millis: TimestampMilli::now(),
             name: "Python".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::NodeSummary::from_text("Python language summary"),
         };
         node2.run(&writer).await.unwrap();

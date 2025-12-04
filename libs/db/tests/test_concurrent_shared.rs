@@ -55,7 +55,7 @@ async fn writer_task_shared_graph(
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
-            temporal_range: None,
+            valid_range: None,
             summary: motlie_db::NodeSummary::from_text(&format!("summary {}", i)),
         }
         .run(&writer)
@@ -79,7 +79,7 @@ async fn writer_task_shared_graph(
                         target_node_id: target_id,
                         ts_millis: TimestampMilli::now(),
                         name: edge_name.clone(),
-                        temporal_range: None,
+                        valid_range: None,
                         summary: EdgeSummary::from_text(&format!("Edge summary {}", edge_name)),
                         weight: None,
                     }

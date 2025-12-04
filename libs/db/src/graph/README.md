@@ -79,7 +79,7 @@ let node = AddNode {
     ts_millis: TimestampMilli::now(),
     name: "Alice".to_string(),
     summary: NodeSummary::from_text("A person"),
-    temporal_range: None,
+    valid_range: None,
 };
 
 // Execute via writer
@@ -139,11 +139,11 @@ Defined in `schema.rs`. The graph uses 7 column families:
 
 | Column Family | Key | Value | Purpose |
 |---------------|-----|-------|---------|
-| `nodes` | `(Id)` | `(ValidTemporalRange?, NodeName, NodeSummary)` | Node metadata |
-| `node-fragments` | `(Id, TimestampMilli)` | `(ValidTemporalRange?, FragmentContent)` | Node content fragments |
-| `outgoing-edges` | `(SrcId, DstId, EdgeName)` | `(ValidTemporalRange?, Weight?, EdgeSummary)` | Edges by source |
+| `nodes` | `(Id)` | `(TemporalRange?, NodeName, NodeSummary)` | Node metadata |
+| `node-fragments` | `(Id, TimestampMilli)` | `(TemporalRange?, FragmentContent)` | Node content fragments |
+| `outgoing-edges` | `(SrcId, DstId, EdgeName)` | `(TemporalRange?, Weight?, EdgeSummary)` | Edges by source |
 | `incoming-edges` | `(DstId, SrcId, EdgeName)` | `()` | Reverse edge index |
-| `edge-fragments` | `(SrcId, DstId, EdgeName, TimestampMilli)` | `(ValidTemporalRange?, FragmentContent)` | Edge content fragments |
+| `edge-fragments` | `(SrcId, DstId, EdgeName, TimestampMilli)` | `(TemporalRange?, FragmentContent)` | Edge content fragments |
 | `node-names` | `(NodeName, Id)` | `()` | Name-to-node index |
 | `edge-names` | `(EdgeName, SrcId, DstId)` | `()` | Name-to-edge index |
 
