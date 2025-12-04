@@ -107,7 +107,7 @@ pub struct EdgeHit {
 /// Aggregated facet counts
 #[derive(Debug)]
 pub struct FacetCounts {
-    /// Document types: [("nodes", 45), ("forward_edges", 23), ...]
+    /// Document types: [("nodes", 45), ("edges", 23), ...]
     pub doc_types: HashMap<String, u64>,
 
     /// User-defined tags: [("rust", 15), ("systems_programming", 8), ...]

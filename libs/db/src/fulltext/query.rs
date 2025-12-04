@@ -77,6 +77,7 @@ impl FuzzyLevel {
 pub enum Search {
     Nodes(Nodes),
     Edges(Edges),
+    Facets(Facets),
 }
 
 impl std::fmt::Display for Search {
@@ -84,6 +85,11 @@ impl std::fmt::Display for Search {
         match self {
             Search::Nodes(q) => write!(f, "FulltextNodes: query={}, limit={}", q.query, q.limit),
             Search::Edges(q) => write!(f, "FulltextEdges: query={}, limit={}", q.query, q.limit),
+            Search::Facets(q) => write!(
+                f,
+                "FulltextFacets: doc_type_filter={:?}, tags_limit={}",
+                q.doc_type_filter, q.tags_limit
+            ),
         }
     }
 }
@@ -318,7 +324,10 @@ impl QueryExecutor for Nodes {
         for tag in &self.tags {
             let facet = tantivy::schema::Facet::from(&format!("/tag/{}", tag));
             let tag_term = Term::from_facet(fields.tags_facet, &facet);
-            query_clauses.push((Occur::Must, Box::new(TermQuery::new(tag_term, IndexRecordOption::Basic))));
+            query_clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(tag_term, IndexRecordOption::Basic)),
+            ));
         }
 
         let combined_query = BooleanQuery::new(query_clauses);
@@ -585,8 +594,8 @@ impl QueryExecutor for Edges {
             Box::new(BooleanQuery::new(term_queries))
         };
 
-        // Build doc_type filter: (doc_type = "forward_edges" OR doc_type = "edge_fragments")
-        let edges_term = Term::from_field_text(fields.doc_type_field, "forward_edges");
+        // Build doc_type filter: (doc_type = "edges" OR doc_type = "edge_fragments")
+        let edges_term = Term::from_field_text(fields.doc_type_field, "edges");
         let fragments_term = Term::from_field_text(fields.doc_type_field, "edge_fragments");
 
         let doc_type_filter = BooleanQuery::new(vec![
@@ -611,7 +620,10 @@ impl QueryExecutor for Edges {
         for tag in &self.tags {
             let facet = tantivy::schema::Facet::from(&format!("/tag/{}", tag));
             let tag_term = Term::from_facet(fields.tags_facet, &facet);
-            query_clauses.push((Occur::Must, Box::new(TermQuery::new(tag_term, IndexRecordOption::Basic))));
+            query_clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(tag_term, IndexRecordOption::Basic)),
+            ));
         }
 
         let combined_query = BooleanQuery::new(query_clauses);
@@ -714,12 +726,240 @@ impl QueryExecutor for Edges {
 
 crate::impl_fulltext_query_processor!(Edges);
 
+// ============================================================================
+// Facets Query - Get facet counts from the index
+// ============================================================================
+
+/// Query to retrieve facet counts from the fulltext index.
+///
+/// This query does not perform text search - it aggregates facet values
+/// across all documents or a filtered subset to provide counts for:
+/// - Document types (nodes, edges, fragments)
+/// - User-defined tags (from #hashtags)
+/// - Validity structure (unbounded, bounded, since_only, until_only)
+///
+/// # Example
+/// ```ignore
+/// // Get all facet counts
+/// let counts = Facets::new()
+///     .run(&reader, Duration::from_secs(5))
+///     .await?;
+///
+/// // Get facet counts for documents matching a filter
+/// let counts = Facets::new()
+///     .with_doc_type_filter(vec!["nodes".to_string()])
+///     .run(&reader, Duration::from_secs(5))
+///     .await?;
+/// ```
+#[derive(Debug)]
+pub struct Facets {
+    /// Optional filter by document types (if empty, count all)
+    pub doc_type_filter: Vec<String>,
+
+    /// Limit for number of tag facets to return (default: 100)
+    pub tags_limit: usize,
+
+    /// Timeout for this query execution (only set when query has channel)
+    pub(crate) timeout: Option<Duration>,
+
+    /// Channel to send the result back to the client (only set when ready to execute)
+    result_tx: Option<oneshot::Sender<Result<super::search::FacetCounts>>>,
+}
+
+impl Facets {
+    /// Create a new facets query (counts all facets across all documents)
+    pub fn new() -> Self {
+        Self {
+            doc_type_filter: Vec::new(),
+            tags_limit: 100,
+            timeout: None,
+            result_tx: None,
+        }
+    }
+
+    /// Filter facet counts to only include documents of specific types.
+    ///
+    /// Valid doc types: "nodes", "edges", "node_fragments", "edge_fragments"
+    ///
+    /// Example:
+    /// ```ignore
+    /// Facets::new().with_doc_type_filter(vec!["nodes".to_string()])
+    /// ```
+    pub fn with_doc_type_filter(mut self, doc_types: Vec<String>) -> Self {
+        self.doc_type_filter = doc_types;
+        self
+    }
+
+    /// Set the maximum number of tag facets to return (default: 100).
+    ///
+    /// Example:
+    /// ```ignore
+    /// Facets::new().with_tags_limit(50)
+    /// ```
+    pub fn with_tags_limit(mut self, limit: usize) -> Self {
+        self.tags_limit = limit;
+        self
+    }
+
+    /// Internal constructor used by the query execution machinery (has the channel)
+    pub(crate) fn with_channel(
+        doc_type_filter: Vec<String>,
+        tags_limit: usize,
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<super::search::FacetCounts>>,
+    ) -> Self {
+        Self {
+            doc_type_filter,
+            tags_limit,
+            timeout: Some(timeout),
+            result_tx: Some(result_tx),
+        }
+    }
+
+    /// Send the result back to the client (consumes self)
+    pub(crate) fn send_result(self, result: Result<super::search::FacetCounts>) {
+        // Ignore error if receiver was dropped (client timeout/cancellation)
+        if let Some(tx) = self.result_tx {
+            let _ = tx.send(result);
+        }
+    }
+}
+
+impl Default for Facets {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for Facets {
+    type Output = super::search::FacetCounts;
+
+    async fn run(self, reader: &Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let query = Facets::with_channel(
+            self.doc_type_filter,
+            self.tags_limit,
+            timeout,
+            result_tx,
+        );
+
+        reader.send_query(Search::Facets(query)).await?;
+
+        // Wait for result with timeout
+        match tokio::time::timeout(timeout, result_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryExecutor for Facets {
+    type Output = super::search::FacetCounts;
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        use tantivy::collector::FacetCollector;
+        use tantivy::query::{AllQuery, BooleanQuery, Occur, TermQuery};
+        use tantivy::schema::IndexRecordOption;
+        use tantivy::Term;
+
+        let index = storage.index()?;
+        let fields = storage.fields()?;
+
+        // Create a reader for searching
+        let reader = index
+            .reader()
+            .map_err(|e| anyhow::anyhow!("Failed to create index reader: {}", e))?;
+        let searcher = reader.searcher();
+
+        // Build query - either all docs or filtered by doc_type
+        let query: Box<dyn tantivy::query::Query> = if self.doc_type_filter.is_empty() {
+            Box::new(AllQuery)
+        } else {
+            // Build doc_type filter
+            let mut doc_type_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+            for doc_type in &self.doc_type_filter {
+                let term = Term::from_field_text(fields.doc_type_field, doc_type);
+                doc_type_clauses.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
+                ));
+            }
+            Box::new(BooleanQuery::new(doc_type_clauses))
+        };
+
+        // Create facet collectors for each facet field
+        let mut doc_type_collector = FacetCollector::for_field("doc_type_facet");
+        doc_type_collector.add_facet(tantivy::schema::Facet::from("/type"));
+
+        let mut tags_collector = FacetCollector::for_field("tags");
+        tags_collector.add_facet(tantivy::schema::Facet::from("/tag"));
+
+        let mut validity_collector = FacetCollector::for_field("validity_facet");
+        validity_collector.add_facet(tantivy::schema::Facet::from("/validity"));
+
+        // Execute search with all three collectors
+        let (doc_type_counts, tags_counts, validity_counts) = searcher
+            .search(
+                &query,
+                &(doc_type_collector, tags_collector, validity_collector),
+            )
+            .map_err(|e| anyhow::anyhow!("Facet search failed: {}", e))?;
+
+        // Convert to FacetCounts structure
+        let mut result = super::search::FacetCounts::new();
+
+        // Extract doc_type facets (/type/nodes, /type/edges, etc.)
+        for (facet, count) in doc_type_counts.get("/type") {
+            // Extract the facet name (last component)
+            let facet_str = facet.to_string();
+            if let Some(name) = facet_str.strip_prefix("/type/") {
+                result.doc_types.insert(name.to_string(), count);
+            }
+        }
+
+        // Extract tag facets (/tag/rust, /tag/programming, etc.)
+        let mut tag_count = 0;
+        for (facet, count) in tags_counts.get("/tag") {
+            if tag_count >= self.tags_limit {
+                break;
+            }
+            let facet_str = facet.to_string();
+            if let Some(name) = facet_str.strip_prefix("/tag/") {
+                result.tags.insert(name.to_string(), count);
+                tag_count += 1;
+            }
+        }
+
+        // Extract validity facets (/validity/unbounded, /validity/bounded, etc.)
+        for (facet, count) in validity_counts.get("/validity") {
+            let facet_str = facet.to_string();
+            if let Some(name) = facet_str.strip_prefix("/validity/") {
+                result.validity.insert(name.to_string(), count);
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+            .expect("Query must have timeout set when executing")
+    }
+}
+
+crate::impl_fulltext_query_processor!(Facets);
+
 #[async_trait::async_trait]
 impl QueryProcessor for Search {
     async fn process_and_send<P: Processor + Sync>(self, processor: &P) {
         match self {
             Search::Nodes(q) => q.process_and_send(processor).await,
             Search::Edges(q) => q.process_and_send(processor).await,
+            Search::Facets(q) => q.process_and_send(processor).await,
         }
     }
 }

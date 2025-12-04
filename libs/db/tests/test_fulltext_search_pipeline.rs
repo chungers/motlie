@@ -11,7 +11,7 @@ use motlie_db::{
     create_fulltext_query_reader, create_mutation_writer, create_query_reader,
     spawn_fulltext_query_consumer_pool_shared, spawn_graph_consumer_with_next,
     spawn_graph_query_consumer_pool_shared, AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
-    DataUrl, EdgeSummary, EdgeSummaryBySrcDstName, FulltextEdges, FulltextIndex,
+    DataUrl, EdgeSummary, EdgeSummaryBySrcDstName, FulltextEdges, FulltextFacets, FulltextIndex,
     FulltextQueryRunnable, FulltextReaderConfig, FulltextStorage, FuzzyLevel, Graph, Id,
     MutationRunnable, NodeById, NodeSummary, QueryRunnable, ReaderConfig, Storage, TimestampMilli,
     WriterConfig,
@@ -439,7 +439,7 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
         use tantivy::query::AllQuery;
         let all_results = searcher.search(&AllQuery, &TopDocs::with_limit(100)).unwrap();
 
-        let mut forward_edges_count = 0;
+        let mut edges_count = 0;
         let mut edge_fragments_count = 0;
         let mut nodes_count = 0;
         let mut node_fragments_count = 0;
@@ -449,7 +449,7 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
             if let Some(dt) = doc.get_first(doc_type_field) {
                 if let Some(text) = dt.as_str() {
                     match text {
-                        "forward_edges" => forward_edges_count += 1,
+                        "edges" => edges_count += 1,
                         "edge_fragments" => edge_fragments_count += 1,
                         "nodes" => nodes_count += 1,
                         "node_fragments" => node_fragments_count += 1,
@@ -462,7 +462,7 @@ async fn test_fulltext_edge_search_resolves_to_rocksdb() {
         println!("  DEBUG: Document types in index:");
         println!("    - nodes: {}", nodes_count);
         println!("    - node_fragments: {}", node_fragments_count);
-        println!("    - forward_edges: {}", forward_edges_count);
+        println!("    - edges: {}", edges_count);
         println!("    - edge_fragments: {}", edge_fragments_count);
 
     }
@@ -1358,4 +1358,235 @@ async fn test_fulltext_fuzzy_search() {
     }
 
     println!("\n✅ Test passed: Fuzzy search works correctly\n");
+}
+
+/// Test 8: Facet counts query
+///
+/// This test verifies:
+/// - `FulltextFacets` query returns counts for all facet types
+/// - doc_type facets include nodes, edges, node_fragments, edge_fragments
+/// - tags facet counts match the hashtags in content
+/// - validity facet counts match the document validity structures
+/// - Optional doc_type filtering restricts counts to specific document types
+#[tokio::test]
+async fn test_fulltext_facets_query() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let (writer, graph_handle, fulltext_handle, db_path, index_path) =
+        setup_mutation_pipeline(&temp_dir).await;
+
+    println!("=== Test: Facet Counts Query ===\n");
+
+    // Create nodes with various hashtags
+    let node1_id = Id::new();
+    let node2_id = Id::new();
+    let node3_id = Id::new();
+
+    // Node 1: #rust #systems
+    AddNode {
+        id: node1_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Rust".to_string(),
+        valid_range: None,
+        summary: NodeSummary::from_text("Rust is a #rust #systems programming language"),
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    // Node 2: #python #scripting #data
+    AddNode {
+        id: node2_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Python".to_string(),
+        valid_range: None,
+        summary: NodeSummary::from_text("Python is a #python #scripting language for #data science"),
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    // Node 3: #rust #async (shares #rust tag with Node 1)
+    AddNode {
+        id: node3_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Tokio".to_string(),
+        valid_range: None,
+        summary: NodeSummary::from_text("Tokio is an #async runtime for #rust"),
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    println!("  Created 3 nodes with various #hashtags");
+
+    // Add node fragments with tags
+    AddNodeFragment {
+        id: node1_id,
+        ts_millis: TimestampMilli::now(),
+        content: DataUrl::from_text("Rust memory safety #memory-safe #systems"),
+        valid_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    AddNodeFragment {
+        id: node2_id,
+        ts_millis: TimestampMilli::now(),
+        content: DataUrl::from_text("Python #data analysis libraries"),
+        valid_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    println!("  Created 2 node fragments");
+
+    // Create edges with tags
+    AddEdge {
+        source_node_id: node1_id,
+        target_node_id: node3_id,
+        ts_millis: TimestampMilli::now(),
+        name: "enables".to_string(),
+        summary: EdgeSummary::from_text("Rust enables #async programming with Tokio"),
+        weight: Some(0.9),
+        valid_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    AddEdge {
+        source_node_id: node2_id,
+        target_node_id: node1_id,
+        ts_millis: TimestampMilli::now(),
+        name: "competes_with".to_string(),
+        summary: EdgeSummary::from_text("Python competes with Rust in some domains #systems"),
+        weight: Some(0.5),
+        valid_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    println!("  Created 2 edges");
+
+    // Add edge fragments
+    AddEdgeFragment {
+        src_id: node1_id,
+        dst_id: node3_id,
+        edge_name: "enables".to_string(),
+        ts_millis: TimestampMilli::now(),
+        content: DataUrl::from_text("Tokio runtime details #performance #async"),
+        valid_range: None,
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    println!("  Created 1 edge fragment\n");
+
+    // Wait for indexing and shutdown
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(writer);
+    graph_handle.await.unwrap().unwrap();
+    fulltext_handle.await.unwrap().unwrap();
+
+    // Setup query infrastructure
+    let (graph_reader, fulltext_reader, graph_handles, fulltext_handles) =
+        setup_query_infrastructure(&db_path, &index_path);
+
+    let timeout = Duration::from_secs(5);
+
+    // === TEST 1: Get all facet counts ===
+    println!("  Testing facet counts for all documents...\n");
+
+    let facet_counts = FulltextFacets::new()
+        .run(&fulltext_reader, timeout)
+        .await
+        .unwrap();
+
+    println!("  Document type counts:");
+    for (doc_type, count) in &facet_counts.doc_types {
+        println!("    {}: {}", doc_type, count);
+    }
+
+    println!("\n  Tag counts:");
+    for (tag, count) in &facet_counts.tags {
+        println!("    #{}: {}", tag, count);
+    }
+
+    println!("\n  Validity counts:");
+    for (validity, count) in &facet_counts.validity {
+        println!("    {}: {}", validity, count);
+    }
+
+    // Verify doc_type counts
+    assert!(facet_counts.doc_types.get("nodes").unwrap_or(&0) >= &3, "Should have at least 3 nodes");
+    assert!(facet_counts.doc_types.get("edges").unwrap_or(&0) >= &2, "Should have at least 2 edges");
+    assert!(facet_counts.doc_types.get("node_fragments").unwrap_or(&0) >= &2, "Should have at least 2 node fragments");
+    assert!(facet_counts.doc_types.get("edge_fragments").unwrap_or(&0) >= &1, "Should have at least 1 edge fragment");
+
+    // Verify tag counts
+    // #rust appears in: Node 1, Node 3, and their fragments/edges mentioning rust
+    assert!(facet_counts.tags.get("rust").unwrap_or(&0) >= &2, "#rust should appear at least twice");
+    // #systems appears in multiple documents
+    assert!(facet_counts.tags.get("systems").unwrap_or(&0) >= &2, "#systems should appear at least twice");
+    // #async appears in multiple documents
+    assert!(facet_counts.tags.get("async").unwrap_or(&0) >= &2, "#async should appear at least twice");
+    // #data appears
+    assert!(facet_counts.tags.contains_key("data"), "#data tag should exist");
+
+    // === TEST 2: Get facet counts filtered by doc_type ===
+    println!("\n  Testing facet counts filtered to nodes only...\n");
+
+    let nodes_only_counts = FulltextFacets::new()
+        .with_doc_type_filter(vec!["nodes".to_string()])
+        .run(&fulltext_reader, timeout)
+        .await
+        .unwrap();
+
+    println!("  Filtered document type counts (nodes only):");
+    for (doc_type, count) in &nodes_only_counts.doc_types {
+        println!("    {}: {}", doc_type, count);
+    }
+
+    println!("\n  Filtered tag counts (nodes only):");
+    for (tag, count) in &nodes_only_counts.tags {
+        println!("    #{}: {}", tag, count);
+    }
+
+    // When filtering to nodes only, the tag counts should only reflect tags in nodes
+    // Node 1 has #rust #systems, Node 2 has #python #scripting #data, Node 3 has #async #rust
+    assert!(nodes_only_counts.tags.contains_key("rust"), "#rust should be in nodes");
+    assert!(nodes_only_counts.tags.contains_key("python"), "#python should be in nodes");
+
+    // === TEST 3: Get facet counts with tags_limit ===
+    println!("\n  Testing facet counts with tags_limit=2...\n");
+
+    let limited_counts = FulltextFacets::new()
+        .with_tags_limit(2)
+        .run(&fulltext_reader, timeout)
+        .await
+        .unwrap();
+
+    println!("  Limited tag counts (max 2):");
+    for (tag, count) in &limited_counts.tags {
+        println!("    #{}: {}", tag, count);
+    }
+
+    assert!(limited_counts.tags.len() <= 2, "Should have at most 2 tags with tags_limit=2");
+
+    // Cleanup - must drop readers first to close channels before awaiting handles
+    drop(fulltext_reader);
+    drop(graph_reader);
+    for h in fulltext_handles {
+        h.await.unwrap();
+    }
+    for h in graph_handles {
+        h.await.unwrap();
+    }
+
+    println!("\n✅ Test passed: Facet counts query works correctly\n");
 }

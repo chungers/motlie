@@ -442,7 +442,7 @@ The fulltext index uses the following schema:
 | `node_name_field` | TEXT | Node name (tokenized, searchable) |
 | `edge_name_field` | TEXT | Edge name (tokenized, searchable) |
 | `content_field` | TEXT | Main content field (summaries, fragments) |
-| `doc_type_field` | TEXT | Document type: "nodes", "forward_edges", "node_fragments", "edge_fragments" |
+| `doc_type_field` | TEXT | Document type: "nodes", "edges", "node_fragments", "edge_fragments" |
 | `creation_timestamp_field` | U64 | Creation timestamp in milliseconds |
 | `valid_since_field` | U64 | Validity start timestamp (optional) |
 | `valid_until_field` | U64 | Validity end timestamp (optional) |
@@ -452,7 +452,7 @@ The fulltext index uses the following schema:
 
 | Facet | Path Pattern | Description |
 |-------|--------------|-------------|
-| `doc_type_facet` | `/type/nodes`, `/type/forward_edges`, etc. | Document type categorization |
+| `doc_type_facet` | `/type/nodes`, `/type/edges`, etc. | Document type categorization |
 | `validity_facet` | `/validity/unbounded`, `/validity/bounded`, etc. | Temporal validity structure |
 | `tags_facet` | `/tag/rust`, `/tag/programming`, etc. | User-defined hashtags |
 
@@ -688,31 +688,61 @@ The `fragment_timestamp` field distinguishes between entity and fragment matches
 
 ## TODO: Planned Query Types
 
-The following query types are planned but not yet implemented:
+### `FulltextFacets` Query
 
-### `FacetCounts` Query
 Get counts of documents by facet values:
 
 ```rust
-// TODO: Not yet implemented
-// Count documents by tag
-let tag_counts = FacetCounts::by_tag()
+// Get all facet counts across all documents
+let counts = FulltextFacets::new()
     .run(&reader, Duration::from_secs(5))
     .await?;
-// Returns: [("rust", 42), ("programming", 38), ("database", 25), ...]
 
-// Count documents by type
-let type_counts = FacetCounts::by_doc_type()
-    .run(&reader, Duration::from_secs(5))
-    .await?;
-// Returns: [("nodes", 500), ("forward_edges", 1200), ("node_fragments", 300), ...]
+// Document type counts: nodes, edges, node_fragments, edge_fragments
+println!("Nodes: {}", counts.doc_types.get("nodes").unwrap_or(&0));
+println!("Edges: {}", counts.doc_types.get("edges").unwrap_or(&0));
 
-// Count by validity structure
-let validity_counts = FacetCounts::by_validity()
-    .run(&reader, Duration::from_secs(5))
-    .await?;
-// Returns: [("unbounded", 400), ("bounded", 100), ("since_only", 50), ...]
+// Tag counts (from #hashtags in content)
+for (tag, count) in &counts.tags {
+    println!("#{}: {}", tag, count);
+}
+
+// Validity structure counts: unbounded, bounded, since_only, until_only
+for (validity, count) in &counts.validity {
+    println!("{}: {}", validity, count);
+}
 ```
+
+#### Filtering by Document Type
+
+```rust
+// Get facet counts only for nodes
+let nodes_counts = FulltextFacets::new()
+    .with_doc_type_filter(vec!["nodes".to_string()])
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Get facet counts for edges and edge fragments
+let edge_counts = FulltextFacets::new()
+    .with_doc_type_filter(vec!["edges".to_string(), "edge_fragments".to_string()])
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+```
+
+#### Limiting Tag Results
+
+```rust
+// Limit tag facets to top 10
+let counts = FulltextFacets::new()
+    .with_tags_limit(10)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// counts.tags will have at most 10 entries
+assert!(counts.tags.len() <= 10);
+```
+
+The following query types are planned but not yet implemented:
 
 ### `Aggregations` Query
 Aggregate statistics over search results:
@@ -756,9 +786,9 @@ let similar = MoreLikeThis::new(node_id)
 - [x] Readonly/Readwrite storage modes
 - [x] Temporal validity fields (valid_since, valid_until)
 - [x] Time range queries on creation_timestamp and validity fields
+- [x] `FulltextFacets` query for facet statistics (doc_types, tags, validity)
 
 ### Planned
-- [ ] `FacetCounts` query for facet statistics
 - [ ] `Aggregations` query for search analytics
 - [ ] `MoreLikeThis` query for similarity search
 - [ ] Highlight support (return matching snippets via `snippet` field)
@@ -794,6 +824,7 @@ The `tests/test_fulltext_search_pipeline.rs` file contains comprehensive integra
 | `test_fulltext_search_limit_and_ordering` | Result limit enforcement, BM25 score ordering, pagination behavior |
 | `test_fulltext_tag_facet_filtering` | `#hashtag` extraction from content, `with_tags()` filter, AND semantics for multiple tags, works for both nodes and edges |
 | `test_fulltext_fuzzy_search` | `FuzzyLevel::Low` (1 edit distance), `FuzzyLevel::Medium` (2 edits), typo tolerance for nodes and edges |
+| `test_fulltext_facets_query` | `FulltextFacets` query for aggregating facet counts, doc_type filtering, tags_limit option, validity facet counts |
 
 ### Running the Tests
 

@@ -26,8 +26,8 @@ mod tantivy_behavior_test;
 
 // Re-export commonly used types
 pub use query::{
-    Edges as FulltextEdges, FuzzyLevel, Nodes as FulltextNodes, Runnable as FulltextQueryRunnable,
-    Search as FulltextQuery,
+    Edges as FulltextEdges, Facets as FulltextFacets, FuzzyLevel, Nodes as FulltextNodes,
+    Runnable as FulltextQueryRunnable, Search as FulltextQuery,
 };
 pub use reader::{
     create_query_consumer as create_fulltext_query_consumer,
