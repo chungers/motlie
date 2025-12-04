@@ -6,7 +6,7 @@ This document describes the design patterns and file organization used across th
 
 ```
 src/
-├── lib.rs              # Crate root - common types (Id, TimestampMilli, DataUrl, ValidTemporalRange)
+├── lib.rs              # Crate root - common types (Id, TimestampMilli, DataUrl, TemporalRange)
 ├── README.md           # This file
 ├── graph/              # RocksDB-based graph storage
 │   ├── mod.rs          # Storage, Graph struct, module exports
@@ -176,7 +176,7 @@ Queries flow from clients through readers to consumers:
 
 The crate root (`lib.rs`) contains:
 
-1. **Common Types**: `Id`, `TimestampMilli`, `DataUrl`, `ValidTemporalRange`
+1. **Common Types**: `Id`, `TimestampMilli`, `DataUrl`, `TemporalRange`
 2. **Module Declarations**: `pub mod graph` and `pub mod fulltext`
 3. **Re-exports**: Flattened exports for ergonomic imports
 
@@ -184,7 +184,7 @@ The crate root (`lib.rs`) contains:
 // Users can import from crate root
 use motlie_db::{
     // Common types
-    Id, TimestampMilli, DataUrl, ValidTemporalRange,
+    Id, TimestampMilli, DataUrl, TemporalRange,
     // Graph types
     Graph, Storage, AddNode, AddEdge, NodeById, OutgoingEdges,
     // Fulltext types

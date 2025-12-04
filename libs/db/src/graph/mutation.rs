@@ -33,7 +33,7 @@ pub struct AddNode {
     pub name: schema::NodeName,
 
     /// The temporal validity range for this node
-    pub temporal_range: Option<schema::ValidTemporalRange>,
+    pub valid_range: Option<schema::TemporalRange>,
 
     /// The summary information for this node
     pub summary: schema::NodeSummary,
@@ -54,7 +54,7 @@ pub struct AddEdge {
     pub name: schema::EdgeName,
 
     /// The temporal validity range for this edge
-    pub temporal_range: Option<schema::ValidTemporalRange>,
+    pub valid_range: Option<schema::TemporalRange>,
 
     /// The summary information for this edge (moved from Edges CF)
     pub summary: schema::EdgeSummary,
@@ -75,7 +75,7 @@ pub struct AddNodeFragment {
     pub content: crate::DataUrl,
 
     /// The temporal validity range for this fragment
-    pub temporal_range: Option<schema::ValidTemporalRange>,
+    pub valid_range: Option<schema::TemporalRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +96,7 @@ pub struct AddEdgeFragment {
     pub content: crate::DataUrl,
 
     /// The temporal validity range for this fragment
-    pub temporal_range: Option<schema::ValidTemporalRange>,
+    pub valid_range: Option<schema::TemporalRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,7 +105,7 @@ pub struct UpdateNodeValidSinceUntil {
     pub id: Id,
 
     /// The temporal validity range for this fragment
-    pub temporal_range: schema::ValidTemporalRange,
+    pub temporal_range: schema::TemporalRange,
 
     /// The reason for invalidation
     pub reason: String,
@@ -123,7 +123,7 @@ pub struct UpdateEdgeValidSinceUntil {
     pub name: schema::EdgeName,
 
     /// The temporal validity range for this edge
-    pub temporal_range: schema::ValidTemporalRange,
+    pub temporal_range: schema::TemporalRange,
 
     /// The reason for invalidation
     pub reason: String,
@@ -148,35 +148,58 @@ pub struct UpdateEdgeWeight {
 // Helper Functions - Shared logic for mutation execution
 // ============================================================================
 
-/// Helper function to update ValidTemporalRange for a single node.
+/// Helper function to update TemporalRange for a single node.
+/// Updates both Nodes CF and NodeNames CF.
 fn update_node_valid_range(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
-    new_range: schema::ValidTemporalRange,
+    new_range: schema::TemporalRange,
 ) -> Result<()> {
     use super::{ColumnFamilyRecord, ValidRangePatchable};
-    use super::schema::{NodeCfKey, Nodes};
+    use super::schema::{NodeCfKey, NodeCfValue, NodeNameCfKey, NodeNames, Nodes};
 
-    let cf = txn_db
+    // Patch Nodes CF
+    let nodes_cf = txn_db
         .cf_handle(Nodes::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
 
-    let key = NodeCfKey(node_id);
-    let key_bytes = Nodes::key_to_bytes(&key);
+    let node_key = NodeCfKey(node_id);
+    let node_key_bytes = Nodes::key_to_bytes(&node_key);
 
-    let value_bytes = txn
-        .get_cf(cf, &key_bytes)?
+    let node_value_bytes = txn
+        .get_cf(nodes_cf, &node_key_bytes)?
         .ok_or_else(|| anyhow::anyhow!("Node not found for id: {}", node_id))?;
 
+    // Deserialize to get node name for NodeNames CF update
+    let node_value: NodeCfValue = Nodes::value_from_bytes(&node_value_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+    let node_name = node_value.1.clone();
+
     let nodes = Nodes;
-    let patched_bytes = nodes.patch_valid_range(&value_bytes, new_range)?;
-    txn.put_cf(cf, &key_bytes, patched_bytes)?;
+    let patched_node_bytes = nodes.patch_valid_range(&node_value_bytes, new_range)?;
+    txn.put_cf(nodes_cf, &node_key_bytes, patched_node_bytes)?;
+
+    // Patch NodeNames CF
+    let node_names_cf = txn_db
+        .cf_handle(NodeNames::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("NodeNames CF not found"))?;
+
+    let node_name_key = NodeNameCfKey(node_name, node_id);
+    let node_name_key_bytes = NodeNames::key_to_bytes(&node_name_key);
+
+    let node_name_value_bytes = txn
+        .get_cf(node_names_cf, &node_name_key_bytes)?
+        .ok_or_else(|| anyhow::anyhow!("NodeName not found for id: {}", node_id))?;
+
+    let node_names = NodeNames;
+    let patched_name_bytes = node_names.patch_valid_range(&node_name_value_bytes, new_range)?;
+    txn.put_cf(node_names_cf, &node_name_key_bytes, patched_name_bytes)?;
 
     Ok(())
 }
 
-/// Helper function to update ValidTemporalRange for a single edge in both ForwardEdges and ReverseEdges CFs.
+/// Helper function to update TemporalRange for a single edge in ForwardEdges, ReverseEdges, and EdgeNames CFs.
 /// This is the core logic shared by UpdateEdgeValidSinceUntil and UpdateNodeValidSinceUntil.
 fn update_edge_valid_range(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -184,10 +207,12 @@ fn update_edge_valid_range(
     src_id: Id,
     dst_id: Id,
     edge_name: &schema::EdgeName,
-    new_range: schema::ValidTemporalRange,
+    new_range: schema::TemporalRange,
 ) -> Result<()> {
     use super::{ColumnFamilyRecord, ValidRangePatchable};
-    use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
+    use super::schema::{
+        EdgeNameCfKey, EdgeNames, ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges,
+    };
 
     // Patch ForwardEdges CF
     let forward_cf = txn_db
@@ -230,6 +255,30 @@ fn update_edge_valid_range(
     let reverse_edges = ReverseEdges;
     let patched_reverse_bytes = reverse_edges.patch_valid_range(&reverse_value_bytes, new_range)?;
     txn.put_cf(reverse_cf, &reverse_key_bytes, patched_reverse_bytes)?;
+
+    // Patch EdgeNames CF
+    let edge_names_cf = txn_db
+        .cf_handle(EdgeNames::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("EdgeNames CF not found"))?;
+
+    let edge_name_key = EdgeNameCfKey(edge_name.clone(), src_id, dst_id);
+    let edge_name_key_bytes = EdgeNames::key_to_bytes(&edge_name_key);
+
+    let edge_name_value_bytes =
+        txn.get_cf(edge_names_cf, &edge_name_key_bytes)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "EdgeName not found: name={}, src={}, dst={}",
+                    edge_name,
+                    src_id,
+                    dst_id
+                )
+            })?;
+
+    let edge_names = EdgeNames;
+    let patched_edge_name_bytes =
+        edge_names.patch_valid_range(&edge_name_value_bytes, new_range)?;
+    txn.put_cf(edge_names_cf, &edge_name_key_bytes, patched_edge_name_bytes)?;
 
     Ok(())
 }
@@ -506,7 +555,7 @@ impl Mutation {
 ///     id: Id::new(),
 ///     name: "Alice".to_string(),
 ///     ts_millis: TimestampMilli::now(),
-///     temporal_range: None,
+///     valid_range: None,
 /// };
 ///
 /// // Execute it
@@ -800,7 +849,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: super::schema::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
@@ -865,7 +914,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::schema::NodeSummary::from_text(&format!("summary {}", i)),
             };
             node_args.run(&writer).await.unwrap();

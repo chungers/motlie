@@ -329,7 +329,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::NodeSummary::from_text("test summary"),
         };
 
@@ -360,7 +360,7 @@ mod tests {
             id: node_id,
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text("This is searchable content about Rust programming"),
-            temporal_range: None,
+            valid_range: None,
         };
 
         let mutations = vec![Mutation::AddNodeFragment(fragment)];
@@ -392,7 +392,7 @@ mod tests {
             name: "depends_on".to_string(),
             summary: crate::graph::schema::EdgeSummary::from_text("dependency relationship"),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         };
 
         let mutations = vec![Mutation::AddEdge(edge)];
@@ -425,7 +425,7 @@ mod tests {
             content: DataUrl::from_markdown(
                 "# Connection Details\nThis edge represents a network connection",
             ),
-            temporal_range: None,
+            valid_range: None,
         };
 
         let mutations = vec![Mutation::AddEdgeFragment(edge_fragment)];
@@ -456,21 +456,21 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "node_one".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("node one summary"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "node_two".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("node two summary"),
             }),
             Mutation::AddNodeFragment(AddNodeFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_text("fragment content here"),
-                temporal_range: None,
+                valid_range: None,
             }),
         ];
 
@@ -511,7 +511,7 @@ mod tests {
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::NodeSummary::from_text("test summary"),
         });
 
@@ -531,7 +531,7 @@ mod tests {
         // Now update its temporal range (which should delete the document)
         let update = Mutation::UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil {
             id: node_id,
-            temporal_range: crate::ValidTemporalRange(
+            temporal_range: crate::TemporalRange(
                 Some(TimestampMilli(0)),
                 Some(TimestampMilli(1000)),
             ),
@@ -560,19 +560,19 @@ mod tests {
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_text("first fragment about databases"),
-                temporal_range: None,
+                valid_range: None,
             }),
             Mutation::AddNodeFragment(AddNodeFragment {
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_text("second fragment about indexing"),
-                temporal_range: None,
+                valid_range: None,
             }),
             Mutation::AddNodeFragment(AddNodeFragment {
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_text("third fragment about search"),
-                temporal_range: None,
+                valid_range: None,
             }),
         ];
 
@@ -602,19 +602,19 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_text("plain text content"),
-                temporal_range: None,
+                valid_range: None,
             }),
             Mutation::AddNodeFragment(AddNodeFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_markdown("# Markdown content"),
-                temporal_range: None,
+                valid_range: None,
             }),
             Mutation::AddNodeFragment(AddNodeFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_html("<p>HTML content</p>"),
-                temporal_range: None,
+                valid_range: None,
             }),
         ];
 
@@ -646,7 +646,7 @@ mod tests {
             name: "weighted_edge".to_string(),
             summary: crate::graph::schema::EdgeSummary::from_text("weighted connection"),
             weight: Some(2.5),
-            temporal_range: None,
+            valid_range: None,
         };
 
         let edge_without_weight = AddEdge {
@@ -656,7 +656,7 @@ mod tests {
             name: "unweighted_edge".to_string(),
             summary: crate::graph::schema::EdgeSummary::from_text("unweighted connection"),
             weight: None,
-            temporal_range: None,
+            valid_range: None,
         };
 
         processor
@@ -712,28 +712,28 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(now),
                 name: "recent_node".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("created just now"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_hour_ago),
                 name: "hourly_node".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("created one hour ago"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_day_ago),
                 name: "daily_node".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("created one day ago"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_week_ago),
                 name: "weekly_node".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("created one week ago"),
             }),
         ];
@@ -795,19 +795,19 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(now),
                 content: DataUrl::from_text("Rust programming is awesome"),
-                temporal_range: None,
+                valid_range: None,
             }),
             Mutation::AddNodeFragment(AddNodeFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_hour_ago),
                 content: DataUrl::from_text("Rust language features"),
-                temporal_range: None,
+                valid_range: None,
             }),
             Mutation::AddNodeFragment(AddNodeFragment {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_week_ago),
                 content: DataUrl::from_text("Old Rust documentation"),
-                temporal_range: None,
+                valid_range: None,
             }),
         ];
 
@@ -863,7 +863,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(now),
                 name: "always_valid".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("no temporal constraints"),
             }),
             // Currently valid (past..future)
@@ -871,7 +871,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(now),
                 name: "currently_valid".to_string(),
-                temporal_range: Some(crate::ValidTemporalRange(
+                valid_range: Some(crate::TemporalRange(
                     Some(TimestampMilli(past)),
                     Some(TimestampMilli(future)),
                 )),
@@ -882,7 +882,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(now),
                 name: "expired".to_string(),
-                temporal_range: Some(crate::ValidTemporalRange(
+                valid_range: Some(crate::TemporalRange(
                     Some(TimestampMilli(past - 86400_000)),
                     Some(TimestampMilli(past)),
                 )),
@@ -893,7 +893,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(now),
                 name: "future".to_string(),
-                temporal_range: Some(crate::ValidTemporalRange(
+                valid_range: Some(crate::TemporalRange(
                     Some(TimestampMilli(future)),
                     None,
                 )),
@@ -961,28 +961,28 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(ts1),
                 name: "first".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("first document"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(ts2),
                 name: "second".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("second document"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(ts3),
                 name: "third".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("third document"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(ts4),
                 name: "fourth".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("fourth document"),
             }),
         ];

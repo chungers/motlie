@@ -6,8 +6,8 @@ use crate::Id;
 use crate::TimestampMilli;
 use serde::{Deserialize, Serialize};
 
-// Re-export ValidTemporalRange and related types from crate root for convenience
-pub use crate::{is_valid_at_time, StartTimestamp, UntilTimestamp, ValidTemporalRange};
+// Re-export TemporalRange and related types from crate root for convenience
+pub use crate::{is_valid_at_time, StartTimestamp, TemporalRange, UntilTimestamp};
 
 /// Nodes column family.
 pub(crate) struct Nodes;
@@ -15,7 +15,7 @@ pub(crate) struct Nodes;
 pub(crate) struct NodeCfKey(pub(crate) Id);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeCfValue(
-    pub(crate) Option<ValidTemporalRange>,
+    pub(crate) Option<TemporalRange>,
     pub(crate) NodeName,
     pub(crate) NodeSummary,
 );
@@ -24,7 +24,7 @@ impl ValidRangePatchable for Nodes {
     fn patch_valid_range(
         &self,
         old_value: &[u8],
-        new_range: ValidTemporalRange,
+        new_range: TemporalRange,
     ) -> Result<Vec<u8>, anyhow::Error> {
         use crate::graph::ColumnFamilyRecord;
 
@@ -45,7 +45,7 @@ impl ValidRangePatchable for ForwardEdges {
     fn patch_valid_range(
         &self,
         old_value: &[u8],
-        new_range: ValidTemporalRange,
+        new_range: TemporalRange,
     ) -> Result<Vec<u8>, anyhow::Error> {
         use crate::graph::ColumnFamilyRecord;
 
@@ -61,7 +61,7 @@ impl ValidRangePatchable for ReverseEdges {
     fn patch_valid_range(
         &self,
         old_value: &[u8],
-        new_range: ValidTemporalRange,
+        new_range: TemporalRange,
     ) -> Result<Vec<u8>, anyhow::Error> {
         use crate::graph::ColumnFamilyRecord;
 
@@ -73,13 +73,45 @@ impl ValidRangePatchable for ReverseEdges {
     }
 }
 
+impl ValidRangePatchable for NodeNames {
+    fn patch_valid_range(
+        &self,
+        old_value: &[u8],
+        new_range: TemporalRange,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        use crate::graph::ColumnFamilyRecord;
+
+        let mut value = NodeNames::value_from_bytes(old_value)
+            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+        value.0 = Some(new_range);
+        NodeNames::value_to_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+    }
+}
+
+impl ValidRangePatchable for EdgeNames {
+    fn patch_valid_range(
+        &self,
+        old_value: &[u8],
+        new_range: TemporalRange,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        use crate::graph::ColumnFamilyRecord;
+
+        let mut value = EdgeNames::value_from_bytes(old_value)
+            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+        value.0 = Some(new_range);
+        EdgeNames::value_to_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+    }
+}
+
 /// Forward edges column family (enhanced with weight and summary).
 pub(crate) struct ForwardEdges;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfKey(pub(crate) SrcId, pub(crate) DstId, pub(crate) EdgeName);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<ValidTemporalRange>, // Field 0: Temporal validity
+    pub(crate) Option<TemporalRange>, // Field 0: Temporal validity
     pub(crate) Option<f64>,                // Field 1: Optional weight
     pub(crate) EdgeSummary,                // Field 2: Edge summary
 );
@@ -89,7 +121,7 @@ pub(crate) struct ReverseEdges;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ReverseEdgeCfKey(pub(crate) DstId, pub(crate) SrcId, pub(crate) EdgeName);
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<ValidTemporalRange>);
+pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<TemporalRange>);
 
 /// Edge fragments column family.
 pub(crate) struct EdgeFragments;
@@ -102,7 +134,7 @@ pub(crate) struct EdgeFragmentCfKey(
 );
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EdgeFragmentCfValue(
-    pub(crate) Option<ValidTemporalRange>,
+    pub(crate) Option<TemporalRange>,
     pub(crate) FragmentContent,
 );
 
@@ -111,14 +143,14 @@ pub(crate) struct NodeNames;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeNameCfKey(pub(crate) NodeName, pub(crate) Id);
 #[derive(Serialize, Deserialize)]
-pub(crate) struct NodeNameCfValue(pub(crate) Option<ValidTemporalRange>);
+pub(crate) struct NodeNameCfValue(pub(crate) Option<TemporalRange>);
 
 /// Edge names column family (index for looking up edges by name).
 pub(crate) struct EdgeNames;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EdgeNameCfKey(pub(crate) EdgeName, pub(crate) SrcId, pub(crate) DstId);
 #[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeNameCfValue(pub(crate) Option<ValidTemporalRange>);
+pub(crate) struct EdgeNameCfValue(pub(crate) Option<TemporalRange>);
 
 pub type NodeName = String;
 pub type EdgeName = String;
@@ -135,7 +167,7 @@ impl ColumnFamilyRecord for Nodes {
     fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
         let value = NodeCfValue(
-            args.temporal_range.clone(),
+            args.valid_range.clone(),
             args.name.clone(),
             args.summary.clone(),
         );
@@ -168,7 +200,7 @@ pub(crate) struct NodeFragments;
 pub(crate) struct NodeFragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeFragmentCfValue(
-    pub(crate) Option<ValidTemporalRange>,
+    pub(crate) Option<TemporalRange>,
     pub(crate) FragmentContent,
 );
 
@@ -180,7 +212,7 @@ impl ColumnFamilyRecord for NodeFragments {
 
     fn record_from(args: &AddNodeFragment) -> (NodeFragmentCfKey, NodeFragmentCfValue) {
         let key = NodeFragmentCfKey(args.id, args.ts_millis);
-        let value = NodeFragmentCfValue(args.temporal_range.clone(), args.content.clone());
+        let value = NodeFragmentCfValue(args.valid_range.clone(), args.content.clone());
         (key, value)
     }
 
@@ -243,7 +275,7 @@ impl ColumnFamilyRecord for EdgeFragments {
             args.edge_name.clone(),
             args.ts_millis,
         );
-        let value = EdgeFragmentCfValue(args.temporal_range.clone(), args.content.clone());
+        let value = EdgeFragmentCfValue(args.valid_range.clone(), args.content.clone());
         (key, value)
     }
 
@@ -314,7 +346,7 @@ impl ColumnFamilyRecord for ForwardEdges {
     fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, args.name.clone());
         let value = ForwardEdgeCfValue(
-            args.temporal_range.clone(),
+            args.valid_range.clone(),
             args.weight,
             args.summary.clone(),
         );
@@ -381,7 +413,7 @@ impl ColumnFamilyRecord for ReverseEdges {
 
     fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
         let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, args.name.clone());
-        let value = ReverseEdgeCfValue(args.temporal_range.clone());
+        let value = ReverseEdgeCfValue(args.valid_range.clone());
         (key, value)
     }
 
@@ -445,7 +477,7 @@ impl ColumnFamilyRecord for NodeNames {
 
     fn record_from(args: &AddNode) -> (NodeNameCfKey, NodeNameCfValue) {
         let key = NodeNameCfKey(args.name.clone(), args.id);
-        let value = NodeNameCfValue(args.temporal_range.clone());
+        let value = NodeNameCfValue(args.valid_range.clone());
         (key, value)
     }
 
@@ -495,7 +527,7 @@ impl ColumnFamilyRecord for EdgeNames {
 
     fn record_from(args: &AddEdge) -> (EdgeNameCfKey, EdgeNameCfValue) {
         let key = EdgeNameCfKey(args.name.clone(), args.source_node_id, args.target_node_id);
-        let value = EdgeNameCfValue(args.temporal_range.clone());
+        let value = EdgeNameCfValue(args.valid_range.clone());
         (key, value)
     }
 
@@ -575,7 +607,7 @@ mod tests {
                 name: "edge_a".to_string(),
                 summary: EdgeSummary::from_text(""),
                 weight: Some(1.0),
-                temporal_range: None,
+                valid_range: None,
             },
             AddEdge {
                 source_node_id: Id::from_bytes([0u8; 16]),
@@ -584,7 +616,7 @@ mod tests {
                 name: "edge_b".to_string(),
                 summary: EdgeSummary::from_text(""),
                 weight: Some(1.0),
-                temporal_range: None,
+                valid_range: None,
             },
             AddEdge {
                 source_node_id: Id::from_bytes([1u8; 16]),
@@ -593,7 +625,7 @@ mod tests {
                 name: "edge_c".to_string(),
                 summary: EdgeSummary::from_text(""),
                 weight: Some(1.0),
-                temporal_range: None,
+                valid_range: None,
             },
             AddEdge {
                 source_node_id: Id::from_bytes([1u8; 16]),
@@ -602,7 +634,7 @@ mod tests {
                 name: "edge_d".to_string(),
                 summary: EdgeSummary::from_text(""),
                 weight: Some(1.0),
-                temporal_range: None,
+                valid_range: None,
             },
             // Add edge with same source and target but different name
             AddEdge {
@@ -612,7 +644,7 @@ mod tests {
                 name: "edge_z".to_string(),
                 summary: EdgeSummary::from_text(""),
                 weight: Some(1.0),
-                temporal_range: None,
+                valid_range: None,
             },
         ];
 
@@ -661,15 +693,15 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_temporal_range_always_valid() {
-        let range = ValidTemporalRange::always_valid();
+    fn test_temporal_range_always_valid() {
+        let range = TemporalRange::always_valid();
         assert!(range.is_none(), "always_valid should return None");
     }
 
     #[test]
-    fn test_valid_temporal_range_valid_from() {
+    fn test_temporal_range_valid_from() {
         let start = TimestampMilli(1000);
-        let range = ValidTemporalRange::valid_from(start);
+        let range = TemporalRange::valid_from(start);
 
         assert!(range.is_some());
         let range = range.unwrap();
@@ -678,9 +710,9 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_temporal_range_valid_until() {
+    fn test_temporal_range_valid_until() {
         let until = TimestampMilli(2000);
-        let range = ValidTemporalRange::valid_until(until);
+        let range = TemporalRange::valid_until(until);
 
         assert!(range.is_some());
         let range = range.unwrap();
@@ -689,10 +721,10 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_temporal_range_valid_between() {
+    fn test_temporal_range_valid_between() {
         let start = TimestampMilli(1000);
         let until = TimestampMilli(2000);
-        let range = ValidTemporalRange::valid_between(start, until);
+        let range = TemporalRange::valid_between(start, until);
 
         assert!(range.is_some());
         let range = range.unwrap();
@@ -702,7 +734,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_with_start_only() {
-        let range = ValidTemporalRange(Some(TimestampMilli(1000)), None);
+        let range = TemporalRange(Some(TimestampMilli(1000)), None);
 
         // Before start - invalid
         assert!(!range.is_valid_at(TimestampMilli(999)));
@@ -717,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_with_until_only() {
-        let range = ValidTemporalRange(None, Some(TimestampMilli(2000)));
+        let range = TemporalRange(None, Some(TimestampMilli(2000)));
 
         // Before until - valid
         assert!(range.is_valid_at(TimestampMilli(0)));
@@ -732,7 +764,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_with_both_boundaries() {
-        let range = ValidTemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
+        let range = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
 
         // Before start - invalid
         assert!(!range.is_valid_at(TimestampMilli(999)));
@@ -753,7 +785,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_with_no_boundaries() {
-        let range = ValidTemporalRange(None, None);
+        let range = TemporalRange(None, None);
 
         // Always valid regardless of timestamp
         assert!(range.is_valid_at(TimestampMilli(0)));
@@ -763,7 +795,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_time_with_none() {
-        let temporal_range: Option<ValidTemporalRange> = None;
+        let temporal_range: Option<TemporalRange> = None;
 
         // None means always valid
         assert!(is_valid_at_time(&temporal_range, TimestampMilli(0)));
@@ -773,7 +805,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_time_with_range() {
-        let temporal_range = Some(ValidTemporalRange(
+        let temporal_range = Some(TemporalRange(
             Some(TimestampMilli(1000)),
             Some(TimestampMilli(2000)),
         ));
@@ -794,43 +826,43 @@ mod tests {
     #[test]
     fn test_is_valid_at_time_edge_cases() {
         // Test with start only
-        let from_only = Some(ValidTemporalRange(Some(TimestampMilli(100)), None));
+        let from_only = Some(TemporalRange(Some(TimestampMilli(100)), None));
         assert!(!is_valid_at_time(&from_only, TimestampMilli(99)));
         assert!(is_valid_at_time(&from_only, TimestampMilli(100)));
         assert!(is_valid_at_time(&from_only, TimestampMilli(u64::MAX)));
 
         // Test with until only
-        let until_only = Some(ValidTemporalRange(None, Some(TimestampMilli(200))));
+        let until_only = Some(TemporalRange(None, Some(TimestampMilli(200))));
         assert!(is_valid_at_time(&until_only, TimestampMilli(0)));
         assert!(is_valid_at_time(&until_only, TimestampMilli(199)));
         assert!(!is_valid_at_time(&until_only, TimestampMilli(200)));
 
         // Test with no constraints (Some with both None)
-        let no_constraints = Some(ValidTemporalRange(None, None));
+        let no_constraints = Some(TemporalRange(None, None));
         assert!(is_valid_at_time(&no_constraints, TimestampMilli(0)));
         assert!(is_valid_at_time(&no_constraints, TimestampMilli(u64::MAX)));
     }
 
     #[test]
-    fn test_valid_temporal_range_serialization() {
-        // Test that ValidTemporalRange can be serialized and deserialized
-        let range = ValidTemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
+    fn test_temporal_range_serialization() {
+        // Test that TemporalRange can be serialized and deserialized
+        let range = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
 
         let serialized = rmp_serde::to_vec(&range).expect("Should serialize");
-        let deserialized: ValidTemporalRange =
+        let deserialized: TemporalRange =
             rmp_serde::from_slice(&serialized).expect("Should deserialize");
 
         assert_eq!(range, deserialized);
     }
 
     #[test]
-    fn test_valid_temporal_range_clone_and_equality() {
-        let range1 = ValidTemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
+    fn test_temporal_range_clone_and_equality() {
+        let range1 = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
         let range2 = range1.clone();
 
         assert_eq!(range1, range2);
 
-        let range3 = ValidTemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2001)));
+        let range3 = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2001)));
         assert_ne!(range1, range3);
     }
 }
