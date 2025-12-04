@@ -227,7 +227,7 @@ let client2 = tokio::spawn(async move {
         .await?;
 
     for result in results {
-        println!("Found: {} (score: {})", result.name, result.score);
+        println!("Found: {} (score: {})", result.id, result.score);
     }
 
     Ok::<_, anyhow::Error>(())
@@ -248,7 +248,7 @@ let client3 = tokio::spawn(async move {
             .run(&graph_reader_clone, Duration::from_secs(5))
             .await?;
 
-        println!("Node {} has {} outgoing edges", result.name, edges.len());
+        println!("Node {} has {} outgoing edges", result.id, edges.len());
     }
 
     Ok::<_, anyhow::Error>(())
@@ -559,28 +559,136 @@ AddNodeFragment {
 Searches for nodes and node fragments, returning deduplicated results by node ID:
 
 ```rust
+use motlie_db::{FulltextNodes, FuzzyLevel, FulltextQueryRunnable};
+
+// Basic search - returns top 10 results
 let results = FulltextNodes::new("rust programming".to_string(), 10)
     .run(&reader, Duration::from_secs(5))
     .await?;
 
 for result in results {
-    println!("ID: {}, Name: {}, Score: {}", result.id, result.name, result.score);
+    println!("ID: {}, Score: {}", result.id, result.score);
 }
 ```
+
+#### Fuzzy Search
+
+Enable typo-tolerant matching with `FuzzyLevel`:
+
+```rust
+// Search with typo tolerance (1 edit distance)
+let results = FulltextNodes::new("progrmming".to_string(), 10)
+    .with_fuzzy(FuzzyLevel::Low)  // matches "programming"
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Higher tolerance (2 edit distance)
+let results = FulltextNodes::new("progrmaing".to_string(), 10)
+    .with_fuzzy(FuzzyLevel::Medium)  // matches "programming"
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+```
+
+**FuzzyLevel options:**
+- `FuzzyLevel::None` - Exact matching only (default)
+- `FuzzyLevel::Low` - 1 character edit (insert, delete, substitute, transpose)
+- `FuzzyLevel::Medium` - 2 character edits
+
+#### Tag Filtering
+
+Filter results by hashtags extracted from content:
+
+```rust
+// Search with tag filter - all specified tags must match
+let results = FulltextNodes::new("systems".to_string(), 10)
+    .with_tags(vec!["rust".to_string(), "async".to_string()])
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Combined: fuzzy search with tag filtering
+let results = FulltextNodes::new("concurency".to_string(), 10)
+    .with_fuzzy(FuzzyLevel::Low)
+    .with_tags(vec!["programming".to_string()])
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+```
+
+Tags are automatically extracted from content during indexing using `#hashtag` syntax.
+See the "Tag Extraction" section in schema.rs for supported tag formats.
+
+### `Edges` Query
+
+Searches for edges and edge fragments, returning deduplicated results by edge key (src_id, dst_id, edge_name):
+
+```rust
+use motlie_db::{FulltextEdges, FuzzyLevel, FulltextQueryRunnable};
+
+// Basic search
+let results = FulltextEdges::new("collaborates".to_string(), 10)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+for result in results {
+    println!("Edge: {} -> {} ({}), Score: {}",
+        result.src_id, result.dst_id, result.edge_name, result.score);
+}
+
+// With fuzzy matching
+let results = FulltextEdges::new("colaborates".to_string(), 10)
+    .with_fuzzy(FuzzyLevel::Low)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// With tag filtering
+let results = FulltextEdges::new("partnership".to_string(), 10)
+    .with_tags(vec!["important".to_string()])
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+```
+
+### Query Result Types
+
+#### `NodeHit`
+
+```rust
+pub struct NodeHit {
+    /// BM25 relevance score
+    pub score: f32,
+    /// Node ID (use to look up full node in RocksDB)
+    pub id: Id,
+    /// Fragment timestamp (None = node match, Some = fragment match)
+    pub fragment_timestamp: Option<u64>,
+    /// Optional text snippet (for future highlighting support)
+    pub snippet: Option<String>,
+}
+```
+
+#### `EdgeHit`
+
+```rust
+pub struct EdgeHit {
+    /// BM25 relevance score
+    pub score: f32,
+    /// Source node ID
+    pub src_id: Id,
+    /// Destination node ID
+    pub dst_id: Id,
+    /// Edge name
+    pub edge_name: String,
+    /// Fragment timestamp (None = edge match, Some = fragment match)
+    pub fragment_timestamp: Option<u64>,
+    /// Optional text snippet (for future highlighting support)
+    pub snippet: Option<String>,
+}
+```
+
+The `fragment_timestamp` field distinguishes between entity and fragment matches:
+- `None` - The match came from the node/edge itself
+- `Some(ts)` - The match came from a fragment; use with ID to look up in RocksDB
 
 ## TODO: Planned Query Types
 
 The following query types are planned but not yet implemented:
-
-### `Edges` Query
-Search for edges by content, similar to `Nodes`:
-
-```rust
-// TODO: Not yet implemented
-let results = FulltextEdges::new("collaborates".to_string(), 10)
-    .run(&reader, Duration::from_secs(5))
-    .await?;
-```
 
 ### `FacetCounts` Query
 Get counts of documents by facet values:
@@ -604,29 +712,6 @@ let validity_counts = FacetCounts::by_validity()
     .run(&reader, Duration::from_secs(5))
     .await?;
 // Returns: [("unbounded", 400), ("bounded", 100), ("since_only", 50), ...]
-```
-
-### `NodesWithFacets` Query
-Search nodes with facet filtering:
-
-```rust
-// TODO: Not yet implemented
-let results = NodesWithFacets::new("machine learning".to_string(), 10)
-    .filter_tag("ai")
-    .filter_validity("bounded")  // Only temporally bounded documents
-    .run(&reader, Duration::from_secs(5))
-    .await?;
-```
-
-### `EdgesWithFacets` Query
-Search edges with facet filtering:
-
-```rust
-// TODO: Not yet implemented
-let results = EdgesWithFacets::new("collaboration".to_string(), 10)
-    .filter_tag("partnership")
-    .run(&reader, Duration::from_secs(5))
-    .await?;
 ```
 
 ### `Aggregations` Query
@@ -661,24 +746,22 @@ let similar = MoreLikeThis::new(node_id)
 
 ### Completed
 - [x] Basic `Nodes` query with BM25 ranking
+- [x] Basic `Edges` query with BM25 ranking
 - [x] Node and node fragment deduplication
+- [x] Edge and edge fragment deduplication
 - [x] Facet indexing (doc_type, validity, tags)
-- [x] Fuzzy search support via `FuzzySearchOptions`
+- [x] Fuzzy search support via `FuzzyLevel` (integrated into queries)
+- [x] Tag filtering via `with_tags()` builder method
 - [x] Multiple query consumers with shared Index
 - [x] Readonly/Readwrite storage modes
 - [x] Temporal validity fields (valid_since, valid_until)
 - [x] Time range queries on creation_timestamp and validity fields
 
-### In Progress
-- [ ] `Edges` query (search edges and edge fragments)
-
 ### Planned
 - [ ] `FacetCounts` query for facet statistics
-- [ ] `NodesWithFacets` query with facet filtering
-- [ ] `EdgesWithFacets` query with facet filtering
 - [ ] `Aggregations` query for search analytics
 - [ ] `MoreLikeThis` query for similarity search
-- [ ] Highlight support (return matching snippets)
+- [ ] Highlight support (return matching snippets via `snippet` field)
 - [ ] Pagination with search_after for deep pagination
 - [ ] Custom scoring/boosting per field
 
@@ -690,15 +773,85 @@ fulltext/
 ├── schema.rs    # Tantivy schema definition and field handles
 ├── mutation.rs  # MutationExecutor impls for index updates
 ├── writer.rs    # Writer/MutationConsumer infrastructure
-├── query.rs     # Query types (Nodes fulltext search)
+├── query.rs     # Query types (Nodes, Edges), FuzzyLevel enum
 ├── reader.rs    # Reader/QueryConsumer infrastructure
-├── search.rs    # Search result types and facet counts
-├── fuzzy.rs     # Fuzzy search options
+├── search.rs    # Search result types (NodeHit, EdgeHit, FacetCounts)
 └── README.md    # This file
+```
+
+## Integration Tests
+
+The `tests/test_fulltext_search_pipeline.rs` file contains comprehensive integration tests that verify the fulltext search functionality with the graph storage backend. Each test demonstrates specific query capabilities:
+
+### Test Coverage
+
+| Test Name | Features Demonstrated |
+|-----------|----------------------|
+| `test_fulltext_node_search_resolves_to_rocksdb` | Basic `FulltextNodes` query, BM25 scoring, result deduplication by node ID, verification via `NodeById` graph query |
+| `test_fulltext_edge_search_resolves_to_rocksdb` | Basic `FulltextEdges` query, BM25 scoring, result deduplication by edge key (src, dst, name), verification via `EdgeSummaryBySrcDstName` graph query |
+| `test_fulltext_combined_search_with_verification` | Mixed node/edge searches, cross-verification between fulltext hits and RocksDB entries, fragment indexing |
+| `test_fulltext_fragment_deduplication_behavior` | Multiple fragments per entity, deduplication semantics, best score retention |
+| `test_fulltext_search_limit_and_ordering` | Result limit enforcement, BM25 score ordering, pagination behavior |
+| `test_fulltext_tag_facet_filtering` | `#hashtag` extraction from content, `with_tags()` filter, AND semantics for multiple tags, works for both nodes and edges |
+| `test_fulltext_fuzzy_search` | `FuzzyLevel::Low` (1 edit distance), `FuzzyLevel::Medium` (2 edits), typo tolerance for nodes and edges |
+
+### Running the Tests
+
+```bash
+# Run all fulltext search pipeline tests
+cargo test --test test_fulltext_search_pipeline
+
+# Run a specific test with output
+cargo test --test test_fulltext_search_pipeline test_fulltext_tag_facet_filtering -- --nocapture
+
+# Run tests matching a pattern
+cargo test --test test_fulltext_search_pipeline fuzzy -- --nocapture
+```
+
+### Test Architecture
+
+Each test follows this pattern:
+
+1. **Setup mutation pipeline** - Graph and fulltext consumers chained together
+2. **Add test data** - Nodes, edges, and fragments with searchable content
+3. **Run fulltext queries** - Using `FulltextNodes` or `FulltextEdges`
+4. **Verify against RocksDB** - Each hit is resolved via graph queries (`NodeById`, `EdgeSummaryBySrcDstName`)
+5. **Cleanup** - Drop readers and await consumer handles
+
+Example from `test_fulltext_tag_facet_filtering`:
+
+```rust
+// Create nodes with hashtags in content
+AddNode {
+    id: rust_id,
+    ts_millis: TimestampMilli::now(),
+    name: "Rust".to_string(),
+    summary: NodeSummary::from_text(
+        "Rust is a #systems programming language with #async support"
+    ),
+    valid_range: None,
+}
+.run(&writer)
+.await?;
+
+// Query with tag filter
+let results = FulltextNodes::new("language".to_string(), 10)
+    .with_tags(vec!["systems".to_string()])  // Filter by #systems tag
+    .run(&fulltext_reader, timeout)
+    .await?;
+
+// Verify results resolve to RocksDB
+for hit in results {
+    let node = NodeById::new(hit.id, None)
+        .run(&graph_reader, timeout)
+        .await?;
+    assert!(node.is_some());
+}
 ```
 
 ## See Also
 
+- `tests/test_fulltext_search_pipeline.rs` - **Main integration tests** demonstrating all query features
 - `tests/test_pipeline_integration.rs` - Complete integration tests demonstrating all patterns
 - `tests/test_fulltext_integration.rs` - Fulltext-specific integration tests
 - `tests/test_fulltext_chaining.rs` - Graph-to-fulltext chaining tests

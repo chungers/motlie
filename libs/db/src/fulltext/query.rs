@@ -3,6 +3,22 @@
 //! This module contains only business logic - query type definitions and their
 //! QueryExecutor implementations. Infrastructure (traits, Reader, Consumer, spawn
 //! functions) is in the `reader` module.
+//!
+//! # Fuzzy Search
+//!
+//! Both `Nodes` and `Edges` queries support fuzzy matching via `FuzzyLevel`:
+//! - `FuzzyLevel::None` - Exact matching only (default)
+//! - `FuzzyLevel::Low` - Allow 1 character edit (typos in short words)
+//! - `FuzzyLevel::Medium` - Allow 2 character edits (more forgiving)
+//!
+//! Example:
+//! ```ignore
+//! // Exact search
+//! Nodes::new("rust".to_string(), 10)
+//!
+//! // Fuzzy search with builder
+//! Nodes::new("rast".to_string(), 10).with_fuzzy(FuzzyLevel::Low)
+//! ```
 
 use std::time::Duration;
 
@@ -13,8 +29,44 @@ use tantivy::schema::Value;
 use tokio::sync::oneshot;
 
 use super::reader::{Processor, QueryExecutor, QueryProcessor, Reader};
+use super::search::{EdgeHit, NodeHit};
 use super::Storage;
 use crate::Id;
+
+// ============================================================================
+// Fuzzy Search Level
+// ============================================================================
+
+/// Fuzzy search level determining match strictness.
+///
+/// Uses Levenshtein distance to find matches even with spelling errors:
+/// - "Rast" matches "Rust" with `Low` (1 character difference)
+/// - "performence" matches "performance" with `Medium` (2 character difference)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FuzzyLevel {
+    /// No fuzzy matching - exact match only (default)
+    #[default]
+    None,
+
+    /// Allow 1 character edit (insert, delete, substitute, or transpose).
+    /// Good for catching typos in short words.
+    Low,
+
+    /// Allow 2 character edits.
+    /// More forgiving, good for longer words.
+    Medium,
+}
+
+impl FuzzyLevel {
+    /// Convert fuzzy level to Levenshtein edit distance
+    pub fn to_distance(self) -> u8 {
+        match self {
+            FuzzyLevel::None => 0,
+            FuzzyLevel::Low => 1,
+            FuzzyLevel::Medium => 2,
+        }
+    }
+}
 
 // ============================================================================
 // Query Enum
@@ -22,14 +74,16 @@ use crate::Id;
 
 /// Query enum representing all possible fulltext query types
 #[derive(Debug)]
-pub enum Query {
+pub enum Search {
     Nodes(Nodes),
+    Edges(Edges),
 }
 
-impl std::fmt::Display for Query {
+impl std::fmt::Display for Search {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Query::Nodes(q) => write!(f, "FulltextNodes: query={}, k={}", q.query, q.k),
+            Search::Nodes(q) => write!(f, "FulltextNodes: query={}, limit={}", q.query, q.limit),
+            Search::Edges(q) => write!(f, "FulltextEdges: query={}, limit={}", q.query, q.limit),
         }
     }
 }
@@ -53,63 +107,93 @@ pub trait Runnable {
 // Nodes Query - Search for nodes by text
 // ============================================================================
 
-/// Search result containing node ID and relevance score
-#[derive(Debug, Clone)]
-pub struct NodeSearchResult {
-    /// The node ID
-    pub id: Id,
-    /// The node name
-    pub name: String,
-    /// BM25 relevance score
-    pub score: f32,
-}
-
 /// Query to search for nodes by fulltext query, returning top K results.
 /// This is the fulltext equivalent of searching nodes.
+///
+/// Supports:
+/// - Fuzzy matching via `with_fuzzy()` builder method
+/// - Tag filtering via `with_tags()` builder method
 #[derive(Debug)]
 pub struct Nodes {
     /// The search query string
     pub query: String,
 
-    /// The top-K to retrieve
-    pub k: usize,
+    /// Maximum number of results to return
+    pub limit: usize,
+
+    /// Fuzzy matching level (default: None = exact match)
+    pub fuzzy_level: FuzzyLevel,
+
+    /// Filter by tags (documents must have ALL specified tags)
+    pub tags: Vec<String>,
 
     /// Timeout for this query execution (only set when query has channel)
     pub(crate) timeout: Option<Duration>,
 
     /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<Vec<NodeSearchResult>>>>,
+    result_tx: Option<oneshot::Sender<Result<Vec<NodeHit>>>>,
 }
 
 impl Nodes {
     /// Create a new query request (public API - no channel, no timeout yet)
     /// Use `.run(reader, timeout)` to execute this query
-    pub fn new(query: String, k: usize) -> Self {
+    pub fn new(query: String, limit: usize) -> Self {
         Self {
             query,
-            k,
+            limit,
+            fuzzy_level: FuzzyLevel::None,
+            tags: Vec::new(),
             timeout: None,
             result_tx: None,
         }
     }
 
+    /// Enable fuzzy matching with the specified level.
+    ///
+    /// Example:
+    /// ```ignore
+    /// Nodes::new("rast".to_string(), 10).with_fuzzy(FuzzyLevel::Low)
+    /// ```
+    pub fn with_fuzzy(mut self, level: FuzzyLevel) -> Self {
+        self.fuzzy_level = level;
+        self
+    }
+
+    /// Filter results to only include documents with ALL specified tags.
+    ///
+    /// Tags are extracted from content using #hashtag syntax during indexing.
+    ///
+    /// Example:
+    /// ```ignore
+    /// Nodes::new("programming".to_string(), 10)
+    ///     .with_tags(vec!["rust".to_string(), "async".to_string()])
+    /// ```
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
     /// Internal constructor used by the query execution machinery (has the channel)
     pub(crate) fn with_channel(
         query: String,
-        k: usize,
+        limit: usize,
+        fuzzy_level: FuzzyLevel,
+        tags: Vec<String>,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<NodeSearchResult>>>,
+        result_tx: oneshot::Sender<Result<Vec<NodeHit>>>,
     ) -> Self {
         Self {
             query,
-            k,
+            limit,
+            fuzzy_level,
+            tags,
             timeout: Some(timeout),
             result_tx: Some(result_tx),
         }
     }
 
     /// Send the result back to the client (consumes self)
-    pub(crate) fn send_result(self, result: Result<Vec<NodeSearchResult>>) {
+    pub(crate) fn send_result(self, result: Result<Vec<NodeHit>>) {
         // Ignore error if receiver was dropped (client timeout/cancellation)
         if let Some(tx) = self.result_tx {
             let _ = tx.send(result);
@@ -119,14 +203,21 @@ impl Nodes {
 
 #[async_trait::async_trait]
 impl Runnable for Nodes {
-    type Output = Vec<NodeSearchResult>;
+    type Output = Vec<NodeHit>;
 
     async fn run(self, reader: &Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = oneshot::channel();
 
-        let query = Nodes::with_channel(self.query, self.k, timeout, result_tx);
+        let query = Nodes::with_channel(
+            self.query,
+            self.limit,
+            self.fuzzy_level,
+            self.tags,
+            timeout,
+            result_tx,
+        );
 
-        reader.send_query(Query::Nodes(query)).await?;
+        reader.send_query(Search::Nodes(query)).await?;
 
         // Wait for result with timeout
         match tokio::time::timeout(timeout, result_rx).await {
@@ -139,11 +230,11 @@ impl Runnable for Nodes {
 
 #[async_trait::async_trait]
 impl QueryExecutor for Nodes {
-    type Output = Vec<NodeSearchResult>;
+    type Output = Vec<NodeHit>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         use std::collections::HashMap;
-        use tantivy::query::{BooleanQuery, Occur, TermQuery};
+        use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, TermQuery};
         use tantivy::schema::IndexRecordOption;
         use tantivy::Term;
 
@@ -156,13 +247,50 @@ impl QueryExecutor for Nodes {
             .map_err(|e| anyhow::anyhow!("Failed to create index reader: {}", e))?;
         let searcher = reader.searcher();
 
-        // Parse the user's text query
-        let query_parser =
-            QueryParser::for_index(index, vec![fields.content_field, fields.node_name_field]);
+        // Build text query - either exact (QueryParser) or fuzzy (FuzzyTermQuery)
+        let text_query: Box<dyn tantivy::query::Query> = if self.fuzzy_level == FuzzyLevel::None {
+            // Exact match: use QueryParser for full query syntax support
+            let query_parser =
+                QueryParser::for_index(index, vec![fields.content_field, fields.node_name_field]);
+            let parsed = query_parser
+                .parse_query(&self.query)
+                .map_err(|e| anyhow::anyhow!("Failed to parse query '{}': {}", self.query, e))?;
+            parsed
+        } else {
+            // Fuzzy match: build FuzzyTermQuery for each term in both fields
+            let distance = self.fuzzy_level.to_distance();
+            let terms: Vec<&str> = self.query.split_whitespace().collect();
 
-        let text_query = query_parser
-            .parse_query(&self.query)
-            .map_err(|e| anyhow::anyhow!("Failed to parse query '{}': {}", self.query, e))?;
+            if terms.is_empty() {
+                return Ok(vec![]);
+            }
+
+            // For each term, create fuzzy queries against both content and node_name fields
+            let mut term_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+
+            for term_str in terms {
+                let term_lower = term_str.to_lowercase();
+
+                // Fuzzy query on content field
+                let content_term = Term::from_field_text(fields.content_field, &term_lower);
+                let content_fuzzy = FuzzyTermQuery::new(content_term, distance, true);
+
+                // Fuzzy query on node_name field
+                let name_term = Term::from_field_text(fields.node_name_field, &term_lower);
+                let name_fuzzy = FuzzyTermQuery::new(name_term, distance, true);
+
+                // Either field can match for this term
+                let term_query = BooleanQuery::new(vec![
+                    (Occur::Should, Box::new(content_fuzzy)),
+                    (Occur::Should, Box::new(name_fuzzy)),
+                ]);
+
+                // All terms must match (AND semantics)
+                term_queries.push((Occur::Must, Box::new(term_query)));
+            }
+
+            Box::new(BooleanQuery::new(term_queries))
+        };
 
         // Build doc_type filter: (doc_type = "nodes" OR doc_type = "node_fragments")
         let nodes_term = Term::from_field_text(fields.doc_type_field, "nodes");
@@ -179,20 +307,30 @@ impl QueryExecutor for Nodes {
             ),
         ]);
 
-        // Combine: text_query AND doc_type_filter
-        let combined_query = BooleanQuery::new(vec![
+        // Build combined query with all filters
+        let mut query_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = vec![
             (Occur::Must, text_query),
             (Occur::Must, Box::new(doc_type_filter)),
-        ]);
+        ];
+
+        // Add tag filters if specified (all tags must match)
+        // Tags are stored as /tag/{name}, so we construct the facet path accordingly
+        for tag in &self.tags {
+            let facet = tantivy::schema::Facet::from(&format!("/tag/{}", tag));
+            let tag_term = Term::from_facet(fields.tags_facet, &facet);
+            query_clauses.push((Occur::Must, Box::new(TermQuery::new(tag_term, IndexRecordOption::Basic))));
+        }
+
+        let combined_query = BooleanQuery::new(query_clauses);
 
         // Search with TopDocs collector - get extra results since we'll dedupe by node ID
         let top_docs = searcher
-            .search(&combined_query, &TopDocs::with_limit(self.k * 3))
+            .search(&combined_query, &TopDocs::with_limit(self.limit * 3))
             .map_err(|e| anyhow::anyhow!("Search failed: {}", e))?;
 
         // Collect results, deduplicating by node ID and keeping best score
         // This handles both node documents and node_fragment documents
-        let mut node_scores: HashMap<Id, (f32, String)> = HashMap::new();
+        let mut node_scores: HashMap<Id, f32> = HashMap::new();
 
         for (score, doc_address) in top_docs {
             let doc = searcher
@@ -208,32 +346,26 @@ impl QueryExecutor for Nodes {
                 None => continue, // No ID field
             };
 
-            // Extract node name (only present on node documents, not fragments)
-            let name = doc
-                .get_first(fields.node_name_field)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            // Update with best score, preferring entries with a name
+            // Update with best score
             node_scores
                 .entry(id)
-                .and_modify(|(existing_score, existing_name)| {
+                .and_modify(|existing_score| {
                     if score > *existing_score {
                         *existing_score = score;
                     }
-                    // Prefer non-empty names
-                    if existing_name.is_empty() && !name.is_empty() {
-                        *existing_name = name.clone();
-                    }
                 })
-                .or_insert((score, name));
+                .or_insert(score);
         }
 
         // Convert to results and sort by score
-        let mut results: Vec<NodeSearchResult> = node_scores
+        let mut results: Vec<NodeHit> = node_scores
             .into_iter()
-            .map(|(id, (score, name))| NodeSearchResult { id, name, score })
+            .map(|(id, score)| NodeHit {
+                score,
+                id,
+                fragment_timestamp: None, // Deduplicated results don't track individual fragments
+                snippet: None,
+            })
             .collect();
 
         results.sort_by(|a, b| {
@@ -241,7 +373,7 @@ impl QueryExecutor for Nodes {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        results.truncate(self.k);
+        results.truncate(self.limit);
 
         Ok(results)
     }
@@ -255,11 +387,339 @@ impl QueryExecutor for Nodes {
 // Use macro to implement QueryProcessor for query types
 crate::impl_fulltext_query_processor!(Nodes);
 
+// ============================================================================
+// Edges Query - Search for edges by text
+// ============================================================================
+
+/// Query to search for edges by fulltext query, returning top K results.
+/// This is the fulltext equivalent of searching edges.
+///
+/// Supports:
+/// - Fuzzy matching via `with_fuzzy()` builder method
+/// - Tag filtering via `with_tags()` builder method
+#[derive(Debug)]
+pub struct Edges {
+    /// The search query string
+    pub query: String,
+
+    /// Maximum number of results to return
+    pub limit: usize,
+
+    /// Fuzzy matching level (default: None = exact match)
+    pub fuzzy_level: FuzzyLevel,
+
+    /// Filter by tags (documents must have ALL specified tags)
+    pub tags: Vec<String>,
+
+    /// Timeout for this query execution (only set when query has channel)
+    pub(crate) timeout: Option<Duration>,
+
+    /// Channel to send the result back to the client (only set when ready to execute)
+    result_tx: Option<oneshot::Sender<Result<Vec<EdgeHit>>>>,
+}
+
+impl Edges {
+    /// Create a new query request (public API - no channel, no timeout yet)
+    /// Use `.run(reader, timeout)` to execute this query
+    pub fn new(query: String, limit: usize) -> Self {
+        Self {
+            query,
+            limit,
+            fuzzy_level: FuzzyLevel::None,
+            tags: Vec::new(),
+            timeout: None,
+            result_tx: None,
+        }
+    }
+
+    /// Enable fuzzy matching with the specified level.
+    ///
+    /// Example:
+    /// ```ignore
+    /// Edges::new("dependz_on".to_string(), 10).with_fuzzy(FuzzyLevel::Low)
+    /// ```
+    pub fn with_fuzzy(mut self, level: FuzzyLevel) -> Self {
+        self.fuzzy_level = level;
+        self
+    }
+
+    /// Filter results to only include documents with ALL specified tags.
+    ///
+    /// Tags are extracted from content using #hashtag syntax during indexing.
+    ///
+    /// Example:
+    /// ```ignore
+    /// Edges::new("relationship".to_string(), 10)
+    ///     .with_tags(vec!["important".to_string()])
+    /// ```
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    /// Internal constructor used by the query execution machinery (has the channel)
+    pub(crate) fn with_channel(
+        query: String,
+        limit: usize,
+        fuzzy_level: FuzzyLevel,
+        tags: Vec<String>,
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<Vec<EdgeHit>>>,
+    ) -> Self {
+        Self {
+            query,
+            limit,
+            fuzzy_level,
+            tags,
+            timeout: Some(timeout),
+            result_tx: Some(result_tx),
+        }
+    }
+
+    /// Send the result back to the client (consumes self)
+    pub(crate) fn send_result(self, result: Result<Vec<EdgeHit>>) {
+        // Ignore error if receiver was dropped (client timeout/cancellation)
+        if let Some(tx) = self.result_tx {
+            let _ = tx.send(result);
+        }
+    }
+}
+
 #[async_trait::async_trait]
-impl QueryProcessor for Query {
+impl Runnable for Edges {
+    type Output = Vec<EdgeHit>;
+
+    async fn run(self, reader: &Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let query = Edges::with_channel(
+            self.query,
+            self.limit,
+            self.fuzzy_level,
+            self.tags,
+            timeout,
+            result_tx,
+        );
+
+        reader.send_query(Search::Edges(query)).await?;
+
+        // Wait for result with timeout
+        match tokio::time::timeout(timeout, result_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryExecutor for Edges {
+    type Output = Vec<EdgeHit>;
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        use std::collections::HashMap;
+        use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, TermQuery};
+        use tantivy::schema::IndexRecordOption;
+        use tantivy::Term;
+
+        let index = storage.index()?;
+        let fields = storage.fields()?;
+
+        // Create a reader for searching
+        let reader = index
+            .reader()
+            .map_err(|e| anyhow::anyhow!("Failed to create index reader: {}", e))?;
+        let searcher = reader.searcher();
+
+        log::debug!(
+            "[FulltextEdges] Executing query='{}', index docs={}, fields content={:?} edge_name={:?} doc_type={:?}",
+            self.query,
+            searcher.num_docs(),
+            fields.content_field,
+            fields.edge_name_field,
+            fields.doc_type_field
+        );
+
+        // Build text query - either exact (QueryParser) or fuzzy (FuzzyTermQuery)
+        let text_query: Box<dyn tantivy::query::Query> = if self.fuzzy_level == FuzzyLevel::None {
+            // Exact match: use QueryParser for full query syntax support
+            let query_parser =
+                QueryParser::for_index(index, vec![fields.content_field, fields.edge_name_field]);
+            let parsed = query_parser
+                .parse_query(&self.query)
+                .map_err(|e| anyhow::anyhow!("Failed to parse query '{}': {}", self.query, e))?;
+            parsed
+        } else {
+            // Fuzzy match: build FuzzyTermQuery for each term in both fields
+            let distance = self.fuzzy_level.to_distance();
+            let terms: Vec<&str> = self.query.split_whitespace().collect();
+
+            if terms.is_empty() {
+                return Ok(vec![]);
+            }
+
+            // For each term, create fuzzy queries against both content and edge_name fields
+            let mut term_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+
+            for term_str in terms {
+                let term_lower = term_str.to_lowercase();
+
+                // Fuzzy query on content field
+                let content_term = Term::from_field_text(fields.content_field, &term_lower);
+                let content_fuzzy = FuzzyTermQuery::new(content_term, distance, true);
+
+                // Fuzzy query on edge_name field
+                let name_term = Term::from_field_text(fields.edge_name_field, &term_lower);
+                let name_fuzzy = FuzzyTermQuery::new(name_term, distance, true);
+
+                // Either field can match for this term
+                let term_query = BooleanQuery::new(vec![
+                    (Occur::Should, Box::new(content_fuzzy)),
+                    (Occur::Should, Box::new(name_fuzzy)),
+                ]);
+
+                // All terms must match (AND semantics)
+                term_queries.push((Occur::Must, Box::new(term_query)));
+            }
+
+            Box::new(BooleanQuery::new(term_queries))
+        };
+
+        // Build doc_type filter: (doc_type = "forward_edges" OR doc_type = "edge_fragments")
+        let edges_term = Term::from_field_text(fields.doc_type_field, "forward_edges");
+        let fragments_term = Term::from_field_text(fields.doc_type_field, "edge_fragments");
+
+        let doc_type_filter = BooleanQuery::new(vec![
+            (
+                Occur::Should,
+                Box::new(TermQuery::new(edges_term, IndexRecordOption::Basic)),
+            ),
+            (
+                Occur::Should,
+                Box::new(TermQuery::new(fragments_term, IndexRecordOption::Basic)),
+            ),
+        ]);
+
+        // Build combined query with all filters
+        let mut query_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = vec![
+            (Occur::Must, text_query),
+            (Occur::Must, Box::new(doc_type_filter)),
+        ];
+
+        // Add tag filters if specified (all tags must match)
+        // Tags are stored as /tag/{name}, so we construct the facet path accordingly
+        for tag in &self.tags {
+            let facet = tantivy::schema::Facet::from(&format!("/tag/{}", tag));
+            let tag_term = Term::from_facet(fields.tags_facet, &facet);
+            query_clauses.push((Occur::Must, Box::new(TermQuery::new(tag_term, IndexRecordOption::Basic))));
+        }
+
+        let combined_query = BooleanQuery::new(query_clauses);
+
+        // Search with TopDocs collector - get extra results since we'll dedupe by edge key
+        let top_docs = searcher
+            .search(&combined_query, &TopDocs::with_limit(self.limit * 3))
+            .map_err(|e| anyhow::anyhow!("Search failed: {}", e))?;
+
+        log::debug!(
+            "[FulltextEdges] Search returned {} raw results for query='{}'",
+            top_docs.len(),
+            self.query
+        );
+
+        // Collect results, deduplicating by edge key (src_id, dst_id, edge_name) and keeping best score
+        // Edge key is (src_id, dst_id, edge_name)
+        let mut edge_scores: HashMap<(Id, Id, String), f32> = HashMap::new();
+
+        for (score, doc_address) in top_docs {
+            let doc = searcher
+                .doc::<tantivy::TantivyDocument>(doc_address)
+                .map_err(|e| anyhow::anyhow!("Failed to retrieve document: {}", e))?;
+
+            // Extract edge IDs
+            let src_id = match doc
+                .get_first(fields.src_id_field)
+                .and_then(|v| v.as_bytes())
+            {
+                Some(bytes) => match Id::from_slice(bytes) {
+                    Ok(id) => id,
+                    Err(_) => continue, // Invalid ID format
+                },
+                None => continue, // No src_id field
+            };
+
+            let dst_id = match doc
+                .get_first(fields.dst_id_field)
+                .and_then(|v| v.as_bytes())
+            {
+                Some(bytes) => match Id::from_slice(bytes) {
+                    Ok(id) => id,
+                    Err(_) => continue, // Invalid ID format
+                },
+                None => continue, // No dst_id field
+            };
+
+            // Extract edge name
+            let edge_name = doc
+                .get_first(fields.edge_name_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Skip if no edge name (shouldn't happen for valid edge docs)
+            if edge_name.is_empty() {
+                continue;
+            }
+
+            // Update with best score
+            let key = (src_id, dst_id, edge_name);
+            edge_scores
+                .entry(key)
+                .and_modify(|existing_score| {
+                    if score > *existing_score {
+                        *existing_score = score;
+                    }
+                })
+                .or_insert(score);
+        }
+
+        // Convert to results and sort by score
+        let mut results: Vec<EdgeHit> = edge_scores
+            .into_iter()
+            .map(|((src_id, dst_id, edge_name), score)| EdgeHit {
+                score,
+                src_id,
+                dst_id,
+                edge_name,
+                fragment_timestamp: None, // Deduplicated results don't track individual fragments
+                snippet: None,
+            })
+            .collect();
+
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(self.limit);
+
+        Ok(results)
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+            .expect("Query must have timeout set when executing")
+    }
+}
+
+crate::impl_fulltext_query_processor!(Edges);
+
+#[async_trait::async_trait]
+impl QueryProcessor for Search {
     async fn process_and_send<P: Processor + Sync>(self, processor: &P) {
         match self {
-            Query::Nodes(q) => q.process_and_send(processor).await,
+            Search::Nodes(q) => q.process_and_send(processor).await,
+            Search::Edges(q) => q.process_and_send(processor).await,
         }
     }
 }
@@ -271,9 +731,7 @@ impl QueryProcessor for Query {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fulltext::reader::{
-        create_query_reader, spawn_consumer, Consumer, ReaderConfig,
-    };
+    use crate::fulltext::reader::{create_query_reader, spawn_consumer, Consumer, ReaderConfig};
     use crate::fulltext::{Index, Storage};
     use crate::graph::mutation::{AddNode, AddNodeFragment, Runnable as MutRunnable};
     use crate::graph::schema::NodeSummary;
