@@ -460,6 +460,98 @@ The fulltext index uses the following schema:
 
 Time-based filtering should use **range queries** on `creation_timestamp`, `valid_since`, and `valid_until` fields at query time, not facets. This allows proper comparison against the query timestamp rather than the index timestamp. See `mod.rs` tests for examples.
 
+## Fragment Indexing Semantics
+
+Node and Edge fragments in motlie-db are **append-only** - each fragment represents a timestamped observation about a node or edge, and multiple fragments form a timeline. This section documents how Tantivy handles these semantics.
+
+### Key Findings
+
+1. **Tantivy is Append-Only by Default**
+   - `IndexWriter::add_document()` **always appends** a new document
+   - Tantivy has no built-in concept of a "document ID" that would trigger an update/replace
+   - Multiple calls to `AddNodeFragment` with the same `node_id` create separate Tantivy documents
+   - This matches our append-only fragment semantics perfectly
+
+2. **Multiple Fragments Are Fully Searchable**
+   ```rust
+   // Adding 5 fragments for the same node
+   for ts in [1000, 2000, 3000, 4000, 5000] {
+       AddNodeFragment {
+           id: same_node_id,
+           ts_millis: ts,
+           content: format!("Fragment at {}", ts)
+       }.run(&writer).await?;
+   }
+   // All 5 documents are indexed and searchable
+   // Search for "Fragment" returns all 5 results
+   ```
+
+3. **RocksDB Key Reconstruction**
+   - Search results contain stored fields to reconstruct the RocksDB CfKey:
+     - **NodeFragments**: `(id_field, creation_timestamp_field)` → RocksDB key `(node_id, timestamp)`
+     - **EdgeFragments**: `(src_id_field, dst_id_field, edge_name_field, creation_timestamp_field)` → RocksDB key `(src_id, dst_id, edge_name, timestamp)`
+   - The `doc_type_field` indicates which column family to query
+
+4. **Delete Operations Require INDEXED Fields**
+   - `IndexWriter::delete_term()` only works on INDEXED fields
+   - ID fields (`id_field`, `src_id_field`, `dst_id_field`) are defined with `STORED | FAST | INDEXED`
+   - This enables `UpdateNodeValidSinceUntil` and `UpdateEdgeValidSinceUntil` to delete documents
+
+### Fragment vs Node/Edge Deletion Behavior
+
+| Mutation | Behavior |
+|----------|----------|
+| `AddNodeFragment` | Appends new document (never overwrites) |
+| `AddEdgeFragment` | Appends new document (never overwrites) |
+| `UpdateNodeValidSinceUntil` | Deletes **all** documents with matching `id_field` |
+| `UpdateEdgeValidSinceUntil` | Deletes **all** documents with matching `src_id_field` |
+
+**Important**: `UpdateNodeValidSinceUntil` deletes the node **and** all its fragments from the fulltext index. This is by design - when a node's validity changes, all its indexed content should be removed from search results. The authoritative data remains in RocksDB.
+
+### Consistency with RocksDB
+
+The fulltext index is a **secondary index** - RocksDB is the source of truth:
+
+1. **Fragments are always append-only** in both RocksDB and Tantivy
+2. **Deletions are eventually consistent** - Tantivy deletions are applied on commit
+3. **Reader visibility** - Tantivy readers must `reload()` to see deletions
+4. **Recovery** - If the fulltext index is lost, it can be rebuilt by replaying mutations from RocksDB
+
+### Example: Fragment Timeline
+
+```rust
+// Create a node with multiple observations over time
+let node_id = Id::new();
+
+// Day 1: Initial observation
+AddNodeFragment {
+    id: node_id,
+    ts_millis: TimestampMilli(day1),
+    content: DataUrl::from_text("Initial status: healthy"),
+}.run(&writer).await?;
+
+// Day 2: Second observation
+AddNodeFragment {
+    id: node_id,
+    ts_millis: TimestampMilli(day2),
+    content: DataUrl::from_text("Status update: minor issue detected"),
+}.run(&writer).await?;
+
+// Day 3: Third observation
+AddNodeFragment {
+    id: node_id,
+    ts_millis: TimestampMilli(day3),
+    content: DataUrl::from_text("Status resolved: back to healthy"),
+}.run(&writer).await?;
+
+// All 3 fragments are searchable:
+// - Search "healthy" → finds Day 1 and Day 3 fragments
+// - Search "issue" → finds Day 2 fragment
+// - Search "status" → finds all 3 fragments
+
+// Each result includes (node_id, timestamp) for RocksDB lookup
+```
+
 ## Current Query Types
 
 ### `Nodes` Query

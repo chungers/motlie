@@ -22,6 +22,9 @@ pub mod schema;
 pub mod search;
 pub mod writer;
 
+#[cfg(test)]
+mod tantivy_behavior_test;
+
 // Re-export commonly used types
 pub use fuzzy::{FuzzyLevel, FuzzySearchOptions};
 pub use query::{

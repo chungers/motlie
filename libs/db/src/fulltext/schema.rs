@@ -55,10 +55,11 @@ pub struct DocumentFields {
 pub fn build_schema() -> (Schema, DocumentFields) {
     let mut schema_builder = Schema::builder();
 
-    // ID fields - STORED because they're needed to look up documents in RocksDB
-    let id_field = schema_builder.add_bytes_field("id", STORED | FAST);
-    let src_id_field = schema_builder.add_bytes_field("src_id", STORED | FAST);
-    let dst_id_field = schema_builder.add_bytes_field("dst_id", STORED | FAST);
+    // ID fields - STORED for RocksDB lookups, INDEXED for delete_term operations
+    // IMPORTANT: INDEXED is required for delete_term to work (e.g., UpdateNodeValidSinceUntil)
+    let id_field = schema_builder.add_bytes_field("id", STORED | FAST | INDEXED);
+    let src_id_field = schema_builder.add_bytes_field("src_id", STORED | FAST | INDEXED);
+    let dst_id_field = schema_builder.add_bytes_field("dst_id", STORED | FAST | INDEXED);
 
     // Name fields - indexed for search, NOT stored (retrieve from RocksDB)
     let text_options = TextOptions::default().set_indexing_options(
