@@ -28,7 +28,7 @@ use tokio::time::Duration;
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
@@ -40,7 +40,7 @@ use tokio::time::Duration;
             name: "test_edge".to_string(),
             summary: EdgeSummary::from_text(""),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         };
         edge_args.run(&writer).await.unwrap();
 
@@ -72,7 +72,7 @@ use tokio::time::Duration;
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::graph::schema::NodeSummary::from_text(&format!("summary {}", i)),
             };
             node_args.run(&writer).await.unwrap();
@@ -101,7 +101,7 @@ use tokio::time::Duration;
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: "node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("node summary"),
         }
         .run(&writer)
@@ -118,7 +118,7 @@ use tokio::time::Duration;
             name: edge_name.clone(),
             summary: EdgeSummary::from_text(""),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await
@@ -128,7 +128,7 @@ use tokio::time::Duration;
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             content: crate::DataUrl::from_text("fragment body"),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await
@@ -194,7 +194,7 @@ use tokio::time::Duration;
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("chained_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::graph::schema::NodeSummary::from_text(&format!("chained summary {}", i)),
             };
             let fragment_args = AddNodeFragment {
@@ -204,7 +204,7 @@ use tokio::time::Duration;
                     "Chained fragment {} processed by both Graph and FullText",
                     i
                 )),
-                temporal_range: None,
+                valid_range: None,
             };
 
             node_args.run(&writer).await.unwrap();
@@ -1140,7 +1140,7 @@ use tokio::time::Duration;
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         };
 
@@ -1211,7 +1211,7 @@ use tokio::time::Duration;
             id: node_a_id,
             ts_millis: TimestampMilli::now(),
             name: "alice".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("alice summary"),
         };
 
@@ -1220,7 +1220,7 @@ use tokio::time::Duration;
             id: node_b_id,
             ts_millis: TimestampMilli::now(),
             name: "bob".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("bob summary"),
         };
 
@@ -1229,7 +1229,7 @@ use tokio::time::Duration;
             id: node_c_id,
             ts_millis: TimestampMilli::now(),
             name: "alice".to_string(), // Same name as node_a
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("alice2 summary"),
         };
 
@@ -1238,7 +1238,7 @@ use tokio::time::Duration;
             id: node_d_id,
             ts_millis: TimestampMilli::now(),
             name: "charlie".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("charlie summary"),
         };
 

@@ -54,7 +54,7 @@ async fn test_fulltext_chaining_basic() {
             id: *node_id,
             ts_millis: TimestampMilli::now(),
             name: format!("ChainedNode_{}", i),
-            temporal_range: None,
+            valid_range: None,
             summary: motlie_db::NodeSummary::from_text(&format!("Summary for node {}", i)),
         };
         node.run(&writer).await.unwrap();
@@ -72,7 +72,7 @@ async fn test_fulltext_chaining_basic() {
             id: *node_id,
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_markdown(content),
-            temporal_range: None,
+            valid_range: None,
         };
         fragment.run(&writer).await.unwrap();
         println!("Sent fragment {} through chain: {}", i, content);
@@ -86,7 +86,7 @@ async fn test_fulltext_chaining_basic() {
         name: "related_to".to_string(),
         summary: EdgeSummary::from_text("Rust and Python are both popular programming languages"),
         weight: Some(0.8),
-        temporal_range: None,
+        valid_range: None,
     };
     edge.run(&writer).await.unwrap();
 
@@ -196,7 +196,7 @@ async fn test_fulltext_chaining_high_volume() {
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: format!("HighVolumeNode_{}", i),
-            temporal_range: None,
+            valid_range: None,
             summary: motlie_db::NodeSummary::from_text(&format!("High volume summary {}", i)),
         };
 
@@ -208,7 +208,7 @@ async fn test_fulltext_chaining_high_volume() {
                 i,
                 node_id.as_str()
             )),
-            temporal_range: None,
+            valid_range: None,
         };
 
         node.run(&writer).await.unwrap();
@@ -271,7 +271,7 @@ async fn test_fulltext_chaining_graceful_shutdown() {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: format!("ShutdownTest_{}", i),
-            temporal_range: None,
+            valid_range: None,
             summary: motlie_db::NodeSummary::from_text(&format!("Shutdown test summary {}", i)),
         };
         node.run(&writer).await.unwrap();

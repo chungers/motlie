@@ -33,7 +33,7 @@ pub struct AddNode {
     pub name: schema::NodeName,
 
     /// The temporal validity range for this node
-    pub temporal_range: Option<schema::TemporalRange>,
+    pub valid_range: Option<schema::TemporalRange>,
 
     /// The summary information for this node
     pub summary: schema::NodeSummary,
@@ -54,7 +54,7 @@ pub struct AddEdge {
     pub name: schema::EdgeName,
 
     /// The temporal validity range for this edge
-    pub temporal_range: Option<schema::TemporalRange>,
+    pub valid_range: Option<schema::TemporalRange>,
 
     /// The summary information for this edge (moved from Edges CF)
     pub summary: schema::EdgeSummary,
@@ -75,7 +75,7 @@ pub struct AddNodeFragment {
     pub content: crate::DataUrl,
 
     /// The temporal validity range for this fragment
-    pub temporal_range: Option<schema::TemporalRange>,
+    pub valid_range: Option<schema::TemporalRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +96,7 @@ pub struct AddEdgeFragment {
     pub content: crate::DataUrl,
 
     /// The temporal validity range for this fragment
-    pub temporal_range: Option<schema::TemporalRange>,
+    pub valid_range: Option<schema::TemporalRange>,
 }
 
 #[derive(Debug, Clone)]
@@ -506,7 +506,7 @@ impl Mutation {
 ///     id: Id::new(),
 ///     name: "Alice".to_string(),
 ///     ts_millis: TimestampMilli::now(),
-///     temporal_range: None,
+///     valid_range: None,
 /// };
 ///
 /// // Execute it
@@ -800,7 +800,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: super::schema::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
@@ -865,7 +865,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::schema::NodeSummary::from_text(&format!("summary {}", i)),
             };
             node_args.run(&writer).await.unwrap();

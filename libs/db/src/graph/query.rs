@@ -1707,7 +1707,7 @@ mod tests {
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
@@ -1832,7 +1832,7 @@ mod tests {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
@@ -1843,7 +1843,7 @@ mod tests {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
@@ -1862,7 +1862,7 @@ mod tests {
             name: edge_name.to_string(),
             summary: edge_summary.clone(),
             weight: Some(edge_weight),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await
@@ -1947,7 +1947,7 @@ mod tests {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
@@ -1958,7 +1958,7 @@ mod tests {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
@@ -1974,7 +1974,7 @@ mod tests {
             name: edge_name.to_string(),
             summary: edge_summary.clone(),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await
@@ -1992,7 +1992,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: fragment1_time,
             content: DataUrl::from_markdown("Fragment 1 content"),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await
@@ -2004,7 +2004,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: fragment2_time,
             content: DataUrl::from_markdown("Fragment 2 content"),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await
@@ -2016,7 +2016,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: fragment3_time,
             content: DataUrl::from_markdown("Fragment 3 content"),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await
@@ -2123,7 +2123,7 @@ mod tests {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
@@ -2134,7 +2134,7 @@ mod tests {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
@@ -2149,7 +2149,7 @@ mod tests {
             name: edge_name.to_string(),
             summary: EdgeSummary::from_text("Bounded test edge"),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await
@@ -2175,7 +2175,7 @@ mod tests {
                 edge_name: edge_name.to_string(),
                 ts_millis: ts,
                 content: DataUrl::from_markdown(content),
-                temporal_range: None,
+                valid_range: None,
             }
             .run(&writer)
             .await
@@ -2307,7 +2307,7 @@ mod tests {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
@@ -2318,7 +2318,7 @@ mod tests {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
@@ -2333,7 +2333,7 @@ mod tests {
             name: edge_name.to_string(),
             summary: EdgeSummary::from_text("Temporal validity test edge"),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await
@@ -2347,7 +2347,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(1000),
             content: DataUrl::from_markdown("Valid from 1000 to 3000"),
-            temporal_range: TemporalRange::valid_between(
+            valid_range: TemporalRange::valid_between(
                 TimestampMilli(1000),
                 TimestampMilli(3000),
             ),
@@ -2363,7 +2363,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(2000),
             content: DataUrl::from_markdown("Valid from 2000 to 5000"),
-            temporal_range: TemporalRange::valid_between(
+            valid_range: TemporalRange::valid_between(
                 TimestampMilli(2000),
                 TimestampMilli(5000),
             ),
@@ -2379,7 +2379,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(3000),
             content: DataUrl::from_markdown("Always valid"),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await
@@ -2491,7 +2491,7 @@ mod tests {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("source summary"),
         }
         .run(&writer)
@@ -2502,7 +2502,7 @@ mod tests {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
@@ -2516,7 +2516,7 @@ mod tests {
             name: edge_name.to_string(),
             summary: EdgeSummary::from_text("Edge with no fragments"),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await

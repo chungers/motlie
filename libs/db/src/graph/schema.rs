@@ -135,7 +135,7 @@ impl ColumnFamilyRecord for Nodes {
     fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
         let value = NodeCfValue(
-            args.temporal_range.clone(),
+            args.valid_range.clone(),
             args.name.clone(),
             args.summary.clone(),
         );
@@ -180,7 +180,7 @@ impl ColumnFamilyRecord for NodeFragments {
 
     fn record_from(args: &AddNodeFragment) -> (NodeFragmentCfKey, NodeFragmentCfValue) {
         let key = NodeFragmentCfKey(args.id, args.ts_millis);
-        let value = NodeFragmentCfValue(args.temporal_range.clone(), args.content.clone());
+        let value = NodeFragmentCfValue(args.valid_range.clone(), args.content.clone());
         (key, value)
     }
 
@@ -243,7 +243,7 @@ impl ColumnFamilyRecord for EdgeFragments {
             args.edge_name.clone(),
             args.ts_millis,
         );
-        let value = EdgeFragmentCfValue(args.temporal_range.clone(), args.content.clone());
+        let value = EdgeFragmentCfValue(args.valid_range.clone(), args.content.clone());
         (key, value)
     }
 
@@ -314,7 +314,7 @@ impl ColumnFamilyRecord for ForwardEdges {
     fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, args.name.clone());
         let value = ForwardEdgeCfValue(
-            args.temporal_range.clone(),
+            args.valid_range.clone(),
             args.weight,
             args.summary.clone(),
         );
@@ -381,7 +381,7 @@ impl ColumnFamilyRecord for ReverseEdges {
 
     fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
         let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, args.name.clone());
-        let value = ReverseEdgeCfValue(args.temporal_range.clone());
+        let value = ReverseEdgeCfValue(args.valid_range.clone());
         (key, value)
     }
 
@@ -445,7 +445,7 @@ impl ColumnFamilyRecord for NodeNames {
 
     fn record_from(args: &AddNode) -> (NodeNameCfKey, NodeNameCfValue) {
         let key = NodeNameCfKey(args.name.clone(), args.id);
-        let value = NodeNameCfValue(args.temporal_range.clone());
+        let value = NodeNameCfValue(args.valid_range.clone());
         (key, value)
     }
 
@@ -495,7 +495,7 @@ impl ColumnFamilyRecord for EdgeNames {
 
     fn record_from(args: &AddEdge) -> (EdgeNameCfKey, EdgeNameCfValue) {
         let key = EdgeNameCfKey(args.name.clone(), args.source_node_id, args.target_node_id);
-        let value = EdgeNameCfValue(args.temporal_range.clone());
+        let value = EdgeNameCfValue(args.valid_range.clone());
         (key, value)
     }
 
@@ -575,7 +575,7 @@ mod tests {
                 name: "edge_a".to_string(),
                 summary: EdgeSummary::from_text(""),
                 weight: Some(1.0),
-                temporal_range: None,
+                valid_range: None,
             },
             AddEdge {
                 source_node_id: Id::from_bytes([0u8; 16]),
@@ -584,7 +584,7 @@ mod tests {
                 name: "edge_b".to_string(),
                 summary: EdgeSummary::from_text(""),
                 weight: Some(1.0),
-                temporal_range: None,
+                valid_range: None,
             },
             AddEdge {
                 source_node_id: Id::from_bytes([1u8; 16]),
@@ -593,7 +593,7 @@ mod tests {
                 name: "edge_c".to_string(),
                 summary: EdgeSummary::from_text(""),
                 weight: Some(1.0),
-                temporal_range: None,
+                valid_range: None,
             },
             AddEdge {
                 source_node_id: Id::from_bytes([1u8; 16]),
@@ -602,7 +602,7 @@ mod tests {
                 name: "edge_d".to_string(),
                 summary: EdgeSummary::from_text(""),
                 weight: Some(1.0),
-                temporal_range: None,
+                valid_range: None,
             },
             // Add edge with same source and target but different name
             AddEdge {
@@ -612,7 +612,7 @@ mod tests {
                 name: "edge_z".to_string(),
                 summary: EdgeSummary::from_text(""),
                 weight: Some(1.0),
-                temporal_range: None,
+                valid_range: None,
             },
         ];
 

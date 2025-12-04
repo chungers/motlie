@@ -242,7 +242,7 @@ pub async fn build_graph(
             id: node.id,
             ts_millis: TimestampMilli::now(),
             name: node.name.clone(),
-            temporal_range: None,
+            valid_range: None,
             summary: NodeSummary::from_text(&node.name),
         }
         .run(&writer)
@@ -258,7 +258,7 @@ pub async fn build_graph(
             name: edge.name,
             summary: EdgeSummary::from_text(""),
             weight: edge.weight,
-            temporal_range: None,
+            valid_range: None,
         }
         .run(&writer)
         .await?;

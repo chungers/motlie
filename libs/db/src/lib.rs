@@ -516,7 +516,7 @@ mod tests {
                 id: node_id.clone(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("integration_test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: NodeSummary::from_text(&format!("integration test summary {}", i)),
             };
 
@@ -524,7 +524,7 @@ mod tests {
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_text(&format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i)),
-                temporal_range: None,
+                valid_range: None,
             };
 
             // Send to both consumers
@@ -763,7 +763,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: NodeSummary::from_text("test summary"),
         };
 
@@ -774,14 +774,14 @@ mod tests {
             name: "test_edge".to_string(),
             summary: EdgeSummary::from_text("edge summary"),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         };
 
         let fragment = AddNodeFragment {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text("test fragment body"),
-            temporal_range: None,
+            valid_range: None,
         };
 
         // Ensure they can be created and debugged

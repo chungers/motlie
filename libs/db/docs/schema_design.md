@@ -373,7 +373,7 @@ AddNode {
     id: Id::new(),
     ts_millis: TimestampMilli::now(),
     name: "node_name".to_string(),
-    temporal_range: None,
+    valid_range: None,
 }.run(&writer).await
 ```
 
@@ -386,7 +386,7 @@ AddEdge {
     name: "edge_name".to_string(),
     summary: EdgeSummary::from_text("Edge description"),
     weight: Some(1.5),
-    temporal_range: None,
+    valid_range: None,
 }.run(&writer).await
 ```
 
@@ -396,7 +396,7 @@ AddNodeFragment {
     id: node_id,
     ts_millis: TimestampMilli::now(),
     content: DataUrl::from_markdown("Fragment content"),
-    temporal_range: None,
+    valid_range: None,
 }.run(&writer).await
 ```
 
@@ -408,7 +408,7 @@ AddEdgeFragment {
     edge_name: "edge_name".to_string(),
     ts_millis: TimestampMilli::now(),
     content: DataUrl::from_markdown("Fragment content"),
-    temporal_range: None,
+    valid_range: None,
 }.run(&writer).await
 ```
 

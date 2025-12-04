@@ -146,7 +146,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     id: node_id.clone(),
                     ts_millis: current_time,
                     name: node_name.to_string(),
-                    temporal_range: None,
+                    valid_range: None,
                     summary: NodeSummary::from_text(fragment_text),
                 };
 
@@ -155,7 +155,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     id: node_id,
                     ts_millis: current_time,
                     content: DataUrl::from_markdown(fragment_text),
-                    temporal_range: None,
+                    valid_range: None,
                 };
 
                 // Time the writer sends
@@ -217,7 +217,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     name: edge_name.to_string(),
                     summary: EdgeSummary::from_markdown(edge_fragment),
                     weight: Some(1.0), // Default weight
-                    temporal_range: None,
+                    valid_range: None,
                 };
 
                 // Create fragment for the edge
@@ -227,7 +227,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     edge_name: edge_name.to_string(),
                     ts_millis: current_time,
                     content: DataUrl::from_markdown(edge_fragment),
-                    temporal_range: None,
+                    valid_range: None,
                 };
 
                 // Time the writer sends
