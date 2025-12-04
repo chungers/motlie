@@ -55,9 +55,10 @@ pub use fulltext::{
     spawn_fulltext_query_consumer,
     spawn_fulltext_query_consumer_pool_readonly,
     spawn_fulltext_query_consumer_pool_shared,
-    DocumentFields, FulltextIndexExecutor, FulltextNodes, FulltextQuery, FulltextQueryConsumer,
-    FulltextQueryExecutor, FulltextQueryProcessor, FulltextQueryRunnable, FulltextReader,
-    FulltextReaderConfig, Index as FulltextIndex, NodeSearchResult, Storage as FulltextStorage,
+    DocumentFields, FulltextEdges, FulltextIndexExecutor, FulltextNodes, FulltextQuery,
+    FulltextQueryConsumer, FulltextQueryExecutor, FulltextQueryProcessor, FulltextQueryRunnable,
+    FulltextReader, FulltextReaderConfig, FuzzyLevel, Index as FulltextIndex,
+    Storage as FulltextStorage,
 };
 
 /// Custom error type for Id parsing

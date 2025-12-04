@@ -61,15 +61,18 @@ pub fn build_schema() -> (Schema, DocumentFields) {
     let src_id_field = schema_builder.add_bytes_field("src_id", STORED | FAST | INDEXED);
     let dst_id_field = schema_builder.add_bytes_field("dst_id", STORED | FAST | INDEXED);
 
-    // Name fields - indexed for search, NOT stored (retrieve from RocksDB)
+    // Name fields - indexed for search
+    // NOTE: node_name is NOT stored (retrieve from RocksDB via NodeById)
+    // BUT edge_name MUST be stored because it's part of the edge key for deduplication and result construction
     let text_options = TextOptions::default().set_indexing_options(
         TextFieldIndexing::default()
             .set_tokenizer("default")
             .set_index_option(IndexRecordOption::WithFreqsAndPositions),
     );
+    let text_options_stored = text_options.clone().set_stored();
 
     let node_name_field = schema_builder.add_text_field("node_name", text_options.clone());
-    let edge_name_field = schema_builder.add_text_field("edge_name", text_options.clone());
+    let edge_name_field = schema_builder.add_text_field("edge_name", text_options_stored);
 
     // Content field - indexed for search, NOT stored (retrieve from RocksDB)
     let content_field = schema_builder.add_text_field("content", text_options);
