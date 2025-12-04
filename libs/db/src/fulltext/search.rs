@@ -8,19 +8,6 @@ use std::collections::HashMap;
 
 use crate::Id;
 
-/// Search results with optional facet counts
-#[derive(Debug)]
-pub struct SearchResults {
-    /// Matching documents
-    pub documents: Vec<Hit>,
-
-    /// Facet counts (if collect_facets was true)
-    pub facets: Option<FacetCounts>,
-
-    /// Total number of results
-    pub total: usize,
-}
-
 /// Individual search result - represents a single matching document from the fulltext index.
 ///
 /// This enum distinguishes between node-related and edge-related search results,
