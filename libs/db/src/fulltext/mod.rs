@@ -40,7 +40,7 @@ pub use reader::{
     ReaderConfig as FulltextReaderConfig,
 };
 pub use schema::{compute_validity_facet, extract_tags, DocumentFields};
-pub use search::{EdgeHit, FacetCounts, Hit, NodeHit, SearchResults};
+pub use search::{EdgeHit, FacetCounts, Hit, NodeHit};
 pub use writer::{
     create_fulltext_consumer, create_fulltext_consumer_with_next,
     create_fulltext_consumer_with_params, create_fulltext_consumer_with_params_and_next,
