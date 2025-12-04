@@ -79,7 +79,7 @@ let node = AddNode {
     ts_millis: TimestampMilli::now(),
     name: "Alice".to_string(),
     summary: NodeSummary::from_text("A person"),
-    temporal_range: None,
+    valid_range: None,
 };
 
 // Execute via writer

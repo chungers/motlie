@@ -301,7 +301,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: crate::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
@@ -310,7 +310,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli(1234567890),
             content: DataUrl::from_text("This is a test fragment with some searchable content"),
-            temporal_range: None,
+            valid_range: None,
         };
         fragment_args.run(&writer).await.unwrap();
 
@@ -369,7 +369,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "persistent_node".to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: crate::NodeSummary::from_text("persistent summary"),
             };
             processor

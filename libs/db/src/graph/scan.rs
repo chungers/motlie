@@ -770,7 +770,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
@@ -824,7 +824,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
@@ -895,7 +895,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
@@ -949,7 +949,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("{} summary", name)),
             };
             node.run(&writer).await.unwrap();
@@ -968,7 +968,7 @@ mod tests {
                 name: name.to_string(),
                 weight: Some(1.0),
                 summary: DataUrl::from_text("test edge"),
-                temporal_range: None,
+                valid_range: None,
             };
             edge.run(&writer).await.unwrap();
         }
@@ -1021,7 +1021,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("{} summary", name)),
             };
             node.run(&writer).await.unwrap();
@@ -1041,7 +1041,7 @@ mod tests {
                 name: name.to_string(),
                 weight: Some(1.0),
                 summary: DataUrl::from_text("test edge"),
-                temporal_range: None,
+                valid_range: None,
             };
             edge.run(&writer).await.unwrap();
         }
@@ -1098,7 +1098,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("node {} summary", i)),
             };
             node.run(&writer).await.unwrap();
@@ -1114,7 +1114,7 @@ mod tests {
                 name: format!("edge_{}_{}", i, i + 1),
                 weight: Some(i as f64),
                 summary: DataUrl::from_text("test"),
-                temporal_range: None,
+                valid_range: None,
             };
             edge.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -1188,7 +1188,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
@@ -1261,7 +1261,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();

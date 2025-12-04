@@ -38,7 +38,7 @@ impl MutationExecutor for AddNode {
         );
 
         // Add temporal validity fields if present
-        if let Some(ref range) = self.temporal_range {
+        if let Some(ref range) = self.valid_range {
             if let Some(since) = range.0 {
                 doc.add_u64(fields.valid_since_field, since.0);
             }
@@ -51,7 +51,7 @@ impl MutationExecutor for AddNode {
         doc.add_facet(fields.doc_type_facet, Facet::from("/type/nodes"));
         doc.add_facet(
             fields.validity_facet,
-            compute_validity_facet(&self.temporal_range),
+            compute_validity_facet(&self.valid_range),
         );
 
         // Add user-defined tags as facets
@@ -64,10 +64,10 @@ impl MutationExecutor for AddNode {
             .context("Failed to index AddNode")?;
 
         log::debug!(
-            "[FullText] Indexed node: id={}, name={}, temporal_range={:?}",
+            "[FullText] Indexed node: id={}, name={}, valid_range={:?}",
             self.id,
             self.name,
-            self.temporal_range
+            self.valid_range
         );
         Ok(())
     }
@@ -94,7 +94,7 @@ impl MutationExecutor for AddEdge {
         );
 
         // Add temporal validity fields if present
-        if let Some(ref range) = self.temporal_range {
+        if let Some(ref range) = self.valid_range {
             if let Some(since) = range.0 {
                 doc.add_u64(fields.valid_since_field, since.0);
             }
@@ -107,7 +107,7 @@ impl MutationExecutor for AddEdge {
         doc.add_facet(fields.doc_type_facet, Facet::from("/type/forward_edges"));
         doc.add_facet(
             fields.validity_facet,
-            compute_validity_facet(&self.temporal_range),
+            compute_validity_facet(&self.valid_range),
         );
 
         // Add weight if present
@@ -125,11 +125,11 @@ impl MutationExecutor for AddEdge {
             .context("Failed to index AddEdge")?;
 
         log::debug!(
-            "[FullText] Indexed edge: src={}, dst={}, name={}, temporal_range={:?}",
+            "[FullText] Indexed edge: src={}, dst={}, name={}, valid_range={:?}",
             self.source_node_id,
             self.target_node_id,
             self.name,
-            self.temporal_range
+            self.valid_range
         );
         Ok(())
     }
@@ -154,7 +154,7 @@ impl MutationExecutor for AddNodeFragment {
         );
 
         // Add temporal validity fields if present
-        if let Some(ref range) = self.temporal_range {
+        if let Some(ref range) = self.valid_range {
             if let Some(since) = range.0 {
                 doc.add_u64(fields.valid_since_field, since.0);
             }
@@ -167,7 +167,7 @@ impl MutationExecutor for AddNodeFragment {
         doc.add_facet(fields.doc_type_facet, Facet::from("/type/node_fragments"));
         doc.add_facet(
             fields.validity_facet,
-            compute_validity_facet(&self.temporal_range),
+            compute_validity_facet(&self.valid_range),
         );
 
         // Add user-defined tags as facets
@@ -180,10 +180,10 @@ impl MutationExecutor for AddNodeFragment {
             .context("Failed to index AddNodeFragment")?;
 
         log::debug!(
-            "[FullText] Indexed node fragment: id={}, content_len={}, temporal_range={:?}",
+            "[FullText] Indexed node fragment: id={}, content_len={}, valid_range={:?}",
             self.id,
             self.content.as_ref().len(),
-            self.temporal_range
+            self.valid_range
         );
         Ok(())
     }
@@ -210,7 +210,7 @@ impl MutationExecutor for AddEdgeFragment {
         );
 
         // Add temporal validity fields if present
-        if let Some(ref range) = self.temporal_range {
+        if let Some(ref range) = self.valid_range {
             if let Some(since) = range.0 {
                 doc.add_u64(fields.valid_since_field, since.0);
             }
@@ -223,7 +223,7 @@ impl MutationExecutor for AddEdgeFragment {
         doc.add_facet(fields.doc_type_facet, Facet::from("/type/edge_fragments"));
         doc.add_facet(
             fields.validity_facet,
-            compute_validity_facet(&self.temporal_range),
+            compute_validity_facet(&self.valid_range),
         );
 
         // Add user-defined tags as facets
@@ -236,12 +236,12 @@ impl MutationExecutor for AddEdgeFragment {
             .context("Failed to index AddEdgeFragment")?;
 
         log::debug!(
-            "[FullText] Indexed edge fragment: src={}, dst={}, name={}, content_len={}, temporal_range={:?}",
+            "[FullText] Indexed edge fragment: src={}, dst={}, name={}, content_len={}, valid_range={:?}",
             self.src_id,
             self.dst_id,
             self.edge_name,
             self.content.as_ref().len(),
-            self.temporal_range
+            self.valid_range
         );
         Ok(())
     }

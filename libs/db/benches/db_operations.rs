@@ -50,7 +50,7 @@ async fn create_test_db(
             id,
             name: format!("node_{}", i),
             ts_millis: TimestampMilli::now(),
-            temporal_range: None,
+            valid_range: None,
             summary: NodeSummary::from_text(&format!("Benchmark node {}", i)),
         };
 
@@ -69,7 +69,7 @@ async fn create_test_db(
                 target_node_id: dst_id,
                 name: format!("edge_{}", j),
                 ts_millis: TimestampMilli::now(),
-                temporal_range: None,
+                valid_range: None,
                 summary: motlie_db::EdgeSummary::from_text(&format!("Benchmark edge {}", j)),
                 weight: None,
             };

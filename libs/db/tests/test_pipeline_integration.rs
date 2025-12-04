@@ -76,7 +76,7 @@ async fn test_single_mutation_pipeline_chain() {
             id: *node_id,
             ts_millis: TimestampMilli::now(),
             name: name.to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: NodeSummary::from_text(summary),
         };
         node.run(&writer).await.unwrap();
@@ -91,7 +91,7 @@ async fn test_single_mutation_pipeline_chain() {
         name: "works_with".to_string(),
         summary: EdgeSummary::from_text("Alice and Bob collaborate on Rust projects"),
         weight: Some(0.9),
-        temporal_range: None,
+        valid_range: None,
     };
     edge.run(&writer).await.unwrap();
     println!("  Sent edge: Alice -> Bob (works_with)");
@@ -112,7 +112,7 @@ She specializes in:
 Her recent projects include graph databases and fulltext search engines.
 "#,
         ),
-        temporal_range: None,
+        valid_range: None,
     };
     fragment.run(&writer).await.unwrap();
     println!("  Sent fragment for Alice with detailed profile");
@@ -183,7 +183,7 @@ async fn test_multi_consumer_query_channels() {
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: format!("TestNode_{}", i),
-            temporal_range: None,
+            valid_range: None,
             summary: NodeSummary::from_text(&format!(
                 "This is test node {} with searchable content about topic {}",
                 i,
@@ -202,7 +202,7 @@ async fn test_multi_consumer_query_channels() {
             name: "connected_to".to_string(),
             summary: EdgeSummary::from_text("Sequential connection"),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         };
         edge.run(&writer).await.unwrap();
     }
@@ -350,7 +350,7 @@ async fn test_concurrent_mixed_queries() {
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("{}_{}", category, i),
-                temporal_range: None,
+                valid_range: None,
                 summary: NodeSummary::from_text(&format!(
                     "Expert in {} with focus on area {}. Keywords: {}, professional, skilled.",
                     category, i, category
@@ -374,7 +374,7 @@ async fn test_concurrent_mixed_queries() {
                 name: format!("{}_link", category),
                 summary: EdgeSummary::from_text(&format!("{} collaboration", category)),
                 weight: Some(0.8),
-                temporal_range: None,
+                valid_range: None,
             };
             edge.run(&writer).await.unwrap();
         }
@@ -548,7 +548,7 @@ async fn test_complete_pipeline_architecture() {
             id: node_id,
             ts_millis: TimestampMilli::now(),
             name: format!("Entity_{:02}", i),
-            temporal_range: None,
+            valid_range: None,
             summary: NodeSummary::from_text(&format!(
                 "Entity {} description with searchable terms: alpha beta gamma",
                 i
@@ -566,7 +566,7 @@ async fn test_complete_pipeline_architecture() {
             name: "relates_to".to_string(),
             summary: EdgeSummary::from_text("Relationship description"),
             weight: Some(0.5 + (i as f64 * 0.03)),
-            temporal_range: None,
+            valid_range: None,
         };
         edge.run(&writer).await.unwrap();
     }

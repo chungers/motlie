@@ -1613,7 +1613,7 @@ AddEdge {
     name: "friend".to_string(),
     weight: Some(1.0),
     summary: EdgeSummary::from_text("Friendship"),
-    temporal_range: None,
+    valid_range: None,
 }.run(&writer).await?;
 
 AddEdge {
@@ -1622,7 +1622,7 @@ AddEdge {
     name: "friend".to_string(),
     weight: Some(1.0),
     summary: EdgeSummary::from_text("Friendship"),
-    temporal_range: None,
+    valid_range: None,
 }.run(&writer).await?;
 ```
 
@@ -1637,7 +1637,7 @@ pub struct AddUndirectedEdge {
     pub name: EdgeName,
     pub summary: EdgeSummary,
     pub weight: Option<f64>,
-    pub temporal_range: Option<TemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 // Automatically creates both (a→b) and (b→a) with same metadata
 ```

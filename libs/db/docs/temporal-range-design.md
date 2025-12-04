@@ -437,7 +437,7 @@ pub struct AddNode {
     pub id: Id,
     pub ts_millis: TimestampMilli,
     pub name: NodeName,
-    pub temporal_range: Option<TemporalRange>,  // New field
+    pub valid_range: Option<TemporalRange>,  // New field
 }
 
 pub struct AddEdge {
@@ -446,14 +446,14 @@ pub struct AddEdge {
     pub target_node_id: Id,
     pub ts_millis: TimestampMilli,
     pub name: EdgeName,
-    pub temporal_range: Option<TemporalRange>,  // New field
+    pub valid_range: Option<TemporalRange>,  // New field
 }
 
 pub struct AddFragment {
     pub id: Id,
     pub ts_millis: TimestampMilli,
     pub content: DataUrl,
-    pub temporal_range: Option<TemporalRange>,  // New field
+    pub valid_range: Option<TemporalRange>,  // New field
 }
 ```
 
@@ -483,8 +483,8 @@ impl QueryExecute for NodeById {
 ### Migration Strategy
 
 **Backward Compatibility:**
-- Existing databases: Records will deserialize with `temporal_range = None`
-- New records: Default to `temporal_range = None` (always valid)
+- Existing databases: Records will deserialize with `valid_range = None`
+- New records: Default to `valid_range = None` (always valid)
 - No migration needed: MessagePack's flexibility handles schema evolution
 
 **Forward Strategy:**
@@ -699,7 +699,7 @@ Uncompressed: 19 bytes → LZ4: 19 bytes (0% compression ratio)
 
 ### Actual Database Overhead (Example Test)
 
-**Test database:** 3 items (2 nodes + 1 edge), all with `temporal_range: None`
+**Test database:** 3 items (2 nodes + 1 edge), all with `valid_range: None`
 
 ```
 Total database size: 261.93 KB

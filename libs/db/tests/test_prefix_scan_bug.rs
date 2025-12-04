@@ -66,7 +66,7 @@ async fn test_node_names_prefix_scan_comprehensive() {
             id: *id,
             name: name.to_string(),
             ts_millis: TimestampMilli(1000),
-            temporal_range: None,
+            valid_range: None,
             summary: motlie_db::NodeSummary::from_text(&format!("{} summary", name)),
         }
         .run(&writer)
@@ -159,7 +159,7 @@ async fn test_node_names_edge_cases() {
             id: *id,
             name: name.to_string(),
             ts_millis: TimestampMilli(1000),
-            temporal_range: None,
+            valid_range: None,
             summary: motlie_db::NodeSummary::from_text(&format!("{} summary", name)),
         }
         .run(&writer)
@@ -223,7 +223,7 @@ async fn test_node_names_pagination() {
             id: Id::new(),
             name: format!("test_{:03}", i),
             ts_millis: TimestampMilli(1000),
-            temporal_range: None,
+            valid_range: None,
             summary: motlie_db::NodeSummary::from_text(&format!("test summary {}", i)),
         }
         .run(&writer)
@@ -325,7 +325,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
         id: src_node,
         name: "Source".to_string(),
         ts_millis: TimestampMilli(1000),
-        temporal_range: None,
+        valid_range: None,
         summary: motlie_db::NodeSummary::from_text("Source summary"),
     }
     .run(&writer)
@@ -336,7 +336,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
         id: dst_node,
         name: "Destination".to_string(),
         ts_millis: TimestampMilli(1000),
-        temporal_range: None,
+        valid_range: None,
         summary: motlie_db::NodeSummary::from_text("Destination summary"),
     }
     .run(&writer)
@@ -360,7 +360,7 @@ async fn test_edge_names_prefix_scan_comprehensive() {
             target_node_id: dst_node,
             name: name.to_string(),
             ts_millis: TimestampMilli(2000),
-            temporal_range: None,
+            valid_range: None,
             summary: motlie_db::EdgeSummary::from_text(&format!("Edge {}", name)),
             weight: None,
         }
@@ -487,7 +487,7 @@ async fn test_empty_prefix_returns_all() {
             id: Id::new(),
             name: name.to_string(),
             ts_millis: TimestampMilli(1000),
-            temporal_range: None,
+            valid_range: None,
             summary: motlie_db::NodeSummary::from_text(&format!("{} summary", name)),
         }
         .run(&writer)
@@ -527,7 +527,7 @@ async fn test_nonexistent_prefix_returns_empty() {
             id: Id::new(),
             name: name.to_string(),
             ts_millis: TimestampMilli(1000),
-            temporal_range: None,
+            valid_range: None,
             summary: motlie_db::NodeSummary::from_text(&format!("{} summary", name)),
         }
         .run(&writer)
