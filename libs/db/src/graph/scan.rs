@@ -25,13 +25,10 @@ use rocksdb::{Direction, IteratorMode};
 use super::ColumnFamilyRecord;
 use super::schema::{
     self, is_valid_at_time, DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary,
-    SrcId, ValidTemporalRange,
+    SrcId, TemporalRange,
 };
 use super::Storage;
 use crate::{Id, TimestampMilli};
-
-// Re-export ValidTemporalRange for use in record types
-pub use crate::ValidTemporalRange as TemporalRange;
 
 // ============================================================================
 // Visitor Trait
@@ -85,7 +82,7 @@ pub struct NodeRecord {
     pub id: Id,
     pub name: NodeName,
     pub summary: NodeSummary,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// A forward edge record as seen by scan visitors.
@@ -96,7 +93,7 @@ pub struct EdgeRecord {
     pub name: EdgeName,
     pub summary: EdgeSummary,
     pub weight: Option<f64>,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// A reverse edge record as seen by scan visitors (index only, no summary/weight).
@@ -105,7 +102,7 @@ pub struct ReverseEdgeRecord {
     pub dst_id: DstId,
     pub src_id: SrcId,
     pub name: EdgeName,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// A node fragment record as seen by scan visitors.
@@ -114,7 +111,7 @@ pub struct NodeFragmentRecord {
     pub node_id: Id,
     pub timestamp: TimestampMilli,
     pub content: FragmentContent,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// An edge fragment record as seen by scan visitors.
@@ -125,7 +122,7 @@ pub struct EdgeFragmentRecord {
     pub edge_name: EdgeName,
     pub timestamp: TimestampMilli,
     pub content: FragmentContent,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// A node name index record as seen by scan visitors.
@@ -133,7 +130,7 @@ pub struct EdgeFragmentRecord {
 pub struct NodeNameRecord {
     pub name: NodeName,
     pub node_id: Id,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 /// An edge name index record as seen by scan visitors.
@@ -142,7 +139,7 @@ pub struct EdgeNameRecord {
     pub name: EdgeName,
     pub src_id: SrcId,
     pub dst_id: DstId,
-    pub valid_range: Option<ValidTemporalRange>,
+    pub valid_range: Option<TemporalRange>,
 }
 
 // ============================================================================
@@ -276,7 +273,7 @@ where
     CF: ColumnFamilyRecord,
     V: Visitor<R>,
     F: Fn(&[u8], &[u8]) -> Result<R>,
-    G: Fn(&R) -> &Option<ValidTemporalRange>,
+    G: Fn(&R) -> &Option<TemporalRange>,
 {
     let direction = if reverse {
         Direction::Reverse
@@ -773,7 +770,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
@@ -827,7 +824,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
@@ -898,7 +895,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
@@ -952,7 +949,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("{} summary", name)),
             };
             node.run(&writer).await.unwrap();
@@ -971,7 +968,7 @@ mod tests {
                 name: name.to_string(),
                 weight: Some(1.0),
                 summary: DataUrl::from_text("test edge"),
-                temporal_range: None,
+                valid_range: None,
             };
             edge.run(&writer).await.unwrap();
         }
@@ -1024,7 +1021,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: name.to_string(),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("{} summary", name)),
             };
             node.run(&writer).await.unwrap();
@@ -1044,7 +1041,7 @@ mod tests {
                 name: name.to_string(),
                 weight: Some(1.0),
                 summary: DataUrl::from_text("test edge"),
-                temporal_range: None,
+                valid_range: None,
             };
             edge.run(&writer).await.unwrap();
         }
@@ -1101,7 +1098,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("node {} summary", i)),
             };
             node.run(&writer).await.unwrap();
@@ -1117,7 +1114,7 @@ mod tests {
                 name: format!("edge_{}_{}", i, i + 1),
                 weight: Some(i as f64),
                 summary: DataUrl::from_text("test"),
-                temporal_range: None,
+                valid_range: None,
             };
             edge.run(&writer).await.unwrap();
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
@@ -1191,7 +1188,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();
@@ -1264,7 +1261,7 @@ mod tests {
                 id,
                 ts_millis: TimestampMilli::now(),
                 name: format!("test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: super::super::schema::NodeSummary::from_text(&format!("test summary {}", i)),
             };
             node.run(&writer).await.unwrap();

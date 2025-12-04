@@ -278,7 +278,7 @@ When a datetime argument is provided after the column family name, only records 
 - `Visitable`
 
 **Re-exports:**
-- `TemporalRange` (alias for `ValidTemporalRange`)
+- `TemporalRange`
 
 ### Internal Types (remain `pub(crate)`)
 

@@ -261,7 +261,7 @@ fn datetime_to_millis(
 }
 
 /// Format a temporal range's start time as a string
-fn format_since(valid_range: &Option<motlie_db::scan::TemporalRange>, format: OutputFormat) -> String {
+fn format_since(valid_range: &Option<motlie_db::TemporalRange>, format: OutputFormat) -> String {
     match valid_range {
         None => "-".to_string(),
         Some(range) => match range.0 {
@@ -272,7 +272,7 @@ fn format_since(valid_range: &Option<motlie_db::scan::TemporalRange>, format: Ou
 }
 
 /// Format a temporal range's end time as a string
-fn format_until(valid_range: &Option<motlie_db::scan::TemporalRange>, format: OutputFormat) -> String {
+fn format_until(valid_range: &Option<motlie_db::TemporalRange>, format: OutputFormat) -> String {
     match valid_range {
         None => "-".to_string(),
         Some(range) => match range.1 {

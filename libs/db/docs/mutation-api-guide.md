@@ -152,7 +152,7 @@ async fn example(writer: &Writer) -> anyhow::Result<()> {
         id: alice_id,
         name: "Alice".to_string(),
         ts_millis: TimestampMilli::now(),
-        temporal_range: None,
+        valid_range: None,
     }
     .run(writer)
     .await?;
@@ -163,14 +163,14 @@ async fn example(writer: &Writer) -> anyhow::Result<()> {
             id: bob_id,
             name: "Bob".to_string(),
             ts_millis: TimestampMilli::now(),
-            temporal_range: None,
+            valid_range: None,
         },
         AddEdge {
             source_node_id: alice_id,
             target_node_id: bob_id,
             name: "follows".to_string(),
             ts_millis: TimestampMilli::now(),
-            temporal_range: None,
+            valid_range: None,
             summary: EdgeSummary::default(),
             weight: None,
         },
@@ -210,7 +210,7 @@ let mutation = AddNode {
     id: Id::new(),
     name: "Alice".to_string(),
     ts_millis: TimestampMilli::now(),
-    temporal_range: None,
+    valid_range: None,
 };
 
 // Execute it (performs I/O)
@@ -281,7 +281,7 @@ AddNode {
     id: Id::new(),
     name: "Alice".to_string(),
     ts_millis: TimestampMilli::now(),
-    temporal_range: None,  // Optional validity range
+    valid_range: None,  // Optional validity range
 }
 .run(&writer)
 .await?;
@@ -291,7 +291,7 @@ AddNode {
 - `id: Id` - Unique identifier for the node (ULID)
 - `name: String` - Human-readable name
 - `ts_millis: TimestampMilli` - Creation timestamp
-- `temporal_range: Option<ValidTemporalRange>` - Optional validity period
+- `valid_range: Option<TemporalRange>` - Optional validity period
 
 ### 2. AddEdge
 
@@ -305,7 +305,7 @@ AddEdge {
     target_node_id: bob_id,
     name: "follows".to_string(),
     ts_millis: TimestampMilli::now(),
-    temporal_range: None,
+    valid_range: None,
     summary: EdgeSummary::default(),
     weight: Some(1.0),
 }
@@ -318,7 +318,7 @@ AddEdge {
 - `target_node_id: Id` - Target node
 - `name: String` - Edge type/name
 - `ts_millis: TimestampMilli` - Creation timestamp
-- `temporal_range: Option<ValidTemporalRange>` - Optional validity period
+- `valid_range: Option<TemporalRange>` - Optional validity period
 - `summary: EdgeSummary` - Summary information for the edge (fragment counts, timestamps)
 - `weight: Option<f64>` - Optional weight for weighted graph algorithms
 
@@ -333,7 +333,7 @@ AddNodeFragment {
     id: node_id,
     ts_millis: TimestampMilli::now(),
     content: DataUrl::from_text("Fragment data"),
-    temporal_range: None,
+    valid_range: None,
 }
 .run(&writer)
 .await?;
@@ -343,7 +343,7 @@ AddNodeFragment {
 - `id: Id` - Node ID this fragment belongs to
 - `ts_millis: TimestampMilli` - Fragment timestamp
 - `content: DataUrl` - Fragment content (text, JSON, binary, etc.)
-- `temporal_range: Option<ValidTemporalRange>` - Optional validity period
+- `valid_range: Option<TemporalRange>` - Optional validity period
 
 ### 4. AddEdgeFragment
 
@@ -358,7 +358,7 @@ AddEdgeFragment {
     edge_name: "follows".to_string(),
     ts_millis: TimestampMilli::now(),
     content: DataUrl::from_text("Fragment data"),
-    temporal_range: None,
+    valid_range: None,
 }
 .run(&writer)
 .await?;
@@ -370,18 +370,18 @@ AddEdgeFragment {
 - `edge_name: String` - Edge name/type
 - `ts_millis: TimestampMilli` - Fragment timestamp
 - `content: DataUrl` - Fragment content (text, JSON, binary, etc.)
-- `temporal_range: Option<ValidTemporalRange>` - Optional validity period
+- `valid_range: Option<TemporalRange>` - Optional validity period
 
 ### 5. UpdateNodeValidSinceUntil
 
 Update the temporal validity range of a node:
 
 ```rust
-use motlie_db::{UpdateNodeValidSinceUntil, Id, TimestampMilli, ValidTemporalRange, MutationRunnable};
+use motlie_db::{UpdateNodeValidSinceUntil, Id, TimestampMilli, TemporalRange, MutationRunnable};
 
 UpdateNodeValidSinceUntil {
     id: node_id,
-    temporal_range: ValidTemporalRange {
+    temporal_range: TemporalRange {
         valid_from: TimestampMilli::now(),
         valid_to: Some(future_timestamp),
     },
@@ -393,7 +393,7 @@ UpdateNodeValidSinceUntil {
 
 **Fields**:
 - `id: Id` - Node ID to update
-- `temporal_range: ValidTemporalRange` - New temporal validity range
+- `temporal_range: TemporalRange` - New temporal validity range
 - `reason: String` - Reason for the update
 
 ### 6. UpdateEdgeValidSinceUntil
@@ -401,13 +401,13 @@ UpdateNodeValidSinceUntil {
 Update the temporal validity range of an edge (using topology instead of edge ID):
 
 ```rust
-use motlie_db::{UpdateEdgeValidSinceUntil, Id, TimestampMilli, ValidTemporalRange, MutationRunnable};
+use motlie_db::{UpdateEdgeValidSinceUntil, Id, TimestampMilli, TemporalRange, MutationRunnable};
 
 UpdateEdgeValidSinceUntil {
     src_id: alice_id,
     dst_id: bob_id,
     name: "follows".to_string(),
-    temporal_range: ValidTemporalRange {
+    temporal_range: TemporalRange {
         valid_from: TimestampMilli::now(),
         valid_to: Some(future_timestamp),
     },
@@ -421,7 +421,7 @@ UpdateEdgeValidSinceUntil {
 - `src_id: Id` - Source node ID
 - `dst_id: Id` - Destination node ID
 - `name: String` - Edge name/type
-- `temporal_range: ValidTemporalRange` - New temporal validity range
+- `temporal_range: TemporalRange` - New temporal validity range
 - `reason: String` - Reason for the update
 
 ### 7. UpdateEdgeWeight
@@ -462,7 +462,7 @@ async fn create_user(
         id: user_id,
         name,
         ts_millis: TimestampMilli::now(),
-        temporal_range: None,
+        valid_range: None,
     }
     .run(writer)
     .await?;
@@ -486,13 +486,13 @@ async fn create_user_with_profile(
             id: user_id,
             name,
             ts_millis: TimestampMilli::now(),
-            temporal_range: None,
+            valid_range: None,
         },
         AddNodeFragment {
             id: user_id,
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text(&bio),
-            temporal_range: None,
+            valid_range: None,
         },
     ]
     .run(writer)
@@ -516,7 +516,7 @@ async fn create_friendship(
             target_node_id: user2_id,
             name: "follows".to_string(),
             ts_millis: TimestampMilli::now(),
-            temporal_range: None,
+            valid_range: None,
             summary: EdgeSummary::default(),
             weight: None,
         },
@@ -525,7 +525,7 @@ async fn create_friendship(
             target_node_id: user1_id,
             name: "follows".to_string(),
             ts_millis: TimestampMilli::now(),
-            temporal_range: None,
+            valid_range: None,
             summary: EdgeSummary::default(),
             weight: None,
         },
@@ -553,14 +553,14 @@ async fn bulk_import_users(
             id: user_id,
             name,
             ts_millis: TimestampMilli::now(),
-            temporal_range: None,
+            valid_range: None,
         });
 
         batch.push(AddNodeFragment {
             id: user_id,
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text(&bio),
-            temporal_range: None,
+            valid_range: None,
         });
     }
 
@@ -585,7 +585,7 @@ async fn update_user_conditionally(
             id: user_id,
             name,
             ts_millis: TimestampMilli::now(),
-            temporal_range: None,
+            valid_range: None,
         });
     }
 
@@ -594,7 +594,7 @@ async fn update_user_conditionally(
             id: user_id,
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text(&bio),
-            temporal_range: None,
+            valid_range: None,
         });
     }
 
@@ -609,7 +609,7 @@ async fn update_user_conditionally(
 ### Pattern 6: Temporal Validity
 
 ```rust
-use motlie_db::schema::ValidTemporalRange;
+use motlie_db::schema::TemporalRange;
 
 async fn create_limited_time_offer(
     writer: &Writer,
@@ -622,7 +622,7 @@ async fn create_limited_time_offer(
         id: offer_id,
         name: offer_name,
         ts_millis: TimestampMilli::now(),
-        temporal_range: Some(ValidTemporalRange {
+        valid_range: Some(TemporalRange {
             valid_from: TimestampMilli::now(),
             valid_to: Some(valid_until),
         }),
@@ -684,7 +684,7 @@ async fn create_post_with_tags(
         id: post_id,
         name: "post".to_string(),
         ts_millis: ts,
-        temporal_range: None,
+        valid_range: None,
     }
     .run(writer)
     .await?;
@@ -694,7 +694,7 @@ async fn create_post_with_tags(
         id: post_id,
         ts_millis: ts,
         content: DataUrl::from_text(&content),
-        temporal_range: None,
+        valid_range: None,
     }
     .run(writer)
     .await?;
@@ -707,7 +707,7 @@ async fn create_post_with_tags(
         target_node_id: post_id,
         name: "authored".to_string(),
         ts_millis: ts,
-        temporal_range: None,
+        valid_range: None,
         summary: EdgeSummary::default(),
         weight: None,
     });
@@ -719,7 +719,7 @@ async fn create_post_with_tags(
             id: tag_id,
             name: tag,
             ts_millis: ts,
-            temporal_range: None,
+            valid_range: None,
         });
 
         batch.push(AddEdge {
@@ -727,7 +727,7 @@ async fn create_post_with_tags(
             target_node_id: tag_id,
             name: "tagged".to_string(),
             ts_millis: ts,
-            temporal_range: None,
+            valid_range: None,
             summary: EdgeSummary::default(),
             weight: None,
         });
@@ -755,7 +755,7 @@ async fn bulk_import_with_batching(
                 id: Id::new(),
                 name: name.clone(),
                 ts_millis: TimestampMilli::now(),
-                temporal_range: None,
+                valid_range: None,
             });
         }
 
@@ -780,7 +780,7 @@ writer.add_node(AddNode {
     id: Id::new(),
     name: "Alice".to_string(),
     ts_millis: TimestampMilli::now(),
-    temporal_range: None,
+    valid_range: None,
 }).await?;
 
 writer.add_edge(AddEdge {
@@ -789,7 +789,7 @@ writer.add_edge(AddEdge {
     target_node_id: bob_id,
     name: "follows".to_string(),
     ts_millis: TimestampMilli::now(),
-    temporal_range: None,
+    valid_range: None,
 }).await?;
 ```
 
@@ -800,7 +800,7 @@ AddNode {
     id: Id::new(),
     name: "Alice".to_string(),
     ts_millis: TimestampMilli::now(),
-    temporal_range: None,
+    valid_range: None,
 }
 .run(&writer)
 .await?;
@@ -810,7 +810,7 @@ AddEdge {
     target_node_id: bob_id,
     name: "follows".to_string(),
     ts_millis: TimestampMilli::now(),
-    temporal_range: None,
+    valid_range: None,
     summary: EdgeSummary::default(),
     weight: None,
 }
@@ -851,7 +851,7 @@ AddFragment {
     id: entity_id,  // Could be node or edge
     ts_millis: TimestampMilli::now(),
     content: DataUrl::from_text("Fragment data"),
-    temporal_range: None,
+    valid_range: None,
 }
 .run(&writer)
 .await?;
@@ -864,7 +864,7 @@ AddNodeFragment {
     id: node_id,
     ts_millis: TimestampMilli::now(),
     content: DataUrl::from_text("Fragment data"),
-    temporal_range: None,
+    valid_range: None,
 }
 .run(&writer)
 .await?;
@@ -876,7 +876,7 @@ AddEdgeFragment {
     edge_name: "follows".to_string(),
     ts_millis: TimestampMilli::now(),
     content: DataUrl::from_text("Fragment data"),
-    temporal_range: None,
+    valid_range: None,
 }
 .run(&writer)
 .await?;
@@ -897,7 +897,7 @@ UpdateEdgeValidSinceUntil {
     src_id: alice_id,
     dst_id: bob_id,
     name: "follows".to_string(),
-    temporal_range: ValidTemporalRange {
+    temporal_range: TemporalRange {
         valid_from: TimestampMilli::now(),
         valid_to: Some(future_timestamp),
     },
@@ -942,7 +942,7 @@ UpdateEdgeWeight {
        target_node_id: bob_id,
        name: "follows".to_string(),
        ts_millis: TimestampMilli::now(),
-       temporal_range: None,
+       valid_range: None,
        summary: EdgeSummary::default(),  // New field
        weight: None,                     // New field
    }

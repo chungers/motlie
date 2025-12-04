@@ -87,7 +87,7 @@ pub type UntilTimestamp = TimestampMilli;
 
 /// Support for temporal queries - defines when a record is valid
 ///
-/// A `ValidTemporalRange` specifies the time window during which a record
+/// A `TemporalRange` specifies the time window during which a record
 /// (node, edge, fragment) is considered valid:
 /// - `(Some(start), None)` - Valid from `start` onwards (inclusive)
 /// - `(None, Some(until))` - Valid until `until` (exclusive)
@@ -96,19 +96,19 @@ pub type UntilTimestamp = TimestampMilli;
 ///
 /// # Example
 /// ```
-/// use motlie_db::{ValidTemporalRange, TimestampMilli};
+/// use motlie_db::{TemporalRange, TimestampMilli};
 ///
 /// // Create a range valid from a specific time
-/// let range = ValidTemporalRange::valid_from(TimestampMilli(1000));
+/// let range = TemporalRange::valid_from(TimestampMilli(1000));
 ///
 /// // Check if a timestamp is within the range
 /// let ts = TimestampMilli(1500);
 /// assert!(range.unwrap().is_valid_at(ts));
 /// ```
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ValidTemporalRange(pub Option<StartTimestamp>, pub Option<UntilTimestamp>);
+pub struct TemporalRange(pub Option<StartTimestamp>, pub Option<UntilTimestamp>);
 
-impl ValidTemporalRange {
+impl TemporalRange {
     /// Create a new temporal range with no constraints (always valid)
     pub fn always_valid() -> Option<Self> {
         None
@@ -116,17 +116,17 @@ impl ValidTemporalRange {
 
     /// Create a temporal range valid from a start time (inclusive)
     pub fn valid_from(start: TimestampMilli) -> Option<Self> {
-        Some(ValidTemporalRange(Some(start), None))
+        Some(TemporalRange(Some(start), None))
     }
 
     /// Create a temporal range valid until an end time (exclusive)
     pub fn valid_until(until: TimestampMilli) -> Option<Self> {
-        Some(ValidTemporalRange(None, Some(until)))
+        Some(TemporalRange(None, Some(until)))
     }
 
     /// Create a temporal range valid between start (inclusive) and until (exclusive)
     pub fn valid_between(start: TimestampMilli, until: TimestampMilli) -> Option<Self> {
-        Some(ValidTemporalRange(Some(start), Some(until)))
+        Some(TemporalRange(Some(start), Some(until)))
     }
 
     /// Check if a timestamp is valid according to this temporal range
@@ -145,7 +145,7 @@ impl ValidTemporalRange {
 
 /// Helper function to check if a record is valid at a given time
 /// Returns true if temporal_range is None (always valid) or if query_time falls within range
-pub fn is_valid_at_time(temporal_range: &Option<ValidTemporalRange>, query_time: TimestampMilli) -> bool {
+pub fn is_valid_at_time(temporal_range: &Option<TemporalRange>, query_time: TimestampMilli) -> bool {
     match temporal_range {
         None => true, // No temporal constraint = always valid
         Some(range) => range.is_valid_at(query_time),
@@ -516,7 +516,7 @@ mod tests {
                 id: node_id.clone(),
                 ts_millis: TimestampMilli::now(),
                 name: format!("integration_test_node_{}", i),
-                temporal_range: None,
+                valid_range: None,
                 summary: NodeSummary::from_text(&format!("integration test summary {}", i)),
             };
 
@@ -524,7 +524,7 @@ mod tests {
                 id: node_id,
                 ts_millis: TimestampMilli::now(),
                 content: DataUrl::from_text(&format!("Integration test fragment {} with searchable content for both Graph storage and FullText indexing", i)),
-                temporal_range: None,
+                valid_range: None,
             };
 
             // Send to both consumers
@@ -763,7 +763,7 @@ mod tests {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
-            temporal_range: None,
+            valid_range: None,
             summary: NodeSummary::from_text("test summary"),
         };
 
@@ -774,14 +774,14 @@ mod tests {
             name: "test_edge".to_string(),
             summary: EdgeSummary::from_text("edge summary"),
             weight: Some(1.0),
-            temporal_range: None,
+            valid_range: None,
         };
 
         let fragment = AddNodeFragment {
             id: Id::new(),
             ts_millis: TimestampMilli::now(),
             content: DataUrl::from_text("test fragment body"),
-            temporal_range: None,
+            valid_range: None,
         };
 
         // Ensure they can be created and debugged

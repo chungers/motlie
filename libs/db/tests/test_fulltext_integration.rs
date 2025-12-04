@@ -45,7 +45,7 @@ async fn test_fulltext_search_integration() {
         id: rust_id,
         ts_millis: TimestampMilli::now(),
         name: "Rust".to_string(),
-        temporal_range: None,
+        valid_range: None,
         summary: motlie_db::NodeSummary::from_text("Rust programming language"),
     };
 
@@ -54,7 +54,7 @@ async fn test_fulltext_search_integration() {
         id: python_id,
         ts_millis: TimestampMilli::now(),
         name: "Python".to_string(),
-        temporal_range: None,
+        valid_range: None,
         summary: motlie_db::NodeSummary::from_text("Python programming language"),
     };
 
@@ -63,7 +63,7 @@ async fn test_fulltext_search_integration() {
         id: javascript_id,
         ts_millis: TimestampMilli::now(),
         name: "JavaScript".to_string(),
-        temporal_range: None,
+        valid_range: None,
         summary: motlie_db::NodeSummary::from_text("JavaScript programming language"),
     };
 
@@ -100,7 +100,7 @@ Key features:
 - Powerful type system with traits
 "#,
         ),
-        temporal_range: None,
+        valid_range: None,
     };
 
     let python_fragment = AddNodeFragment {
@@ -122,7 +122,7 @@ Key features:
 - Great for rapid prototyping
 "#,
         ),
-        temporal_range: None,
+        valid_range: None,
     };
 
     let javascript_fragment = AddNodeFragment {
@@ -143,7 +143,7 @@ Key features:
 - Massive ecosystem (npm)
 "#,
         ),
-        temporal_range: None,
+        valid_range: None,
     };
 
     rust_fragment.clone().run(&graph_writer).await.unwrap();
@@ -174,7 +174,7 @@ Key features:
         name: "used_for".to_string(),
         summary: EdgeSummary::from_text("Systems programming and performance-critical applications"),
         weight: Some(1.0),
-        temporal_range: None,
+        valid_range: None,
     };
 
     rust_to_systems
@@ -306,7 +306,7 @@ async fn test_fulltext_phrase_search() {
         id: Id::new(),
         ts_millis: TimestampMilli::now(),
         content: DataUrl::from_text("The quick brown fox jumps over the lazy dog"),
-        temporal_range: None,
+        valid_range: None,
     }
     .run(&writer)
     .await
@@ -316,7 +316,7 @@ async fn test_fulltext_phrase_search() {
         id: Id::new(),
         ts_millis: TimestampMilli::now(),
         content: DataUrl::from_text("A fast brown fox and a lazy cat"),
-        temporal_range: None,
+        valid_range: None,
     }
     .run(&writer)
     .await
@@ -369,7 +369,7 @@ async fn test_fulltext_bm25_ranking() {
         content: DataUrl::from_text(
             "Rust Rust Rust programming language for systems programming",
         ),
-        temporal_range: None,
+        valid_range: None,
     }
     .run(&writer)
     .await
@@ -379,7 +379,7 @@ async fn test_fulltext_bm25_ranking() {
         id: Id::new(),
         ts_millis: TimestampMilli::now(),
         content: DataUrl::from_text("Rust is a programming language"),
-        temporal_range: None,
+        valid_range: None,
     }
     .run(&writer)
     .await
@@ -389,7 +389,7 @@ async fn test_fulltext_bm25_ranking() {
         id: Id::new(),
         ts_millis: TimestampMilli::now(),
         content: DataUrl::from_text("Python is also a programming language"),
-        temporal_range: None,
+        valid_range: None,
     }
     .run(&writer)
     .await
