@@ -89,7 +89,7 @@ impl MutationExecutor for AddEdge {
             fields.dst_id_field => self.target_node_id.as_bytes().to_vec(),
             fields.edge_name_field => self.name.clone(),
             fields.content_field => summary_text,
-            fields.doc_type_field => "forward_edges",
+            fields.doc_type_field => "edges",
             fields.creation_timestamp_field => self.ts_millis.0,
         );
 
@@ -104,7 +104,7 @@ impl MutationExecutor for AddEdge {
         }
 
         // Add facets
-        doc.add_facet(fields.doc_type_facet, Facet::from("/type/forward_edges"));
+        doc.add_facet(fields.doc_type_facet, Facet::from("/type/edges"));
         doc.add_facet(
             fields.validity_facet,
             compute_validity_facet(&self.valid_range),
