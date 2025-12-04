@@ -146,7 +146,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     id: node_id.clone(),
                     ts_millis: current_time,
                     name: node_name.to_string(),
-                    temporal_range: None,
+                    valid_range: None,
                     summary: NodeSummary::from_text(fragment_text),
                 };
 
@@ -155,7 +155,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     id: node_id,
                     ts_millis: current_time,
                     content: DataUrl::from_markdown(fragment_text),
-                    temporal_range: None,
+                    valid_range: None,
                 };
 
                 // Time the writer sends
@@ -217,7 +217,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     name: edge_name.to_string(),
                     summary: EdgeSummary::from_markdown(edge_fragment),
                     weight: Some(1.0), // Default weight
-                    temporal_range: None,
+                    valid_range: None,
                 };
 
                 // Create fragment for the edge
@@ -227,7 +227,7 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
                     edge_name: edge_name.to_string(),
                     ts_millis: current_time,
                     content: DataUrl::from_markdown(edge_fragment),
-                    temporal_range: None,
+                    valid_range: None,
                 };
 
                 // Time the writer sends
@@ -882,10 +882,10 @@ fn deserialize_node_id(bytes: &[u8]) -> Result<IdBytes> {
 
 fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
     #[derive(serde::Deserialize)]
-    struct ValidTemporalRange(Option<u64>, Option<u64>);
+    struct TemporalRange(Option<u64>, Option<u64>);
 
     #[derive(serde::Deserialize)]
-    struct NodeCfValue(Option<ValidTemporalRange>, String, NodeSummary);
+    struct NodeCfValue(Option<TemporalRange>, String, NodeSummary);
 
     #[derive(serde::Deserialize)]
     struct NodeSummary(DataUrl);
@@ -935,10 +935,10 @@ fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, Strin
 
 fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
-    struct ValidTemporalRange(Option<u64>, Option<u64>);
+    struct TemporalRange(Option<u64>, Option<u64>);
 
     #[derive(serde::Deserialize)]
-    struct EdgeCfValue(Option<ValidTemporalRange>, IdBytes, IdBytes, String, EdgeSummary);
+    struct EdgeCfValue(Option<TemporalRange>, IdBytes, IdBytes, String, EdgeSummary);
 
     #[derive(serde::Deserialize)]
     struct EdgeSummary(DataUrl);
@@ -966,10 +966,10 @@ fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
 
 fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
-    struct ValidTemporalRange(Option<u64>, Option<u64>);
+    struct TemporalRange(Option<u64>, Option<u64>);
 
     #[derive(serde::Deserialize)]
-    struct FragmentCfValue(Option<ValidTemporalRange>, FragmentContent);
+    struct FragmentCfValue(Option<TemporalRange>, FragmentContent);
 
     #[derive(serde::Deserialize)]
     struct FragmentContent(DataUrl);

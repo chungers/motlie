@@ -141,12 +141,12 @@ pub(crate) trait ColumnFamilyRecord {
     }
 }
 
-/// Trait implemented by column families that supports patching of ValidTemporalRange.
+/// Trait implemented by column families that supports patching of TemporalRange.
 pub(crate) trait ValidRangePatchable {
     fn patch_valid_range(
         &self,
         old_value: &[u8],
-        new_range: schema::ValidTemporalRange,
+        new_range: schema::TemporalRange,
     ) -> Result<Vec<u8>, anyhow::Error>;
 }
 
