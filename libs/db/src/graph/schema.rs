@@ -73,6 +73,38 @@ impl ValidRangePatchable for ReverseEdges {
     }
 }
 
+impl ValidRangePatchable for NodeNames {
+    fn patch_valid_range(
+        &self,
+        old_value: &[u8],
+        new_range: TemporalRange,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        use crate::graph::ColumnFamilyRecord;
+
+        let mut value = NodeNames::value_from_bytes(old_value)
+            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+        value.0 = Some(new_range);
+        NodeNames::value_to_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+    }
+}
+
+impl ValidRangePatchable for EdgeNames {
+    fn patch_valid_range(
+        &self,
+        old_value: &[u8],
+        new_range: TemporalRange,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        use crate::graph::ColumnFamilyRecord;
+
+        let mut value = EdgeNames::value_from_bytes(old_value)
+            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+        value.0 = Some(new_range);
+        EdgeNames::value_to_bytes(&value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+    }
+}
+
 /// Forward edges column family (enhanced with weight and summary).
 pub(crate) struct ForwardEdges;
 #[derive(Serialize, Deserialize)]
