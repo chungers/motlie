@@ -14,7 +14,6 @@ use std::sync::Arc;
 use tantivy::IndexWriter;
 
 // Submodules
-pub mod fuzzy;
 pub mod mutation;
 pub mod query;
 pub mod reader;
@@ -22,11 +21,13 @@ pub mod schema;
 pub mod search;
 pub mod writer;
 
+#[cfg(test)]
+mod tantivy_behavior_test;
+
 // Re-export commonly used types
-pub use fuzzy::{FuzzyLevel, FuzzySearchOptions};
 pub use query::{
-    NodeSearchResult, Nodes as FulltextNodes, Query as FulltextQuery,
-    Runnable as FulltextQueryRunnable,
+    Edges as FulltextEdges, Facets as FulltextFacets, FuzzyLevel, Nodes as FulltextNodes,
+    Runnable as FulltextQueryRunnable, Search as FulltextQuery,
 };
 pub use reader::{
     create_query_consumer as create_fulltext_query_consumer,
@@ -39,7 +40,7 @@ pub use reader::{
     ReaderConfig as FulltextReaderConfig,
 };
 pub use schema::{compute_validity_facet, extract_tags, DocumentFields};
-pub use search::{FacetCounts, SearchOptions, SearchResults};
+pub use search::{EdgeHit, FacetCounts, Hit, NodeHit, SearchResults};
 pub use writer::{
     create_fulltext_consumer, create_fulltext_consumer_with_next,
     create_fulltext_consumer_with_params, create_fulltext_consumer_with_params_and_next,
@@ -313,7 +314,9 @@ impl Clone for Index {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, UpdateNodeValidSinceUntil};
+    use crate::graph::mutation::{
+        AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, UpdateNodeValidSinceUntil,
+    };
     use crate::graph::writer::Processor;
     use crate::{DataUrl, Id, TimestampMilli};
     use tantivy::collector::TopDocs;
@@ -745,10 +748,8 @@ mod tests {
 
         // Query: Find nodes created in the last 2 hours (two_hours_ago <= ts < now+1)
         let two_hours_ago = now - 7200_000;
-        let range_query = RangeQuery::new_u64(
-            "creation_timestamp".to_string(),
-            two_hours_ago..(now + 1),
-        );
+        let range_query =
+            RangeQuery::new_u64("creation_timestamp".to_string(), two_hours_ago..(now + 1));
         let top_docs = searcher
             .search(&range_query, &TopDocs::with_limit(10))
             .unwrap();
@@ -756,10 +757,8 @@ mod tests {
 
         // Query: Find nodes created more than 12 hours ago (0 <= ts <= twelve_hours_ago)
         let twelve_hours_ago = now - 43200_000;
-        let range_query = RangeQuery::new_u64(
-            "creation_timestamp".to_string(),
-            0..(twelve_hours_ago + 1),
-        );
+        let range_query =
+            RangeQuery::new_u64("creation_timestamp".to_string(), 0..(twelve_hours_ago + 1));
         let top_docs = searcher
             .search(&range_query, &TopDocs::with_limit(10))
             .unwrap();
@@ -818,17 +817,13 @@ mod tests {
         let fields = processor.fields();
 
         // Combined query: "Rust" AND created in the last 2 hours
-        let query_parser = QueryParser::for_index(
-            processor.tantivy_index(),
-            vec![fields.content_field],
-        );
+        let query_parser =
+            QueryParser::for_index(processor.tantivy_index(), vec![fields.content_field]);
         let text_query = query_parser.parse_query("Rust").unwrap();
 
         let two_hours_ago = now - 7200_000;
-        let time_query = RangeQuery::new_u64(
-            "creation_timestamp".to_string(),
-            two_hours_ago..(now + 1),
-        );
+        let time_query =
+            RangeQuery::new_u64("creation_timestamp".to_string(), two_hours_ago..(now + 1));
 
         let combined_query = BooleanQuery::new(vec![
             (Occur::Must, text_query),
@@ -893,10 +888,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(now),
                 name: "future".to_string(),
-                valid_range: Some(crate::TemporalRange(
-                    Some(TimestampMilli(future)),
-                    None,
-                )),
+                valid_range: Some(crate::TemporalRange(Some(TimestampMilli(future)), None)),
                 summary: crate::NodeSummary::from_text("not yet valid"),
             }),
         ];
@@ -993,10 +985,7 @@ mod tests {
         let searcher = reader.searcher();
 
         // Query: Documents created after ts2 (ts > ts2, i.e., ts >= ts2+1)
-        let after_ts2 = RangeQuery::new_u64(
-            "creation_timestamp".to_string(),
-            (ts2 + 1)..u64::MAX,
-        );
+        let after_ts2 = RangeQuery::new_u64("creation_timestamp".to_string(), (ts2 + 1)..u64::MAX);
         let top_docs = searcher
             .search(&after_ts2, &TopDocs::with_limit(10))
             .unwrap();
