@@ -133,17 +133,17 @@ macro_rules! impl_fulltext_query_processor {
 /// This is the fulltext equivalent of the graph Reader.
 #[derive(Debug, Clone)]
 pub struct Reader {
-    sender: flume::Sender<super::query::Query>,
+    sender: flume::Sender<super::query::Search>,
 }
 
 impl Reader {
     /// Create a new Reader with the given sender
-    pub fn new(sender: flume::Sender<super::query::Query>) -> Self {
+    pub fn new(sender: flume::Sender<super::query::Search>) -> Self {
         Reader { sender }
     }
 
     /// Send a query to the reader queue
-    pub async fn send_query(&self, query: super::query::Query) -> Result<()> {
+    pub async fn send_query(&self, query: super::query::Search) -> Result<()> {
         self.sender
             .send_async(query)
             .await
@@ -174,7 +174,7 @@ impl Default for ReaderConfig {
 /// Create a new fulltext query reader and receiver pair
 pub fn create_query_reader(
     config: ReaderConfig,
-) -> (Reader, flume::Receiver<super::query::Query>) {
+) -> (Reader, flume::Receiver<super::query::Search>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
     let reader = Reader::new(sender);
     (reader, receiver)
@@ -187,7 +187,7 @@ pub fn create_query_reader(
 /// Consumer that processes fulltext queries using an Index.
 /// This is the fulltext equivalent of the graph query Consumer.
 pub struct Consumer {
-    receiver: flume::Receiver<super::query::Query>,
+    receiver: flume::Receiver<super::query::Search>,
     config: ReaderConfig,
     processor: Index,
 }
@@ -195,7 +195,7 @@ pub struct Consumer {
 impl Consumer {
     /// Create a new Consumer
     pub fn new(
-        receiver: flume::Receiver<super::query::Query>,
+        receiver: flume::Receiver<super::query::Search>,
         config: ReaderConfig,
         processor: Index,
     ) -> Self {
@@ -235,7 +235,7 @@ pub fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>>
 
 /// Create a fulltext query consumer
 pub fn create_query_consumer(
-    receiver: flume::Receiver<super::query::Query>,
+    receiver: flume::Receiver<super::query::Search>,
     config: ReaderConfig,
     processor: Index,
 ) -> Consumer {
@@ -247,7 +247,7 @@ pub fn create_query_consumer(
 /// Uses readonly Storage since query consumers only need read access.
 /// Multiple consumers can share the same index path.
 pub fn spawn_query_consumer(
-    receiver: flume::Receiver<super::query::Query>,
+    receiver: flume::Receiver<super::query::Search>,
     config: ReaderConfig,
     index_path: &Path,
 ) -> tokio::task::JoinHandle<Result<()>> {
@@ -298,7 +298,7 @@ pub fn spawn_query_consumer(
 /// # }
 /// ```
 pub fn spawn_query_consumer_pool_shared(
-    receiver: flume::Receiver<super::query::Query>,
+    receiver: flume::Receiver<super::query::Search>,
     index: Arc<Index>,
     num_workers: usize,
 ) -> Vec<tokio::task::JoinHandle<()>> {
@@ -338,7 +338,7 @@ pub fn spawn_query_consumer_pool_shared(
 /// Note: For most use cases, `spawn_query_consumer_pool_shared` is preferred
 /// since it shares memory more efficiently via Arc.
 pub fn spawn_query_consumer_pool_readonly(
-    receiver: flume::Receiver<super::query::Query>,
+    receiver: flume::Receiver<super::query::Search>,
     config: ReaderConfig,
     index_path: &Path,
     num_workers: usize,
