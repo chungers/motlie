@@ -985,7 +985,7 @@ async fn test_fulltext_search_limit_and_ordering() {
 /// This test verifies:
 /// - Tags are extracted from #hashtags in content
 /// - `with_tags()` filter correctly restricts results
-/// - AND semantics: all specified tags must match
+/// - OR semantics: documents matching ANY of the specified tags are returned
 /// - Works for both node and edge queries
 #[tokio::test]
 async fn test_fulltext_tag_facet_filtering() {
@@ -1144,16 +1144,21 @@ async fn test_fulltext_tag_facet_filtering() {
     println!("    Search 'language' with tag #async: {} results", results.len());
     assert_eq!(results.len(), 2, "Should find Rust and Python (both have #async tag)");
 
-    // Test 4: Filter by multiple tags (AND semantics)
+    // Test 4: Filter by multiple tags (OR semantics - matches ANY tag)
     let results = motlie_db::FulltextNodes::new("language".to_string(), 10)
-        .with_tags(vec!["systems".to_string(), "async".to_string()])
+        .with_tags(vec!["systems".to_string(), "scripting".to_string()])
         .run(&fulltext_reader, timeout)
         .await
         .unwrap();
 
-    println!("    Search 'language' with tags #systems AND #async: {} results", results.len());
-    assert_eq!(results.len(), 1, "Should find only Rust (has both #systems AND #async)");
-    assert_eq!(results[0].id, rust_id, "Should be Rust");
+    println!("    Search 'language' with tags #systems OR #scripting: {} results", results.len());
+    // Should find: Rust (#systems), Go (#systems), Python (#scripting), TypeScript (#scripting)
+    assert_eq!(results.len(), 4, "Should find all 4 nodes (Rust/Go have #systems, Python/TypeScript have #scripting)");
+    let result_ids: Vec<_> = results.iter().map(|r| r.id).collect();
+    assert!(result_ids.contains(&rust_id), "Should contain Rust");
+    assert!(result_ids.contains(&go_id), "Should contain Go");
+    assert!(result_ids.contains(&python_id), "Should contain Python");
+    assert!(result_ids.contains(&typescript_id), "Should contain TypeScript");
 
     // Test 5: No results when tag doesn't match
     let results = motlie_db::FulltextNodes::new("language".to_string(), 10)
@@ -1188,15 +1193,17 @@ async fn test_fulltext_tag_facet_filtering() {
     println!("    Search 'similar' with tag #scripting: {} results", results.len());
     assert!(results.len() >= 1, "Should find Python->TypeScript edge (has #scripting tag)");
 
-    // Test 8: Edge with multiple tags (AND semantics)
-    let results = FulltextEdges::new("compete".to_string(), 10)
-        .with_tags(vec!["systems".to_string(), "cloud".to_string()])
+    // Test 8: Edge with multiple tags (OR semantics - matches ANY tag)
+    // Use a broad search term that appears in both edges
+    let results = FulltextEdges::new("applications OR paradigm OR tasks".to_string(), 10)
+        .with_tags(vec!["systems".to_string(), "scripting".to_string()])
         .run(&fulltext_reader, timeout)
         .await
         .unwrap();
 
-    println!("    Search 'compete' with tags #systems AND #cloud: {} results", results.len());
-    assert!(results.len() >= 1, "Should find Rust->Go edge (has both tags)");
+    println!("    Search edges with tags #systems OR #scripting: {} results", results.len());
+    // Should find both edges: Rust->Go (#systems #cloud) and Python->TypeScript (#scripting #web)
+    assert_eq!(results.len(), 2, "Should find both edges (one has #systems, one has #scripting)");
 
     // === VERIFY RESULTS RESOLVE TO ROCKSDB ===
     println!("\n  Verifying tag-filtered results resolve to RocksDB...");
@@ -1227,6 +1234,133 @@ async fn test_fulltext_tag_facet_filtering() {
     }
 
     println!("\n✅ Test passed: Tag-based facet filtering works correctly\n");
+}
+
+/// Test 6b: Explicit test for OR semantics with multiple tags
+///
+/// This test explicitly verifies that when multiple tags are specified,
+/// documents matching ANY of the tags are returned (OR semantics),
+/// not just documents matching ALL tags (AND semantics).
+#[tokio::test]
+async fn test_fulltext_tag_or_semantics() {
+    let temp_dir = TempDir::new().unwrap();
+
+    let (writer, graph_handle, fulltext_handle, db_path, index_path) =
+        setup_mutation_pipeline(&temp_dir).await;
+
+    println!("=== Test: Tag OR Semantics ===\n");
+
+    // Create nodes where each has exactly ONE unique tag
+    let node_a_id = Id::new();
+    let node_b_id = Id::new();
+    let node_c_id = Id::new();
+
+    // Node A: only has #alpha tag
+    AddNode {
+        id: node_a_id,
+        ts_millis: TimestampMilli::now(),
+        name: "NodeA".to_string(),
+        valid_range: None,
+        summary: NodeSummary::from_text("This document has only the #alpha tag"),
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    // Node B: only has #beta tag
+    AddNode {
+        id: node_b_id,
+        ts_millis: TimestampMilli::now(),
+        name: "NodeB".to_string(),
+        valid_range: None,
+        summary: NodeSummary::from_text("This document has only the #beta tag"),
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    // Node C: only has #gamma tag (control - should NOT match alpha OR beta)
+    AddNode {
+        id: node_c_id,
+        ts_millis: TimestampMilli::now(),
+        name: "NodeC".to_string(),
+        valid_range: None,
+        summary: NodeSummary::from_text("This document has only the #gamma tag"),
+    }
+    .run(&writer)
+    .await
+    .unwrap();
+
+    println!("  Created 3 nodes with mutually exclusive tags: #alpha, #beta, #gamma");
+
+    // Wait for indexing
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(writer);
+    graph_handle.await.unwrap().unwrap();
+    fulltext_handle.await.unwrap().unwrap();
+
+    // Setup query infrastructure
+    let (graph_reader, fulltext_reader, graph_handles, fulltext_handles) =
+        setup_query_infrastructure(&db_path, &index_path);
+    let timeout = Duration::from_secs(5);
+
+    // === KEY TEST: Multiple tags with OR semantics ===
+    println!("\n  Testing OR semantics with multiple tags...\n");
+
+    // Search with tags [#alpha, #beta] - should find NodeA and NodeB, but NOT NodeC
+    let results = motlie_db::FulltextNodes::new("document".to_string(), 10)
+        .with_tags(vec!["alpha".to_string(), "beta".to_string()])
+        .run(&fulltext_reader, timeout)
+        .await
+        .unwrap();
+
+    println!("    Search 'document' with tags [#alpha, #beta]: {} results", results.len());
+
+    // With OR semantics: should find 2 results (NodeA has #alpha, NodeB has #beta)
+    // With AND semantics: would find 0 results (no node has both tags)
+    assert_eq!(
+        results.len(),
+        2,
+        "OR semantics: should find 2 nodes (one with #alpha, one with #beta)"
+    );
+
+    let result_ids: Vec<_> = results.iter().map(|r| r.id).collect();
+    assert!(result_ids.contains(&node_a_id), "Should contain NodeA (has #alpha)");
+    assert!(result_ids.contains(&node_b_id), "Should contain NodeB (has #beta)");
+    assert!(!result_ids.contains(&node_c_id), "Should NOT contain NodeC (has only #gamma)");
+
+    // Verify single tag still works
+    let results = motlie_db::FulltextNodes::new("document".to_string(), 10)
+        .with_tags(vec!["gamma".to_string()])
+        .run(&fulltext_reader, timeout)
+        .await
+        .unwrap();
+
+    println!("    Search 'document' with tag [#gamma]: {} results", results.len());
+    assert_eq!(results.len(), 1, "Should find only NodeC with #gamma");
+    assert_eq!(results[0].id, node_c_id, "Should be NodeC");
+
+    // Verify all three tags finds all three nodes
+    let results = motlie_db::FulltextNodes::new("document".to_string(), 10)
+        .with_tags(vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()])
+        .run(&fulltext_reader, timeout)
+        .await
+        .unwrap();
+
+    println!("    Search 'document' with tags [#alpha, #beta, #gamma]: {} results", results.len());
+    assert_eq!(results.len(), 3, "OR semantics: should find all 3 nodes");
+
+    // Cleanup
+    drop(graph_reader);
+    drop(fulltext_reader);
+    for h in graph_handles {
+        h.await.unwrap();
+    }
+    for h in fulltext_handles {
+        h.await.unwrap();
+    }
+
+    println!("\n✅ Test passed: Tag OR semantics verified\n");
 }
 
 /// Test 7: Fuzzy search for typo tolerance
