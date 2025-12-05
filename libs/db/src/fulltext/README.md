@@ -599,11 +599,12 @@ let results = FulltextNodes::new("progrmaing".to_string(), 10)
 Filter results by hashtags extracted from content:
 
 ```rust
-// Search with tag filter - all specified tags must match
+// Search with tag filter - matches documents with ANY of the specified tags (OR semantics)
 let results = FulltextNodes::new("systems".to_string(), 10)
-    .with_tags(vec!["rust".to_string(), "async".to_string()])
+    .with_tags(vec!["rust".to_string(), "golang".to_string()])
     .run(&reader, Duration::from_secs(5))
     .await?;
+// Returns documents tagged with #rust OR #golang
 
 // Combined: fuzzy search with tag filtering
 let results = FulltextNodes::new("concurency".to_string(), 10)
@@ -612,6 +613,12 @@ let results = FulltextNodes::new("concurency".to_string(), 10)
     .run(&reader, Duration::from_secs(5))
     .await?;
 ```
+
+**Tag Filter Semantics (OR)**:
+- When multiple tags are specified, documents matching **ANY** of the tags are returned
+- Example: `.with_tags(vec!["rust", "python"])` returns documents with #rust OR #python
+- This enables "find documents related to any of these topics" queries
+- For AND semantics (all tags required), issue separate queries and intersect results
 
 Tags are automatically extracted from content during indexing using `#hashtag` syntax.
 See the "Tag Extraction" section in schema.rs for supported tag formats.
@@ -822,7 +829,8 @@ The `tests/test_fulltext_search_pipeline.rs` file contains comprehensive integra
 | `test_fulltext_combined_search_with_verification` | Mixed node/edge searches, cross-verification between fulltext hits and RocksDB entries, fragment indexing |
 | `test_fulltext_fragment_deduplication_behavior` | Multiple fragments per entity, deduplication semantics, best score retention |
 | `test_fulltext_search_limit_and_ordering` | Result limit enforcement, BM25 score ordering, pagination behavior |
-| `test_fulltext_tag_facet_filtering` | `#hashtag` extraction from content, `with_tags()` filter, AND semantics for multiple tags, works for both nodes and edges |
+| `test_fulltext_tag_facet_filtering` | `#hashtag` extraction from content, `with_tags()` filter, OR semantics for multiple tags, works for both nodes and edges |
+| `test_fulltext_tag_or_semantics` | Explicit verification of OR semantics: documents with mutually exclusive tags, multiple tags return union of matches |
 | `test_fulltext_fuzzy_search` | `FuzzyLevel::Low` (1 edit distance), `FuzzyLevel::Medium` (2 edits), typo tolerance for nodes and edges |
 | `test_fulltext_facets_query` | `FulltextFacets` query for aggregating facet counts, doc_type filtering, tags_limit option, validity facet counts |
 
@@ -849,35 +857,38 @@ Each test follows this pattern:
 4. **Verify against RocksDB** - Each hit is resolved via graph queries (`NodeById`, `EdgeSummaryBySrcDstName`)
 5. **Cleanup** - Drop readers and await consumer handles
 
-Example from `test_fulltext_tag_facet_filtering`:
+Example from `test_fulltext_tag_or_semantics`:
 
 ```rust
-// Create nodes with hashtags in content
+// Create nodes with mutually exclusive tags
 AddNode {
-    id: rust_id,
-    ts_millis: TimestampMilli::now(),
-    name: "Rust".to_string(),
-    summary: NodeSummary::from_text(
-        "Rust is a #systems programming language with #async support"
-    ),
-    valid_range: None,
-}
-.run(&writer)
-.await?;
+    id: node_a_id,
+    name: "NodeA".to_string(),
+    summary: NodeSummary::from_text("This document has only the #alpha tag"),
+    // ...
+}.run(&writer).await?;
 
-// Query with tag filter
-let results = FulltextNodes::new("language".to_string(), 10)
-    .with_tags(vec!["systems".to_string()])  // Filter by #systems tag
+AddNode {
+    id: node_b_id,
+    name: "NodeB".to_string(),
+    summary: NodeSummary::from_text("This document has only the #beta tag"),
+    // ...
+}.run(&writer).await?;
+
+// Query with multiple tags - OR semantics means EITHER tag matches
+let results = FulltextNodes::new("document".to_string(), 10)
+    .with_tags(vec!["alpha".to_string(), "beta".to_string()])
     .run(&fulltext_reader, timeout)
     .await?;
 
-// Verify results resolve to RocksDB
-for hit in results {
-    let node = NodeById::new(hit.id, None)
-        .run(&graph_reader, timeout)
-        .await?;
-    assert!(node.is_some());
-}
+// With OR semantics: returns 2 results (NodeA has #alpha, NodeB has #beta)
+// With AND semantics: would return 0 results (no node has both tags)
+assert_eq!(results.len(), 2);
+
+// Verify results contain both nodes
+let result_ids: Vec<_> = results.iter().map(|r| r.id).collect();
+assert!(result_ids.contains(&node_a_id));  // Has #alpha
+assert!(result_ids.contains(&node_b_id));  // Has #beta
 ```
 
 ## See Also
