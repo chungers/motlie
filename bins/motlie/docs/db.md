@@ -308,3 +308,43 @@ motlie db -p /data/graph-db scan node-names | grep "^Alice"
 ```bash
 RUST_LOG=debug motlie db -p /data/graph-db scan nodes
 ```
+
+## Tests
+
+Integration tests are available in `bins/motlie/tests/db_cli.rs`.
+
+### Running Tests
+
+```bash
+cargo test --test db_cli
+```
+
+### Test Coverage
+
+| Test | Description |
+|------|-------------|
+| `test_list_column_families` | Verifies `list` command shows all column families |
+| `test_scan_nodes_tsv` | Scans nodes, verifies IDs and names in TSV format |
+| `test_scan_nodes_table_format` | Verifies table format with headers and separators |
+| `test_scan_nodes_with_limit` | Tests `--limit` option restricts result count |
+| `test_scan_nodes_reverse` | Tests `--reverse` returns opposite order |
+| `test_scan_nodes_pagination` | Tests cursor-based pagination with `--last` |
+| `test_scan_node_fragments` | Scans node fragments, verifies content and MIME type |
+| `test_scan_edge_fragments` | Scans edge fragments, verifies src/dst/edge_name |
+| `test_scan_outgoing_edges` | Scans outgoing edges with weights |
+| `test_scan_incoming_edges` | Scans reverse edge index |
+| `test_scan_node_names` | Scans node name index |
+| `test_scan_edge_names` | Scans edge name index |
+| `test_invalid_database_path` | Error handling for non-existent database |
+| `test_invalid_cursor_format` | Error handling for malformed cursor |
+| `test_output_format_tsv_default` | Verifies TSV is default output format |
+| `test_output_format_table` | Verifies table format structure |
+| `test_node_fragment_pagination_cursor` | Tests fragment pagination cursor format |
+| `test_outgoing_edge_pagination_cursor` | Tests edge pagination cursor format |
+
+### Test Approach
+
+The tests:
+1. Insert test data (nodes, edges, fragments) directly into RocksDB
+2. Run the CLI commands via `cargo run --bin motlie`
+3. Parse the output and verify it matches the inserted data by ID
