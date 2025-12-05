@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::FmtSubscriber;
 
 mod db;
+mod fulltext;
 
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
@@ -18,6 +19,8 @@ struct Cli {
 enum Commands {
     /// Database inspection commands
     Db(db::Command),
+    /// Fulltext search commands
+    Fulltext(fulltext::Command),
 }
 
 fn main() {
@@ -31,6 +34,9 @@ fn main() {
     match cli.command {
         Commands::Db(args) => {
             db::run(&args);
+        }
+        Commands::Fulltext(args) => {
+            fulltext::run(&args);
         }
     }
 }

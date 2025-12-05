@@ -962,6 +962,7 @@ dependencies = [
  "rmp-serde",
  "rocksdb",
  "serde",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
