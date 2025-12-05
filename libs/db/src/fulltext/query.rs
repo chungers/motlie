@@ -130,7 +130,7 @@ pub struct Nodes {
     /// Fuzzy matching level (default: None = exact match)
     pub fuzzy_level: FuzzyLevel,
 
-    /// Filter by tags (documents must have ALL specified tags)
+    /// Filter by tags (documents must have ANY of the specified tags)
     pub tags: Vec<String>,
 
     /// Timeout for this query execution (only set when query has channel)
@@ -165,7 +165,7 @@ impl Nodes {
         self
     }
 
-    /// Filter results to only include documents with ALL specified tags.
+    /// Filter results to only include documents with ANY of the specified tags.
     ///
     /// Tags are extracted from content using #hashtag syntax during indexing.
     ///
@@ -319,15 +319,19 @@ impl QueryExecutor for Nodes {
             (Occur::Must, Box::new(doc_type_filter)),
         ];
 
-        // Add tag filters if specified (all tags must match)
+        // Add tag filters if specified (ANY tag must match - OR semantics)
         // Tags are stored as /tag/{name}, so we construct the facet path accordingly
-        for tag in &self.tags {
-            let facet = tantivy::schema::Facet::from(&format!("/tag/{}", tag));
-            let tag_term = Term::from_facet(fields.tags_facet, &facet);
-            query_clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(tag_term, IndexRecordOption::Basic)),
-            ));
+        if !self.tags.is_empty() {
+            let mut tag_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+            for tag in &self.tags {
+                let facet = tantivy::schema::Facet::from(&format!("/tag/{}", tag));
+                let tag_term = Term::from_facet(fields.tags_facet, &facet);
+                tag_clauses.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(tag_term, IndexRecordOption::Basic)),
+                ));
+            }
+            query_clauses.push((Occur::Must, Box::new(BooleanQuery::new(tag_clauses))));
         }
 
         let combined_query = BooleanQuery::new(query_clauses);
@@ -417,7 +421,7 @@ pub struct Edges {
     /// Fuzzy matching level (default: None = exact match)
     pub fuzzy_level: FuzzyLevel,
 
-    /// Filter by tags (documents must have ALL specified tags)
+    /// Filter by tags (documents must have ANY of the specified tags)
     pub tags: Vec<String>,
 
     /// Timeout for this query execution (only set when query has channel)
@@ -452,7 +456,7 @@ impl Edges {
         self
     }
 
-    /// Filter results to only include documents with ALL specified tags.
+    /// Filter results to only include documents with ANY of the specified tags.
     ///
     /// Tags are extracted from content using #hashtag syntax during indexing.
     ///
@@ -615,15 +619,19 @@ impl QueryExecutor for Edges {
             (Occur::Must, Box::new(doc_type_filter)),
         ];
 
-        // Add tag filters if specified (all tags must match)
+        // Add tag filters if specified (ANY tag must match - OR semantics)
         // Tags are stored as /tag/{name}, so we construct the facet path accordingly
-        for tag in &self.tags {
-            let facet = tantivy::schema::Facet::from(&format!("/tag/{}", tag));
-            let tag_term = Term::from_facet(fields.tags_facet, &facet);
-            query_clauses.push((
-                Occur::Must,
-                Box::new(TermQuery::new(tag_term, IndexRecordOption::Basic)),
-            ));
+        if !self.tags.is_empty() {
+            let mut tag_clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+            for tag in &self.tags {
+                let facet = tantivy::schema::Facet::from(&format!("/tag/{}", tag));
+                let tag_term = Term::from_facet(fields.tags_facet, &facet);
+                tag_clauses.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(tag_term, IndexRecordOption::Basic)),
+                ));
+            }
+            query_clauses.push((Occur::Must, Box::new(BooleanQuery::new(tag_clauses))));
         }
 
         let combined_query = BooleanQuery::new(query_clauses);

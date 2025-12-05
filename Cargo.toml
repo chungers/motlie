@@ -76,4 +76,11 @@ path = "examples/graph/pagerank.rs"
 
 [[bin]]
 name = "motlie"
-path = "bins/motlie/main.rs"
+path = "bins/motlie/src/main.rs"
+
+[[test]]
+name = "fulltext_cli"
+path = "bins/motlie/tests/fulltext_cli.rs"
+
+[dev-dependencies]
+tempfile = "3.14"
