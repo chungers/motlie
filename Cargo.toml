@@ -82,5 +82,9 @@ path = "bins/motlie/src/main.rs"
 name = "fulltext_cli"
 path = "bins/motlie/tests/fulltext_cli.rs"
 
+[[test]]
+name = "db_cli"
+path = "bins/motlie/tests/db_cli.rs"
+
 [dev-dependencies]
 tempfile = "3.14"
