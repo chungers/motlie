@@ -6,67 +6,95 @@
 
 use std::collections::HashMap;
 
-/// Search options for fulltext queries with facet filtering
+use crate::Id;
+
+/// Individual search result - represents a single matching document from the fulltext index.
+///
+/// This enum distinguishes between node-related and edge-related search results,
+/// allowing callers to handle each type appropriately when reconstructing RocksDB keys.
 #[derive(Debug, Clone)]
-pub struct SearchOptions {
-    /// The search query string
-    pub query: String,
-
-    /// Facet filters to apply (field_name, facet_value)
-    /// Example: [("type", "node"), ("time", "last_week")]
-    pub facet_filters: Vec<(String, String)>,
-
-    /// Whether to collect facet counts in results
-    pub collect_facets: bool,
-
-    /// Maximum number of results to return
-    pub limit: usize,
+pub enum Hit {
+    /// A node or node fragment matched the search
+    NodeHit(NodeHit),
+    /// An edge or edge fragment matched the search
+    EdgeHit(EdgeHit),
 }
 
-impl Default for SearchOptions {
-    fn default() -> Self {
-        Self {
-            query: String::new(),
-            facet_filters: vec![],
-            collect_facets: false,
-            limit: 10,
+impl Hit {
+    /// Get the BM25 relevance score for this result
+    pub fn score(&self) -> f32 {
+        match self {
+            Hit::NodeHit(hit) => hit.score,
+            Hit::EdgeHit(hit) => hit.score,
         }
     }
 }
 
-/// Search results with optional facet counts
-#[derive(Debug)]
-pub struct SearchResults {
-    /// Matching documents
-    pub documents: Vec<SearchResult>,
-
-    /// Facet counts (if collect_facets was true)
-    pub facets: Option<FacetCounts>,
-
-    /// Total number of results
-    pub total: usize,
-}
-
-/// Individual search result
-#[derive(Debug)]
-pub struct SearchResult {
+/// A node or node fragment that matched the search query.
+///
+/// Contains the information needed to look up the full document in RocksDB.
+/// The presence of `fragment_timestamp` distinguishes between node and fragment matches:
+///
+/// - **Node match** (`fragment_timestamp` is `None`): Use `id` to query the Nodes column family
+/// - **Fragment match** (`fragment_timestamp` is `Some`): Use `id` + `fragment_timestamp`
+///   to query the NodeFragments column family
+#[derive(Debug, Clone)]
+pub struct NodeHit {
     /// BM25 relevance score
     pub score: f32,
 
-    /// Document ID
-    pub id: Vec<u8>,
+    /// Node ID (used as key in Nodes CF, or first part of NodeFragments key)
+    pub id: Id,
 
-    /// Document type (node, edge, node_fragment, edge_fragment)
-    pub doc_type: String,
+    /// Fragment timestamp, if this hit came from a node fragment.
+    ///
+    /// - `None`: The match came from the node itself (Nodes CF)
+    /// - `Some(ts)`: The match came from a fragment; combined with `id`, this forms
+    ///   the complete NodeFragments CfKey
+    pub fragment_timestamp: Option<u64>,
 
-    /// Optional text snippet showing match context
+    /// Optional text snippet showing match context (for highlighting)
+    pub snippet: Option<String>,
+}
+
+/// An edge or edge fragment that matched the search query.
+///
+/// Contains the information needed to look up the full document in RocksDB.
+/// The presence of `fragment_timestamp` distinguishes between edge and fragment matches:
+///
+/// - **Edge match** (`fragment_timestamp` is `None`): Use `src_id` + `dst_id` + `edge_name`
+///   to query the ForwardEdges column family
+/// - **Fragment match** (`fragment_timestamp` is `Some`): Use `src_id` + `dst_id` + `edge_name`
+///   + `fragment_timestamp` to query the EdgeFragments column family
+#[derive(Debug, Clone)]
+pub struct EdgeHit {
+    /// BM25 relevance score
+    pub score: f32,
+
+    /// Source node ID
+    pub src_id: Id,
+
+    /// Destination node ID
+    pub dst_id: Id,
+
+    /// Edge name
+    pub edge_name: String,
+
+    /// Fragment timestamp, if this hit came from an edge fragment.
+    ///
+    /// - `None`: The match came from the edge itself (ForwardEdges CF)
+    /// - `Some(ts)`: The match came from a fragment; combined with `src_id` + `dst_id` +
+    ///   `edge_name`, this forms the complete EdgeFragments CfKey
+    pub fragment_timestamp: Option<u64>,
+
+    /// Optional text snippet showing match context (for highlighting)
     pub snippet: Option<String>,
 }
 
 /// Aggregated facet counts
 #[derive(Debug)]
 pub struct FacetCounts {
-    /// Document types: [("nodes", 45), ("forward_edges", 23), ...]
+    /// Document types: [("nodes", 45), ("edges", 23), ...]
     pub doc_types: HashMap<String, u64>,
 
     /// User-defined tags: [("rust", 15), ("systems_programming", 8), ...]
@@ -101,14 +129,6 @@ impl FacetCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_search_options_default() {
-        let opts = SearchOptions::default();
-        assert_eq!(opts.limit, 10);
-        assert!(!opts.collect_facets);
-        assert!(opts.facet_filters.is_empty());
-    }
 
     #[test]
     fn test_facet_counts_new() {

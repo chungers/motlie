@@ -227,7 +227,7 @@ let client2 = tokio::spawn(async move {
         .await?;
 
     for result in results {
-        println!("Found: {} (score: {})", result.name, result.score);
+        println!("Found: {} (score: {})", result.id, result.score);
     }
 
     Ok::<_, anyhow::Error>(())
@@ -248,7 +248,7 @@ let client3 = tokio::spawn(async move {
             .run(&graph_reader_clone, Duration::from_secs(5))
             .await?;
 
-        println!("Node {} has {} outgoing edges", result.name, edges.len());
+        println!("Node {} has {} outgoing edges", result.id, edges.len());
     }
 
     Ok::<_, anyhow::Error>(())
@@ -442,7 +442,7 @@ The fulltext index uses the following schema:
 | `node_name_field` | TEXT | Node name (tokenized, searchable) |
 | `edge_name_field` | TEXT | Edge name (tokenized, searchable) |
 | `content_field` | TEXT | Main content field (summaries, fragments) |
-| `doc_type_field` | TEXT | Document type: "nodes", "forward_edges", "node_fragments", "edge_fragments" |
+| `doc_type_field` | TEXT | Document type: "nodes", "edges", "node_fragments", "edge_fragments" |
 | `creation_timestamp_field` | U64 | Creation timestamp in milliseconds |
 | `valid_since_field` | U64 | Validity start timestamp (optional) |
 | `valid_until_field` | U64 | Validity end timestamp (optional) |
@@ -452,13 +452,105 @@ The fulltext index uses the following schema:
 
 | Facet | Path Pattern | Description |
 |-------|--------------|-------------|
-| `doc_type_facet` | `/type/nodes`, `/type/forward_edges`, etc. | Document type categorization |
+| `doc_type_facet` | `/type/nodes`, `/type/edges`, etc. | Document type categorization |
 | `validity_facet` | `/validity/unbounded`, `/validity/bounded`, etc. | Temporal validity structure |
 | `tags_facet` | `/tag/rust`, `/tag/programming`, etc. | User-defined hashtags |
 
 ### Note on Temporal Queries
 
 Time-based filtering should use **range queries** on `creation_timestamp`, `valid_since`, and `valid_until` fields at query time, not facets. This allows proper comparison against the query timestamp rather than the index timestamp. See `mod.rs` tests for examples.
+
+## Fragment Indexing Semantics
+
+Node and Edge fragments in motlie-db are **append-only** - each fragment represents a timestamped observation about a node or edge, and multiple fragments form a timeline. This section documents how Tantivy handles these semantics.
+
+### Key Findings
+
+1. **Tantivy is Append-Only by Default**
+   - `IndexWriter::add_document()` **always appends** a new document
+   - Tantivy has no built-in concept of a "document ID" that would trigger an update/replace
+   - Multiple calls to `AddNodeFragment` with the same `node_id` create separate Tantivy documents
+   - This matches our append-only fragment semantics perfectly
+
+2. **Multiple Fragments Are Fully Searchable**
+   ```rust
+   // Adding 5 fragments for the same node
+   for ts in [1000, 2000, 3000, 4000, 5000] {
+       AddNodeFragment {
+           id: same_node_id,
+           ts_millis: ts,
+           content: format!("Fragment at {}", ts)
+       }.run(&writer).await?;
+   }
+   // All 5 documents are indexed and searchable
+   // Search for "Fragment" returns all 5 results
+   ```
+
+3. **RocksDB Key Reconstruction**
+   - Search results contain stored fields to reconstruct the RocksDB CfKey:
+     - **NodeFragments**: `(id_field, creation_timestamp_field)` → RocksDB key `(node_id, timestamp)`
+     - **EdgeFragments**: `(src_id_field, dst_id_field, edge_name_field, creation_timestamp_field)` → RocksDB key `(src_id, dst_id, edge_name, timestamp)`
+   - The `doc_type_field` indicates which column family to query
+
+4. **Delete Operations Require INDEXED Fields**
+   - `IndexWriter::delete_term()` only works on INDEXED fields
+   - ID fields (`id_field`, `src_id_field`, `dst_id_field`) are defined with `STORED | FAST | INDEXED`
+   - This enables `UpdateNodeValidSinceUntil` and `UpdateEdgeValidSinceUntil` to delete documents
+
+### Fragment vs Node/Edge Deletion Behavior
+
+| Mutation | Behavior |
+|----------|----------|
+| `AddNodeFragment` | Appends new document (never overwrites) |
+| `AddEdgeFragment` | Appends new document (never overwrites) |
+| `UpdateNodeValidSinceUntil` | Deletes **all** documents with matching `id_field` |
+| `UpdateEdgeValidSinceUntil` | Deletes **all** documents with matching `src_id_field` |
+
+**Important**: `UpdateNodeValidSinceUntil` deletes the node **and** all its fragments from the fulltext index. This is by design - when a node's validity changes, all its indexed content should be removed from search results. The authoritative data remains in RocksDB.
+
+### Consistency with RocksDB
+
+The fulltext index is a **secondary index** - RocksDB is the source of truth:
+
+1. **Fragments are always append-only** in both RocksDB and Tantivy
+2. **Deletions are eventually consistent** - Tantivy deletions are applied on commit
+3. **Reader visibility** - Tantivy readers must `reload()` to see deletions
+4. **Recovery** - If the fulltext index is lost, it can be rebuilt by replaying mutations from RocksDB
+
+### Example: Fragment Timeline
+
+```rust
+// Create a node with multiple observations over time
+let node_id = Id::new();
+
+// Day 1: Initial observation
+AddNodeFragment {
+    id: node_id,
+    ts_millis: TimestampMilli(day1),
+    content: DataUrl::from_text("Initial status: healthy"),
+}.run(&writer).await?;
+
+// Day 2: Second observation
+AddNodeFragment {
+    id: node_id,
+    ts_millis: TimestampMilli(day2),
+    content: DataUrl::from_text("Status update: minor issue detected"),
+}.run(&writer).await?;
+
+// Day 3: Third observation
+AddNodeFragment {
+    id: node_id,
+    ts_millis: TimestampMilli(day3),
+    content: DataUrl::from_text("Status resolved: back to healthy"),
+}.run(&writer).await?;
+
+// All 3 fragments are searchable:
+// - Search "healthy" → finds Day 1 and Day 3 fragments
+// - Search "issue" → finds Day 2 fragment
+// - Search "status" → finds all 3 fragments
+
+// Each result includes (node_id, timestamp) for RocksDB lookup
+```
 
 ## Current Query Types
 
@@ -467,75 +559,197 @@ Time-based filtering should use **range queries** on `creation_timestamp`, `vali
 Searches for nodes and node fragments, returning deduplicated results by node ID:
 
 ```rust
+use motlie_db::{FulltextNodes, FuzzyLevel, FulltextQueryRunnable};
+
+// Basic search - returns top 10 results
 let results = FulltextNodes::new("rust programming".to_string(), 10)
     .run(&reader, Duration::from_secs(5))
     .await?;
 
 for result in results {
-    println!("ID: {}, Name: {}, Score: {}", result.id, result.name, result.score);
+    println!("ID: {}, Score: {}", result.id, result.score);
 }
 ```
 
-## TODO: Planned Query Types
+#### Fuzzy Search
 
-The following query types are planned but not yet implemented:
-
-### `Edges` Query
-Search for edges by content, similar to `Nodes`:
+Enable typo-tolerant matching with `FuzzyLevel`:
 
 ```rust
-// TODO: Not yet implemented
+// Search with typo tolerance (1 edit distance)
+let results = FulltextNodes::new("progrmming".to_string(), 10)
+    .with_fuzzy(FuzzyLevel::Low)  // matches "programming"
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Higher tolerance (2 edit distance)
+let results = FulltextNodes::new("progrmaing".to_string(), 10)
+    .with_fuzzy(FuzzyLevel::Medium)  // matches "programming"
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+```
+
+**FuzzyLevel options:**
+- `FuzzyLevel::None` - Exact matching only (default)
+- `FuzzyLevel::Low` - 1 character edit (insert, delete, substitute, transpose)
+- `FuzzyLevel::Medium` - 2 character edits
+
+#### Tag Filtering
+
+Filter results by hashtags extracted from content:
+
+```rust
+// Search with tag filter - matches documents with ANY of the specified tags (OR semantics)
+let results = FulltextNodes::new("systems".to_string(), 10)
+    .with_tags(vec!["rust".to_string(), "golang".to_string()])
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+// Returns documents tagged with #rust OR #golang
+
+// Combined: fuzzy search with tag filtering
+let results = FulltextNodes::new("concurency".to_string(), 10)
+    .with_fuzzy(FuzzyLevel::Low)
+    .with_tags(vec!["programming".to_string()])
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+```
+
+**Tag Filter Semantics (OR)**:
+- When multiple tags are specified, documents matching **ANY** of the tags are returned
+- Example: `.with_tags(vec!["rust", "python"])` returns documents with #rust OR #python
+- This enables "find documents related to any of these topics" queries
+- For AND semantics (all tags required), issue separate queries and intersect results
+
+Tags are automatically extracted from content during indexing using `#hashtag` syntax.
+See the "Tag Extraction" section in schema.rs for supported tag formats.
+
+### `Edges` Query
+
+Searches for edges and edge fragments, returning deduplicated results by edge key (src_id, dst_id, edge_name):
+
+```rust
+use motlie_db::{FulltextEdges, FuzzyLevel, FulltextQueryRunnable};
+
+// Basic search
 let results = FulltextEdges::new("collaborates".to_string(), 10)
     .run(&reader, Duration::from_secs(5))
     .await?;
+
+for result in results {
+    println!("Edge: {} -> {} ({}), Score: {}",
+        result.src_id, result.dst_id, result.edge_name, result.score);
+}
+
+// With fuzzy matching
+let results = FulltextEdges::new("colaborates".to_string(), 10)
+    .with_fuzzy(FuzzyLevel::Low)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// With tag filtering
+let results = FulltextEdges::new("partnership".to_string(), 10)
+    .with_tags(vec!["important".to_string()])
+    .run(&reader, Duration::from_secs(5))
+    .await?;
 ```
 
-### `FacetCounts` Query
+### Query Result Types
+
+#### `NodeHit`
+
+```rust
+pub struct NodeHit {
+    /// BM25 relevance score
+    pub score: f32,
+    /// Node ID (use to look up full node in RocksDB)
+    pub id: Id,
+    /// Fragment timestamp (None = node match, Some = fragment match)
+    pub fragment_timestamp: Option<u64>,
+    /// Optional text snippet (for future highlighting support)
+    pub snippet: Option<String>,
+}
+```
+
+#### `EdgeHit`
+
+```rust
+pub struct EdgeHit {
+    /// BM25 relevance score
+    pub score: f32,
+    /// Source node ID
+    pub src_id: Id,
+    /// Destination node ID
+    pub dst_id: Id,
+    /// Edge name
+    pub edge_name: String,
+    /// Fragment timestamp (None = edge match, Some = fragment match)
+    pub fragment_timestamp: Option<u64>,
+    /// Optional text snippet (for future highlighting support)
+    pub snippet: Option<String>,
+}
+```
+
+The `fragment_timestamp` field distinguishes between entity and fragment matches:
+- `None` - The match came from the node/edge itself
+- `Some(ts)` - The match came from a fragment; use with ID to look up in RocksDB
+
+## TODO: Planned Query Types
+
+### `FulltextFacets` Query
+
 Get counts of documents by facet values:
 
 ```rust
-// TODO: Not yet implemented
-// Count documents by tag
-let tag_counts = FacetCounts::by_tag()
+// Get all facet counts across all documents
+let counts = FulltextFacets::new()
     .run(&reader, Duration::from_secs(5))
     .await?;
-// Returns: [("rust", 42), ("programming", 38), ("database", 25), ...]
 
-// Count documents by type
-let type_counts = FacetCounts::by_doc_type()
-    .run(&reader, Duration::from_secs(5))
-    .await?;
-// Returns: [("nodes", 500), ("forward_edges", 1200), ("node_fragments", 300), ...]
+// Document type counts: nodes, edges, node_fragments, edge_fragments
+println!("Nodes: {}", counts.doc_types.get("nodes").unwrap_or(&0));
+println!("Edges: {}", counts.doc_types.get("edges").unwrap_or(&0));
 
-// Count by validity structure
-let validity_counts = FacetCounts::by_validity()
-    .run(&reader, Duration::from_secs(5))
-    .await?;
-// Returns: [("unbounded", 400), ("bounded", 100), ("since_only", 50), ...]
+// Tag counts (from #hashtags in content)
+for (tag, count) in &counts.tags {
+    println!("#{}: {}", tag, count);
+}
+
+// Validity structure counts: unbounded, bounded, since_only, until_only
+for (validity, count) in &counts.validity {
+    println!("{}: {}", validity, count);
+}
 ```
 
-### `NodesWithFacets` Query
-Search nodes with facet filtering:
+#### Filtering by Document Type
 
 ```rust
-// TODO: Not yet implemented
-let results = NodesWithFacets::new("machine learning".to_string(), 10)
-    .filter_tag("ai")
-    .filter_validity("bounded")  // Only temporally bounded documents
+// Get facet counts only for nodes
+let nodes_counts = FulltextFacets::new()
+    .with_doc_type_filter(vec!["nodes".to_string()])
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Get facet counts for edges and edge fragments
+let edge_counts = FulltextFacets::new()
+    .with_doc_type_filter(vec!["edges".to_string(), "edge_fragments".to_string()])
     .run(&reader, Duration::from_secs(5))
     .await?;
 ```
 
-### `EdgesWithFacets` Query
-Search edges with facet filtering:
+#### Limiting Tag Results
 
 ```rust
-// TODO: Not yet implemented
-let results = EdgesWithFacets::new("collaboration".to_string(), 10)
-    .filter_tag("partnership")
+// Limit tag facets to top 10
+let counts = FulltextFacets::new()
+    .with_tags_limit(10)
     .run(&reader, Duration::from_secs(5))
     .await?;
+
+// counts.tags will have at most 10 entries
+assert!(counts.tags.len() <= 10);
 ```
+
+The following query types are planned but not yet implemented:
 
 ### `Aggregations` Query
 Aggregate statistics over search results:
@@ -569,24 +783,22 @@ let similar = MoreLikeThis::new(node_id)
 
 ### Completed
 - [x] Basic `Nodes` query with BM25 ranking
+- [x] Basic `Edges` query with BM25 ranking
 - [x] Node and node fragment deduplication
+- [x] Edge and edge fragment deduplication
 - [x] Facet indexing (doc_type, validity, tags)
-- [x] Fuzzy search support via `FuzzySearchOptions`
+- [x] Fuzzy search support via `FuzzyLevel` (integrated into queries)
+- [x] Tag filtering via `with_tags()` builder method
 - [x] Multiple query consumers with shared Index
 - [x] Readonly/Readwrite storage modes
 - [x] Temporal validity fields (valid_since, valid_until)
 - [x] Time range queries on creation_timestamp and validity fields
-
-### In Progress
-- [ ] `Edges` query (search edges and edge fragments)
+- [x] `FulltextFacets` query for facet statistics (doc_types, tags, validity)
 
 ### Planned
-- [ ] `FacetCounts` query for facet statistics
-- [ ] `NodesWithFacets` query with facet filtering
-- [ ] `EdgesWithFacets` query with facet filtering
 - [ ] `Aggregations` query for search analytics
 - [ ] `MoreLikeThis` query for similarity search
-- [ ] Highlight support (return matching snippets)
+- [ ] Highlight support (return matching snippets via `snippet` field)
 - [ ] Pagination with search_after for deep pagination
 - [ ] Custom scoring/boosting per field
 
@@ -598,15 +810,90 @@ fulltext/
 ├── schema.rs    # Tantivy schema definition and field handles
 ├── mutation.rs  # MutationExecutor impls for index updates
 ├── writer.rs    # Writer/MutationConsumer infrastructure
-├── query.rs     # Query types (Nodes fulltext search)
+├── query.rs     # Query types (Nodes, Edges), FuzzyLevel enum
 ├── reader.rs    # Reader/QueryConsumer infrastructure
-├── search.rs    # Search result types and facet counts
-├── fuzzy.rs     # Fuzzy search options
+├── search.rs    # Search result types (NodeHit, EdgeHit, FacetCounts)
 └── README.md    # This file
+```
+
+## Integration Tests
+
+The `tests/test_fulltext_search_pipeline.rs` file contains comprehensive integration tests that verify the fulltext search functionality with the graph storage backend. Each test demonstrates specific query capabilities:
+
+### Test Coverage
+
+| Test Name | Features Demonstrated |
+|-----------|----------------------|
+| `test_fulltext_node_search_resolves_to_rocksdb` | Basic `FulltextNodes` query, BM25 scoring, result deduplication by node ID, verification via `NodeById` graph query |
+| `test_fulltext_edge_search_resolves_to_rocksdb` | Basic `FulltextEdges` query, BM25 scoring, result deduplication by edge key (src, dst, name), verification via `EdgeSummaryBySrcDstName` graph query |
+| `test_fulltext_combined_search_with_verification` | Mixed node/edge searches, cross-verification between fulltext hits and RocksDB entries, fragment indexing |
+| `test_fulltext_fragment_deduplication_behavior` | Multiple fragments per entity, deduplication semantics, best score retention |
+| `test_fulltext_search_limit_and_ordering` | Result limit enforcement, BM25 score ordering, pagination behavior |
+| `test_fulltext_tag_facet_filtering` | `#hashtag` extraction from content, `with_tags()` filter, OR semantics for multiple tags, works for both nodes and edges |
+| `test_fulltext_tag_or_semantics` | Explicit verification of OR semantics: documents with mutually exclusive tags, multiple tags return union of matches |
+| `test_fulltext_fuzzy_search` | `FuzzyLevel::Low` (1 edit distance), `FuzzyLevel::Medium` (2 edits), typo tolerance for nodes and edges |
+| `test_fulltext_facets_query` | `FulltextFacets` query for aggregating facet counts, doc_type filtering, tags_limit option, validity facet counts |
+
+### Running the Tests
+
+```bash
+# Run all fulltext search pipeline tests
+cargo test --test test_fulltext_search_pipeline
+
+# Run a specific test with output
+cargo test --test test_fulltext_search_pipeline test_fulltext_tag_facet_filtering -- --nocapture
+
+# Run tests matching a pattern
+cargo test --test test_fulltext_search_pipeline fuzzy -- --nocapture
+```
+
+### Test Architecture
+
+Each test follows this pattern:
+
+1. **Setup mutation pipeline** - Graph and fulltext consumers chained together
+2. **Add test data** - Nodes, edges, and fragments with searchable content
+3. **Run fulltext queries** - Using `FulltextNodes` or `FulltextEdges`
+4. **Verify against RocksDB** - Each hit is resolved via graph queries (`NodeById`, `EdgeSummaryBySrcDstName`)
+5. **Cleanup** - Drop readers and await consumer handles
+
+Example from `test_fulltext_tag_or_semantics`:
+
+```rust
+// Create nodes with mutually exclusive tags
+AddNode {
+    id: node_a_id,
+    name: "NodeA".to_string(),
+    summary: NodeSummary::from_text("This document has only the #alpha tag"),
+    // ...
+}.run(&writer).await?;
+
+AddNode {
+    id: node_b_id,
+    name: "NodeB".to_string(),
+    summary: NodeSummary::from_text("This document has only the #beta tag"),
+    // ...
+}.run(&writer).await?;
+
+// Query with multiple tags - OR semantics means EITHER tag matches
+let results = FulltextNodes::new("document".to_string(), 10)
+    .with_tags(vec!["alpha".to_string(), "beta".to_string()])
+    .run(&fulltext_reader, timeout)
+    .await?;
+
+// With OR semantics: returns 2 results (NodeA has #alpha, NodeB has #beta)
+// With AND semantics: would return 0 results (no node has both tags)
+assert_eq!(results.len(), 2);
+
+// Verify results contain both nodes
+let result_ids: Vec<_> = results.iter().map(|r| r.id).collect();
+assert!(result_ids.contains(&node_a_id));  // Has #alpha
+assert!(result_ids.contains(&node_b_id));  // Has #beta
 ```
 
 ## See Also
 
+- `tests/test_fulltext_search_pipeline.rs` - **Main integration tests** demonstrating all query features
 - `tests/test_pipeline_integration.rs` - Complete integration tests demonstrating all patterns
 - `tests/test_fulltext_integration.rs` - Fulltext-specific integration tests
 - `tests/test_fulltext_chaining.rs` - Graph-to-fulltext chaining tests

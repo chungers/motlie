@@ -26,7 +26,7 @@ pub enum Verb {
     /// List column families
     List(List),
     /// Dump contents of a column family
-    Dump(Dump),
+    Scan(Scan),
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -53,7 +53,7 @@ pub enum OutputFormat {
 pub struct List {}
 
 #[derive(Debug, ClapArgs)]
-pub struct Dump {
+pub struct Scan {
     /// Column family to dump
     #[clap(value_enum)]
     pub cf: ColumnFamily,
@@ -89,8 +89,8 @@ pub fn run(cmd: &Command) {
         Verb::List(_args) => {
             run_list();
         }
-        Verb::Dump(args) => {
-            if let Err(e) = run_dump(&cmd.db_dir, args) {
+        Verb::Scan(args) => {
+            if let Err(e) = run_scan(&cmd.db_dir, args) {
                 error!("Dump failed: {}", e);
                 std::process::exit(1);
             }
@@ -109,7 +109,7 @@ fn run_list() {
     println!("  edge-names");
 }
 
-fn run_dump(db_dir: &PathBuf, args: &Dump) -> anyhow::Result<()> {
+fn run_scan(db_dir: &PathBuf, args: &Scan) -> anyhow::Result<()> {
     let mut storage = Storage::readonly(db_dir);
     storage.ready()?;
 
@@ -120,13 +120,13 @@ fn run_dump(db_dir: &PathBuf, args: &Dump) -> anyhow::Result<()> {
     };
 
     match args.cf {
-        ColumnFamily::Nodes => dump_nodes(&storage, args, reference_ts),
-        ColumnFamily::NodeFragments => dump_node_fragments(&storage, args, reference_ts),
-        ColumnFamily::EdgeFragments => dump_edge_fragments(&storage, args, reference_ts),
-        ColumnFamily::OutgoingEdges => dump_outgoing_edges(&storage, args, reference_ts),
-        ColumnFamily::IncomingEdges => dump_incoming_edges(&storage, args, reference_ts),
-        ColumnFamily::NodeNames => dump_node_names(&storage, args, reference_ts),
-        ColumnFamily::EdgeNames => dump_edge_names(&storage, args, reference_ts),
+        ColumnFamily::Nodes => scan_nodes(&storage, args, reference_ts),
+        ColumnFamily::NodeFragments => scan_node_fragments(&storage, args, reference_ts),
+        ColumnFamily::EdgeFragments => scan_edge_fragments(&storage, args, reference_ts),
+        ColumnFamily::OutgoingEdges => scan_outgoing_edges(&storage, args, reference_ts),
+        ColumnFamily::IncomingEdges => scan_incoming_edges(&storage, args, reference_ts),
+        ColumnFamily::NodeNames => scan_node_names(&storage, args, reference_ts),
+        ColumnFamily::EdgeNames => scan_edge_names(&storage, args, reference_ts),
     }
 }
 
@@ -144,7 +144,10 @@ fn parse_datetime(s: &str) -> anyhow::Result<TimestampMilli> {
         // Split on the 4th hyphen (after YYYY-MM-DD-)
         let parts: Vec<&str> = s.splitn(4, '-').collect();
         if parts.len() == 4 {
-            Some((format!("{}-{}-{}", parts[0], parts[1], parts[2]), parts[3].to_string()))
+            Some((
+                format!("{}-{}-{}", parts[0], parts[1], parts[2]),
+                parts[3].to_string(),
+            ))
         } else {
             None
         }
@@ -256,7 +259,8 @@ fn datetime_to_millis(
     total_days += (day - 1) as u64;
 
     // Convert to milliseconds
-    let total_seconds = total_days * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
+    let total_seconds =
+        total_days * 86400 + hour as u64 * 3600 + minute as u64 * 60 + second as u64;
     Ok(total_seconds * 1000)
 }
 
@@ -361,7 +365,11 @@ fn extract_printable_content(content: &DataUrl, max_len: usize) -> String {
     match content.decode_string() {
         Ok(s) => {
             // Replace newlines with spaces and truncate
-            let cleaned: String = s.chars().take(max_len).map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+            let cleaned: String = s
+                .chars()
+                .take(max_len)
+                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                .collect();
             if s.len() > max_len {
                 format!("{}...", cleaned)
             } else {
@@ -438,7 +446,13 @@ impl TablePrinter {
             let line: Vec<String> = row
                 .iter()
                 .enumerate()
-                .map(|(i, cell)| format!("{:width$}", cell, width = widths.get(i).copied().unwrap_or(0)))
+                .map(|(i, cell)| {
+                    format!(
+                        "{:width$}",
+                        cell,
+                        width = widths.get(i).copied().unwrap_or(0)
+                    )
+                })
                 .collect();
             println!("{}", line.join("  "));
         }
@@ -446,10 +460,14 @@ impl TablePrinter {
 }
 
 // ============================================================================
-// Dump Functions
+// Scan Functions
 // ============================================================================
 
-fn dump_nodes(storage: &Storage, args: &Dump, reference_ts: Option<TimestampMilli>) -> anyhow::Result<()> {
+fn scan_nodes(
+    storage: &Storage,
+    args: &Scan,
+    reference_ts: Option<TimestampMilli>,
+) -> anyhow::Result<()> {
     let last = args
         .last
         .as_ref()
@@ -480,12 +498,19 @@ fn dump_nodes(storage: &Storage, args: &Dump, reference_ts: Option<TimestampMill
     Ok(())
 }
 
-fn dump_node_fragments(storage: &Storage, args: &Dump, reference_ts: Option<TimestampMilli>) -> anyhow::Result<()> {
+fn scan_node_fragments(
+    storage: &Storage,
+    args: &Scan,
+    reference_ts: Option<TimestampMilli>,
+) -> anyhow::Result<()> {
     // For node fragments, last format is "node_id:timestamp"
     let last = if let Some(s) = &args.last {
         let parts: Vec<&str> = s.split(':').collect();
         if parts.len() != 2 {
-            anyhow::bail!("Invalid cursor format. Expected 'node_id:timestamp', got '{}'", s);
+            anyhow::bail!(
+                "Invalid cursor format. Expected 'node_id:timestamp', got '{}'",
+                s
+            );
         }
         let node_id = Id::from_str(parts[0])
             .map_err(|e| anyhow::anyhow!("Invalid node ID '{}': {}", parts[0], e))?;
@@ -504,7 +529,10 @@ fn dump_node_fragments(storage: &Storage, args: &Dump, reference_ts: Option<Time
         reference_ts_millis: reference_ts,
     };
 
-    let mut printer = TablePrinter::new(vec!["SINCE", "UNTIL", "NODE_ID", "TIMESTAMP", "MIME", "CONTENT"], args.format);
+    let mut printer = TablePrinter::new(
+        vec!["SINCE", "UNTIL", "NODE_ID", "TIMESTAMP", "MIME", "CONTENT"],
+        args.format,
+    );
 
     scan.accept(storage, &mut |record: &NodeFragmentRecord| {
         let mime = record
@@ -527,7 +555,11 @@ fn dump_node_fragments(storage: &Storage, args: &Dump, reference_ts: Option<Time
     Ok(())
 }
 
-fn dump_edge_fragments(storage: &Storage, args: &Dump, reference_ts: Option<TimestampMilli>) -> anyhow::Result<()> {
+fn scan_edge_fragments(
+    storage: &Storage,
+    args: &Scan,
+    reference_ts: Option<TimestampMilli>,
+) -> anyhow::Result<()> {
     // For edge fragments, last format is "src_id:dst_id:edge_name:timestamp"
     let last = if let Some(s) = &args.last {
         let parts: Vec<&str> = s.splitn(4, ':').collect();
@@ -563,7 +595,16 @@ fn dump_edge_fragments(storage: &Storage, args: &Dump, reference_ts: Option<Time
     };
 
     let mut printer = TablePrinter::new(
-        vec!["SINCE", "UNTIL", "SRC_ID", "DST_ID", "TIMESTAMP", "EDGE_NAME", "MIME", "CONTENT"],
+        vec![
+            "SINCE",
+            "UNTIL",
+            "SRC_ID",
+            "DST_ID",
+            "TIMESTAMP",
+            "EDGE_NAME",
+            "MIME",
+            "CONTENT",
+        ],
         args.format,
     );
 
@@ -590,7 +631,11 @@ fn dump_edge_fragments(storage: &Storage, args: &Dump, reference_ts: Option<Time
     Ok(())
 }
 
-fn dump_outgoing_edges(storage: &Storage, args: &Dump, reference_ts: Option<TimestampMilli>) -> anyhow::Result<()> {
+fn scan_outgoing_edges(
+    storage: &Storage,
+    args: &Scan,
+    reference_ts: Option<TimestampMilli>,
+) -> anyhow::Result<()> {
     // For outgoing edges, last format is "src_id:dst_id:edge_name"
     let last = if let Some(s) = &args.last {
         let parts: Vec<&str> = s.splitn(3, ':').collect();
@@ -617,7 +662,10 @@ fn dump_outgoing_edges(storage: &Storage, args: &Dump, reference_ts: Option<Time
         reference_ts_millis: reference_ts,
     };
 
-    let mut printer = TablePrinter::new(vec!["SINCE", "UNTIL", "SRC_ID", "DST_ID", "EDGE_NAME", "WEIGHT"], args.format);
+    let mut printer = TablePrinter::new(
+        vec!["SINCE", "UNTIL", "SRC_ID", "DST_ID", "EDGE_NAME", "WEIGHT"],
+        args.format,
+    );
 
     scan.accept(storage, &mut |record: &EdgeRecord| {
         let weight_str = record
@@ -639,7 +687,11 @@ fn dump_outgoing_edges(storage: &Storage, args: &Dump, reference_ts: Option<Time
     Ok(())
 }
 
-fn dump_incoming_edges(storage: &Storage, args: &Dump, reference_ts: Option<TimestampMilli>) -> anyhow::Result<()> {
+fn scan_incoming_edges(
+    storage: &Storage,
+    args: &Scan,
+    reference_ts: Option<TimestampMilli>,
+) -> anyhow::Result<()> {
     // For incoming edges, last format is "dst_id:src_id:edge_name"
     let last = if let Some(s) = &args.last {
         let parts: Vec<&str> = s.splitn(3, ':').collect();
@@ -666,7 +718,10 @@ fn dump_incoming_edges(storage: &Storage, args: &Dump, reference_ts: Option<Time
         reference_ts_millis: reference_ts,
     };
 
-    let mut printer = TablePrinter::new(vec!["SINCE", "UNTIL", "DST_ID", "SRC_ID", "EDGE_NAME"], args.format);
+    let mut printer = TablePrinter::new(
+        vec!["SINCE", "UNTIL", "DST_ID", "SRC_ID", "EDGE_NAME"],
+        args.format,
+    );
 
     scan.accept(storage, &mut |record: &ReverseEdgeRecord| {
         printer.add_row(vec![
@@ -683,12 +738,19 @@ fn dump_incoming_edges(storage: &Storage, args: &Dump, reference_ts: Option<Time
     Ok(())
 }
 
-fn dump_node_names(storage: &Storage, args: &Dump, reference_ts: Option<TimestampMilli>) -> anyhow::Result<()> {
+fn scan_node_names(
+    storage: &Storage,
+    args: &Scan,
+    reference_ts: Option<TimestampMilli>,
+) -> anyhow::Result<()> {
     // For node names, last format is "name:node_id"
     let last = if let Some(s) = &args.last {
         // Find the last ':' to split name and id (name may contain ':')
         let last_colon = s.rfind(':').ok_or_else(|| {
-            anyhow::anyhow!("Invalid cursor format. Expected 'name:node_id', got '{}'", s)
+            anyhow::anyhow!(
+                "Invalid cursor format. Expected 'name:node_id', got '{}'",
+                s
+            )
         })?;
         let name = s[..last_colon].to_string();
         let node_id = Id::from_str(&s[last_colon + 1..])
@@ -721,7 +783,11 @@ fn dump_node_names(storage: &Storage, args: &Dump, reference_ts: Option<Timestam
     Ok(())
 }
 
-fn dump_edge_names(storage: &Storage, args: &Dump, reference_ts: Option<TimestampMilli>) -> anyhow::Result<()> {
+fn scan_edge_names(
+    storage: &Storage,
+    args: &Scan,
+    reference_ts: Option<TimestampMilli>,
+) -> anyhow::Result<()> {
     // For edge names, last format is "name:src_id:dst_id"
     let last = if let Some(s) = &args.last {
         // Split from the end - last two ':' separate the IDs
@@ -750,7 +816,10 @@ fn dump_edge_names(storage: &Storage, args: &Dump, reference_ts: Option<Timestam
         reference_ts_millis: reference_ts,
     };
 
-    let mut printer = TablePrinter::new(vec!["SINCE", "UNTIL", "SRC_ID", "DST_ID", "NAME"], args.format);
+    let mut printer = TablePrinter::new(
+        vec!["SINCE", "UNTIL", "SRC_ID", "DST_ID", "NAME"],
+        args.format,
+    );
 
     scan.accept(storage, &mut |record: &EdgeNameRecord| {
         printer.add_row(vec![
