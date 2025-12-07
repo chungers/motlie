@@ -862,7 +862,7 @@ Then open your browser to `http://localhost:8081/viz` (or your custom port).
 | Feature | Description |
 |---------|-------------|
 | **Interactive Graph** | Pan, zoom, and drag nodes to explore the IAM permission structure |
-| **Node Shapes** | Different shapes distinguish entity categories: triangles (Users), diamonds (Workloads), squares (Resources), circles (Groups/Policies/Roles) |
+| **Node Shapes** | Different shapes distinguish entity categories: triangles (Users), diamonds (Workloads), hexagons (VPCs), squares (Resources), circles (Groups/Policies/Roles) |
 | **Node Colors** | Each IAM entity type has a distinct color (Users=blue, Groups=green, Policies=purple, etc.) |
 | **Edge Types** | Colored edges show relationship types (member_of, has_policy, can_access, etc.) |
 | **Click Details** | Click any node or edge to see detailed information in the sidebar |
@@ -881,7 +881,7 @@ Then open your browser to `http://localhost:8081/viz` (or your custom port).
 | Policy | Purple (#9b59b6) | Circle | Permission definitions |
 | Role | Orange (#e67e22) | Circle | Assumable identities |
 | Workload | Teal (#1abc9c) | Diamond | Running services |
-| VPC | Yellow (#f39c12) | Square | Virtual networks |
+| VPC | Yellow (#f39c12) | Hexagon | Virtual networks |
 | Instance | Red (#e74c3c) | Square | Compute resources |
 | Disk | Dark Red (#c0392b) | Square | Storage resources |
 | Database | Dark Purple (#8e44ad) | Square | Database resources |
@@ -890,7 +890,8 @@ Then open your browser to `http://localhost:8081/viz` (or your custom port).
 **Shape Legend:**
 - **Triangles**: Identity nodes (Users)
 - **Diamonds**: Workload nodes (running services that assume roles)
-- **Squares**: Resource nodes (VPCs, Instances, Disks, Databases)
+- **Hexagons**: Network containers (VPCs)
+- **Squares**: Resource nodes (Instances, Disks, Databases)
 - **Circles**: Permission structure nodes (Groups, Policies, Roles, Regions)
 
 ### Understanding This Analysis Panel
