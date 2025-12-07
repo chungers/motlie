@@ -74,18 +74,14 @@
             background: #ffffff;
         }
 
-        /* Sidebar - hidden initially, shown after analysis */
+        /* Sidebar - always visible */
         #sidebar {
             width: 420px;
             background: #252525;
             border-left: 1px solid #333;
-            display: none;
+            display: flex;
             flex-direction: column;
             overflow: hidden;
-        }
-
-        #sidebar.visible {
-            display: flex;
         }
 
         #info {
@@ -651,20 +647,25 @@
     <div id="container">
         <div id="mynetwork"></div>
         <div id="sidebar">
-            <div id="info"></div>
+            <div id="info">
+                <div class="info-section" id="selectionInfo">
+                    <h3>Selection</h3>
+                    <p style="color: #888; font-size: 12px;">Click on a node or edge to view details</p>
+                </div>
+            </div>
             <div id="legend">
                 <div class="legend-title">Node Types</div>
                 <div class="legend-grid">
-                    <div class="legend-item"><span class="legend-color" style="background: #3498db;"></span><span>User</span></div>
-                    <div class="legend-item"><span class="legend-color" style="background: #27ae60;"></span><span>Group</span></div>
-                    <div class="legend-item"><span class="legend-color" style="background: #9b59b6;"></span><span>Policy</span></div>
-                    <div class="legend-item"><span class="legend-color" style="background: #e67e22;"></span><span>Role</span></div>
-                    <div class="legend-item"><span class="legend-color" style="background: #1abc9c;"></span><span>Workload</span></div>
-                    <div class="legend-item"><span class="legend-color" style="background: #f39c12;"></span><span>VPC</span></div>
-                    <div class="legend-item"><span class="legend-color" style="background: #e74c3c;"></span><span>Instance</span></div>
-                    <div class="legend-item"><span class="legend-color" style="background: #c0392b;"></span><span>Disk</span></div>
-                    <div class="legend-item"><span class="legend-color" style="background: #8e44ad;"></span><span>Database</span></div>
-                    <div class="legend-item"><span class="legend-color" style="background: #34495e;"></span><span>Region</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #3498db;"></span><span>User ▲</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #27ae60;"></span><span>Group ●</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #9b59b6;"></span><span>Policy ●</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #e67e22;"></span><span>Role ●</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #1abc9c;"></span><span>Workload ◆</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #f39c12;"></span><span>VPC ⬡</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #e74c3c;"></span><span>Instance ■</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #c0392b;"></span><span>Disk ■</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #8e44ad;"></span><span>Database ■</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #34495e;"></span><span>Region ●</span></div>
                 </div>
             </div>
         </div>
@@ -974,10 +975,7 @@
         }
 
         function showResultsPanel(result, metrics) {
-            const sidebar = document.getElementById('sidebar');
             const infoDiv = document.getElementById('info');
-
-            sidebar.classList.add('visible');
 
             // Metrics panel
             let metricsHtml = '';
@@ -1209,7 +1207,8 @@
             executionMetrics = null;
             overlayActive = false;
 
-            document.getElementById('sidebar').classList.remove('visible');
+            // Reset info panel to default state
+            resetInfoPanel();
             document.getElementById('clearBtn').style.display = 'none';
             updateStatusIdle();
             resetHighlighting();
@@ -1376,6 +1375,11 @@
             network.on("click", function(params) {
                 if (params.nodes.length > 0) {
                     showNodeInfo(params.nodes[0]);
+                } else if (params.edges.length > 0) {
+                    showEdgeInfo(params.edges[0]);
+                } else {
+                    // Clicked on empty space - reset to default or results view
+                    resetInfoPanel();
                 }
             });
 
@@ -1388,22 +1392,29 @@
 
         function showNodeInfo(nodeId) {
             const node = dataNodes.get(nodeId);
-            if (!node || !analysisResult) return;
+            if (!node) return;
 
-            // Update sidebar with node info while keeping results
             const infoDiv = document.getElementById('info');
-            const existingContent = infoDiv.innerHTML;
 
             const connectedEdges = network.getConnectedEdges(nodeId);
-            const edgeInfo = connectedEdges.map(edgeId => {
+
+            // Separate incoming and outgoing edges
+            const incomingEdges = [];
+            const outgoingEdges = [];
+
+            connectedEdges.forEach(edgeId => {
                 const edge = dataEdges.get(edgeId);
                 const otherNodeId = edge.from === nodeId ? edge.to : edge.from;
-                const direction = edge.from === nodeId ? 'to' : 'from';
-                return { edge, edgeId, otherNode: dataNodes.get(otherNodeId), direction };
+                const otherNode = dataNodes.get(otherNodeId);
+                if (edge.from === nodeId) {
+                    outgoingEdges.push({ edge, edgeId, otherNode });
+                } else {
+                    incomingEdges.push({ edge, edgeId, otherNode });
+                }
             });
 
             let annotationHtml = '';
-            if (analysisResult.node_annotations && analysisResult.node_annotations[nodeId]) {
+            if (analysisResult && analysisResult.node_annotations && analysisResult.node_annotations[nodeId]) {
                 annotationHtml = `<div class="result-summary">${escapeHtml(analysisResult.node_annotations[nodeId])}</div>`;
             }
 
@@ -1417,23 +1428,101 @@
                     ${annotationHtml}
                 </div>
                 <div class="info-section">
-                    <h3>Connections (${edgeInfo.length})</h3>
+                    <h3>Incoming Edges (${incomingEdges.length})</h3>
                     <div class="edge-list">
-                        ${edgeInfo.slice(0, 10).map(info => `
+                        ${incomingEdges.length === 0 ? '<div style="color: #666; font-size: 11px; padding: 4px 0;">None</div>' : ''}
+                        ${incomingEdges.slice(0, 8).map(info => `
                             <div class="edge-item" onclick="selectEdgeAndNodes(${info.edgeId}, '${escapeJs(nodeId)}', '${escapeJs(info.otherNode.id)}')">
                                 <span class="edge-type">${info.edge.type}</span>
-                                <span class="edge-target">${info.direction} ${info.otherNode.fullLabel}</span>
+                                <span class="edge-target">from ${info.otherNode.fullLabel}</span>
                             </div>
                         `).join('')}
-                        ${edgeInfo.length > 10 ? `<div class="edge-item" style="color: #888;">... and ${edgeInfo.length - 10} more</div>` : ''}
+                        ${incomingEdges.length > 8 ? `<div class="edge-item" style="color: #888;">... and ${incomingEdges.length - 8} more</div>` : ''}
                     </div>
                 </div>
+                <div class="info-section">
+                    <h3>Outgoing Edges (${outgoingEdges.length})</h3>
+                    <div class="edge-list">
+                        ${outgoingEdges.length === 0 ? '<div style="color: #666; font-size: 11px; padding: 4px 0;">None</div>' : ''}
+                        ${outgoingEdges.slice(0, 8).map(info => `
+                            <div class="edge-item" onclick="selectEdgeAndNodes(${info.edgeId}, '${escapeJs(nodeId)}', '${escapeJs(info.otherNode.id)}')">
+                                <span class="edge-type">${info.edge.type}</span>
+                                <span class="edge-target">to ${info.otherNode.fullLabel}</span>
+                            </div>
+                        `).join('')}
+                        ${outgoingEdges.length > 8 ? `<div class="edge-item" style="color: #888;">... and ${outgoingEdges.length - 8} more</div>` : ''}
+                    </div>
+                </div>
+                ${analysisResult ? `
                 <button onclick="showResultsPanel(analysisResult, executionMetrics)" class="button-secondary" style="width: 100%;">
                     Back to Results
                 </button>
+                ` : ''}
             `;
 
             infoDiv.innerHTML = nodeInfoHtml;
+        }
+
+        function showEdgeInfo(edgeId) {
+            const edge = dataEdges.get(edgeId);
+            if (!edge) return;
+
+            const fromNode = dataNodes.get(edge.from);
+            const toNode = dataNodes.get(edge.to);
+            if (!fromNode || !toNode) return;
+
+            const infoDiv = document.getElementById('info');
+
+            let annotationHtml = '';
+            if (analysisResult && analysisResult.edge_annotations && analysisResult.edge_annotations[edgeId]) {
+                annotationHtml = `<div class="result-summary">${escapeHtml(analysisResult.edge_annotations[edgeId])}</div>`;
+            }
+
+            const edgeInfoHtml = `
+                <div class="info-section">
+                    <h3>Selected: Edge</h3>
+                    <div style="background: #1a1a1a; padding: 12px; border-radius: 4px; border-left: 3px solid ${edge.color.color || edge.color};">
+                        <strong>${escapeHtml(edge.type)}</strong>
+                        <br><small style="color: #888;">Weight: ${edge.weight}</small>
+                    </div>
+                    ${annotationHtml}
+                </div>
+                <div class="info-section">
+                    <h3>From</h3>
+                    <div class="edge-item" onclick="selectNode('${escapeJs(fromNode.id)}')" style="cursor: pointer;">
+                        <span style="display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: ${fromNode.color}; margin-right: 8px;"></span>
+                        <span><strong>${escapeHtml(fromNode.type)}:</strong> ${escapeHtml(fromNode.fullLabel)}</span>
+                    </div>
+                </div>
+                <div class="info-section">
+                    <h3>To</h3>
+                    <div class="edge-item" onclick="selectNode('${escapeJs(toNode.id)}')" style="cursor: pointer;">
+                        <span style="display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: ${toNode.color}; margin-right: 8px;"></span>
+                        <span><strong>${escapeHtml(toNode.type)}:</strong> ${escapeHtml(toNode.fullLabel)}</span>
+                    </div>
+                </div>
+                ${analysisResult ? `
+                <button onclick="showResultsPanel(analysisResult, executionMetrics)" class="button-secondary" style="width: 100%;">
+                    Back to Results
+                </button>
+                ` : ''}
+            `;
+
+            infoDiv.innerHTML = edgeInfoHtml;
+        }
+
+        function resetInfoPanel() {
+            const infoDiv = document.getElementById('info');
+            if (analysisResult) {
+                showResultsPanel(analysisResult, executionMetrics);
+            } else {
+                infoDiv.innerHTML = `
+                    <div class="info-section" id="selectionInfo">
+                        <h3>Selection</h3>
+                        <p style="color: #888; font-size: 12px;">Click on a node or edge to view details</p>
+                    </div>
+                `;
+            }
         }
 
         // Select edge and highlight both source and target nodes
