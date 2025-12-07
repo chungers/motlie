@@ -1267,8 +1267,10 @@
                 if (node.node_type === 'User') {
                     shape = 'triangle';
                 } else if (node.node_type === 'Instance' || node.node_type === 'Disk' ||
-                           node.node_type === 'Database' || node.node_type === 'Vpc') {
+                           node.node_type === 'Database') {
                     shape = 'square';
+                } else if (node.node_type === 'Vpc') {
+                    shape = 'hexagon';
                 } else if (node.node_type === 'Workload') {
                     shape = 'diamond';
                 }
