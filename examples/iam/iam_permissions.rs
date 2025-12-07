@@ -1181,8 +1181,61 @@ mod reference {
         source: NodeIndex,
         sensitive_targets: &[NodeIndex],
     ) -> AnalysisResult {
-        let distances = dijkstra(graph, source, None, |e| *e.weight());
+        use std::cmp::Ordering;
+        use std::collections::BinaryHeap;
 
+        #[derive(Clone)]
+        struct State {
+            cost: f64,
+            node: NodeIndex,
+        }
+
+        impl Eq for State {}
+        impl PartialEq for State {
+            fn eq(&self, other: &Self) -> bool {
+                self.cost == other.cost
+            }
+        }
+        impl Ord for State {
+            fn cmp(&self, other: &Self) -> Ordering {
+                other.cost.partial_cmp(&self.cost).unwrap_or(Ordering::Equal)
+            }
+        }
+        impl PartialOrd for State {
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        let sensitive_set: HashSet<_> = sensitive_targets.iter().copied().collect();
+        let mut distances: HashMap<NodeIndex, f64> = HashMap::new();
+        let mut predecessors: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+        let mut heap = BinaryHeap::new();
+
+        distances.insert(source, 0.0);
+        heap.push(State { cost: 0.0, node: source });
+
+        while let Some(State { cost, node }) = heap.pop() {
+            if let Some(&best_cost) = distances.get(&node) {
+                if cost > best_cost {
+                    continue;
+                }
+            }
+
+            for edge in graph.edges(node) {
+                let next = edge.target();
+                let weight = *edge.weight();
+                let next_cost = cost + weight;
+
+                if next_cost < *distances.get(&next).unwrap_or(&f64::INFINITY) {
+                    distances.insert(next, next_cost);
+                    predecessors.insert(next, node);
+                    heap.push(State { cost: next_cost, node: next });
+                }
+            }
+        }
+
+        // Find best target among sensitive resources
         let mut best_target: Option<(NodeIndex, f64)> = None;
         for &target in sensitive_targets {
             if let Some(&dist) = distances.get(&target) {
@@ -1193,23 +1246,39 @@ mod reference {
         }
 
         match best_target {
-            Some((target, cost)) => AnalysisResult {
-                use_case: "Least Resistance".to_string(),
-                algorithm: "Dijkstra".to_string(),
-                summary: format!(
-                    "Easiest path cost: {:.2}, Target: {}",
-                    cost, graph[target]
-                ),
-                details: vec![format!(
-                    "Found path to {} with total weight {:.2}",
-                    graph[target], cost
-                )],
+            Some((target, cost)) => {
+                // Reconstruct path from source to target
+                let mut path = vec![target];
+                let mut current = target;
+                while let Some(&pred) = predecessors.get(&current) {
+                    path.push(pred);
+                    current = pred;
+                    if current == source {
+                        break;
+                    }
+                }
+                path.reverse();
+
+                let path_str: Vec<String> = path.iter().map(|&idx| graph[idx].clone()).collect();
+
+                AnalysisResult {
+                    use_case: "Least Resistance".to_string(),
+                    algorithm: "Dijkstra".to_string(),
+                    summary: format!(
+                        "Easiest path cost: {:.2}, Target: {}",
+                        cost, graph[target]
+                    ),
+                    details: vec![
+                        format!("Path: {}", path_str.join(" -> ")),
+                        format!("Total weight: {:.2}", cost),
+                    ],
+                }
             },
             None => AnalysisResult {
                 use_case: "Least Resistance".to_string(),
                 algorithm: "Dijkstra".to_string(),
                 summary: "No path to sensitive resources".to_string(),
-                details: vec![],
+                details: vec!["No reachable sensitive resources from source".to_string()],
             },
         }
     }
@@ -2273,6 +2342,7 @@ mod motlie_impl {
 
         let sensitive_set: HashSet<_> = sensitive_targets.iter().copied().collect();
         let mut distances: HashMap<Id, f64> = HashMap::new();
+        let mut predecessors: HashMap<Id, Id> = HashMap::new();
         let mut heap = BinaryHeap::new();
 
         distances.insert(source, 0.0);
@@ -2281,16 +2351,7 @@ mod motlie_impl {
             node: source,
         });
 
-        let mut best_target: Option<(Id, f64)> = None;
-
         while let Some(State { cost, node }) = heap.pop() {
-            if sensitive_set.contains(&node) {
-                if best_target.is_none() || cost < best_target.unwrap().1 {
-                    best_target = Some((node, cost));
-                }
-                continue; // Found a target, but keep looking for better
-            }
-
             if let Some(&best_cost) = distances.get(&node) {
                 if cost > best_cost {
                     continue;
@@ -2305,6 +2366,7 @@ mod motlie_impl {
 
                 if next_cost < *distances.get(&dst).unwrap_or(&f64::INFINITY) {
                     distances.insert(dst, next_cost);
+                    predecessors.insert(dst, node);
                     heap.push(State {
                         cost: next_cost,
                         node: dst,
@@ -2313,26 +2375,53 @@ mod motlie_impl {
             }
         }
 
+        // Find best target among sensitive resources
+        let mut best_target: Option<(Id, f64)> = None;
+        for &target in sensitive_targets {
+            if let Some(&dist) = distances.get(&target) {
+                if best_target.is_none() || dist < best_target.unwrap().1 {
+                    best_target = Some((target, dist));
+                }
+            }
+        }
+
         match best_target {
-            Some((target, cost)) => Ok(AnalysisResult {
-                use_case: "Least Resistance".to_string(),
-                algorithm: "Dijkstra".to_string(),
-                summary: format!(
-                    "Easiest path cost: {:.2}, Target: {}",
-                    cost,
-                    id_to_name.get(&target).unwrap_or(&"unknown".to_string())
-                ),
-                details: vec![format!(
-                    "Found path to {} with total weight {:.2}",
-                    id_to_name.get(&target).unwrap_or(&"unknown".to_string()),
-                    cost
-                )],
-            }),
+            Some((target, cost)) => {
+                // Reconstruct path from source to target
+                let mut path = vec![target];
+                let mut current = target;
+                while let Some(&pred) = predecessors.get(&current) {
+                    path.push(pred);
+                    current = pred;
+                    if current == source {
+                        break;
+                    }
+                }
+                path.reverse();
+
+                let path_str: Vec<String> = path.iter()
+                    .filter_map(|id| id_to_name.get(id).cloned())
+                    .collect();
+
+                Ok(AnalysisResult {
+                    use_case: "Least Resistance".to_string(),
+                    algorithm: "Dijkstra".to_string(),
+                    summary: format!(
+                        "Easiest path cost: {:.2}, Target: {}",
+                        cost,
+                        id_to_name.get(&target).unwrap_or(&"unknown".to_string())
+                    ),
+                    details: vec![
+                        format!("Path: {}", path_str.join(" -> ")),
+                        format!("Total weight: {:.2}", cost),
+                    ],
+                })
+            },
             None => Ok(AnalysisResult {
                 use_case: "Least Resistance".to_string(),
                 algorithm: "Dijkstra".to_string(),
                 summary: "No path to sensitive resources".to_string(),
-                details: vec![],
+                details: vec!["No reachable sensitive resources from source".to_string()],
             }),
         }
     }
