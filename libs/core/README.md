@@ -35,17 +35,24 @@ Enable the `dtrace-otel` feature:
 motlie-core = { path = "libs/core", features = ["dtrace-otel"] }
 ```
 
-Then initialize:
+Then initialize with the guard pattern:
 
 ```rust
 use motlie_core::telemetry;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    telemetry::init_otel_subscriber_with_env_filter("my-service", "http://localhost:4317")?;
+    // IMPORTANT: Keep the guard alive for the entire application lifetime.
+    // When dropped, it flushes pending spans and shuts down the tracer provider.
+    let _guard = telemetry::init_otel_subscriber_with_env_filter("my-service", "http://localhost:4317")?;
+
     // Application code...
+
     Ok(())
+    // _guard is dropped here, ensuring all spans are flushed before exit
 }
 ```
+
+**Why the guard matters**: The `OtelGuard` holds a reference to the `TracerProvider`. When dropped, it calls `shutdown()` to flush any buffered spans to the collector. Without holding this guard, spans may be lost on application exit.
 
 ### Environment Variables
 
@@ -91,36 +98,47 @@ tracing = "0.1"
 use tracing::{info, debug, error};
 
 fn main() {
-    // Initialize tracing FIRST, before any other code
-    init_tracing();
+    // Initialize tracing FIRST, before any other code.
+    // The guard must be held for the lifetime of the application to ensure
+    // proper shutdown and flushing of telemetry data when using OpenTelemetry.
+    let _telemetry_guard = init_tracing();
 
     info!("Service starting");
 
     // Application code...
+
+    // When main exits, _telemetry_guard is dropped, flushing pending spans.
 }
 
 /// Initialize tracing subscriber based on environment and features.
-fn init_tracing() {
-    #[cfg(feature = "dtrace-otel")]
-    {
-        // Check if DTRACE endpoint is configured
-        if let Ok(endpoint) = std::env::var("DTRACE_ENDPOINT") {
-            let service_name = std::env::var("DTRACE_SERVICE_NAME")
-                .unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_string());
+/// Returns an optional OtelGuard that must be kept alive for proper shutdown.
+#[cfg(feature = "dtrace-otel")]
+fn init_tracing() -> Option<motlie_core::telemetry::OtelGuard> {
+    // Check if DTRACE endpoint is configured
+    if let Ok(endpoint) = std::env::var("DTRACE_ENDPOINT") {
+        let service_name = std::env::var("DTRACE_SERVICE_NAME")
+            .unwrap_or_else(|_| env!("CARGO_PKG_NAME").to_string());
 
-            if let Err(e) = motlie_core::telemetry::init_otel_subscriber_with_env_filter(
-                &service_name,
-                &endpoint,
-            ) {
+        match motlie_core::telemetry::init_otel_subscriber_with_env_filter(
+            &service_name,
+            &endpoint,
+        ) {
+            Ok(guard) => return Some(guard),
+            Err(e) => {
                 eprintln!("Failed to initialize OpenTelemetry: {}. Falling back to dev subscriber.", e);
-                motlie_core::telemetry::init_dev_subscriber_with_env_filter();
             }
-            return;
         }
     }
 
     // Default: use development subscriber with env filter
     motlie_core::telemetry::init_dev_subscriber_with_env_filter();
+    None
+}
+
+#[cfg(not(feature = "dtrace-otel"))]
+fn init_tracing() -> Option<()> {
+    motlie_core::telemetry::init_dev_subscriber_with_env_filter();
+    None
 }
 ```
 
