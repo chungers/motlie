@@ -11,7 +11,7 @@ description = "Database library for motlie"
 ferroid = { version = "0.8", features = ["ulid", "std", "base32"] }
 anyhow.workspace = true
 tokio.workspace = true
-log = "0.4"
+tracing = "0.1"
 async-trait = "0.1"
 rocksdb = "0.24"
 serde = { version = "1.0", features = ["derive"] }

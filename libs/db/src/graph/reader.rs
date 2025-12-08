@@ -203,8 +203,9 @@ impl<P: Processor> Consumer<P> {
     }
 
     /// Process queries continuously until the channel is closed
+    #[tracing::instrument(skip(self), name = "query_consumer")]
     pub async fn run(self) -> Result<()> {
-        log::info!("Starting query consumer with config: {:?}", self.config);
+        tracing::info!(config = ?self.config, "Starting query consumer");
 
         loop {
             // Wait for the next query (MPMC semantics via flume)
@@ -215,7 +216,7 @@ impl<P: Processor> Consumer<P> {
                 }
                 Err(_) => {
                     // Channel closed
-                    log::info!("Query consumer shutting down - channel closed");
+                    tracing::info!("Query consumer shutting down - channel closed");
                     return Ok(());
                 }
             }
@@ -223,8 +224,9 @@ impl<P: Processor> Consumer<P> {
     }
 
     /// Process a single query
+    #[tracing::instrument(skip(self), fields(query_type = %query))]
     async fn process_query(&self, query: Query) {
-        log::debug!("Processing {}", query);
+        tracing::debug!(query = %query, "Processing query");
         query.process_and_send(&self.processor).await;
     }
 }
@@ -446,24 +448,24 @@ pub fn spawn_graph_query_consumer_pool_shared(
         let graph = graph.clone();  // Cheap Arc clone - shares TransactionDB
 
         let handle = tokio::spawn(async move {
-            log::info!("Query worker {} starting (shared TransactionDB mode)", worker_id);
+            tracing::info!(worker_id, "Query worker starting (shared TransactionDB mode)");
 
             // Process queries from shared channel
             // All workers share the same TransactionDB via Arc<Graph>
             while let Ok(query) = receiver.recv_async().await {
-                log::debug!("Worker {} processing {} (shared mode)", worker_id, query);
+                tracing::debug!(worker_id, query = %query, "Processing query (shared mode)");
                 query.process_and_send(&*graph).await;
             }
 
-            log::info!("Query worker {} shutting down", worker_id);
+            tracing::info!(worker_id, "Query worker shutting down");
         });
 
         handles.push(handle);
     }
 
-    log::info!(
-        "Spawned {} query consumer workers (shared TransactionDB mode)",
-        num_workers
+    tracing::info!(
+        num_workers,
+        "Spawned query consumer workers (shared TransactionDB mode)"
     );
     handles
 }
@@ -509,12 +511,12 @@ pub fn spawn_graph_query_consumer_pool_readonly(
         let db_path = db_path.to_path_buf();
 
         let handle = tokio::spawn(async move {
-            log::info!("Query worker {} starting (readonly mode)", worker_id);
+            tracing::info!(worker_id, "Query worker starting (readonly mode)");
 
             // Each worker opens its own readonly Storage
             let mut storage = Storage::readonly(&db_path);
             if let Err(e) = storage.ready() {
-                log::error!("Query worker {} failed to ready storage: {}", worker_id, e);
+                tracing::error!(worker_id, err = %e, "Query worker failed to ready storage");
                 return;
             }
 
@@ -523,19 +525,19 @@ pub fn spawn_graph_query_consumer_pool_readonly(
 
             // Process queries from shared channel
             while let Ok(query) = receiver.recv_async().await {
-                log::debug!("Worker {} processing {} (readonly mode)", worker_id, query);
+                tracing::debug!(worker_id, query = %query, "Processing query (readonly mode)");
                 query.process_and_send(&graph).await;
             }
 
-            log::info!("Query worker {} shutting down", worker_id);
+            tracing::info!(worker_id, "Query worker shutting down");
         });
 
         handles.push(handle);
     }
 
-    log::info!(
-        "Spawned {} query consumer workers (readonly mode - 25-30%% consistency)",
-        num_workers
+    tracing::info!(
+        num_workers,
+        "Spawned query consumer workers (readonly mode - 25-30% consistency)"
     );
     handles
 }

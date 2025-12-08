@@ -644,6 +644,263 @@ See `test_transaction_batching_vs_individual_performance` for benchmarking code.
 - **Self-describing**: Type information embedded in stream
 - **Lexicographically sortable**: Natural ordering preserved
 
+## Telemetry
+
+`motlie-db` uses the `tracing` crate for structured logging and distributed tracing. Telemetry initialization helpers are provided by the `motlie-core` crate.
+
+### Development (stderr logging)
+
+For development, use the simple stderr subscriber:
+
+```rust
+use motlie_core::telemetry;
+
+fn main() {
+    // Simple stderr logging at DEBUG level
+    telemetry::init_dev_subscriber();
+
+    // Or with RUST_LOG environment variable support
+    telemetry::init_dev_subscriber_with_env_filter();
+
+    // Application code...
+}
+```
+
+Control log level via environment variable:
+
+```bash
+# Show debug logs
+RUST_LOG=debug cargo run
+
+# Show only motlie_db debug logs, info for others
+RUST_LOG=info,motlie_db=debug cargo run
+
+# Show warnings and errors only
+RUST_LOG=warn cargo run
+```
+
+### Production (OpenTelemetry)
+
+For production deployments with distributed tracing, enable the `dtrace-otel` feature on `motlie-core`:
+
+```toml
+# Cargo.toml
+[dependencies]
+motlie-core = { version = "0.1", features = ["dtrace-otel"] }
+```
+
+Then initialize with OpenTelemetry:
+
+```rust
+use motlie_core::telemetry;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize OpenTelemetry with OTLP exporter
+    telemetry::init_otel_subscriber("my-service", "http://localhost:4317")?;
+
+    // Or with RUST_LOG environment variable support
+    telemetry::init_otel_subscriber_with_env_filter("my-service", "http://localhost:4317")?;
+
+    // Application code...
+    Ok(())
+}
+```
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RUST_LOG` | Log level filter (e.g., `debug`, `info`, `warn`) | `debug` (dev) / `info` (otel) |
+| `DTRACE_ENDPOINT` | OTLP collector endpoint URL | None (required for otel) |
+| `DTRACE_SERVICE_NAME` | Service name for traces | Application-defined |
+
+### Instrumented Spans
+
+Key functions are instrumented with `#[tracing::instrument]` for automatic span creation. Each span includes relevant fields for filtering and analysis.
+
+#### Graph Module
+
+| Span Name | Function | Fields | Description |
+|-----------|----------|--------|-------------|
+| `graph::Storage::ready` | `Storage::ready()` | `path` | Opens RocksDB database |
+| `graph::Graph::process_mutations` | `Graph::process_mutations()` | `mutation_count` | Processes mutation batch in single transaction |
+| `mutation_consumer` | `Consumer::run()` | - | Long-running mutation consumer loop |
+| `graph::Consumer::process_batch` | `Consumer::process_batch()` | `batch_size` | Processes individual mutation batch |
+| `query_consumer` | `Consumer::run()` | - | Long-running query consumer loop |
+| `graph::Consumer::process_query` | `Consumer::process_query()` | `query_type` | Processes individual query |
+
+#### Fulltext Module
+
+| Span Name | Function | Fields | Description |
+|-----------|----------|--------|-------------|
+| `fulltext::Storage::ready` | `Storage::ready()` | `path`, `mode` | Opens Tantivy index |
+| `fulltext::Index::process_mutations` | `Index::process_mutations()` | `mutation_count` | Indexes mutation batch |
+| `fulltext_query_consumer` | `Consumer::run()` | - | Long-running fulltext query consumer |
+
+### Tracing Events
+
+The library emits structured events at various log levels:
+
+#### INFO Events
+
+| Location | Event | Fields | Description |
+|----------|-------|--------|-------------|
+| `graph/mod.rs` | `[Storage] Ready` | - | Database opened successfully |
+| `graph/mod.rs` | `[Graph] About to insert mutations` | `count` | Starting mutation batch |
+| `graph/mod.rs` | `[Graph] Successfully committed mutations` | `count` | Mutation batch committed |
+| `graph/writer.rs` | `Starting mutation consumer` | `config` | Consumer started |
+| `graph/writer.rs` | `Mutation consumer shutting down` | - | Channel closed |
+| `graph/reader.rs` | `Starting query consumer` | `config` | Consumer started |
+| `graph/reader.rs` | `Query consumer shutting down` | - | Channel closed |
+| `graph/reader.rs` | `Query worker starting` | `worker_id` | Pool worker started |
+| `graph/reader.rs` | `Query worker shutting down` | `worker_id` | Pool worker stopped |
+| `graph/reader.rs` | `Spawned query consumer workers` | `num_workers` | Worker pool created |
+| `graph/mutation.rs` | `[UpdateNodeValidSinceUntil]` | `node_id`, `edge_count` | Temporal update |
+| `fulltext/mod.rs` | `[FullText Storage] Opened index` | `path` | Index opened |
+| `fulltext/writer.rs` | `[FullText] Processing mutations` | `count` | Starting indexing |
+| `fulltext/writer.rs` | `[FullText] Successfully indexed` | `count` | Indexing complete |
+| `fulltext/reader.rs` | `Starting fulltext query consumer` | `config` | Consumer started |
+| `fulltext/reader.rs` | `Fulltext query worker starting` | `worker_id` | Pool worker started |
+
+#### DEBUG Events
+
+##### Graph Query Executors
+
+| Location | Event | Fields | Description |
+|----------|-------|--------|-------------|
+| `graph/query.rs` | `Executing NodeById query` | `id` | Lookup node by ID |
+| `graph/query.rs` | `Executing NodeFragmentsByIdTimeRange query` | `id`, `time_range` | Query node fragments |
+| `graph/query.rs` | `Executing EdgeFragmentsByIdTimeRange query` | `src_id`, `dst_id`, `edge_name`, `time_range` | Query edge fragments |
+| `graph/query.rs` | `Executing EdgeSummaryBySrcDstName query` | `src_id`, `dst_id`, `name` | Lookup edge by topology |
+| `graph/query.rs` | `Executing OutgoingEdges query` | `node_id` | Get edges from node |
+| `graph/query.rs` | `Executing IncomingEdges query` | `node_id` | Get edges to node |
+| `graph/query.rs` | `Executing NodesByName query` | `name` | Search nodes by name |
+| `graph/query.rs` | `Executing EdgesByName query` | `name` | Search edges by name |
+
+##### Graph Mutation Executors
+
+| Location | Event | Fields | Description |
+|----------|-------|--------|-------------|
+| `graph/mutation.rs` | `Executing AddNode mutation` | `id`, `name` | Add node to graph |
+| `graph/mutation.rs` | `Executing AddEdge mutation` | `src`, `dst`, `name` | Add edge to graph |
+| `graph/mutation.rs` | `Executing AddNodeFragment mutation` | `id`, `ts`, `content_len` | Add node fragment |
+| `graph/mutation.rs` | `Executing AddEdgeFragment mutation` | `src`, `dst`, `edge_name`, `ts`, `content_len` | Add edge fragment |
+| `graph/mutation.rs` | `Executing UpdateEdgeValidSinceUntil mutation` | `src`, `dst`, `name`, `reason` | Update edge validity |
+| `graph/mutation.rs` | `Executing UpdateEdgeWeight mutation` | `src`, `dst`, `name`, `weight` | Update edge weight |
+
+##### Graph Scan Executors
+
+| Location | Event | Fields | Description |
+|----------|-------|--------|-------------|
+| `graph/scan.rs` | `Executing AllNodes scan` | `limit`, `reverse`, `has_cursor` | Scan all nodes |
+| `graph/scan.rs` | `Executing AllEdges scan` | `limit`, `reverse`, `has_cursor` | Scan forward edges |
+| `graph/scan.rs` | `Executing AllReverseEdges scan` | `limit`, `reverse`, `has_cursor` | Scan reverse edges |
+| `graph/scan.rs` | `Executing AllNodeFragments scan` | `limit`, `reverse`, `has_cursor` | Scan node fragments |
+| `graph/scan.rs` | `Executing AllEdgeFragments scan` | `limit`, `reverse`, `has_cursor` | Scan edge fragments |
+| `graph/scan.rs` | `Executing AllNodeNames scan` | `limit`, `reverse`, `has_cursor` | Scan node name index |
+| `graph/scan.rs` | `Executing AllEdgeNames scan` | `limit`, `reverse`, `has_cursor` | Scan edge name index |
+
+##### Graph Writer Processing
+
+| Location | Event | Fields | Description |
+|----------|-------|--------|-------------|
+| `graph/writer.rs` | `Processing AddNode` | `id`, `name` | Node mutation received |
+| `graph/writer.rs` | `Processing AddEdge` | `source`, `target`, `name` | Edge mutation received |
+| `graph/writer.rs` | `Processing AddNodeFragment` | `id`, `body_len` | Fragment received |
+| `graph/writer.rs` | `Processing AddEdgeFragment` | `src`, `dst`, `name`, `body_len` | Edge fragment received |
+| `graph/writer.rs` | `Processing UpdateNodeValidSinceUntil` | `id`, `reason` | Temporal update received |
+| `graph/writer.rs` | `Processing UpdateEdgeValidSinceUntil` | `src`, `dst`, `name`, `reason` | Edge temporal received |
+| `graph/writer.rs` | `Processing UpdateEdgeWeight` | `src`, `dst`, `name`, `weight` | Weight update received |
+| `graph/reader.rs` | `Processing query` | `query` | Query dispatched |
+
+##### Fulltext Query Executors
+
+| Location | Event | Fields | Description |
+|----------|-------|--------|-------------|
+| `fulltext/query.rs` | `Executing fulltext Nodes query` | `query`, `fuzzy_level`, `limit` | Search nodes |
+| `fulltext/query.rs` | `[FulltextEdges] Executing query` | `query`, `index_docs` | Search edges |
+| `fulltext/query.rs` | `[FulltextEdges] Search returned` | `result_count`, `query` | Search results |
+| `fulltext/query.rs` | `Executing fulltext Facets query` | `doc_type_filter` | Get facet counts |
+
+##### Fulltext Mutation Executors
+
+| Location | Event | Fields | Description |
+|----------|-------|--------|-------------|
+| `fulltext/mutation.rs` | `[FullText] Indexed node` | `id`, `name`, `valid_range` | Node indexed |
+| `fulltext/mutation.rs` | `[FullText] Indexed edge` | `src`, `dst`, `name`, `valid_range` | Edge indexed |
+| `fulltext/mutation.rs` | `[FullText] Indexed node fragment` | `id`, `content_len`, `valid_range` | Fragment indexed |
+| `fulltext/mutation.rs` | `[FullText] Indexed edge fragment` | `src`, `dst`, `name`, `content_len` | Edge fragment indexed |
+| `fulltext/mutation.rs` | `[FullText] Deleted node documents` | `id`, `reason` | Node temporal update |
+| `fulltext/mutation.rs` | `[FullText] Deleted edge documents` | `src`, `dst`, `name`, `reason` | Edge temporal update |
+| `fulltext/mutation.rs` | `[FullText] Edge weight updated` | `src`, `dst`, `name`, `weight` | Weight update (no-op) |
+
+#### WARN Events
+
+| Location | Event | Fields | Description |
+|----------|-------|--------|-------------|
+| `graph/writer.rs` | `[BUFFER FULL] Next consumer busy` | `err`, `count` | Mutations dropped due to backpressure |
+
+#### ERROR Events
+
+| Location | Event | Fields | Description |
+|----------|-------|--------|-------------|
+| `graph/reader.rs` | `Query worker failed to ready storage` | `worker_id`, `err` | Worker initialization failed |
+| `fulltext/reader.rs` | `Worker failed to ready storage` | `worker_id`, `err` | Worker initialization failed |
+
+### Example Trace Output
+
+#### Development (stderr)
+
+```
+2024-01-15T10:30:00.123Z DEBUG motlie_db::graph::mod path="/data/graph" [Storage] Ready
+2024-01-15T10:30:00.125Z  INFO motlie_db::graph::writer config=WriterConfig { channel_buffer_size: 100 } Starting mutation consumer
+2024-01-15T10:30:00.130Z  INFO motlie_db::graph::mod count=5 [Graph] About to insert mutations
+2024-01-15T10:30:00.131Z DEBUG motlie_db::graph::writer id=01HQXYZ123 name="Alice" Processing AddNode
+2024-01-15T10:30:00.132Z DEBUG motlie_db::graph::writer id=01HQXYZ456 name="Bob" Processing AddNode
+2024-01-15T10:30:00.133Z DEBUG motlie_db::graph::writer source=01HQXYZ123 target=01HQXYZ456 name="follows" Processing AddEdge
+2024-01-15T10:30:00.140Z  INFO motlie_db::graph::mod count=5 [Graph] Successfully committed mutations
+2024-01-15T10:30:00.141Z  INFO motlie_db::fulltext::writer count=5 [FullText] Processing mutations for indexing
+2024-01-15T10:30:00.150Z DEBUG motlie_db::fulltext::mutation id=01HQXYZ123 name="Alice" valid_range=None [FullText] Indexed node
+2024-01-15T10:30:00.160Z  INFO motlie_db::fulltext::writer count=5 [FullText] Successfully indexed mutations
+```
+
+#### OpenTelemetry (Jaeger/Tempo)
+
+With OpenTelemetry enabled, spans are exported with full context:
+
+```
+Trace: mutation_consumer (duration: 45ms)
+├── process_batch (batch_size=5, duration: 40ms)
+│   ├── Graph::process_mutations (mutation_count=5, duration: 15ms)
+│   │   └── [Graph] About to insert mutations (count=5)
+│   │   └── Processing AddNode (id=01HQXYZ123, name="Alice")
+│   │   └── Processing AddNode (id=01HQXYZ456, name="Bob")
+│   │   └── Processing AddEdge (source=01HQXYZ123, target=01HQXYZ456)
+│   │   └── [Graph] Successfully committed mutations (count=5)
+│   └── Index::process_mutations (mutation_count=5, duration: 20ms)
+│       └── [FullText] Processing mutations for indexing (count=5)
+│       └── [FullText] Indexed node (id=01HQXYZ123, name="Alice")
+│       └── [FullText] Successfully indexed mutations (count=5)
+```
+
+### Filtering Traces
+
+Use `RUST_LOG` to filter by module or level:
+
+```bash
+# All debug logs from motlie_db
+RUST_LOG=motlie_db=debug
+
+# Only graph module at debug, others at info
+RUST_LOG=info,motlie_db::graph=debug
+
+# Only fulltext indexing
+RUST_LOG=warn,motlie_db::fulltext::writer=info
+
+# Mutation processing only
+RUST_LOG=warn,motlie_db::graph::writer=debug,motlie_db::graph::mod=info
+```
+
 ## Dependencies
 
 - **rocksdb** (0.24): Embedded key-value store
@@ -653,7 +910,18 @@ See `test_transaction_batching_vs_individual_performance` for benchmarking code.
 - **rmp-serde** (1.3): MessagePack serialization
 - **tantivy**: Full-text search engine
 - **data-url** (0.3): DataUrl encoding/decoding
+- **tracing** (0.1): Structured logging and tracing
 - **async-trait**: Async trait support
+
+### Telemetry Dependencies (in motlie-core)
+
+Telemetry initialization is provided by `motlie-core`. When using the `dtrace-otel` feature:
+
+- **tracing-subscriber** (0.3): Subscriber implementations
+- **tracing-opentelemetry**: OpenTelemetry integration for tracing
+- **opentelemetry**: OpenTelemetry API
+- **opentelemetry-otlp**: OTLP exporter
+- **opentelemetry_sdk**: OpenTelemetry SDK with Tokio runtime
 
 ## License
 

@@ -1,0 +1,2005 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IAM Graph Visualization</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network@9.1.2/dist/vis-network.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #1e1e1e;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        #topbar {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            padding: 15px 20px;
+            background: #1a1a1a;
+            border-bottom: 2px solid #333;
+            height: 70px;
+        }
+
+        #header {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            min-width: 200px;
+        }
+
+        h1 {
+            font-size: 18px;
+            margin: 0;
+            color: #fff;
+            white-space: nowrap;
+        }
+
+        .stats {
+            font-size: 11px;
+            color: #888;
+            margin-top: 3px;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+
+        .status-idle { background: #555; color: #fff; }
+        .status-running { background: #f39c12; color: #000; }
+        .status-complete { background: #2ecc71; color: #000; }
+
+        #container {
+            display: flex;
+            height: calc(100vh - 70px);
+            width: 100vw;
+        }
+
+        #mynetwork {
+            flex: 1;
+            border: 1px solid #ccc;
+            background: #ffffff;
+        }
+
+        /* Sidebar - always visible */
+        #sidebar {
+            width: 420px;
+            background: #252525;
+            border-left: 1px solid #333;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        #info {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        .info-section {
+            margin-bottom: 20px;
+        }
+
+        .info-section h3 {
+            font-size: 14px;
+            color: #3498db;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+            justify-content: flex-end;
+        }
+
+        .control-group {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .search-input-wrapper {
+            position: relative;
+            min-width: 200px;
+        }
+
+        .control-group input[type="text"] {
+            width: 100%;
+            padding: 8px 12px;
+            background: #2d2d2d;
+            border: 1px solid #444;
+            border-radius: 4px;
+            color: #e0e0e0;
+            font-size: 12px;
+        }
+
+        .control-group input[type="text"]:focus {
+            outline: none;
+            border-color: #3498db;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .divider {
+            width: 1px;
+            height: 30px;
+            background: #444;
+            margin: 0 5px;
+        }
+
+        button {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: background 0.2s;
+            white-space: nowrap;
+        }
+
+        button:hover { background: #2980b9; }
+        button:active { background: #21618c; }
+        button:disabled { background: #555; cursor: not-allowed; opacity: 0.6; }
+
+        .button-secondary { background: #555; }
+        .button-secondary:hover { background: #666; }
+
+        .button-primary { background: #9b59b6; }
+        .button-primary:hover { background: #8e44ad; }
+
+        .button-success { background: #27ae60; }
+        .button-success:hover { background: #219a52; }
+
+        .button-danger { background: #c0392b; }
+        .button-danger:hover { background: #a93226; }
+
+        #searchResults {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            max-height: 300px;
+            overflow-y: auto;
+            background: #1a1a1a;
+            margin-top: 5px;
+            border-radius: 4px;
+            border: 1px solid #444;
+            z-index: 1000;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .search-result-item {
+            padding: 8px;
+            cursor: pointer;
+            border-bottom: 1px solid #333;
+            font-size: 11px;
+        }
+
+        .search-result-item:hover { background: #2d2d2d; }
+        .search-result-item:last-child { border-bottom: none; }
+
+        .loading {
+            display: none;
+            align-items: center;
+            color: #3498db;
+            margin-left: auto;
+        }
+
+        .loading.active { display: flex; }
+
+        .spinner {
+            border: 2px solid #333;
+            border-top: 2px solid #3498db;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            background: #c0392b;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 4px;
+            font-size: 12px;
+            display: none;
+            z-index: 2000;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .error.active { display: block; }
+
+        /* Modal Overlay */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 3000;
+        }
+
+        .modal-overlay.active { display: flex; }
+
+        .modal {
+            background: #2d2d2d;
+            border-radius: 12px;
+            width: 500px;
+            max-width: 90vw;
+            max-height: 80vh;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            border: 1px solid #444;
+        }
+
+        .modal-header {
+            background: #1a1a1a;
+            padding: 20px;
+            border-bottom: 1px solid #444;
+        }
+
+        .modal-header h2 {
+            font-size: 18px;
+            color: #fff;
+            margin: 0 0 5px 0;
+        }
+
+        .modal-header p {
+            font-size: 12px;
+            color: #888;
+            margin: 0;
+        }
+
+        .modal-body {
+            padding: 20px;
+            overflow-y: auto;
+            max-height: 50vh;
+        }
+
+        .modal-footer {
+            background: #1a1a1a;
+            padding: 15px 20px;
+            border-top: 1px solid #444;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            color: #aaa;
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 10px 12px;
+            background: #1a1a1a;
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: #e0e0e0;
+            font-size: 13px;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #3498db;
+        }
+
+        .form-group small {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            color: #666;
+        }
+
+        /* Toggle Switch */
+        .toggle-group {
+            margin-bottom: 20px;
+        }
+
+        .toggle-group label {
+            display: block;
+            font-size: 12px;
+            color: #aaa;
+            margin-bottom: 10px;
+            font-weight: 500;
+        }
+
+        .toggle-options {
+            display: flex;
+            gap: 0;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #444;
+        }
+
+        .toggle-option {
+            flex: 1;
+            padding: 12px 16px;
+            text-align: center;
+            cursor: pointer;
+            background: #1a1a1a;
+            color: #888;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.2s;
+            border: none;
+        }
+
+        .toggle-option:first-child {
+            border-right: 1px solid #444;
+        }
+
+        .toggle-option.active {
+            background: #3498db;
+            color: #fff;
+        }
+
+        .toggle-option:hover:not(.active) {
+            background: #2a2a2a;
+            color: #ccc;
+        }
+
+        .toggle-option .impl-label {
+            font-weight: bold;
+            display: block;
+            margin-bottom: 2px;
+        }
+
+        .toggle-option .impl-desc {
+            font-size: 10px;
+            opacity: 0.8;
+        }
+
+        /* Legend */
+        #legend {
+            padding: 15px 20px;
+            background: #1a1a1a;
+            border-top: 1px solid #333;
+            font-size: 11px;
+        }
+
+        .legend-title {
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #fff;
+        }
+
+        .legend-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 5px;
+        }
+
+        .legend-item {
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+
+        /* Results Panel Styles */
+        .metrics-panel {
+            background: #1a2a1a;
+            border: 1px solid #2ecc71;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+
+        .metrics-panel h3 {
+            color: #2ecc71;
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+
+        .metric-item {
+            background: #2d2d2d;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 16px;
+            font-weight: bold;
+            color: #2ecc71;
+        }
+
+        .metric-label {
+            font-size: 10px;
+            color: #888;
+            text-transform: uppercase;
+            margin-top: 3px;
+        }
+
+        .result-summary {
+            background: #1a2a1a;
+            border-left: 3px solid #2ecc71;
+            padding: 12px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            font-size: 13px;
+        }
+
+        .result-detail {
+            background: #1a1a1a;
+            padding: 8px 12px;
+            margin: 5px 0;
+            border-radius: 4px;
+            font-size: 12px;
+            border-left: 3px solid #3498db;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .result-detail:hover { background: #2a2a2a; }
+
+        .explanation-section {
+            background: #1a1a2a;
+            border-left: 3px solid #9b59b6;
+            padding: 12px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+
+        .explanation-section h4 {
+            font-size: 11px;
+            color: #9b59b6;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .explanation-section p {
+            font-size: 12px;
+            line-height: 1.5;
+            color: #bbb;
+            margin: 0;
+        }
+
+        .explanation-business { border-left-color: #e74c3c; }
+        .explanation-business h4 { color: #e74c3c; }
+        .explanation-algorithm { border-left-color: #3498db; }
+        .explanation-algorithm h4 { color: #3498db; }
+        .explanation-viz { border-left-color: #2ecc71; }
+        .explanation-viz h4 { color: #2ecc71; }
+
+        .collapsible-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            padding: 8px 0;
+        }
+
+        .collapsible-header:hover h3 { color: #5dade2; }
+
+        .collapse-icon {
+            font-size: 12px;
+            color: #666;
+            transition: transform 0.2s;
+        }
+
+        .collapsed .collapse-icon { transform: rotate(-90deg); }
+
+        .collapsible-content {
+            max-height: 1000px;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+        }
+
+        .collapsed .collapsible-content { max-height: 0; }
+
+        .clickable-node {
+            color: #3498db;
+            cursor: pointer;
+            text-decoration: underline;
+            text-decoration-style: dotted;
+        }
+
+        .clickable-node:hover {
+            color: #5dade2;
+            text-decoration-style: solid;
+        }
+
+        .overlay-legend {
+            margin-top: 10px;
+            padding: 10px;
+            background: #2a2a2a;
+            border-radius: 4px;
+        }
+
+        .overlay-legend-item {
+            display: flex;
+            align-items: center;
+            margin: 5px 0;
+            font-size: 11px;
+        }
+
+        .overlay-legend-color {
+            width: 20px;
+            height: 4px;
+            margin-right: 8px;
+            border-radius: 2px;
+        }
+
+        .edge-list { margin-top: 10px; }
+
+        .edge-item {
+            background: #1a1a1a;
+            padding: 8px 12px;
+            margin: 5px 0;
+            border-radius: 4px;
+            font-size: 12px;
+            border-left: 3px solid #2ecc71;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .edge-item:hover { background: #2a2a2a; }
+
+        .edge-type {
+            color: #2ecc71;
+            font-weight: bold;
+            margin-right: 5px;
+        }
+
+        .edge-target { color: #3498db; }
+
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1a1a1a; }
+        ::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #555; }
+    </style>
+</head>
+<body>
+    <div id="topbar">
+        <div id="header">
+            <h1>IAM Graph Analysis <span id="statusBadge" class="status-badge status-idle">Ready</span></h1>
+            <div class="stats" id="stats">Loading graph data...</div>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <select id="useCaseSelect" style="padding: 12px 18px; background: #2d2d2d; border: 1px solid #444; border-radius: 4px; color: #e0e0e0; font-size: 15px; min-width: 350px; cursor: pointer;">
+                    <option value="">-- Select Analysis --</option>
+                </select>
+            </div>
+            <div class="divider"></div>
+            <div class="control-group">
+                <div class="search-input-wrapper">
+                    <input type="text" id="searchInput" placeholder="Search nodes...">
+                    <div id="searchResults"></div>
+                </div>
+            </div>
+            <div class="button-group">
+                <button onclick="clearAnalysis()" id="clearBtn" class="button-secondary" style="display: none;">Clear</button>
+                <button onclick="fitNetwork()" class="button-secondary">Fit All</button>
+            </div>
+        </div>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <span id="loadingText">Analyzing...</span>
+        </div>
+        <div class="error" id="error"></div>
+    </div>
+
+    <div id="container">
+        <div id="mynetwork"></div>
+        <div id="sidebar">
+            <div id="info">
+                <div class="info-section" id="selectionInfo">
+                    <h3>Selection</h3>
+                    <p style="color: #888; font-size: 12px;">Click on a node or edge to view details</p>
+                </div>
+            </div>
+            <div id="legend">
+                <div class="legend-title">Node Types</div>
+                <div class="legend-grid">
+                    <div class="legend-item"><span class="legend-color" style="background: #3498db;"></span><span>User ▲</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #27ae60;"></span><span>Group ●</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #9b59b6;"></span><span>Policy ●</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #e67e22;"></span><span>Role ●</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #1abc9c;"></span><span>Workload ◆</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #f39c12;"></span><span>VPC ⬡</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #e74c3c;"></span><span>Instance ■</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #c0392b;"></span><span>Disk ■</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #8e44ad;"></span><span>Database ■</span></div>
+                    <div class="legend-item"><span class="legend-color" style="background: #34495e;"></span><span>Region ●</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Dialog -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 id="modalTitle">Configure Analysis</h2>
+                <p id="modalDescription">Configure the analysis parameters</p>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- Dynamic form content -->
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeModal()" class="button-secondary">Cancel</button>
+                <button onclick="runAnalysis()" class="button-success" id="runBtn">Run Analysis</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        let network = null;
+        let nodesData = [];
+        let edgesData = [];
+        let dataNodes = null;
+        let dataEdges = null;
+        let adjacencyMap = {};
+        let analysisResult = null;
+        let executionMetrics = null;
+        let overlayActive = false;
+        let pollInterval = null;
+        let useCases = [];
+        let selectedUseCase = null;
+        let selectedImplementation = 'motlie_db';
+        let runningAnalysisName = null;
+
+        const nodeColors = {
+            'User': '#3498db', 'Group': '#27ae60', 'Policy': '#9b59b6',
+            'Role': '#e67e22', 'Workload': '#1abc9c', 'Vpc': '#f39c12',
+            'Instance': '#e74c3c', 'Disk': '#c0392b', 'Database': '#8e44ad', 'Region': '#34495e',
+        };
+
+        const edgeColors = {
+            'member_of': '#27ae60', 'has_policy': '#9b59b6', 'assumes': '#e67e22',
+            'can_access': '#3498db', 'depends_on': '#e74c3c', 'located_in': '#34495e', 'runs_in': '#1abc9c',
+        };
+
+        function getNodeColor(nodeType) { return nodeColors[nodeType] || '#95a5a6'; }
+        function getEdgeColor(edgeType) { return edgeColors[edgeType] || '#666666'; }
+
+        async function fetchGraphData() {
+            try {
+                const response = await fetch('/api/graph');
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching graph data:', error);
+                return null;
+            }
+        }
+
+        async function fetchUseCases() {
+            try {
+                const response = await fetch('/api/use_cases');
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching use cases:', error);
+                return [];
+            }
+        }
+
+        async function fetchResult() {
+            try {
+                const response = await fetch('/api/result');
+                return await response.json();
+            } catch (error) {
+                console.error('Error fetching result:', error);
+                return null;
+            }
+        }
+
+        // Initialize the visualization
+        async function init() {
+            const loading = document.getElementById('loading');
+            const loadingText = document.getElementById('loadingText');
+            loadingText.textContent = 'Loading graph...';
+            loading.classList.add('active');
+
+            useCases = await fetchUseCases();
+            buildUseCaseDropdown();
+
+            const graphData = await fetchGraphData();
+            if (!graphData || !graphData.nodes || graphData.nodes.length === 0) {
+                document.getElementById('stats').innerHTML = 'Waiting for graph data...';
+                setTimeout(init, 1000);
+                return;
+            }
+
+            visualizeGraph(graphData.nodes, graphData.edges);
+            loading.classList.remove('active');
+        }
+
+        function buildUseCaseDropdown() {
+            const select = document.getElementById('useCaseSelect');
+            select.innerHTML = '<option value="">-- Select Analysis --</option>';
+            // Sort use cases alphabetically by name
+            const sortedUseCases = [...useCases].sort((a, b) => a.name.localeCompare(b.name));
+            sortedUseCases.forEach(uc => {
+                select.innerHTML += `<option value="${uc.id}">${uc.name}</option>`;
+            });
+            select.onchange = onUseCaseSelect;
+        }
+
+        function onUseCaseSelect() {
+            const select = document.getElementById('useCaseSelect');
+            const useCaseId = select.value;
+
+            if (!useCaseId) return;
+
+            const useCase = useCases.find(uc => uc.id === useCaseId);
+            if (!useCase) return;
+
+            selectedUseCase = useCase;
+            selectedImplementation = 'motlie_db';
+            openModal(useCase);
+
+            // Reset dropdown
+            select.value = '';
+        }
+
+        function openModal(useCase) {
+            document.getElementById('modalTitle').textContent = useCase.name;
+            document.getElementById('modalDescription').textContent = useCase.description;
+
+            let formHtml = '';
+
+            // Implementation toggle
+            formHtml += `
+                <div class="toggle-group">
+                    <label>Implementation</label>
+                    <div class="toggle-options">
+                        <div class="toggle-option" onclick="selectImplementation('reference', this)">
+                            <span class="impl-label">Reference</span>
+                            <span class="impl-desc">petgraph (in-memory)</span>
+                        </div>
+                        <div class="toggle-option active" onclick="selectImplementation('motlie_db', this)">
+                            <span class="impl-label">Disk-based</span>
+                            <span class="impl-desc">motlie_db (RocksDB)</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Input fields
+            useCase.inputs.forEach(field => {
+                if (field.field_type === 'node_select') {
+                    const filteredNodes = nodesData.filter(n =>
+                        !field.node_type_filter || n.type === field.node_type_filter
+                    );
+                    let optionsHtml = `<option value="">-- Select ${field.label} --</option>`;
+                    filteredNodes.forEach(n => {
+                        optionsHtml += `<option value="${escapeHtml(n.fullLabel)}">${escapeHtml(n.fullLabel)}</option>`;
+                    });
+                    formHtml += `
+                        <div class="form-group">
+                            <label>${escapeHtml(field.label)}${field.required ? ' *' : ''}</label>
+                            <select id="input_${field.name}">${optionsHtml}</select>
+                            ${field.node_type_filter ? `<small>Filtered to ${field.node_type_filter} nodes</small>` : ''}
+                        </div>
+                    `;
+                } else if (field.field_type === 'number') {
+                    formHtml += `
+                        <div class="form-group">
+                            <label>${escapeHtml(field.label)}${field.required ? ' *' : ''}</label>
+                            <input type="number" id="input_${field.name}" value="${field.default_value || ''}" step="any">
+                        </div>
+                    `;
+                } else {
+                    formHtml += `
+                        <div class="form-group">
+                            <label>${escapeHtml(field.label)}${field.required ? ' *' : ''}</label>
+                            <input type="text" id="input_${field.name}" value="${field.default_value || ''}">
+                        </div>
+                    `;
+                }
+            });
+
+            if (useCase.inputs.length === 0) {
+                formHtml += `<p style="color: #888; font-size: 13px;">No additional configuration needed for this analysis.</p>`;
+            }
+
+            formHtml += `<p style="color: #666; font-size: 11px; margin-top: 15px;"><strong>Algorithm:</strong> ${escapeHtml(useCase.algorithm)}</p>`;
+
+            document.getElementById('modalBody').innerHTML = formHtml;
+            document.getElementById('modalOverlay').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('modalOverlay').classList.remove('active');
+            selectedUseCase = null;
+        }
+
+        function selectImplementation(impl, element) {
+            selectedImplementation = impl;
+            document.querySelectorAll('.toggle-option').forEach(el => el.classList.remove('active'));
+            element.classList.add('active');
+        }
+
+        async function runAnalysis() {
+            if (!selectedUseCase) return;
+
+            const input = {
+                use_case: selectedUseCase.id,
+                implementation: selectedImplementation
+            };
+
+            // Gather input values
+            selectedUseCase.inputs.forEach(field => {
+                const el = document.getElementById('input_' + field.name);
+                if (el && el.value) {
+                    if (field.field_type === 'number') {
+                        input[field.name] = parseFloat(el.value);
+                    } else {
+                        input[field.name] = el.value;
+                    }
+                }
+            });
+
+            // Save the analysis name before closing modal (which clears selectedUseCase)
+            runningAnalysisName = selectedUseCase.name;
+            closeModal();
+
+            // Show loading
+            const loading = document.getElementById('loading');
+            const loadingText = document.getElementById('loadingText');
+            loadingText.textContent = `Running ${selectedImplementation === 'reference' ? 'petgraph' : 'motlie_db'}...`;
+            loading.classList.add('active');
+
+            updateStatusRunning();
+
+            try {
+                const response = await fetch('/api/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(input)
+                });
+                const result = await response.json();
+
+                if (result.success) {
+                    startPolling();
+                } else {
+                    showError(result.error || 'Failed to start analysis');
+                    loading.classList.remove('active');
+                    updateStatusIdle();
+                }
+            } catch (error) {
+                showError('Error: ' + error.message);
+                loading.classList.remove('active');
+                updateStatusIdle();
+            }
+        }
+
+        function startPolling() {
+            if (pollInterval) clearInterval(pollInterval);
+
+            pollInterval = setInterval(async () => {
+                const resultData = await fetchResult();
+                if (resultData && resultData.is_complete) {
+                    analysisResult = resultData.result;
+                    executionMetrics = resultData.metrics;
+                    updateStatusComplete(runningAnalysisName);
+                    showResultsPanel(analysisResult, executionMetrics);
+                    applyOverlay(analysisResult);
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+
+                    document.getElementById('loading').classList.remove('active');
+                    document.getElementById('clearBtn').style.display = 'inline-block';
+                }
+            }, 300);
+        }
+
+        function updateStatusIdle() {
+            const badge = document.getElementById('statusBadge');
+            badge.className = 'status-badge status-idle';
+            badge.textContent = 'Ready';
+        }
+
+        function updateStatusRunning() {
+            const badge = document.getElementById('statusBadge');
+            badge.className = 'status-badge status-running';
+            badge.textContent = 'Running...';
+        }
+
+        function updateStatusComplete(analysisName) {
+            const badge = document.getElementById('statusBadge');
+            badge.className = 'status-badge status-complete';
+            badge.textContent = analysisName ? `Complete: ${analysisName}` : 'Complete';
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.classList.add('active');
+            setTimeout(() => errorDiv.classList.remove('active'), 5000);
+        }
+
+        function showResultsPanel(result, metrics) {
+            const infoDiv = document.getElementById('info');
+
+            // Metrics panel
+            let metricsHtml = '';
+            if (metrics) {
+                const timeFormatted = metrics.execution_time_ms < 1
+                    ? (metrics.execution_time_ms * 1000).toFixed(2) + ' us'
+                    : metrics.execution_time_ms.toFixed(2) + ' ms';
+                const memFormatted = metrics.memory_usage_bytes
+                    ? (metrics.memory_usage_bytes / 1024).toFixed(1) + ' KB'
+                    : 'N/A';
+                const diskBuildFormatted = metrics.disk_build_time_ms
+                    ? (metrics.disk_build_time_ms < 1
+                        ? (metrics.disk_build_time_ms * 1000).toFixed(2) + ' us'
+                        : metrics.disk_build_time_ms.toFixed(2) + ' ms')
+                    : 'N/A';
+                const diskReadFormatted = metrics.disk_read_time_ms
+                    ? (metrics.disk_read_time_ms < 1
+                        ? (metrics.disk_read_time_ms * 1000).toFixed(2) + ' us'
+                        : metrics.disk_read_time_ms.toFixed(2) + ' ms')
+                    : 'N/A';
+
+                metricsHtml = `
+                    <div class="metrics-panel">
+                        <h3>Execution (${metrics.implementation === 'reference' ? 'petgraph' : 'motlie_db'})</h3>
+                        <div class="metrics-grid">
+                            <div class="metric-item">
+                                <div class="metric-value">${timeFormatted}</div>
+                                <div class="metric-label">Algo Time</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-value">${diskBuildFormatted}</div>
+                                <div class="metric-label">Disk Build</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-value">${diskReadFormatted}</div>
+                                <div class="metric-label">Disk Read</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-value">${memFormatted}</div>
+                                <div class="metric-label">Memory</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-value">${metrics.num_nodes.toLocaleString()}</div>
+                                <div class="metric-label">Nodes</div>
+                            </div>
+                            <div class="metric-item">
+                                <div class="metric-value">${metrics.num_edges.toLocaleString()}</div>
+                                <div class="metric-label">Edges</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Result summary
+            let resultHtml = `
+                <div class="info-section">
+                    <h3>${escapeHtml(result.use_case)}</h3>
+                    <div class="result-summary">${escapeHtml(result.summary)}</div>
+                </div>
+            `;
+
+            // Explanation
+            let explanationHtml = '';
+            if (result.explanation) {
+                const exp = result.explanation;
+                explanationHtml = `
+                    <div class="info-section" id="explanationSection">
+                        <div class="collapsible-header" onclick="toggleSection('explanationSection')">
+                            <h3>Understanding</h3>
+                            <span class="collapse-icon">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            <div class="explanation-section explanation-business">
+                                <h4>Business Problem</h4>
+                                <p>${escapeHtml(exp.business_problem)}</p>
+                            </div>
+                            <div class="explanation-section explanation-algorithm">
+                                <h4>Algorithm</h4>
+                                <p>${escapeHtml(exp.algorithm_description)}</p>
+                            </div>
+                            <div class="explanation-section explanation-viz">
+                                <h4>Reading the Visualization</h4>
+                                <p>${escapeHtml(exp.visualization_guide)}</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Details with clickable nodes
+            let detailsHtml = '';
+            if (result.details && result.details.length > 0) {
+                const detailItems = result.details.slice(0, 30).map(d => {
+                    const nodeMatches = extractNodeNames(d);
+                    let detailText = escapeHtml(d);
+                    nodeMatches.forEach(nodeName => {
+                        const node = nodesData.find(n => n.fullLabel === nodeName || n.id === nodeName);
+                        if (node) {
+                            const escapedName = escapeHtml(nodeName);
+                            detailText = detailText.replace(
+                                escapedName,
+                                `<span class="clickable-node" onclick="selectNode('${escapeJs(node.id)}')">${escapedName}</span>`
+                            );
+                        }
+                    });
+                    return `<div class="result-detail">${detailText}</div>`;
+                }).join('');
+
+                detailsHtml = `
+                    <div class="info-section" id="detailsSection">
+                        <div class="collapsible-header" onclick="toggleSection('detailsSection')">
+                            <h3>Details (${result.details.length})</h3>
+                            <span class="collapse-icon">▼</span>
+                        </div>
+                        <div class="collapsible-content">
+                            ${detailItems}
+                            ${result.details.length > 30 ? `<div class="result-detail" style="color: #888;">... and ${result.details.length - 30} more</div>` : ''}
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Overlay info
+            let overlayHtml = '';
+            if (result.highlighted_nodes && result.highlighted_nodes.length > 0) {
+                const overlayType = result.overlay_type || 'default';
+
+                if (overlayType === 'clusters') {
+                    // Clustering overlay: show cluster legend with colors
+                    const clusterColors = [
+                        '#e74c3c', '#3498db', '#2ecc71', '#9b59b6', '#f39c12',
+                        '#1abc9c', '#e91e63', '#00bcd4', '#8bc34a', '#ff5722',
+                        '#673ab7', '#009688'
+                    ];
+
+                    // Count nodes per cluster
+                    const clusterCounts = {};
+                    if (result.node_annotations) {
+                        for (const annotation of Object.values(result.node_annotations)) {
+                            const match = annotation.match(/Cluster\s+(\d+)/);
+                            if (match) {
+                                const clusterNum = parseInt(match[1], 10);
+                                clusterCounts[clusterNum] = (clusterCounts[clusterNum] || 0) + 1;
+                            }
+                        }
+                    }
+
+                    // Build cluster legend items
+                    const clusterNums = Object.keys(clusterCounts).map(Number).sort((a, b) => a - b);
+                    const clusterLegendItems = clusterNums.slice(0, 12).map(num => {
+                        const color = clusterColors[(num - 1) % clusterColors.length];
+                        return `
+                            <div class="overlay-legend-item">
+                                <span class="overlay-legend-color" style="background: transparent; border: 3px solid ${color}; width: 12px; height: 12px; border-radius: 50%;"></span>
+                                <span>Cluster ${num} (${clusterCounts[num]})</span>
+                            </div>
+                        `;
+                    }).join('');
+
+                    overlayHtml = `
+                        <div class="info-section">
+                            <h3>Cluster Colors</h3>
+                            <div class="overlay-legend">
+                                ${clusterLegendItems}
+                            </div>
+                            <button onclick="toggleOverlay()" class="button-primary" style="margin-top: 10px; width: 100%;" id="overlayToggleBtn">
+                                Hide Overlay
+                            </button>
+                        </div>
+                    `;
+                } else {
+                    // Default overlay legend
+                    let sourceCount = 0;
+                    let intermediateCount = 0;
+                    if (result.node_annotations) {
+                        for (const annotation of Object.values(result.node_annotations)) {
+                            if (annotation.includes('Source') || annotation.includes('compromised') ||
+                                annotation.includes('Start') || annotation.includes('Input')) {
+                                sourceCount++;
+                            } else if (annotation.includes('intermediate')) {
+                                intermediateCount++;
+                            }
+                        }
+                    }
+                    const resourceCount = result.highlighted_nodes.length - sourceCount - intermediateCount;
+
+                    overlayHtml = `
+                        <div class="info-section">
+                            <h3>Overlay</h3>
+                            <div class="overlay-legend">
+                                ${sourceCount > 0 ? `
+                                <div class="overlay-legend-item">
+                                    <span class="overlay-legend-color" style="background: #00d4ff; width: 12px; height: 12px; border-radius: 50%;"></span>
+                                    <span>Source node${sourceCount > 1 ? 's' : ''} (${sourceCount})</span>
+                                </div>
+                                ` : ''}
+                                ${intermediateCount > 0 ? `
+                                <div class="overlay-legend-item">
+                                    <span class="overlay-legend-color" style="background: #ffa502; width: 12px; height: 12px; border-radius: 50%;"></span>
+                                    <span>Path nodes (${intermediateCount})</span>
+                                </div>
+                                ` : ''}
+                                <div class="overlay-legend-item">
+                                    <span class="overlay-legend-color" style="background: #ff6b6b; width: 12px; height: 12px; border-radius: 50%;"></span>
+                                    <span>Highlighted (${resourceCount})</span>
+                                </div>
+                                ${result.highlighted_edges && result.highlighted_edges.length > 0 ? `
+                                <div class="overlay-legend-item">
+                                    <span class="overlay-legend-color" style="background: #feca57;"></span>
+                                    <span>Connections (${result.highlighted_edges.length} edges)</span>
+                                </div>
+                                ` : ''}
+                            </div>
+                            <button onclick="toggleOverlay()" class="button-primary" style="margin-top: 10px; width: 100%;" id="overlayToggleBtn">
+                                Hide Overlay
+                            </button>
+                        </div>
+                    `;
+                }
+            }
+
+            infoDiv.innerHTML = metricsHtml + resultHtml + explanationHtml + detailsHtml + overlayHtml;
+            overlayActive = true;
+        }
+
+        function clearAnalysis() {
+            analysisResult = null;
+            executionMetrics = null;
+            overlayActive = false;
+
+            // Reset info panel to default state
+            resetInfoPanel();
+            document.getElementById('clearBtn').style.display = 'none';
+            updateStatusIdle();
+            resetHighlighting();
+            network.fit();
+
+            // Clear server state
+            fetch('/api/clear', { method: 'POST' }).catch(() => {});
+        }
+
+        function extractNodeNames(text) {
+            const names = [];
+            const pattern = /(user|group|policy|role|workload|vpc|instance|disk|database|region)-\d{4}/gi;
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                names.push(match[0]);
+            }
+            return names;
+        }
+
+        function toggleSection(sectionId) {
+            const section = document.getElementById(sectionId);
+            if (section) section.classList.toggle('collapsed');
+        }
+
+        function toggleOverlay() {
+            overlayActive = !overlayActive;
+            const btn = document.getElementById('overlayToggleBtn');
+
+            if (overlayActive && analysisResult) {
+                btn.textContent = 'Hide Overlay';
+                applyOverlay(analysisResult);
+            } else {
+                btn.textContent = 'Show Overlay';
+                resetHighlighting();
+            }
+        }
+
+        function visualizeGraph(nodes, edges) {
+            const nodeConnections = {};
+            edges.forEach(edge => {
+                nodeConnections[edge.from] = (nodeConnections[edge.from] || 0) + 1;
+                nodeConnections[edge.to] = (nodeConnections[edge.to] || 0) + 1;
+            });
+
+            nodesData = nodes.map(node => {
+                const connectionCount = nodeConnections[node.id] || 0;
+                // Base size calculation
+                let size = Math.min(35, Math.max(8, 8 + connectionCount));
+                // Make Groups and Policies smaller
+                if (node.node_type === 'Group' || node.node_type === 'Policy') {
+                    size = Math.min(20, Math.max(6, 6 + connectionCount * 0.5));
+                }
+                // Determine shape based on node type
+                let shape = 'dot';  // default for Groups, Policies, Roles, Regions
+                if (node.node_type === 'User') {
+                    shape = 'triangle';
+                } else if (node.node_type === 'Instance' || node.node_type === 'Disk' ||
+                           node.node_type === 'Database') {
+                    shape = 'square';
+                } else if (node.node_type === 'Vpc') {
+                    shape = 'hexagon';
+                } else if (node.node_type === 'Workload') {
+                    shape = 'diamond';
+                }
+                return {
+                    id: node.id,
+                    label: node.label.length > 20 ? node.label.substring(0, 20) + '...' : node.label,
+                    title: `${node.node_type}: ${node.label}${node.region ? ' (' + node.region + ')' : ''}`,
+                    color: getNodeColor(node.node_type),
+                    size: size,
+                    shape: shape,
+                    type: node.node_type,
+                    region: node.region,
+                    fullLabel: node.label,
+                };
+            });
+
+            edgesData = [];
+            adjacencyMap = {};
+            nodesData.forEach(node => {
+                adjacencyMap[node.id] = { edges: [], neighbors: [] };
+            });
+
+            edges.forEach((edge, i) => {
+                edgesData.push({
+                    id: i,
+                    from: edge.from,
+                    to: edge.to,
+                    label: edge.edge_type,
+                    title: `${edge.edge_type} (weight: ${edge.weight})`,
+                    type: edge.edge_type,
+                    weight: edge.weight,
+                    color: { color: getEdgeColor(edge.edge_type) },
+                    arrows: 'to',
+                });
+
+                if (adjacencyMap[edge.from]) {
+                    adjacencyMap[edge.from].edges.push(i);
+                    adjacencyMap[edge.from].neighbors.push(edge.to);
+                }
+                if (adjacencyMap[edge.to]) {
+                    adjacencyMap[edge.to].edges.push(i);
+                    adjacencyMap[edge.to].neighbors.push(edge.from);
+                }
+            });
+
+            const container = document.getElementById('mynetwork');
+            const data = {
+                nodes: new vis.DataSet(nodesData),
+                edges: new vis.DataSet(edgesData)
+            };
+
+            dataNodes = data.nodes;
+            dataEdges = data.edges;
+
+            const options = {
+                nodes: {
+                    shape: 'dot',
+                    font: { size: 10, color: '#666666', face: 'monospace' },
+                    borderWidth: 2,
+                    borderWidthSelected: 4,
+                    shadow: false,
+                    scaling: { min: 8, max: 35, label: { enabled: true, min: 10, max: 10, maxVisible: 25, drawThreshold: 1 } }
+                },
+                edges: {
+                    width: 1,
+                    smooth: { enabled: true, type: 'continuous', roundness: 0.5 },
+                    arrows: { to: { enabled: true, scaleFactor: 0.4 } },
+                    font: { size: 8, color: '#666666', strokeWidth: 0, align: 'middle', background: 'transparent', face: 'arial' },
+                    shadow: false,
+                    hoverWidth: 0
+                },
+                physics: {
+                    enabled: true,
+                    stabilization: { enabled: true, iterations: 150, updateInterval: 25, fit: true },
+                    barnesHut: { gravitationalConstant: -6000, centralGravity: 0.3, springLength: 120, springConstant: 0.04, damping: 0.09, avoidOverlap: 0.2 },
+                    adaptiveTimestep: true
+                },
+                interaction: {
+                    hover: false,
+                    tooltipDelay: 200,
+                    zoomView: true,
+                    dragView: true,
+                    navigationButtons: true,
+                    keyboard: true,
+                    hideEdgesOnDrag: true,
+                    hideEdgesOnZoom: true
+                }
+            };
+
+            if (network) network.destroy();
+
+            network = new vis.Network(container, data, options);
+
+            network.on('stabilizationProgress', function(params) {
+                const progress = Math.round((params.iterations / params.total) * 100);
+                document.getElementById('loadingText').textContent = `Layout: ${progress}%`;
+            });
+
+            network.once('stabilizationIterationsDone', function() {
+                network.setOptions({ physics: false });
+            });
+
+            network.on("click", function(params) {
+                if (params.nodes.length > 0) {
+                    showNodeInfo(params.nodes[0]);
+                } else if (params.edges.length > 0) {
+                    showEdgeInfo(params.edges[0]);
+                } else {
+                    // Clicked on empty space - reset to default or results view
+                    resetInfoPanel();
+                }
+            });
+
+            document.getElementById('stats').innerHTML = `Nodes: ${nodesData.length} | Edges: ${edgesData.length}`;
+
+            network.once('stabilized', function() {
+                network.fit();
+            });
+        }
+
+        function showNodeInfo(nodeId) {
+            const node = dataNodes.get(nodeId);
+            if (!node) return;
+
+            const infoDiv = document.getElementById('info');
+
+            const connectedEdges = network.getConnectedEdges(nodeId);
+
+            // Separate incoming and outgoing edges
+            const incomingEdges = [];
+            const outgoingEdges = [];
+
+            connectedEdges.forEach(edgeId => {
+                const edge = dataEdges.get(edgeId);
+                const otherNodeId = edge.from === nodeId ? edge.to : edge.from;
+                const otherNode = dataNodes.get(otherNodeId);
+                if (edge.from === nodeId) {
+                    outgoingEdges.push({ edge, edgeId, otherNode });
+                } else {
+                    incomingEdges.push({ edge, edgeId, otherNode });
+                }
+            });
+
+            let annotationHtml = '';
+            if (analysisResult && analysisResult.node_annotations && analysisResult.node_annotations[nodeId]) {
+                annotationHtml = `<div class="result-summary">${escapeHtml(analysisResult.node_annotations[nodeId])}</div>`;
+            }
+
+            const nodeInfoHtml = `
+                <div class="info-section">
+                    <h3>Selected: ${escapeHtml(node.type)}</h3>
+                    <div style="background: #1a1a1a; padding: 12px; border-radius: 4px; border-left: 3px solid ${node.color};">
+                        <strong>${escapeHtml(node.fullLabel)}</strong>
+                        ${node.region ? '<br><small style="color: #888;">Region: ' + escapeHtml(node.region) + '</small>' : ''}
+                    </div>
+                    ${annotationHtml}
+                </div>
+                <div class="info-section">
+                    <h3>Incoming Edges (${incomingEdges.length})</h3>
+                    <div class="edge-list">
+                        ${incomingEdges.length === 0 ? '<div style="color: #666; font-size: 11px; padding: 4px 0;">None</div>' : ''}
+                        ${incomingEdges.slice(0, 8).map(info => `
+                            <div class="edge-item" onclick="selectEdgeAndNodes(${info.edgeId}, '${escapeJs(nodeId)}', '${escapeJs(info.otherNode.id)}')">
+                                <span class="edge-type">${info.edge.type}</span>
+                                <span class="edge-target">from ${info.otherNode.fullLabel}</span>
+                            </div>
+                        `).join('')}
+                        ${incomingEdges.length > 8 ? `<div class="edge-item" style="color: #888;">... and ${incomingEdges.length - 8} more</div>` : ''}
+                    </div>
+                </div>
+                <div class="info-section">
+                    <h3>Outgoing Edges (${outgoingEdges.length})</h3>
+                    <div class="edge-list">
+                        ${outgoingEdges.length === 0 ? '<div style="color: #666; font-size: 11px; padding: 4px 0;">None</div>' : ''}
+                        ${outgoingEdges.slice(0, 8).map(info => `
+                            <div class="edge-item" onclick="selectEdgeAndNodes(${info.edgeId}, '${escapeJs(nodeId)}', '${escapeJs(info.otherNode.id)}')">
+                                <span class="edge-type">${info.edge.type}</span>
+                                <span class="edge-target">to ${info.otherNode.fullLabel}</span>
+                            </div>
+                        `).join('')}
+                        ${outgoingEdges.length > 8 ? `<div class="edge-item" style="color: #888;">... and ${outgoingEdges.length - 8} more</div>` : ''}
+                    </div>
+                </div>
+                ${analysisResult ? `
+                <button onclick="showResultsPanel(analysisResult, executionMetrics)" class="button-secondary" style="width: 100%;">
+                    Back to Results
+                </button>
+                ` : ''}
+            `;
+
+            infoDiv.innerHTML = nodeInfoHtml;
+        }
+
+        function showEdgeInfo(edgeId) {
+            const edge = dataEdges.get(edgeId);
+            if (!edge) return;
+
+            const fromNode = dataNodes.get(edge.from);
+            const toNode = dataNodes.get(edge.to);
+            if (!fromNode || !toNode) return;
+
+            const infoDiv = document.getElementById('info');
+
+            let annotationHtml = '';
+            if (analysisResult && analysisResult.edge_annotations && analysisResult.edge_annotations[edgeId]) {
+                annotationHtml = `<div class="result-summary">${escapeHtml(analysisResult.edge_annotations[edgeId])}</div>`;
+            }
+
+            const edgeInfoHtml = `
+                <div class="info-section">
+                    <h3>Selected: Edge</h3>
+                    <div style="background: #1a1a1a; padding: 12px; border-radius: 4px; border-left: 3px solid ${edge.color.color || edge.color};">
+                        <strong>${escapeHtml(edge.type)}</strong>
+                        <br><small style="color: #888;">Weight: ${edge.weight}</small>
+                    </div>
+                    ${annotationHtml}
+                </div>
+                <div class="info-section">
+                    <h3>From</h3>
+                    <div class="edge-item" onclick="selectNode('${escapeJs(fromNode.id)}')" style="cursor: pointer;">
+                        <span style="display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: ${fromNode.color}; margin-right: 8px;"></span>
+                        <span><strong>${escapeHtml(fromNode.type)}:</strong> ${escapeHtml(fromNode.fullLabel)}</span>
+                    </div>
+                </div>
+                <div class="info-section">
+                    <h3>To</h3>
+                    <div class="edge-item" onclick="selectNode('${escapeJs(toNode.id)}')" style="cursor: pointer;">
+                        <span style="display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: ${toNode.color}; margin-right: 8px;"></span>
+                        <span><strong>${escapeHtml(toNode.type)}:</strong> ${escapeHtml(toNode.fullLabel)}</span>
+                    </div>
+                </div>
+                ${analysisResult ? `
+                <button onclick="showResultsPanel(analysisResult, executionMetrics)" class="button-secondary" style="width: 100%;">
+                    Back to Results
+                </button>
+                ` : ''}
+            `;
+
+            infoDiv.innerHTML = edgeInfoHtml;
+        }
+
+        function resetInfoPanel() {
+            const infoDiv = document.getElementById('info');
+            if (analysisResult) {
+                showResultsPanel(analysisResult, executionMetrics);
+            } else {
+                infoDiv.innerHTML = `
+                    <div class="info-section" id="selectionInfo">
+                        <h3>Selection</h3>
+                        <p style="color: #888; font-size: 12px;">Click on a node or edge to view details</p>
+                    </div>
+                `;
+            }
+        }
+
+        // Select edge and highlight both source and target nodes
+        function selectEdgeAndNodes(edgeId, currentNodeId, otherNodeId) {
+            if (!network || !dataEdges) return;
+
+            const edge = dataEdges.get(edgeId);
+            if (!edge) return;
+
+            // Select both nodes and the edge
+            network.selectNodes([currentNodeId, otherNodeId]);
+            network.selectEdges([edgeId]);
+
+            // Focus on both nodes
+            network.fit({ nodes: [currentNodeId, otherNodeId], animation: true });
+
+            // Highlight the connection
+            highlightConnection(edgeId, edge.from, edge.to);
+        }
+
+        // Cluster colors for privilege clustering overlay
+        const clusterColors = [
+            '#e74c3c', // red
+            '#3498db', // blue
+            '#2ecc71', // green
+            '#9b59b6', // purple
+            '#f39c12', // orange
+            '#1abc9c', // teal
+            '#e91e63', // pink
+            '#00bcd4', // cyan
+            '#8bc34a', // lime
+            '#ff5722', // deep orange
+            '#673ab7', // deep purple
+            '#009688', // dark teal
+        ];
+
+        function getClusterColor(clusterNum) {
+            return clusterColors[(clusterNum - 1) % clusterColors.length];
+        }
+
+        function applyOverlay(result) {
+            if (!result || !dataNodes || !dataEdges) return;
+
+            const highlightedNodes = new Set(result.highlighted_nodes || []);
+            const highlightedEdges = new Set(result.highlighted_edges || []);
+            const overlayType = result.overlay_type || 'default';
+
+            // For clustering overlay, build a map of node -> cluster number
+            const nodeClusterMap = new Map();
+            if (overlayType === 'clusters' && result.node_annotations) {
+                for (const [nodeId, annotation] of Object.entries(result.node_annotations)) {
+                    // Annotation format: "Cluster N"
+                    const match = annotation.match(/Cluster\s+(\d+)/);
+                    if (match) {
+                        nodeClusterMap.set(nodeId, parseInt(match[1], 10));
+                    }
+                }
+            }
+
+            // Identify source/input nodes and intermediate nodes by their annotations
+            // The key in node_annotations is the node ID (e.g., "user-0005")
+            const sourceNodes = new Set();
+            const intermediateNodes = new Set();
+            if (result.node_annotations && overlayType !== 'clusters') {
+                for (const [nodeId, annotation] of Object.entries(result.node_annotations)) {
+                    if (annotation.includes('Source') || annotation.includes('compromised') ||
+                        annotation.includes('Start') || annotation.includes('Input')) {
+                        sourceNodes.add(nodeId);
+                    } else if (annotation.includes('intermediate')) {
+                        // Groups, policies - intermediate nodes on the path
+                        intermediateNodes.add(nodeId);
+                    }
+                }
+            }
+
+            console.log('Overlay type:', overlayType);
+            console.log('Source nodes:', Array.from(sourceNodes));
+            console.log('Intermediate nodes:', Array.from(intermediateNodes));
+            console.log('Highlighted nodes:', Array.from(highlightedNodes).slice(0, 5));
+            console.log('Cluster map size:', nodeClusterMap.size);
+
+            // Dim non-highlighted nodes, subtly highlight highlighted nodes
+            // Source nodes: cyan, Intermediate: amber/orange, Resources: red
+            // Highlighted nodes are at most 10% larger than their original size
+            const nodeUpdates = nodesData.map(node => {
+                const isHighlighted = highlightedNodes.has(node.id) || highlightedNodes.has(node.fullLabel);
+                const isSource = sourceNodes.has(node.id) || sourceNodes.has(node.fullLabel);
+                const isIntermediate = intermediateNodes.has(node.id) || intermediateNodes.has(node.fullLabel);
+
+                // Check if this node belongs to a cluster (for clustering overlay)
+                const clusterNum = nodeClusterMap.get(node.id) || nodeClusterMap.get(node.fullLabel);
+
+                if (clusterNum) {
+                    // Clustering overlay: use cluster-specific border color
+                    const clusterColor = getClusterColor(clusterNum);
+                    const baseColor = getNodeColor(node.type);
+                    return {
+                        id: node.id,
+                        shape: node.shape,
+                        color: {
+                            background: baseColor,
+                            border: clusterColor,
+                            highlight: { background: baseColor, border: clusterColor }
+                        },
+                        size: node.size * 1.1,
+                        font: {
+                            size: 10,
+                            color: '#666666',
+                            face: 'monospace',
+                            strokeWidth: 0,
+                            strokeColor: 'transparent'
+                        },
+                        borderWidth: 4,
+                        shadow: {
+                            enabled: true,
+                            color: hexToRgba(clusterColor, 0.4),
+                            size: 6,
+                            x: 0,
+                            y: 0
+                        }
+                    };
+                } else if (isSource) {
+                    // Source node: distinct cyan/teal color, at most 10% larger
+                    return {
+                        id: node.id,
+                        shape: node.shape,
+                        color: {
+                            background: '#00d4ff',
+                            border: '#00ffff',
+                            highlight: { background: '#00ffff', border: '#ffffff' }
+                        },
+                        size: node.size * 1.1,  // At most 10% larger
+                        font: {
+                            size: 11,
+                            color: '#666666',
+                            face: 'monospace',
+                            strokeWidth: 0,
+                            strokeColor: 'transparent'
+                        },
+                        borderWidth: 3,
+                        shadow: {
+                            enabled: true,
+                            color: 'rgba(0, 212, 255, 0.5)',
+                            size: 8,
+                            x: 0,
+                            y: 0
+                        }
+                    };
+                } else if (isIntermediate) {
+                    // Intermediate nodes (groups, policies): subtle amber/orange
+                    return {
+                        id: node.id,
+                        shape: node.shape,
+                        color: {
+                            background: 'rgba(255, 180, 80, 0.7)',
+                            border: 'rgba(255, 150, 50, 0.8)',
+                            highlight: { background: 'rgba(255, 200, 100, 0.8)', border: '#ffffff' }
+                        },
+                        size: node.size * 1.05,  // 5% larger (less than source)
+                        font: {
+                            size: 10,
+                            color: '#666666',
+                            face: 'monospace',
+                            strokeWidth: 0,
+                            strokeColor: 'transparent'
+                        },
+                        borderWidth: 2,
+                        shadow: {
+                            enabled: true,
+                            color: 'rgba(255, 165, 2, 0.3)',
+                            size: 4,
+                            x: 0,
+                            y: 0
+                        }
+                    };
+                } else if (isHighlighted) {
+                    // Impacted resource nodes: red color, at most 10% larger
+                    return {
+                        id: node.id,
+                        shape: node.shape,
+                        color: {
+                            background: '#ff6b6b',
+                            border: '#ee5a5a',
+                            highlight: { background: '#ff8787', border: '#ffffff' }
+                        },
+                        size: node.size * 1.1,  // At most 10% larger
+                        font: {
+                            size: 11,
+                            color: '#666666',
+                            face: 'monospace',
+                            strokeWidth: 0,
+                            strokeColor: 'transparent'
+                        },
+                        borderWidth: 3,
+                        shadow: {
+                            enabled: true,
+                            color: 'rgba(255, 107, 107, 0.4)',
+                            size: 6,
+                            x: 0,
+                            y: 0
+                        }
+                    };
+                } else {
+                    // Dim non-highlighted nodes but keep them visible
+                    const baseColor = getNodeColor(node.type);
+                    return {
+                        id: node.id,
+                        shape: node.shape,
+                        color: {
+                            background: hexToRgba(baseColor, 0.25),
+                            border: hexToRgba(baseColor, 0.35)
+                        },
+                        size: node.size,  // Keep original size
+                        font: {
+                            size: 8,
+                            color: 'rgba(150, 150, 150, 0.7)',
+                            face: 'monospace'
+                        },
+                        borderWidth: 1,
+                        shadow: { enabled: false }
+                    };
+                }
+            });
+
+            // Strongly dim non-highlighted edges, make highlighted edges very visible
+            const edgeUpdates = edgesData.map(edge => {
+                const isHighlighted = highlightedEdges.has(edge.id);
+                if (isHighlighted) {
+                    return {
+                        id: edge.id,
+                        color: { color: '#feca57', highlight: '#ff9f43' },
+                        width: 6,
+                        arrows: { to: { enabled: true, scaleFactor: 1.2 } },
+                        shadow: {
+                            enabled: true,
+                            color: 'rgba(254, 202, 87, 0.7)',
+                            size: 10
+                        }
+                    };
+                } else {
+                    // Dim non-highlighted edges but keep them visible
+                    const baseColor = getEdgeColor(edge.type);
+                    return {
+                        id: edge.id,
+                        color: { color: hexToRgba(baseColor, 0.2) },
+                        width: 0.5,
+                        arrows: { to: { enabled: true, scaleFactor: 0.3 } },
+                        shadow: { enabled: false }
+                    };
+                }
+            });
+
+            dataNodes.update(nodeUpdates);
+            dataEdges.update(edgeUpdates);
+
+            if (highlightedNodes.size > 0) {
+                const nodeIds = Array.from(highlightedNodes).filter(id => dataNodes.get(id));
+                if (nodeIds.length > 0) {
+                    network.fit({ nodes: nodeIds, animation: true });
+                }
+            }
+        }
+
+        function resetHighlighting() {
+            if (!dataNodes || !dataEdges) return;
+
+            const nodeUpdates = nodesData.map(node => ({
+                id: node.id,
+                shape: node.shape,
+                color: {
+                    background: node.color,
+                    border: node.color
+                },
+                size: node.size,
+                borderWidth: 2,
+                font: { size: 10, color: '#666666', face: 'monospace' },
+                shadow: { enabled: false }
+            }));
+
+            const edgeUpdates = edgesData.map(edge => ({
+                id: edge.id,
+                color: { color: getEdgeColor(edge.type) },
+                width: 1,
+                shadow: { enabled: false }
+            }));
+
+            dataNodes.update(nodeUpdates);
+            dataEdges.update(edgeUpdates);
+        }
+
+        // Search functionality
+        const searchInput = document.getElementById('searchInput');
+        const searchResults = document.getElementById('searchResults');
+
+        searchInput.addEventListener('input', function() {
+            const query = this.value.toLowerCase();
+            if (query.length < 2) {
+                searchResults.innerHTML = '';
+                return;
+            }
+
+            const matches = nodesData.filter(node =>
+                node.fullLabel.toLowerCase().includes(query) ||
+                node.type.toLowerCase().includes(query)
+            ).slice(0, 10);
+
+            if (matches.length > 0) {
+                searchResults.innerHTML = matches.map(node => `
+                    <div class="search-result-item" onclick="selectNode('${escapeJs(node.id)}')">
+                        <div style="color: ${node.color}; font-weight: bold;">${escapeHtml(node.type)}</div>
+                        <div style="font-size: 11px; margin-top: 2px;">${escapeHtml(node.fullLabel)}</div>
+                    </div>
+                `).join('');
+            } else {
+                searchResults.innerHTML = '<div class="search-result-item">No nodes found</div>';
+            }
+        });
+
+        function selectNode(nodeId) {
+            if (!network) return;
+            network.selectNodes([nodeId]);
+            network.focus(nodeId, { scale: 1.5, animation: true });
+            if (analysisResult) showNodeInfo(nodeId);
+            searchInput.value = '';
+            searchResults.innerHTML = '';
+        }
+
+        // Highlight an edge and its connected nodes
+        function selectEdge(edgeId) {
+            if (!network || !dataEdges) return;
+
+            const edge = dataEdges.get(edgeId);
+            if (!edge) return;
+
+            // Highlight the edge
+            network.selectEdges([edgeId]);
+
+            // Focus on both connected nodes
+            const nodeIds = [edge.from, edge.to].filter(id => dataNodes.get(id));
+            if (nodeIds.length > 0) {
+                network.fit({ nodes: nodeIds, animation: true });
+            }
+
+            // Temporarily highlight the edge and its connected nodes
+            highlightConnection(edgeId, edge.from, edge.to);
+        }
+
+        // Temporarily highlight a connection (edge + its nodes)
+        function highlightConnection(edgeId, fromId, toId) {
+            const originalEdge = edgesData.find(e => e.id === edgeId);
+            const originalFrom = nodesData.find(n => n.id === fromId);
+            const originalTo = nodesData.find(n => n.id === toId);
+
+            if (!originalEdge) return;
+
+            // Highlight the edge
+            dataEdges.update({
+                id: edgeId,
+                color: { color: '#00ff88', highlight: '#00ff88' },
+                width: 3,
+                shadow: {
+                    enabled: true,
+                    color: 'rgba(0, 255, 136, 0.4)',
+                    size: 6
+                }
+            });
+
+            // Highlight connected nodes (at most 10% larger)
+            if (originalFrom) {
+                dataNodes.update({
+                    id: fromId,
+                    shape: originalFrom.shape,
+                    color: {
+                        background: '#00ff88',
+                        border: '#00cc6a',
+                        highlight: { background: '#00ff88', border: '#ffffff' }
+                    },
+                    size: originalFrom.size * 1.1,  // At most 10% larger
+                    borderWidth: 3,
+                    shadow: {
+                        enabled: true,
+                        color: 'rgba(0, 255, 136, 0.4)',
+                        size: 6
+                    }
+                });
+            }
+
+            if (originalTo) {
+                dataNodes.update({
+                    id: toId,
+                    shape: originalTo.shape,
+                    color: {
+                        background: '#00ff88',
+                        border: '#00cc6a',
+                        highlight: { background: '#00ff88', border: '#ffffff' }
+                    },
+                    size: originalTo.size * 1.1,  // At most 10% larger
+                    borderWidth: 3,
+                    shadow: {
+                        enabled: true,
+                        color: 'rgba(0, 255, 136, 0.4)',
+                        size: 6
+                    }
+                });
+            }
+
+            // If overlay is active, restore overlay state after 3 seconds
+            // Otherwise, restore original state
+            setTimeout(() => {
+                if (overlayActive && analysisResult) {
+                    applyOverlay(analysisResult);
+                } else {
+                    // Restore original styles
+                    if (originalEdge) {
+                        dataEdges.update({
+                            id: edgeId,
+                            color: { color: getEdgeColor(originalEdge.type) },
+                            width: 1,
+                            shadow: { enabled: false }
+                        });
+                    }
+                    if (originalFrom) {
+                        dataNodes.update({
+                            id: fromId,
+                            shape: originalFrom.shape,
+                            color: { background: originalFrom.color, border: originalFrom.color },
+                            size: originalFrom.size,
+                            borderWidth: 2,
+                            shadow: { enabled: false }
+                        });
+                    }
+                    if (originalTo) {
+                        dataNodes.update({
+                            id: toId,
+                            shape: originalTo.shape,
+                            color: { background: originalTo.color, border: originalTo.color },
+                            size: originalTo.size,
+                            borderWidth: 2,
+                            shadow: { enabled: false }
+                        });
+                    }
+                }
+            }, 3000);
+        }
+
+        function fitNetwork() {
+            if (network) network.fit();
+        }
+
+        function hexToRgba(hex, alpha) {
+            // Handle both #RGB and #RRGGBB formats
+            let r, g, b;
+            if (hex.length === 4) {
+                r = parseInt(hex[1] + hex[1], 16);
+                g = parseInt(hex[2] + hex[2], 16);
+                b = parseInt(hex[3] + hex[3], 16);
+            } else {
+                r = parseInt(hex.slice(1, 3), 16);
+                g = parseInt(hex.slice(3, 5), 16);
+                b = parseInt(hex.slice(5, 7), 16);
+            }
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function escapeJs(text) {
+            if (!text) return '';
+            return text.replace(/'/g, "\\'").replace(/"/g, '\\"');
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>

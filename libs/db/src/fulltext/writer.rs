@@ -46,14 +46,15 @@ impl Processor for Index {
     /// Process a batch of mutations - index content for full-text search.
     ///
     /// Requires the Index to be in readwrite mode.
+    #[tracing::instrument(skip(self, mutations), fields(mutation_count = mutations.len()))]
     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
         if mutations.is_empty() {
             return Ok(());
         }
 
-        log::info!(
-            "[FullText] Processing {} mutations for indexing",
-            mutations.len()
+        tracing::info!(
+            count = mutations.len(),
+            "[FullText] Processing mutations for indexing"
         );
 
         // Get the writer (requires readwrite mode)
@@ -81,9 +82,9 @@ impl Processor for Index {
         // Commit the batch atomically
         writer.commit().context("Failed to commit batch to index")?;
 
-        log::info!(
-            "[FullText] Successfully indexed {} mutations",
-            mutations.len()
+        tracing::info!(
+            count = mutations.len(),
+            "[FullText] Successfully indexed mutations"
         );
         Ok(())
     }

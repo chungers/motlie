@@ -339,6 +339,8 @@ impl MutationExecutor for AddNode {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
+        tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation");
+
         use super::ColumnFamilyRecord;
         use super::schema::{NodeNames, Nodes};
 
@@ -366,6 +368,13 @@ impl MutationExecutor for AddEdge {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
+        tracing::debug!(
+            src = %self.source_node_id,
+            dst = %self.target_node_id,
+            name = %self.name,
+            "Executing AddEdge mutation"
+        );
+
         use super::ColumnFamilyRecord;
         use super::schema::{EdgeNames, ForwardEdges, ReverseEdges};
 
@@ -400,6 +409,13 @@ impl MutationExecutor for AddNodeFragment {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
+        tracing::debug!(
+            id = %self.id,
+            ts = %self.ts_millis.0,
+            content_len = self.content.as_ref().len(),
+            "Executing AddNodeFragment mutation"
+        );
+
         use super::ColumnFamilyRecord;
         use super::schema::NodeFragments;
 
@@ -419,6 +435,15 @@ impl MutationExecutor for AddEdgeFragment {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
+        tracing::debug!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            edge_name = %self.edge_name,
+            ts = %self.ts_millis.0,
+            content_len = self.content.as_ref().len(),
+            "Executing AddEdgeFragment mutation"
+        );
+
         use super::ColumnFamilyRecord;
         use super::schema::EdgeFragments;
 
@@ -447,10 +472,10 @@ impl MutationExecutor for UpdateNodeValidSinceUntil {
         // 2. Find all connected edges (N edges)
         let edges = find_connected_edges(txn, txn_db, node_id)?;
 
-        log::info!(
-            "[UpdateNodeValidSinceUntil] Updating node {} + {} connected edges",
-            node_id,
-            edges.len()
+        tracing::info!(
+            node_id = %node_id,
+            edge_count = edges.len(),
+            "[UpdateNodeValidSinceUntil] Updating node and connected edges"
         );
 
         // 3. Update each edge (N × 2 operations = 2N operations)
@@ -468,6 +493,14 @@ impl MutationExecutor for UpdateEdgeValidSinceUntil {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
+        tracing::debug!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            name = %self.name,
+            reason = %self.reason,
+            "Executing UpdateEdgeValidSinceUntil mutation"
+        );
+
         // Simply delegate to the helper
         update_edge_valid_range(
             txn,
@@ -486,6 +519,14 @@ impl MutationExecutor for UpdateEdgeWeight {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()> {
+        tracing::debug!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            name = %self.name,
+            weight = self.weight,
+            "Executing UpdateEdgeWeight mutation"
+        );
+
         use super::ColumnFamilyRecord;
         use super::schema::{ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges};
 
