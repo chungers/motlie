@@ -22,12 +22,14 @@
 //! motlie-core = { path = "../libs/core", features = ["dtrace-otel"] }
 //! ```
 //!
-//! Then initialize in your application:
+//! Then initialize in your application. **Important**: Keep the returned guard alive
+//! for the duration of your application to ensure proper shutdown and span flushing:
 //! ```ignore
 //! use motlie_core::telemetry;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     telemetry::init_otel_subscriber("my-service", "http://localhost:4317")?;
+//!     // The guard ensures spans are flushed when main exits
+//!     let _telemetry_guard = telemetry::init_otel_subscriber("my-service", "http://localhost:4317")?;
 //!     // Application code...
 //!     Ok(())
 //! }
@@ -35,6 +37,35 @@
 
 use tracing::Level;
 use tracing_subscriber::fmt;
+
+/// Guard that ensures proper shutdown of OpenTelemetry on drop.
+///
+/// When this guard is dropped, it calls `shutdown()` on the `TracerProvider`,
+/// which flushes any pending spans to the collector. This is essential for
+/// ensuring all telemetry data is exported before the application exits.
+///
+/// # Example
+/// ```ignore
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let _guard = motlie_core::telemetry::init_otel_subscriber("my-service", "http://localhost:4317")?;
+///     // Application runs...
+///     // When main exits, _guard is dropped, triggering shutdown
+///     Ok(())
+/// }
+/// ```
+#[cfg(feature = "dtrace-otel")]
+pub struct OtelGuard {
+    provider: opentelemetry_sdk::trace::TracerProvider,
+}
+
+#[cfg(feature = "dtrace-otel")]
+impl Drop for OtelGuard {
+    fn drop(&mut self) {
+        if let Err(e) = self.provider.shutdown() {
+            eprintln!("Error shutting down OpenTelemetry tracer provider: {:?}", e);
+        }
+    }
+}
 
 /// Initialize a simple stderr subscriber for development.
 ///
@@ -116,9 +147,16 @@ pub fn init_dev_subscriber_with_env_filter() {
 ///
 /// Requires the `dtrace-otel` feature to be enabled.
 ///
+/// **Important**: The returned [`OtelGuard`] must be kept alive for the duration of
+/// your application. When the guard is dropped, it flushes pending spans and shuts
+/// down the tracer provider gracefully.
+///
 /// # Arguments
 /// * `service_name` - The name of your service (appears in traces)
 /// * `endpoint` - The OTLP endpoint URL (e.g., "http://localhost:4317")
+///
+/// # Returns
+/// An [`OtelGuard`] that must be held until application exit to ensure proper cleanup.
 ///
 /// # Errors
 /// Returns an error if:
@@ -131,8 +169,10 @@ pub fn init_dev_subscriber_with_env_filter() {
 /// use motlie_core::telemetry;
 ///
 /// fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     telemetry::init_otel_subscriber("my-service", "http://localhost:4317")?;
+///     // Keep the guard alive for the entire application lifetime
+///     let _guard = telemetry::init_otel_subscriber("my-service", "http://localhost:4317")?;
 ///     tracing::info!("Application started with OpenTelemetry");
+///     // When main exits, _guard is dropped, flushing all pending spans
 ///     Ok(())
 /// }
 /// ```
@@ -140,11 +180,13 @@ pub fn init_dev_subscriber_with_env_filter() {
 pub fn init_otel_subscriber(
     service_name: &str,
     endpoint: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<OtelGuard, Box<dyn std::error::Error + Send + Sync>> {
     use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry::KeyValue;
     use opentelemetry_otlp::WithExportConfig;
     use opentelemetry_sdk::trace::TracerProvider;
     use opentelemetry_sdk::runtime;
+    use opentelemetry_sdk::Resource;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -154,9 +196,15 @@ pub fn init_otel_subscriber(
         .with_endpoint(endpoint)
         .build()?;
 
-    // Build the tracer provider with batch export
+    // Create resource with service name (using the standard semantic convention key)
+    let resource = Resource::new(vec![
+        KeyValue::new("service.name", service_name.to_string()),
+    ]);
+
+    // Build the tracer provider with batch export and resource
     let provider = TracerProvider::builder()
         .with_batch_exporter(exporter, runtime::Tokio)
+        .with_resource(resource)
         .build();
 
     // Create a tracer from the provider
@@ -178,16 +226,24 @@ pub fn init_otel_subscriber(
         .with(fmt_layer)
         .init();
 
-    Ok(())
+    // Return guard to keep the provider alive and ensure proper shutdown
+    Ok(OtelGuard { provider })
 }
 
 /// Initialize OpenTelemetry subscriber with environment filter for production.
 ///
 /// Similar to `init_otel_subscriber` but respects the `RUST_LOG` environment variable.
 ///
+/// **Important**: The returned [`OtelGuard`] must be kept alive for the duration of
+/// your application. When the guard is dropped, it flushes pending spans and shuts
+/// down the tracer provider gracefully.
+///
 /// # Arguments
 /// * `service_name` - The name of your service (appears in traces)
 /// * `endpoint` - The OTLP endpoint URL (e.g., "http://localhost:4317")
+///
+/// # Returns
+/// An [`OtelGuard`] that must be held until application exit to ensure proper cleanup.
 ///
 /// # Example
 /// ```ignore
@@ -195,8 +251,10 @@ pub fn init_otel_subscriber(
 ///
 /// fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     // Set RUST_LOG=info for production
-///     telemetry::init_otel_subscriber_with_env_filter("my-service", "http://localhost:4317")?;
+///     // Keep the guard alive for the entire application lifetime
+///     let _guard = telemetry::init_otel_subscriber_with_env_filter("my-service", "http://localhost:4317")?;
 ///     tracing::info!("Application started with OpenTelemetry");
+///     // When main exits, _guard is dropped, flushing all pending spans
 ///     Ok(())
 /// }
 /// ```
@@ -204,11 +262,13 @@ pub fn init_otel_subscriber(
 pub fn init_otel_subscriber_with_env_filter(
     service_name: &str,
     endpoint: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<OtelGuard, Box<dyn std::error::Error + Send + Sync>> {
     use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry::KeyValue;
     use opentelemetry_otlp::WithExportConfig;
     use opentelemetry_sdk::trace::TracerProvider;
     use opentelemetry_sdk::runtime;
+    use opentelemetry_sdk::Resource;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;
@@ -219,9 +279,15 @@ pub fn init_otel_subscriber_with_env_filter(
         .with_endpoint(endpoint)
         .build()?;
 
-    // Build the tracer provider with batch export
+    // Create resource with service name (using the standard semantic convention key)
+    let resource = Resource::new(vec![
+        KeyValue::new("service.name", service_name.to_string()),
+    ]);
+
+    // Build the tracer provider with batch export and resource
     let provider = TracerProvider::builder()
         .with_batch_exporter(exporter, runtime::Tokio)
+        .with_resource(resource)
         .build();
 
     // Create a tracer from the provider
@@ -248,7 +314,8 @@ pub fn init_otel_subscriber_with_env_filter(
         .with(fmt_layer)
         .init();
 
-    Ok(())
+    // Return guard to keep the provider alive and ensure proper shutdown
+    Ok(OtelGuard { provider })
 }
 
 #[cfg(test)]
