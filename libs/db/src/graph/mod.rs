@@ -339,6 +339,7 @@ impl Storage {
     /// Errors:
     /// - If the database path is not a directory or does not exist.
     /// - If the database path is a file or a symlink.
+    #[tracing::instrument(skip(self), fields(path = ?self.db_path))]
     pub fn ready(&mut self) -> Result<()> {
         if self.db.is_some() {
             return Ok(());
@@ -426,7 +427,7 @@ impl Storage {
             }
         }
 
-        log::info!("[Storage] Ready");
+        tracing::info!("[Storage] Ready");
         Ok(())
     }
 
@@ -531,12 +532,13 @@ impl Clone for Graph {
 #[async_trait::async_trait]
 impl Processor for Graph {
     /// Process a batch of mutations
+    #[tracing::instrument(skip(self, mutations), fields(mutation_count = mutations.len()))]
     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
         if mutations.is_empty() {
             return Ok(());
         }
 
-        log::info!("[Graph] About to insert {} mutations", mutations.len());
+        tracing::info!(count = mutations.len(), "[Graph] About to insert mutations");
 
         // Get transaction
         let txn_db = self.storage.transaction_db()?;
@@ -550,9 +552,9 @@ impl Processor for Graph {
         // Single commit for all mutations
         txn.commit()?;
 
-        log::info!(
-            "[Graph] Successfully committed {} mutations",
-            mutations.len()
+        tracing::info!(
+            count = mutations.len(),
+            "[Graph] Successfully committed mutations"
         );
         Ok(())
     }

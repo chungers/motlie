@@ -230,8 +230,9 @@ impl<P: Processor> Consumer<P> {
     }
 
     /// Process mutations continuously until the channel is closed
+    #[tracing::instrument(skip(self), name = "mutation_consumer")]
     pub async fn run(mut self) -> Result<()> {
-        log::info!("Starting mutation consumer with config: {:?}", self.config);
+        tracing::info!(config = ?self.config, "Starting mutation consumer");
 
         loop {
             // Wait for the next batch of mutations
@@ -244,7 +245,7 @@ impl<P: Processor> Consumer<P> {
                 }
                 None => {
                     // Channel closed
-                    log::info!("Mutation consumer shutting down - channel closed");
+                    tracing::info!("Mutation consumer shutting down - channel closed");
                     return Ok(());
                 }
             }
@@ -252,60 +253,61 @@ impl<P: Processor> Consumer<P> {
     }
 
     /// Process a batch of mutations
+    #[tracing::instrument(skip(self, mutations), fields(batch_size = mutations.len()))]
     async fn process_batch(&self, mutations: &[Mutation]) -> Result<()> {
         // Log what we're processing
         for mutation in mutations {
             match mutation {
                 Mutation::AddNode(args) => {
-                    log::debug!("Processing AddNode: id={}, name={}", args.id, args.name);
+                    tracing::debug!(id = %args.id, name = %args.name, "Processing AddNode");
                 }
                 Mutation::AddEdge(args) => {
-                    log::debug!(
-                        "Processing AddEdge: source={}, target={}, name={}",
-                        args.source_node_id,
-                        args.target_node_id,
-                        args.name
+                    tracing::debug!(
+                        source = %args.source_node_id,
+                        target = %args.target_node_id,
+                        name = %args.name,
+                        "Processing AddEdge"
                     );
                 }
                 Mutation::AddNodeFragment(args) => {
-                    log::debug!(
-                        "Processing AddNodeFragment: id={}, body_len={}",
-                        args.id,
-                        args.content.0.len()
+                    tracing::debug!(
+                        id = %args.id,
+                        body_len = args.content.0.len(),
+                        "Processing AddNodeFragment"
                     );
                 }
                 Mutation::AddEdgeFragment(args) => {
-                    log::debug!(
-                        "Processing AddEdgeFragment: src={}, dst={}, name={}, body_len={}",
-                        args.src_id,
-                        args.dst_id,
-                        args.edge_name,
-                        args.content.0.len()
+                    tracing::debug!(
+                        src = %args.src_id,
+                        dst = %args.dst_id,
+                        name = %args.edge_name,
+                        body_len = args.content.0.len(),
+                        "Processing AddEdgeFragment"
                     );
                 }
                 Mutation::UpdateNodeValidSinceUntil(args) => {
-                    log::debug!(
-                        "Processing UpdateNodeValidSinceUntil: id={}, reason={}",
-                        args.id,
-                        args.reason
+                    tracing::debug!(
+                        id = %args.id,
+                        reason = %args.reason,
+                        "Processing UpdateNodeValidSinceUntil"
                     );
                 }
                 Mutation::UpdateEdgeValidSinceUntil(args) => {
-                    log::debug!(
-                        "Processing UpdateEdgeValidSinceUntil: src={}, dst={}, name={}, reason={}",
-                        args.src_id,
-                        args.dst_id,
-                        args.name,
-                        args.reason
+                    tracing::debug!(
+                        src = %args.src_id,
+                        dst = %args.dst_id,
+                        name = %args.name,
+                        reason = %args.reason,
+                        "Processing UpdateEdgeValidSinceUntil"
                     );
                 }
                 Mutation::UpdateEdgeWeight(args) => {
-                    log::debug!(
-                        "Processing UpdateEdgeWeight: src={}, dst={}, name={}, weight={}",
-                        args.src_id,
-                        args.dst_id,
-                        args.name,
-                        args.weight
+                    tracing::debug!(
+                        src = %args.src_id,
+                        dst = %args.dst_id,
+                        name = %args.name,
+                        weight = args.weight,
+                        "Processing UpdateEdgeWeight"
                     );
                 }
             }
@@ -318,10 +320,10 @@ impl<P: Processor> Consumer<P> {
         // This is a best-effort send - if the buffer is full, we log and continue
         if let Some(sender) = &self.next {
             if let Err(e) = sender.try_send(mutations.to_vec()) {
-                log::warn!(
-                    "[BUFFER FULL] Next consumer busy, dropping mutations: err={} count={}",
-                    e,
-                    mutations.len()
+                tracing::warn!(
+                    err = %e,
+                    count = mutations.len(),
+                    "[BUFFER FULL] Next consumer busy, dropping mutations"
                 );
             }
         }

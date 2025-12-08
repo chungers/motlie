@@ -380,6 +380,8 @@ impl Visitable for AllNodes {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
+        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllNodes scan");
+
         let seek_key = self
             .last
             .map(|id| schema::Nodes::key_to_bytes(&schema::NodeCfKey(id)))
@@ -425,6 +427,8 @@ impl Visitable for AllEdges {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
+        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllEdges scan");
+
         let seek_key = self
             .last
             .as_ref()
@@ -482,6 +486,8 @@ impl Visitable for AllReverseEdges {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
+        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllReverseEdges scan");
+
         let seek_key = self
             .last
             .as_ref()
@@ -537,6 +543,8 @@ impl Visitable for AllNodeFragments {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
+        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllNodeFragments scan");
+
         let seek_key = self
             .last
             .map(|(id, ts)| {
@@ -587,6 +595,8 @@ impl Visitable for AllEdgeFragments {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
+        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllEdgeFragments scan");
+
         let seek_key = self
             .last
             .as_ref()
@@ -645,6 +655,8 @@ impl Visitable for AllNodeNames {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
+        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllNodeNames scan");
+
         let seek_key = self
             .last
             .as_ref()
@@ -695,6 +707,8 @@ impl Visitable for AllEdgeNames {
         storage: &Storage,
         visitor: &mut V,
     ) -> Result<usize> {
+        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllEdgeNames scan");
+
         let seek_key = self
             .last
             .as_ref()
