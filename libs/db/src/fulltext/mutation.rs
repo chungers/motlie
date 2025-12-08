@@ -63,11 +63,11 @@ impl MutationExecutor for AddNode {
             .add_document(doc)
             .context("Failed to index AddNode")?;
 
-        log::debug!(
-            "[FullText] Indexed node: id={}, name={}, valid_range={:?}",
-            self.id,
-            self.name,
-            self.valid_range
+        tracing::debug!(
+            id = %self.id,
+            name = %self.name,
+            valid_range = ?self.valid_range,
+            "[FullText] Indexed node"
         );
         Ok(())
     }
@@ -124,12 +124,12 @@ impl MutationExecutor for AddEdge {
             .add_document(doc)
             .context("Failed to index AddEdge")?;
 
-        log::debug!(
-            "[FullText] Indexed edge: src={}, dst={}, name={}, valid_range={:?}",
-            self.source_node_id,
-            self.target_node_id,
-            self.name,
-            self.valid_range
+        tracing::debug!(
+            src = %self.source_node_id,
+            dst = %self.target_node_id,
+            name = %self.name,
+            valid_range = ?self.valid_range,
+            "[FullText] Indexed edge"
         );
         Ok(())
     }
@@ -179,11 +179,11 @@ impl MutationExecutor for AddNodeFragment {
             .add_document(doc)
             .context("Failed to index AddNodeFragment")?;
 
-        log::debug!(
-            "[FullText] Indexed node fragment: id={}, content_len={}, valid_range={:?}",
-            self.id,
-            self.content.as_ref().len(),
-            self.valid_range
+        tracing::debug!(
+            id = %self.id,
+            content_len = self.content.as_ref().len(),
+            valid_range = ?self.valid_range,
+            "[FullText] Indexed node fragment"
         );
         Ok(())
     }
@@ -235,13 +235,13 @@ impl MutationExecutor for AddEdgeFragment {
             .add_document(doc)
             .context("Failed to index AddEdgeFragment")?;
 
-        log::debug!(
-            "[FullText] Indexed edge fragment: src={}, dst={}, name={}, content_len={}, valid_range={:?}",
-            self.src_id,
-            self.dst_id,
-            self.edge_name,
-            self.content.as_ref().len(),
-            self.valid_range
+        tracing::debug!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            name = %self.edge_name,
+            content_len = self.content.as_ref().len(),
+            valid_range = ?self.valid_range,
+            "[FullText] Indexed edge fragment"
         );
         Ok(())
     }
@@ -253,10 +253,10 @@ impl MutationExecutor for UpdateNodeValidSinceUntil {
         let id_term = tantivy::Term::from_field_bytes(fields.id_field, self.id.as_bytes());
         index_writer.delete_term(id_term);
 
-        log::debug!(
-            "[FullText] Deleted node documents for temporal update: id={}, reason={}",
-            self.id,
-            self.reason
+        tracing::debug!(
+            id = %self.id,
+            reason = %self.reason,
+            "[FullText] Deleted node documents for temporal update"
         );
         Ok(())
     }
@@ -271,12 +271,12 @@ impl MutationExecutor for UpdateEdgeValidSinceUntil {
         let src_term = tantivy::Term::from_field_bytes(fields.src_id_field, self.src_id.as_bytes());
         index_writer.delete_term(src_term);
 
-        log::debug!(
-            "[FullText] Deleted edge documents for temporal update: src={}, dst={}, name={}, reason={}",
-            self.src_id,
-            self.dst_id,
-            self.name,
-            self.reason
+        tracing::debug!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            name = %self.name,
+            reason = %self.reason,
+            "[FullText] Deleted edge documents for temporal update"
         );
         Ok(())
     }
@@ -286,12 +286,12 @@ impl MutationExecutor for UpdateEdgeWeight {
     fn index(&self, _index_writer: &IndexWriter, _fields: &DocumentFields) -> Result<()> {
         // For weight updates, we'd need to delete and re-index
         // For now, just log as this is primarily a graph operation
-        log::debug!(
-            "[FullText] Edge weight updated (no index change needed): src={}, dst={}, name={}, weight={}",
-            self.src_id,
-            self.dst_id,
-            self.name,
-            self.weight
+        tracing::debug!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            name = %self.name,
+            weight = self.weight,
+            "[FullText] Edge weight updated (no index change needed)"
         );
         Ok(())
     }
