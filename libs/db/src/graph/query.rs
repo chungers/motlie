@@ -855,6 +855,8 @@ impl QueryExecutor for NodeById {
     type Output = (NodeName, NodeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        tracing::debug!(id = %self.id, "Executing NodeById query");
+
         // Default None to current time for temporal validity checks
         let ref_time = self
             .reference_ts_millis
@@ -908,6 +910,8 @@ impl QueryExecutor for NodeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        tracing::debug!(id = %self.id, time_range = ?self.time_range, "Executing NodeFragmentsByIdTimeRange query");
+
         use std::ops::Bound;
 
         // Default None to current time for temporal validity checks
@@ -986,6 +990,14 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        tracing::debug!(
+            src_id = %self.source_id,
+            dst_id = %self.dest_id,
+            edge_name = %self.edge_name,
+            time_range = ?self.time_range,
+            "Executing EdgeFragmentsByIdTimeRange query"
+        );
+
         use std::ops::Bound;
 
         // Default None to current time for temporal validity checks
@@ -1076,6 +1088,13 @@ impl QueryExecutor for EdgeSummaryBySrcDstName {
     type Output = (EdgeSummary, Option<f64>);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        tracing::debug!(
+            src_id = %self.source_id,
+            dst_id = %self.dest_id,
+            name = %self.name,
+            "Executing EdgeSummaryBySrcDstName query"
+        );
+
         // Default None to current time for temporal validity checks
         let ref_time = self
             .reference_ts_millis
@@ -1150,6 +1169,8 @@ impl QueryExecutor for OutgoingEdges {
     type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        tracing::debug!(node_id = %self.id, "Executing OutgoingEdges query");
+
         // Default None to current time for temporal validity checks
         let ref_time = self
             .reference_ts_millis
@@ -1257,6 +1278,8 @@ impl QueryExecutor for IncomingEdges {
     type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        tracing::debug!(node_id = %self.id, "Executing IncomingEdges query");
+
         // Default None to current time for temporal validity checks
         let ref_time = self
             .reference_ts_millis
@@ -1416,6 +1439,8 @@ impl QueryExecutor for NodesByName {
     type Output = Vec<(NodeName, Id)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        tracing::debug!(name = %self.name, "Executing NodesByName query");
+
         // Default None to current time for temporal validity checks
         let ref_time = self
             .reference_ts_millis
@@ -1545,6 +1570,8 @@ impl QueryExecutor for EdgesByName {
     type Output = Vec<(EdgeName, Id)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        tracing::debug!(name = %self.name, "Executing EdgesByName query");
+
         // Default None to current time for temporal validity checks
         let ref_time = self
             .reference_ts_millis
