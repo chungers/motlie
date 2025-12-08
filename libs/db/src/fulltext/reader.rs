@@ -207,20 +207,21 @@ impl Consumer {
     }
 
     /// Process queries continuously until the channel is closed
+    #[tracing::instrument(skip(self), name = "fulltext_query_consumer")]
     pub async fn run(self) -> Result<()> {
-        log::info!(
-            "Starting fulltext query consumer with config: {:?}",
-            self.config
+        tracing::info!(
+            config = ?self.config,
+            "Starting fulltext query consumer"
         );
 
         loop {
             match self.receiver.recv_async().await {
                 Ok(query) => {
-                    log::debug!("Processing fulltext query: {}", query);
+                    tracing::debug!(query = %query, "Processing fulltext query");
                     query.process_and_send(&self.processor).await;
                 }
                 Err(_) => {
-                    log::info!("Fulltext query consumer shutting down - channel closed");
+                    tracing::info!("Fulltext query consumer shutting down - channel closed");
                     return Ok(());
                 }
             }
@@ -309,19 +310,19 @@ pub fn spawn_query_consumer_pool_shared(
         let index = index.clone(); // Cheap Arc clone - shares Tantivy Index
 
         let handle = tokio::spawn(async move {
-            log::info!(
-                "Fulltext query worker {} starting (shared Index mode)",
-                worker_id
+            tracing::info!(
+                worker_id,
+                "Fulltext query worker starting (shared Index mode)"
             );
 
             // Process queries from shared channel
             // All workers share the same Tantivy Index via Arc<Index>
             while let Ok(query) = receiver.recv_async().await {
-                log::debug!("Worker {} processing query: {}", worker_id, query);
+                tracing::debug!(worker_id, query = %query, "Processing fulltext query");
                 query.process_and_send(&*index).await;
             }
 
-            log::info!("Fulltext query worker {} shutting down", worker_id);
+            tracing::info!(worker_id, "Fulltext query worker shutting down");
         });
 
         handles.push(handle);
@@ -352,26 +353,26 @@ pub fn spawn_query_consumer_pool_readonly(
         let index_path = index_path.clone();
 
         let handle = tokio::spawn(async move {
-            log::info!(
-                "Fulltext query worker {} starting (individual readonly mode)",
-                worker_id
+            tracing::info!(
+                worker_id,
+                "Fulltext query worker starting (individual readonly mode)"
             );
 
             // Each worker creates its own readonly Storage and Index
             let mut storage = Storage::readonly(&index_path);
             if let Err(e) = storage.ready() {
-                log::error!("Worker {} failed to ready storage: {}", worker_id, e);
+                tracing::error!(worker_id, err = %e, "Worker failed to ready storage");
                 return;
             }
             let index = Index::new(Arc::new(storage));
 
             // Process queries from shared channel
             while let Ok(query) = receiver.recv_async().await {
-                log::debug!("Worker {} processing query: {}", worker_id, query);
+                tracing::debug!(worker_id, query = %query, "Processing fulltext query");
                 query.process_and_send(&index).await;
             }
 
-            log::info!("Fulltext query worker {} shutting down", worker_id);
+            tracing::info!(worker_id, "Fulltext query worker shutting down");
         });
 
         handles.push(handle);

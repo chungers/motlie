@@ -131,6 +131,7 @@ impl Storage {
     ///
     /// For ReadOnly mode: Opens the index without acquiring the writer lock.
     /// For ReadWrite mode: Opens the index and creates an exclusive IndexWriter.
+    #[tracing::instrument(skip(self), fields(path = ?self.index_path, mode = ?self.mode))]
     pub fn ready(&mut self) -> Result<()> {
         if self.index.is_some() {
             return Ok(());
@@ -150,9 +151,9 @@ impl Storage {
                 let index = tantivy::Index::open_in_dir(&self.index_path)
                     .context("Failed to open Tantivy index in readonly mode")?;
 
-                log::info!(
-                    "[FullText Storage] Opened index in READONLY mode at {:?}",
-                    self.index_path
+                tracing::info!(
+                    path = ?self.index_path,
+                    "[FullText Storage] Opened index in READONLY mode"
                 );
 
                 self.index = Some(index);
@@ -175,9 +176,9 @@ impl Storage {
                     .writer(50_000_000)
                     .context("Failed to create index writer")?;
 
-                log::info!(
-                    "[FullText Storage] Opened index in READWRITE mode at {:?}",
-                    self.index_path
+                tracing::info!(
+                    path = ?self.index_path,
+                    "[FullText Storage] Opened index in READWRITE mode"
                 );
 
                 self.index = Some(index);

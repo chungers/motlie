@@ -239,6 +239,13 @@ impl QueryExecutor for Nodes {
     type Output = Vec<NodeHit>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        tracing::debug!(
+            query = %self.query,
+            fuzzy_level = ?self.fuzzy_level,
+            limit = self.limit,
+            "Executing fulltext Nodes query"
+        );
+
         use std::collections::HashMap;
         use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, TermQuery};
         use tantivy::schema::IndexRecordOption;
@@ -544,13 +551,13 @@ impl QueryExecutor for Edges {
             .map_err(|e| anyhow::anyhow!("Failed to create index reader: {}", e))?;
         let searcher = reader.searcher();
 
-        log::debug!(
-            "[FulltextEdges] Executing query='{}', index docs={}, fields content={:?} edge_name={:?} doc_type={:?}",
-            self.query,
-            searcher.num_docs(),
-            fields.content_field,
-            fields.edge_name_field,
-            fields.doc_type_field
+        tracing::debug!(
+            query = %self.query,
+            index_docs = searcher.num_docs(),
+            content_field = ?fields.content_field,
+            edge_name_field = ?fields.edge_name_field,
+            doc_type_field = ?fields.doc_type_field,
+            "[FulltextEdges] Executing query"
         );
 
         // Build text query - either exact (QueryParser) or fuzzy (FuzzyTermQuery)
@@ -641,10 +648,10 @@ impl QueryExecutor for Edges {
             .search(&combined_query, &TopDocs::with_limit(self.limit * 3))
             .map_err(|e| anyhow::anyhow!("Search failed: {}", e))?;
 
-        log::debug!(
-            "[FulltextEdges] Search returned {} raw results for query='{}'",
-            top_docs.len(),
-            self.query
+        tracing::debug!(
+            result_count = top_docs.len(),
+            query = %self.query,
+            "[FulltextEdges] Search returned raw results"
         );
 
         // Collect results, deduplicating by edge key (src_id, dst_id, edge_name) and keeping best score
@@ -869,6 +876,11 @@ impl QueryExecutor for Facets {
     type Output = super::search::FacetCounts;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        tracing::debug!(
+            doc_type_filter = ?self.doc_type_filter,
+            "Executing fulltext Facets query"
+        );
+
         use tantivy::collector::FacetCollector;
         use tantivy::query::{AllQuery, BooleanQuery, Occur, TermQuery};
         use tantivy::schema::IndexRecordOption;
