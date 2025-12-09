@@ -24,14 +24,106 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
-use tantivy::schema::Value;
+use tantivy::query::{BooleanQuery, Occur, QueryParser, RegexQuery};
+use tantivy::schema::{Field, Value};
 use tokio::sync::oneshot;
 
 use super::reader::{Processor, QueryExecutor, QueryProcessor, Reader};
-use super::search::{EdgeHit, NodeHit};
+use super::search::{EdgeHit, MatchSource, NodeHit};
 use super::Storage;
 use crate::Id;
+
+// ============================================================================
+// Wildcard Query Support
+// ============================================================================
+
+/// Check if a query term contains wildcard characters (* or ?)
+fn has_wildcard(term: &str) -> bool {
+    term.contains('*') || term.contains('?')
+}
+
+/// Convert a glob-style wildcard pattern to a regex pattern.
+/// - `*` becomes `.*` (match any characters)
+/// - `?` becomes `.` (match single character)
+/// - Other regex special characters are escaped
+fn glob_to_regex(glob: &str) -> String {
+    let mut regex = String::with_capacity(glob.len() * 2);
+    for c in glob.chars() {
+        match c {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            // Escape regex special characters
+            '.' | '+' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\' => {
+                regex.push('\\');
+                regex.push(c);
+            }
+            _ => regex.push(c),
+        }
+    }
+    regex
+}
+
+/// Build a query that handles wildcard patterns.
+/// Returns Some(query) if the input contains wildcards, None otherwise.
+fn build_wildcard_query(
+    query_str: &str,
+    fields: &[Field],
+) -> Option<Box<dyn tantivy::query::Query>> {
+    // Split query into terms
+    let terms: Vec<&str> = query_str.split_whitespace().collect();
+
+    // Check if any term has wildcards
+    if !terms.iter().any(|t| has_wildcard(t)) {
+        return None;
+    }
+
+    // Build queries for each term
+    let mut term_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+
+    for term in terms {
+        if has_wildcard(term) {
+            // Convert glob pattern to regex and create RegexQuery for each field
+            let regex_pattern = glob_to_regex(&term.to_lowercase());
+
+            let mut field_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+            for &field in fields {
+                if let Ok(regex_query) = RegexQuery::from_pattern(&regex_pattern, field) {
+                    field_queries.push((Occur::Should, Box::new(regex_query)));
+                }
+            }
+
+            if !field_queries.is_empty() {
+                term_queries.push((Occur::Must, Box::new(BooleanQuery::new(field_queries))));
+            }
+        } else {
+            // For non-wildcard terms, we'll let the main query parser handle them
+            // by returning None and falling back to normal parsing
+            // This is a simplification - in practice, we handle the whole query as wildcard
+            // if any term has wildcards
+            let term_lower = term.to_lowercase();
+            let mut field_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+            for &field in fields {
+                let tantivy_term = tantivy::Term::from_field_text(field, &term_lower);
+                field_queries.push((
+                    Occur::Should,
+                    Box::new(tantivy::query::TermQuery::new(
+                        tantivy_term,
+                        tantivy::schema::IndexRecordOption::WithFreqs,
+                    )),
+                ));
+            }
+            if !field_queries.is_empty() {
+                term_queries.push((Occur::Must, Box::new(BooleanQuery::new(field_queries))));
+            }
+        }
+    }
+
+    if term_queries.is_empty() {
+        None
+    } else {
+        Some(Box::new(BooleanQuery::new(term_queries)))
+    }
+}
 
 // ============================================================================
 // Fuzzy Search Level
@@ -260,15 +352,25 @@ impl QueryExecutor for Nodes {
             .map_err(|e| anyhow::anyhow!("Failed to create index reader: {}", e))?;
         let searcher = reader.searcher();
 
-        // Build text query - either exact (QueryParser) or fuzzy (FuzzyTermQuery)
+        // Build text query - check for wildcards first, then exact or fuzzy
         let text_query: Box<dyn tantivy::query::Query> = if self.fuzzy_level == FuzzyLevel::None {
-            // Exact match: use QueryParser for full query syntax support
-            let query_parser =
-                QueryParser::for_index(index, vec![fields.content_field, fields.node_name_field]);
-            let parsed = query_parser
-                .parse_query(&self.query)
-                .map_err(|e| anyhow::anyhow!("Failed to parse query '{}': {}", self.query, e))?;
-            parsed
+            // Check for wildcard patterns (e.g., lik*, test?)
+            if let Some(wildcard_query) = build_wildcard_query(
+                &self.query,
+                &[fields.content_field, fields.node_name_field],
+            ) {
+                wildcard_query
+            } else {
+                // No wildcards: use QueryParser for full query syntax support
+                let query_parser = QueryParser::for_index(
+                    index,
+                    vec![fields.content_field, fields.node_name_field],
+                );
+                let parsed = query_parser
+                    .parse_query(&self.query)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse query '{}': {}", self.query, e))?;
+                parsed
+            }
         } else {
             // Fuzzy match: build FuzzyTermQuery for each term in both fields
             let distance = self.fuzzy_level.to_distance();
@@ -348,9 +450,9 @@ impl QueryExecutor for Nodes {
             .search(&combined_query, &TopDocs::with_limit(self.limit * 3))
             .map_err(|e| anyhow::anyhow!("Search failed: {}", e))?;
 
-        // Collect results, deduplicating by node ID and keeping best score
+        // Collect results, deduplicating by node ID and keeping best score + match source
         // This handles both node documents and node_fragment documents
-        let mut node_scores: HashMap<Id, f32> = HashMap::new();
+        let mut node_hits: HashMap<Id, (f32, MatchSource)> = HashMap::new();
 
         for (score, doc_address) in top_docs {
             let doc = searcher
@@ -366,25 +468,34 @@ impl QueryExecutor for Nodes {
                 None => continue, // No ID field
             };
 
-            // Update with best score
-            node_scores
+            // Extract doc_type to determine match source
+            let match_source = match doc.get_first(fields.doc_type_field).and_then(|v| v.as_str())
+            {
+                Some("nodes") => MatchSource::NodeName,
+                Some("node_fragments") => MatchSource::NodeFragment,
+                _ => MatchSource::NodeName, // Default fallback
+            };
+
+            // Update with best score and its match source
+            node_hits
                 .entry(id)
-                .and_modify(|existing_score| {
+                .and_modify(|(existing_score, existing_source)| {
                     if score > *existing_score {
                         *existing_score = score;
+                        *existing_source = match_source;
                     }
                 })
-                .or_insert(score);
+                .or_insert((score, match_source));
         }
 
         // Convert to results and sort by score
-        let mut results: Vec<NodeHit> = node_scores
+        let mut results: Vec<NodeHit> = node_hits
             .into_iter()
-            .map(|(id, score)| NodeHit {
+            .map(|(id, (score, match_source))| NodeHit {
                 score,
                 id,
                 fragment_timestamp: None, // Deduplicated results don't track individual fragments
-                snippet: None,
+                match_source,
             })
             .collect();
 
@@ -560,15 +671,25 @@ impl QueryExecutor for Edges {
             "[FulltextEdges] Executing query"
         );
 
-        // Build text query - either exact (QueryParser) or fuzzy (FuzzyTermQuery)
+        // Build text query - check for wildcards first, then exact or fuzzy
         let text_query: Box<dyn tantivy::query::Query> = if self.fuzzy_level == FuzzyLevel::None {
-            // Exact match: use QueryParser for full query syntax support
-            let query_parser =
-                QueryParser::for_index(index, vec![fields.content_field, fields.edge_name_field]);
-            let parsed = query_parser
-                .parse_query(&self.query)
-                .map_err(|e| anyhow::anyhow!("Failed to parse query '{}': {}", self.query, e))?;
-            parsed
+            // Check for wildcard patterns (e.g., lik*, test?)
+            if let Some(wildcard_query) = build_wildcard_query(
+                &self.query,
+                &[fields.content_field, fields.edge_name_field],
+            ) {
+                wildcard_query
+            } else {
+                // No wildcards: use QueryParser for full query syntax support
+                let query_parser = QueryParser::for_index(
+                    index,
+                    vec![fields.content_field, fields.edge_name_field],
+                );
+                let parsed = query_parser
+                    .parse_query(&self.query)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse query '{}': {}", self.query, e))?;
+                parsed
+            }
         } else {
             // Fuzzy match: build FuzzyTermQuery for each term in both fields
             let distance = self.fuzzy_level.to_distance();
@@ -654,9 +775,9 @@ impl QueryExecutor for Edges {
             "[FulltextEdges] Search returned raw results"
         );
 
-        // Collect results, deduplicating by edge key (src_id, dst_id, edge_name) and keeping best score
+        // Collect results, deduplicating by edge key (src_id, dst_id, edge_name) and keeping best score + match source
         // Edge key is (src_id, dst_id, edge_name)
-        let mut edge_scores: HashMap<(Id, Id, String), f32> = HashMap::new();
+        let mut edge_hits: HashMap<(Id, Id, String), (f32, MatchSource)> = HashMap::new();
 
         for (score, doc_address) in top_docs {
             let doc = searcher
@@ -698,28 +819,37 @@ impl QueryExecutor for Edges {
                 continue;
             }
 
-            // Update with best score
+            // Extract doc_type to determine match source
+            let match_source = match doc.get_first(fields.doc_type_field).and_then(|v| v.as_str())
+            {
+                Some("edges") => MatchSource::EdgeName,
+                Some("edge_fragments") => MatchSource::EdgeFragment,
+                _ => MatchSource::EdgeName, // Default fallback
+            };
+
+            // Update with best score and its match source
             let key = (src_id, dst_id, edge_name);
-            edge_scores
+            edge_hits
                 .entry(key)
-                .and_modify(|existing_score| {
+                .and_modify(|(existing_score, existing_source)| {
                     if score > *existing_score {
                         *existing_score = score;
+                        *existing_source = match_source;
                     }
                 })
-                .or_insert(score);
+                .or_insert((score, match_source));
         }
 
         // Convert to results and sort by score
-        let mut results: Vec<EdgeHit> = edge_scores
+        let mut results: Vec<EdgeHit> = edge_hits
             .into_iter()
-            .map(|((src_id, dst_id, edge_name), score)| EdgeHit {
+            .map(|((src_id, dst_id, edge_name), (score, match_source))| EdgeHit {
                 score,
                 src_id,
                 dst_id,
                 edge_name,
                 fragment_timestamp: None, // Deduplicated results don't track individual fragments
-                snippet: None,
+                match_source,
             })
             .collect();
 
