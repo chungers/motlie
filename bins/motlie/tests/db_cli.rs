@@ -243,6 +243,8 @@ async fn test_scan_nodes_tsv() {
         "nodes",
         "--limit",
         "10",
+        "--format",
+        "tsv",
     ]);
 
     assert!(success, "Scan nodes failed: {}", stderr);
@@ -351,7 +353,7 @@ async fn test_scan_nodes_with_limit() {
 
     let _test_data = insert_test_data(&db_path).await;
 
-    // Scan with limit of 1
+    // Scan with limit of 1 using TSV format to avoid header lines
     let (success, stdout, stderr) = run_motlie(&[
         "db",
         "-p",
@@ -360,6 +362,8 @@ async fn test_scan_nodes_with_limit() {
         "nodes",
         "--limit",
         "1",
+        "--format",
+        "tsv",
     ]);
 
     assert!(success, "Scan nodes with limit failed: {}", stderr);
@@ -441,7 +445,7 @@ async fn test_scan_nodes_pagination() {
 
     let test_data = insert_test_data(&db_path).await;
 
-    // Get first page
+    // Get first page using TSV format for parsing
     let (success, stdout_page1, _) = run_motlie(&[
         "db",
         "-p",
@@ -450,6 +454,8 @@ async fn test_scan_nodes_pagination() {
         "nodes",
         "--limit",
         "1",
+        "--format",
+        "tsv",
     ]);
     assert!(success);
 
@@ -472,6 +478,8 @@ async fn test_scan_nodes_pagination() {
         "1",
         "--last",
         first_id,
+        "--format",
+        "tsv",
     ]);
     assert!(success, "Pagination failed: {}", stderr);
 
@@ -518,6 +526,8 @@ async fn test_scan_node_fragments() {
         "node-fragments",
         "--limit",
         "10",
+        "--format",
+        "tsv",
     ]);
 
     assert!(success, "Scan node-fragments failed: {}", stderr);
@@ -583,6 +593,8 @@ async fn test_scan_edge_fragments() {
         "edge-fragments",
         "--limit",
         "10",
+        "--format",
+        "tsv",
     ]);
 
     assert!(success, "Scan edge-fragments failed: {}", stderr);
@@ -633,6 +645,8 @@ async fn test_scan_outgoing_edges() {
         "outgoing-edges",
         "--limit",
         "10",
+        "--format",
+        "tsv",
     ]);
 
     assert!(success, "Scan outgoing-edges failed: {}", stderr);
@@ -700,6 +714,8 @@ async fn test_scan_incoming_edges() {
         "incoming-edges",
         "--limit",
         "10",
+        "--format",
+        "tsv",
     ]);
 
     assert!(success, "Scan incoming-edges failed: {}", stderr);
@@ -748,6 +764,8 @@ async fn test_scan_node_names() {
         "node-names",
         "--limit",
         "10",
+        "--format",
+        "tsv",
     ]);
 
     assert!(success, "Scan node-names failed: {}", stderr);
@@ -787,6 +805,8 @@ async fn test_scan_edge_names() {
         "edge-names",
         "--limit",
         "10",
+        "--format",
+        "tsv",
     ]);
 
     assert!(success, "Scan edge-names failed: {}", stderr);
@@ -858,13 +878,13 @@ async fn test_invalid_cursor_format() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_output_format_tsv_default() {
+async fn test_output_format_table_default() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("graph_db");
 
     let _test_data = insert_test_data(&db_path).await;
 
-    // Default format should be TSV
+    // Default format should be table
     let (success, stdout, _) = run_motlie(&[
         "db",
         "-p",
@@ -874,10 +894,16 @@ async fn test_output_format_tsv_default() {
     ]);
     assert!(success);
 
-    // TSV should use tabs as separators
+    // Table format should have header row with column names
     let first_line = stdout.lines().next().unwrap();
-    let tab_count = first_line.matches('\t').count();
-    assert_eq!(tab_count, 3, "TSV should have 3 tabs (4 columns)");
+    assert!(
+        first_line.contains("SINCE"),
+        "Default format should be table with SINCE header"
+    );
+    assert!(
+        first_line.contains("ID"),
+        "Default format should be table with ID header"
+    );
 }
 
 #[tokio::test]
@@ -928,7 +954,7 @@ async fn test_node_fragment_pagination_cursor() {
 
     let _test_data = insert_test_data(&db_path).await;
 
-    // Get first fragment
+    // Get first fragment using TSV format for parsing
     let (success, stdout, _) = run_motlie(&[
         "db",
         "-p",
@@ -937,6 +963,8 @@ async fn test_node_fragment_pagination_cursor() {
         "node-fragments",
         "--limit",
         "1",
+        "--format",
+        "tsv",
     ]);
     assert!(success);
 
@@ -957,6 +985,8 @@ async fn test_node_fragment_pagination_cursor() {
         "1",
         "--last",
         &cursor,
+        "--format",
+        "tsv",
     ]);
     assert!(success, "Pagination with cursor failed: {}", stderr);
 
@@ -982,7 +1012,7 @@ async fn test_outgoing_edge_pagination_cursor() {
 
     let _test_data = insert_test_data(&db_path).await;
 
-    // Get first edge
+    // Get first edge using TSV format for parsing
     let (success, stdout, _) = run_motlie(&[
         "db",
         "-p",
@@ -991,6 +1021,8 @@ async fn test_outgoing_edge_pagination_cursor() {
         "outgoing-edges",
         "--limit",
         "1",
+        "--format",
+        "tsv",
     ]);
     assert!(success);
 
@@ -1012,6 +1044,8 @@ async fn test_outgoing_edge_pagination_cursor() {
         "1",
         "--last",
         &cursor,
+        "--format",
+        "tsv",
     ]);
     assert!(success, "Pagination with cursor failed: {}", stderr);
 

@@ -40,7 +40,7 @@ pub use reader::{
     ReaderConfig as FulltextReaderConfig,
 };
 pub use schema::{compute_validity_facet, extract_tags, DocumentFields};
-pub use search::{EdgeHit, FacetCounts, Hit, NodeHit};
+pub use search::{EdgeHit, FacetCounts, Hit, MatchSource, NodeHit};
 pub use writer::{
     create_fulltext_consumer, create_fulltext_consumer_with_next,
     create_fulltext_consumer_with_params, create_fulltext_consumer_with_params_and_next,
@@ -161,7 +161,9 @@ impl Storage {
             }
             StorageMode::ReadWrite => {
                 // ReadWrite: Create or open index with exclusive writer
-                let index = if self.index_path.exists() {
+                // Check for meta.json to determine if a valid Tantivy index exists
+                let meta_path = self.index_path.join("meta.json");
+                let index = if meta_path.exists() {
                     tantivy::Index::open_in_dir(&self.index_path)
                         .context("Failed to open existing Tantivy index")?
                 } else {
@@ -1005,5 +1007,88 @@ mod tests {
             .search(&exact_ts2, &TopDocs::with_limit(10))
             .unwrap();
         assert_eq!(top_docs.len(), 1, "Should find only second");
+    }
+
+    // ========================================================================
+    // Storage Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_readwrite_storage_creates_index_in_empty_directory() {
+        // Regression test: Storage::readwrite should create a new index
+        // when the directory exists but is empty (no meta.json)
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("empty_dir");
+
+        // Create an empty directory (simulating the bug scenario)
+        std::fs::create_dir_all(&index_path).unwrap();
+        assert!(index_path.exists());
+        assert!(index_path.read_dir().unwrap().next().is_none()); // Directory is empty
+
+        // This should succeed by creating a new index, not fail trying to open
+        let mut storage = Storage::readwrite(&index_path);
+        let result = storage.ready();
+        assert!(result.is_ok(), "Should create new index in empty directory");
+
+        // Verify meta.json was created
+        assert!(index_path.join("meta.json").exists());
+
+        // Verify we can use the index
+        let processor = Index::new(Arc::new(storage));
+        let node = crate::graph::mutation::AddNode {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "test_node".to_string(),
+            valid_range: None,
+            summary: crate::NodeSummary::from_text("test"),
+        };
+        processor
+            .process_mutations(&[crate::graph::mutation::Mutation::AddNode(node)])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_readwrite_storage_opens_existing_index() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("existing_index");
+
+        // Create an index first
+        {
+            let mut storage = Storage::readwrite(&index_path);
+            storage.ready().unwrap();
+            let processor = Index::new(Arc::new(storage));
+
+            let node = crate::graph::mutation::AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli::now(),
+                name: "original_node".to_string(),
+                valid_range: None,
+                summary: crate::NodeSummary::from_text("original"),
+            };
+            processor
+                .process_mutations(&[crate::graph::mutation::Mutation::AddNode(node)])
+                .await
+                .unwrap();
+        }
+
+        // Verify meta.json exists
+        assert!(index_path.join("meta.json").exists());
+
+        // Open the existing index - should succeed and preserve data
+        let mut storage = Storage::readwrite(&index_path);
+        storage.ready().unwrap();
+        let processor = Index::new(Arc::new(storage));
+
+        // Search for the original node
+        let reader = processor.tantivy_index().reader().unwrap();
+        let searcher = reader.searcher();
+        let query_parser = QueryParser::for_index(
+            processor.tantivy_index(),
+            vec![processor.fields().node_name_field],
+        );
+        let query = query_parser.parse_query("original_node").unwrap();
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
+        assert_eq!(top_docs.len(), 1, "Should find the original node");
     }
 }
