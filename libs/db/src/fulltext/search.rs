@@ -5,8 +5,36 @@
 //! counts for each facet value.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::Id;
+
+/// Indicates what field/document type the search matched against.
+///
+/// This allows callers to understand the nature of the match without storing
+/// the actual matched text (which would bloat the index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchSource {
+    /// Match came from a node's name field
+    NodeName,
+    /// Match came from a node fragment's content field
+    NodeFragment,
+    /// Match came from an edge's name field
+    EdgeName,
+    /// Match came from an edge fragment's content field
+    EdgeFragment,
+}
+
+impl fmt::Display for MatchSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MatchSource::NodeName => write!(f, "name"),
+            MatchSource::NodeFragment => write!(f, "fragment"),
+            MatchSource::EdgeName => write!(f, "name"),
+            MatchSource::EdgeFragment => write!(f, "fragment"),
+        }
+    }
+}
 
 /// Individual search result - represents a single matching document from the fulltext index.
 ///
@@ -53,8 +81,8 @@ pub struct NodeHit {
     ///   the complete NodeFragments CfKey
     pub fragment_timestamp: Option<u64>,
 
-    /// Optional text snippet showing match context (for highlighting)
-    pub snippet: Option<String>,
+    /// What field/document type the match came from
+    pub match_source: MatchSource,
 }
 
 /// An edge or edge fragment that matched the search query.
@@ -87,8 +115,8 @@ pub struct EdgeHit {
     ///   `edge_name`, this forms the complete EdgeFragments CfKey
     pub fragment_timestamp: Option<u64>,
 
-    /// Optional text snippet showing match context (for highlighting)
-    pub snippet: Option<String>,
+    /// What field/document type the match came from
+    pub match_source: MatchSource,
 }
 
 /// Aggregated facet counts

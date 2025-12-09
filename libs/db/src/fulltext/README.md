@@ -571,6 +571,38 @@ for result in results {
 }
 ```
 
+#### Wildcard Search
+
+Wildcard patterns (`*` and `?`) are automatically detected and converted to regex queries:
+
+```rust
+// Prefix search - finds "likes", "likely", "liked"
+let results = FulltextNodes::new("lik*".to_string(), 10)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Suffix search - finds "backend", "frontend"
+let results = FulltextNodes::new("*end".to_string(), 10)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Single character wildcard - finds "likes", "liked"
+let results = FulltextNodes::new("like?".to_string(), 10)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Contains search - finds anything with "base" in it
+let results = FulltextNodes::new("*base*".to_string(), 10)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+```
+
+**Wildcard patterns:**
+- `*` - Matches zero or more characters
+- `?` - Matches exactly one character
+
+**Note:** When wildcards are detected, the query bypasses the standard QueryParser and uses Tantivy's `RegexQuery` for pattern matching.
+
 #### Fuzzy Search
 
 Enable typo-tolerant matching with `FuzzyLevel`:
@@ -655,6 +687,23 @@ let results = FulltextEdges::new("partnership".to_string(), 10)
 
 ### Query Result Types
 
+#### `MatchSource`
+
+Indicates what field/document type the search matched against:
+
+```rust
+pub enum MatchSource {
+    /// Match came from a node's name field
+    NodeName,
+    /// Match came from a node fragment's content field
+    NodeFragment,
+    /// Match came from an edge's name field
+    EdgeName,
+    /// Match came from an edge fragment's content field
+    EdgeFragment,
+}
+```
+
 #### `NodeHit`
 
 ```rust
@@ -665,8 +714,8 @@ pub struct NodeHit {
     pub id: Id,
     /// Fragment timestamp (None = node match, Some = fragment match)
     pub fragment_timestamp: Option<u64>,
-    /// Optional text snippet (for future highlighting support)
-    pub snippet: Option<String>,
+    /// What field/document type the match came from
+    pub match_source: MatchSource,
 }
 ```
 
@@ -684,14 +733,14 @@ pub struct EdgeHit {
     pub edge_name: String,
     /// Fragment timestamp (None = edge match, Some = fragment match)
     pub fragment_timestamp: Option<u64>,
-    /// Optional text snippet (for future highlighting support)
-    pub snippet: Option<String>,
+    /// What field/document type the match came from
+    pub match_source: MatchSource,
 }
 ```
 
-The `fragment_timestamp` field distinguishes between entity and fragment matches:
-- `None` - The match came from the node/edge itself
-- `Some(ts)` - The match came from a fragment; use with ID to look up in RocksDB
+The `match_source` field indicates where the match came from:
+- `NodeName` / `EdgeName` - The match came from the entity's name field
+- `NodeFragment` / `EdgeFragment` - The match came from a fragment's content
 
 ## TODO: Planned Query Types
 
@@ -794,11 +843,12 @@ let similar = MoreLikeThis::new(node_id)
 - [x] Temporal validity fields (valid_since, valid_until)
 - [x] Time range queries on creation_timestamp and validity fields
 - [x] `FulltextFacets` query for facet statistics (doc_types, tags, validity)
+- [x] `MatchSource` enum to indicate where the match came from (name vs fragment)
+- [x] Wildcard search support (`*` and `?` patterns via RegexQuery)
 
 ### Planned
 - [ ] `Aggregations` query for search analytics
 - [ ] `MoreLikeThis` query for similarity search
-- [ ] Highlight support (return matching snippets via `snippet` field)
 - [ ] Pagination with search_after for deep pagination
 - [ ] Custom scoring/boosting per field
 
@@ -812,7 +862,7 @@ fulltext/
 ├── writer.rs    # Writer/MutationConsumer infrastructure
 ├── query.rs     # Query types (Nodes, Edges), FuzzyLevel enum
 ├── reader.rs    # Reader/QueryConsumer infrastructure
-├── search.rs    # Search result types (NodeHit, EdgeHit, FacetCounts)
+├── search.rs    # Search result types (MatchSource, NodeHit, EdgeHit, FacetCounts)
 └── README.md    # This file
 ```
 

@@ -42,10 +42,10 @@ pub enum ColumnFamily {
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug, Default)]
 pub enum OutputFormat {
-    /// Tab-separated values (default)
-    #[default]
+    /// Tab-separated values
     Tsv,
-    /// Formatted table with aligned columns
+    /// Formatted table with aligned columns (default)
+    #[default]
     Table,
 }
 
@@ -74,7 +74,7 @@ pub struct Scan {
     pub limit: usize,
 
     /// Output format
-    #[clap(long, short = 'f', value_enum, default_value = "tsv")]
+    #[clap(long, short = 'f', value_enum, default_value = "table")]
     pub format: OutputFormat,
 
     /// Scan in reverse direction (from end to start)

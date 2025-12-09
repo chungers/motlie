@@ -54,7 +54,7 @@ motlie db -p <db_dir> scan <column_family> [datetime] [OPTIONS]
 - `-p, --db-dir <path>` - Path to the RocksDB database directory (required)
 - `--last <cursor>` - Cursor for pagination (exclusive start)
 - `--limit <n>` - Maximum number of results (default: 100)
-- `-f, --format <format>` - Output format: `tsv` or `table` (default: tsv)
+- `-f, --format <format>` - Output format: `tsv` or `table` (default: table)
 - `-r, --reverse` - Scan in reverse direction (from end to start)
 
 ## Column Families
@@ -337,7 +337,7 @@ cargo test --test db_cli
 | `test_scan_edge_names` | Scans edge name index |
 | `test_invalid_database_path` | Error handling for non-existent database |
 | `test_invalid_cursor_format` | Error handling for malformed cursor |
-| `test_output_format_tsv_default` | Verifies TSV is default output format |
+| `test_output_format_table_default` | Verifies table is default output format |
 | `test_output_format_table` | Verifies table format structure |
 | `test_node_fragment_pagination_cursor` | Tests fragment pagination cursor format |
 | `test_outgoing_edge_pagination_cursor` | Tests edge pagination cursor format |
