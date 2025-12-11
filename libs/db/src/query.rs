@@ -137,10 +137,27 @@ pub trait QueryProcessor: Send {
 /// - Pagination via `with_offset()`
 ///
 /// Returns `Vec<(Id, NodeName, NodeSummary)>` - full node data from graph.
+///
+/// # Two Ways to Set Tags
+///
+/// ## Builder Pattern (Recommended)
+/// ```ignore
+/// Nodes::new("programming".to_string(), 10)
+///     .with_tags(vec!["rust".to_string()])
+///     .run(&reader, timeout).await
+/// ```
+///
+/// ## Direct Field Access
+/// ```ignore
+/// let mut query = Nodes::new("programming".to_string(), 10);
+/// query.inner.tags = vec!["rust".to_string()];
+/// query.run(&reader, timeout).await
+/// ```
 #[derive(Debug)]
 pub struct Nodes {
-    /// Inner fulltext query - delegates builder methods here
-    pub(crate) inner: fulltext::query::Nodes,
+    /// Inner fulltext query - has public fields (query, limit, fuzzy_level, tags)
+    /// for direct manipulation without builder methods.
+    pub inner: fulltext::query::Nodes,
 
     /// Offset for pagination (skip first N results from fulltext)
     pub offset: usize,
@@ -288,10 +305,27 @@ impl QueryProcessor for Nodes {
 /// - Pagination via `with_offset()`
 ///
 /// Returns `Vec<(SrcId, DstId, EdgeName, EdgeSummary)>` - full edge data from graph.
+///
+/// # Two Ways to Set Tags
+///
+/// ## Builder Pattern (Recommended)
+/// ```ignore
+/// Edges::new("relationship".to_string(), 10)
+///     .with_tags(vec!["collaboration".to_string()])
+///     .run(&reader, timeout).await
+/// ```
+///
+/// ## Direct Field Access
+/// ```ignore
+/// let mut query = Edges::new("relationship".to_string(), 10);
+/// query.inner.tags = vec!["collaboration".to_string()];
+/// query.run(&reader, timeout).await
+/// ```
 #[derive(Debug)]
 pub struct Edges {
-    /// Inner fulltext query - delegates builder methods here
-    pub(crate) inner: fulltext::query::Edges,
+    /// Inner fulltext query - has public fields (query, limit, fuzzy_level, tags)
+    /// for direct manipulation without builder methods.
+    pub inner: fulltext::query::Edges,
 
     /// Offset for pagination (skip first N results from fulltext)
     pub offset: usize,
