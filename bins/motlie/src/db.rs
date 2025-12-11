@@ -1,8 +1,7 @@
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use motlie_db::scan::{
-    AllEdgeFragments, AllEdgeNames, AllEdges, AllNodeFragments, AllNodeNames, AllNodes,
-    AllReverseEdges, EdgeFragmentRecord, EdgeNameRecord, EdgeRecord, NodeFragmentRecord,
-    NodeNameRecord, NodeRecord, ReverseEdgeRecord, Visitable,
+    AllEdgeFragments, AllEdges, AllNodeFragments, AllNodes, AllReverseEdges, EdgeFragmentRecord,
+    EdgeRecord, NodeFragmentRecord, NodeRecord, ReverseEdgeRecord, Visitable,
 };
 use motlie_db::{DataUrl, Id, Storage, TimestampMilli};
 use std::path::PathBuf;
@@ -36,8 +35,6 @@ pub enum ColumnFamily {
     EdgeFragments,
     OutgoingEdges,
     IncomingEdges,
-    NodeNames,
-    EdgeNames,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug, Default)]
@@ -105,8 +102,6 @@ fn run_list() {
     println!("  edge-fragments");
     println!("  outgoing-edges");
     println!("  incoming-edges");
-    println!("  node-names");
-    println!("  edge-names");
 }
 
 fn run_scan(db_dir: &PathBuf, args: &Scan) -> anyhow::Result<()> {
@@ -125,8 +120,6 @@ fn run_scan(db_dir: &PathBuf, args: &Scan) -> anyhow::Result<()> {
         ColumnFamily::EdgeFragments => scan_edge_fragments(&storage, args, reference_ts),
         ColumnFamily::OutgoingEdges => scan_outgoing_edges(&storage, args, reference_ts),
         ColumnFamily::IncomingEdges => scan_incoming_edges(&storage, args, reference_ts),
-        ColumnFamily::NodeNames => scan_node_names(&storage, args, reference_ts),
-        ColumnFamily::EdgeNames => scan_edge_names(&storage, args, reference_ts),
     }
 }
 
@@ -738,100 +731,3 @@ fn scan_incoming_edges(
     Ok(())
 }
 
-fn scan_node_names(
-    storage: &Storage,
-    args: &Scan,
-    reference_ts: Option<TimestampMilli>,
-) -> anyhow::Result<()> {
-    // For node names, last format is "name:node_id"
-    let last = if let Some(s) = &args.last {
-        // Find the last ':' to split name and id (name may contain ':')
-        let last_colon = s.rfind(':').ok_or_else(|| {
-            anyhow::anyhow!(
-                "Invalid cursor format. Expected 'name:node_id', got '{}'",
-                s
-            )
-        })?;
-        let name = s[..last_colon].to_string();
-        let node_id = Id::from_str(&s[last_colon + 1..])
-            .map_err(|e| anyhow::anyhow!("Invalid node ID '{}': {}", &s[last_colon + 1..], e))?;
-        Some((name, node_id))
-    } else {
-        None
-    };
-
-    let scan = AllNodeNames {
-        last,
-        limit: args.limit,
-        reverse: args.reverse,
-        reference_ts_millis: reference_ts,
-    };
-
-    let mut printer = TablePrinter::new(vec!["SINCE", "UNTIL", "NODE_ID", "NAME"], args.format);
-
-    scan.accept(storage, &mut |record: &NodeNameRecord| {
-        printer.add_row(vec![
-            format_since(&record.valid_range, args.format),
-            format_until(&record.valid_range, args.format),
-            record.node_id.to_string(),
-            record.name.clone(),
-        ]);
-        true
-    })?;
-
-    printer.print();
-    Ok(())
-}
-
-fn scan_edge_names(
-    storage: &Storage,
-    args: &Scan,
-    reference_ts: Option<TimestampMilli>,
-) -> anyhow::Result<()> {
-    // For edge names, last format is "name:src_id:dst_id"
-    let last = if let Some(s) = &args.last {
-        // Split from the end - last two ':' separate the IDs
-        let parts: Vec<&str> = s.rsplitn(3, ':').collect();
-        if parts.len() != 3 {
-            anyhow::bail!(
-                "Invalid cursor format. Expected 'name:src_id:dst_id', got '{}'",
-                s
-            );
-        }
-        // parts are in reverse order: [dst_id, src_id, name]
-        let dst_id = Id::from_str(parts[0])
-            .map_err(|e| anyhow::anyhow!("Invalid dst ID '{}': {}", parts[0], e))?;
-        let src_id = Id::from_str(parts[1])
-            .map_err(|e| anyhow::anyhow!("Invalid src ID '{}': {}", parts[1], e))?;
-        let name = parts[2].to_string();
-        Some((name, src_id, dst_id))
-    } else {
-        None
-    };
-
-    let scan = AllEdgeNames {
-        last,
-        limit: args.limit,
-        reverse: args.reverse,
-        reference_ts_millis: reference_ts,
-    };
-
-    let mut printer = TablePrinter::new(
-        vec!["SINCE", "UNTIL", "SRC_ID", "DST_ID", "NAME"],
-        args.format,
-    );
-
-    scan.accept(storage, &mut |record: &EdgeNameRecord| {
-        printer.add_row(vec![
-            format_since(&record.valid_range, args.format),
-            format_until(&record.valid_range, args.format),
-            record.src_id.to_string(),
-            record.dst_id.to_string(),
-            record.name.clone(),
-        ]);
-        true
-    })?;
-
-    printer.print();
-    Ok(())
-}

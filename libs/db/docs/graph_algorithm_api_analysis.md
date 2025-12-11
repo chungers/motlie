@@ -25,9 +25,10 @@ This document evaluates motlie_db's current API capabilities for implementing po
 | `EdgeSummaryBySrcDstName` | `(EdgeSummary, Option<f64>)` | Get edge metadata and weight |
 | `OutgoingEdges` | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Get all edges from a node with weights |
 | `IncomingEdges` | `Vec<(Option<f64>, DstId, SrcId, EdgeName)>` | Get all edges to a node with weights |
-| `NodesByName` | `Vec<(NodeName, Id)>` | Find nodes by name prefix |
-| `EdgesByName` | `Vec<(EdgeName, Id)>` | Find edges by name prefix |
 | `NodeFragmentsByIdTimeRange` | `Vec<(TimestampMilli, FragmentContent)>` | Get time-series node data |
+
+> **Note:** Name-based queries (`NodesByName`, `EdgesByName`) have been removed.
+> Use the fulltext search module or scan API for name-based lookups.
 
 ### Mutation Types (from `mutation.rs`)
 
@@ -267,7 +268,7 @@ async fn pagerank_iteration(
 **Limitation:** No built-in graph enumeration API
 ```rust
 // Missing: How to get all node IDs?
-// Current workaround: Track nodes externally or use NodesByName with empty prefix
+// Current workaround: Track nodes externally or use scan::AllNodes
 ```
 
 **Verdict:** ✅ **Fully supported** for degree and iterative algorithms (PageRank, Eigenvector)
@@ -948,11 +949,12 @@ Both Kahn's algorithm and DFS-based topological sort work seamlessly with:
 
 ### ⚠️ Remaining Limitations
 
-1. **No Graph Enumeration API**
+1. **No Graph Enumeration API** *(Resolved)*
    - **Problem:** No way to get "all node IDs" or "all edges"
    - **Impact:** Algorithms like Kruskal's MST, centrality need this
-   - **Workaround:** Track nodes externally or use `NodesByName("")` with empty prefix
-   - **Proposed Enhancement:**
+   - **Solution:** Use `scan::AllNodes` and `scan::AllEdges` from the scan API
+   - **Alternative:** Use fulltext search for name-based lookups
+   - **Original Proposed Enhancement (now implemented):**
      ```rust
      pub struct AllNodes {
          pub limit: Option<usize>,
@@ -1359,15 +1361,22 @@ pub struct AllEdges {
 - **Global Graph Statistics:** Node count, edge count, degree distribution
 - **Graph Initialization:** PageRank, centrality algorithms need node set
 
-**Current Workaround Cost:**
+**Current Workaround Cost:** *(Now resolved with scan API)*
 ```rust
-// Current approach: External tracking during construction
-let mut node_ids = Vec::new();
-// Must manually track all node IDs during graph construction
+// Use scan::AllNodes to enumerate all nodes
+use motlie_db::scan::{AllNodes, Visitable};
 
-// OR: Empty prefix search (inefficient)
-let nodes = NodesByName::new("".to_string(), 0, 100000, None)
-    .run(&reader, timeout).await?;
+let scan = AllNodes {
+    last: None,
+    limit: 100000,
+    reverse: false,
+    reference_ts_millis: None,
+};
+let mut node_ids = Vec::new();
+scan.accept(&storage, &mut |record| {
+    node_ids.push(record.id);
+    true
+})?;
 ```
 
 **Example: Kruskal's MST with AllEdges:**

@@ -416,18 +416,6 @@ pub struct ReverseEdgeCfValue(
     pub Option<TemporalRange>,
     pub EdgeId,
 );
-
-// NodeNames CF
-pub struct NodeNameCfValue(
-    pub Option<TemporalRange>,
-    pub NodeId,
-);
-
-// EdgeNames CF
-pub struct EdgeNameCfValue(
-    pub Option<TemporalRange>,
-    pub EdgeId,
-);
 ```
 
 ### Mutation Interface Changes

@@ -212,16 +212,6 @@ async fn test_list_column_families() {
         "Expected 'incoming-edges' in output: {}",
         stdout
     );
-    assert!(
-        stdout.contains("node-names"),
-        "Expected 'node-names' in output: {}",
-        stdout
-    );
-    assert!(
-        stdout.contains("edge-names"),
-        "Expected 'edge-names' in output: {}",
-        stdout
-    );
 }
 
 // ============================================================================
@@ -745,94 +735,6 @@ async fn test_scan_incoming_edges() {
     assert!(charlie_incoming, "Expected incoming edge to Charlie from Bob");
 }
 
-// ============================================================================
-// Scan Node Names Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_scan_node_names() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("graph_db");
-
-    let test_data = insert_test_data(&db_path).await;
-
-    let (success, stdout, stderr) = run_motlie(&[
-        "db",
-        "-p",
-        db_path.to_str().unwrap(),
-        "scan",
-        "node-names",
-        "--limit",
-        "10",
-        "--format",
-        "tsv",
-    ]);
-
-    assert!(success, "Scan node-names failed: {}", stderr);
-
-    // Format: SINCE\tUNTIL\tNODE_ID\tNAME
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 3, "Expected 3 node names, got: {:?}", lines);
-
-    // Verify all names are present
-    assert!(stdout.contains("Alice"), "Expected 'Alice' in names");
-    assert!(stdout.contains("Bob"), "Expected 'Bob' in names");
-    assert!(stdout.contains("Charlie"), "Expected 'Charlie' in names");
-
-    // Verify name->ID mappings
-    let alice_entry = lines.iter().any(|line| {
-        line.contains(&test_data.alice_id.to_string()) && line.contains("Alice")
-    });
-    assert!(alice_entry, "Expected Alice name->ID mapping");
-}
-
-// ============================================================================
-// Scan Edge Names Tests
-// ============================================================================
-
-#[tokio::test]
-async fn test_scan_edge_names() {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("graph_db");
-
-    let test_data = insert_test_data(&db_path).await;
-
-    let (success, stdout, stderr) = run_motlie(&[
-        "db",
-        "-p",
-        db_path.to_str().unwrap(),
-        "scan",
-        "edge-names",
-        "--limit",
-        "10",
-        "--format",
-        "tsv",
-    ]);
-
-    assert!(success, "Scan edge-names failed: {}", stderr);
-
-    // Format: SINCE\tUNTIL\tSRC_ID\tDST_ID\tNAME
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 2, "Expected 2 edge names, got: {:?}", lines);
-
-    // Verify edge names are present
-    assert!(
-        stdout.contains("works_with"),
-        "Expected 'works_with' in edge names"
-    );
-    assert!(
-        stdout.contains("reports_to"),
-        "Expected 'reports_to' in edge names"
-    );
-
-    // Verify works_with edge name entry
-    let works_with_entry = lines.iter().any(|line| {
-        line.contains(&test_data.alice_id.to_string())
-            && line.contains(&test_data.bob_id.to_string())
-            && line.contains("works_with")
-    });
-    assert!(works_with_entry, "Expected 'works_with' edge name entry");
-}
 
 // ============================================================================
 // Error Handling Tests

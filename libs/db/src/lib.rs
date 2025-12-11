@@ -28,8 +28,8 @@ pub use graph::{
     spawn_graph_query_consumer_with_graph, spawn_graph_query_consumer_pool_shared,
     spawn_graph_query_consumer_pool_readonly,
     // Query types and trait
-    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById,
-    NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, Query, QueryRunnable,
+    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, IncomingEdges, NodeById,
+    NodeFragmentsByIdTimeRange, OutgoingEdges, Query, QueryRunnable,
     // Schema types
     DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
     // Scan module re-exports
