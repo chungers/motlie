@@ -23,7 +23,8 @@ mod common;
 
 use anyhow::Result;
 use common::{build_graph, compute_hash_pagerank, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::{Id, IncomingEdges, OutgoingEdges, QueryRunnable};
+use motlie_db::graph::query::{IncomingEdges, OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
@@ -133,7 +134,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
 /// - C(Ti) is the number of outbound links from Ti
 async fn pagerank_motlie(
     all_nodes: &[Id],
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
     damping_factor: f64,
     iterations: usize,
@@ -151,7 +152,7 @@ async fn pagerank_motlie(
         new_ranks.insert(node_id, 0.0);
 
         // Get node name
-        let (name, _summary) = motlie_db::NodeById::new(node_id, None)
+        let (name, _summary) = motlie_db::graph::query::NodeById::new(node_id, None)
             .run(reader, timeout)
             .await?;
         name_map.insert(node_id, name);

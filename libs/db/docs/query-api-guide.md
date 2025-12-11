@@ -62,7 +62,7 @@ The `Reader` is a handle for executing queries against the database:
 use motlie_db::{Reader, spawn_query_consumer};
 
 // Create a reader (typically during app initialization)
-let reader = spawn_graph_query_consumer(receiver, storage);
+let reader = spawn_query_consumer(receiver, storage);
 ```
 
 The `Reader` is:

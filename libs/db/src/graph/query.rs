@@ -156,7 +156,7 @@ pub trait Runnable {
     type Output: Send + 'static;
 
     /// Execute this query against a Reader with the specified timeout
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output>;
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output>;
 }
 
 /// Type alias for querying node by ID (returns name and summary)
@@ -555,7 +555,7 @@ impl IncomingEdges {
 impl Runnable for NodeById {
     type Output = (NodeName, NodeSummary);
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
         let query = NodeById::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
@@ -570,7 +570,7 @@ impl Runnable for NodeById {
 impl Runnable for NodeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
         let query = NodeFragmentsByIdTimeRange::with_channel(
@@ -593,7 +593,7 @@ impl Runnable for NodeFragmentsByIdTimeRange {
 impl Runnable for EdgeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
         let query = EdgeFragmentsByIdTimeRange::with_channel(
@@ -618,7 +618,7 @@ impl Runnable for EdgeFragmentsByIdTimeRange {
 impl Runnable for EdgeSummaryBySrcDstName {
     type Output = (EdgeSummary, Option<f64>);
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
         let query = EdgeSummaryBySrcDstName::with_channel(
@@ -641,7 +641,7 @@ impl Runnable for EdgeSummaryBySrcDstName {
 impl Runnable for OutgoingEdges {
     type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let query =
             OutgoingEdges::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
@@ -654,7 +654,7 @@ impl Runnable for OutgoingEdges {
 impl Runnable for IncomingEdges {
     type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let query =
             IncomingEdges::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
@@ -662,7 +662,6 @@ impl Runnable for IncomingEdges {
         result_rx.await?
     }
 }
-
 
 /// Implement QueryExecutor for NodeByIdQuery
 #[async_trait::async_trait]
@@ -1248,7 +1247,6 @@ impl QueryExecutor for IncomingEdges {
     }
 }
 
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1257,9 +1255,9 @@ impl QueryExecutor for IncomingEdges {
 mod tests {
     use super::super::mutation::{AddNode, Runnable as MutRunnable};
     use super::super::reader::{
-        create_query_reader, spawn_consumer, Consumer, QueryWithTimeout, ReaderConfig,
+        create_query_reader, spawn_consumer, Consumer, QueryWithTimeout, Reader, ReaderConfig,
     };
-    use super::super::writer::{create_mutation_writer, spawn_graph_consumer, WriterConfig};
+    use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
     use super::super::{Graph, Storage};
     use super::*;
     use crate::{DataUrl, Id, TimestampMilli};
@@ -1279,7 +1277,7 @@ mod tests {
         };
         let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
         let mutation_consumer_handle =
-            spawn_graph_consumer(mutation_receiver, writer_config, &db_path);
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
 
         // Insert a test node
         let node_id = Id::new();
@@ -1289,7 +1287,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("test summary"),
+            summary: NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
 
@@ -1387,9 +1385,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_summary_by_src_dst_name_query() {
-        use crate::{
-            AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli, WriterConfig,
-        };
+        use super::super::mutation::{AddEdge, AddNode, Runnable as MutationRunnable};
+        use super::super::schema::EdgeSummary;
+        use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::{Id, TimestampMilli};
         use tempfile::TempDir;
 
         // Create temporary database
@@ -1401,9 +1400,8 @@ mod tests {
         };
 
         // Create writer and spawn graph consumer for mutations
-        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle =
-            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let (writer, mutation_receiver) = create_mutation_writer(config.clone());
+        let mutation_consumer_handle = spawn_mutation_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes
         let source_id = Id::new();
@@ -1414,7 +1412,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
+            summary: NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -1425,7 +1423,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
+            summary: NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -1464,13 +1462,13 @@ mod tests {
         let graph = Graph::new(Arc::new(storage));
 
         // Create reader and query consumer
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = {
             let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
+            let reader = Reader::new(sender);
             (reader, receiver)
         };
 
@@ -1499,10 +1497,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_basic() {
-        use crate::{
-            AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli,
-            WriterConfig,
+        use super::super::mutation::{
+            AddEdge, AddEdgeFragment, AddNode, Runnable as MutationRunnable,
         };
+        use super::super::schema::EdgeSummary;
+        use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::{Id, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -1515,32 +1515,31 @@ mod tests {
         };
 
         // Create writer and spawn graph consumer for mutations
-        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle =
-            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let (writer, mutation_receiver) = create_mutation_writer(config.clone());
+        let mutation_consumer_handle = spawn_mutation_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes
         let source_id = Id::new();
         let dest_id = Id::new();
         let edge_name = "test_edge";
 
-        crate::AddNode {
+        AddNode {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
+            summary: NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::AddNode {
+        AddNode {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
+            summary: NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -1548,7 +1547,7 @@ mod tests {
 
         // Create an edge
         let edge_summary = EdgeSummary::from_text("Test edge for fragments");
-        crate::AddEdge {
+        AddEdge {
             source_node_id: source_id,
             target_node_id: dest_id,
             ts_millis: TimestampMilli::now(),
@@ -1567,7 +1566,7 @@ mod tests {
         let fragment2_time = TimestampMilli(base_time.0 + 2000);
         let fragment3_time = TimestampMilli(base_time.0 + 3000);
 
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
@@ -1579,7 +1578,7 @@ mod tests {
         .await
         .unwrap();
 
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
@@ -1591,7 +1590,7 @@ mod tests {
         .await
         .unwrap();
 
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
@@ -1618,13 +1617,13 @@ mod tests {
         let graph = Graph::new(Arc::new(storage));
 
         // Create reader and query consumer
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = {
             let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
+            let reader = Reader::new(sender);
             (reader, receiver)
         };
 
@@ -1675,10 +1674,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_with_bounds() {
-        use crate::{
-            AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli,
-            WriterConfig,
+        use super::super::mutation::{
+            AddEdge, AddEdgeFragment, AddNode, Runnable as MutationRunnable,
         };
+        use super::super::schema::EdgeSummary;
+        use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::{Id, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -1691,39 +1692,38 @@ mod tests {
         };
 
         // Create writer and spawn graph consumer for mutations
-        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle =
-            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let (writer, mutation_receiver) = create_mutation_writer(config.clone());
+        let mutation_consumer_handle = spawn_mutation_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes
         let source_id = Id::new();
         let dest_id = Id::new();
         let edge_name = "bounded_edge";
 
-        crate::AddNode {
+        AddNode {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
+            summary: NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::AddNode {
+        AddNode {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
+            summary: NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
         // Create an edge
-        crate::AddEdge {
+        AddEdge {
             source_node_id: source_id,
             target_node_id: dest_id,
             ts_millis: TimestampMilli::now(),
@@ -1750,7 +1750,7 @@ mod tests {
             (t4, "Fragment at t4"),
             (t5, "Fragment at t5"),
         ] {
-            crate::AddEdgeFragment {
+            AddEdgeFragment {
                 src_id: source_id,
                 dst_id: dest_id,
                 edge_name: edge_name.to_string(),
@@ -1775,13 +1775,13 @@ mod tests {
         storage.ready().unwrap();
         let graph = Graph::new(Arc::new(storage));
 
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = {
             let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
+            let reader = Reader::new(sender);
             (reader, receiver)
         };
 
@@ -1859,11 +1859,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_with_temporal_validity() {
-        use crate::TemporalRange;
-        use crate::{
-            AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli,
-            WriterConfig,
+        use super::super::mutation::{
+            AddEdge, AddEdgeFragment, AddNode, Runnable as MutationRunnable,
         };
+        use super::super::schema::EdgeSummary;
+        use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::{Id, TemporalRange, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -1875,39 +1876,38 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle =
-            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let (writer, mutation_receiver) = create_mutation_writer(config.clone());
+        let mutation_consumer_handle = spawn_mutation_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes
         let source_id = Id::new();
         let dest_id = Id::new();
         let edge_name = "temporal_edge";
 
-        crate::AddNode {
+        AddNode {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
+            summary: NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::AddNode {
+        AddNode {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
+            summary: NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
         // Create an edge
-        crate::AddEdge {
+        AddEdge {
             source_node_id: source_id,
             target_node_id: dest_id,
             ts_millis: TimestampMilli::now(),
@@ -1922,7 +1922,7 @@ mod tests {
 
         // Add edge fragments with different temporal ranges
         // Fragment 1: Valid from 1000 to 3000
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
@@ -1935,7 +1935,7 @@ mod tests {
         .unwrap();
 
         // Fragment 2: Valid from 2000 to 5000
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
@@ -1948,7 +1948,7 @@ mod tests {
         .unwrap();
 
         // Fragment 3: No temporal range (always valid)
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
@@ -1969,13 +1969,13 @@ mod tests {
         storage.ready().unwrap();
         let graph = Graph::new(Arc::new(storage));
 
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = {
             let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
+            let reader = Reader::new(sender);
             (reader, receiver)
         };
 
@@ -2039,9 +2039,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_empty_result() {
-        use crate::{
-            AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli, WriterConfig,
-        };
+        use super::super::mutation::{AddEdge, AddNode, Runnable as MutationRunnable};
+        use super::super::schema::{EdgeSummary, NodeSummary};
+        use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::{Id, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -2053,38 +2054,37 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle =
-            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let (writer, mutation_receiver) = create_mutation_writer(config.clone());
+        let mutation_consumer_handle = spawn_mutation_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes and edge but NO fragments
         let source_id = Id::new();
         let dest_id = Id::new();
         let edge_name = "empty_edge";
 
-        crate::AddNode {
+        AddNode {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
+            summary: NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::AddNode {
+        AddNode {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
+            summary: NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::AddEdge {
+        AddEdge {
             source_node_id: source_id,
             target_node_id: dest_id,
             ts_millis: TimestampMilli::now(),
@@ -2106,13 +2106,13 @@ mod tests {
         storage.ready().unwrap();
         let graph = Graph::new(Arc::new(storage));
 
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = {
             let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
+            let reader = Reader::new(sender);
             (reader, receiver)
         };
 

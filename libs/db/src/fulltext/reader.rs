@@ -267,10 +267,7 @@ pub fn spawn_query_consumer(
 ///
 /// # Example
 /// ```no_run
-/// use motlie_db::{
-///     FulltextStorage, FulltextIndex, FulltextReaderConfig,
-///     create_fulltext_query_reader, spawn_fulltext_query_consumer_pool_shared,
-/// };
+/// use motlie_db::fulltext::{Storage, Index, ReaderConfig, create_query_reader, spawn_query_consumer_pool_shared};
 /// use std::sync::Arc;
 /// use std::path::Path;
 ///
@@ -278,17 +275,17 @@ pub fn spawn_query_consumer(
 /// let index_path = Path::new("/path/to/fulltext_index");
 ///
 /// // Create a shared readonly Index (follows graph::Graph pattern)
-/// let mut storage = FulltextStorage::readonly(index_path);
+/// let mut storage = Storage::readonly(index_path);
 /// storage.ready()?;
-/// let index = FulltextIndex::new(Arc::new(storage));
+/// let index = Index::new(Arc::new(storage));
 ///
 /// // Create reader channel
-/// let config = FulltextReaderConfig { channel_buffer_size: 100 };
-/// let (reader, receiver) = create_fulltext_query_reader(config);
+/// let config = ReaderConfig { channel_buffer_size: 100 };
+/// let (reader, receiver) = create_query_reader(config);
 ///
 /// // Spawn multiple consumers sharing the same Index
 /// let num_workers = 4;
-/// let handles = spawn_fulltext_query_consumer_pool_shared(
+/// let handles = spawn_query_consumer_pool_shared(
 ///     receiver,
 ///     Arc::new(index),
 ///     num_workers,

@@ -249,7 +249,7 @@ use tokio::task::JoinHandle;
 use super::Graph;
 
 /// Create a new query consumer for the graph
-pub fn create_graph_query_consumer(
+pub fn create_query_consumer(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     db_path: &Path,
@@ -262,18 +262,18 @@ pub fn create_graph_query_consumer(
 }
 
 /// Spawn a query consumer as a background task
-pub fn spawn_graph_query_consumer(
+pub fn spawn_query_consumer(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     db_path: &Path,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_graph_query_consumer(receiver, config, db_path);
+    let consumer = create_query_consumer(receiver, config, db_path);
     spawn_consumer(consumer)
 }
 
 /// Create a query consumer with readwrite storage (for testing TransactionDB concurrency)
 ///
-/// Unlike `create_graph_query_consumer` which opens readonly storage, this opens readwrite storage.
+/// Unlike `create_query_consumer` which opens readonly storage, this opens readwrite storage.
 /// This allows testing whether RocksDB TransactionDB supports multiple instances accessing
 /// the same database path concurrently.
 ///
@@ -284,7 +284,7 @@ pub fn spawn_graph_query_consumer(
 ///
 /// # Returns
 /// A Consumer configured with readwrite storage
-pub fn create_graph_query_consumer_readwrite(
+pub fn create_query_consumer_readwrite(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     db_path: &Path,
@@ -298,7 +298,7 @@ pub fn create_graph_query_consumer_readwrite(
 
 /// Spawn a query consumer with readwrite storage as a background task
 ///
-/// This is the readwrite variant of `spawn_graph_query_consumer`.
+/// This is the readwrite variant of `spawn_query_consumer`.
 /// Use this to test concurrent access patterns with TransactionDB.
 ///
 /// # Arguments
@@ -308,12 +308,12 @@ pub fn create_graph_query_consumer_readwrite(
 ///
 /// # Returns
 /// A JoinHandle for the spawned consumer task
-pub fn spawn_graph_query_consumer_readwrite(
+pub fn spawn_query_consumer_readwrite(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     db_path: &Path,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_graph_query_consumer_readwrite(receiver, config, db_path);
+    let consumer = create_query_consumer_readwrite(receiver, config, db_path);
     spawn_consumer(consumer)
 }
 
@@ -335,7 +335,8 @@ pub fn spawn_graph_query_consumer_readwrite(
 ///
 /// # Example
 /// ```no_run
-/// use motlie_db::{Graph, Storage, ReaderConfig};
+/// use motlie_db::graph::{Graph, Storage};
+/// use motlie_db::graph::reader::{Reader, ReaderConfig, spawn_query_consumer_with_graph};
 /// use std::sync::Arc;
 /// use std::time::Duration;
 ///
@@ -349,15 +350,15 @@ pub fn spawn_graph_query_consumer_readwrite(
 ///     let (reader, rx) = {
 ///         let config = ReaderConfig { channel_buffer_size: 10 };
 ///         let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-///         let reader = motlie_db::Reader::new(sender);
+///         let reader = Reader::new(sender);
 ///         (reader, receiver)
 ///     };
-///     motlie_db::spawn_graph_query_consumer_with_graph(rx, ReaderConfig { channel_buffer_size: 10 }, graph.clone());
+///     spawn_query_consumer_with_graph(rx, ReaderConfig { channel_buffer_size: 10 }, graph.clone());
 /// }
 /// # Ok(())
 /// # }
 /// ```
-pub fn spawn_graph_query_consumer_with_graph(
+pub fn spawn_query_consumer_with_graph(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     graph: Arc<Graph>,
@@ -407,7 +408,8 @@ pub fn spawn_graph_query_consumer_with_graph(
 ///
 /// # Example
 /// ```no_run
-/// use motlie_db::{Storage, Graph, ReaderConfig, spawn_graph_query_consumer_pool_shared};
+/// use motlie_db::graph::{Storage, Graph};
+/// use motlie_db::graph::reader::{create_query_reader, spawn_query_consumer_pool_shared, ReaderConfig};
 /// use std::sync::Arc;
 /// use std::path::Path;
 ///
@@ -422,11 +424,11 @@ pub fn spawn_graph_query_consumer_with_graph(
 ///
 /// // Create reader channel
 /// let config = ReaderConfig { channel_buffer_size: 100 };
-/// let (reader, receiver) = motlie_db::create_query_reader(config.clone());
+/// let (reader, receiver) = create_query_reader(config.clone());
 ///
 /// // Spawn worker pool sharing the graph
 /// let num_workers = 4; // Or use num_cpus::get() if you have that dependency
-/// let handles = spawn_graph_query_consumer_pool_shared(
+/// let handles = spawn_query_consumer_pool_shared(
 ///     receiver,
 ///     graph.clone(),
 ///     num_workers,
@@ -436,7 +438,7 @@ pub fn spawn_graph_query_consumer_with_graph(
 /// # Ok(())
 /// # }
 /// ```
-pub fn spawn_graph_query_consumer_pool_shared(
+pub fn spawn_query_consumer_pool_shared(
     receiver: flume::Receiver<Query>,
     graph: Arc<Graph>,
     num_workers: usize,
@@ -487,7 +489,7 @@ pub fn spawn_graph_query_consumer_pool_shared(
 /// # NOT Recommended For
 /// - MCP servers or APIs needing read-after-write consistency
 /// - Real-time applications
-/// - Use `spawn_graph_query_consumer_pool_shared` instead for 99%+ consistency
+/// - Use `spawn_query_consumer_pool_shared` instead for 99%+ consistency
 ///
 /// # Arguments
 /// * `receiver` - Shared flume receiver (MPMC channel)
@@ -497,7 +499,7 @@ pub fn spawn_graph_query_consumer_pool_shared(
 ///
 /// # Returns
 /// Vector of JoinHandles for all worker threads
-pub fn spawn_graph_query_consumer_pool_readonly(
+pub fn spawn_query_consumer_pool_readonly(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     db_path: &Path,

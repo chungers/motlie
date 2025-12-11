@@ -1,12 +1,16 @@
 /// Common utilities for graph algorithm examples
 use anyhow::Result;
-use motlie_db::{create_mutation_writer, spawn_graph_consumer, AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, NodeSummary, Reader, ReaderConfig, TimestampMilli, WriterConfig};
+use motlie_db::graph::mutation::{AddEdge, AddNode, Runnable as MutationRunnable};
+use motlie_db::graph::reader::{Reader, ReaderConfig};
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+use motlie_db::{Id, TimestampMilli};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Instant;
 use tokio::time::Duration;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Parse scale factor from command line argument
 pub fn parse_scale_factor(s: &str) -> Result<usize> {
@@ -216,7 +220,7 @@ pub async fn build_graph(
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
 ) -> Result<(Reader, HashMap<String, Id>, tokio::task::JoinHandle<Result<()>>)> {
-    use motlie_db::{Storage, Graph};
+    use motlie_db::graph::{Graph, Storage};
     use std::sync::Arc;
 
     // Clean up any existing database
@@ -229,7 +233,7 @@ pub async fn build_graph(
     };
 
     let (writer, receiver) = create_mutation_writer(config.clone());
-    let handle = spawn_graph_consumer(receiver, config.clone(), db_path);
+    let handle = spawn_mutation_consumer(receiver, config.clone(), db_path);
 
     // Create a name to ID mapping
     let mut name_to_id = HashMap::new();
@@ -283,8 +287,9 @@ pub async fn build_graph(
     let graph = Arc::new(Graph::new(storage));
 
     // Create query reader and spawn consumer
-    let (reader, receiver) = motlie_db::create_query_reader(reader_config.clone());
-    let query_handle = motlie_db::spawn_graph_query_consumer_with_graph(receiver, reader_config, graph);
+    let (reader, receiver) = motlie_db::graph::reader::create_query_reader(reader_config.clone());
+    let query_handle =
+        motlie_db::graph::reader::spawn_query_consumer_with_graph(receiver, reader_config, graph);
 
     Ok((reader, name_to_id, query_handle))
 }

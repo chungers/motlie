@@ -16,8 +16,13 @@
 mod common;
 
 use anyhow::Result;
-use common::{build_graph, compute_hash, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use common::{
+    build_graph, compute_hash, get_disk_metrics, measure_time_and_memory,
+    measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode,
+    Implementation,
+};
+use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Dfs;
 use std::collections::{HashMap, HashSet};
@@ -112,7 +117,7 @@ fn dfs_petgraph(start_node: NodeIndex, graph: &DiGraph<String, f64>) -> Vec<Stri
 /// DFS implementation using motlie_db
 async fn dfs_motlie(
     start_node: Id,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<Vec<String>> {
     let mut visited = HashSet::new();
@@ -127,7 +132,7 @@ async fn dfs_motlie(
         visited.insert(current_id);
 
         // Get node name
-        let (name, _summary) = motlie_db::NodeById::new(current_id, None)
+        let (name, _summary) = motlie_db::graph::query::NodeById::new(current_id, None)
             .run(reader, timeout)
             .await?;
 

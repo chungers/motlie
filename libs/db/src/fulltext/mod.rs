@@ -24,29 +24,21 @@ pub mod writer;
 #[cfg(test)]
 mod tantivy_behavior_test;
 
-// Re-export commonly used types
-pub use query::{
-    Edges as FulltextEdges, Facets as FulltextFacets, FuzzyLevel, Nodes as FulltextNodes,
-    Runnable as FulltextQueryRunnable, Search as FulltextQuery,
-};
+// Re-export commonly used types (no prefixes - use module path for disambiguation)
+pub use query::{Edges, Facets, FuzzyLevel, Nodes, Runnable, Search};
 pub use reader::{
-    create_query_consumer as create_fulltext_query_consumer,
-    create_query_reader as create_fulltext_query_reader,
-    spawn_query_consumer as spawn_fulltext_query_consumer,
-    spawn_query_consumer_pool_readonly as spawn_fulltext_query_consumer_pool_readonly,
-    spawn_query_consumer_pool_shared as spawn_fulltext_query_consumer_pool_shared,
-    Consumer as FulltextQueryConsumer, Processor as FulltextQueryProcessor,
-    QueryExecutor as FulltextQueryExecutor, Reader as FulltextReader,
-    ReaderConfig as FulltextReaderConfig,
+    create_query_consumer, create_query_reader, spawn_query_consumer,
+    spawn_query_consumer_pool_readonly, spawn_query_consumer_pool_shared, Consumer, Processor,
+    QueryExecutor, Reader, ReaderConfig,
 };
 pub use schema::{compute_validity_facet, extract_tags, DocumentFields};
 pub use search::{EdgeHit, FacetCounts, Hit, MatchSource, NodeHit};
 pub use writer::{
-    create_fulltext_consumer, create_fulltext_consumer_with_next,
-    create_fulltext_consumer_with_params, create_fulltext_consumer_with_params_and_next,
-    spawn_fulltext_consumer, spawn_fulltext_consumer_with_params,
-    spawn_fulltext_consumer_with_params_and_next, spawn_fulltext_mutation_consumer_with_next,
-    MutationExecutor as FulltextIndexExecutor,
+    create_mutation_consumer, create_mutation_consumer_with_next,
+    create_mutation_consumer_with_params, create_mutation_consumer_with_params_and_next,
+    spawn_mutation_consumer, spawn_mutation_consumer_with_next,
+    spawn_mutation_consumer_with_params, spawn_mutation_consumer_with_params_and_next,
+    MutationExecutor,
 };
 
 // ============================================================================
@@ -336,7 +328,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             valid_range: None,
-            summary: crate::NodeSummary::from_text("test summary"),
+            summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         };
 
         let mutations = vec![Mutation::AddNode(node.clone())];
@@ -463,14 +455,14 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: "node_one".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("node one summary"),
+                summary: crate::graph::schema::NodeSummary::from_text("node one summary"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "node_two".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("node two summary"),
+                summary: crate::graph::schema::NodeSummary::from_text("node two summary"),
             }),
             Mutation::AddNodeFragment(AddNodeFragment {
                 id: Id::new(),
@@ -518,7 +510,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             valid_range: None,
-            summary: crate::NodeSummary::from_text("test summary"),
+            summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         });
 
         processor.process_mutations(&[add_node]).await.unwrap();
@@ -719,28 +711,28 @@ mod tests {
                 ts_millis: TimestampMilli(now),
                 name: "recent_node".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("created just now"),
+                summary: crate::graph::schema::NodeSummary::from_text("created just now"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_hour_ago),
                 name: "hourly_node".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("created one hour ago"),
+                summary: crate::graph::schema::NodeSummary::from_text("created one hour ago"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_day_ago),
                 name: "daily_node".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("created one day ago"),
+                summary: crate::graph::schema::NodeSummary::from_text("created one day ago"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_week_ago),
                 name: "weekly_node".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("created one week ago"),
+                summary: crate::graph::schema::NodeSummary::from_text("created one week ago"),
             }),
         ];
 
@@ -862,7 +854,7 @@ mod tests {
                 ts_millis: TimestampMilli(now),
                 name: "always_valid".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("no temporal constraints"),
+                summary: crate::graph::schema::NodeSummary::from_text("no temporal constraints"),
             }),
             // Currently valid (past..future)
             Mutation::AddNode(AddNode {
@@ -873,7 +865,7 @@ mod tests {
                     Some(TimestampMilli(past)),
                     Some(TimestampMilli(future)),
                 )),
-                summary: crate::NodeSummary::from_text("valid now"),
+                summary: crate::graph::schema::NodeSummary::from_text("valid now"),
             }),
             // Expired (past start, past end)
             Mutation::AddNode(AddNode {
@@ -884,7 +876,7 @@ mod tests {
                     Some(TimestampMilli(past - 86400_000)),
                     Some(TimestampMilli(past)),
                 )),
-                summary: crate::NodeSummary::from_text("no longer valid"),
+                summary: crate::graph::schema::NodeSummary::from_text("no longer valid"),
             }),
             // Future (future start)
             Mutation::AddNode(AddNode {
@@ -892,7 +884,7 @@ mod tests {
                 ts_millis: TimestampMilli(now),
                 name: "future".to_string(),
                 valid_range: Some(crate::TemporalRange(Some(TimestampMilli(future)), None)),
-                summary: crate::NodeSummary::from_text("not yet valid"),
+                summary: crate::graph::schema::NodeSummary::from_text("not yet valid"),
             }),
         ];
 
@@ -957,28 +949,28 @@ mod tests {
                 ts_millis: TimestampMilli(ts1),
                 name: "first".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("first document"),
+                summary: crate::graph::schema::NodeSummary::from_text("first document"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(ts2),
                 name: "second".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("second document"),
+                summary: crate::graph::schema::NodeSummary::from_text("second document"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(ts3),
                 name: "third".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("third document"),
+                summary: crate::graph::schema::NodeSummary::from_text("third document"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(ts4),
                 name: "fourth".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("fourth document"),
+                summary: crate::graph::schema::NodeSummary::from_text("fourth document"),
             }),
         ];
 
@@ -1040,7 +1032,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             valid_range: None,
-            summary: crate::NodeSummary::from_text("test"),
+            summary: crate::graph::schema::NodeSummary::from_text("test"),
         };
         processor
             .process_mutations(&[crate::graph::mutation::Mutation::AddNode(node)])
@@ -1064,7 +1056,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: "original_node".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("original"),
+                summary: crate::graph::schema::NodeSummary::from_text("original"),
             };
             processor
                 .process_mutations(&[crate::graph::mutation::Mutation::AddNode(node)])

@@ -1,9 +1,10 @@
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
-use motlie_db::scan::{
+use motlie_db::graph::scan::{
     AllEdgeFragments, AllEdges, AllNodeFragments, AllNodes, AllReverseEdges, EdgeFragmentRecord,
     EdgeRecord, NodeFragmentRecord, NodeRecord, ReverseEdgeRecord, Visitable,
 };
-use motlie_db::{DataUrl, Id, Storage, TimestampMilli};
+use motlie_db::graph::Storage;
+use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::path::PathBuf;
 
 #[allow(unused_imports)]

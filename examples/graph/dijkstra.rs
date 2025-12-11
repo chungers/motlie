@@ -20,7 +20,8 @@ mod common;
 
 use anyhow::Result;
 use common::{build_graph, compute_hash_f64, compute_hash_f64_motlie, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use pathfinding::prelude::dijkstra as pathfinding_dijkstra;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -134,7 +135,7 @@ impl PartialOrd for State {
 async fn dijkstra_motlie(
     start: Id,
     end: Id,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<Option<(f64, Vec<String>)>> {
     let mut dist: HashMap<Id, f64> = HashMap::new();
@@ -154,13 +155,13 @@ async fn dijkstra_motlie(
             let mut current = end;
 
             // Get end node name
-            let (name, _) = motlie_db::NodeById::new(current, None)
+            let (name, _) = motlie_db::graph::query::NodeById::new(current, None)
                 .run(reader, timeout)
                 .await?;
             path.push(name);
 
             while let Some(&prev_node) = prev.get(&current) {
-                let (name, _) = motlie_db::NodeById::new(prev_node, None)
+                let (name, _) = motlie_db::graph::query::NodeById::new(prev_node, None)
                     .run(reader, timeout)
                     .await?;
                 path.push(name);

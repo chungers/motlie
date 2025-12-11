@@ -332,7 +332,9 @@ impl<P: Processor> Consumer<P> {
     }
 }
 
-/// Spawn a mutation consumer as a background task
+/// Spawn a mutation consumer as a background task.
+///
+/// This is the generic helper used internally and by the fulltext module.
 pub fn spawn_consumer<P: Processor + 'static>(
     consumer: Consumer<P>,
 ) -> tokio::task::JoinHandle<Result<()>> {
@@ -350,7 +352,7 @@ use tokio::task::JoinHandle;
 use super::{Graph, Storage};
 
 /// Create a new graph mutation consumer
-pub fn create_graph_consumer(
+pub fn create_mutation_consumer(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     db_path: &Path,
@@ -363,7 +365,7 @@ pub fn create_graph_consumer(
 }
 
 /// Create a new graph mutation consumer that chains to another processor
-pub fn create_graph_consumer_with_next(
+pub fn create_mutation_consumer_with_next(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     db_path: &Path,
@@ -377,23 +379,23 @@ pub fn create_graph_consumer_with_next(
 }
 
 /// Spawn the graph mutation consumer as a background task
-pub fn spawn_graph_consumer(
+pub fn spawn_mutation_consumer(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     db_path: &Path,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_graph_consumer(receiver, config, db_path);
+    let consumer = create_mutation_consumer(receiver, config, db_path);
     spawn_consumer(consumer)
 }
 
 /// Spawn the graph mutation consumer as a background task with chaining to next processor
-pub fn spawn_graph_consumer_with_next(
+pub fn spawn_mutation_consumer_with_next(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     db_path: &Path,
     next: mpsc::Sender<Vec<Mutation>>,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_graph_consumer_with_next(receiver, config, db_path, next);
+    let consumer = create_mutation_consumer_with_next(receiver, config, db_path, next);
     spawn_consumer(consumer)
 }
 
@@ -409,7 +411,7 @@ pub fn spawn_graph_consumer_with_next(
 ///
 /// # Returns
 /// A JoinHandle for the spawned consumer task
-pub fn spawn_graph_consumer_with_graph(
+pub fn spawn_mutation_consumer_with_graph(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     graph: Arc<Graph>,

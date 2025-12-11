@@ -3,63 +3,17 @@ use ferroid::id::ULID;
 use serde::{Deserialize, Serialize};
 
 // Graph module - RocksDB-based graph storage
+// Users access via fully qualified paths: motlie_db::graph::*
 pub mod graph;
-pub use graph::{
-    // Storage and Graph types
-    Graph, Storage,
-    // Writer infrastructure
-    create_mutation_writer, spawn_mutation_consumer,
-    MutationConsumer, MutationExecutor, MutationProcessor,
-    Writer, WriterConfig,
-    // Graph-specific mutation consumer functions
-    create_graph_consumer, create_graph_consumer_with_next,
-    spawn_graph_consumer, spawn_graph_consumer_with_next, spawn_graph_consumer_with_graph,
-    // Mutation types
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
-    Runnable as MutationRunnable, UpdateEdgeValidSinceUntil, UpdateEdgeWeight,
-    UpdateNodeValidSinceUntil,
-    // Reader infrastructure
-    create_query_reader, spawn_query_consumer as spawn_generic_query_consumer,
-    QueryConsumer, ReaderProcessor as QueryProcessor, QueryExecutor,
-    QueryProcessor as QueryProcessorTrait, QueryWithTimeout, Reader, ReaderConfig,
-    // Graph-specific query consumer functions
-    create_graph_query_consumer, create_graph_query_consumer_readwrite,
-    spawn_graph_query_consumer, spawn_graph_query_consumer_readwrite,
-    spawn_graph_query_consumer_with_graph, spawn_graph_query_consumer_pool_shared,
-    spawn_graph_query_consumer_pool_readonly,
-    // Query types and trait
-    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, IncomingEdges, NodeById,
-    NodeFragmentsByIdTimeRange, OutgoingEdges, Query, QueryRunnable,
-    // Schema types
-    DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
-    // Scan module re-exports
-    scan,
-};
 
 // Fulltext module - Tantivy-based fulltext search
+// Users access via fully qualified paths: motlie_db::fulltext::*
 pub mod fulltext;
-pub use fulltext::{
-    create_fulltext_consumer,
-    create_fulltext_consumer_with_next,
-    create_fulltext_consumer_with_params,
-    create_fulltext_consumer_with_params_and_next,
-    // Query types
-    create_fulltext_query_consumer,
-    create_fulltext_query_reader,
-    // Mutation consumer spawn functions
-    spawn_fulltext_consumer,
-    spawn_fulltext_consumer_with_params,
-    spawn_fulltext_consumer_with_params_and_next,
-    spawn_fulltext_mutation_consumer_with_next,
-    // Query consumer spawn functions
-    spawn_fulltext_query_consumer,
-    spawn_fulltext_query_consumer_pool_readonly,
-    spawn_fulltext_query_consumer_pool_shared,
-    DocumentFields, FulltextEdges, FulltextFacets, FulltextIndexExecutor, FulltextNodes,
-    FulltextQuery, FulltextQueryConsumer, FulltextQueryExecutor, FulltextQueryProcessor,
-    FulltextQueryRunnable, FulltextReader, FulltextReaderConfig, FuzzyLevel,
-    Index as FulltextIndex, Storage as FulltextStorage,
-};
+
+// Unified query module - composes fulltext search with graph hydration
+// Users access via fully qualified paths: motlie_db::query::*, motlie_db::reader::*
+pub mod query;
+pub mod reader;
 
 /// Custom error type for Id parsing
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,8 +440,9 @@ impl From<Id> for [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::mutation::Runnable as MutRunnable;
-    use std::path::Path;
+    use crate::graph::mutation::{AddEdge, AddNode, AddNodeFragment, Runnable as MutRunnable};
+    use crate::graph::schema::{EdgeSummary, NodeSummary};
+    use crate::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -505,10 +460,10 @@ mod tests {
         let (writer2, receiver2) = create_mutation_writer(config.clone());
 
         // Spawn both consumer types
-        let graph_handle = spawn_graph_consumer(receiver1, config.clone(), temp_dir.path());
+        let graph_handle = spawn_mutation_consumer(receiver1, config.clone(), temp_dir.path());
         let fulltext_index_path = temp_dir.path().join("fulltext_index");
         let fulltext_handle =
-            spawn_fulltext_consumer(receiver2, config.clone(), &fulltext_index_path);
+            fulltext::spawn_mutation_consumer(receiver2, config.clone(), &fulltext_index_path);
 
         // Send mutations to both writers (simulating fanout)
         for i in 0..3 {

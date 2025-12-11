@@ -607,7 +607,7 @@ impl Visitable for AllEdgeFragments {
 mod tests {
     use super::*;
     use super::super::mutation::Runnable;
-    use super::super::writer::{create_mutation_writer, spawn_graph_consumer, WriterConfig};
+    use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
     use super::super::mutation::{AddEdge, AddNode};
     use crate::DataUrl;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -623,7 +623,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes
         for i in 0..5 {
@@ -674,7 +674,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes
         let mut node_ids = Vec::new();
@@ -748,7 +748,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes
         for i in 0..10 {
@@ -798,7 +798,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes first
         let node1 = Id::new();
@@ -870,7 +870,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes first
         let node1 = Id::new();
@@ -948,7 +948,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add test nodes
         let mut nodes = Vec::new();
@@ -1038,7 +1038,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes with delays to ensure different IDs
         let mut node_ids = Vec::new();
@@ -1113,7 +1113,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add test nodes
         for i in 0..10 {

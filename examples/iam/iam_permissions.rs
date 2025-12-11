@@ -53,7 +53,8 @@ use common::{
     build_graph, compute_hash, get_disk_metrics, measure_time_and_memory,
     measure_time_and_memory_async, GraphEdge, GraphMetrics, GraphNode, Implementation,
 };
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use petgraph::algo::{dijkstra, kosaraju_scc};
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::{Bfs, EdgeRef};
@@ -1994,7 +1995,7 @@ mod reference {
 
 mod motlie_impl {
     use super::*;
-    use motlie_db::IncomingEdges;
+    use motlie_db::graph::query::IncomingEdges;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -2019,7 +2020,7 @@ mod motlie_impl {
         pub async fn query_outgoing_edges(
             &self,
             node: Id,
-            reader: &motlie_db::Reader,
+            reader: &motlie_db::graph::reader::Reader,
             timeout: Duration,
         ) -> Result<Vec<(Option<f64>, Id, Id, String)>> {
             let start = std::time::Instant::now();
@@ -2034,7 +2035,7 @@ mod motlie_impl {
         pub async fn query_incoming_edges(
             &self,
             node: Id,
-            reader: &motlie_db::Reader,
+            reader: &motlie_db::graph::reader::Reader,
             timeout: Duration,
         ) -> Result<Vec<(Option<f64>, Id, Id, String)>> {
             let start = std::time::Instant::now();
@@ -2059,9 +2060,9 @@ mod motlie_impl {
         /// Uses the Visitable trait's accept method to iterate all nodes.
         pub fn scan_all_nodes(
             &self,
-            storage: &motlie_db::Storage,
+            storage: &motlie_db::graph::Storage,
         ) -> Result<Vec<(Id, String)>> {
-            use motlie_db::scan::{AllNodes, Visitable};
+            use motlie_db::graph::scan::{AllNodes, Visitable};
             let start = std::time::Instant::now();
 
             let mut nodes = Vec::new();
@@ -2071,7 +2072,7 @@ mod motlie_impl {
                 reverse: false,
                 reference_ts_millis: None,
             };
-            scan.accept(storage, &mut |record: &motlie_db::scan::NodeRecord| {
+            scan.accept(storage, &mut |record: &motlie_db::graph::scan::NodeRecord| {
                 nodes.push((record.id, record.name.clone()));
                 true // continue scanning
             })?;
@@ -2084,9 +2085,9 @@ mod motlie_impl {
         /// Uses the Visitable trait's accept method to iterate all edges.
         pub fn scan_all_edges(
             &self,
-            storage: &motlie_db::Storage,
+            storage: &motlie_db::graph::Storage,
         ) -> Result<Vec<(Id, Id, Option<f64>, String)>> {
-            use motlie_db::scan::{AllEdges, Visitable};
+            use motlie_db::graph::scan::{AllEdges, Visitable};
             let start = std::time::Instant::now();
 
             let mut edges = Vec::new();
@@ -2096,7 +2097,7 @@ mod motlie_impl {
                 reverse: false,
                 reference_ts_millis: None,
             };
-            scan.accept(storage, &mut |record: &motlie_db::scan::EdgeRecord| {
+            scan.accept(storage, &mut |record: &motlie_db::graph::scan::EdgeRecord| {
                 // SrcId and DstId are type aliases for Id, so they're directly usable
                 edges.push((
                     record.src_id,
@@ -2115,7 +2116,7 @@ mod motlie_impl {
         /// Returns (graph, id_to_idx, idx_to_id, name_to_id).
         pub fn load_petgraph_from_storage(
             &self,
-            storage: &motlie_db::Storage,
+            storage: &motlie_db::graph::Storage,
         ) -> Result<(
             DiGraph<String, f64>,
             HashMap<Id, NodeIndex>,
@@ -2156,7 +2157,7 @@ mod motlie_impl {
         source: Id,
         target: Id,
         id_to_name: &HashMap<Id, String>,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -2215,7 +2216,7 @@ mod motlie_impl {
         source: Id,
         max_depth: usize,
         id_to_name: &HashMap<Id, String>,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -2307,7 +2308,7 @@ mod motlie_impl {
         source: Id,
         sensitive_targets: &[Id],
         id_to_name: &HashMap<Id, String>,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -2430,7 +2431,7 @@ mod motlie_impl {
     pub async fn privilege_clustering(
         user_ids: &[Id],
         id_to_name: &HashMap<Id, String>,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -2538,7 +2539,7 @@ mod motlie_impl {
         sensitive_ids: &[Id],
         id_to_name: &HashMap<Id, String>,
         threshold: usize,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -2597,7 +2598,7 @@ mod motlie_impl {
         user_ids: &[Id],
         id_to_name: &HashMap<Id, String>,
         id_to_region: &HashMap<Id, String>,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -2661,7 +2662,7 @@ mod motlie_impl {
         workload_ids: &[Id],
         all_node_ids: &[Id],
         id_to_name: &HashMap<Id, String>,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -2822,7 +2823,7 @@ mod motlie_impl {
         all_node_ids: &[Id],
         id_to_name: &HashMap<Id, String>,
         threshold_percentile: f64,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -2938,7 +2939,7 @@ mod motlie_impl {
         sensitive_ids: &[Id],
         all_node_ids: &[Id],
         id_to_name: &HashMap<Id, String>,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -3087,7 +3088,7 @@ mod motlie_impl {
     pub async fn accessible_resources(
         user_ids: &[Id],
         id_to_name: &HashMap<Id, String>,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -3172,7 +3173,7 @@ mod motlie_impl {
         id_to_name: &HashMap<Id, String>,
         damping: f64,
         iterations: usize,
-        reader: &motlie_db::Reader,
+        reader: &motlie_db::graph::reader::Reader,
         timeout: Duration,
         timer: &QueryTimer,
     ) -> Result<AnalysisResult> {
@@ -3965,7 +3966,7 @@ async fn run_analysis_from_input(input: UseCaseInput, state: VisualizationState)
     let (result, time_ms, memory, disk_read_ms) = if is_reference {
         // Reference implementation: Load full graph from RocksDB into petgraph
         let timer = motlie_impl::QueryTimer::new();
-        let mut storage = motlie_db::Storage::readonly(&db_path);
+        let mut storage = motlie_db::graph::Storage::readonly(&db_path);
         storage.ready()?;
 
         let (pg_graph, id_to_idx, _idx_to_id, name_to_id) = timer.load_petgraph_from_storage(&storage)?;
@@ -4039,13 +4040,13 @@ async fn run_analysis_from_input(input: UseCaseInput, state: VisualizationState)
         (result, time_ms, memory, disk_read_ms)
     } else {
         // motlie_db implementation: Open readonly storage and run algorithm with query-time disk reads
-        let mut storage = motlie_db::Storage::readonly(&db_path);
+        let mut storage = motlie_db::graph::Storage::readonly(&db_path);
         storage.ready()?;
 
         // Create Reader with query channel and spawn consumer
         let config = motlie_db::graph::ReaderConfig::default();
         let (reader, receiver) = motlie_db::graph::create_query_reader(config.clone());
-        let _consumer_handle = motlie_db::graph::spawn_graph_query_consumer(receiver, config, &db_path);
+        let _consumer_handle = motlie_db::graph::spawn_query_consumer(receiver, config, &db_path);
 
         // Build name_to_id mapping by scanning nodes
         let timer_scan = motlie_impl::QueryTimer::new();

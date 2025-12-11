@@ -1121,12 +1121,15 @@ impl QueryProcessor for Search {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fulltext::reader::{create_query_reader, spawn_consumer, Consumer, ReaderConfig};
+    use crate::fulltext::reader::{
+        create_query_reader, spawn_consumer as spawn_query_consumer, Consumer, ReaderConfig,
+    };
+    use crate::fulltext::writer::spawn_mutation_consumer;
     use crate::fulltext::{Index, Storage};
     use crate::graph::mutation::{AddNode, AddNodeFragment, Runnable as MutRunnable};
     use crate::graph::schema::NodeSummary;
     use crate::graph::writer::{create_mutation_writer, WriterConfig};
-    use crate::{spawn_fulltext_consumer, DataUrl, TimestampMilli};
+    use crate::{DataUrl, TimestampMilli};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -1141,7 +1144,7 @@ mod tests {
             channel_buffer_size: 10,
         };
         let (writer, receiver) = create_mutation_writer(writer_config.clone());
-        let fulltext_handle = spawn_fulltext_consumer(receiver, writer_config, &index_path);
+        let fulltext_handle = spawn_mutation_consumer(receiver, writer_config, &index_path);
 
         // Create test nodes with searchable content
         let node1_id = Id::new();
@@ -1150,7 +1153,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "RustLang".to_string(),
             valid_range: None,
-            summary: crate::NodeSummary::from_text("Rust language summary"),
+            summary: crate::graph::schema::NodeSummary::from_text("Rust language summary"),
         };
         node1.run(&writer).await.unwrap();
 
@@ -1168,7 +1171,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "Python".to_string(),
             valid_range: None,
-            summary: crate::NodeSummary::from_text("Python language summary"),
+            summary: crate::graph::schema::NodeSummary::from_text("Python language summary"),
         };
         node2.run(&writer).await.unwrap();
 
@@ -1190,7 +1193,7 @@ mod tests {
         storage.ready().unwrap();
         let processor = Index::new(Arc::new(storage));
         let consumer = Consumer::new(query_receiver, reader_config, processor);
-        let consumer_handle = spawn_consumer(consumer);
+        let consumer_handle = spawn_query_consumer(consumer);
 
         // Search for "Rust"
         let results = Nodes::new("Rust".to_string(), 10)

@@ -426,7 +426,8 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AddEdge, Id};
+    use super::super::mutation::AddEdge;
+    use crate::Id;
 
     #[test]
     fn test_forward_edges_keys_lexicographically_sortable() {

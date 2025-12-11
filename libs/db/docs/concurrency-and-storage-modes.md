@@ -133,8 +133,8 @@ let storage = Arc::new(storage);
 let graph = Arc::new(Graph::new(storage));
 
 // Share graph across writer + readers
-spawn_graph_consumer_with_graph(writer_rx, config, graph.clone());
-spawn_graph_query_consumer_with_graph(reader_rx, config, graph.clone());
+spawn_mutation_consumer_with_graph(writer_rx, config, graph.clone());
+spawn_query_consumer_with_graph(reader_rx, config, graph.clone());
 ```
 
 **Characteristics**:
@@ -276,7 +276,7 @@ async fn reader_task(db_path: std::path::PathBuf) {
     };
 
     // Spawn query consumer (opens readonly storage)
-    let consumer_handle = motlie_db::spawn_graph_query_consumer(
+    let consumer_handle = motlie_db::spawn_query_consumer(
         reader_rx,
         ReaderConfig { channel_buffer_size: 10 },
         &db_path,
@@ -500,11 +500,11 @@ let storage = Arc::new(storage);
 let graph = Arc::new(Graph::new(storage));
 
 // Writer uses shared graph
-spawn_graph_consumer_with_graph(writer_rx, config, graph.clone());
+spawn_mutation_consumer_with_graph(writer_rx, config, graph.clone());
 
 // Readers use same shared graph
 for _ in 0..4 {
-    spawn_graph_query_consumer_with_graph(reader_rx, config, graph.clone());
+    spawn_query_consumer_with_graph(reader_rx, config, graph.clone());
 }
 ```
 
@@ -558,7 +558,7 @@ async fn shared_readwrite_example() -> anyhow::Result<()> {
     // Spawn writer with shared graph
     let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
     let writer_graph = graph.clone();
-    let writer_handle = motlie_db::spawn_graph_consumer_with_graph(
+    let writer_handle = motlie_db::spawn_mutation_consumer_with_graph(
         writer_rx,
         WriterConfig::default(),
         writer_graph,
@@ -575,7 +575,7 @@ async fn shared_readwrite_example() -> anyhow::Result<()> {
         };
 
         let reader_graph = graph.clone();
-        let reader_handle = motlie_db::spawn_graph_query_consumer_with_graph(
+        let reader_handle = motlie_db::spawn_query_consumer_with_graph(
             reader_rx,
             ReaderConfig { channel_buffer_size: 10 },
             reader_graph,
@@ -785,7 +785,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Spawn consumer (opens readonly storage)
-    let consumer = motlie_db::spawn_graph_query_consumer(
+    let consumer = motlie_db::spawn_query_consumer(
         reader_rx,
         ReaderConfig { channel_buffer_size: 10 },
         &db_path,
@@ -853,8 +853,8 @@ async fn main() -> anyhow::Result<()> {
 
 ```rust
 use motlie_db::{
-    Storage, Graph, create_mutation_writer, spawn_graph_consumer_with_graph,
-    spawn_graph_query_consumer_with_graph, AddNode, Id, TimestampMilli,
+    Storage, Graph, create_mutation_writer, spawn_mutation_consumer_with_graph,
+    spawn_query_consumer_with_graph, AddNode, Id, TimestampMilli,
     MutationRunnable, WriterConfig, ReaderConfig,
 };
 use std::sync::Arc;
@@ -872,7 +872,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create writer
     let (writer, writer_rx) = create_mutation_writer(Default::default());
-    let writer_handle = spawn_graph_consumer_with_graph(
+    let writer_handle = spawn_mutation_consumer_with_graph(
         writer_rx,
         WriterConfig::default(),
         graph.clone(),
@@ -887,7 +887,7 @@ async fn main() -> anyhow::Result<()> {
             (Reader::new(sender), receiver)
         };
 
-        let reader_handle = spawn_graph_query_consumer_with_graph(
+        let reader_handle = spawn_query_consumer_with_graph(
             reader_rx,
             ReaderConfig { channel_buffer_size: 10 },
             graph.clone(),
@@ -1087,6 +1087,6 @@ let storage = Arc::new(storage);
 let graph = Arc::new(Graph::new(storage));
 
 // Share graph across components
-spawn_graph_consumer_with_graph(rx1, config, graph.clone());
-spawn_graph_query_consumer_with_graph(rx2, config, graph.clone());
+spawn_mutation_consumer_with_graph(rx1, config, graph.clone());
+spawn_query_consumer_with_graph(rx2, config, graph.clone());
 ```

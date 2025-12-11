@@ -30,7 +30,8 @@ use common::{
     measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode,
     Implementation,
 };
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::Path;
@@ -393,7 +394,7 @@ fn louvain_reference(adjacency: &HashMap<String, Vec<(String, f64)>>) -> Communi
 async fn louvain_motlie(
     all_nodes: &[Id],
     id_to_name: &HashMap<Id, String>,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<CommunityResult> {
     // Initialize: each node in its own community

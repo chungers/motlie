@@ -244,7 +244,7 @@ let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone())
 
 // Create Graph consumer that forwards to FullText
 let (writer, graph_receiver) = create_mutation_writer(config.clone());
-let graph_handle = spawn_graph_consumer_with_next(graph_receiver, config, fulltext_sender);
+let graph_handle = spawn_mutation_consumer_with_next(graph_receiver, config, fulltext_sender);
 ```
 
 ### Sending mutations (they flow through the chain automatically):
