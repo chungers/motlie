@@ -282,6 +282,8 @@ All queries implement the `QueryWithResult` trait:
 - `EdgesFromNodeByIdQuery`: Get all outgoing edges
 - `EdgesToNodeByIdQuery`: Get all incoming edges
 
+**Note**: Name-based lookups (finding nodes/edges by name) are handled by the fulltext search module.
+
 ### Query Processor Trait
 
 The query `Processor` trait defines the contract for query execution:
@@ -383,17 +385,18 @@ Consumers can forward mutations to the next consumer in the chain:
 
 ```rust
 // Create FullText consumer (end of chain)
-let (fulltext_consumer, _) = spawn_fulltext_consumer(
-    fulltext_processor,
+let fulltext_handle = fulltext::spawn_mutation_consumer(
     receiver_fulltext,
-    None,  // No next consumer
+    config.clone(),
+    &fulltext_index_path,
 );
 
 // Create Graph consumer (forwards to FullText)
-let (graph_consumer, _) = spawn_mutation_consumer(
-    graph_processor,
+let graph_handle = graph::spawn_mutation_consumer_with_next(
     receiver_graph,
-    Some(writer_fulltext),  // Forward to FullText
+    config,
+    &db_path,
+    fulltext_tx,  // Forward to FullText
 );
 ```
 
@@ -774,8 +777,6 @@ The library emits structured events at various log levels:
 | `graph/query.rs` | `Executing EdgeSummaryBySrcDstName query` | `src_id`, `dst_id`, `name` | Lookup edge by topology |
 | `graph/query.rs` | `Executing OutgoingEdges query` | `node_id` | Get edges from node |
 | `graph/query.rs` | `Executing IncomingEdges query` | `node_id` | Get edges to node |
-| `graph/query.rs` | `Executing NodesByName query` | `name` | Search nodes by name |
-| `graph/query.rs` | `Executing EdgesByName query` | `name` | Search edges by name |
 
 ##### Graph Mutation Executors
 
@@ -797,8 +798,6 @@ The library emits structured events at various log levels:
 | `graph/scan.rs` | `Executing AllReverseEdges scan` | `limit`, `reverse`, `has_cursor` | Scan reverse edges |
 | `graph/scan.rs` | `Executing AllNodeFragments scan` | `limit`, `reverse`, `has_cursor` | Scan node fragments |
 | `graph/scan.rs` | `Executing AllEdgeFragments scan` | `limit`, `reverse`, `has_cursor` | Scan edge fragments |
-| `graph/scan.rs` | `Executing AllNodeNames scan` | `limit`, `reverse`, `has_cursor` | Scan node name index |
-| `graph/scan.rs` | `Executing AllEdgeNames scan` | `limit`, `reverse`, `has_cursor` | Scan edge name index |
 
 ##### Graph Writer Processing
 

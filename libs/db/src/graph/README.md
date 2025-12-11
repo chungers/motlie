@@ -93,13 +93,13 @@ Defined in `query.rs`:
 | Type | Description |
 |------|-------------|
 | `NodeById` | Get node by ID |
-| `NodesByName` | Get nodes by name prefix |
 | `OutgoingEdges` | Get edges from a node |
 | `IncomingEdges` | Get edges to a node |
-| `EdgesByName` | Get edges by name prefix |
 | `EdgeSummaryBySrcDstName` | Get edge by (src, dst, name) |
 | `NodeFragmentsByIdTimeRange` | Get node fragments in time range |
 | `EdgeFragmentsByIdTimeRange` | Get edge fragments in time range |
+
+**Note**: Name-based lookups (finding nodes/edges by name) are handled by the fulltext search module.
 
 ### Runnable Trait
 
@@ -135,7 +135,7 @@ let result = NodeById::new(node_id, None)
 
 ## Schema
 
-Defined in `schema.rs`. The graph uses 7 column families:
+Defined in `schema.rs`. The graph uses 5 column families:
 
 | Column Family | Key | Value | Purpose |
 |---------------|-----|-------|---------|
@@ -144,8 +144,8 @@ Defined in `schema.rs`. The graph uses 7 column families:
 | `outgoing-edges` | `(SrcId, DstId, EdgeName)` | `(TemporalRange?, Weight?, EdgeSummary)` | Edges by source |
 | `incoming-edges` | `(DstId, SrcId, EdgeName)` | `()` | Reverse edge index |
 | `edge-fragments` | `(SrcId, DstId, EdgeName, TimestampMilli)` | `(TemporalRange?, FragmentContent)` | Edge content fragments |
-| `node-names` | `(NodeName, Id)` | `()` | Name-to-node index |
-| `edge-names` | `(EdgeName, SrcId, DstId)` | `()` | Name-to-edge index |
+
+**Note**: Name-based lookups (finding nodes/edges by name) are handled by the fulltext search module using Tantivy indexing.
 
 ### Key Encoding
 
@@ -179,25 +179,21 @@ scanner.visit(&graph.storage(), &mut visitor)?;
 | `EdgeRecord` | `src_id, dst_id, name, weight, summary, valid_range` |
 | `NodeFragmentRecord` | `node_id, timestamp, content, valid_range` |
 | `EdgeFragmentRecord` | `src_id, dst_id, edge_name, timestamp, content, valid_range` |
-| `NodeNameRecord` | `name, node_id, valid_range` |
-| `EdgeNameRecord` | `name, src_id, dst_id, valid_range` |
 
 ## Consumer Chaining
 
 The graph consumer can forward mutations to other consumers (e.g., fulltext):
 
 ```rust
-use motlie_db::{
-    create_mutation_writer, spawn_mutation_consumer_with_next,
-    spawn_fulltext_consumer, WriterConfig,
-};
+use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig};
+use motlie_db::fulltext::spawn_mutation_consumer as spawn_fulltext_mutation_consumer;
 use tokio::sync::mpsc;
 
 let config = WriterConfig { channel_buffer_size: 1000 };
 
 // Create fulltext consumer (end of chain)
 let (fulltext_tx, fulltext_rx) = mpsc::channel(config.channel_buffer_size);
-let fulltext_handle = spawn_fulltext_consumer(fulltext_rx, config.clone(), &index_path);
+let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_rx, config.clone(), &index_path);
 
 // Create graph consumer that chains to fulltext
 let (writer, graph_rx) = create_mutation_writer(config.clone());
@@ -214,7 +210,6 @@ let graph_handle = spawn_mutation_consumer_with_next(
 ## See Also
 
 - `tests/test_pipeline_integration.rs` - Complete pipeline tests
-- `tests/test_prefix_scan_bug.rs` - Prefix scanning tests
 - `tests/test_secondary_api.rs` - Secondary storage tests
 - `src/fulltext/` - Fulltext module with parallel design
 - `src/README.md` - Module design patterns overview

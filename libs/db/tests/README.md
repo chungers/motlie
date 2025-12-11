@@ -70,12 +70,6 @@ End-to-end pipeline tests (4 tests):
 - Concurrent client scenarios
 - Mixed query workloads
 
-### Validation Tests
-
-#### `test_prefix_scan_bug.rs`
-Validates RocksDB prefix scanning with direct byte encoding (7 tests).
-Tests that variable-length fields in keys work correctly with prefix extractors.
-
 ## Shared Test Utilities
 
 ### `common/concurrent_test_utils.rs`

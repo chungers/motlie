@@ -101,12 +101,12 @@ Reader → queries   → MPMC Channel → QueryConsumer    → Processor → Sto
 
 | Pattern | Graph | Fulltext |
 |---------|-------|----------|
-| Basic mutation consumer | `spawn_mutation_consumer` | `spawn_fulltext_consumer` |
-| Mutation consumer with chaining | `spawn_mutation_consumer_with_next` | `spawn_fulltext_mutation_consumer_with_next` |
-| Basic query consumer | `spawn_query_consumer` | `spawn_fulltext_query_consumer` |
+| Basic mutation consumer | `spawn_mutation_consumer` | `spawn_mutation_consumer` |
+| Mutation consumer with chaining | `spawn_mutation_consumer_with_next` | `spawn_mutation_consumer_with_next` |
+| Basic query consumer | `spawn_query_consumer` | `spawn_query_consumer` |
 | Query consumer with processor | `spawn_query_consumer_with_graph` | N/A |
-| Shared pool query consumers | `spawn_query_consumer_pool_shared` | `spawn_fulltext_query_consumer_pool_shared` |
-| Readonly pool query consumers | `spawn_query_consumer_pool_readonly` | `spawn_fulltext_query_consumer_pool_readonly` |
+| Shared pool query consumers | `spawn_query_consumer_pool_shared` | `spawn_query_consumer_pool_shared` |
+| Readonly pool query consumers | `spawn_query_consumer_pool_readonly` | `spawn_query_consumer_pool_readonly` |
 
 ## Mutation Flow
 
@@ -136,11 +136,11 @@ The Graph consumer can forward mutations to the Fulltext consumer:
 ```rust
 // Create fulltext consumer (end of chain)
 let (fulltext_tx, fulltext_rx) = mpsc::channel(1000);
-let fulltext_handle = spawn_fulltext_consumer(fulltext_rx, config, &index_path);
+let fulltext_handle = fulltext::spawn_mutation_consumer(fulltext_rx, config, &index_path);
 
 // Create graph consumer that chains to fulltext
 let (writer, graph_rx) = create_mutation_writer(config);
-let graph_handle = spawn_mutation_consumer_with_next(
+let graph_handle = graph::spawn_mutation_consumer_with_next(
     graph_rx,
     config,
     &db_path,
@@ -191,8 +191,11 @@ use motlie_db::{
     FulltextIndex, FulltextStorage, FulltextNodes,
     // Infrastructure
     Writer, WriterConfig, Reader, ReaderConfig,
-    spawn_mutation_consumer, spawn_fulltext_consumer,
 };
+
+// Import spawn functions from submodules with module path
+use motlie_db::graph::{spawn_mutation_consumer, spawn_query_consumer};
+use motlie_db::fulltext::{spawn_mutation_consumer as spawn_fulltext_mutation_consumer};
 
 // Or import from submodules directly
 use motlie_db::graph::{Storage, Graph, schema::Nodes};

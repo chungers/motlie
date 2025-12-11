@@ -86,10 +86,10 @@ impl QueryExecutor for Nodes {
 | Function | Description |
 |----------|-------------|
 | **Mutation Consumers** | |
-| `spawn_consumer(receiver, config, path)` | Single mutation consumer |
-| `spawn_consumer_with_next(receiver, config, path, next_tx)` | Mutation consumer that chains to next |
-| `spawn_consumer_with_params(receiver, config, path, params)` | Mutation consumer with index params |
-| `spawn_consumer_with_params_and_next(receiver, config, path, params, next_tx)` | Mutation consumer with params and chaining |
+| `spawn_mutation_consumer(receiver, config, path)` | Single mutation consumer |
+| `spawn_mutation_consumer_with_next(receiver, config, path, next_tx)` | Mutation consumer that chains to next |
+| `spawn_mutation_consumer_with_params(receiver, config, path, params)` | Mutation consumer with index params |
+| `spawn_mutation_consumer_with_params_and_next(receiver, config, path, params, next_tx)` | Mutation consumer with params and chaining |
 | **Query Consumers** | |
 | `spawn_query_consumer(receiver, config, path)` | Single query consumer with new Index |
 | `spawn_query_consumer_pool_shared(receiver, index, n)` | Pool sharing one Arc\<Index\> |
