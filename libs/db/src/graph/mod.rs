@@ -40,8 +40,8 @@ pub use mutation::{
     UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
 };
 pub use query::{
-    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById,
-    NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
+    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, IncomingEdges, NodeById,
+    NodeFragmentsByIdTimeRange, OutgoingEdges, Query, Runnable as QueryRunnable,
 };
 pub use reader::{
     // Graph-specific query consumer functions
@@ -386,14 +386,6 @@ impl Storage {
             ColumnFamilyDescriptor::new(
                 schema::ReverseEdges::CF_NAME,
                 schema::ReverseEdges::column_family_options(),
-            ),
-            ColumnFamilyDescriptor::new(
-                schema::NodeNames::CF_NAME,
-                schema::NodeNames::column_family_options(),
-            ),
-            ColumnFamilyDescriptor::new(
-                schema::EdgeNames::CF_NAME,
-                schema::EdgeNames::column_family_options(),
             ),
         ];
 

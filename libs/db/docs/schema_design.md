@@ -160,61 +160,7 @@ EdgeFragmentCfValue(
 - Range scan by edge topology + time range → fragments in time window
 - Lexicographic ordering: (src_id, dst_id, edge_name, timestamp)
 
-**Variable-Length Key:** Uses same pattern as NodeNames/EdgeNames CFs. The prefix (src_id + dst_id + edge_name) is variable length, followed by fixed 8-byte timestamp.
-
----
-
-### 6. NodeNames Column Family
-
-**Purpose:** Index for efficient node lookup by name prefix.
-
-**Key Layout:**
-```
-[node_name: UTF-8 variable length] + [node_id: 16 bytes]
-```
-
-**Value Layout (MessagePack + LZ4):**
-```rust
-NodeNamesCfValue(
-    Option<TemporalRange>,  // Temporal validity
-)
-```
-
-**Key Encoding:** Raw bytes (no MessagePack)
-**Value Encoding:** MessagePack serialization + LZ4 compression
-**Prefix Extraction:** Variable-length prefix (node name)
-
-**Query Patterns:**
-- Prefix scan by name → all nodes with that name prefix
-- Point lookup by (name, id) → verify node exists
-- Lexicographic ordering: (name, node_id)
-
----
-
-### 7. EdgeNames Column Family
-
-**Purpose:** Index for efficient edge lookup by name.
-
-**Key Layout:**
-```
-[edge_name: UTF-8 variable length] + [src_id: 16 bytes] + [dst_id: 16 bytes]
-```
-
-**Value Layout (MessagePack + LZ4):**
-```rust
-EdgeNamesCfValue(
-    Option<TemporalRange>,  // Temporal validity
-)
-```
-
-**Key Encoding:** Raw bytes (no MessagePack)
-**Value Encoding:** MessagePack serialization + LZ4 compression
-**Prefix Extraction:** Variable-length prefix (edge name)
-
-**Query Patterns:**
-- Prefix scan by name → all edges with that name
-- Point lookup by (name, src_id, dst_id) → verify edge exists
-- Lexicographic ordering: (name, src_id, dst_id)
+**Variable-Length Key:** The prefix (src_id + dst_id + edge_name) is variable length, followed by fixed 8-byte timestamp.
 
 ---
 
@@ -349,17 +295,8 @@ NodeFragmentsByIdTimeRange::new(node_id, time_range, None).run(&reader, timeout)
 // Returns: Vec<(TimestampMilli, FragmentContent)>
 ```
 
-**Nodes by Name:**
-```rust
-NodesByName::new(name_prefix, start, limit, None).run(&reader, timeout).await
-// Returns: Vec<(Id, NodeName, NodeSummary)>
-```
-
-**Edges by Name:**
-```rust
-EdgesByName::new(edge_name, start, limit, None).run(&reader, timeout).await
-// Returns: Vec<(EdgeName, SrcId, DstId)>
-```
+> **Note:** For searching nodes and edges by name, use the fulltext search module which provides
+> efficient text-based lookups via Tantivy indexing.
 
 ---
 
@@ -525,10 +462,11 @@ UpdateNodeValidSinceUntil {
 | `edge_fragments` | src (16) + dst (16) + name (var) + ts (8) | temporal, content | Edge fragments | Yes (by edge topology) |
 | `forward_edges` | src (16) + dst (16) + name (var) | temporal, weight, summary | Primary edge storage | Yes (by src_id) |
 | `reverse_edges` | dst (16) + src (16) + name (var) | temporal | Incoming edge index | Yes (by dst_id) |
-| `node_names` | name (var) + node_id (16) | temporal | Node name index | Yes (by name prefix) |
-| `edge_names` | name (var) + src (16) + dst (16) | temporal | Edge name index | Yes (by name prefix) |
 
-**Total:** 7 column families (down from 8 in previous design)
+**Total:** 5 column families
+
+> **Note:** Name-based lookups (previously provided by `node_names` and `edge_names` column families)
+> are now handled by the fulltext search module using Tantivy indexing for more flexible text search.
 
 ---
 
