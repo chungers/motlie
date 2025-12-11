@@ -1,15 +1,17 @@
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use motlie_db::fulltext::{
-    EdgeHit, FacetCounts, FulltextEdges, FulltextFacets, FulltextNodes, FulltextQueryExecutor,
-    FuzzyLevel as DbFuzzyLevel, Index as FulltextIndex, NodeHit, Storage as FulltextStorage,
+    EdgeHit, Edges as FulltextEdgesQuery, FacetCounts, Facets as FulltextFacetsQuery,
+    FuzzyLevel as DbFuzzyLevel, Index as FulltextIndex, NodeHit, Nodes as FulltextNodesQuery,
+    QueryExecutor, Storage as FulltextStorage,
 };
 use motlie_db::graph::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation};
 use motlie_db::graph::writer::Processor;
-use motlie_db::scan::{
+use motlie_db::graph::scan::{
     AllEdgeFragments, AllEdges, AllNodeFragments, AllNodes, EdgeFragmentRecord, EdgeRecord,
     NodeFragmentRecord, NodeRecord, Visitable,
 };
-use motlie_db::{DataUrl, Id, Storage, TimestampMilli};
+use motlie_db::graph::Storage as GraphStorage;
+use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -183,7 +185,7 @@ fn run_index(index_dir: &PathBuf, args: &Index) -> anyhow::Result<()> {
     }
 
     // Open the graph database in readonly mode
-    let mut graph_storage = Storage::readonly(&args.graph_db_dir);
+    let mut graph_storage = GraphStorage::readonly(&args.graph_db_dir);
     graph_storage.ready()?;
 
     // Create the fulltext index in readwrite mode
@@ -268,7 +270,7 @@ fn search_nodes(
     info!("Searching nodes for: {}", args.query);
 
     // Build the query
-    let mut query = FulltextNodes::new(args.query.clone(), args.limit);
+    let mut query = FulltextNodesQuery::new(args.query.clone(), args.limit);
     query = query.with_fuzzy(args.fuzzy_level.into());
     if !args.tags.is_empty() {
         query = query.with_tags(args.tags.clone());
@@ -307,7 +309,7 @@ fn search_edges(
     info!("Searching edges for: {}", args.query);
 
     // Build the query
-    let mut query = FulltextEdges::new(args.query.clone(), args.limit);
+    let mut query = FulltextEdgesQuery::new(args.query.clone(), args.limit);
     query = query.with_fuzzy(args.fuzzy_level.into());
     if !args.tags.is_empty() {
         query = query.with_tags(args.tags.clone());
@@ -351,7 +353,7 @@ fn search_facets(
     info!("Getting facet counts...");
 
     // Build the query
-    let mut query = FulltextFacets::new();
+    let mut query = FulltextFacetsQuery::new();
     if !args.doc_type_filter.is_empty() {
         query = query.with_doc_type_filter(args.doc_type_filter.clone());
     }
@@ -409,7 +411,7 @@ fn search_facets(
 
 fn index_nodes(
     rt: &Runtime,
-    graph_storage: &Storage,
+    graph_storage: &GraphStorage,
     fulltext_index: &FulltextIndex,
     batch_size: usize,
     format: OutputFormat,
@@ -487,7 +489,7 @@ fn index_nodes(
 
 fn index_edges(
     rt: &Runtime,
-    graph_storage: &Storage,
+    graph_storage: &GraphStorage,
     fulltext_index: &FulltextIndex,
     batch_size: usize,
     format: OutputFormat,
@@ -577,7 +579,7 @@ fn index_edges(
 
 fn index_node_fragments(
     rt: &Runtime,
-    graph_storage: &Storage,
+    graph_storage: &GraphStorage,
     fulltext_index: &FulltextIndex,
     batch_size: usize,
     format: OutputFormat,
@@ -665,7 +667,7 @@ fn index_node_fragments(
 
 fn index_edge_fragments(
     rt: &Runtime,
-    graph_storage: &Storage,
+    graph_storage: &GraphStorage,
     fulltext_index: &FulltextIndex,
     batch_size: usize,
     format: OutputFormat,

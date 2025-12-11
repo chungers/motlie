@@ -1,9 +1,14 @@
 use crate::graph::{ColumnFamilyRecord, Graph, Storage};
-use crate::graph::mutation::{Runnable as MutRunnable, AddEdge, AddNodeFragment, AddNode};
+use crate::graph::mutation::{
+    AddEdge, AddNode, AddNodeFragment, Runnable as MutRunnable, UpdateEdgeValidSinceUntil,
+    UpdateNodeValidSinceUntil,
+};
 use crate::graph::query::Runnable;
 use crate::graph::schema::{EdgeSummary, NodeFragments, Nodes, ALL_COLUMN_FAMILIES};
-use crate::graph::writer::{spawn_graph_consumer, spawn_graph_consumer_with_next, create_mutation_writer, WriterConfig};
-use crate::{Id, TimestampMilli};
+use crate::graph::writer::{
+    create_mutation_writer, spawn_mutation_consumer, spawn_mutation_consumer_with_next, WriterConfig,
+};
+use crate::{Id, TemporalRange, TimestampMilli};
 use rocksdb::DB;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -21,7 +26,7 @@ use tokio::time::Duration;
         let (writer, receiver) = create_mutation_writer(config.clone());
 
         // Spawn consumer
-        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
 
         // Send some mutations
         let node_args = AddNode {
@@ -64,7 +69,7 @@ use tokio::time::Duration;
         };
 
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
 
         // Send 5 mutations rapidly
         for i in 0..5 {
@@ -93,7 +98,7 @@ use tokio::time::Duration;
 
         let config = WriterConfig::default();
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
 
         // Test all mutation types
         let node_id = Id::new();
@@ -137,20 +142,20 @@ use tokio::time::Duration;
         // Give consumer time to process the node and edge
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        crate::UpdateNodeValidSinceUntil {
+        UpdateNodeValidSinceUntil {
             id: node_id,
-            temporal_range: crate::TemporalRange(None, None),
+            temporal_range: TemporalRange(None, None),
             reason: "test node invalidation".to_string(),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::UpdateEdgeValidSinceUntil {
+        UpdateEdgeValidSinceUntil {
             src_id: edge_src_id,
             dst_id: edge_dst_id,
             name: edge_name,
-            temporal_range: crate::TemporalRange(None, None),
+            temporal_range: TemporalRange(None, None),
             reason: "test edge invalidation".to_string(),
         }
         .run(&writer)
@@ -177,11 +182,11 @@ use tokio::time::Duration;
         // Create the FullText consumer (end of chain)
         let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
         let fulltext_index_path = temp_dir.path().join("fulltext_index");
-        let fulltext_handle = crate::spawn_fulltext_consumer(fulltext_receiver, config.clone(), &fulltext_index_path);
+        let fulltext_handle = crate::fulltext::spawn_mutation_consumer(fulltext_receiver, config.clone(), &fulltext_index_path);
 
         // Create the Graph consumer that forwards to FullText
         let (writer, graph_receiver) = create_mutation_writer(config.clone());
-        let graph_handle = spawn_graph_consumer_with_next(
+        let graph_handle = spawn_mutation_consumer_with_next(
             graph_receiver,
             config.clone(),
             &db_path,
@@ -1132,7 +1137,7 @@ use tokio::time::Duration;
         };
 
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
 
         // Create a node with known ID
         let node_id = Id::new();
@@ -1193,187 +1198,8 @@ use tokio::time::Duration;
         );
     }
 
-    #[tokio::test]
-    async fn test_node_names_column_family() {
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test_db");
-
-        let config = WriterConfig {
-            channel_buffer_size: 10,
-        };
-
-        let (writer, receiver) = create_mutation_writer(config.clone());
-        let consumer_handle = spawn_graph_consumer(receiver, config, &db_path);
-
-        // Create multiple nodes with different names
-        let node_a_id = Id::new();
-        let node_a = AddNode {
-            id: node_a_id,
-            ts_millis: TimestampMilli::now(),
-            name: "alice".to_string(),
-            valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("alice summary"),
-        };
-
-        let node_b_id = Id::new();
-        let node_b = AddNode {
-            id: node_b_id,
-            ts_millis: TimestampMilli::now(),
-            name: "bob".to_string(),
-            valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("bob summary"),
-        };
-
-        let node_c_id = Id::new();
-        let node_c = AddNode {
-            id: node_c_id,
-            ts_millis: TimestampMilli::now(),
-            name: "alice".to_string(), // Same name as node_a
-            valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("alice2 summary"),
-        };
-
-        let node_d_id = Id::new();
-        let node_d = AddNode {
-            id: node_d_id,
-            ts_millis: TimestampMilli::now(),
-            name: "charlie".to_string(),
-            valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("charlie summary"),
-        };
-
-        node_a.clone().run(&writer).await.unwrap();
-        node_b.clone().run(&writer).await.unwrap();
-        node_c.clone().run(&writer).await.unwrap();
-        node_d.clone().run(&writer).await.unwrap();
-
-        // Give consumer time to process
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Drop writer to close channel
-        drop(writer);
-
-        // Wait for consumer to finish
-        consumer_handle.await.unwrap().unwrap();
-
-        // Verify the nodes were written to the NodeNames column family
-        let db = DB::open_cf_for_read_only(
-            &rocksdb::Options::default(),
-            &db_path,
-            ALL_COLUMN_FAMILIES,
-            false,
-        )
-        .expect("Failed to open database for verification");
-
-        use crate::graph::schema::NodeNames;
-        let cf_handle = db
-            .cf_handle(NodeNames::CF_NAME)
-            .expect("NodeNames column family should exist");
-
-        // Verify each node is in the NodeNames column family
-        for node in &[&node_a, &node_b, &node_c, &node_d] {
-            let (key, _value) = NodeNames::record_from(node);
-            let key_bytes = NodeNames::key_to_bytes(&key);
-            let result = db
-                .get_cf(cf_handle, &key_bytes)
-                .expect("Failed to query database");
-            assert!(
-                result.is_some(),
-                "Node {:?} should be written to the 'node_names' column family",
-                node.id
-            );
-
-            // Verify the key contains the correct node ID
-            // NodeNamesCfValue is empty, the node ID is stored in the key (key.1)
-            assert_eq!(
-                key.1, node.id,
-                "NodeNames key should contain the correct node ID"
-            );
-        }
-
-        // Verify key ordering: nodes with same name should be grouped together
-        // and ordered by (name, node_id)
-        let iter = db.prefix_iterator_cf(cf_handle, b"");
-        let mut all_keys: Vec<(String, Id)> = Vec::new();
-
-        for item in iter {
-            let (key_bytes, _value_bytes) = item.expect("Failed to iterate");
-            let key = NodeNames::key_from_bytes(&key_bytes).expect("Failed to deserialize key");
-            all_keys.push((key.0.clone(), key.1));
-        }
-
-        // Should have 4 nodes total
-        assert_eq!(all_keys.len(), 4, "Should have 4 nodes in NodeNames CF");
-
-        // Verify that nodes are ordered lexicographically by (name, id)
-        for i in 0..all_keys.len() - 1 {
-            let (name1, id1) = &all_keys[i];
-            let (name2, id2) = &all_keys[i + 1];
-
-            // Compare as tuples - this gives us lexicographic ordering
-            assert!(
-                (name1, id1) <= (name2, id2),
-                "Keys should be in lexicographic order: {:?} should be <= {:?}",
-                (name1, id1),
-                (name2, id2)
-            );
-        }
-
-        // Verify that nodes are grouped by name
-        let alice_positions: Vec<usize> = all_keys
-            .iter()
-            .enumerate()
-            .filter(|(_, (name, _))| name == "alice")
-            .map(|(i, _)| i)
-            .collect();
-
-        let bob_positions: Vec<usize> = all_keys
-            .iter()
-            .enumerate()
-            .filter(|(_, (name, _))| name == "bob")
-            .map(|(i, _)| i)
-            .collect();
-
-        let charlie_positions: Vec<usize> = all_keys
-            .iter()
-            .enumerate()
-            .filter(|(_, (name, _))| name == "charlie")
-            .map(|(i, _)| i)
-            .collect();
-
-        assert_eq!(alice_positions.len(), 2, "Should have 2 'alice' nodes");
-        assert_eq!(bob_positions.len(), 1, "Should have 1 'bob' node");
-        assert_eq!(charlie_positions.len(), 1, "Should have 1 'charlie' node");
-
-        // All "alice" positions should be consecutive
-        if alice_positions.len() == 2 {
-            assert_eq!(
-                alice_positions[1] - alice_positions[0],
-                1,
-                "Alice nodes should be consecutive"
-            );
-        }
-
-        // Verify alphabetical ordering of names
-        // "alice" should come before "bob" and "charlie"
-        if let (Some(&max_alice_pos), Some(&min_bob_pos)) =
-            (alice_positions.iter().max(), bob_positions.iter().min())
-        {
-            assert!(
-                max_alice_pos < min_bob_pos,
-                "All 'alice' nodes should come before 'bob' nodes"
-            );
-        }
-
-        if let (Some(&max_bob_pos), Some(&min_charlie_pos)) =
-            (bob_positions.iter().max(), charlie_positions.iter().min())
-        {
-            assert!(
-                max_bob_pos < min_charlie_pos,
-                "All 'bob' nodes should come before 'charlie' nodes"
-            );
-        }
-    }
+    // NOTE: test_node_names_column_family was removed - NodeNames column family
+    // no longer exists. Name-based lookups are now handled by fulltext search.
 
     #[test]
     fn test_lz4_compression_round_trip() {

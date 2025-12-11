@@ -120,18 +120,18 @@ let result = NodeById::new(node_id, None)
 
 | Function | Description |
 |----------|-------------|
-| `spawn_graph_consumer(receiver, config, path)` | Creates storage and processes mutations |
-| `spawn_graph_consumer_with_next(receiver, config, path, next_tx)` | Chains to next consumer |
-| `spawn_graph_consumer_with_graph(receiver, config, graph)` | Uses existing Arc\<Graph\> |
+| `spawn_mutation_consumer(receiver, config, path)` | Creates storage and processes mutations |
+| `spawn_mutation_consumer_with_next(receiver, config, path, next_tx)` | Chains to next consumer |
+| `spawn_mutation_consumer_with_graph(receiver, config, graph)` | Uses existing Arc\<Graph\> |
 
 ### Query Consumers
 
 | Function | Description |
 |----------|-------------|
-| `spawn_graph_query_consumer(receiver, config, path)` | Creates storage and processes queries |
-| `spawn_graph_query_consumer_with_graph(receiver, config, graph)` | Uses existing Arc\<Graph\> |
-| `spawn_graph_query_consumer_pool_shared(receiver, graph, n)` | N workers sharing one Graph |
-| `spawn_graph_query_consumer_pool_readonly(receiver, config, path, n)` | N workers with own readonly storage |
+| `spawn_query_consumer(receiver, config, path)` | Creates storage and processes queries |
+| `spawn_query_consumer_with_graph(receiver, config, graph)` | Uses existing Arc\<Graph\> |
+| `spawn_query_consumer_pool_shared(receiver, graph, n)` | N workers sharing one Graph |
+| `spawn_query_consumer_pool_readonly(receiver, config, path, n)` | N workers with own readonly storage |
 
 ## Schema
 
@@ -188,7 +188,7 @@ The graph consumer can forward mutations to other consumers (e.g., fulltext):
 
 ```rust
 use motlie_db::{
-    create_mutation_writer, spawn_graph_consumer_with_next,
+    create_mutation_writer, spawn_mutation_consumer_with_next,
     spawn_fulltext_consumer, WriterConfig,
 };
 use tokio::sync::mpsc;
@@ -201,7 +201,7 @@ let fulltext_handle = spawn_fulltext_consumer(fulltext_rx, config.clone(), &inde
 
 // Create graph consumer that chains to fulltext
 let (writer, graph_rx) = create_mutation_writer(config.clone());
-let graph_handle = spawn_graph_consumer_with_next(
+let graph_handle = spawn_mutation_consumer_with_next(
     graph_rx,
     config,
     &db_path,

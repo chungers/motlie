@@ -5,11 +5,12 @@
 //! 2. Runs the `db list` and `db scan` CLI commands
 //! 3. Verifies the output matches the inserted data
 
-use motlie_db::{
-    create_mutation_writer, spawn_graph_consumer, AddEdge, AddEdgeFragment, AddNode,
-    AddNodeFragment, DataUrl, EdgeSummary, Id, MutationRunnable, NodeSummary, TimestampMilli,
-    WriterConfig,
+use motlie_db::graph::mutation::{
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Runnable as MutationRunnable,
 };
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::collections::HashSet;
 use std::process::Command;
 use tempfile::TempDir;
@@ -57,7 +58,7 @@ async fn insert_test_data(db_path: &std::path::Path) -> TestData {
     };
 
     let (writer, receiver) = create_mutation_writer(config.clone());
-    let _handle = spawn_graph_consumer(receiver, config.clone(), db_path);
+    let _handle = spawn_mutation_consumer(receiver, config.clone(), db_path);
 
     // Create nodes
     let alice_id = Id::new();

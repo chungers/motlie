@@ -44,16 +44,15 @@ pub use query::{
     NodeFragmentsByIdTimeRange, OutgoingEdges, Query, Runnable as QueryRunnable,
 };
 pub use reader::{
-    // Graph-specific query consumer functions
-    create_graph_query_consumer,
-    create_graph_query_consumer_readwrite,
+    // Query consumer functions
+    create_query_consumer,
+    create_query_consumer_readwrite,
     create_query_reader,
-    spawn_consumer as spawn_query_consumer,
-    spawn_graph_query_consumer,
-    spawn_graph_query_consumer_pool_readonly,
-    spawn_graph_query_consumer_pool_shared,
-    spawn_graph_query_consumer_readwrite,
-    spawn_graph_query_consumer_with_graph,
+    spawn_query_consumer,
+    spawn_query_consumer_pool_readonly,
+    spawn_query_consumer_pool_shared,
+    spawn_query_consumer_readwrite,
+    spawn_query_consumer_with_graph,
     Consumer as QueryConsumer,
     Processor as ReaderProcessor,
     QueryExecutor,
@@ -64,14 +63,13 @@ pub use reader::{
 };
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 pub use writer::{
-    // Graph-specific mutation consumer functions
-    create_graph_consumer,
-    create_graph_consumer_with_next,
+    // Mutation consumer functions
+    create_mutation_consumer,
+    create_mutation_consumer_with_next,
     create_mutation_writer,
-    spawn_consumer as spawn_mutation_consumer,
-    spawn_graph_consumer,
-    spawn_graph_consumer_with_graph,
-    spawn_graph_consumer_with_next,
+    spawn_mutation_consumer,
+    spawn_mutation_consumer_with_graph,
+    spawn_mutation_consumer_with_next,
     Consumer as MutationConsumer,
     MutationExecutor,
     Processor as MutationProcessor,
@@ -298,7 +296,7 @@ impl Storage {
     /// # Example
     /// ```no_run
     /// use std::path::PathBuf;
-    /// use motlie_db::Storage;
+    /// use motlie_db::graph::Storage;
     ///
     /// let primary = PathBuf::from("/data/db");
     /// let secondary = primary.join("secondary");
@@ -465,7 +463,7 @@ impl Storage {
     ///
     /// # Example
     /// ```no_run
-    /// # use motlie_db::Storage;
+    /// # use motlie_db::graph::Storage;
     /// # use std::path::PathBuf;
     /// let mut storage = Storage::secondary(
     ///     &PathBuf::from("/data/db"),

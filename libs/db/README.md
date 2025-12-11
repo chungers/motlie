@@ -334,7 +334,7 @@ pub trait Processor: Send + Sync {
 
 ### Consumer Pattern
 
-The `spawn_graph_query_consumer()` function creates an async task that:
+The `spawn_query_consumer()` function creates an async task that:
 
 1. Receives queries from MPMC channel (flume)
 2. Executes query via `Processor`
@@ -390,7 +390,7 @@ let (fulltext_consumer, _) = spawn_fulltext_consumer(
 );
 
 // Create Graph consumer (forwards to FullText)
-let (graph_consumer, _) = spawn_graph_consumer(
+let (graph_consumer, _) = spawn_mutation_consumer(
     graph_processor,
     receiver_graph,
     Some(writer_fulltext),  // Forward to FullText

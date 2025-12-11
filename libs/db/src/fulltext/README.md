@@ -72,40 +72,44 @@ impl QueryExecutor for Nodes {
 | Function | Description |
 |----------|-------------|
 | **Mutation Consumers** | |
-| `spawn_graph_consumer(receiver, config, path)` | Single mutation consumer |
-| `spawn_graph_consumer_with_next(receiver, config, path, next_tx)` | Mutation consumer that chains to next |
-| `spawn_graph_consumer_with_graph(receiver, config, graph)` | Mutation consumer with existing Graph |
+| `spawn_mutation_consumer(receiver, config, path)` | Single mutation consumer |
+| `spawn_mutation_consumer_with_next(receiver, config, path, next_tx)` | Mutation consumer that chains to next |
+| `spawn_mutation_consumer_with_graph(receiver, config, graph)` | Mutation consumer with existing Graph |
 | **Query Consumers** | |
-| `spawn_graph_query_consumer(receiver, config, path)` | Single query consumer with new Graph |
-| `spawn_graph_query_consumer_with_graph(receiver, config, graph)` | Query consumer with existing Graph |
-| `spawn_graph_query_consumer_pool_shared(receiver, graph, n)` | Pool sharing one Arc\<Graph\> |
-| `spawn_graph_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual readonly Graphs |
+| `spawn_query_consumer(receiver, config, path)` | Single query consumer with new Graph |
+| `spawn_query_consumer_with_graph(receiver, config, graph)` | Query consumer with existing Graph |
+| `spawn_query_consumer_pool_shared(receiver, graph, n)` | Pool sharing one Arc\<Graph\> |
+| `spawn_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual readonly Graphs |
 
 ### Fulltext Module
 
 | Function | Description |
 |----------|-------------|
 | **Mutation Consumers** | |
-| `spawn_fulltext_consumer(receiver, config, path)` | Single mutation consumer |
-| `spawn_fulltext_mutation_consumer_with_next(receiver, config, path, next_tx)` | Mutation consumer that chains to next |
-| `spawn_fulltext_consumer_with_params(receiver, config, path, params)` | Mutation consumer with index params |
-| `spawn_fulltext_consumer_with_params_and_next(receiver, config, path, params, next_tx)` | Mutation consumer with params and chaining |
+| `spawn_consumer(receiver, config, path)` | Single mutation consumer |
+| `spawn_consumer_with_next(receiver, config, path, next_tx)` | Mutation consumer that chains to next |
+| `spawn_consumer_with_params(receiver, config, path, params)` | Mutation consumer with index params |
+| `spawn_consumer_with_params_and_next(receiver, config, path, params, next_tx)` | Mutation consumer with params and chaining |
 | **Query Consumers** | |
-| `spawn_fulltext_query_consumer(receiver, config, path)` | Single query consumer with new Index |
-| `spawn_fulltext_query_consumer_pool_shared(receiver, index, n)` | Pool sharing one Arc\<Index\> |
-| `spawn_fulltext_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual readonly Indexes |
+| `spawn_query_consumer(receiver, config, path)` | Single query consumer with new Index |
+| `spawn_query_consumer_pool_shared(receiver, index, n)` | Pool sharing one Arc\<Index\> |
+| `spawn_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual readonly Indexes |
 
 ## Usage Examples
 
 ### Basic Setup
 
 ```rust
-use motlie_db::{
-    create_mutation_writer, create_query_reader, create_fulltext_query_reader,
-    spawn_graph_query_consumer_pool_shared, spawn_fulltext_query_consumer_pool_shared,
-    Graph, Storage, FulltextIndex, FulltextStorage,
-    WriterConfig, ReaderConfig, FulltextReaderConfig,
+use motlie_db::graph::{
+    create_query_reader, spawn_query_consumer_pool_shared,
+    Graph, Storage, WriterConfig, ReaderConfig,
 };
+use motlie_db::fulltext::{
+    create_query_reader as create_fulltext_query_reader,
+    spawn_query_consumer_pool_shared as spawn_fulltext_query_consumer_pool_shared,
+    Index as FulltextIndex, Storage as FulltextStorage, ReaderConfig as FulltextReaderConfig,
+};
+use motlie_db::graph::writer::create_mutation_writer;
 use std::sync::Arc;
 
 // Paths
@@ -119,7 +123,7 @@ let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
 
 // Graph mutation consumer (receives mutations first, chains to fulltext)
 let (fulltext_tx, fulltext_rx) = tokio::sync::mpsc::channel(1000);
-let graph_mutation_handle = spawn_graph_consumer_with_next(
+let graph_mutation_handle = spawn_mutation_consumer_with_next(
     mutation_receiver,
     writer_config.clone(),
     &db_path,
@@ -127,7 +131,7 @@ let graph_mutation_handle = spawn_graph_consumer_with_next(
 );
 
 // Fulltext mutation consumer (receives mutations chained from graph)
-let fulltext_mutation_handle = spawn_fulltext_consumer(
+let fulltext_mutation_handle = motlie_db::fulltext::spawn_mutation_consumer(
     fulltext_rx,
     writer_config,
     &index_path,
@@ -135,13 +139,13 @@ let fulltext_mutation_handle = spawn_fulltext_consumer(
 
 // Alternative: Fulltext first, then chain to graph
 let (graph_tx, graph_rx) = tokio::sync::mpsc::channel(1000);
-let fulltext_mutation_handle = spawn_fulltext_mutation_consumer_with_next(
+let fulltext_mutation_handle = motlie_db::fulltext::spawn_mutation_consumer_with_next(
     mutation_receiver,
     writer_config.clone(),
     &index_path,
     graph_tx,
 );
-let graph_mutation_handle = spawn_graph_consumer(
+let graph_mutation_handle = spawn_mutation_consumer(
     graph_rx,
     writer_config,
     &db_path,
@@ -162,7 +166,7 @@ storage.ready()?;
 let graph = Arc::new(Graph::new(Arc::new(storage)));
 
 // Spawn 2 graph query consumers sharing the same Graph
-let graph_handles = spawn_graph_query_consumer_pool_shared(
+let graph_handles = spawn_query_consumer_pool_shared(
     graph_query_receiver,
     graph,
     2,  // 2 workers
@@ -181,7 +185,7 @@ let fulltext_index = Arc::new(FulltextIndex::new(Arc::new(ft_storage)));
 // Spawn 2 fulltext query consumers sharing the same Index
 let fulltext_handles = spawn_fulltext_query_consumer_pool_shared(
     fulltext_query_receiver,
-    fulltext_index,
+    fulltext_index.clone(),
     2,  // 2 workers
 );
 ```
@@ -191,10 +195,8 @@ let fulltext_handles = spawn_fulltext_query_consumer_pool_shared(
 Multiple clients can concurrently issue both graph and fulltext queries:
 
 ```rust
-use motlie_db::{
-    NodeById, NodesByName, OutgoingEdges, FulltextNodes,
-    QueryRunnable, FulltextQueryRunnable,
-};
+use motlie_db::graph::query::{NodeById, OutgoingEdges, QueryRunnable};
+use motlie_db::fulltext::{Nodes as FulltextNodes, Runnable as FulltextQueryRunnable};
 use std::time::Duration;
 
 // Client 1: Graph queries
@@ -559,7 +561,7 @@ AddNodeFragment {
 Searches for nodes and node fragments, returning deduplicated results by node ID:
 
 ```rust
-use motlie_db::{FulltextNodes, FuzzyLevel, FulltextQueryRunnable};
+use motlie_db::fulltext::{Nodes as FulltextNodes, FuzzyLevel, Runnable as FulltextQueryRunnable};
 
 // Basic search - returns top 10 results
 let results = FulltextNodes::new("rust programming".to_string(), 10)
@@ -660,7 +662,7 @@ See the "Tag Extraction" section in schema.rs for supported tag formats.
 Searches for edges and edge fragments, returning deduplicated results by edge key (src_id, dst_id, edge_name):
 
 ```rust
-use motlie_db::{FulltextEdges, FuzzyLevel, FulltextQueryRunnable};
+use motlie_db::fulltext::{Edges as FulltextEdges, FuzzyLevel, Runnable as FulltextQueryRunnable};
 
 // Basic search
 let results = FulltextEdges::new("collaborates".to_string(), 10)

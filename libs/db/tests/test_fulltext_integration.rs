@@ -6,10 +6,11 @@
 //! - Perform searches using Tantivy's query parser
 //! - Retrieve and rank results using BM25 scoring
 
-use motlie_db::{
-    create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer, AddEdge, AddNode,
-    AddNodeFragment, DataUrl, EdgeSummary, Id, MutationRunnable, TimestampMilli, WriterConfig,
-};
+use motlie_db::fulltext::spawn_mutation_consumer as spawn_fulltext_mutation_consumer;
+use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment, Runnable as MutationRunnable};
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+use motlie_db::{DataUrl, Id, TimestampMilli};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::Value;
@@ -33,8 +34,8 @@ async fn test_fulltext_search_integration() {
     let (fulltext_writer, fulltext_receiver) = create_mutation_writer(config.clone());
 
     // Spawn both consumers
-    let graph_handle = spawn_graph_consumer(graph_receiver, config.clone(), &db_path);
-    let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone(), &index_path);
+    let graph_handle = spawn_mutation_consumer(graph_receiver, config.clone(), &db_path);
+    let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     // Scenario: Building a knowledge graph about programming languages
     println!("=== Building Knowledge Graph ===");
@@ -46,7 +47,7 @@ async fn test_fulltext_search_integration() {
         ts_millis: TimestampMilli::now(),
         name: "Rust".to_string(),
         valid_range: None,
-        summary: motlie_db::NodeSummary::from_text("Rust programming language"),
+        summary: NodeSummary::from_text("Rust programming language"),
     };
 
     let python_id = Id::new();
@@ -55,7 +56,7 @@ async fn test_fulltext_search_integration() {
         ts_millis: TimestampMilli::now(),
         name: "Python".to_string(),
         valid_range: None,
-        summary: motlie_db::NodeSummary::from_text("Python programming language"),
+        summary: NodeSummary::from_text("Python programming language"),
     };
 
     let javascript_id = Id::new();
@@ -64,7 +65,7 @@ async fn test_fulltext_search_integration() {
         ts_millis: TimestampMilli::now(),
         name: "JavaScript".to_string(),
         valid_range: None,
-        summary: motlie_db::NodeSummary::from_text("JavaScript programming language"),
+        summary: NodeSummary::from_text("JavaScript programming language"),
     };
 
     // Send to both graph and fulltext
@@ -299,7 +300,7 @@ async fn test_fulltext_phrase_search() {
     };
 
     let (writer, receiver) = create_mutation_writer(config.clone());
-    let fulltext_handle = spawn_fulltext_consumer(receiver, config, &index_path);
+    let fulltext_handle = spawn_fulltext_mutation_consumer(receiver, config, &index_path);
 
     // Add fragments with specific phrases
     AddNodeFragment {
@@ -360,7 +361,7 @@ async fn test_fulltext_bm25_ranking() {
     };
 
     let (writer, receiver) = create_mutation_writer(config.clone());
-    let fulltext_handle = spawn_fulltext_consumer(receiver, config, &index_path);
+    let fulltext_handle = spawn_fulltext_mutation_consumer(receiver, config, &index_path);
 
     // Add documents with varying term frequencies
     AddNodeFragment {

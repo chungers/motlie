@@ -7,15 +7,30 @@
 //! 4. Fulltext search hits can be resolved back to correct RocksDB entries
 //! 5. Deduplication behavior is documented and tested
 
-use motlie_db::{
-    create_fulltext_query_reader, create_mutation_writer, create_query_reader,
-    spawn_fulltext_query_consumer_pool_shared, spawn_graph_consumer_with_next,
-    spawn_graph_query_consumer_pool_shared, AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
-    DataUrl, EdgeSummary, EdgeSummaryBySrcDstName, FulltextEdges, FulltextFacets, FulltextIndex,
-    FulltextQueryRunnable, FulltextReaderConfig, FulltextStorage, FuzzyLevel, Graph, Id,
-    MutationRunnable, NodeById, NodeSummary, QueryRunnable, ReaderConfig, Storage, TimestampMilli,
-    WriterConfig,
+use motlie_db::fulltext::{
+    create_query_reader as create_fulltext_query_reader, Edges as FulltextEdges,
+    Facets as FulltextFacets, FuzzyLevel, Index as FulltextIndex,
+    Nodes as FulltextNodes, Reader as FulltextReader, ReaderConfig as FulltextReaderConfig,
+    Runnable as FulltextQueryRunnable, spawn_mutation_consumer as spawn_fulltext_mutation_consumer,
+    spawn_query_consumer_pool_shared as spawn_fulltext_query_consumer_pool_shared,
+    Storage as FulltextStorage,
 };
+use motlie_db::graph::mutation::{
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Runnable as MutationRunnable,
+};
+use motlie_db::graph::query::{
+    EdgeSummaryBySrcDstName, NodeById, Runnable as QueryRunnable,
+};
+use motlie_db::graph::reader::{
+    create_query_reader, Reader as GraphReader,
+    spawn_query_consumer_pool_shared, ReaderConfig,
+};
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{
+    create_mutation_writer, spawn_mutation_consumer_with_next, Writer as GraphWriter, WriterConfig,
+};
+use motlie_db::graph::{Graph, Storage};
+use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tantivy::schema::Value;
@@ -28,7 +43,7 @@ use tokio::sync::mpsc;
 async fn setup_mutation_pipeline(
     temp_dir: &TempDir,
 ) -> (
-    motlie_db::Writer,
+    GraphWriter,
     tokio::task::JoinHandle<anyhow::Result<()>>,
     tokio::task::JoinHandle<anyhow::Result<()>>,
     std::path::PathBuf,
@@ -44,12 +59,12 @@ async fn setup_mutation_pipeline(
     // Create fulltext consumer (end of chain)
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
     let fulltext_handle =
-        motlie_db::spawn_fulltext_consumer(fulltext_receiver, config.clone(), &index_path);
+        spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     // Create graph consumer that forwards to fulltext (chained)
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
     let graph_handle =
-        spawn_graph_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
+        spawn_mutation_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
 
     (writer, graph_handle, fulltext_handle, db_path, index_path)
 }
@@ -60,8 +75,8 @@ fn setup_query_infrastructure(
     db_path: &std::path::Path,
     index_path: &std::path::Path,
 ) -> (
-    motlie_db::Reader,
-    motlie_db::FulltextReader,
+    GraphReader,
+    FulltextReader,
     Vec<tokio::task::JoinHandle<()>>,
     Vec<tokio::task::JoinHandle<()>>,
 ) {
@@ -75,7 +90,7 @@ fn setup_query_infrastructure(
     };
     let (graph_reader, graph_query_receiver) = create_query_reader(reader_config);
     let graph_consumer_handles =
-        spawn_graph_query_consumer_pool_shared(graph_query_receiver, graph, 2);
+        spawn_query_consumer_pool_shared(graph_query_receiver, graph, 2);
 
     // Fulltext query consumers
     let fulltext_reader_config = FulltextReaderConfig {
@@ -201,7 +216,7 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
 
     // === FULLTEXT SEARCH: Find nodes containing "programming" ===
     println!("  Searching fulltext for 'programming'...");
-    let results = motlie_db::FulltextNodes::new("programming".to_string(), 10)
+    let results = FulltextNodes::new("programming".to_string(), 10)
         .run(&fulltext_reader, timeout)
         .await
         .unwrap();
@@ -245,7 +260,7 @@ async fn test_fulltext_node_search_resolves_to_rocksdb() {
 
     // === FULLTEXT SEARCH: Find nodes with "Rust" ===
     println!("\n  Searching fulltext for 'Rust'...");
-    let rust_results = motlie_db::FulltextNodes::new("Rust".to_string(), 10)
+    let rust_results = FulltextNodes::new("Rust".to_string(), 10)
         .run(&fulltext_reader, timeout)
         .await
         .unwrap();
@@ -683,7 +698,7 @@ async fn test_fulltext_combined_search_with_verification() {
 
     // === SEARCH: Find all nodes with "database" ===
     println!("  Searching for nodes with 'database'...");
-    let node_results = motlie_db::FulltextNodes::new("database".to_string(), 10)
+    let node_results = FulltextNodes::new("database".to_string(), 10)
         .run(&fulltext_reader, timeout)
         .await
         .unwrap();
@@ -825,7 +840,7 @@ async fn test_fulltext_fragment_deduplication_behavior() {
 
     // Search for the unique keyword
     println!("  Searching for 'unique_keyword_xyz'...");
-    let results = motlie_db::FulltextNodes::new("unique_keyword_xyz".to_string(), 20)
+    let results = FulltextNodes::new("unique_keyword_xyz".to_string(), 20)
         .run(&fulltext_reader, timeout)
         .await
         .unwrap();
@@ -939,7 +954,7 @@ async fn test_fulltext_search_limit_and_ordering() {
 
     // Test limit = 5
     println!("  Searching for 'test' with limit=5...");
-    let results = motlie_db::FulltextNodes::new("test".to_string(), 5)
+    let results = FulltextNodes::new("test".to_string(), 5)
         .run(&fulltext_reader, timeout)
         .await
         .unwrap();
@@ -1109,7 +1124,7 @@ async fn test_fulltext_tag_facet_filtering() {
     println!("  Testing node tag filtering...\n");
 
     // Test 1: Filter by single tag #systems
-    let results = motlie_db::FulltextNodes::new("language".to_string(), 10)
+    let results = FulltextNodes::new("language".to_string(), 10)
         .with_tags(vec!["systems".to_string()])
         .run(&fulltext_reader, timeout)
         .await
@@ -1125,7 +1140,7 @@ async fn test_fulltext_tag_facet_filtering() {
     assert!(!found_ids.contains(&python_id), "Should NOT find Python (no #systems tag)");
 
     // Test 2: Filter by single tag #scripting
-    let results = motlie_db::FulltextNodes::new("language".to_string(), 10)
+    let results = FulltextNodes::new("language".to_string(), 10)
         .with_tags(vec!["scripting".to_string()])
         .run(&fulltext_reader, timeout)
         .await
@@ -1135,7 +1150,7 @@ async fn test_fulltext_tag_facet_filtering() {
     assert_eq!(results.len(), 2, "Should find Python and TypeScript (both have #scripting tag)");
 
     // Test 3: Filter by single tag #async
-    let results = motlie_db::FulltextNodes::new("language".to_string(), 10)
+    let results = FulltextNodes::new("language".to_string(), 10)
         .with_tags(vec!["async".to_string()])
         .run(&fulltext_reader, timeout)
         .await
@@ -1145,7 +1160,7 @@ async fn test_fulltext_tag_facet_filtering() {
     assert_eq!(results.len(), 2, "Should find Rust and Python (both have #async tag)");
 
     // Test 4: Filter by multiple tags (OR semantics - matches ANY tag)
-    let results = motlie_db::FulltextNodes::new("language".to_string(), 10)
+    let results = FulltextNodes::new("language".to_string(), 10)
         .with_tags(vec!["systems".to_string(), "scripting".to_string()])
         .run(&fulltext_reader, timeout)
         .await
@@ -1161,7 +1176,7 @@ async fn test_fulltext_tag_facet_filtering() {
     assert!(result_ids.contains(&typescript_id), "Should contain TypeScript");
 
     // Test 5: No results when tag doesn't match
-    let results = motlie_db::FulltextNodes::new("language".to_string(), 10)
+    let results = FulltextNodes::new("language".to_string(), 10)
         .with_tags(vec!["nonexistent-tag".to_string()])
         .run(&fulltext_reader, timeout)
         .await
@@ -1209,7 +1224,7 @@ async fn test_fulltext_tag_facet_filtering() {
     println!("\n  Verifying tag-filtered results resolve to RocksDB...");
 
     // Get #systems nodes and verify each resolves
-    let results = motlie_db::FulltextNodes::new("language".to_string(), 10)
+    let results = FulltextNodes::new("language".to_string(), 10)
         .with_tags(vec!["systems".to_string()])
         .run(&fulltext_reader, timeout)
         .await
@@ -1308,7 +1323,7 @@ async fn test_fulltext_tag_or_semantics() {
     println!("\n  Testing OR semantics with multiple tags...\n");
 
     // Search with tags [#alpha, #beta] - should find NodeA and NodeB, but NOT NodeC
-    let results = motlie_db::FulltextNodes::new("document".to_string(), 10)
+    let results = FulltextNodes::new("document".to_string(), 10)
         .with_tags(vec!["alpha".to_string(), "beta".to_string()])
         .run(&fulltext_reader, timeout)
         .await
@@ -1330,7 +1345,7 @@ async fn test_fulltext_tag_or_semantics() {
     assert!(!result_ids.contains(&node_c_id), "Should NOT contain NodeC (has only #gamma)");
 
     // Verify single tag still works
-    let results = motlie_db::FulltextNodes::new("document".to_string(), 10)
+    let results = FulltextNodes::new("document".to_string(), 10)
         .with_tags(vec!["gamma".to_string()])
         .run(&fulltext_reader, timeout)
         .await
@@ -1341,7 +1356,7 @@ async fn test_fulltext_tag_or_semantics() {
     assert_eq!(results[0].id, node_c_id, "Should be NodeC");
 
     // Verify all three tags finds all three nodes
-    let results = motlie_db::FulltextNodes::new("document".to_string(), 10)
+    let results = FulltextNodes::new("document".to_string(), 10)
         .with_tags(vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()])
         .run(&fulltext_reader, timeout)
         .await
@@ -1436,7 +1451,7 @@ async fn test_fulltext_fuzzy_search() {
     println!("\n  Testing fuzzy node search...");
 
     // Exact match
-    let results = motlie_db::FulltextNodes::new("programming".to_string(), 10)
+    let results = FulltextNodes::new("programming".to_string(), 10)
         .run(&fulltext_reader, timeout)
         .await
         .unwrap();
@@ -1444,7 +1459,7 @@ async fn test_fulltext_fuzzy_search() {
     assert!(results.len() >= 1, "Exact match should find Programming node");
 
     // FuzzyLevel::Low (1 edit) - common typo
-    let results = motlie_db::FulltextNodes::new("programing".to_string(), 10)  // missing 'm'
+    let results = FulltextNodes::new("programing".to_string(), 10)  // missing 'm'
         .with_fuzzy(FuzzyLevel::Low)
         .run(&fulltext_reader, timeout)
         .await
@@ -1453,7 +1468,7 @@ async fn test_fulltext_fuzzy_search() {
     assert!(results.len() >= 1, "Fuzzy Low should match 'programming' with 1 edit");
 
     // FuzzyLevel::Medium (2 edits)
-    let results = motlie_db::FulltextNodes::new("progaming".to_string(), 10)  // missing 'r' and 'm'
+    let results = FulltextNodes::new("progaming".to_string(), 10)  // missing 'r' and 'm'
         .with_fuzzy(FuzzyLevel::Medium)
         .run(&fulltext_reader, timeout)
         .await
@@ -1462,7 +1477,7 @@ async fn test_fulltext_fuzzy_search() {
     // Note: This may or may not match depending on how Tantivy handles 2-edit distance
 
     // FuzzyLevel::None should NOT match typo
-    let results = motlie_db::FulltextNodes::new("programing".to_string(), 10)
+    let results = FulltextNodes::new("programing".to_string(), 10)
         .run(&fulltext_reader, timeout)  // No fuzzy - exact only
         .await
         .unwrap();

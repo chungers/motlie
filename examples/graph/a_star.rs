@@ -29,7 +29,8 @@ use common::{
     measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge,
     GraphMetrics, GraphNode, Implementation,
 };
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use pathfinding::prelude::astar as pathfinding_astar;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -173,7 +174,7 @@ async fn astar_motlie(
     start: Id,
     end: Id,
     positions: &HashMap<Id, Position>,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<Option<(f64, Vec<String>)>> {
     let end_pos = positions.get(&end).ok_or_else(|| anyhow::anyhow!("End node not in positions"))?;
@@ -205,13 +206,13 @@ async fn astar_motlie(
             let mut current = end;
 
             // Get end node name
-            let (name, _) = motlie_db::NodeById::new(current, None)
+            let (name, _) = motlie_db::graph::query::NodeById::new(current, None)
                 .run(reader, timeout)
                 .await?;
             path.push(name);
 
             while let Some(&prev_node) = prev.get(&current) {
-                let (name, _) = motlie_db::NodeById::new(prev_node, None)
+                let (name, _) = motlie_db::graph::query::NodeById::new(prev_node, None)
                     .run(reader, timeout)
                     .await?;
                 path.push(name);

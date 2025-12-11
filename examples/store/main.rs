@@ -1,10 +1,14 @@
 use anyhow::{Context, Result};
 use csv::ReaderBuilder;
-use motlie_db::{
-    create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdge,
-    AddEdgeFragment, AddNode, AddNodeFragment, DataUrl, EdgeSummary, Id, MutationRunnable,
-    NodeSummary, TimestampMilli, WriterConfig,
+use motlie_db::fulltext::spawn_mutation_consumer as spawn_fulltext_mutation_consumer;
+use motlie_db::graph::mutation::{
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Runnable as MutationRunnable,
 };
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{
+    create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
+};
+use motlie_db::{DataUrl, Id, TimestampMilli};
 use rocksdb::DB;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -83,13 +87,13 @@ async fn store_mode_main(db_path: &str) -> Result<()> {
     let setup_start = Instant::now();
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
     let fulltext_index_path = Path::new(db_path).join("fulltext_index");
-    let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone(), &fulltext_index_path);
+    let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &fulltext_index_path);
 
     // Create the Graph consumer that forwards to FullText with batching
     println!("  2. Creating Batched Graph consumer (forwards to FullText)");
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
     let graph_handle =
-        spawn_graph_consumer_with_next(graph_receiver, config, Path::new(db_path), fulltext_sender);
+        spawn_mutation_consumer_with_next(graph_receiver, config, Path::new(db_path), fulltext_sender);
 
     let setup_duration = setup_start.elapsed();
     println!("  3. Consumer chain ready: Writer → Graph → FullText");

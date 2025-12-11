@@ -15,8 +15,13 @@
 mod common;
 
 use anyhow::Result;
-use common::{build_graph, compute_hash, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use common::{
+    build_graph, compute_hash, get_disk_metrics, measure_time_and_memory,
+    measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode,
+    Implementation,
+};
+use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Bfs;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -90,7 +95,7 @@ fn bfs_petgraph(start_node: NodeIndex, graph: &DiGraph<String, f64>) -> Vec<Stri
 /// BFS implementation using motlie_db
 async fn bfs_motlie(
     start_node: Id,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<Vec<String>> {
     let mut visited = HashSet::new();
@@ -102,7 +107,7 @@ async fn bfs_motlie(
 
     while let Some(current_id) = queue.pop_front() {
         // Get node name
-        let (name, _summary) = motlie_db::NodeById::new(current_id, None)
+        let (name, _summary) = motlie_db::graph::query::NodeById::new(current_id, None)
             .run(reader, timeout)
             .await?;
 
@@ -128,7 +133,7 @@ async fn bfs_motlie(
 /// Calculate the distance (level) from start node to each visited node
 async fn bfs_with_levels(
     start_node: Id,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<HashMap<String, usize>> {
     let mut levels = HashMap::new();
@@ -140,7 +145,7 @@ async fn bfs_with_levels(
 
     while let Some((current_id, level)) = queue.pop_front() {
         // Get node name
-        let (name, _summary) = motlie_db::NodeById::new(current_id, None)
+        let (name, _summary) = motlie_db::graph::query::NodeById::new(current_id, None)
             .run(reader, timeout)
             .await?;
 

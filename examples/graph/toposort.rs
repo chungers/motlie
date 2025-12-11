@@ -17,7 +17,8 @@ mod common;
 
 use anyhow::Result;
 use common::{build_graph, compute_hash, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use petgraph::algo::toposort as petgraph_toposort;
 use petgraph::graph::DiGraph;
 use std::collections::{HashMap, VecDeque};
@@ -102,7 +103,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
 /// Topological sort using Kahn's algorithm with motlie_db
 async fn toposort_motlie(
     all_nodes: &[Id],
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<Vec<String>> {
     // Calculate in-degrees for all nodes
@@ -113,7 +114,7 @@ async fn toposort_motlie(
         in_degree.insert(node_id, 0);
 
         // Get node name
-        let (name, _summary) = motlie_db::NodeById::new(node_id, None)
+        let (name, _summary) = motlie_db::graph::query::NodeById::new(node_id, None)
             .run(reader, timeout)
             .await?;
         name_map.insert(node_id, name);
