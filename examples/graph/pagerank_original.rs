@@ -1,21 +1,7 @@
-/// PageRank Algorithm Implementation
+/// PageRank Algorithm - ORIGINAL (unoptimized)
 ///
-/// This example demonstrates the PageRank algorithm using motlie_db.
-/// PageRank measures the importance of nodes in a directed graph based on
-/// the structure of incoming links.
-///
-/// Developed by Google founders Larry Page and Sergey Brin, PageRank is used for:
-/// - Web page ranking in search engines
-/// - Social network influence analysis
-/// - Citation analysis in academic papers
-/// - Recommendation systems
-///
-/// The algorithm iteratively computes a score for each node based on:
-/// - The number of incoming links
-/// - The importance of nodes providing those links
-/// - A damping factor (usually 0.85) modeling random surfer behavior
-///
-/// Usage: pagerank <db_path>
+/// This is the original implementation using individual NodeById calls.
+/// Used for benchmarking comparison against the NodesByIdsMulti optimized version.
 
 // Include the common module
 #[path = "common.rs"]
@@ -23,16 +9,13 @@ mod common;
 
 use anyhow::Result;
 use common::{build_graph, compute_hash_pagerank, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::graph::query::{IncomingEdges, NodesByIdsMulti, OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::graph::query::{IncomingEdges, OutgoingEdges, Runnable as QueryRunnable};
 use motlie_db::Id;
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use tokio::time::Duration;
 
-/// Create a test graph suitable for PageRank demonstration
-/// Represents a connected web page link structure across multiple sites
-/// The scale parameter determines the total number of pages (scale * 8)
 fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -41,7 +24,6 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     let base_names = vec!["Page_A", "Page_B", "Page_C", "Page_D", "Page_E", "Page_F", "Page_G", "Page_H", "Page_I", "Page_J"];
     let total_nodes = scale * base_names.len();
 
-    // Create all nodes
     for i in 0..total_nodes {
         let id = Id::new();
         let node_name = if scale == 1 {
@@ -56,27 +38,22 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         });
     }
 
-    // Create a connected link structure representing web pages
-    // Each website (cluster of 10 pages) has internal links
-    // and external links to other websites
     let website_size = base_names.len();
 
     for website in 0..scale {
         let website_start = website * website_size;
 
-        // Internal links within each website (following base pattern)
-        // Page_A is a hub linking to many pages
         let internal_links = vec![
-            (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), // Page_A links out
-            (1, 0), (1, 4), (1, 6), // Page_B links
-            (2, 0), (2, 3), (2, 7), // Page_C links
-            (3, 0), (3, 2), (3, 1), (3, 8), // Page_D links (hub)
-            (4, 0), (4, 9), // Page_E links
-            (5, 0), (5, 4), // Page_F links
-            (6, 0), (6, 7), // Page_G links
-            (7, 0), (7, 6), // Page_H links
-            (8, 0), (8, 9), // Page_I links
-            (9, 0), // Page_J links
+            (0, 1), (0, 2), (0, 3), (0, 4), (0, 5),
+            (1, 0), (1, 4), (1, 6),
+            (2, 0), (2, 3), (2, 7),
+            (3, 0), (3, 2), (3, 1), (3, 8),
+            (4, 0), (4, 9),
+            (5, 0), (5, 4),
+            (6, 0), (6, 7),
+            (7, 0), (7, 6),
+            (8, 0), (8, 9),
+            (9, 0),
         ];
 
         for (src_offset, dst_offset) in internal_links {
@@ -88,28 +65,20 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             });
         }
 
-        // External links between websites
-        // Create cross-links to make the entire web connected
         if website < scale - 1 {
             let next_website_start = (website + 1) * website_size;
-
-            // Page_A of current site links to next site's Page_A
             edges.push(GraphEdge {
                 source: all_node_ids[website_start],
                 target: all_node_ids[next_website_start],
                 name: format!("external_{}_{}", website, website + 1),
                 weight: Some(1.0),
             });
-
-            // Page_D of current site links to next site's Page_D
             edges.push(GraphEdge {
                 source: all_node_ids[website_start + 3],
                 target: all_node_ids[next_website_start + 3],
                 name: format!("hub_link_{}_{}", website, website + 1),
                 weight: Some(1.0),
             });
-
-            // Next site's Page_A links back to current site's Page_A (reciprocal link)
             edges.push(GraphEdge {
                 source: all_node_ids[next_website_start],
                 target: all_node_ids[website_start],
@@ -122,20 +91,8 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     (nodes, edges)
 }
 
-/// PageRank implementation using motlie_db
-///
-/// The PageRank formula:
-/// PR(A) = (1-d) + d * Σ(PR(Ti) / C(Ti))
-///
-/// Where:
-/// - PR(A) is the PageRank of page A
-/// - d is the damping factor (typically 0.85)
-/// - Ti are pages that link to A
-/// - C(Ti) is the number of outbound links from Ti
-///
-/// Uses NodesByIdsMulti for efficient batch lookup of all node names during
-/// initialization, reducing the number of RocksDB calls from N to 1.
-async fn pagerank_motlie(
+/// ORIGINAL PageRank - uses individual NodeById calls during initialization
+async fn pagerank_motlie_original(
     all_nodes: &[Id],
     reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
@@ -148,40 +105,29 @@ async fn pagerank_motlie(
     let mut name_map: HashMap<Id, String> = HashMap::new();
     let mut outgoing_counts: HashMap<Id, usize> = HashMap::new();
 
-    // Initialize all ranks to 1/N
     let initial_rank = 1.0 / n;
 
-    // Batch lookup all node names using NodesByIdsMulti
-    // This replaces N individual NodeById calls with a single batch call
-    let node_data = NodesByIdsMulti::new(all_nodes.to_vec(), None)
-        .run(reader, timeout)
-        .await?;
-
-    // Build name map from batch results
-    for (id, name, _summary) in node_data {
-        name_map.insert(id, name);
-    }
-
-    // Initialize ranks and count outgoing edges
+    // ORIGINAL: Individual NodeById call for each node
     for &node_id in all_nodes {
         ranks.insert(node_id, initial_rank);
         new_ranks.insert(node_id, 0.0);
 
-        // Count outgoing edges
+        let (name, _summary) = motlie_db::graph::query::NodeById::new(node_id, None)
+            .run(reader, timeout)
+            .await?;
+        name_map.insert(node_id, name);
+
         let outgoing = OutgoingEdges::new(node_id, None)
             .run(reader, timeout)
             .await?;
         outgoing_counts.insert(node_id, outgoing.len());
     }
 
-    // Iterate to convergence
     for _iteration in 0..iterations {
-        // Reset new ranks
         for rank in new_ranks.values_mut() {
             *rank = 0.0;
         }
 
-        // Calculate new ranks based on incoming links
         for &node_id in all_nodes {
             let incoming = IncomingEdges::new(node_id.into(), None)
                 .run(reader, timeout)
@@ -198,22 +144,18 @@ async fn pagerank_motlie(
                 }
             }
 
-            // Apply PageRank formula
             new_ranks.insert(node_id, (1.0 - damping_factor) / n + damping_factor * rank_sum);
         }
 
-        // Swap old and new ranks
         std::mem::swap(&mut ranks, &mut new_ranks);
     }
 
-    // Convert to name-based map
     Ok(ranks
         .into_iter()
         .filter_map(|(id, rank)| name_map.get(&id).map(|name| (name.clone(), rank)))
         .collect())
 }
 
-/// Simple reference PageRank implementation (in-memory)
 fn pagerank_reference(
     adjacency: &HashMap<String, Vec<String>>,
     damping_factor: f64,
@@ -223,7 +165,6 @@ fn pagerank_reference(
     let mut ranks: HashMap<String, f64> = HashMap::new();
     let mut new_ranks: HashMap<String, f64> = HashMap::new();
 
-    // Build reverse adjacency (incoming links)
     let mut incoming: HashMap<String, Vec<String>> = HashMap::new();
     for node in adjacency.keys() {
         incoming.insert(node.clone(), Vec::new());
@@ -237,7 +178,6 @@ fn pagerank_reference(
         }
     }
 
-    // Iterate
     for _ in 0..iterations {
         for (node, rank) in new_ranks.iter_mut() {
             let mut rank_sum = 0.0;
@@ -264,17 +204,6 @@ async fn main() -> Result<()> {
 
     if args.len() != 4 {
         eprintln!("Usage: {} <implementation> <db_path> <scale_factor>", args[0]);
-        eprintln!();
-        eprintln!("Arguments:");
-        eprintln!("  implementation - 'reference' or 'motlie_db'");
-        eprintln!("  db_path        - Path to RocksDB directory");
-        eprintln!("  scale_factor   - Positive integer to scale the graph size");
-        eprintln!();
-        eprintln!("Examples:");
-        eprintln!("  {} reference /tmp/pagerank_test_db 1      # reference, 8 nodes", args[0]);
-        eprintln!("  {} motlie_db /tmp/pagerank_test_db 1      # motlie_db, 8 nodes", args[0]);
-        eprintln!("  {} reference /tmp/pagerank_test_db 1000   # reference, 8000 nodes", args[0]);
-        eprintln!("  {} motlie_db /tmp/pagerank_test_db 1000   # motlie_db, 8000 nodes", args[0]);
         std::process::exit(1);
     }
 
@@ -282,11 +211,9 @@ async fn main() -> Result<()> {
     let db_path = Path::new(&args[2]);
     let scale = parse_scale_factor(&args[3])?;
 
-    // Generate test graph
     let (nodes, edges) = create_test_graph(scale);
     let num_nodes = nodes.len();
     let num_edges = edges.len();
-
     let node_ids: Vec<Id> = nodes.iter().map(|n| n.id).collect();
 
     let damping_factor = 0.85;
@@ -294,8 +221,6 @@ async fn main() -> Result<()> {
 
     match implementation {
         Implementation::Reference => {
-            // Run PageRank with reference implementation
-            // Build adjacency list for reference implementation
             let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
             for node in &nodes {
                 adjacency.insert(node.name.clone(), Vec::new());
@@ -313,7 +238,7 @@ async fn main() -> Result<()> {
             let result_hash = Some(compute_hash_pagerank(&result));
 
             let metrics = GraphMetrics {
-                algorithm_name: "PageRank".to_string(),
+                algorithm_name: "PageRank_Original".to_string(),
                 implementation: Implementation::Reference,
                 scale,
                 num_nodes,
@@ -321,29 +246,27 @@ async fn main() -> Result<()> {
                 execution_time_ms: time_ms,
                 memory_usage_bytes: memory,
                 result_hash,
-                disk_files: None,       // Reference implementation doesn't use disk
+                disk_files: None,
                 disk_size_bytes: None,
             };
 
             metrics.print_csv();
         }
         Implementation::MotlieDb => {
-            // Run PageRank with motlie_db
             let (reader, _name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
-            let timeout = Duration::from_secs(120); // PageRank needs more time for iterations and large graphs
+            let timeout = Duration::from_secs(300);
 
             let (result, time_ms, memory) = measure_time_and_memory_async(|| {
-                pagerank_motlie(&node_ids, &reader, timeout, damping_factor, iterations)
+                pagerank_motlie_original(&node_ids, &reader, timeout, damping_factor, iterations)
             })
             .await;
             let result = result?;
             let result_hash = Some(compute_hash_pagerank(&result));
 
-            // Measure disk usage after algorithm completes
             let (disk_files, disk_size) = get_disk_metrics(db_path).unwrap_or((0, 0));
 
             let metrics = GraphMetrics {
-                algorithm_name: "PageRank".to_string(),
+                algorithm_name: "PageRank_Original".to_string(),
                 implementation: Implementation::MotlieDb,
                 scale,
                 num_nodes,

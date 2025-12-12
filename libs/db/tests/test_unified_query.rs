@@ -46,8 +46,8 @@ use motlie_db::graph::writer::{
 };
 use motlie_db::graph::{Graph, Storage as GraphStorage};
 use motlie_db::query::{
-    EdgeDetails, Edges, FuzzyLevel, IncomingEdges, NodeById, NodeFragments, Nodes, OutgoingEdges,
-    Runnable, WithOffset,
+    EdgeDetails, Edges, FuzzyLevel, IncomingEdges, NodeById, NodeFragments, Nodes,
+    NodesByIdsMulti, OutgoingEdges, Runnable, WithOffset,
 };
 use motlie_db::reader::{ReaderConfig, Storage as UnifiedStorage};
 use motlie_db::{DataUrl, Id, TimestampMilli};
@@ -1216,6 +1216,87 @@ async fn test_node_by_id_and_edge_queries() {
             incoming
         );
     }
+
+    // Clean shutdown
+    handle.shutdown().await.unwrap();
+}
+
+/// Test NodesByIdsMulti - batch lookup of multiple nodes by ID through unified API.
+#[tokio::test]
+async fn test_nodes_by_ids_multi() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _db_path, _index_path) = setup_test_env_with_unified_storage(&temp_dir).await;
+    let timeout = Duration::from_secs(5);
+
+    // First, use fulltext search to get some node IDs
+    let search_results = Nodes::new("programming".to_string(), 10)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    // Collect the IDs from search results
+    let found_ids: Vec<Id> = search_results.iter().map(|(id, _, _)| *id).collect();
+    assert!(
+        !found_ids.is_empty(),
+        "Should find at least one node with 'programming'"
+    );
+
+    // Now use NodesByIdsMulti to batch lookup these nodes
+    let batch_results = NodesByIdsMulti::new(found_ids.clone(), None)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    // Verify we got the same number of results
+    assert_eq!(
+        batch_results.len(),
+        found_ids.len(),
+        "Batch lookup should return same number of nodes"
+    );
+
+    // Verify the IDs match
+    for (id, _name, _summary) in &batch_results {
+        assert!(
+            found_ids.contains(id),
+            "Each result ID should be in our lookup list"
+        );
+    }
+
+    // Test with a mix of existing and non-existing IDs
+    let non_existing_id = Id::new();
+    let mixed_ids: Vec<Id> = found_ids
+        .iter()
+        .take(2)
+        .copied()
+        .chain(std::iter::once(non_existing_id))
+        .collect();
+
+    let mixed_results = NodesByIdsMulti::new(mixed_ids.clone(), None)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    // Should only return the existing nodes (not the non-existing one)
+    assert!(
+        mixed_results.len() <= found_ids.len().min(2),
+        "Mixed results should not include non-existing nodes"
+    );
+
+    // Verify non-existing ID is not in results
+    for (id, _, _) in &mixed_results {
+        assert_ne!(
+            *id, non_existing_id,
+            "Non-existing ID should not be in results"
+        );
+    }
+
+    // Test with empty input
+    let empty_results = NodesByIdsMulti::new(vec![], None)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    assert_eq!(empty_results.len(), 0, "Empty input should return empty vec");
 
     // Clean shutdown
     handle.shutdown().await.unwrap();

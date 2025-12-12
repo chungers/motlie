@@ -100,6 +100,7 @@ handle.shutdown().await?;
 | `Nodes` | `Vec<(Id, NodeName, NodeSummary)>` | Fulltext search nodes with graph hydration |
 | `Edges` | `Vec<(SrcId, DstId, EdgeName, EdgeSummary)>` | Fulltext search edges with graph hydration |
 | `NodeById` | `(NodeName, NodeSummary)` | Direct node lookup by ID |
+| `NodesByIdsMulti` | `Vec<(Id, NodeName, NodeSummary)>` | Batch lookup nodes by IDs (uses RocksDB MultiGet) |
 | `OutgoingEdges` | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Edges from a node |
 | `IncomingEdges` | `Vec<(Option<f64>, DstId, SrcId, EdgeName)>` | Edges to a node |
 | `EdgeDetails` | `(Option<f64>, SrcId, DstId, EdgeName, EdgeSummary)` | Edge lookup by topology |
@@ -589,6 +590,7 @@ All queries implement the `Runnable<R>` trait parameterized by reader type:
 
 **Graph queries** (`graph::query`):
 - `NodeById`: Lookup node by ID → `(NodeName, NodeSummary)`
+- `NodesByIdsMulti`: Batch lookup nodes by IDs → `Vec<(Id, NodeName, NodeSummary)>` (uses RocksDB MultiGet)
 - `OutgoingEdges`: Get edges from a node → `Vec<(Option<f64>, SrcId, DstId, EdgeName)>`
 - `IncomingEdges`: Get edges to a node → `Vec<(Option<f64>, DstId, SrcId, EdgeName)>`
 - `EdgeSummaryBySrcDstName`: Lookup edge by topology → `(EdgeSummary, Option<f64>)`
@@ -1592,6 +1594,7 @@ The library emits structured events at various log levels:
 | Location | Event | Fields | Description |
 |----------|-------|--------|-------------|
 | `graph/query.rs` | `Executing NodeById query` | `id` | Lookup node by ID |
+| `graph/query.rs` | `Executing NodesByIdsMulti query` | `count` | Batch lookup nodes by IDs |
 | `graph/query.rs` | `Executing NodeFragmentsByIdTimeRange query` | `id`, `time_range` | Query node fragments |
 | `graph/query.rs` | `Executing EdgeFragmentsByIdTimeRange query` | `src_id`, `dst_id`, `edge_name`, `time_range` | Query edge fragments |
 | `graph/query.rs` | `Executing EdgeSummaryBySrcDstName query` | `src_id`, `dst_id`, `name` | Lookup edge by topology |

@@ -606,3 +606,113 @@ Areas for further investigation:
 - **Cross-platform validation** on different hardware and OS combinations
 
 See [MEMORY_ANALYSIS.md](docs/MEMORY_ANALYSIS.md) for detailed findings, data tables, and trend analysis.
+
+## Batch Query Optimizations
+
+Several algorithms have been optimized to use `NodesByIdsMulti` for batch node lookups, significantly improving performance by reducing RocksDB call overhead.
+
+### NodesByIdsMulti
+
+`NodesByIdsMulti` is a batch query that looks up multiple nodes by ID in a single RocksDB `multi_get_cf()` call, rather than making N individual `NodeById` calls. This reduces:
+- System call overhead
+- Lock contention
+- RocksDB internal iteration
+
+### Optimized Algorithms
+
+#### BFS (bfs.rs)
+
+**Optimization**: Level-based batch processing. Instead of looking up one node at a time as it's dequeued, BFS now processes entire levels and batch-looks up all nodes in the current frontier.
+
+```rust
+// Before: N individual calls
+while let Some(current_id) = queue.pop_front() {
+    let (name, _) = NodeById::new(current_id, None).run(reader, timeout).await?;
+    // ...
+}
+
+// After: ~log(N) batch calls (one per BFS level)
+while !current_level.is_empty() {
+    let node_data = NodesByIdsMulti::new(current_level.clone(), None)
+        .run(reader, timeout).await?;
+    // Process entire level...
+}
+```
+
+#### PageRank (pagerank.rs)
+
+**Optimization**: Batch initialization. All node names are fetched in a single batch call at startup instead of N individual calls.
+
+```rust
+// Before: N individual calls during initialization
+for &node_id in all_nodes {
+    let (name, _) = NodeById::new(node_id, None).run(reader, timeout).await?;
+    name_map.insert(node_id, name);
+}
+
+// After: Single batch call
+let node_data = NodesByIdsMulti::new(all_nodes.to_vec(), None)
+    .run(reader, timeout).await?;
+for (id, name, _) in node_data {
+    name_map.insert(id, name);
+}
+```
+
+### Performance Benchmarks
+
+Benchmarks run on release builds comparing original (individual `NodeById`) vs optimized (`NodesByIdsMulti`) implementations:
+
+#### BFS Performance Improvement
+
+| Scale | Nodes | Edges | Original (ms) | Optimized (ms) | Speedup |
+|------:|------:|------:|--------------:|---------------:|--------:|
+| 1,000 | 10,000 | 13,332 | 142.4 | 97.2 | **1.46x (32%)** |
+| 5,000 | 50,000 | 66,666 | 808.4 | 446.6 | **1.81x (45%)** |
+
+**Key insight**: Speedup increases with graph size because larger graphs have more nodes per BFS level, making batch operations more efficient.
+
+#### PageRank Performance Improvement
+
+| Scale | Nodes | Edges | Original (ms) | Optimized (ms) | Speedup |
+|------:|------:|------:|--------------:|---------------:|--------:|
+| 1,000 | 10,000 | 28,997 | 5,377.3 | 5,296.7 | **1.02x (1.5%)** |
+
+**Key insight**: PageRank shows modest improvement because the batch optimization only affects initialization. The bulk of execution time (50 iterations × N edge queries) is unaffected. Implementing `OutgoingEdgesMulti` and `IncomingEdgesMulti` would provide larger gains.
+
+### When to Use Batch Queries
+
+| Pattern | Recommendation |
+|---------|---------------|
+| Level-order traversal (BFS) | Use `NodesByIdsMulti` per level |
+| Initialization with all nodes | Use `NodesByIdsMulti` once |
+| Sequential node processing (DFS) | Individual `NodeById` is fine |
+| Iteration-heavy (PageRank iterations) | Need `OutgoingEdgesMulti`/`IncomingEdgesMulti` |
+
+### Running Benchmark Comparisons
+
+Original (unoptimized) implementations are available for benchmarking:
+
+```bash
+# Build all variants
+cargo build --release --example bfs --example bfs_original --example pagerank --example pagerank_original
+
+# Run BFS comparison
+./target/release/examples/bfs_original motlie_db /tmp/bfs_orig 1000
+./target/release/examples/bfs motlie_db /tmp/bfs_opt 1000
+
+# Run PageRank comparison
+./target/release/examples/pagerank_original motlie_db /tmp/pr_orig 1000
+./target/release/examples/pagerank motlie_db /tmp/pr_opt 1000
+```
+
+### Future Batch Query Optimizations
+
+Additional batch queries are planned (see GitHub issues #17-#22):
+
+| Query | Use Case | Expected Benefit |
+|-------|----------|------------------|
+| `OutgoingEdgesMulti` | BFS/PageRank iterations | 10-50x for edge-heavy algorithms |
+| `IncomingEdgesMulti` | PageRank, reverse traversal | 10-50x for PageRank iterations |
+| Degree queries | Quick connectivity checks | Skip value deserialization |
+
+These would enable batch edge traversal, dramatically improving iteration-heavy algorithms like PageRank.
