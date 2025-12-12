@@ -2,7 +2,7 @@ use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use motlie_db::fulltext::{
     EdgeHit, Edges as FulltextEdgesQuery, FacetCounts, Facets as FulltextFacetsQuery,
     FuzzyLevel as DbFuzzyLevel, Index as FulltextIndex, NodeHit, Nodes as FulltextNodesQuery,
-    QueryExecutor, Storage as FulltextStorage,
+    Storage as FulltextStorage,
 };
 use motlie_db::graph::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation};
 use motlie_db::graph::writer::Processor;

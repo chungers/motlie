@@ -1,72 +1,277 @@
-//! Unified reader module with MPMC pipeline for search + graph hydration.
+//! Unified reader module composing graph and fulltext query infrastructure.
 //!
-//! This module provides the infrastructure for the unified query interface:
-//! - `Storage` - combines graph (RocksDB) and fulltext (Tantivy) storage
-//! - `Reader` - handle for sending unified queries
-//! - `Consumer` - processes unified queries
-//! - Spawn functions for creating consumer pools
+//! This module provides the [`Reader`] and [`Storage`] types that manage both
+//! graph (RocksDB) and fulltext (Tantivy) query subsystems, forwarding queries
+//! to the appropriate backend.
+//!
+//! # Quick Start
+//!
+//! The recommended way to initialize the unified query system is via [`Storage::ready()`]:
+//!
+//! ```ignore
+//! use motlie_db::reader::{Storage, ReaderConfig};
+//! use motlie_db::query::{Nodes, NodeById, OutgoingEdges, Runnable};
+//! use std::time::Duration;
+//!
+//! // 1. Create unified storage pointing to both databases
+//! let storage = Storage::readonly(graph_path, fulltext_path);
+//!
+//! // 2. Initialize storage and spawn query consumer pools
+//! let (reader, handles) = storage.ready(ReaderConfig::default(), 4)?;
+//!
+//! let timeout = Duration::from_secs(5);
+//!
+//! // 3. Execute queries through the unified reader
+//!
+//! // Fulltext search with automatic graph hydration
+//! let results = Nodes::new("rust programming".to_string(), 10)
+//!     .run(&reader, timeout)
+//!     .await?;
+//!
+//! // Direct graph lookups
+//! let (name, summary) = NodeById::new(node_id, None)
+//!     .run(&reader, timeout)
+//!     .await?;
+//!
+//! let edges = OutgoingEdges::new(node_id, None)
+//!     .run(&reader, timeout)
+//!     .await?;
+//!
+//! // 4. Clean shutdown
+//! drop(reader);
+//! for handle in handles {
+//!     handle.await?;
+//! }
+//! ```
 //!
 //! # Architecture
 //!
+//! The unified reader manages three query pipelines:
+//!
 //! ```text
-//! ┌─────────────────┐
-//! │     Reader      │  ◄── Client sends Search queries
-//! └────────┬────────┘
-//!          │ flume channel (MPMC)
-//!          ▼
-//! ┌─────────────────┐
-//! │    Consumer(s)  │  ◄── Pool of workers processing queries
-//! └────────┬────────┘
-//!          │
-//!          ▼
-//! ┌─────────────────┐
-//! │    Storage      │
-//! │ ├── fulltext    │  ◄── Tantivy (for search/ranking)
-//! │ └── graph       │  ◄── RocksDB (source of truth for hydration)
-//! └─────────────────┘
+//! ┌─────────────────────────────────────────────────────────────────────────┐
+//! │                           Reader (unified)                               │
+//! │                                                                          │
+//! │  ┌────────────────────────────────────────────────────────────────────┐ │
+//! │  │                    Unified Query Pipeline                           │ │
+//! │  │  Handles: Nodes, Edges (fulltext search + graph hydration)          │ │
+//! │  │           NodeById, OutgoingEdges, IncomingEdges (forwarded)        │ │
+//! │  │           EdgeDetails, NodeFragments, EdgeFragments (forwarded)     │ │
+//! │  └────────────────────────────────────────────────────────────────────┘ │
+//! │                              │                                           │
+//! │              ┌───────────────┴───────────────┐                          │
+//! │              ▼                               ▼                          │
+//! │  ┌─────────────────────────┐   ┌─────────────────────────────────┐     │
+//! │  │    graph::Reader        │   │       fulltext::Reader          │     │
+//! │  │  (graph queries)        │   │   (raw fulltext queries)        │     │
+//! │  └───────────┬─────────────┘   └───────────────┬─────────────────┘     │
+//! │              │                                 │                        │
+//! │              ▼                                 ▼                        │
+//! │  ┌─────────────────────────┐   ┌─────────────────────────────────┐     │
+//! │  │  Consumer Pool (MPMC)   │   │   Consumer Pool (MPMC)          │     │
+//! │  │  (N async workers)      │   │   (N async workers)             │     │
+//! │  └───────────┬─────────────┘   └───────────────┬─────────────────┘     │
+//! │              │                                 │                        │
+//! │              ▼                                 ▼                        │
+//! │  ┌─────────────────────────┐   ┌─────────────────────────────────┐     │
+//! │  │   graph::Graph          │   │      fulltext::Index            │     │
+//! │  │   (RocksDB)             │   │      (Tantivy)                  │     │
+//! │  └─────────────────────────┘   └─────────────────────────────────┘     │
+//! └─────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # Example
+//! # Key Types
 //!
-//! ```ignore
-//! use motlie_db::reader::{Storage, ReaderConfig, create_query_reader, spawn_consumer_pool_shared};
-//! use motlie_db::query::{Nodes, Runnable};
-//! use std::sync::Arc;
-//! use std::time::Duration;
+//! | Type | Description |
+//! |------|-------------|
+//! | [`Storage`] | Unified storage configuration with `readonly()` and `readwrite()` constructors |
+//! | [`Reader`] | Query interface returned by `Storage::ready()` |
+//! | [`ReaderConfig`] | Configuration for channel buffer sizes |
+//! | [`CompositeStorage`] | Internal storage reference for query execution |
 //!
-//! // Create storage
-//! let storage = Arc::new(Storage::new(graph, fulltext));
+//! # See Also
 //!
-//! // Create reader channel
-//! let config = ReaderConfig { channel_buffer_size: 100 };
-//! let (reader, receiver) = create_query_reader(config);
-//!
-//! // Spawn consumer pool
-//! let handles = spawn_consumer_pool_shared(receiver, storage, 4);
-//!
-//! // Send queries
-//! let results = Nodes::new("rust programming".to_string(), 10)
-//!     .run(&reader, Duration::from_secs(5))
-//!     .await?;
-//! ```
+//! - [`query`](crate::query) - Query types that work with this reader
+//! - [`graph::reader`](crate::graph::reader) - Graph-only reader (advanced use)
+//! - [`fulltext::reader`](crate::fulltext::reader) - Fulltext-only reader (advanced use)
 
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::task::JoinHandle;
 
 use crate::fulltext;
 use crate::graph;
-use crate::query::QueryProcessor;
+use crate::query::{Query, QueryProcessor};
 
 // ============================================================================
-// Storage
+// ReaderConfig - Composes graph and fulltext configs
 // ============================================================================
 
-/// Storage combining graph (RocksDB) and fulltext (Tantivy).
+/// Configuration for the unified reader.
 ///
-/// This provides unified access to both storage backends for the query execution
-/// layer. Fulltext is used for search/ranking, graph is the source of truth.
+/// Composes configurations for both graph and fulltext subsystems.
+#[derive(Debug, Clone)]
+pub struct ReaderConfig {
+    /// Configuration for the graph query reader
+    pub graph: graph::reader::ReaderConfig,
+
+    /// Configuration for the fulltext query reader
+    pub fulltext: fulltext::reader::ReaderConfig,
+
+    /// Channel buffer size for unified search queries
+    pub channel_buffer_size: usize,
+}
+
+impl Default for ReaderConfig {
+    fn default() -> Self {
+        Self {
+            graph: graph::reader::ReaderConfig::default(),
+            fulltext: fulltext::reader::ReaderConfig::default(),
+            channel_buffer_size: 1000,
+        }
+    }
+}
+
+impl ReaderConfig {
+    /// Create a config with the same channel buffer size for all subsystems.
+    pub fn with_channel_buffer_size(size: usize) -> Self {
+        Self {
+            graph: graph::reader::ReaderConfig {
+                channel_buffer_size: size,
+            },
+            fulltext: fulltext::reader::ReaderConfig {
+                channel_buffer_size: size,
+            },
+            channel_buffer_size: size,
+        }
+    }
+}
+
+// ============================================================================
+// Storage - Unified storage with lazy initialization
+// ============================================================================
+
+/// Unified storage combining graph (RocksDB) and fulltext (Tantivy).
+///
+/// This struct manages both storage backends and provides the `ready()` method
+/// to initialize them and set up the MPMC query pipelines.
+///
+/// # Usage
+///
+/// ```ignore
+/// use motlie_db::reader::{Storage, ReaderConfig};
+/// use std::path::Path;
+///
+/// // Create storage configuration (read-write mode)
+/// let mut storage = Storage::readwrite(
+///     Path::new("/path/to/graph"),
+///     Path::new("/path/to/fulltext"),
+/// );
+///
+/// // Initialize storage and get the reader
+/// let (reader, handles) = storage.ready(ReaderConfig::default(), 4)?;
+///
+/// // Use the reader for queries
+/// let results = Nodes::new("query", 10).run(&reader, timeout).await?;
+/// ```
 pub struct Storage {
+    /// Graph storage (lazily initialized)
+    graph_storage: graph::Storage,
+
+    /// Fulltext storage (lazily initialized)
+    fulltext_storage: fulltext::Storage,
+}
+
+impl Storage {
+    /// Create a new readonly unified Storage.
+    ///
+    /// # Arguments
+    /// * `graph_path` - Path to the graph database (RocksDB)
+    /// * `fulltext_path` - Path to the fulltext index (Tantivy)
+    pub fn readonly(
+        graph_path: &std::path::Path,
+        fulltext_path: &std::path::Path,
+    ) -> Self {
+        Self {
+            graph_storage: graph::Storage::readonly(graph_path),
+            fulltext_storage: fulltext::Storage::readonly(fulltext_path),
+        }
+    }
+
+    /// Create a new read-write unified Storage.
+    ///
+    /// # Arguments
+    /// * `graph_path` - Path to the graph database (RocksDB)
+    /// * `fulltext_path` - Path to the fulltext index (Tantivy)
+    pub fn readwrite(
+        graph_path: &std::path::Path,
+        fulltext_path: &std::path::Path,
+    ) -> Self {
+        Self {
+            graph_storage: graph::Storage::readwrite(graph_path),
+            fulltext_storage: fulltext::Storage::readwrite(fulltext_path),
+        }
+    }
+
+    /// Initialize both storage backends and create the MPMC query pipelines.
+    ///
+    /// This method:
+    /// 1. Calls `ready()` on both graph and fulltext storage
+    /// 2. Creates the MPMC channels and consumer pools for all query types
+    /// 3. Returns a Reader and the JoinHandles for the spawned workers
+    ///
+    /// Note: This consumes the Storage struct since the underlying storage
+    /// objects are moved into Arc wrappers.
+    ///
+    /// # Arguments
+    /// * `config` - Reader configuration for channel buffer sizes
+    /// * `num_workers` - Number of worker tasks per subsystem
+    ///
+    /// # Returns
+    /// A tuple of (Reader, all_handles) where all_handles is a combined vec of all worker handles
+    pub fn ready(
+        mut self,
+        config: ReaderConfig,
+        num_workers: usize,
+    ) -> Result<(Reader, Vec<JoinHandle<()>>)> {
+        // Initialize both subsystems
+        self.graph_storage.ready()?;
+        self.fulltext_storage.ready()?;
+
+        // Wrap storage in Arc and create Graph/Index
+        let graph_arc = Arc::new(self.graph_storage);
+        let fulltext_arc = Arc::new(self.fulltext_storage);
+
+        let graph = Arc::new(graph::Graph::new(graph_arc));
+        let fulltext = Arc::new(fulltext::Index::new(fulltext_arc));
+
+        // Build the reader and get all handles
+        let (reader, unified_handles, graph_handles, fulltext_handles) =
+            ReaderBuilder::new(graph, fulltext)
+                .with_config(config)
+                .with_num_workers(num_workers)
+                .build();
+
+        // Combine all handles
+        let mut all_handles = unified_handles;
+        all_handles.extend(graph_handles);
+        all_handles.extend(fulltext_handles);
+
+        Ok((reader, all_handles))
+    }
+
+}
+
+// ============================================================================
+// CompositeStorage - Internal storage reference for query execution
+// ============================================================================
+
+/// Internal storage reference combining graph and fulltext for query execution.
+///
+/// This is used by the consumer pools to execute queries. It holds Arc references
+/// to the initialized storage backends.
+pub struct CompositeStorage {
     /// Graph storage (RocksDB) - source of truth for node/edge data
     pub graph: Arc<graph::Graph>,
 
@@ -74,221 +279,224 @@ pub struct Storage {
     pub fulltext: Arc<fulltext::Index>,
 }
 
-impl Storage {
-    /// Create a new Storage from graph and fulltext components.
-    ///
-    /// # Arguments
-    /// * `graph` - The graph storage (RocksDB), typically in readwrite mode
-    /// * `fulltext` - The fulltext index (Tantivy), typically in readonly mode
+impl CompositeStorage {
+    /// Create a new CompositeStorage from graph and fulltext components.
     pub fn new(graph: Arc<graph::Graph>, fulltext: Arc<fulltext::Index>) -> Self {
         Self { graph, fulltext }
     }
-
-    /// Get a reference to the graph component
-    pub fn graph(&self) -> &graph::Graph {
-        &self.graph
-    }
-
-    /// Get a reference to the fulltext component
-    pub fn fulltext(&self) -> &fulltext::Index {
-        &self.fulltext
-    }
 }
 
 // ============================================================================
-// Reader
+// Reader - Unified query interface
 // ============================================================================
 
-/// Handle for sending unified queries to the reader queue.
+/// Unified reader managing both graph and fulltext query subsystems.
 ///
-/// This is the entry point for clients to submit `Search` queries that will be
-/// processed by the consumer pool. Queries are sent through a bounded MPMC channel.
-#[derive(Debug, Clone)]
+/// Provides a single interface for executing queries, routing them to the
+/// appropriate backend based on query type.
+#[derive(Clone)]
 pub struct Reader {
-    sender: flume::Sender<super::query::Search>,
+    /// Sender for unified search queries (Nodes, Edges with hydration)
+    sender: flume::Sender<Query>,
+
+    /// Graph reader for direct graph queries (NodeById, OutgoingEdges, etc.)
+    graph_reader: graph::Reader,
+
+    /// Fulltext reader for search queries (raw fulltext hits)
+    fulltext_reader: fulltext::Reader,
+
+    /// Shared storage for hydration (fulltext hits → graph data)
+    composite_storage: Arc<CompositeStorage>,
 }
 
 impl Reader {
-    /// Create a new Reader with the given sender
-    pub fn new(sender: flume::Sender<super::query::Search>) -> Self {
-        Reader { sender }
-    }
-
-    /// Send a query to the reader queue
-    pub async fn send_query(&self, query: super::query::Search) -> Result<()> {
+    /// Send a unified search query to the consumer pool.
+    pub async fn send_query(&self, query: Query) -> Result<()> {
         self.sender
             .send_async(query)
             .await
-            .map_err(|_| anyhow::anyhow!("Failed to send query to unified reader queue"))
+            .map_err(|e| anyhow::anyhow!("Failed to send query: {}", e))
     }
 
-    /// Check if the reader is still active
+    /// Get the graph reader for direct graph queries.
+    pub fn graph(&self) -> &graph::Reader {
+        &self.graph_reader
+    }
+
+    /// Get the fulltext reader for fulltext search queries.
+    pub fn fulltext(&self) -> &fulltext::Reader {
+        &self.fulltext_reader
+    }
+
+    /// Get the shared composite storage for query execution.
+    pub fn storage(&self) -> &CompositeStorage {
+        &self.composite_storage
+    }
+
+    /// Check if any reader is closed.
     pub fn is_closed(&self) -> bool {
         self.sender.is_disconnected()
+            || self.graph_reader.is_closed()
+            || self.fulltext_reader.is_closed()
     }
 }
 
 // ============================================================================
-// ReaderConfig
+// ReaderBuilder - Builder for creating unified Reader with infrastructure
 // ============================================================================
 
-/// Configuration for the unified query reader
-#[derive(Debug, Clone)]
-pub struct ReaderConfig {
-    /// Size of the MPMC channel buffer
-    pub channel_buffer_size: usize,
-}
-
-impl Default for ReaderConfig {
-    fn default() -> Self {
-        Self {
-            channel_buffer_size: 1000,
-        }
-    }
-}
-
-// ============================================================================
-// Factory Functions
-// ============================================================================
-
-/// Create a new unified query reader and receiver pair.
+/// Builder for creating a unified Reader with all infrastructure.
 ///
-/// Returns a tuple of (Reader, Receiver) where:
-/// - `Reader` is cloneable and used by clients to send queries
-/// - `Receiver` is passed to consumers to process queries
-pub fn create_query_reader(
+/// This sets up both graph and fulltext consumer pools and returns
+/// a Reader along with the JoinHandles for the spawned workers.
+pub struct ReaderBuilder {
+    graph: Arc<graph::Graph>,
+    fulltext: Arc<fulltext::Index>,
     config: ReaderConfig,
-) -> (Reader, flume::Receiver<super::query::Search>) {
-    let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-    let reader = Reader::new(sender);
-    (reader, receiver)
+    num_workers: usize,
 }
 
-// ============================================================================
-// Consumer
-// ============================================================================
-
-/// Consumer that processes unified queries using Storage.
-///
-/// Each consumer receives queries from a shared MPMC channel, executes them
-/// against the composite storage (fulltext + graph), and sends results back
-/// through oneshot channels.
-pub struct Consumer {
-    receiver: flume::Receiver<super::query::Search>,
-    config: ReaderConfig,
-    storage: Arc<Storage>,
-}
-
-impl Consumer {
-    /// Create a new Consumer
-    pub fn new(
-        receiver: flume::Receiver<super::query::Search>,
-        config: ReaderConfig,
-        storage: Arc<Storage>,
-    ) -> Self {
+impl ReaderBuilder {
+    /// Create a new ReaderBuilder.
+    ///
+    /// # Arguments
+    /// * `graph` - The graph storage (RocksDB)
+    /// * `fulltext` - The fulltext index (Tantivy)
+    pub fn new(graph: Arc<graph::Graph>, fulltext: Arc<fulltext::Index>) -> Self {
         Self {
-            receiver,
-            config,
-            storage,
+            graph,
+            fulltext,
+            config: ReaderConfig::default(),
+            num_workers: 4,
         }
     }
 
-    /// Process queries continuously until the channel is closed
-    #[tracing::instrument(skip(self), name = "unified_query_consumer")]
-    pub async fn run(self) -> Result<()> {
-        tracing::info!(
-            config = ?self.config,
-            "Starting unified query consumer"
+    /// Set the reader configuration.
+    pub fn with_config(mut self, config: ReaderConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Set the number of worker tasks for each subsystem.
+    pub fn with_num_workers(mut self, num_workers: usize) -> Self {
+        self.num_workers = num_workers;
+        self
+    }
+
+    /// Build the Reader and spawn consumer pools.
+    ///
+    /// Returns the Reader and JoinHandles for all spawned workers.
+    /// The handles are grouped as (unified_handles, graph_handles, fulltext_handles).
+    pub fn build(self) -> (Reader, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
+        // Create shared composite storage
+        let composite_storage = Arc::new(CompositeStorage::new(self.graph.clone(), self.fulltext.clone()));
+
+        // Create graph reader and consumer pool
+        let (graph_reader, graph_receiver) =
+            graph::reader::create_query_reader(self.config.graph.clone());
+        let graph_handles = graph::reader::spawn_query_consumer_pool_shared(
+            graph_receiver,
+            self.graph.clone(),
+            self.num_workers,
         );
 
-        loop {
-            match self.receiver.recv_async().await {
-                Ok(query) => {
-                    tracing::debug!(query = %query, "Processing unified query");
-                    query.process_and_send(&self.storage).await;
-                }
-                Err(_) => {
-                    tracing::info!("Unified query consumer shutting down - channel closed");
-                    return Ok(());
-                }
-            }
-        }
+        // Create fulltext reader and consumer pool
+        let (fulltext_reader, fulltext_receiver) =
+            fulltext::reader::create_query_reader(self.config.fulltext.clone());
+        let fulltext_handles = fulltext::reader::spawn_query_consumer_pool_shared(
+            fulltext_receiver,
+            self.fulltext.clone(),
+            self.num_workers,
+        );
+
+        // Create unified search channel and consumer pool
+        let (sender, receiver) = flume::bounded(self.config.channel_buffer_size);
+        let unified_handles = spawn_consumer_pool(
+            receiver,
+            composite_storage.clone(),
+            self.num_workers,
+        );
+
+        let reader = Reader {
+            sender,
+            graph_reader,
+            fulltext_reader,
+            composite_storage,
+        };
+
+        (reader, unified_handles, graph_handles, fulltext_handles)
     }
 }
 
-/// Spawn a unified query consumer as a background task
-pub fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
-    tokio::spawn(async move { consumer.run().await })
-}
-
-/// Create a unified query consumer
-pub fn create_consumer(
-    receiver: flume::Receiver<super::query::Search>,
-    config: ReaderConfig,
-    storage: Arc<Storage>,
-) -> Consumer {
-    Consumer::new(receiver, config, storage)
-}
-
 // ============================================================================
-// Pool Spawning Functions
+// Consumer Pool for Unified Queries
 // ============================================================================
 
-/// Spawn a pool of unified query consumers sharing the same Storage.
+/// Spawn a pool of consumers for unified queries.
 ///
-/// This is the recommended approach for multiple query consumers because
-/// all workers share the same underlying storage via `Arc<Storage>`.
+/// Each consumer processes Query instances by executing them against the
+/// composite storage (fulltext search + graph hydration).
+#[doc(hidden)]
+pub fn spawn_consumer_pool(
+    receiver: flume::Receiver<Query>,
+    storage: Arc<CompositeStorage>,
+    num_workers: usize,
+) -> Vec<JoinHandle<()>> {
+    (0..num_workers)
+        .map(|_| {
+            let receiver = receiver.clone();
+            let storage = storage.clone();
+            tokio::spawn(async move {
+                while let Ok(query) = receiver.recv_async().await {
+                    query.process_and_send(&storage).await;
+                }
+            })
+        })
+        .collect()
+}
+
+// ============================================================================
+// Convenience function
+// ============================================================================
+
+/// Create a unified Reader with default configuration.
+///
+/// This is a convenience function that creates a Reader with the default
+/// configuration and 4 workers per subsystem.
 ///
 /// # Arguments
-/// * `receiver` - The receiver end of the query channel (will be cloned for each worker)
-/// * `storage` - The shared storage
-/// * `num_workers` - Number of worker tasks to spawn
+/// * `graph` - The graph storage (RocksDB)
+/// * `fulltext` - The fulltext index (Tantivy)
 ///
 /// # Returns
-/// A vector of JoinHandles for the spawned worker tasks.
+/// A tuple of (Reader, unified_handles, graph_handles, fulltext_handles)
+pub fn create_reader(
+    graph: Arc<graph::Graph>,
+    fulltext: Arc<fulltext::Index>,
+) -> (Reader, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
+    ReaderBuilder::new(graph, fulltext).build()
+}
+
+/// Create a unified Reader with custom configuration.
 ///
-/// # Example
-/// ```ignore
-/// use motlie_db::reader::{Storage, ReaderConfig, create_query_reader, spawn_consumer_pool_shared};
-/// use std::sync::Arc;
+/// # Arguments
+/// * `graph` - The graph storage (RocksDB)
+/// * `fulltext` - The fulltext index (Tantivy)
+/// * `config` - Reader configuration
+/// * `num_workers` - Number of worker tasks per subsystem
 ///
-/// let storage = Arc::new(Storage::new(graph, fulltext));
-/// let config = ReaderConfig { channel_buffer_size: 100 };
-/// let (reader, receiver) = create_query_reader(config);
-///
-/// // Spawn 4 workers sharing the same storage
-/// let handles = spawn_consumer_pool_shared(receiver, storage, 4);
-/// ```
-pub fn spawn_consumer_pool_shared(
-    receiver: flume::Receiver<super::query::Search>,
-    storage: Arc<Storage>,
+/// # Returns
+/// A tuple of (Reader, unified_handles, graph_handles, fulltext_handles)
+pub fn create_reader_with_config(
+    graph: Arc<graph::Graph>,
+    fulltext: Arc<fulltext::Index>,
+    config: ReaderConfig,
     num_workers: usize,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut handles = Vec::with_capacity(num_workers);
-
-    for worker_id in 0..num_workers {
-        let receiver = receiver.clone();
-        let storage = storage.clone(); // Cheap Arc clone
-
-        let handle = tokio::spawn(async move {
-            tracing::info!(
-                worker_id,
-                "Unified query worker starting (shared storage mode)"
-            );
-
-            // Process queries from shared channel
-            while let Ok(query) = receiver.recv_async().await {
-                tracing::debug!(worker_id, query = %query, "Processing unified query");
-                query.process_and_send(&storage).await;
-            }
-
-            tracing::info!(worker_id, "Unified query worker shutting down");
-        });
-
-        handles.push(handle);
-    }
-
-    handles
+) -> (Reader, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
+    ReaderBuilder::new(graph, fulltext)
+        .with_config(config)
+        .with_num_workers(num_workers)
+        .build()
 }
 
 // ============================================================================
@@ -298,39 +506,18 @@ pub fn spawn_consumer_pool_shared(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
-    #[tokio::test]
-    async fn test_reader_closed_detection() {
+    #[test]
+    fn test_reader_config_default() {
         let config = ReaderConfig::default();
-        let (reader, receiver) = create_query_reader(config);
-
-        assert!(!reader.is_closed());
-
-        // Drop receiver to close channel
-        drop(receiver);
-
-        // Give tokio time to process the close
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Reader should detect channel is closed
-        assert!(reader.is_closed());
+        assert_eq!(config.graph.channel_buffer_size, 1000);
+        assert_eq!(config.fulltext.channel_buffer_size, 1000);
     }
 
-    #[tokio::test]
-    async fn test_reader_config_default() {
-        let config = ReaderConfig::default();
-        assert_eq!(config.channel_buffer_size, 1000);
-    }
-
-    #[tokio::test]
-    async fn test_reader_creation() {
-        let config = ReaderConfig {
-            channel_buffer_size: 50,
-        };
-        let (reader, _receiver) = create_query_reader(config);
-
-        // Reader should not be closed when receiver exists
-        assert!(!reader.is_closed());
+    #[test]
+    fn test_reader_config_with_buffer_size() {
+        let config = ReaderConfig::with_channel_buffer_size(500);
+        assert_eq!(config.graph.channel_buffer_size, 500);
+        assert_eq!(config.fulltext.channel_buffer_size, 500);
     }
 }

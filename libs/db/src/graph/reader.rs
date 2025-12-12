@@ -155,12 +155,18 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Create a new Reader with the given sender
+    /// Create a new Reader with the given sender.
+    ///
+    /// Note: Most users should use `create_query_reader()` instead.
+    #[doc(hidden)]
     pub fn new(sender: flume::Sender<Query>) -> Self {
         Reader { sender }
     }
 
-    /// Send a query to the reader queue (used by query builders)
+    /// Send a query to the reader queue.
+    ///
+    /// Note: Most users should use `Runnable::run()` instead.
+    #[doc(hidden)]
     pub async fn send_query(&self, query: Query) -> Result<()> {
         self.sender
             .send_async(query)
@@ -175,6 +181,7 @@ impl Reader {
 }
 
 /// Create a new query reader and receiver pair
+#[doc(hidden)]
 pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Query>) {
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
     let reader = Reader::new(sender);
@@ -186,6 +193,7 @@ pub fn create_query_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Que
 // ============================================================================
 
 /// Generic consumer that processes queries using a Processor
+#[doc(hidden)]
 pub struct Consumer<P: Processor> {
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -194,6 +202,7 @@ pub struct Consumer<P: Processor> {
 
 impl<P: Processor> Consumer<P> {
     /// Create a new Consumer
+    #[doc(hidden)]
     pub fn new(receiver: flume::Receiver<Query>, config: ReaderConfig, processor: P) -> Self {
         Self {
             receiver,
@@ -204,6 +213,7 @@ impl<P: Processor> Consumer<P> {
 
     /// Process queries continuously until the channel is closed
     #[tracing::instrument(skip(self), name = "query_consumer")]
+    #[doc(hidden)]
     pub async fn run(self) -> Result<()> {
         tracing::info!(config = ?self.config, "Starting query consumer");
 
@@ -232,6 +242,7 @@ impl<P: Processor> Consumer<P> {
 }
 
 /// Spawn a query consumer as a background task
+#[doc(hidden)]
 pub fn spawn_consumer<P: Processor + 'static>(
     consumer: Consumer<P>,
 ) -> tokio::task::JoinHandle<Result<()>> {
@@ -249,6 +260,7 @@ use tokio::task::JoinHandle;
 use super::Graph;
 
 /// Create a new query consumer for the graph
+#[doc(hidden)]
 pub fn create_query_consumer(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -262,6 +274,7 @@ pub fn create_query_consumer(
 }
 
 /// Spawn a query consumer as a background task
+#[doc(hidden)]
 pub fn spawn_query_consumer(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -284,6 +297,7 @@ pub fn spawn_query_consumer(
 ///
 /// # Returns
 /// A Consumer configured with readwrite storage
+#[doc(hidden)]
 pub fn create_query_consumer_readwrite(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -308,6 +322,7 @@ pub fn create_query_consumer_readwrite(
 ///
 /// # Returns
 /// A JoinHandle for the spawned consumer task
+#[doc(hidden)]
 pub fn spawn_query_consumer_readwrite(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -358,6 +373,7 @@ pub fn spawn_query_consumer_readwrite(
 /// # Ok(())
 /// # }
 /// ```
+#[doc(hidden)]
 pub fn spawn_query_consumer_with_graph(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -438,6 +454,7 @@ pub fn spawn_query_consumer_with_graph(
 /// # Ok(())
 /// # }
 /// ```
+#[doc(hidden)]
 pub fn spawn_query_consumer_pool_shared(
     receiver: flume::Receiver<Query>,
     graph: Arc<Graph>,
@@ -499,6 +516,7 @@ pub fn spawn_query_consumer_pool_shared(
 ///
 /// # Returns
 /// Vector of JoinHandles for all worker threads
+#[doc(hidden)]
 pub fn spawn_query_consumer_pool_readonly(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,

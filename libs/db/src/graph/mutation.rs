@@ -149,7 +149,7 @@ pub struct UpdateEdgeWeight {
 // ============================================================================
 
 /// Helper function to update TemporalRange for a single node.
-/// Updates both Nodes CF and NodeNames CF.
+/// Updates the Nodes CF.
 fn update_node_valid_range(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
