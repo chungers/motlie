@@ -11,16 +11,18 @@ use motlie_db::fulltext::{
     create_query_reader as create_fulltext_query_reader, Edges as FulltextEdges,
     Facets as FulltextFacets, FuzzyLevel, Index as FulltextIndex,
     Nodes as FulltextNodes, Reader as FulltextReader, ReaderConfig as FulltextReaderConfig,
-    Runnable as FulltextQueryRunnable, spawn_mutation_consumer as spawn_fulltext_mutation_consumer,
+    Runnable as FulltextQueryRunnable,
+    spawn_mutation_consumer as spawn_fulltext_mutation_consumer,
     spawn_query_consumer_pool_shared as spawn_fulltext_query_consumer_pool_shared,
     Storage as FulltextStorage,
 };
 use motlie_db::graph::mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Runnable as MutationRunnable,
 };
-use motlie_db::graph::query::{
-    EdgeSummaryBySrcDstName, NodeById, Runnable as QueryRunnable,
-};
+use motlie_db::graph::query::{EdgeSummaryBySrcDstName, NodeById};
+// Only import graph::query::Runnable - fulltext queries use .run() on types
+// that only implement fulltext::query::Runnable so there's no ambiguity
+use motlie_db::graph::query::Runnable as GraphQueryRunnable;
 use motlie_db::graph::reader::{
     create_query_reader, Reader as GraphReader,
     spawn_query_consumer_pool_shared, ReaderConfig,

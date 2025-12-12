@@ -1,16 +1,40 @@
-//! Integration tests for the unified query interface (motlie_db::query::{Nodes, Edges}).
+//! Integration tests for the unified query interface (motlie_db::query).
 //!
-//! These tests verify the 2-step composite lookup:
-//! 1. Fulltext search (Tantivy) returns hits with IDs
-//! 2. Graph hydration (RocksDB) retrieves full node/edge data
+//! These tests verify the unified query API that composes:
+//! 1. Fulltext search (Tantivy) for ranking and text matching
+//! 2. Graph hydration (RocksDB) for retrieving full node/edge data
 //!
-//! This ensures that:
-//! - Nodes/Edges queries return hydrated data from graph storage
-//! - Stale fulltext entries (present in Tantivy but not in graph) are skipped
-//! - Pagination via offset works correctly
-//! - Fuzzy matching and tag filtering work end-to-end
+//! # Key Components Demonstrated
+//!
+//! - `motlie_db::reader::Storage::ready()` - Initializes both graph and fulltext
+//!   subsystems and sets up MPMC query pipelines
+//! - `motlie_db::query::Runnable<Reader>` - Trait for executing queries against
+//!   the unified reader
+//! - `motlie_db::query::{Nodes, Edges}` - Fulltext search with graph hydration
+//! - `motlie_db::query::{EdgeDetails, NodeFragments, EdgeFragments}` - Direct
+//!   graph lookups through the unified reader
+//!
+//! # Example Usage
+//!
+//! ```ignore
+//! use motlie_db::reader::{Storage, ReaderConfig};
+//! use motlie_db::query::{Nodes, Runnable};
+//! use std::time::Duration;
+//!
+//! // Initialize unified storage (graph + fulltext)
+//! let storage = Storage::readonly(graph_path, fulltext_path);
+//! let (reader, handles) = storage.ready(ReaderConfig::default(), 4)?;
+//!
+//! // Execute unified queries
+//! let results = Nodes::new("search term".to_string(), 10)
+//!     .run(&reader, Duration::from_secs(5))
+//!     .await?;
+//! ```
 
-use motlie_db::fulltext::{spawn_mutation_consumer as spawn_fulltext_mutation_consumer, Index, Storage as FulltextStorage};
+use motlie_db::fulltext::{
+    spawn_mutation_consumer as spawn_fulltext_mutation_consumer, Index,
+    Storage as FulltextStorage,
+};
 use motlie_db::graph::mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Runnable as MutationRunnable,
 };
@@ -19,17 +43,89 @@ use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
 };
 use motlie_db::graph::{Graph, Storage as GraphStorage};
-use motlie_db::query::{Edges, FuzzyLevel, Nodes, Runnable};
-use motlie_db::reader::{
-    create_query_reader, spawn_consumer_pool_shared, ReaderConfig, Storage as CompositeStorage,
+use motlie_db::query::{
+    EdgeDetails, Edges, FuzzyLevel, IncomingEdges, NodeById, NodeFragments, Nodes, OutgoingEdges,
+    Runnable, WithOffset,
 };
+use motlie_db::reader::{ReaderConfig, Storage as UnifiedStorage};
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-/// Helper to set up a test environment with graph and fulltext storage.
+/// Helper to populate test data in the database.
+/// Creates the mutation pipeline, inserts data, and waits for completion.
+async fn populate_test_data(db_path: &std::path::Path, index_path: &std::path::Path) {
+    let config = WriterConfig {
+        channel_buffer_size: 100,
+    };
+
+    // Create mutation pipeline: Graph -> Fulltext
+    let (writer, mutation_rx) = create_mutation_writer(config.clone());
+    let (fulltext_tx, fulltext_rx) = mpsc::channel(100);
+
+    let graph_handle =
+        spawn_mutation_consumer_with_next(mutation_rx, config.clone(), db_path, fulltext_tx);
+    let fulltext_handle =
+        spawn_fulltext_mutation_consumer(fulltext_rx, config.clone(), index_path);
+
+    // Insert test data
+    insert_test_data(&writer).await;
+
+    // Shutdown mutation pipeline
+    drop(writer);
+    graph_handle.await.unwrap().unwrap();
+    fulltext_handle.await.unwrap().unwrap();
+
+    // Wait for data to be flushed
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+/// Helper to set up a test environment using the unified Storage::ready() API.
+///
+/// This demonstrates the recommended way to initialize the unified query system:
+/// 1. Create a `motlie_db::reader::Storage` with paths to graph and fulltext storage
+/// 2. Call `ready()` to initialize both subsystems and set up MPMC query pipelines
+/// 3. Use the returned `Reader` to execute queries via the `Runnable` trait
+///
+/// Returns the unified reader and consumer handles.
+async fn setup_test_env_with_unified_storage(
+    temp_dir: &TempDir,
+) -> (
+    motlie_db::reader::Reader,
+    Vec<tokio::task::JoinHandle<()>>,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let db_path = temp_dir.path().join("graph_db");
+    let index_path = temp_dir.path().join("fulltext_index");
+
+    // Populate test data
+    populate_test_data(&db_path, &index_path).await;
+
+    // =========================================================================
+    // UNIFIED STORAGE API DEMONSTRATION
+    // =========================================================================
+    //
+    // Use `motlie_db::reader::Storage::ready()` to initialize both graph and
+    // fulltext subsystems in one call. This:
+    // - Opens both RocksDB (graph) and Tantivy (fulltext) storage
+    // - Creates MPMC channels for query dispatch
+    // - Spawns consumer pools for parallel query processing
+    //
+    // The returned Reader can execute any query type that implements
+    // `motlie_db::query::Runnable<Reader>`.
+
+    let storage = UnifiedStorage::readonly(&db_path, &index_path);
+    let config = ReaderConfig::with_channel_buffer_size(100);
+    let (reader, handles) = storage.ready(config, 2).unwrap();
+
+    (reader, handles, db_path, index_path)
+}
+
+/// Helper to set up a test environment with manual graph and fulltext initialization.
+/// This is the lower-level API that gives more control over individual subsystems.
 /// Returns the unified reader, storage, and consumer handles.
 async fn setup_test_env(
     temp_dir: &TempDir,
@@ -42,30 +138,10 @@ async fn setup_test_env(
     let db_path = temp_dir.path().join("graph_db");
     let index_path = temp_dir.path().join("fulltext_index");
 
-    let config = WriterConfig {
-        channel_buffer_size: 100,
-    };
+    // Populate test data
+    populate_test_data(&db_path, &index_path).await;
 
-    // Create mutation pipeline: Graph -> Fulltext
-    let (writer, mutation_rx) = create_mutation_writer(config.clone());
-    let (fulltext_tx, fulltext_rx) = mpsc::channel(100);
-
-    let graph_handle =
-        spawn_mutation_consumer_with_next(mutation_rx, config.clone(), &db_path, fulltext_tx);
-    let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_rx, config.clone(), &index_path);
-
-    // Insert test data
-    insert_test_data(&writer).await;
-
-    // Shutdown mutation pipeline
-    drop(writer);
-    graph_handle.await.unwrap().unwrap();
-    fulltext_handle.await.unwrap().unwrap();
-
-    // Wait for data to be flushed
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Open storage for reading
+    // Manual initialization (lower-level API)
     let mut graph_storage = GraphStorage::readonly(&db_path);
     graph_storage.ready().unwrap();
     let graph = Arc::new(Graph::new(Arc::new(graph_storage)));
@@ -74,14 +150,18 @@ async fn setup_test_env(
     fulltext_storage.ready().unwrap();
     let fulltext_index = Arc::new(Index::new(Arc::new(fulltext_storage)));
 
-    // Create composite storage and reader
-    let composite_storage = Arc::new(CompositeStorage::new(graph, fulltext_index));
+    // Create unified reader with both graph and fulltext subsystems
+    let reader_config = ReaderConfig::with_channel_buffer_size(100);
+    let (reader, unified_handles, graph_handles, fulltext_handles) =
+        motlie_db::reader::ReaderBuilder::new(graph, fulltext_index)
+            .with_config(reader_config)
+            .with_num_workers(2)
+            .build();
 
-    let reader_config = ReaderConfig {
-        channel_buffer_size: 100,
-    };
-    let (reader, receiver) = create_query_reader(reader_config);
-    let handles = spawn_consumer_pool_shared(receiver, composite_storage, 2);
+    // Combine all handles
+    let mut handles = unified_handles;
+    handles.extend(graph_handles);
+    handles.extend(fulltext_handles);
 
     (reader, handles, db_path, index_path)
 }
@@ -454,14 +534,18 @@ async fn setup_tagged_test_env(
     fulltext_storage.ready().unwrap();
     let fulltext_index = Arc::new(Index::new(Arc::new(fulltext_storage)));
 
-    // Create composite storage and reader
-    let composite_storage = Arc::new(CompositeStorage::new(graph, fulltext_index));
+    // Create unified reader with both graph and fulltext subsystems
+    let reader_config = ReaderConfig::with_channel_buffer_size(100);
+    let (reader, unified_handles, graph_handles, fulltext_handles) =
+        motlie_db::reader::ReaderBuilder::new(graph, fulltext_index)
+            .with_config(reader_config)
+            .with_num_workers(2)
+            .build();
 
-    let reader_config = ReaderConfig {
-        channel_buffer_size: 100,
-    };
-    let (reader, receiver) = create_query_reader(reader_config);
-    let handles = spawn_consumer_pool_shared(receiver, composite_storage, 2);
+    // Combine all handles
+    let mut handles = unified_handles;
+    handles.extend(graph_handles);
+    handles.extend(fulltext_handles);
 
     (reader, handles)
 }
@@ -643,14 +727,17 @@ async fn test_nodes_filter_by_tag_struct_init() {
     let temp_dir = TempDir::new().unwrap();
     let (reader, handles) = setup_tagged_test_env(&temp_dir).await;
 
-    // Create query by directly populating struct fields instead of using builder
-    // This shows that the inner fulltext query struct has public fields
+    // Create query using struct initialization instead of builder
+    // This shows that the fulltext query struct has public fields
     //
     // Note: We search for "excels" which appears in the Python fragment that also
     // contains the #scripting tag. Tags are extracted from the same content they appear in.
-    let mut query = Nodes::new("excels".to_string(), 10);
-    // Access the inner fulltext query's public tags field directly
-    query.inner.tags = vec!["scripting".to_string()];
+    let query = Nodes {
+        query: "excels".to_string(),
+        limit: 10,
+        tags: vec!["scripting".to_string()],
+        ..Default::default()
+    };
 
     let results = query.run(&reader, Duration::from_secs(5)).await.unwrap();
 
@@ -746,11 +833,14 @@ async fn test_edges_filter_by_tag_struct_init() {
     let temp_dir = TempDir::new().unwrap();
     let (reader, handles) = setup_tagged_test_env(&temp_dir).await;
 
-    // Create query by directly populating struct fields
+    // Create query using struct initialization instead of builder
     // Note: Search for "services" which appears in the fragment with #web tag
-    let mut query = Edges::new("services".to_string(), 10);
-    // Access the inner fulltext query's public tags field directly
-    query.inner.tags = vec!["web".to_string()];
+    let query = Edges {
+        query: "services".to_string(),
+        limit: 10,
+        tags: vec!["web".to_string()],
+        ..Default::default()
+    };
 
     let results = query.run(&reader, Duration::from_secs(5)).await.unwrap();
 
@@ -795,6 +885,328 @@ async fn test_nodes_filter_by_nonexistent_tag() {
         results.is_empty(),
         "Should have no results for nonexistent tag"
     );
+
+    // Shutdown
+    drop(reader);
+    for handle in handles {
+        handle.await.unwrap();
+    }
+}
+
+// ============================================================================
+// Tests demonstrating the unified Storage::ready() API
+// ============================================================================
+
+/// Test: Demonstrates the unified Storage::ready() API for initializing the query system.
+///
+/// This is the recommended way to set up the unified query infrastructure:
+/// 1. Create `motlie_db::reader::Storage` with paths to graph and fulltext storage
+/// 2. Call `ready()` which initializes both subsystems and spawns MPMC consumer pools
+/// 3. Use the returned `Reader` to execute queries via the `Runnable` trait
+#[tokio::test]
+async fn test_unified_storage_ready_api() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // Use the unified Storage::ready() API
+    let (reader, handles, _, _) = setup_test_env_with_unified_storage(&temp_dir).await;
+
+    // =========================================================================
+    // Execute various query types through the unified reader
+    // =========================================================================
+
+    let timeout = Duration::from_secs(5);
+
+    // 1. Fulltext search for nodes (with graph hydration)
+    let node_results = Nodes::new("programming".to_string(), 10)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    assert!(
+        !node_results.is_empty(),
+        "Nodes query should return hydrated results"
+    );
+
+    // Verify results are hydrated tuples: (Id, NodeName, NodeSummary)
+    for (id, name, summary) in &node_results {
+        assert!(!id.is_nil(), "Node ID should not be nil");
+        assert!(!name.is_empty(), "Node name should not be empty");
+        assert!(
+            !summary.as_ref().is_empty(),
+            "Node summary should be hydrated from graph"
+        );
+    }
+
+    // 2. Fulltext search for edges (with graph hydration)
+    let edge_results = Edges::new("WebAssembly".to_string(), 10)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    assert!(
+        !edge_results.is_empty(),
+        "Edges query should return hydrated results"
+    );
+
+    // Verify results are hydrated tuples: (SrcId, DstId, EdgeName, EdgeSummary)
+    for (src_id, dst_id, edge_name, summary) in &edge_results {
+        assert!(!src_id.is_nil(), "Source ID should not be nil");
+        assert!(!dst_id.is_nil(), "Destination ID should not be nil");
+        assert!(!edge_name.is_empty(), "Edge name should not be empty");
+        assert!(
+            !summary.as_ref().is_empty(),
+            "Edge summary should be hydrated from graph"
+        );
+    }
+
+    // 3. Fuzzy search
+    let fuzzy_results = Nodes::new("programing".to_string(), 10) // intentional typo
+        .with_fuzzy(FuzzyLevel::Low)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    assert!(
+        !fuzzy_results.is_empty(),
+        "Fuzzy search should match despite typo"
+    );
+
+    // 4. Pagination with offset
+    let first_page = Nodes::new("programming".to_string(), 1)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    let second_page = Nodes::new("programming".to_string(), 1)
+        .with_offset(1)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    // If there are multiple results, pages should be different
+    if !first_page.is_empty() && !second_page.is_empty() {
+        assert_ne!(
+            first_page[0].0, second_page[0].0,
+            "Pagination should return different results"
+        );
+    }
+
+    // Shutdown
+    drop(reader);
+    for handle in handles {
+        handle.await.unwrap();
+    }
+}
+
+/// Test: EdgeDetails query returns full edge information without exposing scores.
+///
+/// This demonstrates using `EdgeDetails` (alias for `EdgeSummaryBySrcDstName`)
+/// through the unified reader, which returns `EdgeResult` instead of the
+/// internal `(EdgeSummary, Option<f64>)` type.
+#[tokio::test]
+async fn test_edge_details_query() {
+    let temp_dir = TempDir::new().unwrap();
+    let (reader, handles, _, _) = setup_test_env_with_unified_storage(&temp_dir).await;
+
+    let timeout = Duration::from_secs(5);
+
+    // First, search for edges to get IDs
+    let edge_results = Edges::new("WebAssembly".to_string(), 10)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    assert!(!edge_results.is_empty(), "Should have edge results");
+
+    // Get the first edge's details using EdgeDetails query
+    let (src_id, dst_id, edge_name, _summary) = &edge_results[0];
+
+    let edge_detail = EdgeDetails::new(*src_id, *dst_id, edge_name.clone(), None)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    // EdgeDetails returns EdgeResult: (SrcId, DstId, EdgeName, EdgeSummary)
+    let (detail_src, detail_dst, detail_name, detail_summary) = edge_detail;
+
+    assert_eq!(detail_src, *src_id, "Source ID should match");
+    assert_eq!(detail_dst, *dst_id, "Destination ID should match");
+    assert_eq!(&detail_name, edge_name, "Edge name should match");
+    assert!(
+        !detail_summary.as_ref().is_empty(),
+        "Edge summary should be present"
+    );
+
+    // Shutdown
+    drop(reader);
+    for handle in handles {
+        handle.await.unwrap();
+    }
+}
+
+/// Test: NodeFragments query retrieves fragment history for a node.
+#[tokio::test]
+async fn test_node_fragments_query() {
+    let temp_dir = TempDir::new().unwrap();
+    let (reader, handles, _, _) = setup_test_env_with_unified_storage(&temp_dir).await;
+
+    let timeout = Duration::from_secs(5);
+
+    // First, search for nodes to get an ID
+    let node_results = Nodes::new("Rust".to_string(), 10)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    assert!(!node_results.is_empty(), "Should have node results");
+
+    // Get the node's fragment history
+    let (node_id, _name, _summary) = &node_results[0];
+
+    // Query all fragments (unbounded time range)
+    use std::ops::Bound;
+    let fragments = NodeFragments::new(
+        *node_id,
+        (Bound::Unbounded, Bound::Unbounded),
+        None,
+    )
+    .run(&reader, timeout)
+    .await
+    .unwrap();
+
+    // Should have at least one fragment (we inserted one in test data)
+    assert!(
+        !fragments.is_empty(),
+        "Should have fragment history for the node"
+    );
+
+    // Verify fragment structure: Vec<(TimestampMilli, FragmentContent)>
+    for (ts, content) in &fragments {
+        assert!(ts.0 > 0, "Timestamp should be valid");
+        assert!(
+            !content.as_ref().is_empty(),
+            "Fragment content should not be empty"
+        );
+    }
+
+    // Shutdown
+    drop(reader);
+    for handle in handles {
+        handle.await.unwrap();
+    }
+}
+
+/// Test: NodeById, OutgoingEdges, and IncomingEdges via the unified reader.
+///
+/// Demonstrates that graph queries can be executed through the unified reader
+/// without needing to import separate graph traits.
+#[tokio::test]
+async fn test_node_by_id_and_edge_queries() {
+    let temp_dir = TempDir::new().unwrap();
+    let (reader, handles, _, _) = setup_test_env_with_unified_storage(&temp_dir).await;
+
+    let timeout = Duration::from_secs(5);
+
+    // First, find a node via fulltext search to get its ID
+    let search_results = Nodes::new("Rust".to_string(), 10)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    assert!(!search_results.is_empty(), "Should find nodes via fulltext");
+    let (rust_id, rust_name, _) = &search_results[0];
+    assert!(
+        rust_name.contains("Rust"),
+        "Should find a Rust node: found '{}'",
+        rust_name
+    );
+
+    // =========================================================================
+    // 1. NodeById - Direct graph lookup by ID
+    // =========================================================================
+    let (name, summary) = NodeById::new(*rust_id, None)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    assert!(
+        name.contains("Rust"),
+        "NodeById should return the correct node"
+    );
+    assert!(
+        !summary.as_ref().is_empty(),
+        "NodeById should return a summary"
+    );
+    println!("NodeById result: name='{}', summary_len={}", name, summary.as_ref().len());
+
+    // =========================================================================
+    // 2. OutgoingEdges - Get edges originating from this node
+    // =========================================================================
+    let outgoing = OutgoingEdges::new(*rust_id, None)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    // The test data has Rust -> JavaScript (influences) edge
+    println!("OutgoingEdges from Rust: {} edges", outgoing.len());
+    for (weight, src_id, dst_id, edge_name) in &outgoing {
+        println!(
+            "  {} -> {} via '{}' (weight: {:?})",
+            src_id, dst_id, edge_name, weight
+        );
+    }
+
+    // Should have at least one outgoing edge
+    assert!(
+        !outgoing.is_empty(),
+        "Rust node should have outgoing edges"
+    );
+
+    // Find the JavaScript node to verify incoming edges
+    let js_results = Nodes::new("JavaScript".to_string(), 10)
+        .run(&reader, timeout)
+        .await
+        .unwrap();
+
+    if !js_results.is_empty() {
+        let (js_id, js_name, _) = &js_results[0];
+
+        // =====================================================================
+        // 3. IncomingEdges - Get edges pointing to this node
+        // =====================================================================
+        let incoming = IncomingEdges::new(*js_id, None)
+            .run(&reader, timeout)
+            .await
+            .unwrap();
+
+        println!("IncomingEdges to {}: {} edges", js_name, incoming.len());
+        for (weight, src_id, dst_id, edge_name) in &incoming {
+            println!(
+                "  {} -> {} via '{}' (weight: {:?})",
+                src_id, dst_id, edge_name, weight
+            );
+        }
+
+        // Should have at least one incoming edge (from Rust)
+        assert!(
+            !incoming.is_empty(),
+            "JavaScript node should have incoming edges from Rust"
+        );
+
+        // Verify the edge is from Rust to JavaScript
+        // IncomingEdges returns edges where the queried node is involved
+        // The tuple format is (weight, src_id, dst_id, edge_name) from the edge's perspective
+        // For incoming edges to js_id, we look for edges where dst_id == js_id (target)
+        // OR where the edge connects rust and js
+        let rust_to_js_edge = incoming
+            .iter()
+            .find(|(_, src, dst, _)| (*src == *rust_id && *dst == *js_id) || (*dst == *rust_id && *src == *js_id));
+        assert!(
+            rust_to_js_edge.is_some(),
+            "Should have an edge connecting Rust and JavaScript. Found: {:?}",
+            incoming
+        );
+    }
 
     // Shutdown
     drop(reader);

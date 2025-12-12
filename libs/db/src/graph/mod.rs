@@ -9,7 +9,7 @@
 //! - `schema.rs` - RocksDB schema definitions (column families)
 //! - `mutation.rs` - Mutation types (AddNode, AddEdge, etc.)
 //! - `writer.rs` - Writer infrastructure and mutation consumers
-//! - `query.rs` - Query types (NodeById, EdgesByName, etc.)
+//! - `query.rs` - Query types (NodeById, EdgeSummaryBySrcDstName, etc.)
 //! - `reader.rs` - Reader infrastructure and query consumers
 //! - `scan.rs` - Scan API for pagination
 
