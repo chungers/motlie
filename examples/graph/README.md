@@ -258,6 +258,29 @@ cargo run --release --example louvain -- motlie_db /tmp/louvain_test_db 10
 
 The examples output performance metrics in CSV format for easy data collection and analysis.
 
+### CSV Output Format
+
+Each example outputs a single CSV row with the following columns:
+
+| Column | Name | Description |
+|--------|------|-------------|
+| 1 | `algorithm` | Algorithm name (e.g., BFS, DFS, PageRank) |
+| 2 | `implementation` | Implementation type: `reference` (in-memory) or `motlie_db` (persistent) |
+| 3 | `scale` | Scale factor determining graph size |
+| 4 | `nodes` | Total number of nodes in the graph |
+| 5 | `edges` | Total number of edges in the graph |
+| 6 | `time_ms` | Execution time in milliseconds |
+| 7 | `memory_kb` | Memory usage delta in kilobytes (RSS change during execution) |
+| 8 | `result_hash` | Hash of algorithm output for correctness verification |
+| 9 | `disk_files` | Number of files in RocksDB directory (motlie_db only) |
+| 10 | `disk_kb` | Total disk usage in kilobytes (motlie_db only) |
+
+**Notes:**
+- Reference implementations show 8 columns (disk metrics are omitted)
+- motlie_db implementations show all 10 columns
+- Identical `result_hash` values confirm correctness across implementations
+- Memory usage represents the delta (increase) in Resident Set Size (RSS) during execution
+
 ### DFS (Depth-First Search)
 
 ```bash
