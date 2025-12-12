@@ -20,7 +20,7 @@ A graph database library built on RocksDB with async query/mutation processing a
 The recommended way to use `motlie-db` is through the **Unified Query API**, which provides a single `Reader` interface for all query types:
 
 ```rust
-use motlie_db::reader::{Storage, ReaderConfig};
+use motlie_db::reader::{Storage, ReaderConfig, StorageHandle};
 use motlie_db::query::{
     // Fulltext search queries (with graph hydration)
     Nodes, Edges,
@@ -32,8 +32,9 @@ use motlie_db::query::{
 use std::time::Duration;
 
 // 1. Initialize unified storage (graph + fulltext)
+//    ready() returns a StorageHandle that manages lifecycle
 let storage = Storage::readonly(graph_path, fulltext_path);
-let (reader, handles) = storage.ready(ReaderConfig::default(), 4)?;
+let handle = storage.ready(ReaderConfig::default(), 4)?;
 
 let timeout = Duration::from_secs(5);
 
@@ -42,33 +43,34 @@ let timeout = Duration::from_secs(5);
 let results = Nodes::new("rust programming".to_string(), 10)
     .with_fuzzy(FuzzyLevel::Low)
     .with_tags(vec!["systems".to_string()])
-    .run(&reader, timeout)
+    .run(handle.reader(), timeout)
     .await?;
 
 // 3. Direct graph lookups - same unified reader!
 let (name, summary) = NodeById::new(node_id, None)
-    .run(&reader, timeout)
+    .run(handle.reader(), timeout)
     .await?;
 
 let outgoing = OutgoingEdges::new(node_id, None)
-    .run(&reader, timeout)
+    .run(handle.reader(), timeout)
     .await?;
 
 let incoming = IncomingEdges::new(node_id, None)
-    .run(&reader, timeout)
+    .run(handle.reader(), timeout)
     .await?;
 
 // 4. Edge details and fragment history
 let edge = EdgeDetails::new(src_id, dst_id, "relationship".to_string(), None)
-    .run(&reader, timeout)
+    .run(handle.reader(), timeout)
     .await?;
 
 use std::ops::Bound;
 let fragments = NodeFragments::new(node_id, (Bound::Unbounded, Bound::Unbounded), None)
-    .run(&reader, timeout)
+    .run(handle.reader(), timeout)
     .await?;
 
 // 5. Concurrent queries with tokio::try_join!
+let reader = handle.reader_clone();
 let (nodes, edges, incoming) = tokio::try_join!(
     Nodes::new("search".to_string(), 10).run(&reader, timeout),
     OutgoingEdges::new(node_id, None).run(&reader, timeout),
@@ -76,10 +78,7 @@ let (nodes, edges, incoming) = tokio::try_join!(
 )?;
 
 // 6. Clean shutdown
-drop(reader);
-for handle in handles {
-    handle.await?;
-}
+handle.shutdown().await?;
 ```
 
 ### Key Benefits
@@ -87,10 +86,11 @@ for handle in handles {
 | Feature | Description |
 |---------|-------------|
 | **Single Reader** | One `reader::Reader` for all query types - no need for separate fulltext/graph readers |
+| **Lifecycle Management** | `StorageHandle` provides `shutdown()` for clean termination |
 | **Automatic Hydration** | Fulltext results automatically hydrated with full graph data |
-| **Consistent API** | All queries use `query.run(&reader, timeout)` pattern |
+| **Consistent API** | All queries use `query.run(handle.reader(), timeout)` pattern |
 | **Type Safety** | Return types determined by query type, not reader type |
-| **Concurrent Queries** | Use `tokio::try_join!` for parallel execution |
+| **Concurrent Queries** | Use `tokio::try_join!` with `handle.reader_clone()` for parallel execution |
 | **MPMC Pipeline** | Efficient multi-producer multi-consumer query dispatch |
 
 ### Query Types
@@ -101,10 +101,71 @@ for handle in handles {
 | `Edges` | `Vec<(SrcId, DstId, EdgeName, EdgeSummary)>` | Fulltext search edges with graph hydration |
 | `NodeById` | `(NodeName, NodeSummary)` | Direct node lookup by ID |
 | `OutgoingEdges` | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Edges from a node |
-| `IncomingEdges` | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Edges to a node |
-| `EdgeDetails` | `(SrcId, DstId, EdgeName, EdgeSummary)` | Edge lookup by topology |
+| `IncomingEdges` | `Vec<(Option<f64>, DstId, SrcId, EdgeName)>` | Edges to a node |
+| `EdgeDetails` | `(Option<f64>, SrcId, DstId, EdgeName, EdgeSummary)` | Edge lookup by topology |
 | `NodeFragments` | `Vec<(TimestampMilli, FragmentContent)>` | Node fragment history |
 | `EdgeFragments` | `Vec<(TimestampMilli, FragmentContent)>` | Edge fragment history |
+
+### StorageHandle: Lifecycle Management
+
+The `StorageHandle` returned by `Storage::ready()` provides clean lifecycle management for the unified query system:
+
+```rust
+use motlie_db::reader::{Storage, ReaderConfig, StorageHandle};
+
+// Initialize storage - ready() returns StorageHandle
+let storage = Storage::readonly(graph_path, fulltext_path);
+let handle: StorageHandle = storage.ready(ReaderConfig::default(), 4)?;
+
+// Access the reader for queries
+let reader = handle.reader();           // &Reader
+let reader_clone = handle.reader_clone(); // Reader (for concurrent use)
+
+// Check if system is still running
+if handle.is_running() {
+    // Execute queries...
+}
+
+// Clean shutdown - closes channels and awaits all workers
+handle.shutdown().await?;
+
+// Alternative: graceful shutdown (logs warnings instead of returning errors)
+// handle.shutdown_graceful().await;
+```
+
+**StorageHandle API:**
+
+| Method | Return Type | Description |
+|--------|-------------|-------------|
+| `reader()` | `&Reader` | Get a reference to the Reader |
+| `reader_clone()` | `Reader` | Clone the Reader (for concurrent tasks) |
+| `is_running()` | `bool` | Check if channels are still open |
+| `shutdown()` | `Result<()>` | Clean termination - drops Reader, awaits worker handles |
+| `shutdown_graceful()` | `()` | Same as shutdown but logs warnings instead of errors |
+
+**Lifecycle Diagram:**
+
+```
+Storage::new()  →  Storage::ready()  →  StorageHandle  →  shutdown()
+      │                   │                   │                │
+      │                   │                   │                ├── Drops Reader (closes channels)
+      │                   │                   │                └── Awaits all worker JoinHandles
+      │                   │                   │
+      │                   │                   ├── reader() → execute queries
+      │                   │                   └── is_running() → check status
+      │                   │
+      │                   └── Initializes graph + fulltext subsystems
+      │                       Spawns MPMC consumer pools
+      │
+      └── Creates Storage with paths to graph and fulltext databases
+```
+
+**Why StorageHandle?**
+
+1. **RAII-style resource management**: Even if `shutdown()` isn't called, dropping the handle closes channels and workers terminate gracefully
+2. **Proper ownership**: The Reader and worker handles are bundled together, preventing resource leaks
+3. **Clean API**: Single point of control for start/stop lifecycle
+4. **Idiomatic Rust**: Follows the pattern of `tokio::spawn()` returning a `JoinHandle`
 
 ## Architecture
 
@@ -279,29 +340,32 @@ There are **three reader types** in `motlie-db`, each serving different use case
 The **unified reader** provides a single interface for all query types:
 
 ```rust
-use motlie_db::reader::{Storage, ReaderConfig};
+use motlie_db::reader::{Storage, ReaderConfig, StorageHandle};
 use motlie_db::query::{Nodes, NodeById, OutgoingEdges, Runnable};
 use std::time::Duration;
 
 // Initialize both graph and fulltext subsystems
 let storage = Storage::readonly(graph_path, fulltext_path);
-let (reader, handles) = storage.ready(ReaderConfig::default(), 4)?;
+let handle = storage.ready(ReaderConfig::default(), 4)?;
 
 let timeout = Duration::from_secs(5);
 
 // Fulltext search with automatic graph hydration
 let results = Nodes::new("rust".to_string(), 10)
-    .run(&reader, timeout)
+    .run(handle.reader(), timeout)
     .await?;
 
 // Direct graph lookups through the same reader
 let (name, summary) = NodeById::new(node_id, None)
-    .run(&reader, timeout)
+    .run(handle.reader(), timeout)
     .await?;
 
 let edges = OutgoingEdges::new(node_id, None)
-    .run(&reader, timeout)
+    .run(handle.reader(), timeout)
     .await?;
+
+// Clean shutdown
+handle.shutdown().await?;
 ```
 
 #### 2. Graph Reader (`graph::Reader`) - Graph-only queries
@@ -353,37 +417,47 @@ See: [`docs/query-api-guide.md`](docs/query-api-guide.md) for comprehensive API 
 The `Writer` provides async mutation operations with automatic transaction batching:
 
 ```rust
-use motlie_db::{Writer, WriterConfig, AddNode, AddEdge, AddFragment, TimestampMilli, Id};
+use motlie_db::graph::writer::{create_mutation_writer, WriterConfig};
+use motlie_db::graph::mutation::{AddNode, AddEdge, AddNodeFragment, Runnable};
+use motlie_db::{Id, TimestampMilli, DataUrl};
 
-// Create writer
+// Create writer and receiver
 let (writer, receiver) = create_mutation_writer(WriterConfig::default());
 
+// Mutations implement the Runnable trait
+// Use mutation.run(&writer).await to execute
+
 // Add node
-writer.add_node(AddNode {
+AddNode {
     id: Id::new(),
     name: "Alice".to_string(),
     ts_millis: TimestampMilli::now(),
-}).await?;
+    summary: DataUrl::from_text("Alice's profile"),
+    valid_range: None,
+}.run(&writer).await?;
 
 // Add edge
-writer.add_edge(AddEdge {
-    id: Id::new(),
-    source_node_id: alice_id,
-    target_node_id: bob_id,
-    name: "follows".to_string(),
+AddEdge {
+    src_id: alice_id,
+    dst_id: bob_id,
+    edge_name: "follows".to_string(),
     ts_millis: TimestampMilli::now(),
-}).await?;
+    summary: DataUrl::from_text("Alice follows Bob"),
+    weight: Some(1.0),
+    valid_range: None,
+}.run(&writer).await?;
 
-// Add fragment
-writer.add_fragment(AddFragment {
+// Add fragment (time-series content)
+AddNodeFragment {
     id: alice_id,
-    content: "Fragment content".to_string(),
-    ts_millis: TimestampMilli::now().0,
-}).await?;
+    ts_millis: TimestampMilli::now(),
+    content: DataUrl::from_text("Status update: Hello world!"),
+    valid_range: None,
+}.run(&writer).await?;
 ```
 
 **Key Features**:
-- Non-blocking async writes
+- Non-blocking async writes via `Runnable` trait
 - **Automatic transaction batching** - mutations are batched and committed in single RocksDB transactions
 - MPSC channel-based with `Vec<Mutation>` batching support
 - Consumer chaining (Graph → FullText)
@@ -501,53 +575,72 @@ See:
 
 ### Architecture
 
-Queries use an async consumer-processor pattern:
+Queries use an async consumer-processor pattern with MPMC (multi-producer multi-consumer) channels:
 
 ```
-Reader → Query → MPMC Channel → Consumer → Processor → RocksDB
-   ↓                                             ↓
-   └─────── oneshot channel ←──── Result ────────┘
+Query.run(&reader)  →  MPMC Channel  →  Consumer Pool  →  Storage
+         ↓                                                    ↓
+         └─────────── oneshot channel ←──── Result ──────────┘
 ```
 
 ### Query Types
 
-All queries implement the `QueryWithResult` trait:
+All queries implement the `Runnable<R>` trait parameterized by reader type:
 
-- `NodeByIdQuery`: Lookup node by ID
-- `EdgeByIdQuery`: Lookup edge with full topology by ID
-- `EdgeSummaryBySrcDstNameQuery`: Lookup edge by (src, dst, name)
-- `FragmentContentByIdQuery`: Retrieve all fragments for an entity
-- `EdgesFromNodeByIdQuery`: Get all outgoing edges
-- `EdgesToNodeByIdQuery`: Get all incoming edges
+**Graph queries** (`graph::query`):
+- `NodeById`: Lookup node by ID → `(NodeName, NodeSummary)`
+- `OutgoingEdges`: Get edges from a node → `Vec<(Option<f64>, SrcId, DstId, EdgeName)>`
+- `IncomingEdges`: Get edges to a node → `Vec<(Option<f64>, DstId, SrcId, EdgeName)>`
+- `EdgeSummaryBySrcDstName`: Lookup edge by topology → `(EdgeSummary, Option<f64>)`
+- `NodeFragmentsByIdTimeRange`: Get node fragments → `Vec<(TimestampMilli, FragmentContent)>`
+- `EdgeFragmentsByIdTimeRange`: Get edge fragments → `Vec<(TimestampMilli, FragmentContent)>`
+
+**Fulltext queries** (`fulltext::query`):
+- `Nodes`: Search nodes → `Vec<NodeHit>` (with scores)
+- `Edges`: Search edges → `Vec<EdgeHit>` (with scores)
+- `Facets`: Get tag facet counts → `FacetCounts`
+
+**Unified queries** (`query`): Re-exports with graph hydration
+- `Nodes`: Search + hydrate → `Vec<(Id, NodeName, NodeSummary)>`
+- `Edges`: Search + hydrate → `Vec<(SrcId, DstId, EdgeName, EdgeSummary)>`
+- Plus all graph query types with same return types
 
 **Note**: Name-based lookups (finding nodes/edges by name) are handled by the fulltext search module.
 
-### Query Processor Trait
+### Query Processor Traits
 
-The query `Processor` trait defines the contract for query execution:
+Each module has its own `Processor` trait for storage access:
+
+**Graph Processor** (`graph::reader::Processor`):
+```rust
+pub trait Processor: Send + Sync {
+    /// Get access to the underlying storage for query execution
+    fn storage(&self) -> &Storage;
+}
+```
+
+**Fulltext Processor** (`fulltext::reader::Processor`):
+```rust
+pub trait Processor {
+    /// Get a reference to the underlying Storage
+    fn storage(&self) -> &Storage;
+}
+```
+
+Query execution uses the `QueryExecutor` trait which takes `&Storage` directly:
 
 ```rust
 #[async_trait]
-pub trait Processor: Send + Sync {
-    async fn get_node_by_id(&self, query: &NodeByIdQuery)
-        -> Result<(NodeName, NodeSummary)>;
-
-    async fn get_edge_by_id(&self, query: &EdgeByIdQuery)
-        -> Result<(SrcId, DstId, EdgeName, EdgeSummary)>;
-
-    async fn get_outgoing_edges_by_id(&self, query: &EdgesFromNodeByIdQuery)
-        -> Result<Vec<(SrcId, EdgeName, DstId)>>;
-
-    async fn get_incoming_edges_by_id(&self, query: &EdgesToNodeByIdQuery)
-        -> Result<Vec<(DstId, EdgeName, SrcId)>>;
-
-    // ... more methods
+pub trait QueryExecutor: Send + Sync {
+    type Output: Send;
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output>;
+    fn timeout(&self) -> Duration;
 }
 ```
 
 **Implementations**:
-- `Graph`: Executes queries against RocksDB
-- Test processors for mocking
+- `graph::Graph`: Implements `graph::reader::Processor`
+- `fulltext::Index`: Implements `fulltext::reader::Processor`
 
 ### Mutation Processor Trait
 
@@ -568,24 +661,24 @@ pub trait Processor: Send + Sync {
 - Supports both single mutation (slice of 1) and true batching
 
 **Implementations**:
-- `Graph`: Processes all mutations in a single RocksDB transaction
-- `Backend`: Indexes all mutations in batch
+- `graph::Graph`: Processes all mutations in a single RocksDB transaction
+- `fulltext::Index`: Indexes all mutations in batch
 - Test processors for mocking
 
 ### Consumer Pattern
 
-The `spawn_query_consumer()` function creates an async task that:
+The `spawn_query_consumer_pool_shared()` function creates a pool of async tasks that:
 
-1. Receives queries from MPMC channel (flume)
-2. Executes query via `Processor`
-3. Handles timeouts
-4. Sends result via oneshot channel
-5. Continues processing until channel closed
+1. Receive queries from MPMC channel (flume)
+2. Execute query via `QueryExecutor::execute(&storage)`
+3. Handle timeouts
+4. Send result via oneshot channel
+5. Continue processing until channel closed
 
 **Benefits**:
-- Concurrent query execution
+- Concurrent query execution with configurable pool size
 - Backpressure via bounded channels
-- Clean shutdown semantics
+- Clean shutdown semantics (drop Reader to close channels)
 - Testable via mock processors
 
 ## Mutation Processing
@@ -612,10 +705,15 @@ Writer → Vec<Mutation> → MPSC Channel → Consumer₁ → Consumer₂ → ..
 pub enum Mutation {
     AddNode(AddNode),
     AddEdge(AddEdge),
-    AddFragment(AddFragment),
-    Invalidate(InvalidateArgs),
+    AddNodeFragment(AddNodeFragment),
+    AddEdgeFragment(AddEdgeFragment),
+    UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil),
+    UpdateEdgeValidSinceUntil(UpdateEdgeValidSinceUntil),
+    UpdateEdgeWeight(UpdateEdgeWeight),
 }
 ```
+
+Each mutation type implements `Runnable` for direct execution via `mutation.run(&writer).await`.
 
 ### Consumer Chaining
 
@@ -643,45 +741,17 @@ let graph_handle = graph::spawn_mutation_consumer_with_next(
 - Then forwards to FullText for indexing
 - Ensures consistency (index only after successful storage)
 
-### GraphProcessor
+### Graph Mutation Processing
 
-Implements `Processor` trait with batched mutation processing:
+The `Graph` struct implements `writer::Processor` for batched mutation processing:
 
 ```rust
 #[async_trait]
-impl Processor for Graph {
+impl writer::Processor for Graph {
     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-        if mutations.is_empty() {
-            return Ok(());
-        }
-
-        log::info!("[Graph] About to insert {} mutations", mutations.len());
-
-        // Each mutation generates its own storage operations
-        let mut operations = Vec::new();
-        for mutation in mutations {
-            operations.extend(mutation.plan()?);
-        }
-
-        // Execute all operations in a SINGLE transaction
-        let txn_db = self.storage.transaction_db()?;
-        let txn = txn_db.transaction();
-
-        for op in operations {
-            match op {
-                StorageOperation::PutCf(PutCf(cf_name, (key, value))) => {
-                    let cf = txn_db.cf_handle(cf_name)
-                        .ok_or_else(|| anyhow!("Column family '{}' not found", cf_name))?;
-                    txn.put_cf(cf, key, value)?;
-                }
-            }
-        }
-
-        // Single commit for all mutations
-        txn.commit()?;
-
-        log::info!("[Graph] Successfully committed {} mutations", mutations.len());
-        Ok(())
+        // Process all mutations in a single RocksDB transaction
+        // Each mutation generates column family operations via mutation.plan()
+        // All operations committed atomically
     }
 }
 ```
@@ -1222,56 +1292,78 @@ The unified API provides a solid foundation for graph algorithms. The proposed b
 
 ## Storage Modes
 
-### ReadWrite Mode
-```rust
-let mut storage = Storage::new("/path/to/db");
-storage.ready().await?;  // Create/open database
+### Graph Storage
 
-// Write operations allowed
-storage.execute_batch(ops).await?;
+```rust
+use motlie_db::graph::Storage;
+
+// ReadWrite mode - for mutations
+let mut storage = Storage::new("/path/to/db");
+storage.ready()?;  // Create/open database
+
+// ReadOnly mode - for queries only
+let storage = Storage::readonly("/path/to/db");
+
+// Secondary mode - follows primary
+let secondary = Storage::secondary("/path/to/db", "/path/to/secondary");
 ```
 
-### ReadOnly Mode
+### Unified Storage
+
 ```rust
-let storage = Storage::new_readonly("/path/to/db")?;
+use motlie_db::reader::{Storage, ReaderConfig, StorageHandle};
 
-// Only read operations
-let value = storage.db()?.get_cf(cf, key)?;
+// Initialize both graph and fulltext
+let storage = Storage::readonly(graph_path, fulltext_path);
+// Or for read-write: Storage::readwrite(graph_path, fulltext_path)
 
-// Multiple readonly instances can coexist
-let reader1 = Storage::new_readonly("/path/to/db")?;
-let reader2 = Storage::new_readonly("/path/to/db")?;
+// Get handle with lifecycle management
+let handle = storage.ready(ReaderConfig::default(), 4)?;
+
+// Use reader for queries
+let reader = handle.reader();
+
+// Clean shutdown
+handle.shutdown().await?;
 ```
 
 **Concurrency**:
 - 1 ReadWrite + N ReadOnly instances can coexist
+- Secondary instances follow primary via catch-up
 - ReadOnly instances are independent
-- Closing ReadWrite doesn't affect ReadOnly
 
 ## Full-Text Search
 
-### Backend
+### Index
 
 Maintains a Tantivy search index synchronized with graph mutations:
 
 ```rust
-pub struct Backend {
-    index: Index,
-    schema: Schema,
-    // Fields: id, entity_type, content, timestamp
-}
+use motlie_db::fulltext::{Storage, Index};
+
+let mut storage = Storage::new("/path/to/index");
+storage.ready()?;
+
+let index = Index::new(Arc::new(storage));
 ```
 
 **Indexed Fields**:
 - `id`: Entity ID (STRING, stored)
-- `entity_type`: "node" | "edge" | "fragment" (STRING, indexed)
-- `content`: Searchable text (TEXT, indexed + stored)
-- `timestamp`: Creation time (U64, indexed + stored)
+- `doc_type`: "node" | "edge" | "node_fragment" | "edge_fragment" (STRING, indexed)
+- `name`: Node/edge name (TEXT, indexed + stored)
+- `summary`: Summary content (TEXT, indexed + stored)
+- `content`: Fragment content (TEXT, indexed + stored)
+- `tags`: Extracted hashtags (FACET, indexed)
+- `src_id`, `dst_id`: Edge endpoints (STRING, stored)
+- `edge_name`: Edge type (STRING, stored)
+- `valid_since`, `valid_until`: Temporal validity (U64, indexed)
+- `score`: Relevance score (F64, stored)
 
 **Mutation Handling**:
-- `AddNode`: Index node summary
-- `AddEdge`: Index edge summary
-- `AddFragment`: Index fragment content
+- `AddNode`: Index node name and summary
+- `AddEdge`: Index edge with topology
+- `AddNodeFragment`: Index fragment content with tags
+- `AddEdgeFragment`: Index edge fragment content
 
 **Consumer Chain**: Graph → FullText ensures search index stays in sync
 

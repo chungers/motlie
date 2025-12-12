@@ -27,8 +27,8 @@
 //! |-------|--------|-------------|
 //! | [`NodeById`] | `(NodeName, NodeSummary)` | Lookup node by ID |
 //! | [`OutgoingEdges`] | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Get edges from a node |
-//! | [`IncomingEdges`] | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Get edges to a node |
-//! | [`EdgeDetails`] | `(SrcId, DstId, EdgeName, EdgeSummary)` | Lookup edge by topology |
+//! | [`IncomingEdges`] | `Vec<(Option<f64>, DstId, SrcId, EdgeName)>` | Get edges to a node |
+//! | [`EdgeDetails`] | `(Option<f64>, SrcId, DstId, EdgeName, EdgeSummary)` | Lookup edge by topology |
 //! | [`NodeFragments`] | `Vec<(TimestampMilli, FragmentContent)>` | Get node fragment history |
 //! | [`EdgeFragments`] | `Vec<(TimestampMilli, FragmentContent)>` | Get edge fragment history |
 //!
@@ -38,16 +38,16 @@
 //! with `query.run(&reader, timeout)`:
 //!
 //! ```ignore
-//! use motlie_db::reader::{Storage, ReaderConfig};
+//! use motlie_db::reader::{Storage, ReaderConfig, StorageHandle};
 //! use motlie_db::query::{
 //!     Nodes, Edges, NodeById, OutgoingEdges, IncomingEdges,
 //!     EdgeDetails, NodeFragments, FuzzyLevel, Runnable,
 //! };
 //! use std::time::Duration;
 //!
-//! // Initialize unified storage
+//! // Initialize unified storage and get handle
 //! let storage = Storage::readonly(graph_path, fulltext_path);
-//! let (reader, handles) = storage.ready(ReaderConfig::default(), 4)?;
+//! let handle = storage.ready(ReaderConfig::default(), 4)?;
 //!
 //! let timeout = Duration::from_secs(5);
 //!
@@ -55,35 +55,39 @@
 //! let results = Nodes::new("rust programming".to_string(), 10)
 //!     .with_fuzzy(FuzzyLevel::Low)
 //!     .with_tags(vec!["systems".to_string()])
-//!     .run(&reader, timeout)
+//!     .run(handle.reader(), timeout)
 //!     .await?;
 //!
 //! // Direct graph lookup by ID
 //! let (name, summary) = NodeById::new(node_id, None)
-//!     .run(&reader, timeout)
+//!     .run(handle.reader(), timeout)
 //!     .await?;
 //!
 //! // Get outgoing edges from a node
 //! let outgoing = OutgoingEdges::new(node_id, None)
-//!     .run(&reader, timeout)
+//!     .run(handle.reader(), timeout)
 //!     .await?;
 //!
 //! // Get incoming edges to a node
 //! let incoming = IncomingEdges::new(node_id, None)
-//!     .run(&reader, timeout)
+//!     .run(handle.reader(), timeout)
 //!     .await?;
 //!
 //! // Lookup edge by topology
 //! let edge = EdgeDetails::new(src_id, dst_id, "relationship".to_string(), None)
-//!     .run(&reader, timeout)
+//!     .run(handle.reader(), timeout)
 //!     .await?;
 //!
 //! // Concurrent queries with tokio::try_join!
+//! let reader = handle.reader_clone();
 //! let (nodes, outgoing, incoming) = tokio::try_join!(
 //!     Nodes::new("search".to_string(), 10).run(&reader, timeout),
 //!     OutgoingEdges::new(node_id, None).run(&reader, timeout),
 //!     IncomingEdges::new(node_id, None).run(&reader, timeout)
 //! )?;
+//!
+//! // Clean shutdown
+//! handle.shutdown().await?;
 //! ```
 //!
 //! # Architecture
@@ -116,7 +120,9 @@ use tokio::sync::oneshot;
 
 use crate::fulltext;
 use crate::graph;
-use crate::graph::schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
+use crate::graph::schema::{
+    DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
+};
 use crate::{Id, TimestampMilli};
 
 // ============================================================================
@@ -197,10 +203,10 @@ pub type IncomingEdges = graph::query::IncomingEdges;
 /// Type alias to graph::query::EdgeSummaryBySrcDstName.
 ///
 /// Look up an edge's details by source ID, destination ID, and edge name.
-/// Returns `EdgeResult` (SrcId, DstId, EdgeName, EdgeSummary).
+/// Returns `EdgeDetailsResult` (Option<f64>, SrcId, DstId, EdgeName, EdgeSummary).
 ///
 /// - With `graph::Reader`: use `.run()` method (returns `(EdgeSummary, Option<f64>)`)
-/// - With `reader::Reader`: use `.run()` method (returns `EdgeResult`)
+/// - With `reader::Reader`: use `.run()` method (returns `EdgeDetailsResult`)
 pub type EdgeDetails = graph::query::EdgeSummaryBySrcDstName;
 
 /// Type alias to graph::query::NodeFragmentsByIdTimeRange.
@@ -229,6 +235,9 @@ pub type NodeResult = (Id, NodeName, NodeSummary);
 /// Result type for hydrated edge searches: (SrcId, DstId, EdgeName, EdgeSummary)
 pub type EdgeResult = (SrcId, DstId, EdgeName, EdgeSummary);
 
+/// Result type for EdgeDetails query: (weight, src_id, dst_id, edge_name, edge_summary)
+pub type EdgeDetailsResult = (Option<f64>, SrcId, DstId, EdgeName, EdgeSummary);
+
 // ============================================================================
 // Query Enum for Dispatch
 // ============================================================================
@@ -249,7 +258,7 @@ pub enum Query {
     NodeById(NodeByIdDispatch),
     OutgoingEdges(OutgoingEdgesDispatch),
     IncomingEdges(IncomingEdgesDispatch),
-    EdgeSummary(EdgeSummaryDispatch),
+    EdgeDetails(EdgeDetailsDispatch),
     NodeFragments(NodeFragmentsDispatch),
     EdgeFragments(EdgeFragmentsDispatch),
 }
@@ -270,16 +279,12 @@ impl std::fmt::Display for Query {
             Query::NodeById(q) => write!(f, "NodeById: id={}", q.params.id),
             Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.params.id),
             Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.params.id),
-            Query::EdgeSummary(q) => write!(
+            Query::EdgeDetails(q) => write!(
                 f,
-                "EdgeSummary: src={}, dst={}, edge={}",
+                "EdgeDetails: src={}, dst={}, edge={}",
                 q.params.source_id, q.params.dest_id, q.params.name
             ),
-            Query::NodeFragments(q) => write!(
-                f,
-                "NodeFragments: id={}",
-                q.params.id
-            ),
+            Query::NodeFragments(q) => write!(f, "NodeFragments: id={}", q.params.id),
             Query::EdgeFragments(q) => write!(
                 f,
                 "EdgeFragments: src={}, dst={}, edge={}",
@@ -314,14 +319,18 @@ impl NodesDispatch {
     }
 
     /// Execute against composite storage
-    pub(crate) async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<Vec<NodeResult>> {
+    pub(crate) async fn execute(
+        &self,
+        storage: &super::reader::CompositeStorage,
+    ) -> Result<Vec<NodeResult>> {
         // Step 1: REUSE existing fulltext query execution to get hits
         use crate::fulltext::query::NodesDispatch as FulltextNodesDispatch;
         use crate::fulltext::reader::Processor as FulltextProcessor;
         use crate::graph::reader::Processor as GraphProcessor;
 
         let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
-        let hits: Vec<NodeHit> = FulltextNodesDispatch::execute_params(&self.params, fulltext_storage).await?;
+        let hits: Vec<NodeHit> =
+            FulltextNodesDispatch::execute_params(&self.params, fulltext_storage).await?;
 
         // Step 2: Hydrate each hit from graph storage
         use crate::graph::query::NodeByIdDispatch;
@@ -378,14 +387,18 @@ impl EdgesDispatch {
     }
 
     /// Execute against composite storage
-    pub(crate) async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<Vec<EdgeResult>> {
+    pub(crate) async fn execute(
+        &self,
+        storage: &super::reader::CompositeStorage,
+    ) -> Result<Vec<EdgeResult>> {
         // Step 1: REUSE existing fulltext query execution to get hits
         use crate::fulltext::query::EdgesDispatch as FulltextEdgesDispatch;
         use crate::fulltext::reader::Processor as FulltextProcessor;
         use crate::graph::reader::Processor as GraphProcessor;
 
         let fulltext_storage = FulltextProcessor::storage(storage.fulltext.as_ref());
-        let hits: Vec<EdgeHit> = FulltextEdgesDispatch::execute_params(&self.params, fulltext_storage).await?;
+        let hits: Vec<EdgeHit> =
+            FulltextEdgesDispatch::execute_params(&self.params, fulltext_storage).await?;
 
         // Step 2: Hydrate each hit from graph storage
         use crate::graph::query::EdgeSummaryBySrcDstNameDispatch;
@@ -446,7 +459,10 @@ impl NodeByIdDispatch {
         let _ = self.result_tx.send(result);
     }
 
-    pub(crate) async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<(NodeName, NodeSummary)> {
+    pub(crate) async fn execute(
+        &self,
+        storage: &super::reader::CompositeStorage,
+    ) -> Result<(NodeName, NodeSummary)> {
         use crate::graph::query::NodeByIdDispatch as GraphNodeByIdDispatch;
         use crate::graph::reader::Processor as GraphProcessor;
 
@@ -480,7 +496,10 @@ impl OutgoingEdgesDispatch {
         let _ = self.result_tx.send(result);
     }
 
-    pub(crate) async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
+    pub(crate) async fn execute(
+        &self,
+        storage: &super::reader::CompositeStorage,
+    ) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
         use crate::graph::query::OutgoingEdgesDispatch as GraphOutgoingEdgesDispatch;
         use crate::graph::reader::Processor as GraphProcessor;
 
@@ -505,16 +524,19 @@ pub(crate) struct IncomingEdgesDispatch {
     pub(crate) params: graph::query::IncomingEdges,
 
     /// Channel to send the result back to the client
-    /// Returns (weight, src_id, dst_id, edge_name) tuples
-    result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
+    /// Returns (weight, dst_id, src_id, edge_name) tuples
+    result_tx: oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>,
 }
 
 impl IncomingEdgesDispatch {
-    fn send_result(self, result: Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>) {
+    fn send_result(self, result: Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>) {
         let _ = self.result_tx.send(result);
     }
 
-    pub(crate) async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
+    pub(crate) async fn execute(
+        &self,
+        storage: &super::reader::CompositeStorage,
+    ) -> Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>> {
         use crate::graph::query::IncomingEdgesDispatch as GraphIncomingEdgesDispatch;
         use crate::graph::reader::Processor as GraphProcessor;
 
@@ -529,33 +551,39 @@ impl IncomingEdgesDispatch {
 }
 
 // ============================================================================
-// EdgeSummaryDispatch - Internal wrapper for EdgeSummaryBySrcDstName dispatch
+// EdgeDetailsDispatch - Internal wrapper for EdgeSummaryBySrcDstName dispatch
 // ============================================================================
 
 /// Internal dispatch wrapper for EdgeSummaryBySrcDstName query execution.
 #[derive(Debug)]
-pub(crate) struct EdgeSummaryDispatch {
+pub(crate) struct EdgeDetailsDispatch {
     /// The underlying graph query params
     pub(crate) params: graph::query::EdgeSummaryBySrcDstName,
 
     /// Channel to send the result back to the client
-    result_tx: oneshot::Sender<Result<EdgeResult>>,
+    /// Returns (weight, src_id, dst_id, edge_name, edge_summary) tuples
+    result_tx: oneshot::Sender<Result<EdgeDetailsResult>>,
 }
 
-impl EdgeSummaryDispatch {
-    fn send_result(self, result: Result<EdgeResult>) {
+impl EdgeDetailsDispatch {
+    fn send_result(self, result: Result<EdgeDetailsResult>) {
         let _ = self.result_tx.send(result);
     }
 
-    pub(crate) async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<EdgeResult> {
+    pub(crate) async fn execute(
+        &self,
+        storage: &super::reader::CompositeStorage,
+    ) -> Result<EdgeDetailsResult> {
         use crate::graph::query::EdgeSummaryBySrcDstNameDispatch;
         use crate::graph::reader::Processor as GraphProcessor;
 
         let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
-        let (summary, _weight) = EdgeSummaryBySrcDstNameDispatch::execute_params(&self.params, graph_storage).await?;
+        let (summary, weight) =
+            EdgeSummaryBySrcDstNameDispatch::execute_params(&self.params, graph_storage).await?;
 
-        // Reconstruct EdgeResult from params and summary (don't expose score)
+        // Return EdgeDetailsResult with weight included
         Ok((
+            weight,
             self.params.source_id,
             self.params.dest_id,
             self.params.name.clone(),
@@ -588,7 +616,10 @@ impl NodeFragmentsDispatch {
         let _ = self.result_tx.send(result);
     }
 
-    pub(crate) async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
+    pub(crate) async fn execute(
+        &self,
+        storage: &super::reader::CompositeStorage,
+    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
         use crate::graph::query::NodeFragmentsByIdTimeRangeDispatch;
         use crate::graph::reader::Processor as GraphProcessor;
 
@@ -621,7 +652,10 @@ impl EdgeFragmentsDispatch {
         let _ = self.result_tx.send(result);
     }
 
-    pub(crate) async fn execute(&self, storage: &super::reader::CompositeStorage) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
+    pub(crate) async fn execute(
+        &self,
+        storage: &super::reader::CompositeStorage,
+    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
         use crate::graph::query::EdgeFragmentsByIdTimeRangeDispatch;
         use crate::graph::reader::Processor as GraphProcessor;
 
@@ -655,7 +689,7 @@ impl QueryProcessor for Query {
             Query::NodeById(q) => q.process_and_send(processor).await,
             Query::OutgoingEdges(q) => q.process_and_send(processor).await,
             Query::IncomingEdges(q) => q.process_and_send(processor).await,
-            Query::EdgeSummary(q) => q.process_and_send(processor).await,
+            Query::EdgeDetails(q) => q.process_and_send(processor).await,
             Query::NodeFragments(q) => q.process_and_send(processor).await,
             Query::EdgeFragments(q) => q.process_and_send(processor).await,
         }
@@ -681,7 +715,10 @@ pub struct QueryWithOffset<T> {
 
 impl<T> WithOffset for T {
     fn with_offset(self, offset: usize) -> QueryWithOffset<Self> {
-        QueryWithOffset { query: self, offset }
+        QueryWithOffset {
+            query: self,
+            offset,
+        }
     }
 }
 
@@ -787,17 +824,17 @@ impl Runnable<super::reader::Reader> for QueryWithOffset<Edges> {
 
 #[async_trait::async_trait]
 impl Runnable<super::reader::Reader> for EdgeDetails {
-    type Output = EdgeResult;
+    type Output = EdgeDetailsResult;
 
     async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = oneshot::channel();
 
-        let dispatch = EdgeSummaryDispatch {
+        let dispatch = EdgeDetailsDispatch {
             params: self,
             result_tx,
         };
 
-        reader.send_query(Query::EdgeSummary(dispatch)).await?;
+        reader.send_query(Query::EdgeDetails(dispatch)).await?;
 
         match tokio::time::timeout(timeout, result_rx).await {
             Ok(Ok(result)) => result,
@@ -918,8 +955,8 @@ impl Runnable<super::reader::Reader> for OutgoingEdges {
 // Runnable<reader::Reader> Implementation for IncomingEdges
 // ============================================================================
 
-/// Result type for IncomingEdges query: (weight, src_id, dst_id, edge_name)
-pub type IncomingEdgesResult = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+/// Result type for IncomingEdges query: (weight, dst_id, src_id, edge_name)
+pub type IncomingEdgesResult = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
 #[async_trait::async_trait]
 impl Runnable<super::reader::Reader> for IncomingEdges {
