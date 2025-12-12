@@ -26,6 +26,7 @@
 //! | Query | Output | Description |
 //! |-------|--------|-------------|
 //! | [`NodeById`] | `(NodeName, NodeSummary)` | Lookup node by ID |
+//! | [`NodesByIdsMulti`] | `Vec<(Id, NodeName, NodeSummary)>` | Batch lookup nodes by IDs |
 //! | [`OutgoingEdges`] | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Get edges from a node |
 //! | [`IncomingEdges`] | `Vec<(Option<f64>, DstId, SrcId, EdgeName)>` | Get edges to a node |
 //! | [`EdgeDetails`] | `(Option<f64>, SrcId, DstId, EdgeName, EdgeSummary)` | Lookup edge by topology |
@@ -184,6 +185,16 @@ pub trait Runnable<R> {
 /// - With `reader::Reader`: same result, forwarded to graph storage
 pub type NodeById = graph::query::NodeById;
 
+/// Type alias to graph::query::NodesByIdsMulti.
+///
+/// Batch lookup of multiple nodes by ID. Uses RocksDB's `multi_get_cf()`
+/// for efficient batch reads. Missing nodes and temporally invalid nodes
+/// are silently omitted from results.
+///
+/// - With `graph::Reader`: returns `Vec<(Id, NodeName, NodeSummary)>`
+/// - With `reader::Reader`: same result, forwarded to graph storage
+pub type NodesByIdsMulti = graph::query::NodesByIdsMulti;
+
 /// Type alias to graph::query::OutgoingEdges.
 ///
 /// Get all outgoing edges from a node.
@@ -256,6 +267,7 @@ pub enum Query {
     Edges(EdgesDispatch),
     // Graph queries (forwarded to graph storage)
     NodeById(NodeByIdDispatch),
+    NodesByIdsMulti(NodesByIdsMultiDispatch),
     OutgoingEdges(OutgoingEdgesDispatch),
     IncomingEdges(IncomingEdgesDispatch),
     EdgeDetails(EdgeDetailsDispatch),
@@ -277,6 +289,9 @@ impl std::fmt::Display for Query {
                 q.params.query, q.params.limit, q.offset
             ),
             Query::NodeById(q) => write!(f, "NodeById: id={}", q.params.id),
+            Query::NodesByIdsMulti(q) => {
+                write!(f, "NodesByIdsMulti: count={}", q.params.ids.len())
+            }
             Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.params.id),
             Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.params.id),
             Query::EdgeDetails(q) => write!(
@@ -468,6 +483,43 @@ impl NodeByIdDispatch {
 
         let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
         GraphNodeByIdDispatch::execute_params(&self.params, graph_storage).await
+    }
+
+    pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
+        let result = self.execute(storage).await;
+        self.send_result(result);
+    }
+}
+
+// ============================================================================
+// NodesByIdsMultiDispatch - Internal wrapper for NodesByIdsMulti dispatch
+// ============================================================================
+
+/// Internal dispatch wrapper for NodesByIdsMulti query execution.
+#[derive(Debug)]
+pub(crate) struct NodesByIdsMultiDispatch {
+    /// The underlying graph query params
+    pub(crate) params: graph::query::NodesByIdsMulti,
+
+    /// Channel to send the result back to the client
+    /// Returns (id, node_name, node_summary) tuples for found nodes
+    result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
+}
+
+impl NodesByIdsMultiDispatch {
+    fn send_result(self, result: Result<Vec<(Id, NodeName, NodeSummary)>>) {
+        let _ = self.result_tx.send(result);
+    }
+
+    pub(crate) async fn execute(
+        &self,
+        storage: &super::reader::CompositeStorage,
+    ) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
+        use crate::graph::query::NodesByIdsMultiDispatch as GraphNodesByIdsMultiDispatch;
+        use crate::graph::reader::Processor as GraphProcessor;
+
+        let graph_storage = GraphProcessor::storage(storage.graph.as_ref());
+        GraphNodesByIdsMultiDispatch::execute_params(&self.params, graph_storage).await
     }
 
     pub(crate) async fn process_and_send(self, storage: &super::reader::CompositeStorage) {
@@ -687,6 +739,7 @@ impl QueryProcessor for Query {
             Query::Nodes(q) => q.process_and_send(processor).await,
             Query::Edges(q) => q.process_and_send(processor).await,
             Query::NodeById(q) => q.process_and_send(processor).await,
+            Query::NodesByIdsMulti(q) => q.process_and_send(processor).await,
             Query::OutgoingEdges(q) => q.process_and_send(processor).await,
             Query::IncomingEdges(q) => q.process_and_send(processor).await,
             Query::EdgeDetails(q) => q.process_and_send(processor).await,
@@ -913,6 +966,35 @@ impl Runnable<super::reader::Reader> for NodeById {
         };
 
         reader.send_query(Query::NodeById(dispatch)).await?;
+
+        match tokio::time::timeout(timeout, result_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("Query channel closed")),
+            Err(_) => Err(anyhow::anyhow!("Query timeout after {:?}", timeout)),
+        }
+    }
+}
+
+// ============================================================================
+// Runnable<reader::Reader> Implementation for NodesByIdsMulti
+// ============================================================================
+
+/// Result type for NodesByIdsMulti query: (id, node_name, node_summary)
+pub type NodesByIdsMultiResult = Vec<(Id, NodeName, NodeSummary)>;
+
+#[async_trait::async_trait]
+impl Runnable<super::reader::Reader> for NodesByIdsMulti {
+    type Output = NodesByIdsMultiResult;
+
+    async fn run(self, reader: &super::reader::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let dispatch = NodesByIdsMultiDispatch {
+            params: self,
+            result_tx,
+        };
+
+        reader.send_query(Query::NodesByIdsMulti(dispatch)).await?;
 
         match tokio::time::timeout(timeout, result_rx).await {
             Ok(Ok(result)) => result,

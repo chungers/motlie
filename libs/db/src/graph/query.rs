@@ -97,6 +97,7 @@ macro_rules! iterate_cf {
 #[allow(private_interfaces)]
 pub enum Query {
     NodeById(NodeByIdDispatch),
+    NodesByIdsMulti(NodesByIdsMultiDispatch),
     EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameDispatch),
     NodeFragmentsByIdTimeRange(NodeFragmentsByIdTimeRangeDispatch),
     EdgeFragmentsByIdTimeRange(EdgeFragmentsByIdTimeRangeDispatch),
@@ -108,6 +109,9 @@ impl std::fmt::Display for Query {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Query::NodeById(q) => write!(f, "NodeById: id={}", q.params.id),
+            Query::NodesByIdsMulti(q) => {
+                write!(f, "NodesByIdsMulti: count={}", q.params.ids.len())
+            }
             Query::EdgeSummaryBySrcDstName(q) => write!(
                 f,
                 "EdgeBySrcDstName: source={}, dest={}, name={}",
@@ -136,6 +140,7 @@ impl std::fmt::Display for Query {
 // Use macro to implement QueryProcessor for dispatch types
 crate::impl_query_processor!(
     NodeByIdDispatch,
+    NodesByIdsMultiDispatch,
     EdgeSummaryBySrcDstNameDispatch,
     NodeFragmentsByIdTimeRangeDispatch,
     EdgeFragmentsByIdTimeRangeDispatch,
@@ -148,6 +153,7 @@ impl QueryProcessor for Query {
     async fn process_and_send<P: Processor>(self, processor: &P) {
         match self {
             Query::NodeById(q) => q.process_and_send(processor).await,
+            Query::NodesByIdsMulti(q) => q.process_and_send(processor).await,
             Query::EdgeSummaryBySrcDstName(q) => q.process_and_send(processor).await,
             Query::NodeFragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
             Query::EdgeFragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
@@ -191,6 +197,38 @@ pub(crate) struct NodeByIdDispatch {
     pub(crate) params: NodeById,
     pub(crate) timeout: Duration,
     pub(crate) result_tx: oneshot::Sender<Result<(NodeName, NodeSummary)>>,
+}
+
+/// Query parameters for batch lookup of multiple nodes by ID.
+///
+/// More efficient than multiple `NodeById` calls as it uses RocksDB's
+/// `multi_get_cf()` for batched reads. Missing IDs are silently omitted
+/// from results.
+///
+/// # Example
+///
+/// ```ignore
+/// let nodes = NodesByIdsMulti::new(vec![id1, id2, id3], None)
+///     .run(&reader, timeout)
+///     .await?;
+/// // Returns Vec<(Id, NodeName, NodeSummary)> for found nodes
+/// ```
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NodesByIdsMulti {
+    /// Node IDs to look up
+    pub ids: Vec<Id>,
+
+    /// Reference timestamp for temporal validity checks
+    /// If None, defaults to current time in the query executor
+    pub reference_ts_millis: Option<TimestampMilli>,
+}
+
+/// Internal dispatch wrapper for NodesByIdsMulti query execution.
+#[derive(Debug)]
+pub(crate) struct NodesByIdsMultiDispatch {
+    pub(crate) params: NodesByIdsMulti,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
 }
 
 /// Query parameters for scanning node fragments by ID with time range filtering.
@@ -401,6 +439,51 @@ impl NodeByIdDispatch {
             result_tx: tx,
         };
         <NodeByIdDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+    }
+}
+
+impl NodesByIdsMulti {
+    /// Create a new batch query request.
+    pub fn new(ids: Vec<Id>, reference_ts_millis: Option<TimestampMilli>) -> Self {
+        Self {
+            ids,
+            reference_ts_millis,
+        }
+    }
+}
+
+impl NodesByIdsMultiDispatch {
+    /// Create a new dispatch wrapper.
+    pub(crate) fn new(
+        params: NodesByIdsMulti,
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
+    ) -> Self {
+        Self {
+            params,
+            timeout,
+            result_tx,
+        }
+    }
+
+    /// Send the result back to the client (consumes self).
+    pub(crate) fn send_result(self, result: Result<Vec<(Id, NodeName, NodeSummary)>>) {
+        let _ = self.result_tx.send(result);
+    }
+
+    /// Execute a NodesByIdsMulti query directly without dispatch machinery.
+    /// This is used by the unified query module for composition.
+    pub(crate) async fn execute_params(
+        params: &NodesByIdsMulti,
+        storage: &Storage,
+    ) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = NodesByIdsMultiDispatch {
+            params: params.clone(),
+            timeout: Duration::from_secs(0),
+            result_tx: tx,
+        };
+        <NodesByIdsMultiDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
     }
 }
 
@@ -673,6 +756,19 @@ impl Runnable<super::Reader> for NodeById {
     }
 }
 
+/// Implement Runnable<Reader> for NodesByIdsMulti
+#[async_trait::async_trait]
+impl Runnable<super::Reader> for NodesByIdsMulti {
+    type Output = Vec<(Id, NodeName, NodeSummary)>;
+
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let dispatch = NodesByIdsMultiDispatch::new(self, timeout, result_tx);
+        reader.send_query(Query::NodesByIdsMulti(dispatch)).await?;
+        result_rx.await?
+    }
+}
+
 /// Implement Runnable<Reader> for NodeFragmentsByIdTimeRange
 #[async_trait::async_trait]
 impl Runnable<super::Reader> for NodeFragmentsByIdTimeRange {
@@ -790,6 +886,89 @@ impl QueryExecutor for NodeByIdDispatch {
         }
 
         Ok((value.1, value.2))
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+/// Implement QueryExecutor for NodesByIdsMultiDispatch
+///
+/// Uses RocksDB's `multi_get_cf()` for efficient batch lookups.
+/// Missing nodes and temporally invalid nodes are silently omitted from results.
+#[async_trait::async_trait]
+impl QueryExecutor for NodesByIdsMultiDispatch {
+    type Output = Vec<(Id, NodeName, NodeSummary)>;
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        let params = &self.params;
+        tracing::debug!(count = params.ids.len(), "Executing NodesByIdsMulti query");
+
+        if params.ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Default None to current time for temporal validity checks
+        let ref_time = params
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        // Prepare keys for batch lookup
+        let keys: Vec<Vec<u8>> = params
+            .ids
+            .iter()
+            .map(|id| schema::Nodes::key_to_bytes(&schema::NodeCfKey(*id)))
+            .collect();
+
+        // Use multi_get_cf for batch lookup - handles both readonly and readwrite modes
+        let results: Vec<Result<Option<Vec<u8>>, rocksdb::Error>> = if let Ok(db) = storage.db() {
+            let cf = db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+            })?;
+            db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())))
+        } else {
+            let txn_db = storage.transaction_db()?;
+            let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+            })?;
+            txn_db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())))
+        };
+
+        // Parse results, skipping missing entries and temporally invalid nodes
+        let mut output = Vec::with_capacity(results.len());
+        for (id, result) in params.ids.iter().zip(results) {
+            match result {
+                Ok(Some(value_bytes)) => {
+                    match schema::Nodes::value_from_bytes(&value_bytes) {
+                        Ok(value) => {
+                            // Check temporal validity - skip invalid nodes
+                            if schema::is_valid_at_time(&value.0, ref_time) {
+                                output.push((*id, value.1, value.2));
+                            } else {
+                                tracing::trace!(
+                                    id = %id,
+                                    "Skipping node: not valid at time {}",
+                                    ref_time.0
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(id = %id, error = %e, "Failed to deserialize node value");
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Node not found - silently skip
+                    tracing::trace!(id = %id, "Node not found");
+                }
+                Err(e) => {
+                    tracing::warn!(id = %id, error = %e, "RocksDB error fetching node");
+                }
+            }
+        }
+
+        Ok(output)
     }
 
     fn timeout(&self) -> Duration {
@@ -2211,6 +2390,207 @@ mod tests {
         .unwrap();
 
         assert_eq!(fragments.len(), 0);
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_nodes_by_ids_multi_basic() {
+        // Create a temporary database with real data
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create writer and mutation consumer
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer_handle =
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Insert multiple test nodes
+        let node_ids: Vec<Id> = (0..5).map(|_| Id::new()).collect();
+        for (i, &id) in node_ids.iter().enumerate() {
+            let node_args = AddNode {
+                id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("node_{}", i),
+                valid_range: None,
+                summary: NodeSummary::from_text(&format!("summary for node {}", i)),
+            };
+            node_args.run(&writer).await.unwrap();
+        }
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop writer to close mutation channel
+        drop(writer);
+
+        // Wait for mutation consumer to finish
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        // Create reader and query consumer
+        let reader_config = ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query all nodes with batch lookup
+        let results = NodesByIdsMulti::new(node_ids.clone(), None)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Verify all nodes were found
+        assert_eq!(results.len(), 5);
+
+        // Verify each node is present
+        for (id, name, _summary) in &results {
+            assert!(node_ids.contains(id));
+            assert!(name.starts_with("node_"));
+        }
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_nodes_by_ids_multi_missing_nodes() {
+        // Create a temporary database with real data
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create writer and mutation consumer
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer_handle =
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Insert only 2 test nodes
+        let existing_ids: Vec<Id> = (0..2).map(|_| Id::new()).collect();
+        for (i, &id) in existing_ids.iter().enumerate() {
+            let node_args = AddNode {
+                id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("node_{}", i),
+                valid_range: None,
+                summary: NodeSummary::from_text(&format!("summary for node {}", i)),
+            };
+            node_args.run(&writer).await.unwrap();
+        }
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop writer to close mutation channel
+        drop(writer);
+
+        // Wait for mutation consumer to finish
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        // Create reader and query consumer
+        let reader_config = ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query with a mix of existing and non-existing IDs
+        let non_existing_ids: Vec<Id> = (0..3).map(|_| Id::new()).collect();
+        let all_ids: Vec<Id> = existing_ids
+            .iter()
+            .chain(non_existing_ids.iter())
+            .copied()
+            .collect();
+
+        let results = NodesByIdsMulti::new(all_ids, None)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Should only return the 2 existing nodes
+        assert_eq!(results.len(), 2);
+
+        // Verify only existing IDs are in results
+        for (id, _name, _summary) in &results {
+            assert!(existing_ids.contains(id));
+        }
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_nodes_by_ids_multi_empty_input() {
+        // Create a temporary database
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create writer and mutation consumer
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer_handle =
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Insert one node so DB is properly initialized
+        let node_args = AddNode {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "dummy".to_string(),
+            valid_range: None,
+            summary: NodeSummary::from_text("dummy"),
+        };
+        node_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        let reader_config = ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query with empty input
+        let results = NodesByIdsMulti::new(vec![], None)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Should return empty vector
+        assert_eq!(results.len(), 0);
 
         // Cleanup
         drop(reader);
