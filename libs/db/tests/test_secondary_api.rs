@@ -2,8 +2,10 @@
 ///
 /// Secondary instances provide dynamic catch-up capability for read replicas,
 /// allowing them to see new writes from the primary database.
-use motlie_db::graph::mutation::{AddNode, Runnable as MutationRunnable};
-use motlie_db::graph::query::{NodeById, Runnable as QueryRunnable};
+use motlie_db::graph::mutation::AddNode;
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::query::NodeById;
+use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::{Id, TimestampMilli};
 use std::time::Duration;
 use tempfile::TempDir;

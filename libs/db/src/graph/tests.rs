@@ -1,9 +1,10 @@
 use crate::graph::{ColumnFamilyRecord, Graph, Storage};
 use crate::graph::mutation::{
-    AddEdge, AddNode, AddNodeFragment, Runnable as MutRunnable, UpdateEdgeValidSinceUntil,
+    AddEdge, AddNode, AddNodeFragment, UpdateEdgeValidSinceUntil,
     UpdateNodeValidSinceUntil,
 };
-use crate::graph::query::Runnable;
+use crate::writer::Runnable as MutRunnable;
+use crate::reader::Runnable;
 use crate::graph::schema::{EdgeSummary, NodeFragments, Nodes, ALL_COLUMN_FAMILIES};
 use crate::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer, spawn_mutation_consumer_with_next, WriterConfig,

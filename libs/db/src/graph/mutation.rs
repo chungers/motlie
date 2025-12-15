@@ -8,6 +8,7 @@ use anyhow::Result;
 
 use super::schema;
 use super::writer::{MutationExecutor, Writer};
+use crate::writer::Runnable;
 use crate::{Id, TimestampMilli};
 
 #[derive(Debug, Clone)]
@@ -517,60 +518,39 @@ impl Mutation {
 }
 
 // ============================================================================
-// Runnable Trait - Execute mutations against a Writer
+// Runnable Trait Implementations
 // ============================================================================
 
-/// Trait for mutations that can be executed against a Writer.
-///
-/// This trait follows the same pattern as the Query API's Runnable trait,
-/// enabling mutations to be constructed separately from execution.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use motlie_db::{AddNode, Id, TimestampMilli, Runnable};
-///
-/// // Construct mutation
-/// let mutation = AddNode {
-///     id: Id::new(),
-///     name: "Alice".to_string(),
-///     ts_millis: TimestampMilli::now(),
-///     valid_range: None,
-/// };
-///
-/// // Execute it
-/// mutation.run(&writer).await?;
-/// ```
-pub trait Runnable {
-    /// Execute this mutation against the writer
-    async fn run(self, writer: &Writer) -> Result<()>;
-}
-
 // Implement Runnable for individual mutation types
+#[async_trait::async_trait]
 impl Runnable for AddNode {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::AddNode(self)]).await
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for AddEdge {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::AddEdge(self)]).await
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for AddNodeFragment {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::AddNodeFragment(self)]).await
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for AddEdgeFragment {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::AddEdgeFragment(self)]).await
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for UpdateNodeValidSinceUntil {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer
@@ -579,6 +559,7 @@ impl Runnable for UpdateNodeValidSinceUntil {
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for UpdateEdgeValidSinceUntil {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer
@@ -587,6 +568,7 @@ impl Runnable for UpdateEdgeValidSinceUntil {
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for UpdateEdgeWeight {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::UpdateEdgeWeight(self)]).await
@@ -702,6 +684,7 @@ impl Default for MutationBatch {
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for MutationBatch {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(self.0).await

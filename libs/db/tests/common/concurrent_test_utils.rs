@@ -9,7 +9,8 @@
 /// - test_concurrent_read_write.rs (readonly instances)
 /// - test_concurrent_secondary.rs (secondary instances with catch-up)
 
-use motlie_db::graph::mutation::{AddEdge, AddNode, Runnable as MutationRunnable};
+use motlie_db::graph::mutation::{AddEdge, AddNode};
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer};
 use motlie_db::{Id, TimestampMilli};

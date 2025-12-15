@@ -27,7 +27,8 @@ mod tantivy_behavior_test;
 // Re-export commonly used types (no prefixes - use module path for disambiguation)
 // Note: Runnable is now generic: Runnable<R> where R is the reader type
 // Search enum is public for reader APIs but has #[doc(hidden)] variants
-pub use query::{Edges, Facets, FuzzyLevel, Nodes, Runnable, Search};
+pub use query::{Edges, Facets, FuzzyLevel, Nodes, Search};
+pub use crate::reader::Runnable;
 pub use reader::{
     create_query_consumer, create_query_reader, spawn_query_consumer,
     spawn_query_consumer_pool_readonly, spawn_query_consumer_pool_shared, Consumer, Processor,

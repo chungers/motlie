@@ -11,8 +11,10 @@ use motlie_db::fulltext::{
     spawn_query_consumer_pool_shared as spawn_fulltext_query_consumer_pool_shared,
     Storage as FulltextStorage,
 };
-use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment, Runnable as MutationRunnable};
-use motlie_db::graph::query::{NodeById, OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::query::{NodeById, OutgoingEdges};
+use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::graph::reader::{
     create_query_reader, spawn_query_consumer_pool_shared, ReaderConfig,
 };

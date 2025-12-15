@@ -19,7 +19,8 @@
 mod common;
 
 use common::concurrent_test_utils::{writer_task, Metrics, TestContext};
-use motlie_db::graph::query::{NodeById, Runnable as QueryRunnable};
+use motlie_db::graph::query::NodeById;
+use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::graph::reader::{spawn_query_consumer, Reader, ReaderConfig};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

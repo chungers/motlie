@@ -17,12 +17,13 @@ use motlie_db::fulltext::{
     Storage as FulltextStorage,
 };
 use motlie_db::graph::mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Runnable as MutationRunnable,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
 };
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::{EdgeSummaryBySrcDstName, NodeById};
 // Only import graph::query::Runnable - fulltext queries use .run() on types
 // that only implement fulltext::query::Runnable so there's no ambiguity
-use motlie_db::graph::query::Runnable as GraphQueryRunnable;
+use motlie_db::reader::Runnable as GraphQueryRunnable;
 use motlie_db::graph::reader::{
     create_query_reader, Reader as GraphReader,
     spawn_query_consumer_pool_shared, ReaderConfig,

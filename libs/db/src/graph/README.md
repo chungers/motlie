@@ -69,10 +69,13 @@ Defined in `mutation.rs`:
 
 ### Runnable Trait
 
-All mutations implement `mutation::Runnable`:
+All mutations implement `writer::Runnable` (defined in `motlie_db::writer`):
 
 ```rust
-use motlie_db::{AddNode, MutationRunnable, Writer, Id, TimestampMilli, NodeSummary};
+use motlie_db::graph::mutation::AddNode;
+use motlie_db::writer::Runnable;  // Unified mutation trait
+use motlie_db::{Id, TimestampMilli};
+use motlie_db::graph::schema::NodeSummary;
 
 let node = AddNode {
     id: Id::new(),
@@ -103,10 +106,11 @@ Defined in `query.rs`:
 
 ### Runnable Trait
 
-All queries implement `query::Runnable`:
+All queries implement `reader::Runnable` (defined in `motlie_db::reader`):
 
 ```rust
-use motlie_db::{NodeById, QueryRunnable, Reader};
+use motlie_db::graph::query::NodeById;
+use motlie_db::reader::Runnable;  // Unified query trait
 use std::time::Duration;
 
 let result = NodeById::new(node_id, None)

@@ -427,7 +427,8 @@ pub fn spawn_mutation_consumer_with_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::mutation::{AddEdge, AddNode, AddNodeFragment, Runnable as MutRunnable, UpdateEdgeValidSinceUntil};
+    use super::super::mutation::{AddEdge, AddNode, AddNodeFragment, UpdateEdgeValidSinceUntil};
+    use crate::writer::Runnable as MutRunnable;
     use super::super::schema::{EdgeSummary, NodeSummary};
     use crate::{DataUrl, Id, TimestampMilli};
     use tokio::time::Duration;

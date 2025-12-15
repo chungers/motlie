@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 use super::reader::{Processor, QueryExecutor, QueryProcessor};
+use crate::reader::Runnable;
 use super::schema::{
     self, DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
 };
@@ -161,19 +162,6 @@ impl QueryProcessor for Query {
             Query::IncomingEdges(q) => q.process_and_send(processor).await,
         }
     }
-}
-
-/// Trait for query builders that can be executed.
-///
-/// Generic over the reader type `R` to allow the same query type to be
-/// executed against different readers (e.g., `graph::Reader` vs `reader::Reader`).
-#[async_trait::async_trait]
-pub trait Runnable<R> {
-    /// The output type this query produces
-    type Output: Send + 'static;
-
-    /// Execute this query against a Reader with the specified timeout
-    async fn run(self, reader: &R, timeout: Duration) -> Result<Self::Output>;
 }
 
 /// Query parameters for finding a node by its ID.
@@ -538,7 +526,10 @@ impl NodeFragmentsByIdTimeRangeDispatch {
             timeout: Duration::from_secs(0),
             result_tx: tx,
         };
-        <NodeFragmentsByIdTimeRangeDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+        <NodeFragmentsByIdTimeRangeDispatch as super::reader::QueryExecutor>::execute(
+            &dispatch, storage,
+        )
+        .await
     }
 }
 
@@ -597,7 +588,10 @@ impl EdgeFragmentsByIdTimeRangeDispatch {
             timeout: Duration::from_secs(0),
             result_tx: tx,
         };
-        <EdgeFragmentsByIdTimeRangeDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+        <EdgeFragmentsByIdTimeRangeDispatch as super::reader::QueryExecutor>::execute(
+            &dispatch, storage,
+        )
+        .await
     }
 }
 
@@ -649,7 +643,10 @@ impl EdgeSummaryBySrcDstNameDispatch {
             timeout: Duration::from_secs(0),
             result_tx: tx,
         };
-        <EdgeSummaryBySrcDstNameDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+        <EdgeSummaryBySrcDstNameDispatch as super::reader::QueryExecutor>::execute(
+            &dispatch, storage,
+        )
+        .await
     }
 }
 
@@ -1511,7 +1508,8 @@ impl QueryExecutor for IncomingEdgesDispatch {
 
 #[cfg(test)]
 mod tests {
-    use super::super::mutation::{AddNode, Runnable as MutRunnable};
+    use super::super::mutation::AddNode;
+    use crate::writer::Runnable as MutRunnable;
     use super::super::reader::{
         create_query_reader, spawn_consumer, Consumer, QueryWithTimeout, Reader, ReaderConfig,
     };
@@ -1643,8 +1641,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_summary_by_src_dst_name_query() {
-        use super::super::mutation::{AddEdge, AddNode, Runnable as MutationRunnable};
+        use super::super::mutation::{AddEdge, AddNode};
         use super::super::schema::EdgeSummary;
+        use crate::writer::Runnable as MutationRunnable;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
         use crate::{Id, TimestampMilli};
         use tempfile::TempDir;
@@ -1756,8 +1755,9 @@ mod tests {
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_basic() {
         use super::super::mutation::{
-            AddEdge, AddEdgeFragment, AddNode, Runnable as MutationRunnable,
+            AddEdge, AddEdgeFragment, AddNode,
         };
+        use crate::writer::Runnable as MutationRunnable;
         use super::super::schema::EdgeSummary;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
         use crate::{Id, TimestampMilli};
@@ -1933,8 +1933,9 @@ mod tests {
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_with_bounds() {
         use super::super::mutation::{
-            AddEdge, AddEdgeFragment, AddNode, Runnable as MutationRunnable,
+            AddEdge, AddEdgeFragment, AddNode,
         };
+        use crate::writer::Runnable as MutationRunnable;
         use super::super::schema::EdgeSummary;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
         use crate::{Id, TimestampMilli};
@@ -2118,8 +2119,9 @@ mod tests {
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_with_temporal_validity() {
         use super::super::mutation::{
-            AddEdge, AddEdgeFragment, AddNode, Runnable as MutationRunnable,
+            AddEdge, AddEdgeFragment, AddNode,
         };
+        use crate::writer::Runnable as MutationRunnable;
         use super::super::schema::EdgeSummary;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
         use crate::{Id, TemporalRange, TimestampMilli};
@@ -2297,8 +2299,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_empty_result() {
-        use super::super::mutation::{AddEdge, AddNode, Runnable as MutationRunnable};
+        use super::super::mutation::{AddEdge, AddNode};
         use super::super::schema::{EdgeSummary, NodeSummary};
+        use crate::writer::Runnable as MutationRunnable;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
         use crate::{Id, TimestampMilli};
         use std::ops::Bound;

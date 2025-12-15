@@ -36,13 +36,15 @@ mod tests;
 
 // Re-export commonly used types from submodules
 pub use mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch, Runnable,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
     UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
 };
+pub use crate::writer::Runnable;
 pub use query::{
     EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, IncomingEdges, NodeById,
-    NodeFragmentsByIdTimeRange, OutgoingEdges, Query, Runnable as QueryRunnable,
+    NodeFragmentsByIdTimeRange, OutgoingEdges, Query,
 };
+pub use crate::reader::Runnable as QueryRunnable;
 pub use reader::{
     // Query consumer functions
     create_query_consumer,
