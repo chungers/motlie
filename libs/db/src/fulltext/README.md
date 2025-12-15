@@ -195,8 +195,9 @@ let fulltext_handles = spawn_fulltext_query_consumer_pool_shared(
 Multiple clients can concurrently issue both graph and fulltext queries:
 
 ```rust
-use motlie_db::graph::query::{NodeById, OutgoingEdges, QueryRunnable};
-use motlie_db::fulltext::{Nodes as FulltextNodes, Runnable as FulltextQueryRunnable};
+use motlie_db::graph::query::{NodeById, OutgoingEdges};
+use motlie_db::fulltext::Nodes as FulltextNodes;
+use motlie_db::reader::Runnable as QueryRunnable;  // Unified trait for all queries
 use std::time::Duration;
 
 // Client 1: Graph queries
@@ -561,7 +562,8 @@ AddNodeFragment {
 Searches for nodes and node fragments, returning deduplicated results by node ID:
 
 ```rust
-use motlie_db::fulltext::{Nodes as FulltextNodes, FuzzyLevel, Runnable as FulltextQueryRunnable};
+use motlie_db::fulltext::{Nodes as FulltextNodes, FuzzyLevel};
+use motlie_db::reader::Runnable;  // Unified query trait
 
 // Basic search - returns top 10 results
 let results = FulltextNodes::new("rust programming".to_string(), 10)
@@ -662,7 +664,8 @@ See the "Tag Extraction" section in schema.rs for supported tag formats.
 Searches for edges and edge fragments, returning deduplicated results by edge key (src_id, dst_id, edge_name):
 
 ```rust
-use motlie_db::fulltext::{Edges as FulltextEdges, FuzzyLevel, Runnable as FulltextQueryRunnable};
+use motlie_db::fulltext::{Edges as FulltextEdges, FuzzyLevel};
+use motlie_db::reader::Runnable;  // Unified query trait
 
 // Basic search
 let results = FulltextEdges::new("collaborates".to_string(), 10)

@@ -7,7 +7,8 @@
 //! - Retrieve and rank results using BM25 scoring
 
 use motlie_db::fulltext::spawn_mutation_consumer as spawn_fulltext_mutation_consumer;
-use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment, Runnable as MutationRunnable};
+use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
 use motlie_db::{DataUrl, Id, TimestampMilli};

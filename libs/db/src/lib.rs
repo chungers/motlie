@@ -14,6 +14,7 @@ pub mod fulltext;
 // Users access via fully qualified paths: motlie_db::query::*, motlie_db::reader::*
 pub mod query;
 pub mod reader;
+pub mod writer;
 
 /// Custom error type for Id parsing
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -440,7 +441,8 @@ impl From<Id> for [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::mutation::{AddEdge, AddNode, AddNodeFragment, Runnable as MutRunnable};
+    use crate::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
+    use crate::writer::Runnable as MutRunnable;
     use crate::graph::schema::{EdgeSummary, NodeSummary};
     use crate::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
     use tokio::time::Duration;

@@ -38,8 +38,9 @@ use motlie_db::fulltext::{
     spawn_mutation_consumer as spawn_fulltext_mutation_consumer, Index, Storage as FulltextStorage,
 };
 use motlie_db::graph::mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Runnable as MutationRunnable,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
 };
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,

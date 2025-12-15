@@ -94,6 +94,7 @@
 //! - [`fulltext::reader`](crate::fulltext::reader) - Fulltext-only reader (advanced use)
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::task::JoinHandle;
@@ -147,6 +148,37 @@ impl ReaderConfig {
 }
 
 // ============================================================================
+// Runnable Trait
+// ============================================================================
+
+/// Trait for query builders that can be executed via a Reader.
+///
+/// This trait is generic over the reader type `R`, which allows the same query type
+/// (e.g., `Nodes`) to be executed against different readers with different return types:
+///
+/// - `Runnable<fulltext::Reader>` → returns raw fulltext hits (e.g., `Vec<NodeHit>`)
+/// - `Runnable<reader::Reader>` → returns hydrated graph data (e.g., `Vec<NodeResult>`)
+///
+/// # Example
+///
+/// ```ignore
+/// use motlie_db::fulltext::{Nodes, Runnable, Reader as FulltextReader};
+/// use motlie_db::reader::Reader as UnifiedReader;
+///
+/// // Same Nodes type, different output based on reader
+/// let hits: Vec<NodeHit> = Nodes::new("rust", 10).run(&fulltext_reader, timeout).await?;
+/// let results: Vec<NodeResult> = Nodes::new("rust", 10).run(&unified_reader, timeout).await?;
+/// ```
+#[async_trait::async_trait]
+pub trait Runnable<R> {
+    /// The output type this query produces
+    type Output: Send + 'static;
+
+    /// Execute this query against the specified reader with the given timeout
+    async fn run(self, reader: &R, timeout: Duration) -> Result<Self::Output>;
+}
+
+// ============================================================================
 // Storage - Unified storage with lazy initialization
 // ============================================================================
 
@@ -187,10 +219,7 @@ impl Storage {
     /// # Arguments
     /// * `graph_path` - Path to the graph database (RocksDB)
     /// * `fulltext_path` - Path to the fulltext index (Tantivy)
-    pub fn readonly(
-        graph_path: &std::path::Path,
-        fulltext_path: &std::path::Path,
-    ) -> Self {
+    pub fn readonly(graph_path: &std::path::Path, fulltext_path: &std::path::Path) -> Self {
         Self {
             graph_storage: graph::Storage::readonly(graph_path),
             fulltext_storage: fulltext::Storage::readonly(fulltext_path),
@@ -202,10 +231,7 @@ impl Storage {
     /// # Arguments
     /// * `graph_path` - Path to the graph database (RocksDB)
     /// * `fulltext_path` - Path to the fulltext index (Tantivy)
-    pub fn readwrite(
-        graph_path: &std::path::Path,
-        fulltext_path: &std::path::Path,
-    ) -> Self {
+    pub fn readwrite(graph_path: &std::path::Path, fulltext_path: &std::path::Path) -> Self {
         Self {
             graph_storage: graph::Storage::readwrite(graph_path),
             fulltext_storage: fulltext::Storage::readwrite(fulltext_path),
@@ -240,11 +266,7 @@ impl Storage {
     /// // Clean shutdown
     /// handle.shutdown().await?;
     /// ```
-    pub fn ready(
-        mut self,
-        config: ReaderConfig,
-        num_workers: usize,
-    ) -> Result<StorageHandle> {
+    pub fn ready(mut self, config: ReaderConfig, num_workers: usize) -> Result<StorageHandle> {
         // Initialize both subsystems
         self.graph_storage.ready()?;
         self.fulltext_storage.ready()?;
@@ -538,9 +560,19 @@ impl ReaderBuilder {
     ///
     /// Returns the Reader and JoinHandles for all spawned workers.
     /// The handles are grouped as (unified_handles, graph_handles, fulltext_handles).
-    pub fn build(self) -> (Reader, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
+    pub fn build(
+        self,
+    ) -> (
+        Reader,
+        Vec<JoinHandle<()>>,
+        Vec<JoinHandle<()>>,
+        Vec<JoinHandle<()>>,
+    ) {
         // Create shared composite storage
-        let composite_storage = Arc::new(CompositeStorage::new(self.graph.clone(), self.fulltext.clone()));
+        let composite_storage = Arc::new(CompositeStorage::new(
+            self.graph.clone(),
+            self.fulltext.clone(),
+        ));
 
         // Create graph reader and consumer pool
         let (graph_reader, graph_receiver) =
@@ -562,11 +594,8 @@ impl ReaderBuilder {
 
         // Create unified search channel and consumer pool
         let (sender, receiver) = flume::bounded(self.config.channel_buffer_size);
-        let unified_handles = spawn_consumer_pool(
-            receiver,
-            composite_storage.clone(),
-            self.num_workers,
-        );
+        let unified_handles =
+            spawn_consumer_pool(receiver, composite_storage.clone(), self.num_workers);
 
         let reader = Reader {
             sender,
@@ -624,7 +653,12 @@ pub fn spawn_consumer_pool(
 pub fn create_reader(
     graph: Arc<graph::Graph>,
     fulltext: Arc<fulltext::Index>,
-) -> (Reader, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
+) -> (
+    Reader,
+    Vec<JoinHandle<()>>,
+    Vec<JoinHandle<()>>,
+    Vec<JoinHandle<()>>,
+) {
     ReaderBuilder::new(graph, fulltext).build()
 }
 
@@ -643,7 +677,12 @@ pub fn create_reader_with_config(
     fulltext: Arc<fulltext::Index>,
     config: ReaderConfig,
     num_workers: usize,
-) -> (Reader, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>, Vec<JoinHandle<()>>) {
+) -> (
+    Reader,
+    Vec<JoinHandle<()>>,
+    Vec<JoinHandle<()>>,
+    Vec<JoinHandle<()>>,
+) {
     ReaderBuilder::new(graph, fulltext)
         .with_config(config)
         .with_num_workers(num_workers)

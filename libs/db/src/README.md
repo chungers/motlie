@@ -8,12 +8,15 @@ This document describes the design patterns and file organization used across th
 src/
 ├── lib.rs              # Crate root - common types (Id, TimestampMilli, DataUrl, TemporalRange)
 ├── README.md           # This file
+├── reader.rs           # Unified reader module - Runnable trait for queries
+├── writer.rs           # Unified writer module - Runnable trait for mutations
+├── query.rs            # Unified query module - composes fulltext + graph queries
 ├── graph/              # RocksDB-based graph storage
 │   ├── mod.rs          # Storage, Graph struct, module exports
 │   ├── schema.rs       # Column family definitions, key/value types
-│   ├── mutation.rs     # Mutation types (AddNode, AddEdge, etc.)
+│   ├── mutation.rs     # Mutation types (AddNode, AddEdge, etc.) + Runnable impls
 │   ├── writer.rs       # Writer/MutationConsumer infrastructure
-│   ├── query.rs        # Query types (NodeById, OutgoingEdges, etc.)
+│   ├── query.rs        # Query types (NodeById, OutgoingEdges, etc.) + Runnable impls
 │   ├── reader.rs       # Reader/QueryConsumer infrastructure
 │   ├── scan.rs         # Pagination/iteration API
 │   └── tests.rs        # Module-level tests
@@ -21,7 +24,7 @@ src/
     ├── mod.rs          # Storage, Index struct, module exports
     ├── mutation.rs     # Mutation processing for index updates
     ├── writer.rs       # Writer/MutationConsumer infrastructure
-    ├── query.rs        # Query types (Nodes fulltext search)
+    ├── query.rs        # Query types (Nodes, Edges fulltext search) + Runnable impls
     ├── reader.rs       # Reader/QueryConsumer infrastructure
     ├── search.rs       # Low-level search utilities
     ├── fuzzy.rs        # Fuzzy search implementation
@@ -38,9 +41,9 @@ Both `graph` and `fulltext` modules follow the same architectural pattern for co
 |------|---------|
 | `mod.rs` | Module entry point with `Storage` and processor (`Graph`/`Index`) structs, re-exports |
 | `schema.rs` | Data schema definitions (graph only - column families, key/value types) |
-| `mutation.rs` | Mutation types and the `Runnable` trait for executing mutations |
+| `mutation.rs` | Mutation types and their `Runnable` trait implementations |
 | `writer.rs` | `Writer`, `WriterConfig`, mutation consumer spawn functions, `Processor` trait |
-| `query.rs` | Query types and the `Runnable` trait for executing queries |
+| `query.rs` | Query types and their `Runnable` trait implementations |
 | `reader.rs` | `Reader`, `ReaderConfig`, query consumer spawn functions, `Processor` trait |
 | `scan.rs` | Pagination API for iterating over records (graph only) |
 | `search.rs` | Low-level search utilities (fulltext only) |
@@ -54,8 +57,17 @@ Both `graph` and `fulltext` modules follow the same architectural pattern for co
 | **Processor** | `graph::Graph` | `fulltext::Index` |
 | **Writer** | `graph::Writer` | Uses graph `Writer` |
 | **Reader** | `graph::Reader` | `fulltext::Reader` |
-| **Mutation Trait** | `mutation::Runnable` | N/A (uses graph mutations) |
-| **Query Trait** | `query::Runnable` | `query::Runnable` |
+| **Mutation Trait** | `writer::Runnable` | N/A (uses graph mutations) |
+| **Query Trait** | `reader::Runnable` | `reader::Runnable` |
+
+### Unified Trait Modules
+
+The `Runnable` traits are defined at the crate level for consistency:
+
+- **`motlie_db::writer::Runnable`** - Trait for mutations that can be executed against a `Writer`
+- **`motlie_db::reader::Runnable`** - Trait for queries that can be executed against a `Reader`
+
+Both graph and fulltext modules re-export these traits for convenience.
 
 ### Storage Layer
 

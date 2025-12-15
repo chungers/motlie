@@ -606,7 +606,7 @@ impl Visitable for AllEdgeFragments {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::mutation::Runnable;
+    use crate::writer::Runnable;
     use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
     use super::super::mutation::{AddEdge, AddNode};
     use crate::DataUrl;

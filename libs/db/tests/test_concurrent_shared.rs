@@ -17,8 +17,10 @@
 mod common;
 
 use common::concurrent_test_utils::{Metrics, TestContext};
-use motlie_db::graph::mutation::{AddEdge, AddNode, Runnable as MutationRunnable};
-use motlie_db::graph::query::{NodeById, Runnable as QueryRunnable};
+use motlie_db::graph::mutation::{AddEdge, AddNode};
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::query::NodeById;
+use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::graph::reader::{Reader, ReaderConfig, spawn_query_consumer_with_graph};
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{

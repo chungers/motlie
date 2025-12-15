@@ -121,6 +121,9 @@ use tokio::sync::oneshot;
 
 use crate::fulltext;
 use crate::graph;
+
+// Re-export Runnable trait from reader module
+pub use crate::reader::Runnable;
 use crate::graph::schema::{
     DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
 };
@@ -151,27 +154,6 @@ pub type Edges = fulltext::query::Edges;
 // Re-export other query-related types
 pub use crate::fulltext::query::FuzzyLevel;
 pub use crate::fulltext::search::{EdgeHit, MatchSource, NodeHit};
-
-// ============================================================================
-// Runnable Trait - Unified query execution
-// ============================================================================
-
-/// Trait for executing queries against a reader.
-///
-/// Query types implement this trait for `reader::Reader` to enable unified
-/// query execution that composes fulltext search with graph hydration.
-///
-/// Note: This is a distinct trait from `graph::query::Runnable<R>` and
-/// `fulltext::query::Runnable<R>`. Import only the trait you need to avoid
-/// ambiguity, or use fully qualified syntax if multiple are in scope.
-#[async_trait::async_trait]
-pub trait Runnable<R> {
-    /// The output type this query produces
-    type Output: Send + 'static;
-
-    /// Execute this query against the specified reader with the given timeout.
-    async fn run(self, reader: &R, timeout: Duration) -> Result<Self::Output>;
-}
 
 // ============================================================================
 // Re-exports from graph::query

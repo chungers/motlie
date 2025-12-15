@@ -29,6 +29,7 @@ use tantivy::schema::{Field, Value};
 use tokio::sync::oneshot;
 
 use super::reader::{Processor, QueryExecutor, QueryProcessor, Reader};
+use crate::reader::Runnable;
 use super::search::{EdgeHit, MatchSource, NodeHit};
 use super::Storage;
 use crate::Id;
@@ -183,8 +184,16 @@ pub enum Search {
 impl std::fmt::Display for Search {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Search::Nodes(q) => write!(f, "FulltextNodes: query={}, limit={}", q.params.query, q.params.limit),
-            Search::Edges(q) => write!(f, "FulltextEdges: query={}, limit={}", q.params.query, q.params.limit),
+            Search::Nodes(q) => write!(
+                f,
+                "FulltextNodes: query={}, limit={}",
+                q.params.query, q.params.limit
+            ),
+            Search::Edges(q) => write!(
+                f,
+                "FulltextEdges: query={}, limit={}",
+                q.params.query, q.params.limit
+            ),
             Search::Facets(q) => write!(
                 f,
                 "FulltextFacets: doc_type_filter={:?}, tags_limit={}",
@@ -192,37 +201,6 @@ impl std::fmt::Display for Search {
             ),
         }
     }
-}
-
-// ============================================================================
-// Runnable Trait
-// ============================================================================
-
-/// Trait for query builders that can be executed via a Reader.
-///
-/// This trait is generic over the reader type `R`, which allows the same query type
-/// (e.g., `Nodes`) to be executed against different readers with different return types:
-///
-/// - `Runnable<fulltext::Reader>` → returns raw fulltext hits (e.g., `Vec<NodeHit>`)
-/// - `Runnable<reader::Reader>` → returns hydrated graph data (e.g., `Vec<NodeResult>`)
-///
-/// # Example
-///
-/// ```ignore
-/// use motlie_db::fulltext::{Nodes, Runnable, Reader as FulltextReader};
-/// use motlie_db::reader::Reader as UnifiedReader;
-///
-/// // Same Nodes type, different output based on reader
-/// let hits: Vec<NodeHit> = Nodes::new("rust", 10).run(&fulltext_reader, timeout).await?;
-/// let results: Vec<NodeResult> = Nodes::new("rust", 10).run(&unified_reader, timeout).await?;
-/// ```
-#[async_trait::async_trait]
-pub trait Runnable<R> {
-    /// The output type this query produces
-    type Output: Send + 'static;
-
-    /// Execute this query against the specified reader with the given timeout
-    async fn run(self, reader: &R, timeout: Duration) -> Result<Self::Output>;
 }
 
 // ============================================================================
@@ -434,9 +412,9 @@ impl QueryExecutor for NodesDispatch {
                     index,
                     vec![fields.content_field, fields.node_name_field],
                 );
-                let parsed = query_parser
-                    .parse_query(&params.query)
-                    .map_err(|e| anyhow::anyhow!("Failed to parse query '{}': {}", params.query, e))?;
+                let parsed = query_parser.parse_query(&params.query).map_err(|e| {
+                    anyhow::anyhow!("Failed to parse query '{}': {}", params.query, e)
+                })?;
                 parsed
             }
         } else {
@@ -537,7 +515,9 @@ impl QueryExecutor for NodesDispatch {
             };
 
             // Extract doc_type to determine match source
-            let match_source = match doc.get_first(fields.doc_type_field).and_then(|v| v.as_str())
+            let match_source = match doc
+                .get_first(fields.doc_type_field)
+                .and_then(|v| v.as_str())
             {
                 Some("nodes") => MatchSource::NodeName,
                 Some("node_fragments") => MatchSource::NodeFragment,
@@ -792,9 +772,9 @@ impl QueryExecutor for EdgesDispatch {
                     index,
                     vec![fields.content_field, fields.edge_name_field],
                 );
-                let parsed = query_parser
-                    .parse_query(&params.query)
-                    .map_err(|e| anyhow::anyhow!("Failed to parse query '{}': {}", params.query, e))?;
+                let parsed = query_parser.parse_query(&params.query).map_err(|e| {
+                    anyhow::anyhow!("Failed to parse query '{}': {}", params.query, e)
+                })?;
                 parsed
             }
         } else {
@@ -927,7 +907,9 @@ impl QueryExecutor for EdgesDispatch {
             }
 
             // Extract doc_type to determine match source
-            let match_source = match doc.get_first(fields.doc_type_field).and_then(|v| v.as_str())
+            let match_source = match doc
+                .get_first(fields.doc_type_field)
+                .and_then(|v| v.as_str())
             {
                 Some("edges") => MatchSource::EdgeName,
                 Some("edge_fragments") => MatchSource::EdgeFragment,
@@ -950,14 +932,16 @@ impl QueryExecutor for EdgesDispatch {
         // Convert to results and sort by score
         let mut results: Vec<EdgeHit> = edge_hits
             .into_iter()
-            .map(|((src_id, dst_id, edge_name), (score, match_source))| EdgeHit {
-                score,
-                src_id,
-                dst_id,
-                edge_name,
-                fragment_timestamp: None, // Deduplicated results don't track individual fragments
-                match_source,
-            })
+            .map(
+                |((src_id, dst_id, edge_name), (score, match_source))| EdgeHit {
+                    score,
+                    src_id,
+                    dst_id,
+                    edge_name,
+                    fragment_timestamp: None, // Deduplicated results don't track individual fragments
+                    match_source,
+                },
+            )
             .collect();
 
         results.sort_by(|a, b| {
@@ -1258,7 +1242,8 @@ mod tests {
     };
     use crate::fulltext::writer::spawn_mutation_consumer;
     use crate::fulltext::{Index, Storage};
-    use crate::graph::mutation::{AddNode, AddNodeFragment, Runnable as MutRunnable};
+    use crate::graph::mutation::{AddNode, AddNodeFragment};
+    use crate::writer::Runnable as MutRunnable;
     use crate::graph::schema::NodeSummary;
     use crate::graph::writer::{create_mutation_writer, WriterConfig};
     use crate::{DataUrl, TimestampMilli};
