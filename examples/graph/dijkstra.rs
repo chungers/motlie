@@ -12,6 +12,16 @@
 /// - Airline route planning
 /// - Game AI pathfinding
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{OutgoingEdges, Runnable}`, `motlie_db::graph::query::NodeById`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
 /// Usage: dijkstra <db_path>
 
 // Include the common module
@@ -52,6 +62,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -80,6 +91,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[district_start + dst_offset],
                 name: format!("road_d{}_{}_{}", district, src_offset, dst_offset),
                 weight: Some(weight),
+                summary: None,
             });
         }
 
@@ -92,6 +104,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[next_district_start],
                 name: format!("highway_{}_{}", district, district + 1),
                 weight: Some(3.0),
+                summary: None,
             });
             // Reverse highway
             edges.push(GraphEdge {
@@ -99,6 +112,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[district_start + 9],
                 name: format!("highway_{}_{}_rev", district + 1, district),
                 weight: Some(3.0),
+                summary: None,
             });
         }
     }

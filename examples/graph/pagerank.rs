@@ -15,6 +15,16 @@
 /// - The importance of nodes providing those links
 /// - A damping factor (usually 0.85) modeling random surfer behavior
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{NodesByIdsMulti, IncomingEdges, OutgoingEdges, Runnable}`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// Uses `NodesByIdsMulti` for efficient batch lookup of all node names during
+/// initialization, reducing RocksDB calls from N to 1.
+///
 /// Usage: pagerank <db_path>
 
 // Include the common module
@@ -53,6 +63,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -85,6 +96,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[website_start + dst_offset],
                 name: format!("link_w{}_{}_{}", website, src_offset, dst_offset),
                 weight: Some(1.0),
+                summary: None,
             });
         }
 
@@ -99,6 +111,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[next_website_start],
                 name: format!("external_{}_{}", website, website + 1),
                 weight: Some(1.0),
+                summary: None,
             });
 
             // Page_D of current site links to next site's Page_D
@@ -107,6 +120,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[next_website_start + 3],
                 name: format!("hub_link_{}_{}", website, website + 1),
                 weight: Some(1.0),
+                summary: None,
             });
 
             // Next site's Page_A links back to current site's Page_A (reciprocal link)
@@ -115,6 +129,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[website_start],
                 name: format!("backlink_{}_{}", website + 1, website),
                 weight: Some(1.0),
+                summary: None,
             });
         }
     }

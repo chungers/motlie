@@ -9,6 +9,16 @@
 /// - Course prerequisite ordering
 /// - Dependency resolution
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{OutgoingEdges, Runnable}`, `motlie_db::graph::query::NodeById`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
 /// Usage: toposort <db_path>
 
 // Include the common module
@@ -49,6 +59,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -81,6 +92,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[module_start + dst_offset],
                 name: format!("dep_m{}_{}_{}", module, src_offset, dst_offset),
                 weight: Some(1.0),
+                summary: None,
             });
         }
 
@@ -93,6 +105,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[next_module_start], // next Start
                 name: format!("bridge_m{}_to_m{}", module, module + 1),
                 weight: Some(1.0),
+                summary: None,
             });
         }
     }

@@ -8,6 +8,16 @@
 /// - Level-order traversal
 /// - Finding connected components
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{NodesByIdsMulti, OutgoingEdges, Runnable}`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
 /// Usage: bfs <db_path>
 
 // Include the common module
@@ -52,6 +62,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -72,6 +83,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                     target: all_node_ids[child],
                     name: format!("edge_{}_{}", i, child),
                     weight: Some(1.0),
+                    summary: None,
                 });
             }
         }
@@ -99,7 +111,7 @@ fn bfs_petgraph(start_node: NodeIndex, graph: &DiGraph<String, f64>) -> Vec<Stri
 /// current frontier level, reducing the number of RocksDB calls.
 async fn bfs_motlie(
     start_node: Id,
-    reader: &motlie_db::graph::reader::Reader,
+    reader: &motlie_db::reader::Reader,
     timeout: Duration,
 ) -> Result<Vec<String>> {
     let mut visited = HashSet::new();
@@ -156,7 +168,7 @@ async fn bfs_motlie(
 /// Uses level-order processing with NodesByIdsMulti for efficient batch lookups.
 async fn bfs_with_levels(
     start_node: Id,
-    reader: &motlie_db::graph::reader::Reader,
+    reader: &motlie_db::reader::Reader,
     timeout: Duration,
 ) -> Result<HashMap<String, usize>> {
     let mut levels = HashMap::new();
@@ -282,7 +294,7 @@ async fn main() -> Result<()> {
             let start_id = name_to_id[&start_name];
             let timeout = Duration::from_secs(60); // Longer timeout for large graphs
 
-            let (result, time_ms, memory) = measure_time_and_memory_async(|| bfs_motlie(start_id, reader.graph(), timeout)).await;
+            let (result, time_ms, memory) = measure_time_and_memory_async(|| bfs_motlie(start_id, &reader, timeout)).await;
             let result = result?;
             let result_hash = Some(compute_hash(&result));
 
