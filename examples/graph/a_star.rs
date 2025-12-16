@@ -29,7 +29,7 @@ use common::{
     measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge,
     GraphMetrics, GraphNode, Implementation,
 };
-use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::query::{OutgoingEdges, Runnable as QueryRunnable};
 use motlie_db::Id;
 use pathfinding::prelude::astar as pathfinding_astar;
 use std::cmp::Ordering;
@@ -373,7 +373,7 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run A* with motlie_db
-            let (reader, name_to_id_built, _query_handle) =
+            let (reader, name_to_id_built, _handles) =
                 build_graph(db_path, nodes, edges).await?;
             let start_id = name_to_id_built[&start_name];
             let end_id = name_to_id_built[&end_name];
@@ -387,7 +387,7 @@ async fn main() -> Result<()> {
             let timeout = Duration::from_secs(120); // Longer timeout for large graphs
 
             let (result, time_ms, memory) = measure_time_and_memory_async(|| {
-                astar_motlie(start_id, end_id, &positions_rebuilt, &reader, timeout)
+                astar_motlie(start_id, end_id, &positions_rebuilt, reader.graph(), timeout)
             })
             .await;
             let result = result?;

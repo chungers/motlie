@@ -30,7 +30,7 @@ use common::{
     measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode,
     Implementation,
 };
-use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::query::{OutgoingEdges, Runnable as QueryRunnable};
 use motlie_db::Id;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -657,7 +657,7 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run Louvain with motlie_db
-            let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
+            let (reader, name_to_id, _handles) = build_graph(db_path, nodes, edges).await?;
 
             // Rebuild id_to_name with IDs from build_graph
             let id_to_name_rebuilt: HashMap<Id, String> = name_to_id
@@ -670,7 +670,7 @@ async fn main() -> Result<()> {
             let timeout = Duration::from_secs(120);
 
             let (result, time_ms, memory) = measure_time_and_memory_async(|| {
-                louvain_motlie(&node_ids_rebuilt, &id_to_name_rebuilt, &reader, timeout)
+                louvain_motlie(&node_ids_rebuilt, &id_to_name_rebuilt, reader.graph(), timeout)
             })
             .await;
             let result = result?;

@@ -1,49 +1,48 @@
-//! Unified reader module composing graph and fulltext query infrastructure.
+//! Unified reader infrastructure for graph and fulltext query subsystems.
 //!
-//! This module provides the [`Storage`], [`StorageHandle`], and [`Reader`] types
-//! that manage both graph (RocksDB) and fulltext (Tantivy) query subsystems,
-//! forwarding queries to the appropriate backend.
+//! This module provides the [`Reader`], [`ReaderConfig`], and [`ReaderBuilder`] types
+//! for executing queries across both graph (RocksDB) and fulltext (Tantivy) backends.
 //!
-//! # Quick Start
+//! # Usage
 //!
-//! The recommended way to initialize the unified query system is via [`Storage::ready()`]:
+//! The recommended entry point is [`Storage`](crate::Storage) at the crate root.
+//! This module provides the infrastructure types used by `Storage::ready()`.
 //!
 //! ```ignore
-//! use motlie_db::reader::{Storage, ReaderConfig, StorageHandle};
-//! use motlie_db::query::{Nodes, NodeById, OutgoingEdges, Runnable};
+//! use motlie_db::{Storage, StorageConfig};
+//! use motlie_db::query::{Nodes, Runnable};
 //! use std::time::Duration;
 //!
-//! // 1. Create unified storage pointing to both databases
+//! // Read-only mode: Storage::readonly() → ReadOnlyHandles
 //! let storage = Storage::readonly(graph_path, fulltext_path);
+//! let handles = storage.ready(StorageConfig::default())?;
 //!
-//! // 2. Initialize storage and get the handle
-//! let handle = storage.ready(ReaderConfig::default(), 4)?;
-//!
+//! // Execute queries via the reader
 //! let timeout = Duration::from_secs(5);
-//!
-//! // 3. Execute queries through the reader
-//!
-//! // Fulltext search with automatic graph hydration
-//! let results = Nodes::new("rust programming".to_string(), 10)
-//!     .run(handle.reader(), timeout)
+//! let results = Nodes::new("query".to_string(), 10)
+//!     .run(handles.reader(), timeout)
 //!     .await?;
 //!
-//! // Direct graph lookups
-//! let (name, summary) = NodeById::new(node_id, None)
-//!     .run(handle.reader(), timeout)
+//! // Read-write mode: Storage::readwrite() → ReadWriteHandles
+//! // Both reader() and writer() are available
+//! let storage = Storage::readwrite(graph_path, fulltext_path);
+//! let handles = storage.ready(StorageConfig::default())?;
+//! let results = Nodes::new("query".to_string(), 10)
+//!     .run(handles.reader(), timeout)
 //!     .await?;
-//!
-//! let edges = OutgoingEdges::new(node_id, None)
-//!     .run(handle.reader(), timeout)
-//!     .await?;
-//!
-//! // 4. Clean shutdown
-//! handle.shutdown().await?;
 //! ```
 //!
-//! # Architecture
+//! # Key Types
 //!
-//! The unified reader manages three query pipelines:
+//! | Type | Description |
+//! |------|-------------|
+//! | [`Reader`] | Query interface for both graph and fulltext |
+//! | [`ReaderConfig`] | Configuration for channel buffer sizes |
+//! | [`ReaderBuilder`] | Builder for creating Reader with infrastructure |
+//! | [`Runnable`] | Trait for executing queries against a reader |
+//! | [`CompositeStorage`] | Internal storage reference for query execution |
+//!
+//! # Architecture
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────────┐
@@ -53,7 +52,6 @@
 //! │  │                    Unified Query Pipeline                           │ │
 //! │  │  Handles: Nodes, Edges (fulltext search + graph hydration)          │ │
 //! │  │           NodeById, OutgoingEdges, IncomingEdges (forwarded)        │ │
-//! │  │           EdgeDetails, NodeFragments, EdgeFragments (forwarded)     │ │
 //! │  └────────────────────────────────────────────────────────────────────┘ │
 //! │                              │                                           │
 //! │              ┌───────────────┴───────────────┐                          │
@@ -77,18 +75,9 @@
 //! └─────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # Key Types
-//!
-//! | Type | Description |
-//! |------|-------------|
-//! | [`Storage`] | Unified storage configuration with `readonly()` and `readwrite()` constructors |
-//! | [`StorageHandle`] | Lifecycle manager returned by `Storage::ready()` with `shutdown()` method |
-//! | [`Reader`] | Query interface obtained via `StorageHandle::reader()` |
-//! | [`ReaderConfig`] | Configuration for channel buffer sizes |
-//! | [`CompositeStorage`] | Internal storage reference for query execution |
-//!
 //! # See Also
 //!
+//! - [`Storage`](crate::Storage) - Entry point for unified API
 //! - [`query`](crate::query) - Query types that work with this reader
 //! - [`graph::reader`](crate::graph::reader) - Graph-only reader (advanced use)
 //! - [`fulltext::reader`](crate::fulltext::reader) - Fulltext-only reader (advanced use)
@@ -179,264 +168,6 @@ pub trait Runnable<R> {
 }
 
 // ============================================================================
-// Storage - Unified storage with lazy initialization
-// ============================================================================
-
-/// Unified storage combining graph (RocksDB) and fulltext (Tantivy).
-///
-/// This struct manages both storage backends and provides the `ready()` method
-/// to initialize them and set up the MPMC query pipelines.
-///
-/// # Usage
-///
-/// ```ignore
-/// use motlie_db::reader::{Storage, ReaderConfig};
-/// use std::path::Path;
-///
-/// // Create storage configuration (read-write mode)
-/// let mut storage = Storage::readwrite(
-///     Path::new("/path/to/graph"),
-///     Path::new("/path/to/fulltext"),
-/// );
-///
-/// // Initialize storage and get the reader
-/// let (reader, handles) = storage.ready(ReaderConfig::default(), 4)?;
-///
-/// // Use the reader for queries
-/// let results = Nodes::new("query", 10).run(&reader, timeout).await?;
-/// ```
-pub struct Storage {
-    /// Graph storage (lazily initialized)
-    graph_storage: graph::Storage,
-
-    /// Fulltext storage (lazily initialized)
-    fulltext_storage: fulltext::Storage,
-}
-
-impl Storage {
-    /// Create a new readonly unified Storage.
-    ///
-    /// # Arguments
-    /// * `graph_path` - Path to the graph database (RocksDB)
-    /// * `fulltext_path` - Path to the fulltext index (Tantivy)
-    pub fn readonly(graph_path: &std::path::Path, fulltext_path: &std::path::Path) -> Self {
-        Self {
-            graph_storage: graph::Storage::readonly(graph_path),
-            fulltext_storage: fulltext::Storage::readonly(fulltext_path),
-        }
-    }
-
-    /// Create a new read-write unified Storage.
-    ///
-    /// # Arguments
-    /// * `graph_path` - Path to the graph database (RocksDB)
-    /// * `fulltext_path` - Path to the fulltext index (Tantivy)
-    pub fn readwrite(graph_path: &std::path::Path, fulltext_path: &std::path::Path) -> Self {
-        Self {
-            graph_storage: graph::Storage::readwrite(graph_path),
-            fulltext_storage: fulltext::Storage::readwrite(fulltext_path),
-        }
-    }
-
-    /// Initialize both storage backends and create the MPMC query pipelines.
-    ///
-    /// This method:
-    /// 1. Calls `ready()` on both graph and fulltext storage
-    /// 2. Creates the MPMC channels and consumer pools for all query types
-    /// 3. Returns a [`StorageHandle`] that manages the Reader and worker lifecycle
-    ///
-    /// Note: This consumes the Storage struct since the underlying storage
-    /// objects are moved into Arc wrappers.
-    ///
-    /// # Arguments
-    /// * `config` - Reader configuration for channel buffer sizes
-    /// * `num_workers` - Number of worker tasks per subsystem
-    ///
-    /// # Returns
-    /// A [`StorageHandle`] providing access to the Reader and clean shutdown
-    ///
-    /// # Example
-    /// ```ignore
-    /// let storage = Storage::readonly(graph_path, fulltext_path);
-    /// let handle = storage.ready(ReaderConfig::default(), 4)?;
-    ///
-    /// // Use the reader
-    /// let results = Nodes::new("query", 10).run(handle.reader(), timeout).await?;
-    ///
-    /// // Clean shutdown
-    /// handle.shutdown().await?;
-    /// ```
-    pub fn ready(mut self, config: ReaderConfig, num_workers: usize) -> Result<StorageHandle> {
-        // Initialize both subsystems
-        self.graph_storage.ready()?;
-        self.fulltext_storage.ready()?;
-
-        // Wrap storage in Arc and create Graph/Index
-        let graph_arc = Arc::new(self.graph_storage);
-        let fulltext_arc = Arc::new(self.fulltext_storage);
-
-        let graph = Arc::new(graph::Graph::new(graph_arc));
-        let fulltext = Arc::new(fulltext::Index::new(fulltext_arc));
-
-        // Build the reader and get all handles
-        let (reader, unified_handles, graph_handles, fulltext_handles) =
-            ReaderBuilder::new(graph, fulltext)
-                .with_config(config)
-                .with_num_workers(num_workers)
-                .build();
-
-        // Combine all handles
-        let mut all_handles = unified_handles;
-        all_handles.extend(graph_handles);
-        all_handles.extend(fulltext_handles);
-
-        Ok(StorageHandle {
-            reader,
-            handles: all_handles,
-        })
-    }
-}
-
-// ============================================================================
-// StorageHandle - Lifecycle manager for Reader and worker tasks
-// ============================================================================
-
-/// Handle returned by [`Storage::ready()`] that manages the Reader and worker lifecycle.
-///
-/// This struct provides:
-/// - Access to the [`Reader`] for executing queries
-/// - A [`shutdown()`](StorageHandle::shutdown) method for clean termination
-///
-/// # Lifecycle
-///
-/// ```text
-/// Storage::ready()  →  StorageHandle  →  shutdown()
-///       │                    │                │
-///       │                    │                ├── Drops Reader (closes channels)
-///       │                    │                └── Awaits all worker handles
-///       │                    │
-///       │                    └── Provides Reader for queries
-///       │
-///       └── Initializes storage, spawns workers
-/// ```
-///
-/// # Example
-/// ```ignore
-/// use motlie_db::reader::{Storage, ReaderConfig, StorageHandle};
-/// use motlie_db::query::{Nodes, Runnable};
-/// use std::time::Duration;
-///
-/// // Initialize storage and get handle
-/// let storage = Storage::readonly(graph_path, fulltext_path);
-/// let handle = storage.ready(ReaderConfig::default(), 4)?;
-///
-/// // Execute queries through the reader
-/// let timeout = Duration::from_secs(5);
-/// let results = Nodes::new("rust programming".to_string(), 10)
-///     .run(handle.reader(), timeout)
-///     .await?;
-///
-/// // Clean shutdown - closes channels and waits for workers
-/// handle.shutdown().await?;
-/// ```
-///
-/// # Shutdown Semantics
-///
-/// The [`shutdown()`](StorageHandle::shutdown) method:
-/// 1. Drops the Reader, which disconnects all channel senders
-/// 2. Workers detect the disconnected channels and exit their loops
-/// 3. Awaits all worker JoinHandles to ensure clean termination
-///
-/// If you drop the StorageHandle without calling shutdown(), the workers
-/// will still terminate (channels close on drop), but you won't await
-/// their completion.
-pub struct StorageHandle {
-    reader: Reader,
-    handles: Vec<JoinHandle<()>>,
-}
-
-impl StorageHandle {
-    /// Get a reference to the Reader for executing queries.
-    ///
-    /// The Reader can be cloned if needed for concurrent access from
-    /// multiple tasks.
-    pub fn reader(&self) -> &Reader {
-        &self.reader
-    }
-
-    /// Get a clone of the Reader.
-    ///
-    /// This is useful when you need to share the reader across multiple
-    /// async tasks or threads.
-    pub fn reader_clone(&self) -> Reader {
-        self.reader.clone()
-    }
-
-    /// Check if the storage system is still running.
-    ///
-    /// Returns `false` if any of the channels are closed, indicating
-    /// that the workers are shutting down or have shut down.
-    pub fn is_running(&self) -> bool {
-        !self.reader.is_closed()
-    }
-
-    /// Shut down the storage system cleanly.
-    ///
-    /// This method:
-    /// 1. Drops the Reader, closing all channel senders
-    /// 2. Workers detect closed channels and exit their loops
-    /// 3. Awaits all worker JoinHandles
-    ///
-    /// # Errors
-    /// Returns an error if any worker task panicked during shutdown.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let handle = storage.ready(config, 4)?;
-    ///
-    /// // ... use the reader ...
-    ///
-    /// // Clean shutdown
-    /// handle.shutdown().await?;
-    /// ```
-    pub async fn shutdown(self) -> Result<()> {
-        // Drop the reader to close all channels
-        // This signals workers to stop
-        drop(self.reader);
-
-        // Await all worker handles
-        for handle in self.handles {
-            handle
-                .await
-                .map_err(|e| anyhow::anyhow!("Worker task panicked during shutdown: {}", e))?;
-        }
-
-        tracing::info!("Storage shutdown complete");
-        Ok(())
-    }
-
-    /// Shut down the storage system, consuming self but ignoring worker errors.
-    ///
-    /// This is a convenience method when you want to ensure shutdown happens
-    /// but don't need to handle individual worker failures.
-    ///
-    /// Unlike [`shutdown()`](StorageHandle::shutdown), this method:
-    /// - Logs warnings for any worker panics instead of returning errors
-    /// - Always returns `Ok(())`
-    pub async fn shutdown_graceful(self) {
-        drop(self.reader);
-
-        for (i, handle) in self.handles.into_iter().enumerate() {
-            if let Err(e) = handle.await {
-                tracing::warn!(worker_id = i, error = %e, "Worker panicked during shutdown");
-            }
-        }
-
-        tracing::info!("Storage graceful shutdown complete");
-    }
-}
-
-// ============================================================================
 // CompositeStorage - Internal storage reference for query execution
 // ============================================================================
 
@@ -467,6 +198,19 @@ impl CompositeStorage {
 ///
 /// Provides a single interface for executing queries, routing them to the
 /// appropriate backend based on query type.
+///
+/// # Usage
+///
+/// The Reader is obtained from [`ReadOnlyHandles::reader()`](crate::ReadOnlyHandles::reader)
+/// or [`ReadWriteHandles::reader()`](crate::ReadWriteHandles::reader):
+///
+/// ```ignore
+/// let handles = storage.ready(config)?;
+/// let reader = handles.reader();
+///
+/// // Execute queries
+/// let results = Nodes::new("query", 10).run(reader, timeout).await?;
+/// ```
 #[derive(Clone)]
 pub struct Reader {
     /// Sender for unified search queries (Nodes, Edges with hydration)
@@ -522,6 +266,19 @@ impl Reader {
 ///
 /// This sets up both graph and fulltext consumer pools and returns
 /// a Reader along with the JoinHandles for the spawned workers.
+///
+/// # Usage
+///
+/// This is typically used internally by [`Storage::ready()`](crate::Storage::ready).
+/// For advanced use cases, you can use it directly:
+///
+/// ```ignore
+/// let (reader, unified_handles, graph_handles, fulltext_handles) =
+///     ReaderBuilder::new(graph, fulltext)
+///         .with_config(config)
+///         .with_num_workers(4)
+///         .build();
+/// ```
 pub struct ReaderBuilder {
     graph: Arc<graph::Graph>,
     fulltext: Arc<fulltext::Index>,
@@ -636,7 +393,7 @@ pub fn spawn_consumer_pool(
 }
 
 // ============================================================================
-// Convenience function
+// Convenience Functions
 // ============================================================================
 
 /// Create a unified Reader with default configuration.

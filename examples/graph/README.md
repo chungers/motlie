@@ -1,5 +1,13 @@
 # Graph Algorithm Examples
 
+> **API Status (December 2024)**: These examples now use the **unified motlie_db API** (porcelain layer).
+> - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+> - Mutations: `motlie_db::mutation::{AddNode, AddEdge, Runnable, NodeSummary, EdgeSummary, ...}`
+> - Queries: `motlie_db::query::{OutgoingEdges, IncomingEdges, NodesByIdsMulti, Runnable, ...}`
+>
+> All examples use the unified `motlie_db::Storage` API which initializes both graph (RocksDB)
+> and fulltext (Tantivy) backends. `ReadWriteHandles` provides access to both `reader()` and `writer()`.
+
 This directory contains example implementations of classic graph algorithms using `motlie_db`, a persistent graph database built on RocksDB. Each example compares the `motlie_db` implementation against a reference in-memory implementation to demonstrate correctness and performance characteristics.
 
 ## Performance Analysis Results

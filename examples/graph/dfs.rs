@@ -21,7 +21,7 @@ use common::{
     measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode,
     Implementation,
 };
-use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::query::{NodeById, OutgoingEdges, Runnable as QueryRunnable};
 use motlie_db::Id;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Dfs;
@@ -227,12 +227,12 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run DFS with motlie_db
-            let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes.clone(), edges).await?;
+            let (reader, name_to_id, _handles) = build_graph(db_path, nodes.clone(), edges).await?;
             let start_name = nodes[0].name.clone();
             let start_id = name_to_id[&start_name];
             let timeout = Duration::from_secs(60); // Longer timeout for large graphs
 
-            let (result, time_ms, memory) = measure_time_and_memory_async(|| dfs_motlie(start_id, &reader, timeout)).await;
+            let (result, time_ms, memory) = measure_time_and_memory_async(|| dfs_motlie(start_id, reader.graph(), timeout)).await;
             let result = result?;
             let result_hash = Some(compute_hash(&result));
 

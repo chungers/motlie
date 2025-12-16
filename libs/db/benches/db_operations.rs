@@ -20,8 +20,10 @@
 // ```
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use motlie_db::graph::mutation::{AddEdge, AddNode, Runnable as MutationRunnable};
-use motlie_db::graph::query::{NodeById, OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::graph::mutation::{AddEdge, AddNode};
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::query::{NodeById, OutgoingEdges};
+use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::graph::reader::{create_query_reader, spawn_query_consumer, ReaderConfig};
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};

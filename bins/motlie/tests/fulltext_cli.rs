@@ -5,9 +5,8 @@
 //! 2. Runs the `fulltext index` CLI command to build the fulltext index
 //! 3. Runs the `fulltext search` CLI commands and verifies the results match the inserted data
 
-use motlie_db::graph::mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Runnable as MutationRunnable,
-};
+use motlie_db::graph::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
+use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
 use motlie_db::{DataUrl, Id, TimestampMilli};

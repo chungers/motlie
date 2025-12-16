@@ -6,7 +6,7 @@
 //!
 //! # Key Components Demonstrated
 //!
-//! - `motlie_db::reader::Storage::ready()` - Initializes both graph and fulltext
+//! - `motlie_db::Storage::ready()` - Initializes both graph and fulltext
 //!   subsystems and sets up MPMC query pipelines
 //! - `motlie_db::query::Runnable<Reader>` - Trait for executing queries against
 //!   the unified reader
@@ -17,41 +17,49 @@
 //! # Example Usage
 //!
 //! ```ignore
-//! use motlie_db::reader::{Storage, ReaderConfig, StorageHandle};
+//! use motlie_db::{Storage, StorageConfig};
 //! use motlie_db::query::{Nodes, Runnable};
 //! use std::time::Duration;
 //!
-//! // Initialize unified storage (graph + fulltext)
+//! // Read-only mode: Initialize unified storage (graph + fulltext)
 //! let storage = Storage::readonly(graph_path, fulltext_path);
-//! let handle = storage.ready(ReaderConfig::default(), 4)?;
+//! let handles = storage.ready(StorageConfig::default())?;  // Returns ReadOnlyHandles
 //!
 //! // Execute unified queries
 //! let results = Nodes::new("search term".to_string(), 10)
-//!     .run(handle.reader(), Duration::from_secs(5))
+//!     .run(handles.reader(), Duration::from_secs(5))
 //!     .await?;
 //!
 //! // Clean shutdown
-//! handle.shutdown().await?;
+//! handles.shutdown().await?;
+//!
+//! // Read-write mode: Use Storage::readwrite() for both reads and writes
+//! let storage = Storage::readwrite(graph_path, fulltext_path);
+//! let handles = storage.ready(StorageConfig::default())?;  // Returns ReadWriteHandles
+//!
+//! // Write mutations - no unwrap() needed!
+//! AddNode { /* ... */ }.run(handles.writer()).await?;
+//!
+//! // Execute queries
+//! let results = Nodes::new("query", 10).run(handles.reader(), timeout).await?;
 //! ```
 
 use motlie_db::fulltext::{
     spawn_mutation_consumer as spawn_fulltext_mutation_consumer, Index, Storage as FulltextStorage,
 };
-use motlie_db::graph::mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment,
-};
-use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
 };
 use motlie_db::graph::{Graph, Storage as GraphStorage};
+use motlie_db::mutation::Runnable as MutationRunnable;
 use motlie_db::query::{
     EdgeDetails, Edges, FuzzyLevel, IncomingEdges, NodeById, NodeFragments, Nodes,
     NodesByIdsMulti, OutgoingEdges, Runnable, WithOffset,
 };
-use motlie_db::reader::{ReaderConfig, Storage as UnifiedStorage};
-use motlie_db::{DataUrl, Id, TimestampMilli};
+use motlie_db::reader::ReaderConfig;
+use motlie_db::{DataUrl, Id, ReadOnlyHandles, Storage, StorageConfig, TimestampMilli};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -87,19 +95,15 @@ async fn populate_test_data(db_path: &std::path::Path, index_path: &std::path::P
 /// Helper to set up a test environment using the unified Storage::ready() API.
 ///
 /// This demonstrates the recommended way to initialize the unified query system:
-/// 1. Create a `motlie_db::reader::Storage` with paths to graph and fulltext storage
-/// 2. Call `ready()` to initialize both subsystems and get a `StorageHandle`
-/// 3. Use `handle.reader()` to execute queries via the `Runnable` trait
-/// 4. Call `handle.shutdown()` for clean termination
+/// 1. Create a `motlie_db::Storage` with paths to graph and fulltext storage
+/// 2. Call `ready()` to initialize both subsystems and get `ReadOnlyHandles`
+/// 3. Use `handles.reader()` to execute queries via the `Runnable` trait
+/// 4. Call `handles.shutdown()` for clean termination
 ///
-/// Returns the StorageHandle and paths for cleanup.
+/// Returns the ReadOnlyHandles and paths for cleanup.
 async fn setup_test_env_with_unified_storage(
     temp_dir: &TempDir,
-) -> (
-    motlie_db::reader::StorageHandle,
-    std::path::PathBuf,
-    std::path::PathBuf,
-) {
+) -> (ReadOnlyHandles, std::path::PathBuf, std::path::PathBuf) {
     let db_path = temp_dir.path().join("graph_db");
     let index_path = temp_dir.path().join("fulltext_index");
 
@@ -110,22 +114,25 @@ async fn setup_test_env_with_unified_storage(
     // UNIFIED STORAGE API DEMONSTRATION
     // =========================================================================
     //
-    // Use `motlie_db::reader::Storage::ready()` to initialize both graph and
+    // Use `motlie_db::Storage::readonly().ready()` to initialize both graph and
     // fulltext subsystems in one call. This:
-    // - Opens both RocksDB (graph) and Tantivy (fulltext) storage
+    // - Opens both RocksDB (graph) and Tantivy (fulltext) storage in read-only mode
     // - Creates MPMC channels for query dispatch
     // - Spawns consumer pools for parallel query processing
-    // - Returns a StorageHandle for lifecycle management
+    // - Returns ReadOnlyHandles for lifecycle management
     //
-    // The StorageHandle provides:
+    // The ReadOnlyHandles provides:
     // - `reader()` - Get the Reader for executing queries
     // - `shutdown()` - Clean termination of all workers
+    //
+    // For read-write mode, use Storage::readwrite() which returns ReadWriteHandles
+    // with both reader() and writer() - no unwrap() needed!
 
-    let storage = UnifiedStorage::readonly(&db_path, &index_path);
-    let config = ReaderConfig::with_channel_buffer_size(100);
-    let handle = storage.ready(config, 2).unwrap();
+    let storage = Storage::readonly(&db_path, &index_path);
+    let config = StorageConfig::with_channel_buffer_size(100).with_num_workers(2);
+    let handles = storage.ready(config).unwrap();
 
-    (handle, db_path, index_path)
+    (handles, db_path, index_path)
 }
 
 /// Helper to set up a test environment with manual graph and fulltext initialization.
@@ -919,10 +926,11 @@ async fn test_nodes_filter_by_nonexistent_tag() {
 /// Test: Demonstrates the unified Storage::ready() API for initializing the query system.
 ///
 /// This is the recommended way to set up the unified query infrastructure:
-/// 1. Create `motlie_db::reader::Storage` with paths to graph and fulltext storage
-/// 2. Call `ready()` which returns a `StorageHandle` with lifecycle management
-/// 3. Use `handle.reader()` to execute queries via the `Runnable` trait
-/// 4. Call `handle.shutdown().await` for clean termination
+/// 1. Create `motlie_db::Storage::readonly()` or `Storage::readwrite()` with paths
+/// 2. Call `ready()` which returns `ReadOnlyHandles` or `ReadWriteHandles`
+/// 3. Use `handles.reader()` to execute queries via the `Runnable` trait
+/// 4. For read-write, use `handles.writer()` - no unwrap() needed!
+/// 5. Call `handles.shutdown().await` for clean termination
 #[tokio::test]
 async fn test_unified_storage_ready_api() {
     let temp_dir = TempDir::new().unwrap();

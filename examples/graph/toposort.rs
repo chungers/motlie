@@ -17,7 +17,7 @@ mod common;
 
 use anyhow::Result;
 use common::{build_graph, compute_hash, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::query::{OutgoingEdges, Runnable as QueryRunnable};
 use motlie_db::Id;
 use petgraph::algo::toposort as petgraph_toposort;
 use petgraph::graph::DiGraph;
@@ -251,10 +251,10 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run topological sort with motlie_db
-            let (reader, _name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
+            let (reader, _name_to_id, _handles) = build_graph(db_path, nodes, edges).await?;
             let timeout = Duration::from_secs(60); // Longer timeout for large graphs
 
-            let (result, time_ms, memory) = measure_time_and_memory_async(|| toposort_motlie(&node_ids, &reader, timeout)).await;
+            let (result, time_ms, memory) = measure_time_and_memory_async(|| toposort_motlie(&node_ids, reader.graph(), timeout)).await;
             let result = result?;
             let result_hash = Some(compute_hash(&result));
 

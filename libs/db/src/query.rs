@@ -39,16 +39,16 @@
 //! with `query.run(&reader, timeout)`:
 //!
 //! ```ignore
-//! use motlie_db::reader::{Storage, ReaderConfig, StorageHandle};
+//! use motlie_db::{Storage, StorageConfig};
 //! use motlie_db::query::{
 //!     Nodes, Edges, NodeById, OutgoingEdges, IncomingEdges,
 //!     EdgeDetails, NodeFragments, FuzzyLevel, Runnable,
 //! };
 //! use std::time::Duration;
 //!
-//! // Initialize unified storage and get handle
+//! // Initialize unified storage (read-only or read-write)
 //! let storage = Storage::readonly(graph_path, fulltext_path);
-//! let handle = storage.ready(ReaderConfig::default(), 4)?;
+//! let handles = storage.ready(StorageConfig::default())?;  // ReadOnlyHandles
 //!
 //! let timeout = Duration::from_secs(5);
 //!
@@ -56,31 +56,31 @@
 //! let results = Nodes::new("rust programming".to_string(), 10)
 //!     .with_fuzzy(FuzzyLevel::Low)
 //!     .with_tags(vec!["systems".to_string()])
-//!     .run(handle.reader(), timeout)
+//!     .run(handles.reader(), timeout)
 //!     .await?;
 //!
 //! // Direct graph lookup by ID
 //! let (name, summary) = NodeById::new(node_id, None)
-//!     .run(handle.reader(), timeout)
+//!     .run(handles.reader(), timeout)
 //!     .await?;
 //!
 //! // Get outgoing edges from a node
 //! let outgoing = OutgoingEdges::new(node_id, None)
-//!     .run(handle.reader(), timeout)
+//!     .run(handles.reader(), timeout)
 //!     .await?;
 //!
 //! // Get incoming edges to a node
 //! let incoming = IncomingEdges::new(node_id, None)
-//!     .run(handle.reader(), timeout)
+//!     .run(handles.reader(), timeout)
 //!     .await?;
 //!
 //! // Lookup edge by topology
 //! let edge = EdgeDetails::new(src_id, dst_id, "relationship".to_string(), None)
-//!     .run(handle.reader(), timeout)
+//!     .run(handles.reader(), timeout)
 //!     .await?;
 //!
 //! // Concurrent queries with tokio::try_join!
-//! let reader = handle.reader_clone();
+//! let reader = handles.reader_clone();
 //! let (nodes, outgoing, incoming) = tokio::try_join!(
 //!     Nodes::new("search".to_string(), 10).run(&reader, timeout),
 //!     OutgoingEdges::new(node_id, None).run(&reader, timeout),
@@ -88,7 +88,7 @@
 //! )?;
 //!
 //! // Clean shutdown
-//! handle.shutdown().await?;
+//! handles.shutdown().await?;
 //! ```
 //!
 //! # Architecture
@@ -110,7 +110,7 @@
 //!
 //! # See Also
 //!
-//! - [`reader::Storage::ready()`](crate::reader::Storage::ready) - Initialize the unified reader
+//! - [`Storage::ready()`](crate::Storage::ready) - Initialize unified storage
 //! - [`fulltext::query`](crate::fulltext::query) - Raw fulltext queries (returns hits with scores)
 //! - [`graph::query`](crate::graph::query) - Graph-only queries
 
