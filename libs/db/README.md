@@ -22,7 +22,10 @@ use motlie_db::{Id, TimestampMilli};
 use std::time::Duration;
 
 // 1. Create storage in read-write mode
-let storage = Storage::readwrite(graph_path, fulltext_path);
+// Storage takes a single path and derives:
+//   <db_path>/graph - RocksDB graph database
+//   <db_path>/fulltext - Tantivy fulltext index
+let storage = Storage::readwrite(db_path);
 
 // 2. Initialize and get handles (ReadWriteHandles)
 let handles = storage.ready(StorageConfig::default())?;
@@ -56,7 +59,8 @@ use motlie_db::query::{Nodes, NodeById, OutgoingEdges, Runnable};
 use std::time::Duration;
 
 // 1. Create storage in read-only mode
-let storage = Storage::readonly(graph_path, fulltext_path);
+// Storage takes a single path and derives <path>/graph and <path>/fulltext
+let storage = Storage::readonly(db_path);
 
 // 2. Initialize and get handles (ReadOnlyHandles)
 let handles = storage.ready(StorageConfig::default())?;
@@ -85,20 +89,26 @@ handles.shutdown().await?;
 The unified API uses Rust's type system to distinguish between read-only and read-write access at compile time:
 
 ```text
-Storage::readonly(graph, fulltext)   ──► Storage<ReadOnly>  ──► ReadOnlyHandles
-                                                                   └── reader() only
+Storage::readonly(db_path)   ──► Storage<ReadOnly>  ──► ReadOnlyHandles
+                                                             └── reader() only
 
-Storage::readwrite(graph, fulltext)  ──► Storage<ReadWrite> ──► ReadWriteHandles
-                                                                   ├── reader()
-                                                                   └── writer()
+Storage::readwrite(db_path)  ──► Storage<ReadWrite> ──► ReadWriteHandles
+                                                             ├── reader()
+                                                             └── writer()
 ```
+
+Storage takes a single path and automatically derives:
+- `<db_path>/graph` - RocksDB graph database
+- `<db_path>/fulltext` - Tantivy fulltext index
 
 This eliminates runtime checks - if you have `ReadWriteHandles`, `writer()` is guaranteed to exist.
 
 ### Writer Lifecycle (Read-Write Mode)
 
 ```text
-Storage::readwrite(graph_path, fulltext_path)
+Storage::readwrite(db_path)
+    │
+    ├── Derives: <db_path>/graph, <db_path>/fulltext
     │
     ▼
 storage.ready(StorageConfig)  →  ReadWriteHandles
@@ -119,7 +129,9 @@ storage.ready(StorageConfig)  →  ReadWriteHandles
 ### Reader Lifecycle (Read-Only Mode)
 
 ```text
-Storage::readonly(graph_path, fulltext_path)
+Storage::readonly(db_path)
+    │
+    ├── Derives: <db_path>/graph, <db_path>/fulltext
     │
     ▼
 storage.ready(StorageConfig)  →  ReadOnlyHandles

@@ -4367,13 +4367,11 @@ async fn run_analysis_from_input(input: UseCaseInput, state: VisualizationState)
     // Run the analysis - both implementations read from disk (no writes)
     // Returns: (result, time_ms, memory, disk_read_ms)
     // Graph data is stored in db_path/graph subdirectory (created by build_graph)
-    let graph_path = db_path.join("graph");
-
     let (result, time_ms, memory, disk_read_ms) = if is_reference {
         // Reference implementation: Load full graph from RocksDB into petgraph
         // Use unified Storage API for read operations
-        let fulltext_path = db_path.join("fulltext");
-        let storage = Storage::readonly(&graph_path, &fulltext_path);
+        // Storage takes a single path and derives <path>/graph and <path>/fulltext automatically
+        let storage = Storage::readonly(&db_path);
         let handles = storage.ready(StorageConfig::default())?;
         let reader = handles.reader();
         let timeout = Duration::from_secs(120);
@@ -4475,8 +4473,8 @@ async fn run_analysis_from_input(input: UseCaseInput, state: VisualizationState)
         (result, time_ms, memory, disk_read_ms)
     } else {
         // motlie_db implementation: Open unified readonly storage
-        let fulltext_path = db_path.join("fulltext");
-        let storage = Storage::readonly(&graph_path, &fulltext_path);
+        // Storage takes a single path and derives <path>/graph and <path>/fulltext automatically
+        let storage = Storage::readonly(&db_path);
         let handles = storage.ready(StorageConfig::default())?;
         let reader = handles.reader();
 

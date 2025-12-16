@@ -22,7 +22,10 @@
 //! use std::time::Duration;
 //!
 //! // Read-only mode: Initialize unified storage (graph + fulltext)
-//! let storage = Storage::readonly(graph_path, fulltext_path);
+//! // Storage takes a single path and derives subdirectories:
+//! //   <db_path>/graph - RocksDB graph database
+//! //   <db_path>/fulltext - Tantivy fulltext index
+//! let storage = Storage::readonly(db_path);
 //! let handles = storage.ready(StorageConfig::default())?;  // Returns ReadOnlyHandles
 //!
 //! // Execute unified queries
@@ -34,7 +37,7 @@
 //! handles.shutdown().await?;
 //!
 //! // Read-write mode: Use Storage::readwrite() for both reads and writes
-//! let storage = Storage::readwrite(graph_path, fulltext_path);
+//! let storage = Storage::readwrite(db_path);
 //! let handles = storage.ready(StorageConfig::default())?;  // Returns ReadWriteHandles
 //!
 //! // Write mutations - no unwrap() needed!
@@ -95,7 +98,7 @@ async fn populate_test_data(db_path: &std::path::Path, index_path: &std::path::P
 /// Helper to set up a test environment using the unified Storage::ready() API.
 ///
 /// This demonstrates the recommended way to initialize the unified query system:
-/// 1. Create a `motlie_db::Storage` with paths to graph and fulltext storage
+/// 1. Create a `motlie_db::Storage` with a single base path
 /// 2. Call `ready()` to initialize both subsystems and get `ReadOnlyHandles`
 /// 3. Use `handles.reader()` to execute queries via the `Runnable` trait
 /// 4. Call `handles.shutdown()` for clean termination
@@ -104,11 +107,12 @@ async fn populate_test_data(db_path: &std::path::Path, index_path: &std::path::P
 async fn setup_test_env_with_unified_storage(
     temp_dir: &TempDir,
 ) -> (ReadOnlyHandles, std::path::PathBuf, std::path::PathBuf) {
-    let db_path = temp_dir.path().join("graph_db");
-    let index_path = temp_dir.path().join("fulltext_index");
+    let db_path = temp_dir.path().join("motlie_db");
+    let graph_path = db_path.join("graph");
+    let index_path = db_path.join("fulltext");
 
-    // Populate test data
-    populate_test_data(&db_path, &index_path).await;
+    // Populate test data using the derived subdirectory paths
+    populate_test_data(&graph_path, &index_path).await;
 
     // =========================================================================
     // UNIFIED STORAGE API DEMONSTRATION
@@ -116,7 +120,10 @@ async fn setup_test_env_with_unified_storage(
     //
     // Use `motlie_db::Storage::readonly().ready()` to initialize both graph and
     // fulltext subsystems in one call. This:
-    // - Opens both RocksDB (graph) and Tantivy (fulltext) storage in read-only mode
+    // - Takes a single base path and derives subdirectories:
+    //   - <path>/graph for RocksDB
+    //   - <path>/fulltext for Tantivy
+    // - Opens both storage systems in read-only mode
     // - Creates MPMC channels for query dispatch
     // - Spawns consumer pools for parallel query processing
     // - Returns ReadOnlyHandles for lifecycle management
@@ -128,11 +135,11 @@ async fn setup_test_env_with_unified_storage(
     // For read-write mode, use Storage::readwrite() which returns ReadWriteHandles
     // with both reader() and writer() - no unwrap() needed!
 
-    let storage = Storage::readonly(&db_path, &index_path);
+    let storage = Storage::readonly(&db_path);
     let config = StorageConfig::with_channel_buffer_size(100).with_num_workers(2);
     let handles = storage.ready(config).unwrap();
 
-    (handles, db_path, index_path)
+    (handles, graph_path, index_path)
 }
 
 /// Helper to set up a test environment with manual graph and fulltext initialization.

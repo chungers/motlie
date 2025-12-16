@@ -54,7 +54,8 @@
 //! use std::time::Duration;
 //!
 //! // Initialize unified storage (read-only or read-write)
-//! let storage = Storage::readonly(graph_path, fulltext_path);
+//! // Storage takes a single path and derives <path>/graph and <path>/fulltext
+//! let storage = Storage::readonly(db_path);
 //! let handles = storage.ready(StorageConfig::default())?;  // ReadOnlyHandles
 //!
 //! let timeout = Duration::from_secs(5);

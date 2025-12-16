@@ -14,7 +14,8 @@
 //! use std::time::Duration;
 //!
 //! // Read-only mode: Storage::readonly() → ReadOnlyHandles
-//! let storage = Storage::readonly(graph_path, fulltext_path);
+//! // Storage takes a single path and derives <path>/graph and <path>/fulltext
+//! let storage = Storage::readonly(db_path);
 //! let handles = storage.ready(StorageConfig::default())?;
 //!
 //! // Execute queries via the reader
@@ -25,7 +26,7 @@
 //!
 //! // Read-write mode: Storage::readwrite() → ReadWriteHandles
 //! // Both reader() and writer() are available
-//! let storage = Storage::readwrite(graph_path, fulltext_path);
+//! let storage = Storage::readwrite(db_path);
 //! let handles = storage.ready(StorageConfig::default())?;
 //! let results = Nodes::new("query".to_string(), 10)
 //!     .run(handles.reader(), timeout)
