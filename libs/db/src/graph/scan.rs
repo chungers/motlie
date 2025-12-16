@@ -125,22 +125,6 @@ pub struct EdgeFragmentRecord {
     pub valid_range: Option<TemporalRange>,
 }
 
-/// A node name index record as seen by scan visitors.
-#[derive(Debug, Clone)]
-pub struct NodeNameRecord {
-    pub name: NodeName,
-    pub node_id: Id,
-    pub valid_range: Option<TemporalRange>,
-}
-
-/// An edge name index record as seen by scan visitors.
-#[derive(Debug, Clone)]
-pub struct EdgeNameRecord {
-    pub name: EdgeName,
-    pub src_id: SrcId,
-    pub dst_id: DstId,
-    pub valid_range: Option<TemporalRange>,
-}
 
 // ============================================================================
 // Scan Types
@@ -221,35 +205,6 @@ pub struct AllEdgeFragments {
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
-/// Scan all node names with pagination.
-#[derive(Debug, Clone, Default)]
-pub struct AllNodeNames {
-    /// Last cursor from previous page (name, node_id).
-    pub last: Option<(NodeName, Id)>,
-    /// Maximum number of records to return.
-    pub limit: usize,
-    /// Scan in reverse direction (from end to start).
-    pub reverse: bool,
-    /// Reference timestamp for temporal validity check.
-    /// If Some, only records valid at this time are returned.
-    /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
-}
-
-/// Scan all edge names with pagination.
-#[derive(Debug, Clone, Default)]
-pub struct AllEdgeNames {
-    /// Last cursor from previous page (name, src_id, dst_id).
-    pub last: Option<(EdgeName, SrcId, DstId)>,
-    /// Maximum number of records to return.
-    pub limit: usize,
-    /// Scan in reverse direction (from end to start).
-    pub reverse: bool,
-    /// Reference timestamp for temporal validity check.
-    /// If Some, only records valid at this time are returned.
-    /// If None, all records are returned regardless of temporal validity.
-    pub reference_ts_millis: Option<TimestampMilli>,
-}
 
 // ============================================================================
 // Internal Helpers
@@ -647,120 +602,12 @@ impl Visitable for AllEdgeFragments {
     }
 }
 
-impl Visitable for AllNodeNames {
-    type Record = NodeNameRecord;
-
-    fn accept<V: Visitor<Self::Record>>(
-        &self,
-        storage: &Storage,
-        visitor: &mut V,
-    ) -> Result<usize> {
-        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllNodeNames scan");
-
-        let seek_key = self
-            .last
-            .as_ref()
-            .map(|(name, id)| {
-                schema::NodeNames::key_to_bytes(&schema::NodeNameCfKey(name.clone(), *id))
-            })
-            .unwrap_or_default();
-
-        let last_cursor = self.last.clone();
-
-        iterate_and_visit::<schema::NodeNames, _, _, _, _>(
-            storage,
-            seek_key,
-            self.limit,
-            self.last.is_some(),
-            self.reverse,
-            self.reference_ts_millis,
-            |key_bytes| {
-                if let Some((name, id)) = &last_cursor {
-                    let cursor_key = schema::NodeNames::key_to_bytes(
-                        &schema::NodeNameCfKey(name.clone(), *id),
-                    );
-                    key_bytes == cursor_key.as_slice()
-                } else {
-                    false
-                }
-            },
-            |key_bytes, value_bytes| {
-                let key = schema::NodeNames::key_from_bytes(key_bytes)?;
-                let value = schema::NodeNames::value_from_bytes(value_bytes)?;
-                Ok(NodeNameRecord {
-                    name: key.0,
-                    node_id: key.1,
-                    valid_range: value.0,
-                })
-            },
-            |record| &record.valid_range,
-            visitor,
-        )
-    }
-}
-
-impl Visitable for AllEdgeNames {
-    type Record = EdgeNameRecord;
-
-    fn accept<V: Visitor<Self::Record>>(
-        &self,
-        storage: &Storage,
-        visitor: &mut V,
-    ) -> Result<usize> {
-        tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllEdgeNames scan");
-
-        let seek_key = self
-            .last
-            .as_ref()
-            .map(|(name, src, dst)| {
-                schema::EdgeNames::key_to_bytes(&schema::EdgeNameCfKey(
-                    name.clone(),
-                    *src,
-                    *dst,
-                ))
-            })
-            .unwrap_or_default();
-
-        let last_cursor = self.last.clone();
-
-        iterate_and_visit::<schema::EdgeNames, _, _, _, _>(
-            storage,
-            seek_key,
-            self.limit,
-            self.last.is_some(),
-            self.reverse,
-            self.reference_ts_millis,
-            |key_bytes| {
-                if let Some((name, src, dst)) = &last_cursor {
-                    let cursor_key = schema::EdgeNames::key_to_bytes(
-                        &schema::EdgeNameCfKey(name.clone(), *src, *dst),
-                    );
-                    key_bytes == cursor_key.as_slice()
-                } else {
-                    false
-                }
-            },
-            |key_bytes, value_bytes| {
-                let key = schema::EdgeNames::key_from_bytes(key_bytes)?;
-                let value = schema::EdgeNames::value_from_bytes(value_bytes)?;
-                Ok(EdgeNameRecord {
-                    name: key.0,
-                    src_id: key.1,
-                    dst_id: key.2,
-                    valid_range: value.0,
-                })
-            },
-            |record| &record.valid_range,
-            visitor,
-        )
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::mutation::Runnable;
-    use super::super::writer::{create_mutation_writer, spawn_graph_consumer, WriterConfig};
+    use crate::writer::Runnable;
+    use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
     use super::super::mutation::{AddEdge, AddNode};
     use crate::DataUrl;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -776,7 +623,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes
         for i in 0..5 {
@@ -827,7 +674,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes
         let mut node_ids = Vec::new();
@@ -901,7 +748,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes
         for i in 0..10 {
@@ -951,7 +798,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes first
         let node1 = Id::new();
@@ -1023,7 +870,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes first
         let node1 = Id::new();
@@ -1101,7 +948,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add test nodes
         let mut nodes = Vec::new();
@@ -1191,7 +1038,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add some test nodes with delays to ensure different IDs
         let mut node_ids = Vec::new();
@@ -1266,7 +1113,7 @@ mod tests {
             channel_buffer_size: 100,
         };
         let (writer, receiver) = create_mutation_writer(config.clone());
-        let handle = spawn_graph_consumer(receiver, config, db_path);
+        let handle = spawn_mutation_consumer(receiver, config, db_path);
 
         // Add test nodes
         for i in 0..10 {

@@ -25,7 +25,7 @@ motlie fulltext -p <index_dir> index [OPTIONS] <graph_db_dir>
 **Options:**
 - `-p, --index-dir <path>` - Path to the fulltext index directory (required)
 - `-b, --batch-size <n>` - Number of records to batch before sending to indexer (default: 100)
-- `-o, --format <format>` - Output format: `tsv` or `table` (default: tsv)
+- `-o, --format <format>` - Output format: `tsv` or `table` (default: table)
 
 **Example:**
 ```bash
@@ -62,12 +62,14 @@ motlie fulltext -p <index_dir> search nodes [OPTIONS] <query>
 - `-l, --limit <n>` - Maximum number of results (default: 10)
 - `-f, --fuzzy-level <level>` - Fuzzy matching: `none`, `low`, `medium` (default: none)
 - `-t, --tags <tag>` - Filter by tags (can be repeated, matches ANY tag)
-- `-o, --format <format>` - Output format: `tsv` or `table` (default: tsv)
+- `-o, --format <format>` - Output format: `tsv` or `table` (default: table)
 
-**Output format (TSV):**
-```
-SCORE    ID    FRAGMENT_TS    SNIPPET
-```
+**Output columns:**
+| Column | Description |
+|--------|-------------|
+| SCORE | BM25 relevance score |
+| ID | Node ID |
+| MATCH | Match source: `name` (matched node name) or `fragment` (matched fragment content) |
 
 **Example:**
 ```bash
@@ -100,12 +102,16 @@ motlie fulltext -p <index_dir> search edges [OPTIONS] <query>
 - `-l, --limit <n>` - Maximum number of results (default: 10)
 - `-f, --fuzzy-level <level>` - Fuzzy matching: `none`, `low`, `medium` (default: none)
 - `-t, --tags <tag>` - Filter by tags (can be repeated, matches ANY tag)
-- `-o, --format <format>` - Output format: `tsv` or `table` (default: tsv)
+- `-o, --format <format>` - Output format: `tsv` or `table` (default: table)
 
-**Output format (TSV):**
-```
-SCORE    SRC_ID    DST_ID    EDGE_NAME    FRAGMENT_TS    SNIPPET
-```
+**Output columns:**
+| Column | Description |
+|--------|-------------|
+| SCORE | BM25 relevance score |
+| SRC_ID | Source node ID |
+| DST_ID | Destination node ID |
+| EDGE_NAME | Edge name |
+| MATCH | Match source: `name` (matched edge name) or `fragment` (matched fragment content) |
 
 **Example:**
 ```bash
@@ -131,12 +137,14 @@ motlie fulltext -p <index_dir> search facets [OPTIONS]
 - `-d, --doc-type-filter <type>` - Filter by document types (can be repeated)
   - Valid values: `nodes`, `edges`, `node_fragments`, `edge_fragments`
 - `-l, --tags-limit <n>` - Maximum number of tags to return (default: 50)
-- `-o, --format <format>` - Output format: `tsv` or `table` (default: tsv)
+- `-o, --format <format>` - Output format: `tsv` or `table` (default: table)
 
-**Output format (TSV):**
-```
-CATEGORY    NAME    COUNT
-```
+**Output columns:**
+| Column | Description |
+|--------|-------------|
+| CATEGORY | Facet category: `doc_type`, `tag`, or `validity` |
+| NAME | Facet value name |
+| COUNT | Number of documents with this facet value |
 
 **Example:**
 ```bash
@@ -152,6 +160,35 @@ motlie fulltext -p /data/fulltext-index search facets -d edges -d edge_fragments
 # Limit tag results
 motlie fulltext -p /data/fulltext-index search facets -l 20
 ```
+
+## Wildcard Matching
+
+Wildcard patterns allow prefix, suffix, and pattern matching:
+
+| Pattern | Description | Example |
+|---------|-------------|---------|
+| `lik*` | Prefix match | Matches "likes", "likely", "liked" |
+| `*end` | Suffix match | Matches "backend", "frontend" |
+| `like?` | Single character wildcard | Matches "likes", "liked" (exactly one char) |
+| `*middle*` | Contains match | Matches anything containing "middle" |
+| `Da?a` | Character substitution | Matches "Data", "Dada" |
+
+**Examples:**
+```bash
+# Find all edges starting with "lik"
+motlie fulltext -p /data/fulltext-index search edges 'lik*'
+
+# Find all nodes starting with "Ali"
+motlie fulltext -p /data/fulltext-index search nodes 'Ali*'
+
+# Find nodes ending with "end"
+motlie fulltext -p /data/fulltext-index search nodes '*end'
+
+# Single character wildcard
+motlie fulltext -p /data/fulltext-index search edges 'like?'
+```
+
+**Note:** When using wildcards on the command line, quote the pattern with single quotes to prevent shell expansion (e.g., `'lik*'` not `lik*`).
 
 ## Fuzzy Matching
 

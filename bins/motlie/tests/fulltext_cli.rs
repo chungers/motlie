@@ -5,11 +5,11 @@
 //! 2. Runs the `fulltext index` CLI command to build the fulltext index
 //! 3. Runs the `fulltext search` CLI commands and verifies the results match the inserted data
 
-use motlie_db::{
-    create_mutation_writer, spawn_graph_consumer, AddEdge, AddEdgeFragment, AddNode,
-    AddNodeFragment, DataUrl, EdgeSummary, Id, MutationRunnable, NodeSummary, TimestampMilli,
-    WriterConfig,
-};
+use motlie_db::graph::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::collections::HashSet;
 use std::process::Command;
 use tempfile::TempDir;
@@ -108,7 +108,7 @@ async fn insert_test_data(db_path: &std::path::Path) -> TestData {
     };
 
     let (writer, receiver) = create_mutation_writer(config.clone());
-    let _handle = spawn_graph_consumer(receiver, config.clone(), db_path);
+    let _handle = spawn_mutation_consumer(receiver, config.clone(), db_path);
 
     // Create nodes with searchable content
     let rust_id = Id::new();
@@ -306,6 +306,8 @@ async fn test_search_nodes_by_exact_name() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "Rust",
         "-l",
@@ -330,6 +332,8 @@ async fn test_search_nodes_by_exact_name() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "Python",
         "-l",
@@ -351,6 +355,8 @@ async fn test_search_nodes_by_exact_name() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "JavaScript",
         "-l",
@@ -383,6 +389,8 @@ async fn test_search_nodes_by_unique_content() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "ownership",
         "-l",
@@ -411,6 +419,8 @@ async fn test_search_nodes_by_unique_content() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "machine learning",
         "-l",
@@ -434,6 +444,8 @@ async fn test_search_nodes_by_unique_content() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "superset",
         "-l",
@@ -466,6 +478,8 @@ async fn test_search_nodes_no_false_positives() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "xyznonexistent123",
         "-l",
@@ -497,6 +511,8 @@ async fn test_search_edges_by_name() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "edges",
         "influences",
         "-l",
@@ -524,6 +540,8 @@ async fn test_search_edges_by_name() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "edges",
         "extends",
         "-l",
@@ -551,6 +569,8 @@ async fn test_search_edges_by_name() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "edges",
         "competes",
         "-l",
@@ -587,6 +607,8 @@ async fn test_search_edges_by_fragment_content() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "edges",
         "Django",
         "-l",
@@ -614,6 +636,8 @@ async fn test_search_edges_by_fragment_content() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "edges",
         "Pandas",
         "-l",
@@ -645,6 +669,8 @@ async fn test_search_with_tag_filter() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "language",
         "-l",
@@ -678,6 +704,8 @@ async fn test_search_with_tag_filter() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "language",
         "-l",
@@ -721,6 +749,8 @@ async fn test_search_with_fuzzy_matching() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "Pythn",
         "-l",
@@ -746,6 +776,8 @@ async fn test_search_with_fuzzy_matching() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "JavaScrpt",
         "-l",
@@ -782,6 +814,8 @@ async fn test_facets_document_type_counts() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "facets",
     ]);
     assert!(success, "Facets command failed: {}", stderr);
@@ -862,6 +896,8 @@ async fn test_facets_tag_counts() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "facets",
     ]);
     assert!(success, "Facets command failed: {}", stderr);
@@ -900,6 +936,8 @@ async fn test_reindex_prevention() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "Rust",
         "-l",
@@ -931,6 +969,8 @@ async fn test_reindex_prevention() {
         "-p",
         index_path.to_str().unwrap(),
         "search",
+        "-o",
+        "tsv",
         "nodes",
         "Rust",
         "-l",

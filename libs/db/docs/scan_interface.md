@@ -6,7 +6,7 @@ This document describes the design for a synchronous scan API that allows extern
 
 ## Problem Statement
 
-The existing query API (`query::NodesByName`, `query::EdgesByName`, etc.) is async and channel-based, designed for concurrent query processing. For CLI utilities that need simple, synchronous iteration over column families:
+The async query API is channel-based, designed for concurrent query processing. For CLI utilities that need simple, synchronous iteration over column families:
 
 1. The async machinery is overkill
 2. Internal schema types (`NodeCfKey`, `NodeCfValue`, etc.) are `pub(crate)` and shouldn't be exposed
@@ -33,8 +33,6 @@ User-facing record types that hide internal schema details:
 | `ReverseEdgeRecord` | `dst_id`, `src_id`, `name`, `valid_range` | Reverse edge index (incoming) |
 | `NodeFragmentRecord` | `node_id`, `timestamp`, `content`, `valid_range` | Node content fragment |
 | `EdgeFragmentRecord` | `src_id`, `dst_id`, `edge_name`, `timestamp`, `content`, `valid_range` | Edge content fragment |
-| `NodeNameRecord` | `name`, `node_id`, `valid_range` | Node name index |
-| `EdgeNameRecord` | `name`, `src_id`, `dst_id`, `valid_range` | Edge name index |
 
 ### Visitor Trait
 
@@ -67,8 +65,6 @@ Each column family has a corresponding scan type with pagination parameters:
 | `AllReverseEdges` | `Option<(DstId, SrcId, EdgeName)>` | Scan reverse edges |
 | `AllNodeFragments` | `Option<(Id, TimestampMilli)>` | Scan node fragments |
 | `AllEdgeFragments` | `Option<(SrcId, DstId, EdgeName, TimestampMilli)>` | Scan edge fragments |
-| `AllNodeNames` | `Option<(NodeName, Id)>` | Scan node name index |
-| `AllEdgeNames` | `Option<(EdgeName, SrcId, DstId)>` | Scan edge name index |
 
 All scan types support the following fields:
 - `last`: Optional cursor for pagination (type depends on scan type)
@@ -261,8 +257,6 @@ When a datetime argument is provided after the column family name, only records 
 - `ReverseEdgeRecord`
 - `NodeFragmentRecord`
 - `EdgeFragmentRecord`
-- `NodeNameRecord`
-- `EdgeNameRecord`
 
 **Scan Types:**
 - `AllNodes`
@@ -270,8 +264,6 @@ When a datetime argument is provided after the column family name, only records 
 - `AllReverseEdges`
 - `AllNodeFragments`
 - `AllEdgeFragments`
-- `AllNodeNames`
-- `AllEdgeNames`
 
 **Traits:**
 - `Visitor<R>`

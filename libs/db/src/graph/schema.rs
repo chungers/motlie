@@ -1,5 +1,5 @@
-use super::ColumnFamilyRecord;
 use super::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
+use super::ColumnFamilyRecord;
 use super::ValidRangePatchable;
 use crate::DataUrl;
 use crate::Id;
@@ -73,38 +73,6 @@ impl ValidRangePatchable for ReverseEdges {
     }
 }
 
-impl ValidRangePatchable for NodeNames {
-    fn patch_valid_range(
-        &self,
-        old_value: &[u8],
-        new_range: TemporalRange,
-    ) -> Result<Vec<u8>, anyhow::Error> {
-        use crate::graph::ColumnFamilyRecord;
-
-        let mut value = NodeNames::value_from_bytes(old_value)
-            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
-        value.0 = Some(new_range);
-        NodeNames::value_to_bytes(&value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
-    }
-}
-
-impl ValidRangePatchable for EdgeNames {
-    fn patch_valid_range(
-        &self,
-        old_value: &[u8],
-        new_range: TemporalRange,
-    ) -> Result<Vec<u8>, anyhow::Error> {
-        use crate::graph::ColumnFamilyRecord;
-
-        let mut value = EdgeNames::value_from_bytes(old_value)
-            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
-        value.0 = Some(new_range);
-        EdgeNames::value_to_bytes(&value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
-    }
-}
-
 /// Forward edges column family (enhanced with weight and summary).
 pub(crate) struct ForwardEdges;
 #[derive(Serialize, Deserialize)]
@@ -112,8 +80,8 @@ pub(crate) struct ForwardEdgeCfKey(pub(crate) SrcId, pub(crate) DstId, pub(crate
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfValue(
     pub(crate) Option<TemporalRange>, // Field 0: Temporal validity
-    pub(crate) Option<f64>,                // Field 1: Optional weight
-    pub(crate) EdgeSummary,                // Field 2: Edge summary
+    pub(crate) Option<f64>,           // Field 1: Optional weight
+    pub(crate) EdgeSummary,           // Field 2: Edge summary
 );
 
 /// Reverse edges column family (index only).
@@ -133,24 +101,7 @@ pub(crate) struct EdgeFragmentCfKey(
     pub(crate) TimestampMilli,
 );
 #[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeFragmentCfValue(
-    pub(crate) Option<TemporalRange>,
-    pub(crate) FragmentContent,
-);
-
-/// Node names column family.
-pub(crate) struct NodeNames;
-#[derive(Serialize, Deserialize)]
-pub(crate) struct NodeNameCfKey(pub(crate) NodeName, pub(crate) Id);
-#[derive(Serialize, Deserialize)]
-pub(crate) struct NodeNameCfValue(pub(crate) Option<TemporalRange>);
-
-/// Edge names column family (index for looking up edges by name).
-pub(crate) struct EdgeNames;
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeNameCfKey(pub(crate) EdgeName, pub(crate) SrcId, pub(crate) DstId);
-#[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeNameCfValue(pub(crate) Option<TemporalRange>);
+pub(crate) struct EdgeFragmentCfValue(pub(crate) Option<TemporalRange>, pub(crate) FragmentContent);
 
 pub type NodeName = String;
 pub type EdgeName = String;
@@ -199,10 +150,7 @@ pub(crate) struct NodeFragments;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeFragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
 #[derive(Serialize, Deserialize)]
-pub(crate) struct NodeFragmentCfValue(
-    pub(crate) Option<TemporalRange>,
-    pub(crate) FragmentContent,
-);
+pub(crate) struct NodeFragmentCfValue(pub(crate) Option<TemporalRange>, pub(crate) FragmentContent);
 
 impl ColumnFamilyRecord for NodeFragments {
     const CF_NAME: &'static str = "node_fragments";
@@ -345,11 +293,7 @@ impl ColumnFamilyRecord for ForwardEdges {
 
     fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, args.name.clone());
-        let value = ForwardEdgeCfValue(
-            args.valid_range.clone(),
-            args.weight,
-            args.summary.clone(),
-        );
+        let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, args.summary.clone());
         (key, value)
     }
 
@@ -469,114 +413,6 @@ impl ColumnFamilyRecord for ReverseEdges {
     }
 }
 
-impl ColumnFamilyRecord for NodeNames {
-    const CF_NAME: &'static str = "node_names";
-    type Key = NodeNameCfKey;
-    type Value = NodeNameCfValue;
-    type CreateOp = AddNode;
-
-    fn record_from(args: &AddNode) -> (NodeNameCfKey, NodeNameCfValue) {
-        let key = NodeNameCfKey(args.name.clone(), args.id);
-        let value = NodeNameCfValue(args.valid_range.clone());
-        (key, value)
-    }
-
-    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // NodeNamesCfKey(NodeName, Id)
-        // Layout: [name UTF-8 bytes] + [node_id (16)]
-        let name_bytes = key.0.as_bytes();
-        let mut bytes = Vec::with_capacity(name_bytes.len() + 16);
-        bytes.extend_from_slice(name_bytes);
-        bytes.extend_from_slice(&key.1.into_bytes());
-        bytes
-    }
-
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
-        if bytes.len() < 16 {
-            anyhow::bail!(
-                "Invalid NodeNamesCfKey length: expected >= 16, got {}",
-                bytes.len()
-            );
-        }
-
-        // The name is everything before the last 16 bytes (which is the node_id)
-        let name_end = bytes.len() - 16;
-        let name_bytes = &bytes[0..name_end];
-        let name = String::from_utf8(name_bytes.to_vec())
-            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in NodeName: {}", e))?;
-
-        let mut node_id_bytes = [0u8; 16];
-        node_id_bytes.copy_from_slice(&bytes[name_end..name_end + 16]);
-
-        Ok(NodeNameCfKey(name, Id::from_bytes(node_id_bytes)))
-    }
-
-    fn column_family_options() -> rocksdb::Options {
-        // Key layout: [name (variable)] + [node_id (16)]
-        // No prefix extraction needed for this column family
-        // as queries will typically be by name which is variable-length at the start
-        rocksdb::Options::default()
-    }
-}
-
-impl ColumnFamilyRecord for EdgeNames {
-    const CF_NAME: &'static str = "edge_names";
-    type Key = EdgeNameCfKey;
-    type Value = EdgeNameCfValue;
-    type CreateOp = AddEdge;
-
-    fn record_from(args: &AddEdge) -> (EdgeNameCfKey, EdgeNameCfValue) {
-        let key = EdgeNameCfKey(args.name.clone(), args.source_node_id, args.target_node_id);
-        let value = EdgeNameCfValue(args.valid_range.clone());
-        (key, value)
-    }
-
-    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // EdgeNamesCfKey(EdgeName, SrcId, DstId)
-        // Layout: [name UTF-8 bytes] + [src_id (16)] + [dst_id (16)]
-        let name_bytes = key.0.as_bytes();
-        let mut bytes = Vec::with_capacity(name_bytes.len() + 32);
-        bytes.extend_from_slice(name_bytes);
-        bytes.extend_from_slice(&key.1.into_bytes());
-        bytes.extend_from_slice(&key.2.into_bytes());
-        bytes
-    }
-
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
-        if bytes.len() < 32 {
-            anyhow::bail!(
-                "Invalid EdgeNamesCfKey length: expected >= 32, got {}",
-                bytes.len()
-            );
-        }
-
-        // The name is everything before the last 32 bytes (which are src_id + dst_id)
-        let name_end = bytes.len() - 32;
-        let name_bytes = &bytes[0..name_end];
-        let name = String::from_utf8(name_bytes.to_vec())
-            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
-
-        let mut src_id_bytes = [0u8; 16];
-        src_id_bytes.copy_from_slice(&bytes[name_end..name_end + 16]);
-
-        let mut dst_id_bytes = [0u8; 16];
-        dst_id_bytes.copy_from_slice(&bytes[name_end + 16..name_end + 32]);
-
-        Ok(EdgeNameCfKey(
-            name,
-            Id::from_bytes(src_id_bytes),
-            Id::from_bytes(dst_id_bytes),
-        ))
-    }
-
-    fn column_family_options() -> rocksdb::Options {
-        // Key layout: [name (variable)] + [src_id (16)] + [dst_id (16)]
-        // No prefix extraction needed for this column family
-        // as queries will typically be by name which is variable-length at the start
-        rocksdb::Options::default()
-    }
-}
-
 /// All column families used in the database.
 /// This is the authoritative list that should be used when opening the database.
 pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
@@ -585,14 +421,13 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     EdgeFragments::CF_NAME,
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
-    NodeNames::CF_NAME,
-    EdgeNames::CF_NAME,
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AddEdge, Id};
+    use super::super::mutation::AddEdge;
+    use crate::Id;
 
     #[test]
     fn test_forward_edges_keys_lexicographically_sortable() {

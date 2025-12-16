@@ -17,17 +17,24 @@
 mod common;
 
 use common::concurrent_test_utils::{Metrics, TestContext};
-use motlie_db::{
-    AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, NodeById, QueryRunnable, ReaderConfig,
-    TimestampMilli, WriterConfig,
+use motlie_db::graph::mutation::{AddEdge, AddNode};
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::query::NodeById;
+use motlie_db::reader::Runnable as QueryRunnable;
+use motlie_db::graph::reader::{Reader, ReaderConfig, spawn_query_consumer_with_graph};
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{
+    create_mutation_writer, spawn_mutation_consumer_with_graph, WriterConfig,
 };
+use motlie_db::graph::{Graph, Storage};
+use motlie_db::{Id, TimestampMilli};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 /// Writer task using shared Graph (instead of opening its own storage)
 async fn writer_task_shared_graph(
-    graph: Arc<motlie_db::Graph>,
+    graph: Arc<Graph>,
     context: Arc<TestContext>,
     num_nodes: usize,
     num_edges_per_node: usize,
@@ -35,11 +42,11 @@ async fn writer_task_shared_graph(
     let mut metrics = Metrics::new();
 
     // Create writer
-    let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
+    let (writer, writer_rx) = create_mutation_writer(Default::default());
 
     // Spawn write consumer with SHARED graph
     let consumer_handle =
-        motlie_db::spawn_graph_consumer_with_graph(writer_rx, WriterConfig::default(), graph);
+        spawn_mutation_consumer_with_graph(writer_rx, WriterConfig::default(), graph);
 
     // Insert nodes
     for i in 0..num_nodes {
@@ -56,7 +63,7 @@ async fn writer_task_shared_graph(
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
             valid_range: None,
-            summary: motlie_db::NodeSummary::from_text(&format!("summary {}", i)),
+            summary: NodeSummary::from_text(&format!("summary {}", i)),
         }
         .run(&writer)
         .await;
@@ -113,7 +120,7 @@ async fn writer_task_shared_graph(
 
 /// Reader task: continuously queries nodes and edges using shared Graph
 async fn reader_task_shared_graph(
-    graph: Arc<motlie_db::Graph>,
+    graph: Arc<Graph>,
     context: Arc<TestContext>,
     _reader_id: usize,
 ) -> Metrics {
@@ -133,13 +140,13 @@ async fn reader_task_shared_graph(
             channel_buffer_size: 10,
         };
         let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-        let reader = motlie_db::Reader::new(sender);
+        let reader = Reader::new(sender);
         (reader, receiver)
     };
 
     // Spawn query consumer with SHARED graph
     // All readers share the same Arc<Graph> which wraps the single TransactionDB
-    let consumer_handle = motlie_db::spawn_graph_query_consumer_with_graph(
+    let consumer_handle = spawn_query_consumer_with_graph(
         reader_rx,
         ReaderConfig {
             channel_buffer_size: 10,
@@ -198,10 +205,10 @@ async fn test_concurrent_read_write_with_readwrite_readers() {
 
     // Create shared readwrite storage and Graph
     // Both writer and readers will share this single TransactionDB instance
-    let mut storage = motlie_db::Storage::readwrite(&db_path);
+    let mut storage = Storage::readwrite(&db_path);
     storage.ready().expect("Failed to ready storage");
     let storage = Arc::new(storage);
-    let graph = Arc::new(motlie_db::Graph::new(storage.clone()));
+    let graph = Arc::new(Graph::new(storage.clone()));
 
     // Spawn writer task using shared graph
     let writer_context = context.clone();

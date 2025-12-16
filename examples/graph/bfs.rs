@@ -8,6 +8,16 @@
 /// - Level-order traversal
 /// - Finding connected components
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{NodesByIdsMulti, OutgoingEdges, Runnable}`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
 /// Usage: bfs <db_path>
 
 // Include the common module
@@ -15,11 +25,16 @@
 mod common;
 
 use anyhow::Result;
-use common::{build_graph, compute_hash, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use common::{
+    build_graph, compute_hash, get_disk_metrics, measure_time_and_memory,
+    measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode,
+    Implementation,
+};
+use motlie_db::query::{NodesByIdsMulti, OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Bfs;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::Path;
 use tokio::time::Duration;
@@ -47,6 +62,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -67,6 +83,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                     target: all_node_ids[child],
                     name: format!("edge_{}_{}", i, child),
                     weight: Some(1.0),
+                    summary: None,
                 });
             }
         }
@@ -88,76 +105,112 @@ fn bfs_petgraph(start_node: NodeIndex, graph: &DiGraph<String, f64>) -> Vec<Stri
 }
 
 /// BFS implementation using motlie_db
+///
+/// Uses level-order processing with NodesByIdsMulti for efficient batch lookups.
+/// Instead of looking up one node at a time, we batch-lookup all nodes in the
+/// current frontier level, reducing the number of RocksDB calls.
 async fn bfs_motlie(
     start_node: Id,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::reader::Reader,
     timeout: Duration,
 ) -> Result<Vec<String>> {
     let mut visited = HashSet::new();
     let mut visit_order = Vec::new();
-    let mut queue = VecDeque::new();
 
-    queue.push_back(start_node);
+    // Process level by level for batch optimization
+    let mut current_level = vec![start_node];
     visited.insert(start_node);
 
-    while let Some(current_id) = queue.pop_front() {
-        // Get node name
-        let (name, _summary) = motlie_db::NodeById::new(current_id, None)
+    while !current_level.is_empty() {
+        // Batch lookup all nodes in current level using NodesByIdsMulti
+        let node_data = NodesByIdsMulti::new(current_level.clone(), None)
             .run(reader, timeout)
             .await?;
 
-        visit_order.push(name);
+        // Build a map of id -> name for ordering
+        let id_to_name: HashMap<Id, String> = node_data
+            .into_iter()
+            .map(|(id, name, _summary)| (id, name))
+            .collect();
 
-        // Get outgoing edges
-        let edges = OutgoingEdges::new(current_id, None)
-            .run(reader, timeout)
-            .await?;
-
-        // Add unvisited neighbors to queue
-        for (_weight, _src, dst, _name) in edges {
-            if !visited.contains(&dst) {
-                visited.insert(dst);
-                queue.push_back(dst);
+        // Add names to visit order (preserving queue order)
+        for id in &current_level {
+            if let Some(name) = id_to_name.get(id) {
+                visit_order.push(name.clone());
             }
         }
+
+        // Collect all neighbors for next level
+        let mut next_level = Vec::new();
+        for current_id in current_level {
+            // Get outgoing edges
+            let edges = OutgoingEdges::new(current_id, None)
+                .run(reader, timeout)
+                .await?;
+
+            // Add unvisited neighbors to next level
+            for (_weight, _src, dst, _name) in edges {
+                if !visited.contains(&dst) {
+                    visited.insert(dst);
+                    next_level.push(dst);
+                }
+            }
+        }
+
+        current_level = next_level;
     }
 
     Ok(visit_order)
 }
 
 /// Calculate the distance (level) from start node to each visited node
+///
+/// Uses level-order processing with NodesByIdsMulti for efficient batch lookups.
 async fn bfs_with_levels(
     start_node: Id,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::reader::Reader,
     timeout: Duration,
 ) -> Result<HashMap<String, usize>> {
     let mut levels = HashMap::new();
     let mut visited = HashSet::new();
-    let mut queue = VecDeque::new();
 
-    queue.push_back((start_node, 0_usize));
+    // Process level by level
+    let mut current_level = vec![start_node];
+    let mut current_depth = 0_usize;
     visited.insert(start_node);
 
-    while let Some((current_id, level)) = queue.pop_front() {
-        // Get node name
-        let (name, _summary) = motlie_db::NodeById::new(current_id, None)
+    while !current_level.is_empty() {
+        // Batch lookup all nodes in current level using NodesByIdsMulti
+        let node_data = NodesByIdsMulti::new(current_level.clone(), None)
             .run(reader, timeout)
             .await?;
 
-        levels.insert(name, level);
+        // Record levels for all nodes in this level
+        for (id, name, _summary) in node_data {
+            levels.insert(name, current_depth);
+            // Note: we use id from node_data to ensure we have the right mapping
+            let _ = id;
+        }
 
-        // Get outgoing edges
-        let edges = OutgoingEdges::new(current_id, None)
-            .run(reader, timeout)
-            .await?;
+        // Collect all neighbors for next level
+        let mut next_level = Vec::new();
+        for current_id in current_level {
+            // Get outgoing edges
+            let edges = OutgoingEdges::new(current_id, None)
+                .run(reader, timeout)
+                .await?;
 
-        // Add unvisited neighbors to queue with incremented level
-        for (_weight, _src, dst, _name) in edges {
-            if !visited.contains(&dst) {
-                visited.insert(dst);
-                queue.push_back((dst, level + 1));
+            // Add unvisited neighbors to next level
+            for (_weight, _src, dst, _name) in edges {
+                if !visited.contains(&dst) {
+                    visited.insert(dst);
+                    next_level.push(dst);
+                }
             }
         }
+
+        current_level = next_level;
+        current_depth += 1;
     }
 
     Ok(levels)
@@ -236,7 +289,7 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run BFS with motlie_db
-            let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes.clone(), edges).await?;
+            let (reader, name_to_id, _handles) = build_graph(db_path, nodes.clone(), edges).await?;
             let start_name = nodes[0].name.clone();
             let start_id = name_to_id[&start_name];
             let timeout = Duration::from_secs(60); // Longer timeout for large graphs

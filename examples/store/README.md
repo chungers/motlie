@@ -240,11 +240,11 @@ Notice how:
 ```rust
 // Create FullText consumer (end of chain)
 let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
-let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone());
+let fulltext_handle = fulltext::spawn_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
 // Create Graph consumer that forwards to FullText
 let (writer, graph_receiver) = create_mutation_writer(config.clone());
-let graph_handle = spawn_graph_consumer_with_next(graph_receiver, config, fulltext_sender);
+let graph_handle = graph::spawn_mutation_consumer_with_next(graph_receiver, config, &db_path, fulltext_sender);
 ```
 
 ### Sending mutations (they flow through the chain automatically):

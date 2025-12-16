@@ -22,12 +22,19 @@ This document evaluates motlie_db's current API capabilities for implementing po
 | Query Type | Output | Purpose |
 |------------|--------|---------|
 | `NodeById` | `(NodeName, NodeSummary)` | Get node metadata by ID |
+| `NodesByIdsMulti` | `Vec<(Id, NodeName, NodeSummary)>` | Batch lookup nodes by IDs |
 | `EdgeSummaryBySrcDstName` | `(EdgeSummary, Option<f64>)` | Get edge metadata and weight |
 | `OutgoingEdges` | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Get all edges from a node with weights |
 | `IncomingEdges` | `Vec<(Option<f64>, DstId, SrcId, EdgeName)>` | Get all edges to a node with weights |
-| `NodesByName` | `Vec<(NodeName, Id)>` | Find nodes by name prefix |
-| `EdgesByName` | `Vec<(EdgeName, Id)>` | Find edges by name prefix |
+| `AllNodes` | `Vec<(Id, NodeName, NodeSummary)>` | Enumerate all nodes (pagination) |
+| `AllEdges` | `Vec<(Option<f64>, SrcId, DstId, EdgeName)>` | Enumerate all edges (pagination) |
 | `NodeFragmentsByIdTimeRange` | `Vec<(TimestampMilli, FragmentContent)>` | Get time-series node data |
+
+> **Note:** Name-based queries (`NodesByName`, `EdgesByName`) have been removed.
+> Use the fulltext search module for name-based lookups.
+>
+> **Graph Enumeration:** `AllNodes` and `AllEdges` are now part of the unified API (`motlie_db::query`)
+> for implementing graph algorithms like PageRank, Louvain, and Kruskal's MST.
 
 ### Mutation Types (from `mutation.rs`)
 
@@ -267,7 +274,7 @@ async fn pagerank_iteration(
 **Limitation:** No built-in graph enumeration API
 ```rust
 // Missing: How to get all node IDs?
-// Current workaround: Track nodes externally or use NodesByName with empty prefix
+// Current workaround: Track nodes externally or use scan::AllNodes
 ```
 
 **Verdict:** ✅ **Fully supported** for degree and iterative algorithms (PageRank, Eigenvector)
@@ -948,11 +955,12 @@ Both Kahn's algorithm and DFS-based topological sort work seamlessly with:
 
 ### ⚠️ Remaining Limitations
 
-1. **No Graph Enumeration API**
+1. **No Graph Enumeration API** *(Resolved)*
    - **Problem:** No way to get "all node IDs" or "all edges"
    - **Impact:** Algorithms like Kruskal's MST, centrality need this
-   - **Workaround:** Track nodes externally or use `NodesByName("")` with empty prefix
-   - **Proposed Enhancement:**
+   - **Solution:** Use `scan::AllNodes` and `scan::AllEdges` from the scan API
+   - **Alternative:** Use fulltext search for name-based lookups
+   - **Original Proposed Enhancement (now implemented):**
      ```rust
      pub struct AllNodes {
          pub limit: Option<usize>,
@@ -1320,64 +1328,61 @@ This section provides a comprehensive analysis of remaining API gaps, their prio
 - Point lookups (nodes and edges by ID/topology)
 - Name-based prefix searching
 
-**⚠️ Partially Implemented (15% Algorithm Support):**
-- Graph enumeration (workaround: external tracking or empty prefix search)
-- Batch lookups (workaround: sequential async queries)
+**✅ Now Fully Implemented:**
+- Graph enumeration via unified API `AllNodes` and `AllEdges` queries
+- Batch lookups via `NodesByIdsMulti`
 - Undirected edge primitives (workaround: manual bidirectional edges)
 
 ---
 
-### Priority 1: Graph Enumeration Queries
+### Priority 1: Graph Enumeration Queries ✅ IMPLEMENTED
 
-#### Missing Functionality
+> **Status: COMPLETED** - `AllNodes` and `AllEdges` are now available in the unified API (`motlie_db::query`).
 
-**AllNodes Query:**
+**AllNodes Query (Unified API):**
 ```rust
-pub struct AllNodes {
-    pub limit: Option<usize>,
-    pub start: Option<Id>,
-    pub reference_ts_millis: Option<TimestampMilli>,
-}
-// Returns: Vec<Id>
+use motlie_db::query::{AllNodes, Runnable};
+
+// Get all nodes with pagination
+let nodes = AllNodes::new(1000)  // limit
+    .with_cursor(last_id)        // optional: pagination cursor
+    .with_reference_time(ts)     // optional: temporal validity
+    .run(handles.reader(), timeout)
+    .await?;
+// Returns: Vec<(Id, NodeName, NodeSummary)>
 ```
 
-**AllEdges Query:**
+**AllEdges Query (Unified API):**
 ```rust
-pub struct AllEdges {
-    pub limit: Option<usize>,
-    pub start: Option<(SrcId, DstId, EdgeName)>,
-    pub reference_ts_millis: Option<TimestampMilli>,
-}
+use motlie_db::query::{AllEdges, Runnable};
+
+// Get all edges with pagination
+let edges = AllEdges::new(1000)  // limit
+    .with_cursor((src, dst, name))  // optional: pagination cursor
+    .with_reference_time(ts)        // optional: temporal validity
+    .run(handles.reader(), timeout)
+    .await?;
 // Returns: Vec<(Option<f64>, SrcId, DstId, EdgeName)>
 ```
 
-#### Impact on Algorithms
+#### Now Supported Use Cases
 
-**Blocked Use Cases:**
-- **Kruskal's MST:** Requires enumerating all edges sorted by weight
-- **Edge Betweenness Centrality:** Needs complete edge set
-- **Global Graph Statistics:** Node count, edge count, degree distribution
-- **Graph Initialization:** PageRank, centrality algorithms need node set
-
-**Current Workaround Cost:**
-```rust
-// Current approach: External tracking during construction
-let mut node_ids = Vec::new();
-// Must manually track all node IDs during graph construction
-
-// OR: Empty prefix search (inefficient)
-let nodes = NodesByName::new("".to_string(), 0, 100000, None)
-    .run(&reader, timeout).await?;
-```
+**All Previously Blocked Use Cases Are Now Supported:**
+- ✅ **Kruskal's MST:** Enumerate all edges sorted by weight
+- ✅ **Edge Betweenness Centrality:** Complete edge set access
+- ✅ **Global Graph Statistics:** Node count, edge count, degree distribution
+- ✅ **Graph Initialization:** PageRank, centrality algorithms have node set
 
 **Example: Kruskal's MST with AllEdges:**
 ```rust
+use motlie_db::query::{AllEdges, Runnable};
+
 async fn kruskal_mst(
-    reader: &Reader,
+    reader: &motlie_db::reader::Reader,
     timeout: Duration
 ) -> Result<Vec<(SrcId, DstId, EdgeName, f64)>> {
-    // Get all edges with weights (Priority 1 enhancement)
-    let all_edges = AllEdges::new(None, None, None)
+    // Get all edges with weights via unified API
+    let all_edges = AllEdges::new(100000)
         .run(reader, timeout)
         .await?;
 
@@ -1404,12 +1409,57 @@ async fn kruskal_mst(
 }
 ```
 
-**Unlocked Use Cases:**
+**Example: PageRank Initialization with AllNodes:**
+```rust
+use motlie_db::query::{AllNodes, IncomingEdges, Runnable};
+
+async fn pagerank(
+    reader: &motlie_db::reader::Reader,
+    timeout: Duration,
+    damping: f64,
+    iterations: usize,
+) -> Result<HashMap<Id, f64>> {
+    // Get all node IDs via unified API
+    let nodes = AllNodes::new(100000)
+        .run(reader, timeout)
+        .await?;
+
+    let node_ids: Vec<Id> = nodes.iter().map(|(id, _, _)| *id).collect();
+    let n = node_ids.len() as f64;
+
+    // Initialize PageRank scores
+    let mut scores: HashMap<Id, f64> = node_ids.iter()
+        .map(|id| (*id, 1.0 / n))
+        .collect();
+
+    for _ in 0..iterations {
+        let mut new_scores = HashMap::new();
+        for &node_id in &node_ids {
+            let incoming = IncomingEdges::new(node_id, None)
+                .run(reader, timeout)
+                .await?;
+
+            let sum: f64 = incoming.iter()
+                .map(|(_, _, src, _)| scores.get(src).unwrap_or(&0.0) / out_degree(src))
+                .sum();
+
+            new_scores.insert(node_id, (1.0 - damping) / n + damping * sum);
+        }
+        scores = new_scores;
+    }
+
+    Ok(scores)
+}
+```
+
+**Fully Unlocked Use Cases:**
 - ✅ Kruskal's MST without external tracking
 - ✅ Edge-centric centrality algorithms
 - ✅ Global graph statistics (degree distribution, density)
 - ✅ PageRank initialization without external node list
 - ✅ Graph export/serialization
+- ✅ Louvain community detection
+- ✅ Connected components
 
 ---
 

@@ -1,8 +1,12 @@
 # NodeNames and EdgeNames Prefix Scanning - Final Analysis
 
+> **⚠️ HISTORICAL DOCUMENT**: The `NodeNames` and `EdgeNames` column families described in this
+> document have been removed. Name-based lookups are now handled by the fulltext search module
+> using Tantivy indexing. This document is preserved for historical reference only.
+
 ## Executive Summary and Final Decision
 
-**Status**: ✅ **NO CHANGES NEEDED - CURRENT DESIGN IS OPTIMAL**
+**Status**: ❌ **DEPRECATED - Column families removed in favor of fulltext search**
 
 After thorough analysis, including investigation of hash-based optimization approaches, the **current V1 schema is correct and optimal** for string prefix scanning requirements.
 

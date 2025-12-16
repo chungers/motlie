@@ -2,14 +2,17 @@
 //!
 //! This test shows how to:
 //! - Chain consumers so mutations flow through Graph storage first, then to FullText indexing
-//! - Use spawn_graph_consumer_with_next to forward mutations downstream
+//! - Use spawn_mutation_consumer_with_next to forward mutations downstream
 //! - Verify both consumers process the same data in sequence
 
-use motlie_db::{
-    create_mutation_writer, spawn_fulltext_consumer, spawn_graph_consumer_with_next, AddEdge,
-    AddNode, AddNodeFragment, DataUrl, EdgeSummary, Id, MutationRunnable, TimestampMilli,
-    WriterConfig,
+use motlie_db::fulltext::spawn_mutation_consumer as spawn_fulltext_mutation_consumer;
+use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{
+    create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
 };
+use motlie_db::{DataUrl, Id, TimestampMilli};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::Value;
@@ -32,11 +35,11 @@ async fn test_fulltext_chaining_basic() {
 
     // Create the FullText consumer (end of chain)
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
-    let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone(), &index_path);
+    let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     // Create the Graph consumer that forwards to FullText
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_handle = spawn_graph_consumer_with_next(
+    let graph_handle = spawn_mutation_consumer_with_next(
         graph_receiver,
         config.clone(),
         &db_path,
@@ -55,7 +58,7 @@ async fn test_fulltext_chaining_basic() {
             ts_millis: TimestampMilli::now(),
             name: format!("ChainedNode_{}", i),
             valid_range: None,
-            summary: motlie_db::NodeSummary::from_text(&format!("Summary for node {}", i)),
+            summary: NodeSummary::from_text(&format!("Summary for node {}", i)),
         };
         node.run(&writer).await.unwrap();
     }
@@ -172,10 +175,10 @@ async fn test_fulltext_chaining_high_volume() {
 
     // Create the chain: Writer -> Graph -> FullText
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
-    let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone(), &index_path);
+    let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_handle = spawn_graph_consumer_with_next(
+    let graph_handle = spawn_mutation_consumer_with_next(
         graph_receiver,
         config.clone(),
         &db_path,
@@ -197,7 +200,7 @@ async fn test_fulltext_chaining_high_volume() {
             ts_millis: TimestampMilli::now(),
             name: format!("HighVolumeNode_{}", i),
             valid_range: None,
-            summary: motlie_db::NodeSummary::from_text(&format!("High volume summary {}", i)),
+            summary: NodeSummary::from_text(&format!("High volume summary {}", i)),
         };
 
         let fragment = AddNodeFragment {
@@ -255,10 +258,10 @@ async fn test_fulltext_chaining_graceful_shutdown() {
 
     // Create the chain
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
-    let fulltext_handle = spawn_fulltext_consumer(fulltext_receiver, config.clone(), &index_path);
+    let fulltext_handle = spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_handle = spawn_graph_consumer_with_next(
+    let graph_handle = spawn_mutation_consumer_with_next(
         graph_receiver,
         config.clone(),
         &db_path,
@@ -272,7 +275,7 @@ async fn test_fulltext_chaining_graceful_shutdown() {
             ts_millis: TimestampMilli::now(),
             name: format!("ShutdownTest_{}", i),
             valid_range: None,
-            summary: motlie_db::NodeSummary::from_text(&format!("Shutdown test summary {}", i)),
+            summary: NodeSummary::from_text(&format!("Shutdown test summary {}", i)),
         };
         node.run(&writer).await.unwrap();
     }

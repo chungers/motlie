@@ -4,6 +4,9 @@
 **Date**: Originally proposed 2025-11-14, implemented 2025-11-16
 **Context**: Unified trait-based pattern for both mutations and queries
 
+> **Note**: Some types mentioned in this document (`NodesByName`, `EdgesByName`, `NodeNames`, `EdgeNames`)
+> have been removed. Name-based lookups are now handled by the fulltext search module.
+
 ## Current Status
 
 Both the query and mutation systems now follow a consistent trait-based execution pattern:
