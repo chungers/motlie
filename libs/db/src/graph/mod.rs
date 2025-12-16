@@ -9,7 +9,7 @@
 //! - `schema.rs` - RocksDB schema definitions (column families)
 //! - `mutation.rs` - Mutation types (AddNode, AddEdge, etc.)
 //! - `writer.rs` - Writer infrastructure and mutation consumers
-//! - `query.rs` - Query types (NodeById, EdgesByName, etc.)
+//! - `query.rs` - Query types (NodeById, EdgeSummaryBySrcDstName, etc.)
 //! - `reader.rs` - Reader infrastructure and query consumers
 //! - `scan.rs` - Scan API for pagination
 
@@ -36,24 +36,25 @@ mod tests;
 
 // Re-export commonly used types from submodules
 pub use mutation::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch, Runnable,
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
     UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
 };
+pub use crate::writer::Runnable;
 pub use query::{
-    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, EdgesByName, IncomingEdges, NodeById,
-    NodeFragmentsByIdTimeRange, NodesByName, OutgoingEdges, Query, Runnable as QueryRunnable,
+    EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, IncomingEdges, NodeById,
+    NodeFragmentsByIdTimeRange, OutgoingEdges, Query,
 };
+pub use crate::reader::Runnable as QueryRunnable;
 pub use reader::{
-    // Graph-specific query consumer functions
-    create_graph_query_consumer,
-    create_graph_query_consumer_readwrite,
+    // Query consumer functions
+    create_query_consumer,
+    create_query_consumer_readwrite,
     create_query_reader,
-    spawn_consumer as spawn_query_consumer,
-    spawn_graph_query_consumer,
-    spawn_graph_query_consumer_pool_readonly,
-    spawn_graph_query_consumer_pool_shared,
-    spawn_graph_query_consumer_readwrite,
-    spawn_graph_query_consumer_with_graph,
+    spawn_query_consumer,
+    spawn_query_consumer_pool_readonly,
+    spawn_query_consumer_pool_shared,
+    spawn_query_consumer_readwrite,
+    spawn_query_consumer_with_graph,
     Consumer as QueryConsumer,
     Processor as ReaderProcessor,
     QueryExecutor,
@@ -64,14 +65,13 @@ pub use reader::{
 };
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 pub use writer::{
-    // Graph-specific mutation consumer functions
-    create_graph_consumer,
-    create_graph_consumer_with_next,
+    // Mutation consumer functions
+    create_mutation_consumer,
+    create_mutation_consumer_with_next,
     create_mutation_writer,
-    spawn_consumer as spawn_mutation_consumer,
-    spawn_graph_consumer,
-    spawn_graph_consumer_with_graph,
-    spawn_graph_consumer_with_next,
+    spawn_mutation_consumer,
+    spawn_mutation_consumer_with_graph,
+    spawn_mutation_consumer_with_next,
     Consumer as MutationConsumer,
     MutationExecutor,
     Processor as MutationProcessor,
@@ -298,7 +298,7 @@ impl Storage {
     /// # Example
     /// ```no_run
     /// use std::path::PathBuf;
-    /// use motlie_db::Storage;
+    /// use motlie_db::graph::Storage;
     ///
     /// let primary = PathBuf::from("/data/db");
     /// let secondary = primary.join("secondary");
@@ -387,14 +387,6 @@ impl Storage {
                 schema::ReverseEdges::CF_NAME,
                 schema::ReverseEdges::column_family_options(),
             ),
-            ColumnFamilyDescriptor::new(
-                schema::NodeNames::CF_NAME,
-                schema::NodeNames::column_family_options(),
-            ),
-            ColumnFamilyDescriptor::new(
-                schema::EdgeNames::CF_NAME,
-                schema::EdgeNames::column_family_options(),
-            ),
         ];
 
         match &self.mode {
@@ -473,7 +465,7 @@ impl Storage {
     ///
     /// # Example
     /// ```no_run
-    /// # use motlie_db::Storage;
+    /// # use motlie_db::graph::Storage;
     /// # use std::path::PathBuf;
     /// let mut storage = Storage::secondary(
     ///     &PathBuf::from("/data/db"),

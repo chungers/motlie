@@ -2,7 +2,11 @@
 ///
 /// Secondary instances provide dynamic catch-up capability for read replicas,
 /// allowing them to see new writes from the primary database.
-use motlie_db::{AddNode, Id, MutationRunnable, NodeById, QueryRunnable, TimestampMilli};
+use motlie_db::graph::mutation::AddNode;
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::query::NodeById;
+use motlie_db::reader::Runnable as QueryRunnable;
+use motlie_db::{Id, TimestampMilli};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -13,9 +17,9 @@ async fn test_secondary_instance_basic() {
     let secondary_path = temp_dir.path().join("secondary");
 
     // Create primary database and write a node
-    let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
+    let (writer, writer_rx) = motlie_db::graph::writer::create_mutation_writer(Default::default());
     let writer_handle =
-        motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &primary_path);
+        motlie_db::graph::writer::spawn_mutation_consumer(writer_rx, Default::default(), &primary_path);
 
     let node_id = Id::new();
     let node_name = "test_node".to_string();
@@ -25,7 +29,7 @@ async fn test_secondary_instance_basic() {
         ts_millis: TimestampMilli::now(),
         name: node_name.clone(),
         valid_range: None,
-        summary: motlie_db::NodeSummary::from_text("test node summary"),
+        summary: motlie_db::graph::schema::NodeSummary::from_text("test node summary"),
     }
     .run(&writer)
     .await
@@ -41,7 +45,7 @@ async fn test_secondary_instance_basic() {
         .expect("Writer failed");
 
     // Open secondary instance
-    let mut secondary_storage = motlie_db::Storage::secondary(&primary_path, &secondary_path);
+    let mut secondary_storage = motlie_db::graph::Storage::secondary(&primary_path, &secondary_path);
     secondary_storage
         .ready()
         .expect("Failed to ready secondary");
@@ -54,18 +58,18 @@ async fn test_secondary_instance_basic() {
         .expect("Failed to catch up");
 
     // Create reader on secondary
-    let graph = motlie_db::Graph::new(std::sync::Arc::new(secondary_storage));
+    let graph = motlie_db::graph::Graph::new(std::sync::Arc::new(secondary_storage));
     let (reader, reader_rx) = {
-        let config = motlie_db::ReaderConfig {
+        let config = motlie_db::graph::reader::ReaderConfig {
             channel_buffer_size: 10,
         };
         let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-        let reader = motlie_db::Reader::new(sender);
+        let reader = motlie_db::graph::reader::Reader::new(sender);
         (reader, receiver)
     };
 
     let consumer_handle =
-        motlie_db::spawn_graph_query_consumer(reader_rx, Default::default(), &primary_path);
+        motlie_db::graph::reader::spawn_query_consumer(reader_rx, Default::default(), &primary_path);
 
     // Query the node from secondary
     let result = NodeById::new(node_id, None).run(
@@ -90,9 +94,9 @@ async fn test_secondary_catch_up_sees_new_writes() {
 
     // Write first node
     {
-        let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
+        let (writer, writer_rx) = motlie_db::graph::writer::create_mutation_writer(Default::default());
         let writer_handle =
-            motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &primary_path);
+            motlie_db::graph::writer::spawn_mutation_consumer(writer_rx, Default::default(), &primary_path);
 
         let node1_id = Id::new();
         AddNode {
@@ -100,7 +104,7 @@ async fn test_secondary_catch_up_sees_new_writes() {
             ts_millis: TimestampMilli::now(),
             name: "node1".to_string(),
             valid_range: None,
-            summary: motlie_db::NodeSummary::from_text("node1 summary"),
+            summary: motlie_db::graph::schema::NodeSummary::from_text("node1 summary"),
         }
         .run(&writer)
         .await
@@ -112,7 +116,7 @@ async fn test_secondary_catch_up_sees_new_writes() {
     }
 
     // Open secondary and catch up
-    let mut secondary_storage = motlie_db::Storage::secondary(&primary_path, &secondary_path);
+    let mut secondary_storage = motlie_db::graph::Storage::secondary(&primary_path, &secondary_path);
     secondary_storage
         .ready()
         .expect("Failed to ready secondary");
@@ -123,16 +127,16 @@ async fn test_secondary_catch_up_sees_new_writes() {
     // Write second node to primary
     let node2_id = Id::new();
     {
-        let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
+        let (writer, writer_rx) = motlie_db::graph::writer::create_mutation_writer(Default::default());
         let writer_handle =
-            motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &primary_path);
+            motlie_db::graph::writer::spawn_mutation_consumer(writer_rx, Default::default(), &primary_path);
 
         AddNode {
             id: node2_id,
             ts_millis: TimestampMilli::now(),
             name: "node2".to_string(),
             valid_range: None,
-            summary: motlie_db::NodeSummary::from_text("node2 summary"),
+            summary: motlie_db::graph::schema::NodeSummary::from_text("node2 summary"),
         }
         .run(&writer)
         .await
@@ -163,12 +167,12 @@ fn test_secondary_instance_creation() {
     let secondary_path = temp_dir.path().join("secondary");
 
     // Create a minimal primary database
-    let mut primary = motlie_db::Storage::readwrite(&primary_path);
+    let mut primary = motlie_db::graph::Storage::readwrite(&primary_path);
     primary.ready().expect("Failed to ready primary");
     primary.close().expect("Failed to close primary");
 
     // Create secondary instance
-    let secondary = motlie_db::Storage::secondary(&primary_path, &secondary_path);
+    let secondary = motlie_db::graph::Storage::secondary(&primary_path, &secondary_path);
 
     assert!(secondary.is_secondary());
     assert!(!secondary.is_transactional());
@@ -180,11 +184,11 @@ fn test_try_catch_up_on_non_secondary_fails() {
     let db_path = temp_dir.path().join("db");
 
     // Create readonly instance
-    let mut readonly = motlie_db::Storage::readonly(&db_path);
+    let mut readonly = motlie_db::graph::Storage::readonly(&db_path);
 
     // Create a minimal database first
     {
-        let mut primary = motlie_db::Storage::readwrite(&db_path);
+        let mut primary = motlie_db::graph::Storage::readwrite(&db_path);
         primary.ready().expect("Failed to ready");
         primary.close().expect("Failed to close");
     }

@@ -9,6 +9,16 @@
 /// - Course prerequisite ordering
 /// - Dependency resolution
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{OutgoingEdges, Runnable}`, `motlie_db::graph::query::NodeById`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
 /// Usage: toposort <db_path>
 
 // Include the common module
@@ -17,7 +27,8 @@ mod common;
 
 use anyhow::Result;
 use common::{build_graph, compute_hash, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use motlie_db::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use petgraph::algo::toposort as petgraph_toposort;
 use petgraph::graph::DiGraph;
 use std::collections::{HashMap, VecDeque};
@@ -48,6 +59,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -80,6 +92,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[module_start + dst_offset],
                 name: format!("dep_m{}_{}_{}", module, src_offset, dst_offset),
                 weight: Some(1.0),
+                summary: None,
             });
         }
 
@@ -92,6 +105,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[next_module_start], // next Start
                 name: format!("bridge_m{}_to_m{}", module, module + 1),
                 weight: Some(1.0),
+                summary: None,
             });
         }
     }
@@ -102,7 +116,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
 /// Topological sort using Kahn's algorithm with motlie_db
 async fn toposort_motlie(
     all_nodes: &[Id],
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<Vec<String>> {
     // Calculate in-degrees for all nodes
@@ -113,7 +127,7 @@ async fn toposort_motlie(
         in_degree.insert(node_id, 0);
 
         // Get node name
-        let (name, _summary) = motlie_db::NodeById::new(node_id, None)
+        let (name, _summary) = motlie_db::graph::query::NodeById::new(node_id, None)
             .run(reader, timeout)
             .await?;
         name_map.insert(node_id, name);
@@ -250,10 +264,10 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run topological sort with motlie_db
-            let (reader, _name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
+            let (reader, _name_to_id, _handles) = build_graph(db_path, nodes, edges).await?;
             let timeout = Duration::from_secs(60); // Longer timeout for large graphs
 
-            let (result, time_ms, memory) = measure_time_and_memory_async(|| toposort_motlie(&node_ids, &reader, timeout)).await;
+            let (result, time_ms, memory) = measure_time_and_memory_async(|| toposort_motlie(&node_ids, reader.graph(), timeout)).await;
             let result = result?;
             let result_hash = Some(compute_hash(&result));
 

@@ -18,6 +18,16 @@
 /// 1. Local optimization: Move nodes between communities to maximize modularity gain
 /// 2. Network aggregation: Build a new network of communities
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{OutgoingEdges, Runnable}`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
 /// Usage: louvain <implementation> <db_path> <scale_factor>
 
 // Include the common module
@@ -30,7 +40,8 @@ use common::{
     measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode,
     Implementation,
 };
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use motlie_db::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::Path;
@@ -59,6 +70,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -79,6 +91,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                     target: all_node_ids[dst_idx],
                     name: format!("intra_c{}_{}_{}", community, i, j),
                     weight: Some(1.0),
+                    summary: None,
                 });
 
                 // Backward edge (undirected graph)
@@ -87,6 +100,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                     target: all_node_ids[src_idx],
                     name: format!("intra_c{}_{}_{}_rev", community, j, i),
                     weight: Some(1.0),
+                    summary: None,
                 });
             }
         }
@@ -104,6 +118,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             target: all_node_ids[next_start],
             name: format!("bridge_{}_{}", community, community + 1),
             weight: Some(1.0),
+            summary: None,
         });
 
         // Reverse bridge
@@ -112,6 +127,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             target: all_node_ids[current_start + community_size - 1],
             name: format!("bridge_{}_{}_rev", community + 1, community),
             weight: Some(1.0),
+            summary: None,
         });
 
         // Second bridge (middle nodes) for larger graphs
@@ -122,6 +138,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[next_start + mid],
                 name: format!("bridge2_{}_{}", community, community + 1),
                 weight: Some(1.0),
+                summary: None,
             });
 
             edges.push(GraphEdge {
@@ -129,6 +146,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[current_start + mid],
                 name: format!("bridge2_{}_{}_rev", community + 1, community),
                 weight: Some(1.0),
+                summary: None,
             });
         }
     }
@@ -143,6 +161,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             target: all_node_ids[last_start + community_size - 1],
             name: format!("bridge_circular_0_{}", num_communities - 1),
             weight: Some(1.0),
+            summary: None,
         });
 
         edges.push(GraphEdge {
@@ -150,6 +169,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             target: all_node_ids[first_start],
             name: format!("bridge_circular_{}_0_rev", num_communities - 1),
             weight: Some(1.0),
+            summary: None,
         });
     }
 
@@ -393,7 +413,7 @@ fn louvain_reference(adjacency: &HashMap<String, Vec<(String, f64)>>) -> Communi
 async fn louvain_motlie(
     all_nodes: &[Id],
     id_to_name: &HashMap<Id, String>,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<CommunityResult> {
     // Initialize: each node in its own community
@@ -656,7 +676,7 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run Louvain with motlie_db
-            let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
+            let (reader, name_to_id, _handles) = build_graph(db_path, nodes, edges).await?;
 
             // Rebuild id_to_name with IDs from build_graph
             let id_to_name_rebuilt: HashMap<Id, String> = name_to_id
@@ -669,7 +689,7 @@ async fn main() -> Result<()> {
             let timeout = Duration::from_secs(120);
 
             let (result, time_ms, memory) = measure_time_and_memory_async(|| {
-                louvain_motlie(&node_ids_rebuilt, &id_to_name_rebuilt, &reader, timeout)
+                louvain_motlie(&node_ids_rebuilt, &id_to_name_rebuilt, reader.graph(), timeout)
             })
             .await;
             let result = result?;

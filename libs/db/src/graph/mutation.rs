@@ -8,6 +8,7 @@ use anyhow::Result;
 
 use super::schema;
 use super::writer::{MutationExecutor, Writer};
+use crate::writer::Runnable;
 use crate::{Id, TimestampMilli};
 
 #[derive(Debug, Clone)]
@@ -149,7 +150,7 @@ pub struct UpdateEdgeWeight {
 // ============================================================================
 
 /// Helper function to update TemporalRange for a single node.
-/// Updates both Nodes CF and NodeNames CF.
+/// Updates the Nodes CF.
 fn update_node_valid_range(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
@@ -157,7 +158,7 @@ fn update_node_valid_range(
     new_range: schema::TemporalRange,
 ) -> Result<()> {
     use super::{ColumnFamilyRecord, ValidRangePatchable};
-    use super::schema::{NodeCfKey, NodeCfValue, NodeNameCfKey, NodeNames, Nodes};
+    use super::schema::{NodeCfKey, Nodes};
 
     // Patch Nodes CF
     let nodes_cf = txn_db
@@ -171,35 +172,14 @@ fn update_node_valid_range(
         .get_cf(nodes_cf, &node_key_bytes)?
         .ok_or_else(|| anyhow::anyhow!("Node not found for id: {}", node_id))?;
 
-    // Deserialize to get node name for NodeNames CF update
-    let node_value: NodeCfValue = Nodes::value_from_bytes(&node_value_bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
-    let node_name = node_value.1.clone();
-
     let nodes = Nodes;
     let patched_node_bytes = nodes.patch_valid_range(&node_value_bytes, new_range)?;
     txn.put_cf(nodes_cf, &node_key_bytes, patched_node_bytes)?;
 
-    // Patch NodeNames CF
-    let node_names_cf = txn_db
-        .cf_handle(NodeNames::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("NodeNames CF not found"))?;
-
-    let node_name_key = NodeNameCfKey(node_name, node_id);
-    let node_name_key_bytes = NodeNames::key_to_bytes(&node_name_key);
-
-    let node_name_value_bytes = txn
-        .get_cf(node_names_cf, &node_name_key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("NodeName not found for id: {}", node_id))?;
-
-    let node_names = NodeNames;
-    let patched_name_bytes = node_names.patch_valid_range(&node_name_value_bytes, new_range)?;
-    txn.put_cf(node_names_cf, &node_name_key_bytes, patched_name_bytes)?;
-
     Ok(())
 }
 
-/// Helper function to update TemporalRange for a single edge in ForwardEdges, ReverseEdges, and EdgeNames CFs.
+/// Helper function to update TemporalRange for a single edge in ForwardEdges and ReverseEdges CFs.
 /// This is the core logic shared by UpdateEdgeValidSinceUntil and UpdateNodeValidSinceUntil.
 fn update_edge_valid_range(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -210,9 +190,7 @@ fn update_edge_valid_range(
     new_range: schema::TemporalRange,
 ) -> Result<()> {
     use super::{ColumnFamilyRecord, ValidRangePatchable};
-    use super::schema::{
-        EdgeNameCfKey, EdgeNames, ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges,
-    };
+    use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
 
     // Patch ForwardEdges CF
     let forward_cf = txn_db
@@ -255,30 +233,6 @@ fn update_edge_valid_range(
     let reverse_edges = ReverseEdges;
     let patched_reverse_bytes = reverse_edges.patch_valid_range(&reverse_value_bytes, new_range)?;
     txn.put_cf(reverse_cf, &reverse_key_bytes, patched_reverse_bytes)?;
-
-    // Patch EdgeNames CF
-    let edge_names_cf = txn_db
-        .cf_handle(EdgeNames::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("EdgeNames CF not found"))?;
-
-    let edge_name_key = EdgeNameCfKey(edge_name.clone(), src_id, dst_id);
-    let edge_name_key_bytes = EdgeNames::key_to_bytes(&edge_name_key);
-
-    let edge_name_value_bytes =
-        txn.get_cf(edge_names_cf, &edge_name_key_bytes)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "EdgeName not found: name={}, src={}, dst={}",
-                    edge_name,
-                    src_id,
-                    dst_id
-                )
-            })?;
-
-    let edge_names = EdgeNames;
-    let patched_edge_name_bytes =
-        edge_names.patch_valid_range(&edge_name_value_bytes, new_range)?;
-    txn.put_cf(edge_names_cf, &edge_name_key_bytes, patched_edge_name_bytes)?;
 
     Ok(())
 }
@@ -342,7 +296,7 @@ impl MutationExecutor for AddNode {
         tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation");
 
         use super::ColumnFamilyRecord;
-        use super::schema::{NodeNames, Nodes};
+        use super::schema::Nodes;
 
         // Write to Nodes CF
         let nodes_cf = txn_db
@@ -350,13 +304,6 @@ impl MutationExecutor for AddNode {
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
         let (node_key, node_value) = Nodes::create_bytes(self)?;
         txn.put_cf(nodes_cf, node_key, node_value)?;
-
-        // Write to NodeNames CF
-        let names_cf = txn_db
-            .cf_handle(NodeNames::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeNames::CF_NAME))?;
-        let (name_key, name_value) = NodeNames::create_bytes(self)?;
-        txn.put_cf(names_cf, name_key, name_value)?;
 
         Ok(())
     }
@@ -376,7 +323,7 @@ impl MutationExecutor for AddEdge {
         );
 
         use super::ColumnFamilyRecord;
-        use super::schema::{EdgeNames, ForwardEdges, ReverseEdges};
+        use super::schema::{ForwardEdges, ReverseEdges};
 
         // Write to ForwardEdges CF
         let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
@@ -391,13 +338,6 @@ impl MutationExecutor for AddEdge {
         })?;
         let (reverse_key, reverse_value) = ReverseEdges::create_bytes(self)?;
         txn.put_cf(reverse_cf, reverse_key, reverse_value)?;
-
-        // Write to EdgeNames CF
-        let names_cf = txn_db
-            .cf_handle(EdgeNames::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeNames::CF_NAME))?;
-        let (name_key, name_value) = EdgeNames::create_bytes(self)?;
-        txn.put_cf(names_cf, name_key, name_value)?;
 
         Ok(())
     }
@@ -578,60 +518,39 @@ impl Mutation {
 }
 
 // ============================================================================
-// Runnable Trait - Execute mutations against a Writer
+// Runnable Trait Implementations
 // ============================================================================
 
-/// Trait for mutations that can be executed against a Writer.
-///
-/// This trait follows the same pattern as the Query API's Runnable trait,
-/// enabling mutations to be constructed separately from execution.
-///
-/// # Examples
-///
-/// ```rust,ignore
-/// use motlie_db::{AddNode, Id, TimestampMilli, Runnable};
-///
-/// // Construct mutation
-/// let mutation = AddNode {
-///     id: Id::new(),
-///     name: "Alice".to_string(),
-///     ts_millis: TimestampMilli::now(),
-///     valid_range: None,
-/// };
-///
-/// // Execute it
-/// mutation.run(&writer).await?;
-/// ```
-pub trait Runnable {
-    /// Execute this mutation against the writer
-    async fn run(self, writer: &Writer) -> Result<()>;
-}
-
 // Implement Runnable for individual mutation types
+#[async_trait::async_trait]
 impl Runnable for AddNode {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::AddNode(self)]).await
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for AddEdge {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::AddEdge(self)]).await
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for AddNodeFragment {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::AddNodeFragment(self)]).await
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for AddEdgeFragment {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::AddEdgeFragment(self)]).await
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for UpdateNodeValidSinceUntil {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer
@@ -640,6 +559,7 @@ impl Runnable for UpdateNodeValidSinceUntil {
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for UpdateEdgeValidSinceUntil {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer
@@ -648,6 +568,7 @@ impl Runnable for UpdateEdgeValidSinceUntil {
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for UpdateEdgeWeight {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(vec![Mutation::UpdateEdgeWeight(self)]).await
@@ -763,6 +684,7 @@ impl Default for MutationBatch {
     }
 }
 
+#[async_trait::async_trait]
 impl Runnable for MutationBatch {
     async fn run(self, writer: &Writer) -> Result<()> {
         writer.send(self.0).await

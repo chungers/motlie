@@ -17,7 +17,10 @@
 mod common;
 
 use common::concurrent_test_utils::{writer_task, Metrics, TestContext};
-use motlie_db::{NodeById, QueryRunnable, ReaderConfig};
+use motlie_db::graph::query::NodeById;
+use motlie_db::reader::Runnable as QueryRunnable;
+use motlie_db::graph::reader::{spawn_query_consumer, Reader, ReaderConfig};
+use motlie_db::graph::Storage;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -83,7 +86,7 @@ async fn reader_task_with_secondary(
 
     // Create secondary instance with unique path per reader
     let secondary_path = primary_path.join(format!("secondary_{}", reader_id));
-    let mut storage = motlie_db::Storage::secondary(&primary_path, &secondary_path);
+    let mut storage = Storage::secondary(&primary_path, &secondary_path);
 
     if storage.ready().is_err() {
         return (read_metrics, catchup_metrics);
@@ -128,12 +131,12 @@ async fn reader_task_with_secondary(
             channel_buffer_size: 10,
         };
         let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-        let reader = motlie_db::Reader::new(sender);
+        let reader = Reader::new(sender);
         (reader, receiver)
     };
 
     // Spawn query consumer
-    let consumer_handle = motlie_db::spawn_graph_query_consumer(
+    let consumer_handle = spawn_query_consumer(
         reader_rx,
         ReaderConfig {
             channel_buffer_size: 10,

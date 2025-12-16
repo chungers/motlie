@@ -92,6 +92,14 @@ name = "mcp"
 path = "examples/mcp/main.rs"
 
 [[example]]
+name = "bfs_original"
+path = "examples/graph/bfs_original.rs"
+
+[[example]]
+name = "pagerank_original"
+path = "examples/graph/pagerank_original.rs"
+
+[[example]]
 name = "a_star"
 path = "examples/graph/a_star.rs"
 

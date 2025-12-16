@@ -24,29 +24,24 @@ pub mod writer;
 #[cfg(test)]
 mod tantivy_behavior_test;
 
-// Re-export commonly used types
-pub use query::{
-    Edges as FulltextEdges, Facets as FulltextFacets, FuzzyLevel, Nodes as FulltextNodes,
-    Runnable as FulltextQueryRunnable, Search as FulltextQuery,
-};
+// Re-export commonly used types (no prefixes - use module path for disambiguation)
+// Note: Runnable is now generic: Runnable<R> where R is the reader type
+// Search enum is public for reader APIs but has #[doc(hidden)] variants
+pub use query::{Edges, Facets, FuzzyLevel, Nodes, Search};
+pub use crate::reader::Runnable;
 pub use reader::{
-    create_query_consumer as create_fulltext_query_consumer,
-    create_query_reader as create_fulltext_query_reader,
-    spawn_query_consumer as spawn_fulltext_query_consumer,
-    spawn_query_consumer_pool_readonly as spawn_fulltext_query_consumer_pool_readonly,
-    spawn_query_consumer_pool_shared as spawn_fulltext_query_consumer_pool_shared,
-    Consumer as FulltextQueryConsumer, Processor as FulltextQueryProcessor,
-    QueryExecutor as FulltextQueryExecutor, Reader as FulltextReader,
-    ReaderConfig as FulltextReaderConfig,
+    create_query_consumer, create_query_reader, spawn_query_consumer,
+    spawn_query_consumer_pool_readonly, spawn_query_consumer_pool_shared, Consumer, Processor,
+    QueryExecutor, Reader, ReaderConfig,
 };
 pub use schema::{compute_validity_facet, extract_tags, DocumentFields};
-pub use search::{EdgeHit, FacetCounts, Hit, NodeHit};
+pub use search::{EdgeHit, FacetCounts, Hit, MatchSource, NodeHit};
 pub use writer::{
-    create_fulltext_consumer, create_fulltext_consumer_with_next,
-    create_fulltext_consumer_with_params, create_fulltext_consumer_with_params_and_next,
-    spawn_fulltext_consumer, spawn_fulltext_consumer_with_params,
-    spawn_fulltext_consumer_with_params_and_next, spawn_fulltext_mutation_consumer_with_next,
-    MutationExecutor as FulltextIndexExecutor,
+    create_mutation_consumer, create_mutation_consumer_with_next,
+    create_mutation_consumer_with_params, create_mutation_consumer_with_params_and_next,
+    spawn_mutation_consumer, spawn_mutation_consumer_with_next,
+    spawn_mutation_consumer_with_params, spawn_mutation_consumer_with_params_and_next,
+    MutationExecutor,
 };
 
 // ============================================================================
@@ -161,7 +156,9 @@ impl Storage {
             }
             StorageMode::ReadWrite => {
                 // ReadWrite: Create or open index with exclusive writer
-                let index = if self.index_path.exists() {
+                // Check for meta.json to determine if a valid Tantivy index exists
+                let meta_path = self.index_path.join("meta.json");
+                let index = if meta_path.exists() {
                     tantivy::Index::open_in_dir(&self.index_path)
                         .context("Failed to open existing Tantivy index")?
                 } else {
@@ -334,7 +331,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             valid_range: None,
-            summary: crate::NodeSummary::from_text("test summary"),
+            summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         };
 
         let mutations = vec![Mutation::AddNode(node.clone())];
@@ -461,14 +458,14 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: "node_one".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("node one summary"),
+                summary: crate::graph::schema::NodeSummary::from_text("node one summary"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli::now(),
                 name: "node_two".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("node two summary"),
+                summary: crate::graph::schema::NodeSummary::from_text("node two summary"),
             }),
             Mutation::AddNodeFragment(AddNodeFragment {
                 id: Id::new(),
@@ -516,7 +513,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             valid_range: None,
-            summary: crate::NodeSummary::from_text("test summary"),
+            summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         });
 
         processor.process_mutations(&[add_node]).await.unwrap();
@@ -717,28 +714,28 @@ mod tests {
                 ts_millis: TimestampMilli(now),
                 name: "recent_node".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("created just now"),
+                summary: crate::graph::schema::NodeSummary::from_text("created just now"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_hour_ago),
                 name: "hourly_node".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("created one hour ago"),
+                summary: crate::graph::schema::NodeSummary::from_text("created one hour ago"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_day_ago),
                 name: "daily_node".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("created one day ago"),
+                summary: crate::graph::schema::NodeSummary::from_text("created one day ago"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(one_week_ago),
                 name: "weekly_node".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("created one week ago"),
+                summary: crate::graph::schema::NodeSummary::from_text("created one week ago"),
             }),
         ];
 
@@ -860,7 +857,7 @@ mod tests {
                 ts_millis: TimestampMilli(now),
                 name: "always_valid".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("no temporal constraints"),
+                summary: crate::graph::schema::NodeSummary::from_text("no temporal constraints"),
             }),
             // Currently valid (past..future)
             Mutation::AddNode(AddNode {
@@ -871,7 +868,7 @@ mod tests {
                     Some(TimestampMilli(past)),
                     Some(TimestampMilli(future)),
                 )),
-                summary: crate::NodeSummary::from_text("valid now"),
+                summary: crate::graph::schema::NodeSummary::from_text("valid now"),
             }),
             // Expired (past start, past end)
             Mutation::AddNode(AddNode {
@@ -882,7 +879,7 @@ mod tests {
                     Some(TimestampMilli(past - 86400_000)),
                     Some(TimestampMilli(past)),
                 )),
-                summary: crate::NodeSummary::from_text("no longer valid"),
+                summary: crate::graph::schema::NodeSummary::from_text("no longer valid"),
             }),
             // Future (future start)
             Mutation::AddNode(AddNode {
@@ -890,7 +887,7 @@ mod tests {
                 ts_millis: TimestampMilli(now),
                 name: "future".to_string(),
                 valid_range: Some(crate::TemporalRange(Some(TimestampMilli(future)), None)),
-                summary: crate::NodeSummary::from_text("not yet valid"),
+                summary: crate::graph::schema::NodeSummary::from_text("not yet valid"),
             }),
         ];
 
@@ -955,28 +952,28 @@ mod tests {
                 ts_millis: TimestampMilli(ts1),
                 name: "first".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("first document"),
+                summary: crate::graph::schema::NodeSummary::from_text("first document"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(ts2),
                 name: "second".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("second document"),
+                summary: crate::graph::schema::NodeSummary::from_text("second document"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(ts3),
                 name: "third".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("third document"),
+                summary: crate::graph::schema::NodeSummary::from_text("third document"),
             }),
             Mutation::AddNode(AddNode {
                 id: Id::new(),
                 ts_millis: TimestampMilli(ts4),
                 name: "fourth".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("fourth document"),
+                summary: crate::graph::schema::NodeSummary::from_text("fourth document"),
             }),
         ];
 
@@ -1005,5 +1002,88 @@ mod tests {
             .search(&exact_ts2, &TopDocs::with_limit(10))
             .unwrap();
         assert_eq!(top_docs.len(), 1, "Should find only second");
+    }
+
+    // ========================================================================
+    // Storage Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_readwrite_storage_creates_index_in_empty_directory() {
+        // Regression test: Storage::readwrite should create a new index
+        // when the directory exists but is empty (no meta.json)
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("empty_dir");
+
+        // Create an empty directory (simulating the bug scenario)
+        std::fs::create_dir_all(&index_path).unwrap();
+        assert!(index_path.exists());
+        assert!(index_path.read_dir().unwrap().next().is_none()); // Directory is empty
+
+        // This should succeed by creating a new index, not fail trying to open
+        let mut storage = Storage::readwrite(&index_path);
+        let result = storage.ready();
+        assert!(result.is_ok(), "Should create new index in empty directory");
+
+        // Verify meta.json was created
+        assert!(index_path.join("meta.json").exists());
+
+        // Verify we can use the index
+        let processor = Index::new(Arc::new(storage));
+        let node = crate::graph::mutation::AddNode {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "test_node".to_string(),
+            valid_range: None,
+            summary: crate::graph::schema::NodeSummary::from_text("test"),
+        };
+        processor
+            .process_mutations(&[crate::graph::mutation::Mutation::AddNode(node)])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_readwrite_storage_opens_existing_index() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let index_path = temp_dir.path().join("existing_index");
+
+        // Create an index first
+        {
+            let mut storage = Storage::readwrite(&index_path);
+            storage.ready().unwrap();
+            let processor = Index::new(Arc::new(storage));
+
+            let node = crate::graph::mutation::AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli::now(),
+                name: "original_node".to_string(),
+                valid_range: None,
+                summary: crate::graph::schema::NodeSummary::from_text("original"),
+            };
+            processor
+                .process_mutations(&[crate::graph::mutation::Mutation::AddNode(node)])
+                .await
+                .unwrap();
+        }
+
+        // Verify meta.json exists
+        assert!(index_path.join("meta.json").exists());
+
+        // Open the existing index - should succeed and preserve data
+        let mut storage = Storage::readwrite(&index_path);
+        storage.ready().unwrap();
+        let processor = Index::new(Arc::new(storage));
+
+        // Search for the original node
+        let reader = processor.tantivy_index().reader().unwrap();
+        let searcher = reader.searcher();
+        let query_parser = QueryParser::for_index(
+            processor.tantivy_index(),
+            vec![processor.fields().node_name_field],
+        );
+        let query = query_parser.parse_query("original_node").unwrap();
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
+        assert_eq!(top_docs.len(), 1, "Should find the original node");
     }
 }
