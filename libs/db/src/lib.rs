@@ -10,10 +10,21 @@ pub mod graph;
 // Users access via fully qualified paths: motlie_db::fulltext::*
 pub mod fulltext;
 
+// Unified storage module - combines graph and fulltext
+// Users access via: motlie_db::Storage, motlie_db::StorageConfig, etc.
+mod storage;
+pub use storage::{
+    ReadOnly, ReadOnlyHandles, ReadWrite, ReadWriteHandles, Storage, StorageConfig,
+};
+
 // Unified query module - composes fulltext search with graph hydration
 // Users access via fully qualified paths: motlie_db::query::*, motlie_db::reader::*
 pub mod query;
 pub mod reader;
+
+// Unified mutation module - composes graph storage with fulltext indexing
+// Users access via fully qualified paths: motlie_db::mutation::*, motlie_db::writer::*
+pub mod mutation;
 pub mod writer;
 
 /// Custom error type for Id parsing

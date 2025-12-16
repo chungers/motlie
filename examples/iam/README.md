@@ -1,5 +1,13 @@
 # IAM Permissions Graph Analysis
 
+> **API Status (December 2024)**: This example now uses the **unified motlie_db API** (porcelain layer).
+> - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+> - Mutations: `motlie_db::mutation::{AddNode, AddEdge, Runnable, NodeSummary, EdgeSummary, ...}`
+> - Queries: `motlie_db::query::{OutgoingEdges, IncomingEdges, Runnable, ...}`
+>
+> Uses the unified `motlie_db::Storage` API which initializes both graph (RocksDB)
+> and fulltext (Tantivy) backends. `ReadWriteHandles` provides access to both `reader()` and `writer()`.
+
 A comprehensive cloud IAM (Identity and Access Management) security analysis tool that simulates and analyzes permission structures in cloud environments using graph algorithms.
 
 ## Table of Contents

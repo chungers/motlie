@@ -1,10 +1,10 @@
 /// Common utilities for graph algorithm examples
+///
+/// This module uses the unified motlie_db API (porcelain layer) for all storage operations.
 use anyhow::Result;
-use motlie_db::graph::mutation::{AddEdge, AddNode, Runnable as MutationRunnable};
-use motlie_db::graph::reader::{Reader, ReaderConfig};
-use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
-use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
-use motlie_db::{Id, TimestampMilli};
+use motlie_db::mutation::{AddEdge, AddNode, EdgeSummary, NodeSummary, Runnable as MutationRunnable};
+use motlie_db::reader::Reader;
+use motlie_db::{Id, ReadWriteHandles, Storage, StorageConfig, TimestampMilli};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -215,31 +215,35 @@ pub struct GraphEdge {
 }
 
 /// Build a graph in motlie_db and return a Reader for querying
+///
+/// Uses the unified Storage API. The db_path is used as the base directory,
+/// with graph and fulltext subdirectories created automatically.
 pub async fn build_graph(
     db_path: &Path,
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
-) -> Result<(Reader, HashMap<String, Id>, tokio::task::JoinHandle<Result<()>>)> {
-    use motlie_db::graph::{Graph, Storage};
-    use std::sync::Arc;
+) -> Result<(Reader, HashMap<String, Id>, ReadWriteHandles)> {
+    // Set up paths for graph and fulltext storage
+    let graph_path = db_path.join("graph");
+    let fulltext_path = db_path.join("fulltext");
 
     // Clean up any existing database
     if db_path.exists() {
         std::fs::remove_dir_all(db_path)?;
     }
 
-    let config = WriterConfig {
-        channel_buffer_size: 1000,
-    };
+    // Create unified storage in read-write mode
+    let storage = Storage::readwrite(&graph_path, &fulltext_path);
+    let handles = storage.ready(StorageConfig::default())?;
 
-    let (writer, receiver) = create_mutation_writer(config.clone());
-    let handle = spawn_mutation_consumer(receiver, config.clone(), db_path);
+    // Get writer - no unwrap needed with ReadWriteHandles!
+    let writer = handles.writer();
 
     // Create a name to ID mapping
     let mut name_to_id = HashMap::new();
 
     // Add nodes
-    for node in nodes {
+    for node in &nodes {
         name_to_id.insert(node.name.clone(), node.id);
 
         AddNode {
@@ -249,49 +253,31 @@ pub async fn build_graph(
             valid_range: None,
             summary: NodeSummary::from_text(&node.name),
         }
-        .run(&writer)
+        .run(writer)
         .await?;
     }
 
     // Add edges
-    for edge in edges {
+    for edge in &edges {
         AddEdge {
             source_node_id: edge.source,
             target_node_id: edge.target,
             ts_millis: TimestampMilli::now(),
-            name: edge.name,
+            name: edge.name.clone(),
             summary: EdgeSummary::from_text(""),
             weight: edge.weight,
             valid_range: None,
         }
-        .run(&writer)
+        .run(writer)
         .await?;
     }
 
-    // Shutdown writer and wait for processing to complete
-    drop(writer);
-    handle.await??;
-
-    // Give the database a moment to finish flushing
+    // Give the database a moment to finish processing
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Create reader for querying
-    let reader_config = ReaderConfig {
-        channel_buffer_size: 100,
-    };
-
-    // Open storage for reading
-    let mut storage = Storage::readonly(db_path);
-    storage.ready()?;
-    let storage = Arc::new(storage);
-    let graph = Arc::new(Graph::new(storage));
-
-    // Create query reader and spawn consumer
-    let (reader, receiver) = motlie_db::graph::reader::create_query_reader(reader_config.clone());
-    let query_handle =
-        motlie_db::graph::reader::spawn_query_consumer_with_graph(receiver, reader_config, graph);
-
-    Ok((reader, name_to_id, query_handle))
+    // Return the reader and handles (caller is responsible for shutdown)
+    let reader = handles.reader_clone();
+    Ok((reader, name_to_id, handles))
 }
 
 /// Measure execution time of a closure

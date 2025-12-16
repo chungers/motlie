@@ -23,7 +23,7 @@ mod common;
 
 use anyhow::Result;
 use common::{build_graph, compute_hash_pagerank, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::graph::query::{IncomingEdges, NodesByIdsMulti, OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::query::{IncomingEdges, NodesByIdsMulti, OutgoingEdges, Runnable as QueryRunnable};
 use motlie_db::Id;
 use std::collections::HashMap;
 use std::env;
@@ -329,11 +329,11 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run PageRank with motlie_db
-            let (reader, _name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
+            let (reader, _name_to_id, _handles) = build_graph(db_path, nodes, edges).await?;
             let timeout = Duration::from_secs(120); // PageRank needs more time for iterations and large graphs
 
             let (result, time_ms, memory) = measure_time_and_memory_async(|| {
-                pagerank_motlie(&node_ids, &reader, timeout, damping_factor, iterations)
+                pagerank_motlie(&node_ids, reader.graph(), timeout, damping_factor, iterations)
             })
             .await;
             let result = result?;

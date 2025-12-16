@@ -53,7 +53,7 @@ use common::{
     build_graph, compute_hash, get_disk_metrics, measure_time_and_memory,
     measure_time_and_memory_async, GraphEdge, GraphMetrics, GraphNode, Implementation,
 };
-use motlie_db::graph::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::query::{OutgoingEdges, Runnable as QueryRunnable};
 use motlie_db::Id;
 use petgraph::algo::{dijkstra, kosaraju_scc};
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -1995,7 +1995,7 @@ mod reference {
 
 mod motlie_impl {
     use super::*;
-    use motlie_db::graph::query::IncomingEdges;
+    use motlie_db::query::IncomingEdges;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
