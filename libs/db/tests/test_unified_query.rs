@@ -55,8 +55,8 @@ use motlie_db::graph::writer::{
 use motlie_db::graph::{Graph, Storage as GraphStorage};
 use motlie_db::mutation::Runnable as MutationRunnable;
 use motlie_db::query::{
-    EdgeDetails, Edges, FuzzyLevel, IncomingEdges, NodeById, NodeFragments, Nodes,
-    NodesByIdsMulti, OutgoingEdges, Runnable, WithOffset,
+    AllEdges, AllNodes, EdgeDetails, Edges, FuzzyLevel, IncomingEdges, NodeById, NodeFragments,
+    Nodes, NodesByIdsMulti, OutgoingEdges, Runnable, WithOffset,
 };
 use motlie_db::reader::ReaderConfig;
 use motlie_db::{DataUrl, Id, ReadOnlyHandles, Storage, StorageConfig, TimestampMilli};
@@ -1306,6 +1306,219 @@ async fn test_nodes_by_ids_multi() {
         .unwrap();
 
     assert_eq!(empty_results.len(), 0, "Empty input should return empty vec");
+
+    // Clean shutdown
+    handle.shutdown().await.unwrap();
+}
+
+// ============================================================================
+// Tests for AllNodes and AllEdges graph enumeration queries
+// ============================================================================
+
+/// Test: AllNodes query returns all nodes via the unified API
+#[tokio::test]
+async fn test_all_nodes_via_unified_api() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _, _) = setup_test_env_with_unified_storage(&temp_dir).await;
+
+    let timeout = Duration::from_secs(5);
+
+    // Query all nodes - the test data has 3 nodes (Rust, Python, JavaScript)
+    let results = AllNodes::new(100)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    // Should return all 3 nodes
+    assert_eq!(results.len(), 3, "Should return all 3 nodes from test data");
+
+    // Verify results are tuples: (Id, NodeName, NodeSummary)
+    let names: Vec<&str> = results.iter().map(|(_, name, _)| name.as_str()).collect();
+    assert!(names.contains(&"Rust"), "Should contain Rust node");
+    assert!(names.contains(&"Python"), "Should contain Python node");
+    assert!(names.contains(&"JavaScript"), "Should contain JavaScript node");
+
+    // Verify each node has valid data
+    for (id, name, summary) in &results {
+        assert!(!id.is_nil(), "Node ID should not be nil");
+        assert!(!name.is_empty(), "Node name should not be empty");
+        assert!(
+            !summary.as_ref().is_empty(),
+            "Node summary should not be empty"
+        );
+    }
+
+    // Clean shutdown
+    handle.shutdown().await.unwrap();
+}
+
+/// Test: AllNodes pagination via the unified API
+#[tokio::test]
+async fn test_all_nodes_pagination_via_unified_api() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _, _) = setup_test_env_with_unified_storage(&temp_dir).await;
+
+    let timeout = Duration::from_secs(5);
+
+    // Get first page of 2 nodes
+    let page1 = AllNodes::new(2)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    assert_eq!(page1.len(), 2, "First page should have 2 nodes");
+
+    // Get second page using cursor from last result
+    let last_id = page1.last().unwrap().0;
+    let page2 = AllNodes::new(2)
+        .with_cursor(last_id)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    assert_eq!(page2.len(), 1, "Second page should have 1 remaining node");
+
+    // Verify no overlap between pages
+    let page1_ids: std::collections::HashSet<_> = page1.iter().map(|(id, _, _)| *id).collect();
+    let page2_ids: std::collections::HashSet<_> = page2.iter().map(|(id, _, _)| *id).collect();
+    assert!(
+        page1_ids.is_disjoint(&page2_ids),
+        "Pages should not overlap"
+    );
+
+    // Combined should equal total nodes
+    assert_eq!(
+        page1.len() + page2.len(),
+        3,
+        "All pages combined should have all 3 nodes"
+    );
+
+    // Clean shutdown
+    handle.shutdown().await.unwrap();
+}
+
+/// Test: AllEdges query returns all edges via the unified API
+#[tokio::test]
+async fn test_all_edges_via_unified_api() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _, _) = setup_test_env_with_unified_storage(&temp_dir).await;
+
+    let timeout = Duration::from_secs(5);
+
+    // Query all edges - the test data has 2 edges (Rust->JS influences, Python->JS used_with)
+    let results = AllEdges::new(100)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    // Should return all 2 edges
+    assert_eq!(results.len(), 2, "Should return all 2 edges from test data");
+
+    // Verify results are tuples: (Option<f64>, SrcId, DstId, EdgeName)
+    let edge_names: Vec<&str> = results.iter().map(|(_, _, _, name)| name.as_str()).collect();
+    assert!(
+        edge_names.contains(&"influences"),
+        "Should contain 'influences' edge"
+    );
+    assert!(
+        edge_names.contains(&"used_with"),
+        "Should contain 'used_with' edge"
+    );
+
+    // Verify each edge has valid data
+    for (weight, src_id, dst_id, name) in &results {
+        assert!(!src_id.is_nil(), "Source ID should not be nil");
+        assert!(!dst_id.is_nil(), "Destination ID should not be nil");
+        assert!(!name.is_empty(), "Edge name should not be empty");
+        assert!(weight.is_some(), "Edge weight should be present");
+    }
+
+    // Verify weights match test data
+    for (weight, _, _, name) in &results {
+        match name.as_str() {
+            "influences" => assert_eq!(*weight, Some(0.8), "influences edge should have weight 0.8"),
+            "used_with" => assert_eq!(*weight, Some(0.9), "used_with edge should have weight 0.9"),
+            _ => panic!("Unexpected edge name: {}", name),
+        }
+    }
+
+    // Clean shutdown
+    handle.shutdown().await.unwrap();
+}
+
+/// Test: AllEdges pagination via the unified API
+#[tokio::test]
+async fn test_all_edges_pagination_via_unified_api() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _, _) = setup_test_env_with_unified_storage(&temp_dir).await;
+
+    let timeout = Duration::from_secs(5);
+
+    // Get first page of 1 edge
+    let page1 = AllEdges::new(1)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    assert_eq!(page1.len(), 1, "First page should have 1 edge");
+
+    // Get second page using cursor from last result
+    let (_, src, dst, name) = page1.last().unwrap();
+    let page2 = AllEdges::new(1)
+        .with_cursor((*src, *dst, name.clone()))
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    assert_eq!(page2.len(), 1, "Second page should have 1 remaining edge");
+
+    // Verify no overlap - different edge names
+    let page1_names: std::collections::HashSet<_> =
+        page1.iter().map(|(_, _, _, name)| name.as_str()).collect();
+    let page2_names: std::collections::HashSet<_> =
+        page2.iter().map(|(_, _, _, name)| name.as_str()).collect();
+    assert!(
+        page1_names.is_disjoint(&page2_names),
+        "Pages should not overlap"
+    );
+
+    // Clean shutdown
+    handle.shutdown().await.unwrap();
+}
+
+/// Test: AllNodes with limit 0 returns empty
+#[tokio::test]
+async fn test_all_nodes_limit_zero() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _, _) = setup_test_env_with_unified_storage(&temp_dir).await;
+
+    let timeout = Duration::from_secs(5);
+
+    let results = AllNodes::new(0)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 0, "Limit 0 should return empty results");
+
+    // Clean shutdown
+    handle.shutdown().await.unwrap();
+}
+
+/// Test: AllEdges with limit 0 returns empty
+#[tokio::test]
+async fn test_all_edges_limit_zero() {
+    let temp_dir = TempDir::new().unwrap();
+    let (handle, _, _) = setup_test_env_with_unified_storage(&temp_dir).await;
+
+    let timeout = Duration::from_secs(5);
+
+    let results = AllEdges::new(0)
+        .run(handle.reader(), timeout)
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 0, "Limit 0 should return empty results");
 
     // Clean shutdown
     handle.shutdown().await.unwrap();
