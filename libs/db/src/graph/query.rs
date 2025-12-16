@@ -9,11 +9,13 @@ use std::ops::Bound;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-use super::ColumnFamilyRecord;
 use super::reader::{Processor, QueryExecutor, QueryProcessor};
+use super::scan::{self, Visitable};
+use crate::reader::Runnable;
 use super::schema::{
     self, DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
 };
+use super::ColumnFamilyRecord;
 use super::Storage;
 use crate::{Id, TimestampMilli};
 
@@ -85,60 +87,73 @@ macro_rules! iterate_cf {
 // Query Enum
 // ============================================================================
 
-/// Query enum representing all possible query types
+/// Query enum representing all possible query types.
+/// Uses dispatch wrappers internally for channel/timeout handling.
+///
+/// **Note**: This is internal infrastructure for the query dispatch pipeline.
+/// Users interact with query parameter structs directly via the `Runnable` trait.
+/// This enum is public because it appears in reader function signatures, but users
+/// should not construct variants directly.
 #[derive(Debug)]
+#[doc(hidden)]
+#[allow(private_interfaces)]
 pub enum Query {
-    NodeById(NodeById),
-    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstName),
-    NodeFragmentsByIdTimeRange(NodeFragmentsByIdTimeRange),
-    EdgeFragmentsByIdTimeRange(EdgeFragmentsByIdTimeRange),
-    OutgoingEdges(OutgoingEdges),
-    IncomingEdges(IncomingEdges),
-    NodesByName(NodesByName),
-    EdgesByName(EdgesByName),
+    NodeById(NodeByIdDispatch),
+    NodesByIdsMulti(NodesByIdsMultiDispatch),
+    EdgeSummaryBySrcDstName(EdgeSummaryBySrcDstNameDispatch),
+    NodeFragmentsByIdTimeRange(NodeFragmentsByIdTimeRangeDispatch),
+    EdgeFragmentsByIdTimeRange(EdgeFragmentsByIdTimeRangeDispatch),
+    OutgoingEdges(OutgoingEdgesDispatch),
+    IncomingEdges(IncomingEdgesDispatch),
+    AllNodes(AllNodesDispatch),
+    AllEdges(AllEdgesDispatch),
 }
 
 impl std::fmt::Display for Query {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Query::NodeById(q) => write!(f, "NodeById: id={}", q.id),
+            Query::NodeById(q) => write!(f, "NodeById: id={}", q.params.id),
+            Query::NodesByIdsMulti(q) => {
+                write!(f, "NodesByIdsMulti: count={}", q.params.ids.len())
+            }
             Query::EdgeSummaryBySrcDstName(q) => write!(
                 f,
                 "EdgeBySrcDstName: source={}, dest={}, name={}",
-                q.source_id, q.dest_id, q.name
+                q.params.source_id, q.params.dest_id, q.params.name
             ),
             Query::NodeFragmentsByIdTimeRange(q) => {
                 write!(
                     f,
                     "NodeFragmentsByIdTimeRange: id={}, range={:?}",
-                    q.id, q.time_range
+                    q.params.id, q.params.time_range
                 )
             }
             Query::EdgeFragmentsByIdTimeRange(q) => {
                 write!(
                     f,
                     "EdgeFragmentsByIdTimeRange: source={}, dest={}, name={}, range={:?}",
-                    q.source_id, q.dest_id, q.edge_name, q.time_range
+                    q.params.source_id, q.params.dest_id, q.params.edge_name, q.params.time_range
                 )
             }
-            Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.id),
-            Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.id),
-            Query::NodesByName(q) => write!(f, "NodesByName: name={}", q.name),
-            Query::EdgesByName(q) => write!(f, "EdgesByName: name={}", q.name),
+            Query::OutgoingEdges(q) => write!(f, "OutgoingEdges: id={}", q.params.id),
+            Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.params.id),
+            Query::AllNodes(q) => write!(f, "AllNodes: limit={}", q.params.limit),
+            Query::AllEdges(q) => write!(f, "AllEdges: limit={}", q.params.limit),
         }
     }
 }
 
-// Use macro to implement QueryProcessor for query types
+// Use macro to implement QueryProcessor for dispatch types
 crate::impl_query_processor!(
-    NodeById,
-    EdgeSummaryBySrcDstName,
-    NodeFragmentsByIdTimeRange,
-    EdgeFragmentsByIdTimeRange,
-    OutgoingEdges,
-    IncomingEdges,
-    NodesByName,
-    EdgesByName,
+    NodeByIdDispatch,
+    NodesByIdsMultiDispatch,
+    EdgeSummaryBySrcDstNameDispatch,
+    NodeFragmentsByIdTimeRangeDispatch,
+    EdgeFragmentsByIdTimeRangeDispatch,
+    OutgoingEdgesDispatch,
+    IncomingEdgesDispatch,
+    AllNodesDispatch,
+    AllEdgesDispatch,
 );
 
 #[async_trait::async_trait]
@@ -146,53 +161,79 @@ impl QueryProcessor for Query {
     async fn process_and_send<P: Processor>(self, processor: &P) {
         match self {
             Query::NodeById(q) => q.process_and_send(processor).await,
+            Query::NodesByIdsMulti(q) => q.process_and_send(processor).await,
             Query::EdgeSummaryBySrcDstName(q) => q.process_and_send(processor).await,
             Query::NodeFragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
             Query::EdgeFragmentsByIdTimeRange(q) => q.process_and_send(processor).await,
             Query::OutgoingEdges(q) => q.process_and_send(processor).await,
             Query::IncomingEdges(q) => q.process_and_send(processor).await,
-            Query::NodesByName(q) => q.process_and_send(processor).await,
-            Query::EdgesByName(q) => q.process_and_send(processor).await,
+            Query::AllNodes(q) => q.process_and_send(processor).await,
+            Query::AllEdges(q) => q.process_and_send(processor).await,
         }
     }
 }
 
-/// Trait for query builders that can be executed
-#[async_trait::async_trait]
-pub trait Runnable {
-    /// The output type this query produces
-    type Output: Send + 'static;
-
-    /// Execute this query against a Reader with the specified timeout
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output>;
-}
-
-/// Type alias for querying node by ID (returns name and summary)
-pub type NodeById = ByIdQuery<(NodeName, NodeSummary)>;
-
-/// Generic query to find an entity by its ID
-#[derive(Debug)]
-pub struct ByIdQuery<T: Send + Sync + 'static> {
+/// Query parameters for finding a node by its ID.
+///
+/// This struct contains only user-facing parameters and can be:
+/// - Constructed via struct initialization
+/// - Cloned and reused
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeById {
     /// The entity ID to search for
     pub id: Id,
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the TemporalRange in the record
-    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
-
-    /// Timeout for this query execution (only set when query has channel)
-    pub(crate) timeout: Option<Duration>,
-
-    /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<T>>>,
 }
 
-/// Query to scan node fragments by ID with time range filtering
-/// This is different from ByIdQuery because it requires time range filtering
-/// and returns multiple results (scan operation) rather than a single entity lookup.
+/// Internal dispatch wrapper for NodeById query execution.
 #[derive(Debug)]
+pub(crate) struct NodeByIdDispatch {
+    pub(crate) params: NodeById,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<(NodeName, NodeSummary)>>,
+}
+
+/// Query parameters for batch lookup of multiple nodes by ID.
+///
+/// More efficient than multiple `NodeById` calls as it uses RocksDB's
+/// `multi_get_cf()` for batched reads. Missing IDs are silently omitted
+/// from results.
+///
+/// # Example
+///
+/// ```ignore
+/// let nodes = NodesByIdsMulti::new(vec![id1, id2, id3], None)
+///     .run(&reader, timeout)
+///     .await?;
+/// // Returns Vec<(Id, NodeName, NodeSummary)> for found nodes
+/// ```
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NodesByIdsMulti {
+    /// Node IDs to look up
+    pub ids: Vec<Id>,
+
+    /// Reference timestamp for temporal validity checks
+    /// If None, defaults to current time in the query executor
+    pub reference_ts_millis: Option<TimestampMilli>,
+}
+
+/// Internal dispatch wrapper for NodesByIdsMulti query execution.
+#[derive(Debug)]
+pub(crate) struct NodesByIdsMultiDispatch {
+    pub(crate) params: NodesByIdsMulti,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
+}
+
+/// Query parameters for scanning node fragments by ID with time range filtering.
+///
+/// This struct contains only user-facing parameters and can be:
+/// - Constructed via struct initialization
+/// - Cloned and reused
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeFragmentsByIdTimeRange {
     /// The entity ID to search for
     pub id: Id,
@@ -203,20 +244,23 @@ pub struct NodeFragmentsByIdTimeRange {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the TemporalRange in the record
-    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
-
-    /// Timeout for this query execution (only set when query has channel)
-    pub(crate) timeout: Option<Duration>,
-
-    /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>>,
 }
 
-/// Query to scan edge fragments by source ID, destination ID, edge name, and time range
-/// Similar to NodeFragmentsByIdTimeRange but for edge fragments
+/// Internal dispatch wrapper for NodeFragmentsByIdTimeRange query execution.
 #[derive(Debug)]
+pub(crate) struct NodeFragmentsByIdTimeRangeDispatch {
+    pub(crate) params: NodeFragmentsByIdTimeRange,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
+}
+
+/// Query parameters for scanning edge fragments by source ID, destination ID, edge name, and time range.
+///
+/// This struct contains only user-facing parameters and can be:
+/// - Constructed via struct initialization
+/// - Cloned and reused
+#[derive(Debug, Clone, PartialEq)]
 pub struct EdgeFragmentsByIdTimeRange {
     /// Source node ID
     pub source_id: SrcId,
@@ -233,19 +277,23 @@ pub struct EdgeFragmentsByIdTimeRange {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the TemporalRange in the record
-    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
-
-    /// Timeout for this query execution (only set when query has channel)
-    pub(crate) timeout: Option<Duration>,
-
-    /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>>,
 }
 
-/// Query to find an edge by source ID, destination ID, and name
+/// Internal dispatch wrapper for EdgeFragmentsByIdTimeRange query execution.
 #[derive(Debug)]
+pub(crate) struct EdgeFragmentsByIdTimeRangeDispatch {
+    pub(crate) params: EdgeFragmentsByIdTimeRange,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
+}
+
+/// Query parameters for finding an edge by source ID, destination ID, and name.
+///
+/// This struct contains only user-facing parameters and can be:
+/// - Constructed via struct initialization
+/// - Cloned and reused
+#[derive(Debug, Clone, PartialEq)]
 pub struct EdgeSummaryBySrcDstName {
     /// Source node ID
     pub source_id: Id,
@@ -258,19 +306,37 @@ pub struct EdgeSummaryBySrcDstName {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the TemporalRange in the record
-    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
-
-    /// Timeout for this query execution (only set when query has channel)
-    pub(crate) timeout: Option<Duration>,
-
-    /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<(EdgeSummary, Option<f64>)>>>,
 }
 
-/// Query to find all outgoing edges from a node by its ID
+/// Internal dispatch wrapper for EdgeSummaryBySrcDstName query execution.
 #[derive(Debug)]
+pub(crate) struct EdgeSummaryBySrcDstNameDispatch {
+    pub(crate) params: EdgeSummaryBySrcDstName,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<(EdgeSummary, Option<f64>)>>,
+}
+
+/// Query parameters for finding all outgoing edges from a node.
+///
+/// This struct contains only user-facing parameters and can be:
+/// - Constructed via struct initialization with `..Default::default()`
+/// - Deserialized from JSON or other formats
+/// - Cloned and reused
+///
+/// # Examples
+///
+/// ```ignore
+/// // Struct initialization
+/// let query = OutgoingEdges {
+///     id: node_id,
+///     reference_ts_millis: Some(TimestampMilli::now()),
+/// };
+///
+/// // Constructor
+/// let query = OutgoingEdges::new(node_id, None);
+/// ```
+#[derive(Debug, Clone, PartialEq)]
 pub struct OutgoingEdges {
     /// The node ID to search for
     pub id: Id,
@@ -280,16 +346,29 @@ pub struct OutgoingEdges {
     /// Temporal validity is always checked against the TemporalRange in the record
     /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
-
-    /// Timeout for this query execution (only set when query has channel)
-    pub(crate) timeout: Option<Duration>,
-
-    /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>>,
 }
 
-/// Query to find all incoming edges to a node by its ID
+/// Internal dispatch wrapper for OutgoingEdges query execution.
+/// Contains the query parameters plus channel/timeout for async dispatch.
 #[derive(Debug)]
+pub(crate) struct OutgoingEdgesDispatch {
+    /// The query parameters
+    pub(crate) params: OutgoingEdges,
+
+    /// Timeout for this query execution
+    pub(crate) timeout: Duration,
+
+    /// Channel to send the result back to the client
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
+}
+
+/// Query parameters for finding all incoming edges to a node.
+///
+/// This struct contains only user-facing parameters and can be:
+/// - Constructed via struct initialization with `..Default::default()`
+/// - Deserialized from JSON or other formats
+/// - Cloned and reused
+#[derive(Debug, Clone, PartialEq)]
 pub struct IncomingEdges {
     /// The node ID to search for
     pub id: DstId,
@@ -299,105 +378,198 @@ pub struct IncomingEdges {
     /// Temporal validity is always checked against the TemporalRange in the record
     /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
-
-    /// Timeout for this query execution (only set when query has channel)
-    pub(crate) timeout: Option<Duration>,
-
-    /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>>,
 }
 
-/// Query to find nodes by name prefix
+/// Internal dispatch wrapper for IncomingEdges query execution.
+/// Contains the query parameters plus channel/timeout for async dispatch.
 #[derive(Debug)]
-pub struct NodesByName {
-    /// The node name or prefix to search for
-    pub name: NodeName,
+pub(crate) struct IncomingEdgesDispatch {
+    /// The query parameters
+    pub(crate) params: IncomingEdges,
 
-    /// Optional start position for pagination (exclusive): (last_name, last_id)
-    /// For prefix queries, this should be the full name and ID of the last result from the previous page
-    pub start: Option<(NodeName, Id)>,
+    /// Timeout for this query execution
+    pub(crate) timeout: Duration,
 
-    /// Maximum number of results to return
-    pub limit: Option<usize>,
+    /// Channel to send the result back to the client
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>,
+}
+
+/// Query parameters for enumerating all nodes with pagination.
+///
+/// This is the query-based interface for graph enumeration, useful for
+/// graph algorithms that need to iterate over all nodes (e.g., PageRank).
+///
+/// # Examples
+///
+/// ```ignore
+/// // Get first page of nodes
+/// let nodes = AllNodes::new(1000)
+///     .run(&reader, timeout)
+///     .await?;
+///
+/// // Get next page using cursor
+/// if let Some((last_id, _, _)) = nodes.last() {
+///     let next_page = AllNodes::new(1000)
+///         .with_cursor(*last_id)
+///         .run(&reader, timeout)
+///         .await?;
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AllNodes {
+    /// Cursor for pagination - last ID from previous page (exclusive)
+    pub last: Option<Id>,
+
+    /// Maximum number of records to return
+    pub limit: usize,
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the TemporalRange in the record
-    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
-
-    /// Timeout for this query execution (only set when query has channel)
-    pub(crate) timeout: Option<Duration>,
-
-    /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<Vec<(NodeName, Id)>>>>,
 }
 
-/// Query to find edges by name prefix
+/// Internal dispatch wrapper for AllNodes query execution.
 #[derive(Debug)]
-pub struct EdgesByName {
-    /// The edge name or prefix to search for
-    pub name: String,
+pub(crate) struct AllNodesDispatch {
+    pub(crate) params: AllNodes,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
+}
 
-    /// Optional start position for pagination (exclusive): (last_name, last_id)
-    /// For prefix queries, this should be the full name and ID of the last result from the previous page
-    pub start: Option<(EdgeName, Id)>,
+/// Query parameters for enumerating all edges with pagination.
+///
+/// This is the query-based interface for graph enumeration, useful for
+/// graph algorithms that need to iterate over all edges (e.g., Kruskal's MST).
+///
+/// # Examples
+///
+/// ```ignore
+/// // Get first page of edges
+/// let edges = AllEdges::new(1000)
+///     .run(&reader, timeout)
+///     .await?;
+///
+/// // Get next page using cursor
+/// if let Some((_, src, dst, name)) = edges.last() {
+///     let next_page = AllEdges::new(1000)
+///         .with_cursor((*src, *dst, name.clone()))
+///         .run(&reader, timeout)
+///         .await?;
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AllEdges {
+    /// Cursor for pagination - (src_id, dst_id, edge_name) from previous page (exclusive)
+    pub last: Option<(SrcId, DstId, EdgeName)>,
 
-    /// The maximum number of results to return
-    pub limit: Option<usize>,
+    /// Maximum number of records to return
+    pub limit: usize,
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the TemporalRange in the record
-    /// Records without a TemporalRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
-
-    /// Timeout for this query execution (only set when query has channel)
-    pub(crate) timeout: Option<Duration>,
-
-    /// Channel to send the result back to the client (only set when ready to execute)
-    result_tx: Option<oneshot::Sender<Result<Vec<(EdgeName, Id)>>>>,
 }
 
-impl<T: Send + Sync + 'static> ByIdQuery<T> {
-    /// Create a new query request (public API - no channel, no timeout yet)
-    /// Use `.run(reader, timeout)` to execute this query
+/// Internal dispatch wrapper for AllEdges query execution.
+#[derive(Debug)]
+pub(crate) struct AllEdgesDispatch {
+    pub(crate) params: AllEdges,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
+}
+
+impl NodeById {
+    /// Create a new query request.
     pub fn new(id: Id, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             id,
             reference_ts_millis,
-            timeout: None,
-            result_tx: None,
         }
     }
+}
 
-    /// Internal constructor used by the query execution machinery (has the channel)
-    pub(crate) fn with_channel(
-        id: Id,
-        reference_ts_millis: Option<TimestampMilli>,
+impl NodeByIdDispatch {
+    /// Create a new dispatch wrapper.
+    pub(crate) fn new(
+        params: NodeById,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<T>>,
+        result_tx: oneshot::Sender<Result<(NodeName, NodeSummary)>>,
     ) -> Self {
         Self {
-            id,
-            reference_ts_millis,
-            timeout: Some(timeout),
-            result_tx: Some(result_tx),
+            params,
+            timeout,
+            result_tx,
         }
     }
 
-    /// Send the result back to the client (consumes self)
-    pub(crate) fn send_result(self, result: Result<T>) {
-        // Ignore error if receiver was dropped (client timeout/cancellation)
-        if let Some(tx) = self.result_tx {
-            let _ = tx.send(result);
+    /// Send the result back to the client (consumes self).
+    pub(crate) fn send_result(self, result: Result<(NodeName, NodeSummary)>) {
+        let _ = self.result_tx.send(result);
+    }
+
+    /// Execute a NodeById query directly without dispatch machinery.
+    /// This is used by the unified query module for composition.
+    pub(crate) async fn execute_params(
+        params: &NodeById,
+        storage: &Storage,
+    ) -> Result<(NodeName, NodeSummary)> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = NodeByIdDispatch {
+            params: params.clone(),
+            timeout: Duration::from_secs(0),
+            result_tx: tx,
+        };
+        <NodeByIdDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
+    }
+}
+
+impl NodesByIdsMulti {
+    /// Create a new batch query request.
+    pub fn new(ids: Vec<Id>, reference_ts_millis: Option<TimestampMilli>) -> Self {
+        Self {
+            ids,
+            reference_ts_millis,
         }
+    }
+}
+
+impl NodesByIdsMultiDispatch {
+    /// Create a new dispatch wrapper.
+    pub(crate) fn new(
+        params: NodesByIdsMulti,
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
+    ) -> Self {
+        Self {
+            params,
+            timeout,
+            result_tx,
+        }
+    }
+
+    /// Send the result back to the client (consumes self).
+    pub(crate) fn send_result(self, result: Result<Vec<(Id, NodeName, NodeSummary)>>) {
+        let _ = self.result_tx.send(result);
+    }
+
+    /// Execute a NodesByIdsMulti query directly without dispatch machinery.
+    /// This is used by the unified query module for composition.
+    pub(crate) async fn execute_params(
+        params: &NodesByIdsMulti,
+        storage: &Storage,
+    ) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = NodesByIdsMultiDispatch {
+            params: params.clone(),
+            timeout: Duration::from_secs(0),
+            result_tx: tx,
+        };
+        <NodesByIdsMultiDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
     }
 }
 
 impl NodeFragmentsByIdTimeRange {
-    /// Create a new query request (public API - no channel, no timeout yet)
-    /// Use `.run(reader, timeout)` to execute this query
+    /// Create a new query request.
     pub fn new(
         id: Id,
         time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
@@ -407,45 +579,55 @@ impl NodeFragmentsByIdTimeRange {
             id,
             time_range,
             reference_ts_millis,
-            timeout: None,
-            result_tx: None,
         }
     }
 
-    /// Internal constructor used by the query execution machinery (has the channel)
-    pub(crate) fn with_channel(
-        id: Id,
-        time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
-        reference_ts_millis: Option<TimestampMilli>,
+    /// Check if a timestamp falls within this range.
+    pub fn contains(&self, ts: TimestampMilli) -> bool {
+        timestamp_in_range(ts, &self.time_range)
+    }
+}
+
+impl NodeFragmentsByIdTimeRangeDispatch {
+    /// Create a new dispatch wrapper.
+    pub(crate) fn new(
+        params: NodeFragmentsByIdTimeRange,
         timeout: Duration,
         result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
     ) -> Self {
         Self {
-            id,
-            time_range,
-            reference_ts_millis,
-            timeout: Some(timeout),
-            result_tx: Some(result_tx),
+            params,
+            timeout,
+            result_tx,
         }
     }
 
-    /// Send the result back to the client (consumes self)
+    /// Send the result back to the client (consumes self).
     pub(crate) fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
-        // Ignore error if receiver was dropped (client timeout/cancellation)
-        if let Some(tx) = self.result_tx {
-            let _ = tx.send(result);
-        }
+        let _ = self.result_tx.send(result);
     }
 
-    /// Check if a timestamp falls within this range
-    pub fn contains(&self, ts: TimestampMilli) -> bool {
-        timestamp_in_range(ts, &self.time_range)
+    /// Execute a NodeFragmentsByIdTimeRange query directly without dispatch machinery.
+    /// This is used by the unified query module for composition.
+    pub(crate) async fn execute_params(
+        params: &NodeFragmentsByIdTimeRange,
+        storage: &Storage,
+    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = NodeFragmentsByIdTimeRangeDispatch {
+            params: params.clone(),
+            timeout: Duration::from_secs(0),
+            result_tx: tx,
+        };
+        <NodeFragmentsByIdTimeRangeDispatch as super::reader::QueryExecutor>::execute(
+            &dispatch, storage,
+        )
+        .await
     }
 }
 
 impl EdgeFragmentsByIdTimeRange {
-    /// Create a new query request (public API - no channel, no timeout yet)
-    /// Use `.run(reader, timeout)` to execute this query
+    /// Create a new query request.
     pub fn new(
         source_id: SrcId,
         dest_id: DstId,
@@ -459,49 +641,55 @@ impl EdgeFragmentsByIdTimeRange {
             edge_name,
             time_range,
             reference_ts_millis,
-            timeout: None,
-            result_tx: None,
         }
     }
 
-    /// Internal constructor used by the query execution machinery (has the channel)
-    pub(crate) fn with_channel(
-        source_id: SrcId,
-        dest_id: DstId,
-        edge_name: EdgeName,
-        time_range: (Bound<TimestampMilli>, Bound<TimestampMilli>),
-        reference_ts_millis: Option<TimestampMilli>,
-        timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
-    ) -> Self {
-        Self {
-            source_id,
-            dest_id,
-            edge_name,
-            time_range,
-            reference_ts_millis,
-            timeout: Some(timeout),
-            result_tx: Some(result_tx),
-        }
-    }
-
-    /// Send the result back to the client (consumes self)
-    pub(crate) fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
-        // Ignore error if receiver was dropped (client timeout/cancellation)
-        if let Some(tx) = self.result_tx {
-            let _ = tx.send(result);
-        }
-    }
-
-    /// Check if a timestamp falls within this range
+    /// Check if a timestamp falls within this range.
     pub fn contains(&self, ts: TimestampMilli) -> bool {
         timestamp_in_range(ts, &self.time_range)
     }
 }
 
+impl EdgeFragmentsByIdTimeRangeDispatch {
+    /// Create a new dispatch wrapper.
+    pub(crate) fn new(
+        params: EdgeFragmentsByIdTimeRange,
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<Vec<(TimestampMilli, FragmentContent)>>>,
+    ) -> Self {
+        Self {
+            params,
+            timeout,
+            result_tx,
+        }
+    }
+
+    /// Send the result back to the client (consumes self).
+    pub(crate) fn send_result(self, result: Result<Vec<(TimestampMilli, FragmentContent)>>) {
+        let _ = self.result_tx.send(result);
+    }
+
+    /// Execute an EdgeFragmentsByIdTimeRange query directly without dispatch machinery.
+    /// This is used by the unified query module for composition.
+    pub(crate) async fn execute_params(
+        params: &EdgeFragmentsByIdTimeRange,
+        storage: &Storage,
+    ) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = EdgeFragmentsByIdTimeRangeDispatch {
+            params: params.clone(),
+            timeout: Duration::from_secs(0),
+            result_tx: tx,
+        };
+        <EdgeFragmentsByIdTimeRangeDispatch as super::reader::QueryExecutor>::execute(
+            &dispatch, storage,
+        )
+        .await
+    }
+}
+
 impl EdgeSummaryBySrcDstName {
-    /// Create a new query request (public API - no channel, no timeout yet)
-    /// Use `.run(reader, timeout)` to execute this query
+    /// Create a new query request.
     pub fn new(
         source_id: SrcId,
         dest_id: DstId,
@@ -513,356 +701,388 @@ impl EdgeSummaryBySrcDstName {
             dest_id,
             name,
             reference_ts_millis,
-            timeout: None,
-            result_tx: None,
         }
     }
+}
 
-    /// Internal constructor used by the query execution machinery (has the channel)
-    pub(crate) fn with_channel(
-        source_id: SrcId,
-        dest_id: DstId,
-        name: String,
-        reference_ts_millis: Option<TimestampMilli>,
+impl EdgeSummaryBySrcDstNameDispatch {
+    /// Create a new dispatch wrapper.
+    pub(crate) fn new(
+        params: EdgeSummaryBySrcDstName,
         timeout: Duration,
         result_tx: oneshot::Sender<Result<(EdgeSummary, Option<f64>)>>,
     ) -> Self {
         Self {
-            source_id,
-            dest_id,
-            name,
-            reference_ts_millis,
-            timeout: Some(timeout),
-            result_tx: Some(result_tx),
+            params,
+            timeout,
+            result_tx,
         }
     }
 
+    /// Send the result back to the client (consumes self).
     pub(crate) fn send_result(self, result: Result<(EdgeSummary, Option<f64>)>) {
-        if let Some(tx) = self.result_tx {
-            let _ = tx.send(result);
-        }
+        let _ = self.result_tx.send(result);
+    }
+
+    /// Execute an EdgeSummaryBySrcDstName query directly without dispatch machinery.
+    /// This is used by the unified query module for composition.
+    pub(crate) async fn execute_params(
+        params: &EdgeSummaryBySrcDstName,
+        storage: &Storage,
+    ) -> Result<(EdgeSummary, Option<f64>)> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = EdgeSummaryBySrcDstNameDispatch {
+            params: params.clone(),
+            timeout: Duration::from_secs(0),
+            result_tx: tx,
+        };
+        <EdgeSummaryBySrcDstNameDispatch as super::reader::QueryExecutor>::execute(
+            &dispatch, storage,
+        )
+        .await
     }
 }
 
 impl OutgoingEdges {
-    /// Create a new query request (public API - no channel, no timeout yet)
+    /// Create a new query request.
     pub fn new(id: Id, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             id,
             reference_ts_millis,
-            timeout: None,
-            result_tx: None,
         }
     }
+}
 
-    /// Internal constructor used by the query execution machinery
-    pub(crate) fn with_channel(
-        id: Id,
-        reference_ts_millis: Option<TimestampMilli>,
+impl OutgoingEdgesDispatch {
+    /// Create a new dispatch wrapper
+    pub(crate) fn new(
+        params: OutgoingEdges,
         timeout: Duration,
         result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
     ) -> Self {
         Self {
-            id,
-            reference_ts_millis,
-            timeout: Some(timeout),
-            result_tx: Some(result_tx),
+            params,
+            timeout,
+            result_tx,
         }
     }
 
+    /// Send the result back to the client (consumes self)
     pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>) {
-        if let Some(tx) = self.result_tx {
-            let _ = tx.send(result);
-        }
+        let _ = self.result_tx.send(result);
+    }
+
+    /// Execute an OutgoingEdges query directly without dispatch machinery.
+    /// This is used by the unified query module for composition.
+    pub(crate) async fn execute_params(
+        params: &OutgoingEdges,
+        storage: &Storage,
+    ) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = OutgoingEdgesDispatch {
+            params: params.clone(),
+            timeout: Duration::from_secs(0),
+            result_tx: tx,
+        };
+        <OutgoingEdgesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
     }
 }
 
 impl IncomingEdges {
-    /// Create a new query request (public API - no channel, no timeout yet)
+    /// Create a new query request.
     pub fn new(id: DstId, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             id,
             reference_ts_millis,
-            timeout: None,
-            result_tx: None,
         }
     }
+}
 
-    /// Internal constructor used by the query execution machinery
-    pub(crate) fn with_channel(
-        id: DstId,
-        reference_ts_millis: Option<TimestampMilli>,
+impl IncomingEdgesDispatch {
+    /// Create a new dispatch wrapper
+    pub(crate) fn new(
+        params: IncomingEdges,
         timeout: Duration,
         result_tx: oneshot::Sender<Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>>,
     ) -> Self {
         Self {
-            id,
-            reference_ts_millis,
-            timeout: Some(timeout),
-            result_tx: Some(result_tx),
+            params,
+            timeout,
+            result_tx,
         }
     }
 
+    /// Send the result back to the client (consumes self)
     pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>>) {
-        if let Some(tx) = self.result_tx {
-            let _ = tx.send(result);
-        }
+        let _ = self.result_tx.send(result);
+    }
+
+    /// Execute an IncomingEdges query directly without dispatch machinery.
+    /// This is used by the unified query module for composition.
+    pub(crate) async fn execute_params(
+        params: &IncomingEdges,
+        storage: &Storage,
+    ) -> Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = IncomingEdgesDispatch {
+            params: params.clone(),
+            timeout: Duration::from_secs(0),
+            result_tx: tx,
+        };
+        <IncomingEdgesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
     }
 }
 
-impl NodesByName {
-    /// Create a new query request (public API - no channel, no timeout yet)
-    pub fn new(
-        name: NodeName,
-        start: Option<(NodeName, Id)>,
-        limit: Option<usize>,
-        reference_ts_millis: Option<TimestampMilli>,
-    ) -> Self {
+impl AllNodes {
+    /// Create a new AllNodes query with the specified limit.
+    pub fn new(limit: usize) -> Self {
         Self {
-            name,
-            start,
+            last: None,
             limit,
-            reference_ts_millis,
-            timeout: None,
-            result_tx: None,
+            reference_ts_millis: None,
         }
     }
 
-    /// Internal constructor used by the query execution machinery
-    pub(crate) fn with_channel(
-        name: NodeName,
-        start: Option<(NodeName, Id)>,
-        limit: Option<usize>,
-        reference_ts_millis: Option<TimestampMilli>,
+    /// Set the cursor for pagination (exclusive start).
+    pub fn with_cursor(mut self, last: Id) -> Self {
+        self.last = Some(last);
+        self
+    }
+
+    /// Set the reference timestamp for temporal validity checks.
+    pub fn with_reference_time(mut self, ts: TimestampMilli) -> Self {
+        self.reference_ts_millis = Some(ts);
+        self
+    }
+}
+
+impl AllNodesDispatch {
+    /// Create a new dispatch wrapper.
+    pub(crate) fn new(
+        params: AllNodes,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(NodeName, Id)>>>,
+        result_tx: oneshot::Sender<Result<Vec<(Id, NodeName, NodeSummary)>>>,
     ) -> Self {
         Self {
-            name,
-            start,
-            limit,
-            reference_ts_millis,
-            timeout: Some(timeout),
-            result_tx: Some(result_tx),
+            params,
+            timeout,
+            result_tx,
         }
     }
 
-    pub(crate) fn send_result(self, result: Result<Vec<(NodeName, Id)>>) {
-        if let Some(tx) = self.result_tx {
-            let _ = tx.send(result);
-        }
+    /// Send the result back to the client (consumes self).
+    pub(crate) fn send_result(self, result: Result<Vec<(Id, NodeName, NodeSummary)>>) {
+        let _ = self.result_tx.send(result);
+    }
+
+    /// Execute an AllNodes query directly without dispatch machinery.
+    /// This is used by the unified query module for composition.
+    pub(crate) async fn execute_params(
+        params: &AllNodes,
+        storage: &Storage,
+    ) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = AllNodesDispatch {
+            params: params.clone(),
+            timeout: Duration::from_secs(0),
+            result_tx: tx,
+        };
+        <AllNodesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
     }
 }
 
-impl EdgesByName {
-    /// Create a new query request (public API - no channel, no timeout yet)
-    pub fn new(
-        name: String,
-        start: Option<(EdgeName, Id)>,
-        limit: Option<usize>,
-        reference_ts_millis: Option<TimestampMilli>,
-    ) -> Self {
+impl AllEdges {
+    /// Create a new AllEdges query with the specified limit.
+    pub fn new(limit: usize) -> Self {
         Self {
-            name,
-            start,
+            last: None,
             limit,
-            reference_ts_millis,
-            timeout: None,
-            result_tx: None,
+            reference_ts_millis: None,
         }
     }
 
-    /// Internal constructor used by the query execution machinery
-    pub(crate) fn with_channel(
-        name: String,
-        start: Option<(EdgeName, Id)>,
-        limit: Option<usize>,
-        reference_ts_millis: Option<TimestampMilli>,
+    /// Set the cursor for pagination (exclusive start).
+    pub fn with_cursor(mut self, last: (SrcId, DstId, EdgeName)) -> Self {
+        self.last = Some(last);
+        self
+    }
+
+    /// Set the reference timestamp for temporal validity checks.
+    pub fn with_reference_time(mut self, ts: TimestampMilli) -> Self {
+        self.reference_ts_millis = Some(ts);
+        self
+    }
+}
+
+impl AllEdgesDispatch {
+    /// Create a new dispatch wrapper.
+    pub(crate) fn new(
+        params: AllEdges,
         timeout: Duration,
-        result_tx: oneshot::Sender<Result<Vec<(EdgeName, Id)>>>,
+        result_tx: oneshot::Sender<Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>>,
     ) -> Self {
         Self {
-            name,
-            start,
-            limit,
-            reference_ts_millis,
-            timeout: Some(timeout),
-            result_tx: Some(result_tx),
+            params,
+            timeout,
+            result_tx,
         }
     }
 
-    pub(crate) fn send_result(self, result: Result<Vec<(EdgeName, Id)>>) {
-        if let Some(tx) = self.result_tx {
-            let _ = tx.send(result);
-        }
+    /// Send the result back to the client (consumes self).
+    pub(crate) fn send_result(self, result: Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>>) {
+        let _ = self.result_tx.send(result);
+    }
+
+    /// Execute an AllEdges query directly without dispatch machinery.
+    /// This is used by the unified query module for composition.
+    pub(crate) async fn execute_params(
+        params: &AllEdges,
+        storage: &Storage,
+    ) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = AllEdgesDispatch {
+            params: params.clone(),
+            timeout: Duration::from_secs(0),
+            result_tx: tx,
+        };
+        <AllEdgesDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
     }
 }
 
-/// Implement Runnable for NodeByIdQuery specifically
+/// Implement Runnable<Reader> for NodeById
 #[async_trait::async_trait]
-impl Runnable for NodeById {
+impl Runnable<super::Reader> for NodeById {
     type Output = (NodeName, NodeSummary);
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        let query = NodeById::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
-
-        reader.send_query(Query::NodeById(query)).await?;
+        let dispatch = NodeByIdDispatch::new(self, timeout, result_tx);
+        reader.send_query(Query::NodeById(dispatch)).await?;
         result_rx.await?
     }
 }
 
-/// Implement Runnable for NodeFragmentsByIdTimeRangeQuery
+/// Implement Runnable<Reader> for NodesByIdsMulti
 #[async_trait::async_trait]
-impl Runnable for NodeFragmentsByIdTimeRange {
+impl Runnable<super::Reader> for NodesByIdsMulti {
+    type Output = Vec<(Id, NodeName, NodeSummary)>;
+
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let dispatch = NodesByIdsMultiDispatch::new(self, timeout, result_tx);
+        reader.send_query(Query::NodesByIdsMulti(dispatch)).await?;
+        result_rx.await?
+    }
+}
+
+/// Implement Runnable<Reader> for NodeFragmentsByIdTimeRange
+#[async_trait::async_trait]
+impl Runnable<super::Reader> for NodeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        let query = NodeFragmentsByIdTimeRange::with_channel(
-            self.id,
-            self.time_range,
-            self.reference_ts_millis,
-            timeout,
-            result_tx,
-        );
-
+        let dispatch = NodeFragmentsByIdTimeRangeDispatch::new(self, timeout, result_tx);
         reader
-            .send_query(Query::NodeFragmentsByIdTimeRange(query))
+            .send_query(Query::NodeFragmentsByIdTimeRange(dispatch))
             .await?;
         result_rx.await?
     }
 }
 
-/// Implement Runnable for EdgeFragmentsByIdTimeRange
+/// Implement Runnable<Reader> for EdgeFragmentsByIdTimeRange
 #[async_trait::async_trait]
-impl Runnable for EdgeFragmentsByIdTimeRange {
+impl Runnable<super::Reader> for EdgeFragmentsByIdTimeRange {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        let query = EdgeFragmentsByIdTimeRange::with_channel(
-            self.source_id,
-            self.dest_id,
-            self.edge_name,
-            self.time_range,
-            self.reference_ts_millis,
-            timeout,
-            result_tx,
-        );
-
+        let dispatch = EdgeFragmentsByIdTimeRangeDispatch::new(self, timeout, result_tx);
         reader
-            .send_query(Query::EdgeFragmentsByIdTimeRange(query))
+            .send_query(Query::EdgeFragmentsByIdTimeRange(dispatch))
             .await?;
         result_rx.await?
     }
 }
 
-/// Implement Runnable for EdgeSummaryBySrcDstNameQuery
+/// Implement Runnable<Reader> for EdgeSummaryBySrcDstName
 #[async_trait::async_trait]
-impl Runnable for EdgeSummaryBySrcDstName {
+impl Runnable<super::Reader> for EdgeSummaryBySrcDstName {
     type Output = (EdgeSummary, Option<f64>);
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        let query = EdgeSummaryBySrcDstName::with_channel(
-            self.source_id,
-            self.dest_id,
-            self.name,
-            self.reference_ts_millis,
-            timeout,
-            result_tx,
-        );
-
+        let dispatch = EdgeSummaryBySrcDstNameDispatch::new(self, timeout, result_tx);
         reader
-            .send_query(Query::EdgeSummaryBySrcDstName(query))
+            .send_query(Query::EdgeSummaryBySrcDstName(dispatch))
             .await?;
         result_rx.await?
     }
 }
 
 #[async_trait::async_trait]
-impl Runnable for OutgoingEdges {
+impl Runnable<super::Reader> for OutgoingEdges {
     type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query =
-            OutgoingEdges::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
-        reader.send_query(Query::OutgoingEdges(query)).await?;
+        let dispatch = OutgoingEdgesDispatch::new(self, timeout, result_tx);
+        reader.send_query(Query::OutgoingEdges(dispatch)).await?;
         result_rx.await?
     }
 }
 
 #[async_trait::async_trait]
-impl Runnable for IncomingEdges {
+impl Runnable<super::Reader> for IncomingEdges {
     type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query =
-            IncomingEdges::with_channel(self.id, self.reference_ts_millis, timeout, result_tx);
-        reader.send_query(Query::IncomingEdges(query)).await?;
+        let dispatch = IncomingEdgesDispatch::new(self, timeout, result_tx);
+        reader.send_query(Query::IncomingEdges(dispatch)).await?;
         result_rx.await?
     }
 }
 
 #[async_trait::async_trait]
-impl Runnable for NodesByName {
-    type Output = Vec<(NodeName, Id)>;
+impl Runnable<super::Reader> for AllNodes {
+    type Output = Vec<(Id, NodeName, NodeSummary)>;
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query = NodesByName::with_channel(
-            self.name,
-            self.start,
-            self.limit,
-            self.reference_ts_millis,
-            timeout,
-            result_tx,
-        );
-        reader.send_query(Query::NodesByName(query)).await?;
+        let dispatch = AllNodesDispatch::new(self, timeout, result_tx);
+        reader.send_query(Query::AllNodes(dispatch)).await?;
         result_rx.await?
     }
 }
 
 #[async_trait::async_trait]
-impl Runnable for EdgesByName {
-    type Output = Vec<(EdgeName, Id)>;
+impl Runnable<super::Reader> for AllEdges {
+    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
-    async fn run(self, reader: &crate::Reader, timeout: Duration) -> Result<Self::Output> {
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let query = EdgesByName::with_channel(
-            self.name,
-            self.start,
-            self.limit,
-            self.reference_ts_millis,
-            timeout,
-            result_tx,
-        );
-        reader.send_query(Query::EdgesByName(query)).await?;
+        let dispatch = AllEdgesDispatch::new(self, timeout, result_tx);
+        reader.send_query(Query::AllEdges(dispatch)).await?;
         result_rx.await?
     }
 }
 
-/// Implement QueryExecutor for NodeByIdQuery
+/// Implement QueryExecutor for NodeByIdDispatch
 #[async_trait::async_trait]
-impl QueryExecutor for NodeById {
+impl QueryExecutor for NodeByIdDispatch {
     type Output = (NodeName, NodeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        tracing::debug!(id = %self.id, "Executing NodeById query");
+        let params = &self.params;
+        tracing::debug!(id = %params.id, "Executing NodeById query");
 
         // Default None to current time for temporal validity checks
-        let ref_time = self
+        let ref_time = params
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let id = self.id;
+        let id = params.id;
 
         let key = schema::NodeCfKey(id);
         let key_bytes = schema::Nodes::key_to_bytes(&key);
@@ -900,30 +1120,113 @@ impl QueryExecutor for NodeById {
 
     fn timeout(&self) -> Duration {
         self.timeout
-            .expect("Query must have timeout set when executing")
     }
 }
 
-/// Implement QueryExecutor for NodeFragmentsByIdTimeRangeQuery
+/// Implement QueryExecutor for NodesByIdsMultiDispatch
+///
+/// Uses RocksDB's `multi_get_cf()` for efficient batch lookups.
+/// Missing nodes and temporally invalid nodes are silently omitted from results.
 #[async_trait::async_trait]
-impl QueryExecutor for NodeFragmentsByIdTimeRange {
+impl QueryExecutor for NodesByIdsMultiDispatch {
+    type Output = Vec<(Id, NodeName, NodeSummary)>;
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        let params = &self.params;
+        tracing::debug!(count = params.ids.len(), "Executing NodesByIdsMulti query");
+
+        if params.ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Default None to current time for temporal validity checks
+        let ref_time = params
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        // Prepare keys for batch lookup
+        let keys: Vec<Vec<u8>> = params
+            .ids
+            .iter()
+            .map(|id| schema::Nodes::key_to_bytes(&schema::NodeCfKey(*id)))
+            .collect();
+
+        // Use multi_get_cf for batch lookup - handles both readonly and readwrite modes
+        let results: Vec<Result<Option<Vec<u8>>, rocksdb::Error>> = if let Ok(db) = storage.db() {
+            let cf = db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+            })?;
+            db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())))
+        } else {
+            let txn_db = storage.transaction_db()?;
+            let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+            })?;
+            txn_db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())))
+        };
+
+        // Parse results, skipping missing entries and temporally invalid nodes
+        let mut output = Vec::with_capacity(results.len());
+        for (id, result) in params.ids.iter().zip(results) {
+            match result {
+                Ok(Some(value_bytes)) => {
+                    match schema::Nodes::value_from_bytes(&value_bytes) {
+                        Ok(value) => {
+                            // Check temporal validity - skip invalid nodes
+                            if schema::is_valid_at_time(&value.0, ref_time) {
+                                output.push((*id, value.1, value.2));
+                            } else {
+                                tracing::trace!(
+                                    id = %id,
+                                    "Skipping node: not valid at time {}",
+                                    ref_time.0
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(id = %id, error = %e, "Failed to deserialize node value");
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Node not found - silently skip
+                    tracing::trace!(id = %id, "Node not found");
+                }
+                Err(e) => {
+                    tracing::warn!(id = %id, error = %e, "RocksDB error fetching node");
+                }
+            }
+        }
+
+        Ok(output)
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+/// Implement QueryExecutor for NodeFragmentsByIdTimeRangeDispatch
+#[async_trait::async_trait]
+impl QueryExecutor for NodeFragmentsByIdTimeRangeDispatch {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        tracing::debug!(id = %self.id, time_range = ?self.time_range, "Executing NodeFragmentsByIdTimeRange query");
+        let params = &self.params;
+        tracing::debug!(id = %params.id, time_range = ?params.time_range, "Executing NodeFragmentsByIdTimeRange query");
 
         use std::ops::Bound;
 
         // Default None to current time for temporal validity checks
-        let ref_time = self
+        let ref_time = params
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let id = self.id;
+        let id = params.id;
         let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
 
         // Construct optimal starting key based on start bound
-        let start_key = match &self.time_range.0 {
+        let start_key = match &params.time_range.0 {
             Bound::Unbounded => {
                 let mut key = Vec::with_capacity(24);
                 key.extend_from_slice(&id.into_bytes());
@@ -949,7 +1252,7 @@ impl QueryExecutor for NodeFragmentsByIdTimeRange {
 
             let timestamp = key.1;
 
-            match &self.time_range.1 {
+            match &params.time_range.1 {
                 Bound::Unbounded => { /* continue scanning */ }
                 Bound::Included(end_ts) => {
                     if timestamp.0 > end_ts.0 {
@@ -980,39 +1283,39 @@ impl QueryExecutor for NodeFragmentsByIdTimeRange {
 
     fn timeout(&self) -> Duration {
         self.timeout
-            .expect("Query must have timeout set when executing")
     }
 }
 
-/// Implement QueryExecutor for EdgeFragmentsByIdTimeRange
+/// Implement QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch
 #[async_trait::async_trait]
-impl QueryExecutor for EdgeFragmentsByIdTimeRange {
+impl QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch {
     type Output = Vec<(TimestampMilli, FragmentContent)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        let params = &self.params;
         tracing::debug!(
-            src_id = %self.source_id,
-            dst_id = %self.dest_id,
-            edge_name = %self.edge_name,
-            time_range = ?self.time_range,
+            src_id = %params.source_id,
+            dst_id = %params.dest_id,
+            edge_name = %params.edge_name,
+            time_range = ?params.time_range,
             "Executing EdgeFragmentsByIdTimeRange query"
         );
 
         use std::ops::Bound;
 
         // Default None to current time for temporal validity checks
-        let ref_time = self
+        let ref_time = params
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let source_id = self.source_id;
-        let dest_id = self.dest_id;
-        let edge_name = &self.edge_name;
+        let source_id = params.source_id;
+        let dest_id = params.dest_id;
+        let edge_name = &params.edge_name;
         let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
 
         // Construct optimal starting key based on start bound
         // EdgeFragmentCfKey: (SrcId, DstId, EdgeName, TimestampMilli)
-        let start_key = match &self.time_range.0 {
+        let start_key = match &params.time_range.0 {
             Bound::Unbounded => {
                 let name_bytes = edge_name.as_bytes();
                 let mut key = Vec::with_capacity(32 + name_bytes.len() + 8);
@@ -1047,7 +1350,7 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRange {
 
             let timestamp = key.3;
 
-            match &self.time_range.1 {
+            match &params.time_range.1 {
                 Bound::Unbounded => { /* continue scanning */ }
                 Bound::Included(end_ts) => {
                     if timestamp.0 > end_ts.0 {
@@ -1078,31 +1381,31 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRange {
 
     fn timeout(&self) -> Duration {
         self.timeout
-            .expect("Query must have timeout set when executing")
     }
 }
 
-/// Implement QueryExecutor for EdgeSummaryBySrcDstNameQuery
+/// Implement QueryExecutor for EdgeSummaryBySrcDstNameDispatch
 #[async_trait::async_trait]
-impl QueryExecutor for EdgeSummaryBySrcDstName {
+impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
     type Output = (EdgeSummary, Option<f64>);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        let params = &self.params;
         tracing::debug!(
-            src_id = %self.source_id,
-            dst_id = %self.dest_id,
-            name = %self.name,
+            src_id = %params.source_id,
+            dst_id = %params.dest_id,
+            name = %params.name,
             "Executing EdgeSummaryBySrcDstName query"
         );
 
         // Default None to current time for temporal validity checks
-        let ref_time = self
+        let ref_time = params
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let source_id = self.source_id;
-        let dest_id = self.dest_id;
-        let name = &self.name;
+        let source_id = params.source_id;
+        let dest_id = params.dest_id;
+        let name = &params.name;
 
         let key = schema::ForwardEdgeCfKey(source_id, dest_id, name.clone());
         let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
@@ -1159,24 +1462,24 @@ impl QueryExecutor for EdgeSummaryBySrcDstName {
 
     fn timeout(&self) -> Duration {
         self.timeout
-            .expect("Query must have timeout set when executing")
     }
 }
 
-/// Implement QueryExecutor for OutgoingEdgesQuery
+/// Implement QueryExecutor for OutgoingEdgesDispatch
 #[async_trait::async_trait]
-impl QueryExecutor for OutgoingEdges {
+impl QueryExecutor for OutgoingEdgesDispatch {
     type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        tracing::debug!(node_id = %self.id, "Executing OutgoingEdges query");
+        let params = &self.params;
+        tracing::debug!(node_id = %params.id, "Executing OutgoingEdges query");
 
         // Default None to current time for temporal validity checks
-        let ref_time = self
+        let ref_time = params
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let id = self.id;
+        let id = params.id;
         let mut edges: Vec<(Option<f64>, SrcId, DstId, EdgeName)> = Vec::new();
         let prefix = id.into_bytes();
 
@@ -1268,24 +1571,24 @@ impl QueryExecutor for OutgoingEdges {
 
     fn timeout(&self) -> Duration {
         self.timeout
-            .expect("Query must have timeout set when executing")
     }
 }
 
-/// Implement QueryExecutor for IncomingEdgesQuery
+/// Implement QueryExecutor for IncomingEdgesDispatch
 #[async_trait::async_trait]
-impl QueryExecutor for IncomingEdges {
+impl QueryExecutor for IncomingEdgesDispatch {
     type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        tracing::debug!(node_id = %self.id, "Executing IncomingEdges query");
+        let params = &self.params;
+        tracing::debug!(node_id = %params.id, "Executing IncomingEdges query");
 
         // Default None to current time for temporal validity checks
-        let ref_time = self
+        let ref_time = params
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let id = self.id;
+        let id = params.id;
         let mut edges: Vec<(Option<f64>, DstId, SrcId, EdgeName)> = Vec::new();
         let prefix = id.into_bytes();
 
@@ -1429,269 +1732,72 @@ impl QueryExecutor for IncomingEdges {
 
     fn timeout(&self) -> Duration {
         self.timeout
-            .expect("Query must have timeout set when executing")
     }
 }
 
-/// Implement QueryExecutor for NodesByNameQuery
+/// Implement QueryExecutor for AllNodesDispatch
+/// Delegates to the scan module's Visitable implementation.
 #[async_trait::async_trait]
-impl QueryExecutor for NodesByName {
-    type Output = Vec<(NodeName, Id)>;
+impl QueryExecutor for AllNodesDispatch {
+    type Output = Vec<(Id, NodeName, NodeSummary)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        tracing::debug!(name = %self.name, "Executing NodesByName query");
+        let params = &self.params;
+        tracing::debug!(limit = params.limit, has_cursor = params.last.is_some(), "Executing AllNodes query");
 
-        // Default None to current time for temporal validity checks
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
-
-        let name = &self.name;
-        let mut nodes: Vec<(NodeName, Id)> = Vec::new();
-
-        let seek_key = if let Some((start_name, start_id)) = &self.start {
-            let mut bytes = Vec::with_capacity(start_name.len() + 16);
-            bytes.extend_from_slice(start_name.as_bytes());
-            bytes.extend_from_slice(&start_id.into_bytes());
-            bytes
-        } else {
-            name.as_bytes().to_vec()
+        // Create scan request matching scan::AllNodes
+        let scan_request = scan::AllNodes {
+            last: params.last,
+            limit: params.limit,
+            reverse: false,
+            reference_ts_millis: params.reference_ts_millis,
         };
 
-        if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::NodeNames::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::NodeNames::CF_NAME)
-            })?;
+        // Collect results via visitor pattern
+        let mut results = Vec::with_capacity(params.limit);
+        scan_request.accept(storage, &mut |record: &scan::NodeRecord| {
+            results.push((record.id, record.name.clone(), record.summary.clone()));
+            true // continue
+        })?;
 
-            let iter = db.iterator_cf(
-                cf,
-                rocksdb::IteratorMode::From(&seek_key, rocksdb::Direction::Forward),
-            );
-
-            for item in iter {
-                if let Some(limit) = self.limit {
-                    if nodes.len() >= limit {
-                        break;
-                    }
-                }
-
-                let (key_bytes, value_bytes) = item?;
-                let key: schema::NodeNameCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-                let node_name = key.0;
-                let node_id = key.1;
-
-                if !node_name.starts_with(name) {
-                    break;
-                }
-
-                if let Some((start_name, start_id)) = &self.start {
-                    if node_name == *start_name && node_id == *start_id {
-                        continue;
-                    }
-                }
-
-                // Deserialize and check temporal validity
-                let value: schema::NodeNameCfValue =
-                    schema::NodeNames::value_from_bytes(&value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-                // Always check temporal validity - skip invalid node names
-                if !schema::is_valid_at_time(&value.0, ref_time) {
-                    continue;
-                }
-
-                nodes.push((node_name, node_id));
-            }
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let cf = txn_db
-                .cf_handle(schema::NodeNames::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Column family '{}' not found", schema::NodeNames::CF_NAME)
-                })?;
-
-            let iter = txn_db.iterator_cf(
-                cf,
-                rocksdb::IteratorMode::From(&seek_key, rocksdb::Direction::Forward),
-            );
-
-            for item in iter {
-                if let Some(limit) = self.limit {
-                    if nodes.len() >= limit {
-                        break;
-                    }
-                }
-
-                let (key_bytes, value_bytes) = item?;
-                let key: schema::NodeNameCfKey = schema::NodeNames::key_from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-                let node_name = key.0;
-                let node_id = key.1;
-
-                if !node_name.starts_with(name) {
-                    break;
-                }
-
-                if let Some((start_name, start_id)) = &self.start {
-                    if node_name == *start_name && node_id == *start_id {
-                        continue;
-                    }
-                }
-
-                // Deserialize and check temporal validity
-                let value: schema::NodeNameCfValue =
-                    schema::NodeNames::value_from_bytes(&value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-                // Always check temporal validity - skip invalid node names
-                if !schema::is_valid_at_time(&value.0, ref_time) {
-                    continue;
-                }
-
-                nodes.push((node_name, node_id));
-            }
-        }
-
-        Ok(nodes)
+        Ok(results)
     }
 
     fn timeout(&self) -> Duration {
         self.timeout
-            .expect("Query must have timeout set when executing")
     }
 }
 
-/// Implement QueryExecutor for EdgesByNameQuery
+/// Implement QueryExecutor for AllEdgesDispatch
+/// Delegates to the scan module's Visitable implementation.
 #[async_trait::async_trait]
-impl QueryExecutor for EdgesByName {
-    type Output = Vec<(EdgeName, Id)>;
+impl QueryExecutor for AllEdgesDispatch {
+    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        tracing::debug!(name = %self.name, "Executing EdgesByName query");
+        let params = &self.params;
+        tracing::debug!(limit = params.limit, has_cursor = params.last.is_some(), "Executing AllEdges query");
 
-        // Default None to current time for temporal validity checks
-        let ref_time = self
-            .reference_ts_millis
-            .unwrap_or_else(|| TimestampMilli::now());
-
-        let name = &self.name;
-        let mut edges: Vec<(EdgeName, Id)> = Vec::new();
-
-        let seek_key = if let Some((start_name, start_id)) = &self.start {
-            let mut bytes = Vec::with_capacity(start_name.len() + 16);
-            bytes.extend_from_slice(start_name.as_bytes());
-            bytes.extend_from_slice(&start_id.into_bytes());
-            bytes
-        } else {
-            name.as_bytes().to_vec()
+        // Create scan request matching scan::AllEdges
+        let scan_request = scan::AllEdges {
+            last: params.last.clone(),
+            limit: params.limit,
+            reverse: false,
+            reference_ts_millis: params.reference_ts_millis,
         };
 
-        if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::EdgeNames::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::EdgeNames::CF_NAME)
-            })?;
+        // Collect results via visitor pattern
+        let mut results = Vec::with_capacity(params.limit);
+        scan_request.accept(storage, &mut |record: &scan::EdgeRecord| {
+            results.push((record.weight, record.src_id, record.dst_id, record.name.clone()));
+            true // continue
+        })?;
 
-            let iter = db.iterator_cf(
-                cf,
-                rocksdb::IteratorMode::From(&seek_key, rocksdb::Direction::Forward),
-            );
-
-            for item in iter {
-                if let Some(limit) = self.limit {
-                    if edges.len() >= limit {
-                        break;
-                    }
-                }
-
-                let (key_bytes, value_bytes) = item?;
-                let key: schema::EdgeNameCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-                let edge_name = &key.0;
-                let edge_id = key.1;
-
-                if !edge_name.starts_with(name) {
-                    break;
-                }
-
-                if let Some((start_name, start_id)) = &self.start {
-                    if edge_name == start_name && edge_id == *start_id {
-                        continue;
-                    }
-                }
-
-                // Deserialize and check temporal validity
-                let value: schema::EdgeNameCfValue =
-                    schema::EdgeNames::value_from_bytes(&value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-                // Always check temporal validity - skip invalid edge names
-                if !schema::is_valid_at_time(&value.0, ref_time) {
-                    continue;
-                }
-
-                edges.push((edge_name.clone(), edge_id));
-            }
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let cf = txn_db
-                .cf_handle(schema::EdgeNames::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Column family '{}' not found", schema::EdgeNames::CF_NAME)
-                })?;
-
-            let iter = txn_db.iterator_cf(
-                cf,
-                rocksdb::IteratorMode::From(&seek_key, rocksdb::Direction::Forward),
-            );
-
-            for item in iter {
-                if let Some(limit) = self.limit {
-                    if edges.len() >= limit {
-                        break;
-                    }
-                }
-
-                let (key_bytes, value_bytes) = item?;
-                let key: schema::EdgeNameCfKey = schema::EdgeNames::key_from_bytes(&key_bytes)
-                    .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
-
-                let edge_name = &key.0;
-                let edge_id = key.1;
-
-                if !edge_name.starts_with(name) {
-                    break;
-                }
-
-                if let Some((start_name, start_id)) = &self.start {
-                    if edge_name == start_name && edge_id == *start_id {
-                        continue;
-                    }
-                }
-
-                // Deserialize and check temporal validity
-                let value: schema::EdgeNameCfValue =
-                    schema::EdgeNames::value_from_bytes(&value_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-                // Always check temporal validity - skip invalid edge names
-                if !schema::is_valid_at_time(&value.0, ref_time) {
-                    continue;
-                }
-
-                edges.push((edge_name.clone(), edge_id));
-            }
-        }
-
-        Ok(edges)
+        Ok(results)
     }
 
     fn timeout(&self) -> Duration {
         self.timeout
-            .expect("Query must have timeout set when executing")
     }
 }
 
@@ -1701,13 +1807,14 @@ impl QueryExecutor for EdgesByName {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::{Graph, Storage};
-    use super::super::mutation::{AddNode, Runnable as MutRunnable};
-    use super::super::writer::{spawn_graph_consumer, create_mutation_writer, WriterConfig};
+    use super::super::mutation::AddNode;
+    use crate::writer::Runnable as MutRunnable;
     use super::super::reader::{
-        create_query_reader, spawn_consumer, Consumer, QueryWithTimeout, ReaderConfig,
+        create_query_reader, spawn_consumer, Consumer, QueryWithTimeout, Reader, ReaderConfig,
     };
+    use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+    use super::super::{Graph, Storage};
+    use super::*;
     use crate::{DataUrl, Id, TimestampMilli};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1725,7 +1832,7 @@ mod tests {
         };
         let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
         let mutation_consumer_handle =
-            spawn_graph_consumer(mutation_receiver, writer_config, &db_path);
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
 
         // Insert a test node
         let node_id = Id::new();
@@ -1735,7 +1842,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("test summary"),
+            summary: NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
 
@@ -1833,9 +1940,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_summary_by_src_dst_name_query() {
-        use crate::{
-            AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli, WriterConfig,
-        };
+        use super::super::mutation::{AddEdge, AddNode};
+        use super::super::schema::EdgeSummary;
+        use crate::writer::Runnable as MutationRunnable;
+        use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::{Id, TimestampMilli};
         use tempfile::TempDir;
 
         // Create temporary database
@@ -1847,9 +1956,8 @@ mod tests {
         };
 
         // Create writer and spawn graph consumer for mutations
-        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle =
-            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let (writer, mutation_receiver) = create_mutation_writer(config.clone());
+        let mutation_consumer_handle = spawn_mutation_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes
         let source_id = Id::new();
@@ -1860,7 +1968,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
+            summary: NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
@@ -1871,7 +1979,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
+            summary: NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -1910,13 +2018,13 @@ mod tests {
         let graph = Graph::new(Arc::new(storage));
 
         // Create reader and query consumer
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = {
             let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
+            let reader = Reader::new(sender);
             (reader, receiver)
         };
 
@@ -1945,10 +2053,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_basic() {
-        use crate::{
-            AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli,
-            WriterConfig,
+        use super::super::mutation::{
+            AddEdge, AddEdgeFragment, AddNode,
         };
+        use crate::writer::Runnable as MutationRunnable;
+        use super::super::schema::EdgeSummary;
+        use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::{Id, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -1961,32 +2072,31 @@ mod tests {
         };
 
         // Create writer and spawn graph consumer for mutations
-        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle =
-            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let (writer, mutation_receiver) = create_mutation_writer(config.clone());
+        let mutation_consumer_handle = spawn_mutation_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes
         let source_id = Id::new();
         let dest_id = Id::new();
         let edge_name = "test_edge";
 
-        crate::AddNode {
+        AddNode {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
+            summary: NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::AddNode {
+        AddNode {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
+            summary: NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
@@ -1994,7 +2104,7 @@ mod tests {
 
         // Create an edge
         let edge_summary = EdgeSummary::from_text("Test edge for fragments");
-        crate::AddEdge {
+        AddEdge {
             source_node_id: source_id,
             target_node_id: dest_id,
             ts_millis: TimestampMilli::now(),
@@ -2013,7 +2123,7 @@ mod tests {
         let fragment2_time = TimestampMilli(base_time.0 + 2000);
         let fragment3_time = TimestampMilli(base_time.0 + 3000);
 
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
@@ -2025,7 +2135,7 @@ mod tests {
         .await
         .unwrap();
 
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
@@ -2037,7 +2147,7 @@ mod tests {
         .await
         .unwrap();
 
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
@@ -2064,13 +2174,13 @@ mod tests {
         let graph = Graph::new(Arc::new(storage));
 
         // Create reader and query consumer
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = {
             let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
+            let reader = Reader::new(sender);
             (reader, receiver)
         };
 
@@ -2121,10 +2231,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_with_bounds() {
-        use crate::{
-            AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli,
-            WriterConfig,
+        use super::super::mutation::{
+            AddEdge, AddEdgeFragment, AddNode,
         };
+        use crate::writer::Runnable as MutationRunnable;
+        use super::super::schema::EdgeSummary;
+        use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::{Id, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -2137,39 +2250,38 @@ mod tests {
         };
 
         // Create writer and spawn graph consumer for mutations
-        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle =
-            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let (writer, mutation_receiver) = create_mutation_writer(config.clone());
+        let mutation_consumer_handle = spawn_mutation_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes
         let source_id = Id::new();
         let dest_id = Id::new();
         let edge_name = "bounded_edge";
 
-        crate::AddNode {
+        AddNode {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
+            summary: NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::AddNode {
+        AddNode {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
+            summary: NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
         // Create an edge
-        crate::AddEdge {
+        AddEdge {
             source_node_id: source_id,
             target_node_id: dest_id,
             ts_millis: TimestampMilli::now(),
@@ -2196,7 +2308,7 @@ mod tests {
             (t4, "Fragment at t4"),
             (t5, "Fragment at t5"),
         ] {
-            crate::AddEdgeFragment {
+            AddEdgeFragment {
                 src_id: source_id,
                 dst_id: dest_id,
                 edge_name: edge_name.to_string(),
@@ -2221,13 +2333,13 @@ mod tests {
         storage.ready().unwrap();
         let graph = Graph::new(Arc::new(storage));
 
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = {
             let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
+            let reader = Reader::new(sender);
             (reader, receiver)
         };
 
@@ -2305,11 +2417,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_by_id_time_range_with_temporal_validity() {
-        use crate::{
-            AddEdge, AddEdgeFragment, AddNode, EdgeSummary, Id,
-            MutationRunnable, TimestampMilli, WriterConfig,
+        use super::super::mutation::{
+            AddEdge, AddEdgeFragment, AddNode,
         };
-        use crate::TemporalRange;
+        use crate::writer::Runnable as MutationRunnable;
+        use super::super::schema::EdgeSummary;
+        use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::{Id, TemporalRange, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -2321,39 +2435,38 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle =
-            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let (writer, mutation_receiver) = create_mutation_writer(config.clone());
+        let mutation_consumer_handle = spawn_mutation_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes
         let source_id = Id::new();
         let dest_id = Id::new();
         let edge_name = "temporal_edge";
 
-        crate::AddNode {
+        AddNode {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
+            summary: NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::AddNode {
+        AddNode {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
+            summary: NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
         // Create an edge
-        crate::AddEdge {
+        AddEdge {
             source_node_id: source_id,
             target_node_id: dest_id,
             ts_millis: TimestampMilli::now(),
@@ -2368,39 +2481,33 @@ mod tests {
 
         // Add edge fragments with different temporal ranges
         // Fragment 1: Valid from 1000 to 3000
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(1000),
             content: DataUrl::from_markdown("Valid from 1000 to 3000"),
-            valid_range: TemporalRange::valid_between(
-                TimestampMilli(1000),
-                TimestampMilli(3000),
-            ),
+            valid_range: TemporalRange::valid_between(TimestampMilli(1000), TimestampMilli(3000)),
         }
         .run(&writer)
         .await
         .unwrap();
 
         // Fragment 2: Valid from 2000 to 5000
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(2000),
             content: DataUrl::from_markdown("Valid from 2000 to 5000"),
-            valid_range: TemporalRange::valid_between(
-                TimestampMilli(2000),
-                TimestampMilli(5000),
-            ),
+            valid_range: TemporalRange::valid_between(TimestampMilli(2000), TimestampMilli(5000)),
         }
         .run(&writer)
         .await
         .unwrap();
 
         // Fragment 3: No temporal range (always valid)
-        crate::AddEdgeFragment {
+        AddEdgeFragment {
             src_id: source_id,
             dst_id: dest_id,
             edge_name: edge_name.to_string(),
@@ -2421,13 +2528,13 @@ mod tests {
         storage.ready().unwrap();
         let graph = Graph::new(Arc::new(storage));
 
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = {
             let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
+            let reader = Reader::new(sender);
             (reader, receiver)
         };
 
@@ -2491,9 +2598,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_fragments_empty_result() {
-        use crate::{
-            AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, TimestampMilli, WriterConfig,
-        };
+        use super::super::mutation::{AddEdge, AddNode};
+        use super::super::schema::{EdgeSummary, NodeSummary};
+        use crate::writer::Runnable as MutationRunnable;
+        use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+        use crate::{Id, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -2505,38 +2614,37 @@ mod tests {
             channel_buffer_size: 10,
         };
 
-        let (writer, mutation_receiver) = crate::create_mutation_writer(config.clone());
-        let mutation_consumer_handle =
-            crate::spawn_graph_consumer(mutation_receiver, config, &db_path);
+        let (writer, mutation_receiver) = create_mutation_writer(config.clone());
+        let mutation_consumer_handle = spawn_mutation_consumer(mutation_receiver, config, &db_path);
 
         // Create source and destination nodes and edge but NO fragments
         let source_id = Id::new();
         let dest_id = Id::new();
         let edge_name = "empty_edge";
 
-        crate::AddNode {
+        AddNode {
             id: source_id,
             ts_millis: TimestampMilli::now(),
             name: "source_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("source summary"),
+            summary: NodeSummary::from_text("source summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::AddNode {
+        AddNode {
             id: dest_id,
             ts_millis: TimestampMilli::now(),
             name: "dest_node".to_string(),
             valid_range: None,
-            summary: crate::graph::schema::NodeSummary::from_text("dest summary"),
+            summary: NodeSummary::from_text("dest summary"),
         }
         .run(&writer)
         .await
         .unwrap();
 
-        crate::AddEdge {
+        AddEdge {
             source_node_id: source_id,
             target_node_id: dest_id,
             ts_millis: TimestampMilli::now(),
@@ -2558,13 +2666,13 @@ mod tests {
         storage.ready().unwrap();
         let graph = Graph::new(Arc::new(storage));
 
-        let reader_config = crate::ReaderConfig {
+        let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = {
             let (sender, receiver) = flume::bounded(reader_config.channel_buffer_size);
-            let reader = crate::Reader::new(sender);
+            let reader = Reader::new(sender);
             (reader, receiver)
         };
 
@@ -2584,6 +2692,506 @@ mod tests {
         .unwrap();
 
         assert_eq!(fragments.len(), 0);
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_nodes_by_ids_multi_basic() {
+        // Create a temporary database with real data
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create writer and mutation consumer
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer_handle =
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Insert multiple test nodes
+        let node_ids: Vec<Id> = (0..5).map(|_| Id::new()).collect();
+        for (i, &id) in node_ids.iter().enumerate() {
+            let node_args = AddNode {
+                id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("node_{}", i),
+                valid_range: None,
+                summary: NodeSummary::from_text(&format!("summary for node {}", i)),
+            };
+            node_args.run(&writer).await.unwrap();
+        }
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop writer to close mutation channel
+        drop(writer);
+
+        // Wait for mutation consumer to finish
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        // Create reader and query consumer
+        let reader_config = ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query all nodes with batch lookup
+        let results = NodesByIdsMulti::new(node_ids.clone(), None)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Verify all nodes were found
+        assert_eq!(results.len(), 5);
+
+        // Verify each node is present
+        for (id, name, _summary) in &results {
+            assert!(node_ids.contains(id));
+            assert!(name.starts_with("node_"));
+        }
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_nodes_by_ids_multi_missing_nodes() {
+        // Create a temporary database with real data
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create writer and mutation consumer
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer_handle =
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Insert only 2 test nodes
+        let existing_ids: Vec<Id> = (0..2).map(|_| Id::new()).collect();
+        for (i, &id) in existing_ids.iter().enumerate() {
+            let node_args = AddNode {
+                id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("node_{}", i),
+                valid_range: None,
+                summary: NodeSummary::from_text(&format!("summary for node {}", i)),
+            };
+            node_args.run(&writer).await.unwrap();
+        }
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Drop writer to close mutation channel
+        drop(writer);
+
+        // Wait for mutation consumer to finish
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        // Create reader and query consumer
+        let reader_config = ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query with a mix of existing and non-existing IDs
+        let non_existing_ids: Vec<Id> = (0..3).map(|_| Id::new()).collect();
+        let all_ids: Vec<Id> = existing_ids
+            .iter()
+            .chain(non_existing_ids.iter())
+            .copied()
+            .collect();
+
+        let results = NodesByIdsMulti::new(all_ids, None)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Should only return the 2 existing nodes
+        assert_eq!(results.len(), 2);
+
+        // Verify only existing IDs are in results
+        for (id, _name, _summary) in &results {
+            assert!(existing_ids.contains(id));
+        }
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_nodes_by_ids_multi_empty_input() {
+        // Create a temporary database
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create writer and mutation consumer
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer_handle =
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Insert one node so DB is properly initialized
+        let node_args = AddNode {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "dummy".to_string(),
+            valid_range: None,
+            summary: NodeSummary::from_text("dummy"),
+        };
+        node_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        let reader_config = ReaderConfig {
+            channel_buffer_size: 10,
+        };
+
+        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query with empty input
+        let results = NodesByIdsMulti::new(vec![], None)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Should return empty vector
+        assert_eq!(results.len(), 0);
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_all_nodes_query() {
+        // Create a temporary database with real data
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create writer and mutation consumer
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer_handle =
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Insert multiple test nodes
+        let node_ids: Vec<Id> = (0..5).map(|_| Id::new()).collect();
+        for (i, &node_id) in node_ids.iter().enumerate() {
+            let node_args = AddNode {
+                id: node_id,
+                ts_millis: TimestampMilli::now(),
+                name: format!("node_{}", i),
+                valid_range: None,
+                summary: NodeSummary::from_text(&format!("summary for node {}", i)),
+            };
+            node_args.run(&writer).await.unwrap();
+        }
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        // Create reader and query consumer
+        let reader_config = ReaderConfig {
+            channel_buffer_size: 10,
+        };
+        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query all nodes
+        let results = AllNodes::new(100)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Should return all 5 nodes
+        assert_eq!(results.len(), 5, "Should return all 5 nodes");
+
+        // Verify each node has expected data
+        for (id, name, summary) in &results {
+            assert!(!id.is_nil(), "Node ID should not be nil");
+            assert!(name.starts_with("node_"), "Node name should start with 'node_'");
+            assert!(
+                summary.decode_string().unwrap().contains("summary for node"),
+                "Summary should contain expected text"
+            );
+        }
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_all_nodes_pagination() {
+        // Create a temporary database with real data
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create writer and mutation consumer
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer_handle =
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Insert 10 test nodes
+        for i in 0..10 {
+            let node_args = AddNode {
+                id: Id::new(),
+                ts_millis: TimestampMilli::now(),
+                name: format!("node_{}", i),
+                valid_range: None,
+                summary: NodeSummary::from_text(&format!("summary {}", i)),
+            };
+            node_args.run(&writer).await.unwrap();
+        }
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        // Create reader and query consumer
+        let reader_config = ReaderConfig {
+            channel_buffer_size: 10,
+        };
+        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Get first page of 3 nodes
+        let page1 = AllNodes::new(3)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(page1.len(), 3, "First page should have 3 nodes");
+
+        // Get second page using cursor
+        let last_id = page1.last().unwrap().0;
+        let page2 = AllNodes::new(3)
+            .with_cursor(last_id)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(page2.len(), 3, "Second page should have 3 nodes");
+
+        // Ensure no overlap between pages
+        let page1_ids: std::collections::HashSet<_> = page1.iter().map(|(id, _, _)| *id).collect();
+        let page2_ids: std::collections::HashSet<_> = page2.iter().map(|(id, _, _)| *id).collect();
+        assert!(
+            page1_ids.is_disjoint(&page2_ids),
+            "Pages should not overlap"
+        );
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_all_edges_query() {
+        use super::super::mutation::AddEdge;
+
+        // Create a temporary database with real data
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create writer and mutation consumer
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer_handle =
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Insert nodes first
+        let node1 = Id::new();
+        let node2 = Id::new();
+        let node3 = Id::new();
+
+        for (id, name) in [(node1, "A"), (node2, "B"), (node3, "C")] {
+            AddNode {
+                id,
+                ts_millis: TimestampMilli::now(),
+                name: name.to_string(),
+                valid_range: None,
+                summary: NodeSummary::from_text(&format!("Node {}", name)),
+            }
+            .run(&writer)
+            .await
+            .unwrap();
+        }
+
+        // Insert edges
+        AddEdge {
+            source_node_id: node1,
+            target_node_id: node2,
+            ts_millis: TimestampMilli::now(),
+            name: "connects".to_string(),
+            summary: schema::EdgeSummary::from_text("A connects to B"),
+            weight: Some(1.0),
+            valid_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        AddEdge {
+            source_node_id: node2,
+            target_node_id: node3,
+            ts_millis: TimestampMilli::now(),
+            name: "links".to_string(),
+            summary: schema::EdgeSummary::from_text("B links to C"),
+            weight: Some(0.5),
+            valid_range: None,
+        }
+        .run(&writer)
+        .await
+        .unwrap();
+
+        // Give consumer time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        // Create reader and query consumer
+        let reader_config = ReaderConfig {
+            channel_buffer_size: 10,
+        };
+        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query all edges
+        let results = AllEdges::new(100)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        // Should return 2 edges
+        assert_eq!(results.len(), 2, "Should return 2 edges");
+
+        // Verify edge data
+        let edge_names: Vec<_> = results.iter().map(|(_, _, _, name)| name.as_str()).collect();
+        assert!(edge_names.contains(&"connects"), "Should contain 'connects' edge");
+        assert!(edge_names.contains(&"links"), "Should contain 'links' edge");
+
+        // Verify weights are present
+        for (weight, _, _, _) in &results {
+            assert!(weight.is_some(), "Edge weight should be present");
+        }
+
+        // Cleanup
+        drop(reader);
+        consumer_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_all_nodes_empty_database() {
+        // Create an empty database
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        // Create writer but don't insert any data
+        let writer_config = WriterConfig {
+            channel_buffer_size: 10,
+        };
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer_handle =
+            spawn_mutation_consumer(mutation_receiver, writer_config, &db_path);
+
+        // Need to insert at least one item to initialize the DB properly
+        // then we'll test a different scenario
+        let node_args = AddNode {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "temp".to_string(),
+            valid_range: None,
+            summary: NodeSummary::from_text("temp"),
+        };
+        node_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        mutation_consumer_handle.await.unwrap().unwrap();
+
+        // Now open storage for reading
+        let mut storage = Storage::readonly(&db_path);
+        storage.ready().unwrap();
+        let graph = Graph::new(Arc::new(storage));
+
+        let reader_config = ReaderConfig {
+            channel_buffer_size: 10,
+        };
+        let (reader, receiver) = create_query_reader(reader_config.clone());
+        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer_handle = spawn_consumer(consumer);
+
+        // Query with limit 0 should return empty
+        let results = AllNodes::new(0)
+            .run(&reader, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 0, "Limit 0 should return empty results");
 
         // Cleanup
         drop(reader);

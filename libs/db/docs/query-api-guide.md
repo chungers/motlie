@@ -62,7 +62,7 @@ The `Reader` is a handle for executing queries against the database:
 use motlie_db::{Reader, spawn_query_consumer};
 
 // Create a reader (typically during app initialization)
-let reader = spawn_graph_query_consumer(receiver, storage);
+let reader = spawn_query_consumer(receiver, storage);
 ```
 
 The `Reader` is:
@@ -238,74 +238,27 @@ for (weight, dst, src, edge_name) in incoming {
 - Tuple ordering: weight-first design (metadata before topology)
 - Weight is `None` for unweighted edges
 
-### 6. NodesByName
+### 6. Name-based Search (via Fulltext)
 
-Prefix search for nodes with pagination:
+For searching nodes and edges by name, use the fulltext search module:
 
 ```rust
-let nodes = NodesByName::new(
-    "user_".to_string(),    // prefix
-    None,                    // start cursor (for pagination)
-    Some(100),              // page size
-    ref_ts
-)
-.run(&reader, timeout)
-.await?;
+use motlie_db::fulltext::{FulltextQuery, SearchRequest};
 
-// Returns: Vec<(NodeName, Id)>
-for (name, id) in &nodes {
-    println!("Node: {} ({})", name, id);
-}
-```
+// Search for nodes by name
+let request = SearchRequest {
+    query: "user_*".to_string(),  // wildcard search
+    limit: Some(100),
+    ..Default::default()
+};
 
-**Returns**: `Vec<(NodeName, Id)>`
-
-**Pagination Example**:
-```rust
-let mut cursor = None;
-
-loop {
-    let page = NodesByName::new(
-        "user_".to_string(),
-        cursor.clone(),
-        Some(100),
-        None
-    )
-    .run(&reader, timeout)
+let results = FulltextQuery::Search(request)
+    .run(&fulltext_reader, timeout)
     .await?;
-
-    if page.is_empty() {
-        break;
-    }
-
-    // Process page...
-    for (name, id) in &page {
-        println!("{}: {}", name, id);
-    }
-
-    // Set cursor to last item for next page
-    cursor = page.last().cloned();
-}
 ```
 
-### 7. EdgesByName
-
-Prefix search for edges with pagination:
-
-```rust
-let edges = EdgesByName::new(
-    "follows_".to_string(),  // prefix
-    None,                     // start cursor
-    Some(100),               // page size
-    ref_ts
-)
-.run(&reader, timeout)
-.await?;
-
-// Returns: Vec<(EdgeName, Id)>
-```
-
-**Returns**: `Vec<(EdgeName, Id)>`
+See the fulltext search documentation for more details on search capabilities including
+fuzzy matching, tag filtering, and faceted search.
 
 ## Common Patterns
 
@@ -381,37 +334,29 @@ async fn get_historical_state(
 }
 ```
 
-### Pattern 5: Pagination
+### Pattern 5: Pagination with Scan
+
+For paginating through all nodes, use the scan interface:
 
 ```rust
-async fn list_all_users(
-    reader: &Reader,
-    timeout: Duration
-) -> anyhow::Result<Vec<(NodeName, Id)>> {
-    let mut all_users = Vec::new();
-    let mut cursor = None;
+use motlie_db::scan::{AllNodes, Visitable};
 
-    loop {
-        let page = NodesByName::new(
-            "user_".to_string(),
-            cursor.clone(),
-            Some(100),
-            None
-        )
-        .run(reader, timeout)
-        .await?;
+let scan = AllNodes {
+    last: None,              // cursor for pagination
+    limit: 100,              // page size
+    reverse: false,          // direction
+    reference_ts_millis: None,  // temporal filter
+};
 
-        if page.is_empty() {
-            break;
-        }
-
-        all_users.extend(page.iter().cloned());
-        cursor = page.last().cloned();
-    }
-
-    Ok(all_users)
-}
+let mut results = Vec::new();
+scan.accept(&storage, &mut |record| {
+    results.push((record.name.clone(), record.id));
+    true  // continue scanning
+})?;
 ```
+
+For name-based search, use the fulltext search module which provides
+more flexible text matching capabilities.
 
 ### Pattern 6: Graph Traversal
 
@@ -635,13 +580,8 @@ let (name, summary) = NodeById::new(id, Some(ref_time))
    // Old: reader.edges_to_node_by_id(node_id, ref_ts, timeout).await?
    IncomingEdges::new(node_id, ref_ts).run(&reader, timeout).await?
 
-   // NodesByName
-   // Old: reader.nodes_by_name(prefix, cursor, limit, ref_ts, timeout).await?
-   NodesByName::new(prefix, cursor, limit, ref_ts).run(&reader, timeout).await?
-
-   // EdgesByName
-   // Old: reader.edges_by_name(prefix, cursor, limit, ref_ts, timeout).await?
-   EdgesByName::new(prefix, cursor, limit, ref_ts).run(&reader, timeout).await?
+   // Name-based search - use fulltext module instead
+   // See fulltext search documentation for details
    ```
 
 3. ✅ Parameter order changed:
@@ -702,9 +642,9 @@ assert_eq!(result1, result2);
 ### Query Performance
 
 - **Point lookups** (`NodeById`, `EdgeSummaryBySrcDstName`): O(1) - ~1-10µs
-- **Prefix scans** (`NodesByName`, `EdgesByName`): O(K) where K = results - ~10-100µs per page
 - **Range scans** (`FragmentsByIdTimeRange`): O(K) where K = results - ~10-100µs per page
 - **Topology queries** (`OutgoingEdges`, `IncomingEdges`): O(degree) - ~10µs + 1µs per edge
+- **Fulltext search**: O(K) where K = results - performance depends on query complexity
 
 ### Concurrency
 

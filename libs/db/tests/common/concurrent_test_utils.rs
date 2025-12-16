@@ -9,7 +9,11 @@
 /// - test_concurrent_read_write.rs (readonly instances)
 /// - test_concurrent_secondary.rs (secondary instances with catch-up)
 
-use motlie_db::{AddEdge, AddNode, Id, MutationRunnable, TimestampMilli};
+use motlie_db::graph::mutation::{AddEdge, AddNode};
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer};
+use motlie_db::{Id, TimestampMilli};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -155,11 +159,10 @@ pub async fn writer_task(
     let mut metrics = Metrics::new();
 
     // Create writer
-    let (writer, writer_rx) = motlie_db::create_mutation_writer(Default::default());
+    let (writer, writer_rx) = create_mutation_writer(Default::default());
 
     // Spawn write consumer
-    let consumer_handle =
-        motlie_db::spawn_graph_consumer(writer_rx, Default::default(), &db_path);
+    let consumer_handle = spawn_mutation_consumer(writer_rx, Default::default(), &db_path);
 
     // Insert nodes
     for i in 0..num_nodes {
@@ -176,7 +179,7 @@ pub async fn writer_task(
             ts_millis: TimestampMilli::now(),
             name: node_name.clone(),
             valid_range: None,
-            summary: motlie_db::NodeSummary::from_text(&format!("summary {}", i)),
+            summary: NodeSummary::from_text(&format!("summary {}", i)),
         }
         .run(&writer)
         .await;
@@ -200,7 +203,7 @@ pub async fn writer_task(
                         ts_millis: TimestampMilli::now(),
                         name: edge_name.clone(),
                         valid_range: None,
-                        summary: motlie_db::EdgeSummary::from_text(&format!("Edge summary {}", edge_name)),
+                        summary: EdgeSummary::from_text(&format!("Edge summary {}", edge_name)),
                         weight: None,
                     }
                     .run(&writer)

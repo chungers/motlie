@@ -248,7 +248,7 @@ Critical documents for understanding database internals:
 ### 4. Concurrency & Operations
 - ⭐ `concurrency-and-storage-modes.md` - **ESSENTIAL** guide to threading patterns
 - `benchmark-plan.md` - Performance measurement strategy
-- `prefix-scanning-analysis-final.md` - NodeNames/EdgeNames analysis
+- `prefix-scanning-analysis-final.md` - Prefix scanning analysis (historical)
 
 ### 5. Future Development
 - `graph_algorithm_api_analysis.md` - API gaps and requirements

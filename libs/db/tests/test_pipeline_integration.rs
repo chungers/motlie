@@ -4,13 +4,26 @@
 //! 2. Multiple query consumers sharing a single channel (MPMC pattern)
 //! 3. Concurrent clients performing mixed graph and fulltext queries
 
-use motlie_db::{
-    create_fulltext_query_reader, create_mutation_writer, create_query_reader,
-    spawn_fulltext_query_consumer_pool_shared, spawn_graph_query_consumer_pool_shared, AddEdge, AddNode,
-    AddNodeFragment, DataUrl, EdgeSummary, FulltextIndex, FulltextNodes, FulltextQueryRunnable,
-    FulltextReaderConfig, FulltextStorage, Graph, Id, MutationRunnable, NodeById, NodeSummary,
-    NodesByName, OutgoingEdges, QueryRunnable, ReaderConfig, Storage, TimestampMilli, WriterConfig,
+use motlie_db::fulltext::{
+    create_query_reader as create_fulltext_query_reader, Index as FulltextIndex,
+    Nodes as FulltextNodes, ReaderConfig as FulltextReaderConfig,
+    Runnable as FulltextQueryRunnable, spawn_mutation_consumer as spawn_fulltext_mutation_consumer,
+    spawn_query_consumer_pool_shared as spawn_fulltext_query_consumer_pool_shared,
+    Storage as FulltextStorage,
 };
+use motlie_db::graph::mutation::{AddEdge, AddNode, AddNodeFragment};
+use motlie_db::writer::Runnable as MutationRunnable;
+use motlie_db::graph::query::{NodeById, OutgoingEdges};
+use motlie_db::reader::Runnable as QueryRunnable;
+use motlie_db::graph::reader::{
+    create_query_reader, spawn_query_consumer_pool_shared, ReaderConfig,
+};
+use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
+use motlie_db::graph::writer::{
+    create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
+};
+use motlie_db::graph::{Graph, Storage};
+use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -36,11 +49,11 @@ async fn test_single_mutation_pipeline_chain() {
     // Create the FullText consumer (end of chain)
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
     let fulltext_handle =
-        motlie_db::spawn_fulltext_consumer(fulltext_receiver, config.clone(), &index_path);
+        spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     // Create the Graph consumer that forwards to FullText (chained)
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
-    let graph_handle = motlie_db::spawn_graph_consumer_with_next(
+    let graph_handle = spawn_mutation_consumer_with_next(
         graph_receiver,
         config.clone(),
         &db_path,
@@ -167,11 +180,11 @@ async fn test_multi_consumer_query_channels() {
     // First, populate the database
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
     let fulltext_handle =
-        motlie_db::spawn_fulltext_consumer(fulltext_receiver, config.clone(), &index_path);
+        spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
     let graph_handle =
-        motlie_db::spawn_graph_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
+        spawn_mutation_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
 
     // Create test nodes
     let mut node_ids = Vec::new();
@@ -230,7 +243,7 @@ async fn test_multi_consumer_query_channels() {
 
     // Spawn 2 graph query consumers sharing the same channel
     let graph_consumer_handles =
-        spawn_graph_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
+        spawn_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
     println!("  Spawned 2 graph query consumers");
 
     // FullText: Create 2 query consumers sharing the same channel
@@ -331,11 +344,11 @@ async fn test_concurrent_mixed_queries() {
     // Populate database
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
     let fulltext_handle =
-        motlie_db::spawn_fulltext_consumer(fulltext_receiver, config.clone(), &index_path);
+        spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
     let graph_handle =
-        motlie_db::spawn_graph_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
+        spawn_mutation_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
 
     // Create a more realistic dataset
     let categories = ["engineering", "science", "business", "design"];
@@ -398,7 +411,7 @@ async fn test_concurrent_mixed_queries() {
     };
     let (graph_reader, graph_query_receiver) = create_query_reader(reader_config.clone());
     let graph_consumer_handles =
-        spawn_graph_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
+        spawn_query_consumer_pool_shared(graph_query_receiver, graph.clone(), 2);
 
     let fulltext_reader_config = FulltextReaderConfig {
         channel_buffer_size: 100,
@@ -440,16 +453,18 @@ async fn test_concurrent_mixed_queries() {
         successes
     });
 
-    // Client 2: Graph queries by name
+    // Client 2: More Graph queries by node ID
+    // (NodesByName was removed - name-based search is now via fulltext)
+    let node_ids_clone_2: Vec<_> = all_node_ids.iter().map(|(id, _)| *id).collect();
     let client2 = tokio::spawn(async move {
         let mut successes = 0;
-        for category in &["engineering", "science", "business"] {
-            let query = NodesByName::new(format!("{}_0", category), None, None, None);
+        for node_id in &node_ids_clone_2[10..15] {
+            let query = NodeById::new(*node_id, None);
             if query.run(&graph_reader_2, timeout).await.is_ok() {
                 successes += 1;
             }
         }
-        println!("  Client 2 (Graph NodesByName): {}/3 successful", successes);
+        println!("  Client 2 (Graph NodeById): {}/5 successful", successes);
         successes
     });
 
@@ -532,11 +547,11 @@ async fn test_complete_pipeline_architecture() {
     // === SETUP: Mutation Pipeline ===
     let (fulltext_sender, fulltext_receiver) = mpsc::channel(config.channel_buffer_size);
     let fulltext_mut_handle =
-        motlie_db::spawn_fulltext_consumer(fulltext_receiver, config.clone(), &index_path);
+        spawn_fulltext_mutation_consumer(fulltext_receiver, config.clone(), &index_path);
 
     let (writer, graph_receiver) = create_mutation_writer(config.clone());
     let graph_mut_handle =
-        motlie_db::spawn_graph_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
+        spawn_mutation_consumer_with_next(graph_receiver, config.clone(), &db_path, fulltext_sender);
 
     // Populate with test data
     let mut node_ids = Vec::new();
@@ -588,7 +603,7 @@ async fn test_complete_pipeline_architecture() {
     let (graph_reader, graph_query_receiver) = create_query_reader(ReaderConfig {
         channel_buffer_size: 100,
     });
-    let graph_query_handles = spawn_graph_query_consumer_pool_shared(graph_query_receiver, graph, 2);
+    let graph_query_handles = spawn_query_consumer_pool_shared(graph_query_receiver, graph, 2);
 
     // FullText query consumers (2 - using readonly Index)
     let (fulltext_reader, fulltext_query_receiver) =
