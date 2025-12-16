@@ -3,13 +3,23 @@
 /// This example demonstrates DFS traversal using both petgraph (in-memory)
 /// and motlie_db (persistent graph database), comparing correctness and performance.
 ///
-/// Usage: dfs <db_path>
-///
 /// The program:
 /// 1. Generates a test graph
 /// 2. Runs DFS using petgraph
 /// 3. Runs DFS using motlie_db
 /// 4. Compares results and metrics
+///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{NodeById, OutgoingEdges, Runnable}`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
+/// Usage: dfs <db_path>
 
 // Include the common module
 #[path = "common.rs"]
@@ -22,6 +32,7 @@ use common::{
     Implementation,
 };
 use motlie_db::query::{NodeById, OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::reader::Reader;
 use motlie_db::Id;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Dfs;
@@ -53,6 +64,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -76,6 +88,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[cluster_start + dst_offset],
                 name: format!("edge_c{}_{}_{}", cluster, src_offset, dst_offset),
                 weight: Some(1.0 + (src_offset as f64) * 0.5),
+                summary: None,
             });
         }
 
@@ -88,6 +101,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[next_cluster_start],
                 name: format!("bridge_{}_to_{}", cluster, cluster + 1),
                 weight: Some(1.0),
+                summary: None,
             });
             // Add a back edge for interesting cycles
             edges.push(GraphEdge {
@@ -95,6 +109,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[cluster_start + 1],
                 name: format!("back_{}_to_{}", cluster + 1, cluster),
                 weight: Some(2.0),
+                summary: None,
             });
         }
     }
@@ -117,7 +132,7 @@ fn dfs_petgraph(start_node: NodeIndex, graph: &DiGraph<String, f64>) -> Vec<Stri
 /// DFS implementation using motlie_db
 async fn dfs_motlie(
     start_node: Id,
-    reader: &motlie_db::graph::reader::Reader,
+    reader: &Reader,
     timeout: Duration,
 ) -> Result<Vec<String>> {
     let mut visited = HashSet::new();
@@ -132,7 +147,7 @@ async fn dfs_motlie(
         visited.insert(current_id);
 
         // Get node name
-        let (name, _summary) = motlie_db::graph::query::NodeById::new(current_id, None)
+        let (name, _summary) = NodeById::new(current_id, None)
             .run(reader, timeout)
             .await?;
 
@@ -232,7 +247,7 @@ async fn main() -> Result<()> {
             let start_id = name_to_id[&start_name];
             let timeout = Duration::from_secs(60); // Longer timeout for large graphs
 
-            let (result, time_ms, memory) = measure_time_and_memory_async(|| dfs_motlie(start_id, reader.graph(), timeout)).await;
+            let (result, time_ms, memory) = measure_time_and_memory_async(|| dfs_motlie(start_id, &reader, timeout)).await;
             let result = result?;
             let result_hash = Some(compute_hash(&result));
 

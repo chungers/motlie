@@ -4,7 +4,21 @@
 /// an interactive web UI for running security analyses comparing petgraph
 /// (in-memory) vs motlie_db (persistent).
 ///
-/// Graph Structure:
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadOnlyHandles, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{AllNodes, AllEdges, OutgoingEdges, Runnable}`
+/// - Mutations: `motlie_db::mutation::{AddNode, AddEdge, NodeSummary, EdgeSummary, Runnable}`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The example demonstrates:
+/// - Paginated queries with `AllNodes`/`AllEdges` using cursor-based pagination
+/// - Entity tagging via node/edge summaries (e.g., `type:user region:us-east sensitive:true`)
+/// - Type-safe storage handles for both read-only and read-write access
+///
+/// ## Graph Structure
+///
 /// - Users: Human identities with group memberships
 /// - Groups: Collections of users with attached policies
 /// - Policies: Permission sets that can be attached to users, groups, or roles
@@ -13,7 +27,8 @@
 /// - Workloads: Jobs/services that assume roles
 /// - Regions: Geographic locations containing resources
 ///
-/// Edge Types:
+/// ## Edge Types
+///
 /// - MEMBER_OF: User -> Group
 /// - HAS_POLICY: User/Group/Role -> Policy
 /// - ASSUMES: Workload -> Role
@@ -22,7 +37,8 @@
 /// - LOCATED_IN: Resource -> Region
 /// - RUNS_IN: Workload -> Resource (e.g., runs on instance)
 ///
-/// Use Cases (select from UI dropdown):
+/// ## Use Cases (select from UI dropdown)
+///
 /// 1. Reachability Analysis - Can user X access resource Y? (BFS/DFS)
 /// 2. Blast Radius - What resources are affected if credential X is compromised? (BFS)
 /// 3. Least Resistance Path - Easiest path from user to sensitive resource (Dijkstra/A*)
@@ -35,12 +51,14 @@
 /// 10. Accessible Resources - List all resources a user can access (DFS/BFS traversal)
 /// 11. High Value Targets - Identify high-value targets using PageRank
 ///
-/// Usage:
+/// ## Usage
+///
 ///   iam_permissions <db_path> <scale>                 # Start HTTP server
 ///   iam_permissions --generate <db_path> <scale>      # Generate graph data only
 ///   iam_permissions list                              # List available use cases
 ///
-/// Examples:
+/// ## Examples
+///
 ///   iam_permissions /tmp/iam_db 50                    # Start server (default port 8081)
 ///   iam_permissions /tmp/iam_db 100 --port 9000       # Start server on custom port
 ///   iam_permissions --generate /tmp/iam_db 100        # Generate graph data only
@@ -53,10 +71,11 @@ use common::{
     build_graph, compute_hash, get_disk_metrics, measure_time_and_memory,
     measure_time_and_memory_async, GraphEdge, GraphMetrics, GraphNode, Implementation,
 };
-use motlie_db::query::{OutgoingEdges, Runnable as QueryRunnable};
-use motlie_db::Id;
-use petgraph::algo::{dijkstra, kosaraju_scc};
-use petgraph::graph::{DiGraph, NodeIndex};
+use motlie_db::query::{AllEdges, AllNodes, OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::{Id, ReadOnlyHandles, Storage, StorageConfig};
+use petgraph::algo::{dijkstra, kosaraju_scc, min_spanning_tree};
+use petgraph::data::FromElements;
+use petgraph::graph::{DiGraph, NodeIndex, UnGraph};
 use petgraph::visit::{Bfs, EdgeRef};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
@@ -844,6 +863,115 @@ impl IamGraph {
         stats.roles += 1;
         // This role has NO edges at all - completely isolated
 
+        // 4. MST REDUNDANCY TEST CASES
+        // Create parallel high-weight edges that should NOT be in MST
+        // These test that Kruskal's algorithm correctly excludes redundant paths
+
+        // Case A: Redundant direct policy access (high weight)
+        // If user already reaches a resource via a low-weight path through a group,
+        // a parallel high-weight direct path should not be in MST
+        if users.len() >= 2 && policies.len() >= 2 && sensitive_resources.len() >= 1 {
+            // Create a redundant high-weight policy for MST testing
+            let mst_redundant_policy = Id::new();
+            nodes.push(IamNode {
+                id: mst_redundant_policy,
+                name: "policy-mst-redundant-high".to_string(),
+                node_type: NodeType::Policy,
+                region: None,
+            });
+            policies.push(mst_redundant_policy);
+            stats.policies += 1;
+
+            // Connect to a sensitive resource with HIGH weight (DependsOn = 3.5)
+            let target = sensitive_resources[0];
+            edges.push(IamEdge {
+                source: mst_redundant_policy,
+                target,
+                edge_type: EdgeType::DependsOn, // Weight 3.5
+            });
+            *stats.edges_by_type.entry("depends_on".to_string()).or_insert(0) += 1;
+
+            // Connect user to this redundant policy
+            // This creates a parallel path with higher total weight
+            // User -> policy (1.5) -> resource (3.5) = 5.0 total
+            // vs existing User -> group -> policy -> resource paths
+            let user_for_mst = users[1];
+            edges.push(IamEdge {
+                source: user_for_mst,
+                target: mst_redundant_policy,
+                edge_type: EdgeType::HasPolicy, // Weight 1.5
+            });
+            *stats.edges_by_type.entry("has_policy".to_string()).or_insert(0) += 1;
+        }
+
+        // Case B: Redundant resource dependency chain
+        // Create a chain of DependsOn edges (each weight 3.5) that forms a cycle
+        // with an existing lower-weight path
+        if resources.len() >= 4 {
+            // Connect resources in a redundant chain
+            // resource[0] -> resource[1] already connected somewhere
+            // Add: resource[1] -> resource[2] -> resource[3] -> resource[0] (cycle)
+            // MST should exclude one edge to break the cycle
+
+            edges.push(IamEdge {
+                source: resources[1],
+                target: resources[2],
+                edge_type: EdgeType::DependsOn, // Weight 3.5
+            });
+            *stats.edges_by_type.entry("depends_on".to_string()).or_insert(0) += 1;
+
+            edges.push(IamEdge {
+                source: resources[2],
+                target: resources[3],
+                edge_type: EdgeType::DependsOn, // Weight 3.5
+            });
+            *stats.edges_by_type.entry("depends_on".to_string()).or_insert(0) += 1;
+
+            // This edge creates a cycle - should be excluded from MST
+            edges.push(IamEdge {
+                source: resources[3],
+                target: resources[0],
+                edge_type: EdgeType::DependsOn, // Weight 3.5 - REDUNDANT
+            });
+            *stats.edges_by_type.entry("depends_on".to_string()).or_insert(0) += 1;
+        }
+
+        // Case C: Parallel role assumption paths
+        // Create two roles that both lead to the same workload
+        // One with lower-weight path, one with higher-weight path
+        if workloads.len() >= 1 && roles.len() >= 2 {
+            // Create a redundant role with higher-weight connection
+            let mst_parallel_role = Id::new();
+            nodes.push(IamNode {
+                id: mst_parallel_role,
+                name: "role-mst-parallel-high".to_string(),
+                node_type: NodeType::Role,
+                region: None,
+            });
+            roles.push(mst_parallel_role);
+            stats.roles += 1;
+
+            // This role assumes via DependsOn (3.5) instead of Assumes (2.5)
+            // Creating a higher-weight parallel path to the same workload
+            let target_workload = workloads[0];
+            edges.push(IamEdge {
+                source: mst_parallel_role,
+                target: target_workload,
+                edge_type: EdgeType::DependsOn, // Weight 3.5 (higher than Assumes 2.5)
+            });
+            *stats.edges_by_type.entry("depends_on".to_string()).or_insert(0) += 1;
+
+            // Connect to existing policy
+            if !policies.is_empty() {
+                edges.push(IamEdge {
+                    source: mst_parallel_role,
+                    target: policies[0],
+                    edge_type: EdgeType::HasPolicy,
+                });
+                *stats.edges_by_type.entry("has_policy".to_string()).or_insert(0) += 1;
+            }
+        }
+
         IamGraph {
             nodes,
             edges,
@@ -860,23 +988,48 @@ impl IamGraph {
     }
 
     fn to_graph_nodes_edges(&self) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+        // Create a set of sensitive resource IDs for quick lookup
+        let sensitive_set: std::collections::HashSet<_> = self.sensitive_resources.iter().copied().collect();
+
         let nodes: Vec<GraphNode> = self
             .nodes
             .iter()
-            .map(|n| GraphNode {
-                id: n.id,
-                name: n.name.clone(),
+            .map(|n| {
+                // Build tagged summary for fulltext search
+                let mut summary_parts = vec![
+                    format!("type:{}", n.node_type.as_str()),
+                ];
+                if let Some(ref region) = n.region {
+                    summary_parts.push(format!("region:{}", region));
+                }
+                if sensitive_set.contains(&n.id) {
+                    summary_parts.push("sensitive:true".to_string());
+                }
+                // Include the name for searchability
+                summary_parts.push(n.name.clone());
+
+                GraphNode {
+                    id: n.id,
+                    name: n.name.clone(),
+                    summary: Some(summary_parts.join(" ")),
+                }
             })
             .collect();
 
         let edges: Vec<GraphEdge> = self
             .edges
             .iter()
-            .map(|e| GraphEdge {
-                source: e.source,
-                target: e.target,
-                name: e.edge_type.as_str().to_string(),
-                weight: Some(e.edge_type.weight()),
+            .map(|e| {
+                // Build tagged summary for edge relationships
+                let summary = format!("type:{}", e.edge_type.as_str());
+
+                GraphEdge {
+                    source: e.source,
+                    target: e.target,
+                    name: e.edge_type.as_str().to_string(),
+                    weight: Some(e.edge_type.weight()),
+                    summary: Some(summary),
+                }
             })
             .collect();
 
@@ -923,6 +1076,7 @@ enum UseCase {
     MinimalPrivilege,
     AccessibleResources,
     HighValueTargets,
+    MinimumSpanningTree,
 }
 
 impl UseCase {
@@ -939,6 +1093,7 @@ impl UseCase {
             "minimal_privilege" | "minimal" | "verify" => Some(UseCase::MinimalPrivilege),
             "accessible_resources" | "accessible" | "resources" | "access_list" => Some(UseCase::AccessibleResources),
             "high_value_targets" | "high_value" | "pagerank" | "targets" => Some(UseCase::HighValueTargets),
+            "minimum_spanning_tree" | "mst" | "spanning_tree" | "kruskal" => Some(UseCase::MinimumSpanningTree),
             _ => None,
         }
     }
@@ -956,6 +1111,7 @@ impl UseCase {
             UseCase::MinimalPrivilege => "Minimal Privilege Verification",
             UseCase::AccessibleResources => "Accessible Resources Listing",
             UseCase::HighValueTargets => "High Value Targets Detection",
+            UseCase::MinimumSpanningTree => "Minimum Spanning Tree",
         }
     }
 
@@ -972,6 +1128,7 @@ impl UseCase {
             UseCase::MinimalPrivilege => "Dijkstra path verification",
             UseCase::AccessibleResources => "DFS/BFS traversal",
             UseCase::HighValueTargets => "PageRank algorithm",
+            UseCase::MinimumSpanningTree => "Kruskal's Algorithm with Union-Find",
         }
     }
 
@@ -988,6 +1145,7 @@ impl UseCase {
             UseCase::MinimalPrivilege => "Verify existing permission paths are minimal (no shorter alternatives exist)",
             UseCase::AccessibleResources => "List all resources a user can access via DFS/BFS traversal",
             UseCase::HighValueTargets => "Identify high-value targets using PageRank (nodes with many incoming permission paths)",
+            UseCase::MinimumSpanningTree => "Find minimal permission infrastructure using MST. Edges NOT in MST are redundant and could be removed.",
         }
     }
 
@@ -1004,6 +1162,7 @@ impl UseCase {
             UseCase::MinimalPrivilege,
             UseCase::AccessibleResources,
             UseCase::HighValueTargets,
+            UseCase::MinimumSpanningTree,
         ]
     }
 }
@@ -1987,6 +2146,98 @@ mod reference {
             details,
         }
     }
+
+    /// Minimum Spanning Tree using petgraph's built-in algorithm.
+    ///
+    /// Uses petgraph::algo::min_spanning_tree which implements Kruskal's algorithm.
+    /// The directed graph is treated as undirected for MST computation.
+    ///
+    /// Returns edges in the MST and identifies redundant edges that could be removed.
+    pub fn minimum_spanning_tree(
+        graph: &DiGraph<String, f64>,
+        node_type_map: &HashMap<String, NodeType>,
+    ) -> AnalysisResult {
+        // 1. Count unique undirected edges in original graph
+        let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
+        for edge in graph.edge_references() {
+            let src = edge.source();
+            let dst = edge.target();
+            // Canonical ordering to treat as undirected
+            let (a, b) = if src.index() < dst.index() {
+                (src.index(), dst.index())
+            } else {
+                (dst.index(), src.index())
+            };
+            seen_edges.insert((a, b));
+        }
+        let total_edges = seen_edges.len();
+
+        // 2. Use petgraph's built-in min_spanning_tree (Kruskal's algorithm)
+        // min_spanning_tree treats the graph as undirected and returns an iterator
+        let mst_graph: UnGraph<String, f64> = UnGraph::from_elements(min_spanning_tree(graph));
+
+        // 3. Collect MST edges with metadata
+        let mut mst_edges: Vec<(String, String, f64, String, String)> = Vec::new();
+        let mut total_weight = 0.0;
+
+        for edge in mst_graph.edge_references() {
+            let weight = *edge.weight();
+            let src_idx = edge.source();
+            let dst_idx = edge.target();
+
+            let src_name = mst_graph[src_idx].clone();
+            let dst_name = mst_graph[dst_idx].clone();
+
+            let src_type = node_type_map
+                .get(&src_name)
+                .map(|t| t.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let dst_type = node_type_map
+                .get(&dst_name)
+                .map(|t| t.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            mst_edges.push((src_name, dst_name, weight, src_type, dst_type));
+            total_weight += weight;
+        }
+
+        // Sort edges by weight for consistent output
+        mst_edges.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 4. Generate summary and details
+        let redundant_edges = total_edges.saturating_sub(mst_edges.len());
+
+        let summary = format!(
+            "MST: {} edges (total weight: {:.2}), {} redundant edges could be removed",
+            mst_edges.len(),
+            total_weight,
+            redundant_edges
+        );
+
+        let mut details = Vec::new();
+        details.push(format!("Total MST weight: {:.2}", total_weight));
+        details.push(format!("MST edges: {}", mst_edges.len()));
+        details.push(format!("Redundant edges: {}", redundant_edges));
+        details.push(format!("Original unique edges: {}", total_edges));
+        details.push(String::new()); // separator
+
+        details.push("MST edges (sorted by weight):".to_string());
+        for (src, dst, weight, src_type, dst_type) in &mst_edges {
+            details.push(format!(
+                "  {} ({}) -> {} ({}): {:.2}",
+                src, src_type, dst, dst_type, weight
+            ));
+        }
+
+        AnalysisResult {
+            use_case: "Minimum Spanning Tree".to_string(),
+            algorithm: "Kruskal's Algorithm (petgraph)".to_string(),
+            summary,
+            details,
+        }
+    }
 }
 
 // ============================================================================
@@ -2054,6 +2305,11 @@ mod motlie_impl {
         /// Reset the timer
         pub fn reset(&self) {
             self.total_ns.store(0, Ordering::Relaxed);
+        }
+
+        /// Record elapsed time from a Duration
+        pub fn record_elapsed(&self, elapsed: std::time::Duration) {
+            self.add_elapsed(elapsed.as_nanos() as u64);
         }
 
         /// Scan all nodes with timing. Returns (nodes: Vec<(Id, String)>, count).
@@ -3285,6 +3541,146 @@ mod motlie_impl {
             details,
         })
     }
+
+    /// Minimum Spanning Tree using Kruskal's algorithm (motlie_db version)
+    ///
+    /// Uses pre-fetched edges from the graph to compute MST.
+    /// Treats edges as undirected for MST computation.
+    pub async fn minimum_spanning_tree(
+        all_nodes: &[(Id, String)],
+        all_edges: &[(Id, Id, Option<f64>, String)], // (src, dst, weight, name) from scan_all_edges
+        node_type_map: &HashMap<Id, NodeType>,
+        id_to_name: &HashMap<Id, String>,
+        _timer: &QueryTimer,
+    ) -> Result<AnalysisResult> {
+        // 1. Collect unique undirected edges with weights
+        let mut edges: Vec<(f64, Id, Id, String, String)> = Vec::new();
+        let mut seen_edges: HashSet<(Id, Id)> = HashSet::new();
+
+        for (src, dst, weight_opt, _name) in all_edges {
+            let weight = weight_opt.unwrap_or(1.0);
+
+            // Canonical ordering to treat as undirected
+            let (a, b) = if src < dst { (*src, *dst) } else { (*dst, *src) };
+
+            // Skip if we've seen this undirected edge
+            if seen_edges.contains(&(a, b)) {
+                continue;
+            }
+            seen_edges.insert((a, b));
+
+            let src_name = id_to_name.get(src).cloned().unwrap_or_default();
+            let dst_name = id_to_name.get(dst).cloned().unwrap_or_default();
+            edges.push((weight, *src, *dst, src_name, dst_name));
+        }
+
+        let total_edges = edges.len();
+
+        // 2. Sort edges by weight (ascending)
+        edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 3. Union-Find for cycle detection
+        let mut parent: HashMap<Id, Id> = HashMap::new();
+        let mut rank: HashMap<Id, usize> = HashMap::new();
+
+        for (id, _name) in all_nodes {
+            parent.insert(*id, *id);
+            rank.insert(*id, 0);
+        }
+
+        fn find(parent: &mut HashMap<Id, Id>, x: Id) -> Id {
+            if parent[&x] != x {
+                let root = find(parent, parent[&x]);
+                parent.insert(x, root);
+            }
+            parent[&x]
+        }
+
+        fn union(
+            parent: &mut HashMap<Id, Id>,
+            rank: &mut HashMap<Id, usize>,
+            x: Id,
+            y: Id,
+        ) -> bool {
+            let root_x = find(parent, x);
+            let root_y = find(parent, y);
+
+            if root_x == root_y {
+                return false;
+            }
+
+            let rank_x = rank[&root_x];
+            let rank_y = rank[&root_y];
+
+            if rank_x < rank_y {
+                parent.insert(root_x, root_y);
+            } else if rank_x > rank_y {
+                parent.insert(root_y, root_x);
+            } else {
+                parent.insert(root_y, root_x);
+                *rank.get_mut(&root_x).unwrap() += 1;
+            }
+            true
+        }
+
+        // 4. Build MST
+        let mut mst_edges: Vec<(String, String, f64, String, String)> = Vec::new();
+        let mut total_weight = 0.0;
+        let target_edges = all_nodes.len().saturating_sub(1);
+
+        for (weight, src, dst, src_name, dst_name) in edges {
+            if mst_edges.len() >= target_edges {
+                break;
+            }
+
+            if union(&mut parent, &mut rank, src, dst) {
+                let src_type = node_type_map
+                    .get(&src)
+                    .map(|t| t.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let dst_type = node_type_map
+                    .get(&dst)
+                    .map(|t| t.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                mst_edges.push((src_name, dst_name, weight, src_type, dst_type));
+                total_weight += weight;
+            }
+        }
+
+        // 5. Generate results
+        let redundant_edges = total_edges.saturating_sub(mst_edges.len());
+
+        let summary = format!(
+            "MST: {} edges (total weight: {:.2}), {} redundant edges could be removed",
+            mst_edges.len(),
+            total_weight,
+            redundant_edges
+        );
+
+        let mut details = Vec::new();
+        details.push(format!("Total MST weight: {:.2}", total_weight));
+        details.push(format!("MST edges: {}", mst_edges.len()));
+        details.push(format!("Redundant edges: {}", redundant_edges));
+        details.push(format!("Original unique edges: {}", total_edges));
+        details.push(String::new());
+
+        details.push("MST edges (sorted by weight):".to_string());
+        for (src, dst, weight, src_type, dst_type) in &mst_edges {
+            details.push(format!(
+                "  {} ({}) -> {} ({}): {:.2}",
+                src, src_type, dst, dst_type, weight
+            ));
+        }
+
+        Ok(AnalysisResult {
+            use_case: "Minimum Spanning Tree".to_string(),
+            algorithm: "Kruskal's Algorithm".to_string(),
+            summary,
+            details,
+        })
+    }
 }
 
 // ============================================================================
@@ -3752,6 +4148,13 @@ fn get_use_case_infos() -> Vec<UseCaseInfo> {
             description: "Identify high-value targets based on permission flow.".to_string(),
             inputs: vec![],
         },
+        UseCaseInfo {
+            id: "mst".to_string(),
+            name: "Minimum Spanning Tree".to_string(),
+            algorithm: "Kruskal's Algorithm with Union-Find".to_string(),
+            description: "Find minimal permission infrastructure. Edges NOT in MST are redundant.".to_string(),
+            inputs: vec![],
+        },
     ]
 }
 
@@ -3963,14 +4366,43 @@ async fn run_analysis_from_input(input: UseCaseInput, state: VisualizationState)
 
     // Run the analysis - both implementations read from disk (no writes)
     // Returns: (result, time_ms, memory, disk_read_ms)
+    // Graph data is stored in db_path/graph subdirectory (created by build_graph)
+    let graph_path = db_path.join("graph");
+
     let (result, time_ms, memory, disk_read_ms) = if is_reference {
         // Reference implementation: Load full graph from RocksDB into petgraph
-        let timer = motlie_impl::QueryTimer::new();
-        let mut storage = motlie_db::graph::Storage::readonly(&db_path);
-        storage.ready()?;
+        // Use unified Storage API for read operations
+        let fulltext_path = db_path.join("fulltext");
+        let storage = Storage::readonly(&graph_path, &fulltext_path);
+        let handles = storage.ready(StorageConfig::default())?;
+        let reader = handles.reader();
+        let timeout = Duration::from_secs(120);
 
-        let (pg_graph, id_to_idx, _idx_to_id, name_to_id) = timer.load_petgraph_from_storage(&storage)?;
-        let disk_read_ms = timer.total_ms();
+        // Load all nodes and edges using unified AllNodes/AllEdges queries
+        // Use a large but safe limit (1M should be more than enough for IAM graphs)
+        let disk_start = std::time::Instant::now();
+        let scanned_nodes = AllNodes::new(1_000_000).run(reader, timeout).await?;
+        let scanned_edges = AllEdges::new(1_000_000).run(reader, timeout).await?;
+        let disk_read_ms = disk_start.elapsed().as_secs_f64() * 1000.0;
+
+        // Build petgraph from scanned data
+        let mut pg_graph = DiGraph::new();
+        let mut id_to_idx: HashMap<Id, NodeIndex> = HashMap::new();
+        let mut name_to_id: HashMap<String, Id> = HashMap::new();
+
+        // Add nodes
+        for (id, name, _summary) in &scanned_nodes {
+            let idx = pg_graph.add_node(name.clone());
+            id_to_idx.insert(*id, idx);
+            name_to_id.insert(name.clone(), *id);
+        }
+
+        // Add edges
+        for (weight, src_id, dst_id, _name) in &scanned_edges {
+            if let (Some(&src_idx), Some(&dst_idx)) = (id_to_idx.get(src_id), id_to_idx.get(dst_id)) {
+                pg_graph.add_edge(src_idx, dst_idx, weight.unwrap_or(1.0));
+            }
+        }
 
         // Build auxiliary index structures using metadata (not IamGraph)
         let user_indices: Vec<NodeIndex> = metadata.user_names.iter()
@@ -4035,25 +4467,30 @@ async fn run_analysis_from_input(input: UseCaseInput, state: VisualizationState)
                 UseCase::HighValueTargets => {
                     reference::high_value_targets(&pg_graph, 0.85, 20)
                 }
+                UseCase::MinimumSpanningTree => {
+                    reference::minimum_spanning_tree(&pg_graph, &metadata.name_to_type)
+                }
             }
         });
         (result, time_ms, memory, disk_read_ms)
     } else {
-        // motlie_db implementation: Open readonly storage and run algorithm with query-time disk reads
-        let mut storage = motlie_db::graph::Storage::readonly(&db_path);
-        storage.ready()?;
+        // motlie_db implementation: Open unified readonly storage
+        let fulltext_path = db_path.join("fulltext");
+        let storage = Storage::readonly(&graph_path, &fulltext_path);
+        let handles = storage.ready(StorageConfig::default())?;
+        let reader = handles.reader();
 
-        // Create Reader with query channel and spawn consumer
-        let config = motlie_db::graph::ReaderConfig::default();
-        let (reader, receiver) = motlie_db::graph::create_query_reader(config.clone());
-        let _consumer_handle = motlie_db::graph::spawn_query_consumer(receiver, config, &db_path);
+        let timeout = Duration::from_secs(120);
 
-        // Build name_to_id mapping by scanning nodes
+        // Build name_to_id mapping by scanning nodes using unified AllNodes query
+        // Use a large but safe limit (1M should be more than enough for IAM graphs)
         let timer_scan = motlie_impl::QueryTimer::new();
-        let scanned_nodes = timer_scan.scan_all_nodes(&storage)?;
-        // scan_all_nodes returns Vec<(Id, String)>, so we need to swap to (String, Id) for HashMap
-        let name_to_id: HashMap<String, Id> = scanned_nodes.into_iter().map(|(id, name)| (name, id)).collect();
-        let id_to_name: HashMap<Id, String> = name_to_id.iter().map(|(n, &id)| (id, n.clone())).collect();
+        let scan_start = std::time::Instant::now();
+        let scanned_nodes = AllNodes::new(1_000_000).run(reader, timeout).await?;
+        timer_scan.record_elapsed(scan_start.elapsed());
+        // AllNodes returns Vec<(Id, NodeName, NodeSummary)>, extract (name, id)
+        let name_to_id: HashMap<String, Id> = scanned_nodes.iter().map(|(id, name, _)| (name.clone(), *id)).collect();
+        let id_to_name: HashMap<Id, String> = scanned_nodes.iter().map(|(id, name, _)| (*id, name.clone())).collect();
 
         // Build category ID lists
         let user_ids: Vec<Id> = metadata.user_names.iter()
@@ -4072,54 +4509,74 @@ async fn run_analysis_from_input(input: UseCaseInput, state: VisualizationState)
         let id_to_region: HashMap<Id, String> = metadata.name_to_region.iter()
             .filter_map(|(name, region)| name_to_id.get(name).map(|&id| (id, region.clone())))
             .collect();
+        // Build id_to_type for MST algorithm
+        let id_to_type: HashMap<Id, NodeType> = metadata.name_to_type.iter()
+            .filter_map(|(name, node_type)| name_to_id.get(name).map(|&id| (id, node_type.clone())))
+            .collect();
+        // Scan all edges for MST using unified AllEdges query (only when needed)
+        let all_edges = if use_case == UseCase::MinimumSpanningTree {
+            let edge_scan_start = std::time::Instant::now();
+            let edges = AllEdges::new(1_000_000).run(reader, timeout).await?;
+            timer_scan.record_elapsed(edge_scan_start.elapsed());
+            // AllEdges returns Vec<(Option<f64>, SrcId, DstId, EdgeName)>
+            edges.into_iter().map(|(weight, src, dst, name)| (src, dst, weight, name)).collect()
+        } else {
+            Vec::new()
+        };
+        // Convert scanned nodes to the format expected by MST
+        let all_nodes_for_mst: Vec<(Id, String)> = id_to_name.iter().map(|(&id, name)| (id, name.clone())).collect();
 
         let source_id = input.source_node.as_ref().and_then(|name| name_to_id.get(name).copied());
         let target_id = input.target_node.as_ref().and_then(|name| name_to_id.get(name).copied());
 
-        let timeout = Duration::from_secs(120);
-
         // Create query timer to track all disk reads during algorithm execution
         let timer = motlie_impl::QueryTimer::new();
+
+        // Get the low-level graph reader for algorithm execution
+        let graph_reader = reader.graph();
 
         let (result, time_ms, memory) = measure_time_and_memory_async(|| async {
             match use_case {
                 UseCase::Reachability => {
                     let source = source_id.unwrap_or(user_ids[0]);
                     let target = target_id.unwrap_or(sensitive_ids[0]);
-                    motlie_impl::reachability(source, target, &id_to_name, &reader, timeout, &timer).await
+                    motlie_impl::reachability(source, target, &id_to_name, graph_reader, timeout, &timer).await
                 }
                 UseCase::BlastRadius => {
                     let source = source_id.unwrap_or(user_ids[0]);
-                    motlie_impl::blast_radius(source, max_depth, &id_to_name, &reader, timeout, &timer).await
+                    motlie_impl::blast_radius(source, max_depth, &id_to_name, graph_reader, timeout, &timer).await
                 }
                 UseCase::LeastResistance => {
                     let source = source_id.unwrap_or(user_ids[0]);
-                    motlie_impl::least_resistance(source, &sensitive_ids, &id_to_name, &reader, timeout, &timer).await
+                    motlie_impl::least_resistance(source, &sensitive_ids, &id_to_name, graph_reader, timeout, &timer).await
                 }
                 UseCase::PrivilegeClustering => {
                     let users: Vec<_> = user_ids.iter().take(100).copied().collect();
-                    motlie_impl::privilege_clustering(&users, &id_to_name, &reader, timeout, &timer).await
+                    motlie_impl::privilege_clustering(&users, &id_to_name, graph_reader, timeout, &timer).await
                 }
                 UseCase::OverPrivileged => {
-                    motlie_impl::over_privileged(&user_ids, &sensitive_ids, &id_to_name, threshold as usize, &reader, timeout, &timer).await
+                    motlie_impl::over_privileged(&user_ids, &sensitive_ids, &id_to_name, threshold as usize, graph_reader, timeout, &timer).await
                 }
                 UseCase::CrossRegionAccess => {
-                    motlie_impl::cross_region_access(&user_ids, &id_to_name, &id_to_region, &reader, timeout, &timer).await
+                    motlie_impl::cross_region_access(&user_ids, &id_to_name, &id_to_region, graph_reader, timeout, &timer).await
                 }
                 UseCase::UnusedRoles => {
-                    motlie_impl::unused_roles(&role_ids, &workload_ids, &all_node_ids, &id_to_name, &reader, timeout, &timer).await
+                    motlie_impl::unused_roles(&role_ids, &workload_ids, &all_node_ids, &id_to_name, graph_reader, timeout, &timer).await
                 }
                 UseCase::PrivilegeHubs => {
-                    motlie_impl::privilege_hubs(&all_node_ids, &id_to_name, threshold, &reader, timeout, &timer).await
+                    motlie_impl::privilege_hubs(&all_node_ids, &id_to_name, threshold, graph_reader, timeout, &timer).await
                 }
                 UseCase::MinimalPrivilege => {
-                    motlie_impl::minimal_privilege(&user_ids, &sensitive_ids, &all_node_ids, &id_to_name, &reader, timeout, &timer).await
+                    motlie_impl::minimal_privilege(&user_ids, &sensitive_ids, &all_node_ids, &id_to_name, graph_reader, timeout, &timer).await
                 }
                 UseCase::AccessibleResources => {
-                    motlie_impl::accessible_resources(&user_ids, &id_to_name, &reader, timeout, &timer).await
+                    motlie_impl::accessible_resources(&user_ids, &id_to_name, graph_reader, timeout, &timer).await
                 }
                 UseCase::HighValueTargets => {
-                    motlie_impl::high_value_targets(&all_node_ids, &id_to_name, 0.85, 20, &reader, timeout, &timer).await
+                    motlie_impl::high_value_targets(&all_node_ids, &id_to_name, 0.85, 20, graph_reader, timeout, &timer).await
+                }
+                UseCase::MinimumSpanningTree => {
+                    motlie_impl::minimum_spanning_tree(&all_nodes_for_mst, &all_edges, &id_to_type, &id_to_name, &timer).await
                 }
             }
         }).await;
@@ -4470,6 +4927,30 @@ fn create_vis_result(
             }
             (nodes, annotations, "high_value_targets")
         }
+        UseCase::MinimumSpanningTree => {
+            // Parse MST edges from result details
+            let mut nodes = HashSet::new();
+            let mut annotations = HashMap::new();
+
+            for detail in &result.details {
+                let trimmed = detail.trim();
+                if trimmed.contains(" -> ") && trimmed.contains(": ") {
+                    let parts: Vec<&str> = trimmed.split(" -> ").collect();
+                    if parts.len() == 2 {
+                        let src = parts[0].split(" (").next().unwrap_or(parts[0]).trim();
+                        let dst_weight: Vec<&str> = parts[1].split(": ").collect();
+                        if dst_weight.len() == 2 {
+                            let dst = dst_weight[0].split(" (").next().unwrap_or(dst_weight[0]).trim();
+                            nodes.insert(src.to_string());
+                            nodes.insert(dst.to_string());
+                            annotations.insert(src.to_string(), "MST node".to_string());
+                            annotations.insert(dst.to_string(), "MST node".to_string());
+                        }
+                    }
+                }
+            }
+            (nodes.into_iter().collect(), annotations, "mst")
+        }
     };
 
     // Compute highlighted edges: edges where both source and target are in highlighted_nodes
@@ -4745,6 +5226,52 @@ fn create_vis_result_from_metadata(
                 }
             }
             (nodes, annotations, "high_value_targets")
+        }
+        UseCase::MinimumSpanningTree => {
+            // Parse MST edges from result details
+            // Format: "  src (type) -> dst (type): weight"
+            let mut nodes = HashSet::new();
+            let mut annotations = HashMap::new();
+            let mut mst_edges: Vec<(String, String, String)> = Vec::new();
+
+            for detail in &result.details {
+                let trimmed = detail.trim();
+                // Parse MST edge lines
+                if trimmed.contains(" -> ") && trimmed.contains(": ") {
+                    // Extract source and destination
+                    let parts: Vec<&str> = trimmed.split(" -> ").collect();
+                    if parts.len() == 2 {
+                        // Source: "node (type)" or just "node"
+                        let src = parts[0].split(" (").next().unwrap_or(parts[0]).trim();
+                        // Destination + weight: "node (type): weight"
+                        let dst_weight: Vec<&str> = parts[1].split(": ").collect();
+                        if dst_weight.len() == 2 {
+                            let dst = dst_weight[0].split(" (").next().unwrap_or(dst_weight[0]).trim();
+                            let weight = dst_weight[1].trim();
+
+                            nodes.insert(src.to_string());
+                            nodes.insert(dst.to_string());
+                            mst_edges.push((src.to_string(), dst.to_string(), weight.to_string()));
+
+                            // Annotate nodes with MST info
+                            let src_annotation = annotations.entry(src.to_string()).or_insert_with(String::new);
+                            if !src_annotation.is_empty() {
+                                src_annotation.push_str(", ");
+                            }
+                            src_annotation.push_str(&format!("MST edge to {}", dst));
+
+                            let dst_annotation = annotations.entry(dst.to_string()).or_insert_with(String::new);
+                            if !dst_annotation.is_empty() {
+                                dst_annotation.push_str(", ");
+                            }
+                            dst_annotation.push_str(&format!("MST edge from {}", src));
+                        }
+                    }
+                }
+            }
+
+            // Convert to Vec for return
+            (nodes.into_iter().collect(), annotations, "mst")
         }
     };
 
@@ -5152,6 +5679,74 @@ fn generate_use_case_explanation_from_metadata(
                 highlighted_resources.len(),
                 format_entity_list(&highlighted_resources, "resource")
             ),
+        },
+
+        UseCase::MinimumSpanningTree => {
+            // Parse MST statistics from result
+            let mut total_weight = 0.0;
+            let mut mst_edge_count = 0;
+            let mut redundant_count = 0;
+
+            for detail in &result.details {
+                if detail.starts_with("Total MST weight:") {
+                    total_weight = detail.split(':').nth(1)
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0.0);
+                }
+                if detail.starts_with("MST edges:") {
+                    mst_edge_count = detail.split(':').nth(1)
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                }
+                if detail.starts_with("Redundant edges:") {
+                    redundant_count = detail.split(':').nth(1)
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                }
+            }
+
+            UseCaseExplanation {
+                business_problem: format!(
+                    "PERMISSION OPTIMIZATION: What is the minimal permission infrastructure?\n\n\
+                    The Minimum Spanning Tree identifies the essential permission backbone—the smallest \
+                    set of edges that maintains full connectivity between all entities.\n\n\
+                    RESULTS:\n\
+                    • MST edges: {} (essential permissions)\n\
+                    • Redundant edges: {} (could potentially be removed)\n\
+                    • Total MST weight: {:.2} (permission cost)\n\n\
+                    Redundant edges represent attack surface that could be eliminated while \
+                    preserving full access capability.",
+                    mst_edge_count, redundant_count, total_weight
+                ),
+                algorithm_description: format!(
+                    "ALGORITHM: Kruskal's with Union-Find\n\n\
+                    1. Collect all edges with their weights (permission costs)\n\
+                    2. Sort edges by weight (lowest first)\n\
+                    3. For each edge, add to MST if it doesn't create a cycle\n\
+                    4. Stop when all nodes are connected (N-1 edges)\n\n\
+                    Edge weights represent 'resistance' in the permission model:\n\
+                    • CanAccess: 1.0 (direct permission)\n\
+                    • HasPolicy: 1.5 (policy attachment)\n\
+                    • MemberOf: 2.0 (group membership)\n\
+                    • Assumes: 2.5 (role assumption)\n\
+                    • DependsOn: 3.5 (resource dependency)"
+                ),
+                visualization_guide: format!(
+                    "MST ANALYSIS: {} essential edges identified\n\n\
+                    ENTITIES: {}\n\n\
+                    HOW TO READ:\n\
+                    • HIGHLIGHTED edges are in the MST (essential)\n\
+                    • GRAY edges are redundant (could be removed)\n\
+                    • Lower-weight MST edges are more efficient permission paths\n\n\
+                    SECURITY INSIGHTS:\n\
+                    • {} redundant edges represent excess attack surface\n\
+                    • MST weight {:.2} is the minimum 'permission cost'",
+                    mst_edge_count,
+                    format_entity_list(&highlighted_users, "user"),
+                    redundant_count,
+                    total_weight
+                ),
+            }
         },
     }
 }
@@ -6073,6 +6668,76 @@ fn generate_use_case_explanation(
                 },
             }
         },
+
+        UseCase::MinimumSpanningTree => {
+            // Parse MST statistics from result
+            let mut total_weight = 0.0;
+            let mut mst_edge_count = 0;
+            let mut redundant_count = 0;
+
+            for detail in &result.details {
+                if detail.starts_with("Total MST weight:") {
+                    total_weight = detail.split(':').nth(1)
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0.0);
+                }
+                if detail.starts_with("MST edges:") {
+                    mst_edge_count = detail.split(':').nth(1)
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                }
+                if detail.starts_with("Redundant edges:") {
+                    redundant_count = detail.split(':').nth(1)
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                }
+            }
+
+            UseCaseExplanation {
+                business_problem: format!(
+                    "PERMISSION OPTIMIZATION: What is the minimal permission infrastructure?\n\n\
+                    The Minimum Spanning Tree identifies the essential permission backbone—the smallest \
+                    set of edges that maintains full connectivity between all entities.\n\n\
+                    RESULTS:\n\
+                    • MST edges: {} (essential permissions)\n\
+                    • Redundant edges: {} (could potentially be removed)\n\
+                    • Total MST weight: {:.2} (permission cost)\n\n\
+                    Redundant edges represent attack surface that could be eliminated while \
+                    preserving full access capability.",
+                    mst_edge_count, redundant_count, total_weight
+                ),
+                algorithm_description: format!(
+                    "ALGORITHM: Kruskal's with Union-Find\n\n\
+                    1. Collect all edges with their weights (permission costs)\n\
+                    2. Sort edges by weight (lowest first)\n\
+                    3. For each edge, add to MST if it doesn't create a cycle\n\
+                    4. Stop when all nodes are connected (N-1 edges)\n\n\
+                    Edge weights represent 'resistance' in the permission model:\n\
+                    • CanAccess: 1.0 (direct permission)\n\
+                    • HasPolicy: 1.5 (policy attachment)\n\
+                    • MemberOf: 2.0 (group membership)\n\
+                    • Assumes: 2.5 (role assumption)\n\
+                    • DependsOn: 3.5 (resource dependency)"
+                ),
+                visualization_guide: format!(
+                    "MST ANALYSIS: {} essential edges identified\n\n\
+                    HOW TO READ:\n\
+                    • HIGHLIGHTED edges are in the MST (essential)\n\
+                    • GRAY edges are redundant (could be removed)\n\
+                    • Lower-weight MST edges are more efficient permission paths\n\n\
+                    SECURITY INSIGHTS:\n\
+                    • {} redundant edges represent excess attack surface\n\
+                    • MST weight {:.2} is the minimum 'permission cost'\n\n\
+                    EXPLORING THE GRAPH:\n\
+                    • Click on MST edges to see the permission type\n\
+                    • Trace the MST to understand the core permission structure\n\
+                    • Redundant edges are candidates for removal during permission cleanup",
+                    mst_edge_count,
+                    redundant_count,
+                    total_weight
+                ),
+            }
+        },
     }
 }
 
@@ -6143,6 +6808,7 @@ fn list_use_cases() {
             UseCase::MinimalPrivilege => "minimal_privilege",
             UseCase::AccessibleResources => "accessible_resources",
             UseCase::HighValueTargets => "high_value_targets",
+            UseCase::MinimumSpanningTree => "mst",
         });
         println!("   Algorithm: {}", use_case.algorithm());
         println!("   {}", use_case.description());

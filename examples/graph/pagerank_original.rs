@@ -2,6 +2,16 @@
 ///
 /// This is the original implementation using individual NodeById calls.
 /// Used for benchmarking comparison against the NodesByIdsMulti optimized version.
+///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{IncomingEdges, OutgoingEdges, Runnable}`, `motlie_db::graph::query::NodeById`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// Unlike the optimized pagerank.rs, this version makes individual NodeById calls
+/// for each node during initialization (N calls instead of 1 batch call).
 
 // Include the common module
 #[path = "common.rs"]
@@ -35,6 +45,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -62,6 +73,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[website_start + dst_offset],
                 name: format!("link_w{}_{}_{}", website, src_offset, dst_offset),
                 weight: Some(1.0),
+                summary: None,
             });
         }
 
@@ -72,18 +84,21 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[next_website_start],
                 name: format!("external_{}_{}", website, website + 1),
                 weight: Some(1.0),
+                summary: None,
             });
             edges.push(GraphEdge {
                 source: all_node_ids[website_start + 3],
                 target: all_node_ids[next_website_start + 3],
                 name: format!("hub_link_{}_{}", website, website + 1),
                 weight: Some(1.0),
+                summary: None,
             });
             edges.push(GraphEdge {
                 source: all_node_ids[next_website_start],
                 target: all_node_ids[website_start],
                 name: format!("backlink_{}_{}", website + 1, website),
                 weight: Some(1.0),
+                summary: None,
             });
         }
     }

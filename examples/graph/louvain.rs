@@ -18,6 +18,16 @@
 /// 1. Local optimization: Move nodes between communities to maximize modularity gain
 /// 2. Network aggregation: Build a new network of communities
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{OutgoingEdges, Runnable}`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
 /// Usage: louvain <implementation> <db_path> <scale_factor>
 
 // Include the common module
@@ -60,6 +70,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -80,6 +91,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                     target: all_node_ids[dst_idx],
                     name: format!("intra_c{}_{}_{}", community, i, j),
                     weight: Some(1.0),
+                    summary: None,
                 });
 
                 // Backward edge (undirected graph)
@@ -88,6 +100,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                     target: all_node_ids[src_idx],
                     name: format!("intra_c{}_{}_{}_rev", community, j, i),
                     weight: Some(1.0),
+                    summary: None,
                 });
             }
         }
@@ -105,6 +118,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             target: all_node_ids[next_start],
             name: format!("bridge_{}_{}", community, community + 1),
             weight: Some(1.0),
+            summary: None,
         });
 
         // Reverse bridge
@@ -113,6 +127,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             target: all_node_ids[current_start + community_size - 1],
             name: format!("bridge_{}_{}_rev", community + 1, community),
             weight: Some(1.0),
+            summary: None,
         });
 
         // Second bridge (middle nodes) for larger graphs
@@ -123,6 +138,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[next_start + mid],
                 name: format!("bridge2_{}_{}", community, community + 1),
                 weight: Some(1.0),
+                summary: None,
             });
 
             edges.push(GraphEdge {
@@ -130,6 +146,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[current_start + mid],
                 name: format!("bridge2_{}_{}_rev", community + 1, community),
                 weight: Some(1.0),
+                summary: None,
             });
         }
     }
@@ -144,6 +161,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             target: all_node_ids[last_start + community_size - 1],
             name: format!("bridge_circular_0_{}", num_communities - 1),
             weight: Some(1.0),
+            summary: None,
         });
 
         edges.push(GraphEdge {
@@ -151,6 +169,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
             target: all_node_ids[first_start],
             name: format!("bridge_circular_{}_0_rev", num_communities - 1),
             weight: Some(1.0),
+            summary: None,
         });
     }
 

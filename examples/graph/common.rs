@@ -201,17 +201,22 @@ impl GraphMetrics {
 }
 
 /// Node and edge structures for graph construction
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct GraphNode {
     pub id: Id,
     pub name: String,
+    /// Optional summary with tags for fulltext search (e.g., "type:user role:admin sensitive:false")
+    pub summary: Option<String>,
 }
 
+#[derive(Default)]
 pub struct GraphEdge {
     pub source: Id,
     pub target: Id,
     pub name: String,
     pub weight: Option<f64>,
+    /// Optional summary with relationship metadata (e.g., "type:member_of direction:outbound")
+    pub summary: Option<String>,
 }
 
 /// Build a graph in motlie_db and return a Reader for querying
@@ -246,12 +251,14 @@ pub async fn build_graph(
     for node in &nodes {
         name_to_id.insert(node.name.clone(), node.id);
 
+        // Use provided summary or default to node name
+        let summary_text = node.summary.as_ref().map(|s| s.as_str()).unwrap_or(&node.name);
         AddNode {
             id: node.id,
             ts_millis: TimestampMilli::now(),
             name: node.name.clone(),
             valid_range: None,
-            summary: NodeSummary::from_text(&node.name),
+            summary: NodeSummary::from_text(summary_text),
         }
         .run(writer)
         .await?;
@@ -259,12 +266,14 @@ pub async fn build_graph(
 
     // Add edges
     for edge in &edges {
+        // Use provided summary or default to edge name
+        let summary_text = edge.summary.as_ref().map(|s| s.as_str()).unwrap_or(&edge.name);
         AddEdge {
             source_node_id: edge.source,
             target_node_id: edge.target,
             ts_millis: TimestampMilli::now(),
             name: edge.name.clone(),
-            summary: EdgeSummary::from_text(""),
+            summary: EdgeSummary::from_text(summary_text),
             weight: edge.weight,
             valid_range: None,
         }

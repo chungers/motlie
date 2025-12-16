@@ -17,6 +17,16 @@
 /// - h(n): Heuristic estimate from current node to goal
 /// - f(n) = g(n) + h(n): Total estimated cost through this node
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{OutgoingEdges, Runnable}`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
 /// Usage: a_star <implementation> <db_path> <scale_factor>
 
 // Include the common module
@@ -89,6 +99,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>, HashMap<I
             nodes.push(GraphNode {
                 id,
                 name: node_name,
+                summary: None,
             });
             row.push(id);
         }
@@ -128,6 +139,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>, HashMap<I
                         target: dst_id,
                         name: format!("edge_{}_{}_{}", x, y, directions.iter().position(|d| d == &(*dy, *dx, *base_weight)).unwrap()),
                         weight: Some(weight),
+                        summary: None,
                     });
                 }
             }

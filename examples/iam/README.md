@@ -32,7 +32,7 @@ Cloud IAM systems are naturally represented as directed graphs where:
 - **Nodes** represent entities (users, groups, roles, resources)
 - **Edges** represent relationships (membership, permissions, access)
 
-This example demonstrates how graph algorithms can be applied to IAM security analysis, implementing 11 different use cases that answer critical security questions:
+This example demonstrates how graph algorithms can be applied to IAM security analysis, implementing 12 different use cases that answer critical security questions:
 
 - Who can access what?
 - What's the blast radius if credentials are compromised?
@@ -253,6 +253,42 @@ Details:
   role-unused-0000: no workloads assume
   role-unused-0001: no workloads assume
 ```
+
+---
+
+### 4. MST Redundancy Test Cases
+
+**Detected by**: `mst` use case
+
+**What is injected**:
+
+**Case A: Redundant High-Weight Policy**
+- A policy (`policy-mst-redundant-high`) that uses `DependsOn` edge (weight 3.5) instead of `CanAccess` (weight 1.0)
+- A user connected to both this high-weight policy AND a lower-weight group path
+- The high-weight path should NOT be in the MST
+
+**Case B: Redundant Resource Dependency Chain**
+- A chain of `DependsOn` edges between resources forming a cycle
+- resources[1] → resources[2] → resources[3] → resources[0]
+- MST should exclude one edge to break the cycle
+
+**Case C: Parallel Role Assumption Paths**
+- A role (`role-mst-parallel-high`) using `DependsOn` (weight 3.5) instead of `Assumes` (weight 2.5)
+- Creates a parallel higher-weight path to the same workload
+- The higher-weight path should be excluded from MST
+
+**Why these are violations**:
+Redundant edges increase attack surface without adding connectivity value:
+- Every extra edge is a potential attack vector
+- MST identifies the minimum edges needed for full connectivity
+- Edges outside MST are candidates for permission cleanup
+
+**Expected detection**:
+```
+Summary: MST: 832 edges (total weight: 1247.50), 681 redundant edges could be removed
+```
+
+The injected test cases ensure that high-weight parallel paths are correctly identified as redundant by Kruskal's algorithm.
 
 ---
 
@@ -704,6 +740,69 @@ Summary: PageRank analysis (d=0.85, 20 iters): 302 resources ranked
 
 ---
 
+### 12. Minimum Spanning Tree Analysis
+
+**Command**: `mst`
+**Algorithm**: Kruskal's Algorithm (`petgraph::algo::min_spanning_tree`)
+**Question**: What is the minimal permission infrastructure needed?
+
+```bash
+cargo run --release --example iam_permissions -- mst reference /tmp/iam_db 50
+cargo run --release --example iam_permissions -- mst motlie_db /tmp/iam_db 50
+```
+
+**Business Problem**: What is the minimal set of permission edges that maintains full connectivity between all entities? The Minimum Spanning Tree identifies essential permission relationships vs. redundant ones. Edges NOT in the MST are candidates for removal during permission cleanup.
+
+**How it works**:
+1. Collect all edges with their weights (permission costs)
+2. Sort edges by weight (lowest first)
+3. Use Union-Find data structure for cycle detection
+4. For each edge, add to MST if it doesn't create a cycle
+5. Stop when all nodes are connected (N-1 edges for N nodes)
+
+**Algorithm details** (Kruskal's):
+```
+1. Sort all edges by weight ascending
+2. Initialize: each node is its own set (Union-Find)
+3. For each edge (u, v, weight) in sorted order:
+   a. If find(u) ≠ find(v):  // Different components
+      - Add edge to MST
+      - Union(u, v)
+   b. Stop when MST has N-1 edges
+4. Return MST edges and identify redundant edges
+```
+
+**Interpretation**:
+- **MST edges** = essential permission infrastructure (minimum needed for full connectivity)
+- **Redundant edges** = excess attack surface that could potentially be removed
+- Lower MST weight = more efficient permission structure
+
+**Sample output**:
+```
+Summary: MST: 832 edges (total weight: 1247.50), 681 redundant edges could be removed
+Details:
+  MST edges (sorted by weight):
+    region-us-east (region) -> vpc-0000 (vpc): 0.50
+    region-us-west (region) -> vpc-0001 (vpc): 0.50
+    policy-0000 (policy) -> instance-0000 (instance): 1.00
+    ...
+```
+
+**Reading the Visualization**:
+- MST edges are highlighted (essential permission paths)
+- Non-highlighted edges are redundant (could be removed without breaking connectivity)
+- Lower-weight edges represent more efficient permission paths
+- Click edges to see their weight and understand the permission type
+
+**Security Applications**:
+- **Attack Surface Reduction**: Identify redundant permission edges for cleanup
+- **Permission Optimization**: Find the most efficient permission structure
+- **Compliance**: Demonstrate minimal necessary access
+
+**Use case**: Permission optimization, attack surface reduction, least privilege enforcement
+
+---
+
 ## Algorithm Deep Dives
 
 ### BFS vs DFS for Graph Traversal
@@ -776,6 +875,31 @@ Where:
 
 Each DFS tree in Phase 2 is a strongly connected component.
 
+### Reference Implementation Libraries
+
+The reference implementations use established Rust graph libraries where available. Some algorithms require custom implementations due to specific output requirements (path tracking, depth tracking) or unavailability in standard libraries.
+
+| Use Case | Algorithm | Reference Implementation | Library/Source |
+|----------|-----------|-------------------------|----------------|
+| **Reachability** | BFS | Custom BFS | Hand-coded (needs path tracking) |
+| **Blast Radius** | BFS + depth | Custom BFS | Hand-coded (needs depth tracking) |
+| **Least Resistance** | Dijkstra | Custom Dijkstra | Hand-coded (needs path reconstruction) |
+| **Privilege Clustering** | Jaccard + BFS | `petgraph::visit::Bfs` | [petgraph](https://crates.io/crates/petgraph) |
+| **Over-Privileged** | BFS + counting | `petgraph::visit::Bfs` | [petgraph](https://crates.io/crates/petgraph) |
+| **Cross-Region Access** | Filtered BFS | Custom BFS | Hand-coded (complex path tracking) |
+| **Unused Roles** | Kosaraju SCC | `petgraph::algo::kosaraju_scc` | [petgraph](https://crates.io/crates/petgraph) |
+| **Privilege Hubs** | Degree analysis | Custom counting | Hand-coded (simple, no library needed) |
+| **Minimal Privilege** | Dijkstra verification | `petgraph::algo::dijkstra` | [petgraph](https://crates.io/crates/petgraph) |
+| **Accessible Resources** | DFS traversal | Custom DFS | Hand-coded (needs result collection) |
+| **High Value Targets** | PageRank | Custom PageRank | Hand-coded (not in petgraph) |
+| **Minimum Spanning Tree** | Kruskal's MST | `petgraph::algo::min_spanning_tree` | [petgraph](https://crates.io/crates/petgraph) |
+
+**Notes:**
+- **petgraph**: Industry-standard Rust graph library with optimized implementations
+- **Hand-coded algorithms** exist where library functions don't provide required output (e.g., path tracking, depth levels)
+- **PageRank**: Not available in petgraph; uses standard iterative implementation with damping factor 0.85
+- All implementations verified for correctness via result comparison between reference and motlie_db versions
+
 ---
 
 ## Running the Examples
@@ -829,6 +953,10 @@ cargo run --release --example iam_permissions -- accessible_resources motlie_db 
 # High Value Targets (PageRank)
 cargo run --release --example iam_permissions -- high_value_targets reference /tmp/iam_db 50
 cargo run --release --example iam_permissions -- high_value_targets motlie_db /tmp/iam_db 50
+
+# Minimum Spanning Tree
+cargo run --release --example iam_permissions -- mst reference /tmp/iam_db 50
+cargo run --release --example iam_permissions -- mst motlie_db /tmp/iam_db 50
 ```
 
 ### Comparing Implementations
@@ -931,6 +1059,7 @@ When an analysis completes, click **"Show Overlay"** to highlight relevant nodes
 | **Minimal Privilege** | Highlights non-minimal paths |
 | **Accessible Resources** | Highlights users and their resource counts |
 | **High Value Targets** | Highlights high PageRank nodes |
+| **Minimum Spanning Tree** | Highlights MST edges; non-MST edges grayed out |
 
 ### API Endpoints
 
@@ -981,6 +1110,7 @@ curl http://localhost:8081/api/result | jq '.result.summary'
 | **Minimal Privilege** | Dijkstra Verify | 0.15 | 9.59 | 63.9x | ✓ |
 | **Accessible Resources** | DFS Traversal | 0.43 | 4.85 | 11.3x | ✓ |
 | **High Value Targets** | PageRank | 1.92 | 21.50 | 11.2x | ✓ |
+| **Minimum Spanning Tree** | Kruskal's | 0.35 | 2.15 | 6.1x | ✓ |
 
 **Legend**:
 - ✓ = Identical hash (exact match)

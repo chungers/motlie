@@ -2,6 +2,16 @@
 ///
 /// This is the original implementation using individual NodeById calls.
 /// Used for benchmarking comparison against the NodesByIdsMulti optimized version.
+///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{NodeById, OutgoingEdges, Runnable}`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// Unlike the optimized bfs.rs, this version makes individual NodeById calls
+/// for each node as it's dequeued (N calls instead of batch calls per level).
 
 // Include the common module
 #[path = "common.rs"]
@@ -14,6 +24,7 @@ use common::{
     Implementation,
 };
 use motlie_db::query::{NodeById, OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::reader::Reader;
 use motlie_db::Id;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::Bfs;
@@ -42,6 +53,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -54,6 +66,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                     target: all_node_ids[child],
                     name: format!("edge_{}_{}", i, child),
                     weight: Some(1.0),
+                    summary: None,
                 });
             }
         }
@@ -74,7 +87,7 @@ fn bfs_petgraph(start_node: NodeIndex, graph: &DiGraph<String, f64>) -> Vec<Stri
 /// ORIGINAL BFS implementation - uses individual NodeById calls
 async fn bfs_motlie_original(
     start_node: Id,
-    reader: &motlie_db::graph::reader::Reader,
+    reader: &Reader,
     timeout: Duration,
 ) -> Result<Vec<String>> {
     let mut visited = HashSet::new();
@@ -86,7 +99,7 @@ async fn bfs_motlie_original(
 
     while let Some(current_id) = queue.pop_front() {
         // Individual NodeById call for each node
-        let (name, _summary) = motlie_db::graph::query::NodeById::new(current_id, None)
+        let (name, _summary) = NodeById::new(current_id, None)
             .run(reader, timeout)
             .await?;
 
@@ -168,7 +181,7 @@ async fn main() -> Result<()> {
             let start_id = name_to_id[&start_name];
             let timeout = Duration::from_secs(120);
 
-            let (result, time_ms, memory) = measure_time_and_memory_async(|| bfs_motlie_original(start_id, reader.graph(), timeout)).await;
+            let (result, time_ms, memory) = measure_time_and_memory_async(|| bfs_motlie_original(start_id, &reader, timeout)).await;
             let result = result?;
             let result_hash = Some(compute_hash(&result));
 
