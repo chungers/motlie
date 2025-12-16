@@ -1,12 +1,16 @@
 /// Common utilities for graph algorithm examples
+///
+/// This module uses the unified motlie_db API (porcelain layer) for all storage operations.
 use anyhow::Result;
-use motlie_db::{create_mutation_writer, spawn_graph_consumer, AddEdge, AddNode, EdgeSummary, Id, MutationRunnable, NodeSummary, Reader, ReaderConfig, TimestampMilli, WriterConfig};
+use motlie_db::mutation::{AddEdge, AddNode, EdgeSummary, NodeSummary, Runnable as MutationRunnable};
+use motlie_db::reader::Reader;
+use motlie_db::{Id, ReadWriteHandles, Storage, StorageConfig, TimestampMilli};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::Instant;
 use tokio::time::Duration;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Parse scale factor from command line argument
 pub fn parse_scale_factor(s: &str) -> Result<usize> {
@@ -197,96 +201,89 @@ impl GraphMetrics {
 }
 
 /// Node and edge structures for graph construction
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct GraphNode {
     pub id: Id,
     pub name: String,
+    /// Optional summary with tags for fulltext search (e.g., "type:user role:admin sensitive:false")
+    pub summary: Option<String>,
 }
 
+#[derive(Default)]
 pub struct GraphEdge {
     pub source: Id,
     pub target: Id,
     pub name: String,
     pub weight: Option<f64>,
+    /// Optional summary with relationship metadata (e.g., "type:member_of direction:outbound")
+    pub summary: Option<String>,
 }
 
 /// Build a graph in motlie_db and return a Reader for querying
+///
+/// Uses the unified Storage API. The db_path is used as the base directory,
+/// with graph and fulltext subdirectories created automatically.
 pub async fn build_graph(
     db_path: &Path,
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
-) -> Result<(Reader, HashMap<String, Id>, tokio::task::JoinHandle<Result<()>>)> {
-    use motlie_db::{Storage, Graph};
-    use std::sync::Arc;
-
+) -> Result<(Reader, HashMap<String, Id>, ReadWriteHandles)> {
     // Clean up any existing database
     if db_path.exists() {
         std::fs::remove_dir_all(db_path)?;
     }
 
-    let config = WriterConfig {
-        channel_buffer_size: 1000,
-    };
+    // Create unified storage in read-write mode
+    // Storage automatically creates <db_path>/graph and <db_path>/fulltext subdirectories
+    let storage = Storage::readwrite(db_path);
+    let handles = storage.ready(StorageConfig::default())?;
 
-    let (writer, receiver) = create_mutation_writer(config.clone());
-    let handle = spawn_graph_consumer(receiver, config.clone(), db_path);
+    // Get writer - no unwrap needed with ReadWriteHandles!
+    let writer = handles.writer();
 
     // Create a name to ID mapping
     let mut name_to_id = HashMap::new();
 
     // Add nodes
-    for node in nodes {
+    for node in &nodes {
         name_to_id.insert(node.name.clone(), node.id);
 
+        // Use provided summary or default to node name
+        let summary_text = node.summary.as_ref().map(|s| s.as_str()).unwrap_or(&node.name);
         AddNode {
             id: node.id,
             ts_millis: TimestampMilli::now(),
             name: node.name.clone(),
             valid_range: None,
-            summary: NodeSummary::from_text(&node.name),
+            summary: NodeSummary::from_text(summary_text),
         }
-        .run(&writer)
+        .run(writer)
         .await?;
     }
 
     // Add edges
-    for edge in edges {
+    for edge in &edges {
+        // Use provided summary or default to edge name
+        let summary_text = edge.summary.as_ref().map(|s| s.as_str()).unwrap_or(&edge.name);
         AddEdge {
             source_node_id: edge.source,
             target_node_id: edge.target,
             ts_millis: TimestampMilli::now(),
-            name: edge.name,
-            summary: EdgeSummary::from_text(""),
+            name: edge.name.clone(),
+            summary: EdgeSummary::from_text(summary_text),
             weight: edge.weight,
             valid_range: None,
         }
-        .run(&writer)
+        .run(writer)
         .await?;
     }
 
-    // Shutdown writer and wait for processing to complete
-    drop(writer);
-    handle.await??;
-
-    // Give the database a moment to finish flushing
+    // Give the database a moment to finish processing
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Create reader for querying
-    let reader_config = ReaderConfig {
-        channel_buffer_size: 100,
-    };
-
-    // Open storage for reading
-    let mut storage = Storage::readonly(db_path);
-    storage.ready()?;
-    let storage = Arc::new(storage);
-    let graph = Arc::new(Graph::new(storage));
-
-    // Create query reader and spawn consumer
-    let (reader, receiver) = motlie_db::create_query_reader(reader_config.clone());
-    let query_handle = motlie_db::spawn_graph_query_consumer_with_graph(receiver, reader_config, graph);
-
-    Ok((reader, name_to_id, query_handle))
+    // Return the reader and handles (caller is responsible for shutdown)
+    let reader = handles.reader_clone();
+    Ok((reader, name_to_id, handles))
 }
 
 /// Measure execution time of a closure

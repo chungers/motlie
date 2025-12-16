@@ -120,7 +120,7 @@ pub(super) fn create_readonly_index(index_path: &Path) -> Index {
 // ============================================================================
 
 /// Create a new full-text mutation consumer with default parameters
-pub fn create_fulltext_consumer(
+pub fn create_mutation_consumer(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     index_path: &Path,
@@ -130,7 +130,7 @@ pub fn create_fulltext_consumer(
 }
 
 /// Create a new full-text mutation consumer with default parameters that chains to another processor
-pub fn create_fulltext_consumer_with_next(
+pub fn create_mutation_consumer_with_next(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     index_path: &Path,
@@ -141,7 +141,7 @@ pub fn create_fulltext_consumer_with_next(
 }
 
 /// Create a new full-text mutation consumer with custom BM25 parameters
-pub fn create_fulltext_consumer_with_params(
+pub fn create_mutation_consumer_with_params(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     index_path: &Path,
@@ -154,7 +154,7 @@ pub fn create_fulltext_consumer_with_params(
 }
 
 /// Create a new full-text mutation consumer with custom BM25 parameters that chains to another processor
-pub fn create_fulltext_consumer_with_params_and_next(
+pub fn create_mutation_consumer_with_params_and_next(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     index_path: &Path,
@@ -172,24 +172,24 @@ pub fn create_fulltext_consumer_with_params_and_next(
 // ============================================================================
 
 /// Spawn the full-text mutation consumer as a background task with default parameters
-pub fn spawn_fulltext_consumer(
+pub fn spawn_mutation_consumer(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     index_path: &Path,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_fulltext_consumer(receiver, config, index_path);
+    let consumer = create_mutation_consumer(receiver, config, index_path);
     crate::graph::writer::spawn_consumer(consumer)
 }
 
 /// Spawn the full-text mutation consumer as a background task with default parameters and chaining.
 ///
-/// This follows the same pattern as `spawn_graph_consumer_with_next` - the consumer processes
+/// This follows the same pattern as `spawn_mutation_consumer_with_next` - the consumer processes
 /// mutations and then forwards them to the next consumer in the chain.
 ///
 /// # Example
 /// ```no_run
-/// use motlie_db::{create_mutation_writer, WriterConfig};
-/// use motlie_db::fulltext::spawn_fulltext_mutation_consumer_with_next;
+/// use motlie_db::graph::writer::{create_mutation_writer, WriterConfig};
+/// use motlie_db::fulltext::spawn_mutation_consumer_with_next;
 /// use std::path::Path;
 ///
 /// # async fn example() -> anyhow::Result<()> {
@@ -200,7 +200,7 @@ pub fn spawn_fulltext_consumer(
 /// let (next_tx, next_rx) = tokio::sync::mpsc::channel(100);
 ///
 /// // Fulltext consumer processes mutations then forwards to next_tx
-/// let handle = spawn_fulltext_mutation_consumer_with_next(
+/// let handle = spawn_mutation_consumer_with_next(
 ///     mutation_rx,
 ///     config,
 ///     Path::new("/data/fulltext"),
@@ -209,30 +209,30 @@ pub fn spawn_fulltext_consumer(
 /// # Ok(())
 /// # }
 /// ```
-pub fn spawn_fulltext_mutation_consumer_with_next(
+pub fn spawn_mutation_consumer_with_next(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     index_path: &Path,
     next: mpsc::Sender<Vec<Mutation>>,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_fulltext_consumer_with_next(receiver, config, index_path, next);
+    let consumer = create_mutation_consumer_with_next(receiver, config, index_path, next);
     crate::graph::writer::spawn_consumer(consumer)
 }
 
 /// Spawn the full-text mutation consumer as a background task with custom BM25 parameters
-pub fn spawn_fulltext_consumer_with_params(
+pub fn spawn_mutation_consumer_with_params(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     index_path: &Path,
     k1: f32,
     b: f32,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_fulltext_consumer_with_params(receiver, config, index_path, k1, b);
+    let consumer = create_mutation_consumer_with_params(receiver, config, index_path, k1, b);
     crate::graph::writer::spawn_consumer(consumer)
 }
 
 /// Spawn the full-text mutation consumer as a background task with custom BM25 parameters and chaining
-pub fn spawn_fulltext_consumer_with_params_and_next(
+pub fn spawn_mutation_consumer_with_params_and_next(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     index_path: &Path,
@@ -241,7 +241,7 @@ pub fn spawn_fulltext_consumer_with_params_and_next(
     next: mpsc::Sender<Vec<Mutation>>,
 ) -> JoinHandle<Result<()>> {
     let consumer =
-        create_fulltext_consumer_with_params_and_next(receiver, config, index_path, k1, b, next);
+        create_mutation_consumer_with_params_and_next(receiver, config, index_path, k1, b, next);
     crate::graph::writer::spawn_consumer(consumer)
 }
 
@@ -252,7 +252,8 @@ pub fn spawn_fulltext_consumer_with_params_and_next(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::mutation::{AddNode, AddNodeFragment, Runnable as MutRunnable};
+    use crate::graph::mutation::{AddNode, AddNodeFragment};
+    use crate::writer::Runnable as MutRunnable;
     use crate::graph::writer::create_mutation_writer;
     use crate::graph::schema::NodeSummary;
     use crate::{DataUrl, Id, TimestampMilli};
@@ -295,7 +296,7 @@ mod tests {
         let (writer, receiver) = create_mutation_writer(config.clone());
 
         // Spawn consumer
-        let consumer_handle = spawn_fulltext_consumer(receiver, config, &index_path);
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &index_path);
 
         // Send some mutations
         let node_args = AddNode {
@@ -303,7 +304,7 @@ mod tests {
             ts_millis: TimestampMilli::now(),
             name: "test_node".to_string(),
             valid_range: None,
-            summary: crate::NodeSummary::from_text("test summary"),
+            summary: crate::graph::schema::NodeSummary::from_text("test summary"),
         };
         node_args.run(&writer).await.unwrap();
 
@@ -371,7 +372,7 @@ mod tests {
                 ts_millis: TimestampMilli::now(),
                 name: "persistent_node".to_string(),
                 valid_range: None,
-                summary: crate::NodeSummary::from_text("persistent summary"),
+                summary: crate::graph::schema::NodeSummary::from_text("persistent summary"),
             };
             processor
                 .process_mutations(&[Mutation::AddNode(node)])

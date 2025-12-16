@@ -70,12 +70,6 @@ End-to-end pipeline tests (4 tests):
 - Concurrent client scenarios
 - Mixed query workloads
 
-### Validation Tests
-
-#### `test_prefix_scan_bug.rs`
-Validates RocksDB prefix scanning with direct byte encoding (7 tests).
-Tests that variable-length fields in keys work correctly with prefix extractors.
-
 ## Shared Test Utilities
 
 ### `common/concurrent_test_utils.rs`
@@ -122,8 +116,8 @@ cargo test test_concurrent_read_write_integration -- --nocapture
 - **Correct pattern**: Share `Arc<Graph>` (wrapping `Arc<Storage>`) across threads
 
 ### API Functions for Shared Storage
-- `spawn_graph_query_consumer_with_graph()` - Share Storage across query consumers
-- `spawn_graph_consumer_with_graph()` - Share Storage for mutation consumer
+- `spawn_query_consumer_with_graph()` - Share Storage across query consumers
+- `spawn_mutation_consumer_with_graph()` - Share Storage for mutation consumer
 - Both require `Graph` to implement `Clone` (shallow clone of Arc)
 
 ### Success Rate Dependencies

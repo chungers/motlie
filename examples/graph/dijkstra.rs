@@ -12,6 +12,16 @@
 /// - Airline route planning
 /// - Game AI pathfinding
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{OutgoingEdges, Runnable}`, `motlie_db::graph::query::NodeById`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
 /// Usage: dijkstra <db_path>
 
 // Include the common module
@@ -20,7 +30,8 @@ mod common;
 
 use anyhow::Result;
 use common::{build_graph, compute_hash_f64, compute_hash_f64_motlie, get_disk_metrics, measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge, GraphMetrics, GraphNode, Implementation};
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use motlie_db::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use pathfinding::prelude::dijkstra as pathfinding_dijkstra;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -51,6 +62,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
         nodes.push(GraphNode {
             id,
             name: node_name,
+            summary: None,
         });
     }
 
@@ -79,6 +91,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[district_start + dst_offset],
                 name: format!("road_d{}_{}_{}", district, src_offset, dst_offset),
                 weight: Some(weight),
+                summary: None,
             });
         }
 
@@ -91,6 +104,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[next_district_start],
                 name: format!("highway_{}_{}", district, district + 1),
                 weight: Some(3.0),
+                summary: None,
             });
             // Reverse highway
             edges.push(GraphEdge {
@@ -98,6 +112,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>) {
                 target: all_node_ids[district_start + 9],
                 name: format!("highway_{}_{}_rev", district + 1, district),
                 weight: Some(3.0),
+                summary: None,
             });
         }
     }
@@ -134,7 +149,7 @@ impl PartialOrd for State {
 async fn dijkstra_motlie(
     start: Id,
     end: Id,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<Option<(f64, Vec<String>)>> {
     let mut dist: HashMap<Id, f64> = HashMap::new();
@@ -154,13 +169,13 @@ async fn dijkstra_motlie(
             let mut current = end;
 
             // Get end node name
-            let (name, _) = motlie_db::NodeById::new(current, None)
+            let (name, _) = motlie_db::graph::query::NodeById::new(current, None)
                 .run(reader, timeout)
                 .await?;
             path.push(name);
 
             while let Some(&prev_node) = prev.get(&current) {
-                let (name, _) = motlie_db::NodeById::new(prev_node, None)
+                let (name, _) = motlie_db::graph::query::NodeById::new(prev_node, None)
                     .run(reader, timeout)
                     .await?;
                 path.push(name);
@@ -285,12 +300,12 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run Dijkstra with motlie_db
-            let (reader, name_to_id, _query_handle) = build_graph(db_path, nodes, edges).await?;
+            let (reader, name_to_id, _handles) = build_graph(db_path, nodes, edges).await?;
             let start_id = name_to_id[&start_name];
             let end_id = name_to_id[&end_name];
             let timeout = Duration::from_secs(60); // Longer timeout for large graphs
 
-            let (result, time_ms, memory) = measure_time_and_memory_async(|| dijkstra_motlie(start_id, end_id, &reader, timeout)).await;
+            let (result, time_ms, memory) = measure_time_and_memory_async(|| dijkstra_motlie(start_id, end_id, reader.graph(), timeout)).await;
             let result = result?;
             let result_hash = Some(compute_hash_f64_motlie(&result));
 

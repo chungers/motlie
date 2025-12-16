@@ -34,8 +34,6 @@ Column families:
   edge-fragments
   outgoing-edges
   incoming-edges
-  node-names
-  edge-names
 ```
 
 ### Scan Column Family
@@ -66,8 +64,6 @@ motlie db -p <db_dir> scan <column_family> [datetime] [OPTIONS]
 | Edge Fragments | `edge-fragments` | Edge content fragments with timestamps |
 | Outgoing Edges | `outgoing-edges` | Forward edges (source → destination) |
 | Incoming Edges | `incoming-edges` | Reverse edge index (destination ← source) |
-| Node Names | `node-names` | Node name index for lookups by name |
-| Edge Names | `edge-names` | Edge name index for lookups by name |
 
 ## Output Columns
 
@@ -96,16 +92,6 @@ SINCE    UNTIL    SRC_ID    DST_ID    EDGE_NAME    WEIGHT
 ### Incoming Edges
 ```
 SINCE    UNTIL    DST_ID    SRC_ID    EDGE_NAME
-```
-
-### Node Names
-```
-SINCE    UNTIL    NODE_ID    NAME
-```
-
-### Edge Names
-```
-SINCE    UNTIL    SRC_ID    DST_ID    NAME
 ```
 
 ## Output Formats
@@ -192,8 +178,6 @@ motlie db -p /data/graph-db scan nodes --limit 10 --last 01JGXYZ123456789ABCDEF
 | `edge-fragments` | `<src_id>:<dst_id>:<edge_name>:<timestamp>` | `01JGX...:01JGY...:follows:1704067200000` |
 | `outgoing-edges` | `<src_id>:<dst_id>:<edge_name>` | `01JGX...:01JGY...:follows` |
 | `incoming-edges` | `<dst_id>:<src_id>:<edge_name>` | `01JGY...:01JGX...:follows` |
-| `node-names` | `<name>:<node_id>` | `Alice:01JGXYZ...` |
-| `edge-names` | `<name>:<src_id>:<dst_id>` | `follows:01JGX...:01JGY...` |
 
 ## Reverse Scanning
 
@@ -238,18 +222,6 @@ Fragment output includes:
 - `MIME` - Content type (e.g., `text/plain`, `application/json`, `text/markdown`)
 - `CONTENT` - Preview of text content (truncated to 60 chars for printable types)
 
-### Scanning Indexes
-
-Name indexes allow efficient lookups by name:
-
-```bash
-# Scan node names index
-motlie db -p /data/graph-db scan node-names -f table
-
-# Scan edge names index
-motlie db -p /data/graph-db scan edge-names -f table
-```
-
 ### Combined Options
 
 Options can be combined for complex queries:
@@ -279,8 +251,6 @@ motlie db -p /data/graph-db scan nodes | grep -i "pattern"
 # Export to CSV
 motlie db -p /data/graph-db scan nodes | tr '\t' ',' > nodes.csv
 
-# Find nodes by name prefix
-motlie db -p /data/graph-db scan node-names | grep "^Alice"
 ```
 
 ## Error Handling
@@ -333,8 +303,6 @@ cargo test --test db_cli
 | `test_scan_edge_fragments` | Scans edge fragments, verifies src/dst/edge_name |
 | `test_scan_outgoing_edges` | Scans outgoing edges with weights |
 | `test_scan_incoming_edges` | Scans reverse edge index |
-| `test_scan_node_names` | Scans node name index |
-| `test_scan_edge_names` | Scans edge name index |
 | `test_invalid_database_path` | Error handling for non-existent database |
 | `test_invalid_cursor_format` | Error handling for malformed cursor |
 | `test_output_format_table_default` | Verifies table is default output format |

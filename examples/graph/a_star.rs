@@ -17,6 +17,16 @@
 /// - h(n): Heuristic estimate from current node to goal
 /// - f(n) = g(n) + h(n): Total estimated cost through this node
 ///
+/// # Unified API Usage
+///
+/// This example uses the **unified motlie_db API** (porcelain layer):
+/// - Storage: `motlie_db::{Storage, StorageConfig, ReadWriteHandles}`
+/// - Queries: `motlie_db::query::{OutgoingEdges, Runnable}`
+/// - Reader: `motlie_db::reader::Reader`
+///
+/// The unified API provides type-safe handles and a consistent interface
+/// for both graph (RocksDB) and fulltext (Tantivy) operations.
+///
 /// Usage: a_star <implementation> <db_path> <scale_factor>
 
 // Include the common module
@@ -29,7 +39,8 @@ use common::{
     measure_time_and_memory, measure_time_and_memory_async, parse_scale_factor, GraphEdge,
     GraphMetrics, GraphNode, Implementation,
 };
-use motlie_db::{Id, OutgoingEdges, QueryRunnable};
+use motlie_db::query::{OutgoingEdges, Runnable as QueryRunnable};
+use motlie_db::Id;
 use pathfinding::prelude::astar as pathfinding_astar;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -88,6 +99,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>, HashMap<I
             nodes.push(GraphNode {
                 id,
                 name: node_name,
+                summary: None,
             });
             row.push(id);
         }
@@ -127,6 +139,7 @@ fn create_test_graph(scale: usize) -> (Vec<GraphNode>, Vec<GraphEdge>, HashMap<I
                         target: dst_id,
                         name: format!("edge_{}_{}_{}", x, y, directions.iter().position(|d| d == &(*dy, *dx, *base_weight)).unwrap()),
                         weight: Some(weight),
+                        summary: None,
                     });
                 }
             }
@@ -173,7 +186,7 @@ async fn astar_motlie(
     start: Id,
     end: Id,
     positions: &HashMap<Id, Position>,
-    reader: &motlie_db::Reader,
+    reader: &motlie_db::graph::reader::Reader,
     timeout: Duration,
 ) -> Result<Option<(f64, Vec<String>)>> {
     let end_pos = positions.get(&end).ok_or_else(|| anyhow::anyhow!("End node not in positions"))?;
@@ -205,13 +218,13 @@ async fn astar_motlie(
             let mut current = end;
 
             // Get end node name
-            let (name, _) = motlie_db::NodeById::new(current, None)
+            let (name, _) = motlie_db::graph::query::NodeById::new(current, None)
                 .run(reader, timeout)
                 .await?;
             path.push(name);
 
             while let Some(&prev_node) = prev.get(&current) {
-                let (name, _) = motlie_db::NodeById::new(prev_node, None)
+                let (name, _) = motlie_db::graph::query::NodeById::new(prev_node, None)
                     .run(reader, timeout)
                     .await?;
                 path.push(name);
@@ -372,7 +385,7 @@ async fn main() -> Result<()> {
         }
         Implementation::MotlieDb => {
             // Run A* with motlie_db
-            let (reader, name_to_id_built, _query_handle) =
+            let (reader, name_to_id_built, _handles) =
                 build_graph(db_path, nodes, edges).await?;
             let start_id = name_to_id_built[&start_name];
             let end_id = name_to_id_built[&end_name];
@@ -386,7 +399,7 @@ async fn main() -> Result<()> {
             let timeout = Duration::from_secs(120); // Longer timeout for large graphs
 
             let (result, time_ms, memory) = measure_time_and_memory_async(|| {
-                astar_motlie(start_id, end_id, &positions_rebuilt, &reader, timeout)
+                astar_motlie(start_id, end_id, &positions_rebuilt, reader.graph(), timeout)
             })
             .await;
             let result = result?;
