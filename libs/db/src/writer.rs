@@ -14,7 +14,8 @@
 //! use motlie_db::{Id, TimestampMilli};
 //!
 //! // Create storage in read-write mode
-//! let storage = Storage::readwrite(graph_path, fulltext_path);
+//! // Storage takes a single path and derives <path>/graph and <path>/fulltext
+//! let storage = Storage::readwrite(db_path);
 //!
 //! // ready() returns ReadWriteHandles which guarantees writer() exists
 //! let handles = storage.ready(StorageConfig::default())?;

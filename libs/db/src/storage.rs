@@ -4,6 +4,12 @@
 //! that manage both graph (RocksDB) and fulltext (Tantivy) backends, providing
 //! a single entry point for the motlie_db API.
 //!
+//! # Directory Structure
+//!
+//! Storage takes a single base path and automatically creates subdirectories:
+//! - `<base_path>/graph` - RocksDB graph database
+//! - `<base_path>/fulltext` - Tantivy fulltext index
+//!
 //! # Type-Safe Access Modes
 //!
 //! Storage uses Rust's type system to distinguish between read-only and read-write
@@ -23,8 +29,8 @@
 //! use motlie_db::query::{Nodes, Runnable as QueryRunnable};
 //! use std::time::Duration;
 //!
-//! // Read-write mode
-//! let storage = Storage::readwrite(graph_path, fulltext_path);
+//! // Read-write mode - single path, subdirectories created automatically
+//! let storage = Storage::readwrite(db_path);
 //! let handles = storage.ready(StorageConfig::default())?;
 //!
 //! // Write mutations - no unwrap needed!
@@ -55,7 +61,7 @@
 //! use motlie_db::query::{Nodes, Runnable};
 //!
 //! // Read-only mode - no writer available
-//! let storage = Storage::readonly(graph_path, fulltext_path);
+//! let storage = Storage::readonly(db_path);
 //! let handles = storage.ready(StorageConfig::default())?;
 //!
 //! // Execute queries
@@ -183,6 +189,12 @@ impl StorageConfig {
 /// - `Storage<ReadOnly>` - Created via [`Storage::readonly()`], returns [`ReadOnlyHandles`]
 /// - `Storage<ReadWrite>` - Created via [`Storage::readwrite()`], returns [`ReadWriteHandles`]
 ///
+/// # Directory Structure
+///
+/// Storage takes a single base path and automatically manages subdirectories:
+/// - `<path>/graph` - RocksDB graph database
+/// - `<path>/fulltext` - Tantivy fulltext index
+///
 /// # Type Safety
 ///
 /// The type-state pattern ensures that:
@@ -197,7 +209,7 @@ impl StorageConfig {
 /// use motlie_db::{Storage, StorageConfig};
 /// use motlie_db::mutation::{AddNode, Runnable};
 ///
-/// let storage = Storage::readwrite(graph_path, fulltext_path);
+/// let storage = Storage::readwrite(db_path);
 /// let handles = storage.ready(StorageConfig::default())?;
 ///
 /// // writer() returns &Writer directly - no unwrap needed
@@ -212,7 +224,7 @@ impl StorageConfig {
 /// use motlie_db::{Storage, StorageConfig};
 /// use motlie_db::query::{Nodes, Runnable};
 ///
-/// let storage = Storage::readonly(graph_path, fulltext_path);
+/// let storage = Storage::readonly(db_path);
 /// let handles = storage.ready(StorageConfig::default())?;
 ///
 /// // Only reader is available
@@ -223,8 +235,7 @@ impl StorageConfig {
 /// handles.shutdown().await?;
 /// ```
 pub struct Storage<Mode> {
-    graph_path: PathBuf,
-    fulltext_path: PathBuf,
+    path: PathBuf,
     _mode: PhantomData<Mode>,
 }
 
@@ -234,13 +245,17 @@ impl Storage<ReadOnly> {
     /// Returns `Storage<ReadOnly>` which produces [`ReadOnlyHandles`] when
     /// `ready()` is called. The handles will only have a reader - no writer.
     ///
+    /// # Directory Structure
+    ///
+    /// The path is the base directory. Storage will use:
+    /// - `<path>/graph` - RocksDB graph database
+    /// - `<path>/fulltext` - Tantivy fulltext index
+    ///
     /// # Arguments
-    /// * `graph_path` - Path to the graph database (RocksDB)
-    /// * `fulltext_path` - Path to the fulltext index (Tantivy)
-    pub fn readonly(graph_path: &Path, fulltext_path: &Path) -> Self {
+    /// * `path` - Base path for the storage directory
+    pub fn readonly(path: &Path) -> Self {
         Self {
-            graph_path: graph_path.to_path_buf(),
-            fulltext_path: fulltext_path.to_path_buf(),
+            path: path.to_path_buf(),
             _mode: PhantomData,
         }
     }
@@ -248,8 +263,8 @@ impl Storage<ReadOnly> {
     /// Initialize storage and return read-only handles.
     ///
     /// This method:
-    /// 1. Initializes graph storage (RocksDB) in read-only mode
-    /// 2. Initializes fulltext storage (Tantivy) in read-only mode
+    /// 1. Initializes graph storage (RocksDB) in read-only mode at `<path>/graph`
+    /// 2. Initializes fulltext storage (Tantivy) in read-only mode at `<path>/fulltext`
     /// 3. Sets up MPMC query consumer pools
     /// 4. Returns [`ReadOnlyHandles`] for reading only
     ///
@@ -259,14 +274,17 @@ impl Storage<ReadOnly> {
     /// # Returns
     /// [`ReadOnlyHandles`] providing access to Reader only
     pub fn ready(self, config: StorageConfig) -> Result<ReadOnlyHandles> {
+        let graph_path = self.path.join("graph");
+        let fulltext_path = self.path.join("fulltext");
+
         // Initialize graph storage in read-only mode
-        let mut graph_storage = graph::Storage::readonly(&self.graph_path);
+        let mut graph_storage = graph::Storage::readonly(&graph_path);
         graph_storage.ready()?;
         let graph_arc = Arc::new(graph_storage);
         let graph = Arc::new(graph::Graph::new(graph_arc));
 
         // Initialize fulltext storage in read-only mode
-        let mut fulltext_storage = fulltext::Storage::readonly(&self.fulltext_path);
+        let mut fulltext_storage = fulltext::Storage::readonly(&fulltext_path);
         fulltext_storage.ready()?;
         let fulltext_arc = Arc::new(fulltext_storage);
         let fulltext_index = Arc::new(fulltext::Index::new(fulltext_arc));
@@ -295,13 +313,17 @@ impl Storage<ReadWrite> {
     /// Returns `Storage<ReadWrite>` which produces [`ReadWriteHandles`] when
     /// `ready()` is called. The handles will have both reader and writer.
     ///
+    /// # Directory Structure
+    ///
+    /// The path is the base directory. Storage will use:
+    /// - `<path>/graph` - RocksDB graph database
+    /// - `<path>/fulltext` - Tantivy fulltext index
+    ///
     /// # Arguments
-    /// * `graph_path` - Path to the graph database (RocksDB)
-    /// * `fulltext_path` - Path to the fulltext index (Tantivy)
-    pub fn readwrite(graph_path: &Path, fulltext_path: &Path) -> Self {
+    /// * `path` - Base path for the storage directory
+    pub fn readwrite(path: &Path) -> Self {
         Self {
-            graph_path: graph_path.to_path_buf(),
-            fulltext_path: fulltext_path.to_path_buf(),
+            path: path.to_path_buf(),
             _mode: PhantomData,
         }
     }
@@ -309,8 +331,8 @@ impl Storage<ReadWrite> {
     /// Initialize storage and return read-write handles.
     ///
     /// This method:
-    /// 1. Initializes graph storage (RocksDB) in read-write mode
-    /// 2. Initializes fulltext storage (Tantivy) in read-write mode
+    /// 1. Initializes graph storage (RocksDB) in read-write mode at `<path>/graph`
+    /// 2. Initializes fulltext storage (Tantivy) in read-write mode at `<path>/fulltext`
     /// 3. Sets up MPMC query consumer pools
     /// 4. Sets up graph → fulltext mutation pipeline
     /// 5. Returns [`ReadWriteHandles`] for both reading and writing
@@ -321,14 +343,17 @@ impl Storage<ReadWrite> {
     /// # Returns
     /// [`ReadWriteHandles`] providing access to both Reader and Writer
     pub fn ready(self, config: StorageConfig) -> Result<ReadWriteHandles> {
+        let graph_path = self.path.join("graph");
+        let fulltext_path = self.path.join("fulltext");
+
         // Initialize graph storage in read-write mode
-        let mut graph_storage = graph::Storage::readwrite(&self.graph_path);
+        let mut graph_storage = graph::Storage::readwrite(&graph_path);
         graph_storage.ready()?;
         let graph_arc = Arc::new(graph_storage);
         let graph = Arc::new(graph::Graph::new(graph_arc));
 
         // Initialize fulltext storage in read-write mode
-        let mut fulltext_storage = fulltext::Storage::readwrite(&self.fulltext_path);
+        let mut fulltext_storage = fulltext::Storage::readwrite(&fulltext_path);
         fulltext_storage.ready()?;
         let fulltext_arc = Arc::new(fulltext_storage);
         let fulltext_index = Arc::new(fulltext::Index::new(fulltext_arc));
@@ -360,14 +385,19 @@ impl Storage<ReadWrite> {
 
 // Common methods for both modes
 impl<Mode> Storage<Mode> {
-    /// Get the graph path.
-    pub fn graph_path(&self) -> &Path {
-        &self.graph_path
+    /// Get the base storage path.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
-    /// Get the fulltext path.
-    pub fn fulltext_path(&self) -> &Path {
-        &self.fulltext_path
+    /// Get the graph subdirectory path (`<base_path>/graph`).
+    pub fn graph_path(&self) -> PathBuf {
+        self.path.join("graph")
+    }
+
+    /// Get the fulltext subdirectory path (`<base_path>/fulltext`).
+    pub fn fulltext_path(&self) -> PathBuf {
+        self.path.join("fulltext")
     }
 }
 
@@ -384,7 +414,7 @@ impl<Mode> Storage<Mode> {
 /// # Example
 ///
 /// ```ignore
-/// let storage = Storage::readonly(graph_path, fulltext_path);
+/// let storage = Storage::readonly(db_path);
 /// let handles: ReadOnlyHandles = storage.ready(config)?;
 ///
 /// // Execute queries
@@ -469,7 +499,7 @@ impl ReadOnlyHandles {
 /// # Example
 ///
 /// ```ignore
-/// let storage = Storage::readwrite(graph_path, fulltext_path);
+/// let storage = Storage::readwrite(db_path);
 /// let handles: ReadWriteHandles = storage.ready(config)?;
 ///
 /// // Write mutations - no unwrap needed!
@@ -614,15 +644,17 @@ mod tests {
 
     #[test]
     fn test_storage_readonly_paths() {
-        let storage = Storage::readonly(Path::new("/tmp/graph"), Path::new("/tmp/fulltext"));
-        assert_eq!(storage.graph_path(), Path::new("/tmp/graph"));
-        assert_eq!(storage.fulltext_path(), Path::new("/tmp/fulltext"));
+        let storage = Storage::readonly(Path::new("/tmp/motlie_db"));
+        assert_eq!(storage.path(), Path::new("/tmp/motlie_db"));
+        assert_eq!(storage.graph_path(), Path::new("/tmp/motlie_db/graph"));
+        assert_eq!(storage.fulltext_path(), Path::new("/tmp/motlie_db/fulltext"));
     }
 
     #[test]
     fn test_storage_readwrite_paths() {
-        let storage = Storage::readwrite(Path::new("/tmp/graph"), Path::new("/tmp/fulltext"));
-        assert_eq!(storage.graph_path(), Path::new("/tmp/graph"));
-        assert_eq!(storage.fulltext_path(), Path::new("/tmp/fulltext"));
+        let storage = Storage::readwrite(Path::new("/tmp/motlie_db"));
+        assert_eq!(storage.path(), Path::new("/tmp/motlie_db"));
+        assert_eq!(storage.graph_path(), Path::new("/tmp/motlie_db/graph"));
+        assert_eq!(storage.fulltext_path(), Path::new("/tmp/motlie_db/fulltext"));
     }
 }

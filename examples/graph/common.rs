@@ -228,17 +228,14 @@ pub async fn build_graph(
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
 ) -> Result<(Reader, HashMap<String, Id>, ReadWriteHandles)> {
-    // Set up paths for graph and fulltext storage
-    let graph_path = db_path.join("graph");
-    let fulltext_path = db_path.join("fulltext");
-
     // Clean up any existing database
     if db_path.exists() {
         std::fs::remove_dir_all(db_path)?;
     }
 
     // Create unified storage in read-write mode
-    let storage = Storage::readwrite(&graph_path, &fulltext_path);
+    // Storage automatically creates <db_path>/graph and <db_path>/fulltext subdirectories
+    let storage = Storage::readwrite(db_path);
     let handles = storage.ready(StorageConfig::default())?;
 
     // Get writer - no unwrap needed with ReadWriteHandles!

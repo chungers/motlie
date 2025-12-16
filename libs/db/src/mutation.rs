@@ -33,7 +33,8 @@
 //! use motlie_db::{Id, TimestampMilli};
 //!
 //! // Initialize unified storage in read-write mode
-//! let storage = Storage::readwrite(graph_path, fulltext_path);
+//! // Storage takes a single path and derives <path>/graph and <path>/fulltext
+//! let storage = Storage::readwrite(db_path);
 //! let handles = storage.ready(StorageConfig::default())?;  // ReadWriteHandles
 //!
 //! // Create a node - writer() returns &Writer directly, no unwrap needed!
