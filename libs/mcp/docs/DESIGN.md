@@ -1,8 +1,8 @@
-# Motlie MCP Server Design (pmcp SDK)
+# Motlie MCP Server Design (rmcp SDK)
 
 ## Overview
 
-This document describes the design and implementation of the Model Context Protocol (MCP) server for the Motlie graph database using the **pmcp** (Pragmatic Model Context Protocol) SDK. The MCP server exposes the graph mutation and query APIs as MCP tools, enabling AI assistants to interact with the graph database through standardized protocols.
+This document describes the design and implementation of the Model Context Protocol (MCP) server for the Motlie graph database using the **rmcp** SDK. The MCP server exposes the graph mutation and query APIs as MCP tools, enabling AI assistants to interact with the graph database through standardized protocols.
 
 ## Architecture
 
@@ -24,18 +24,17 @@ motlie/
 
 ### Key Components
 
-1. **MotlieMcpServer**: Core server struct that wraps database access and builds the pmcp server
-2. **TypedTool Handlers**: Type-safe MCP tools for each mutation and query operation
-3. **Authentication**: Built-in pmcp auth context validation
-4. **Transport Layer**: Support for stdio transport via pmcp SDK
+1. **MotlieMcpServer**: Core server struct that wraps database access and implements the rmcp `ServerHandler` trait
+2. **Tool Handlers**: MCP tools implemented via rmcp's `#[tool]` attribute macro
+3. **LazyDatabase**: Deferred database initialization for fast server startup
+4. **Transport Layer**: Support for stdio and HTTP transports via rmcp SDK
 
 ## Dependencies
 
 ### External Crates
 
-- **pmcp** (v1.8): Official Rust SDK for Model Context Protocol by Pragmatic AI Labs
-  - Features: `schema-generation`, `validation`
-  - Provides: `ServerBuilder`, `TypedTool`, `RequestHandlerExtra`, authentication
+- **rmcp** (v0.9): Official Rust SDK for Model Context Protocol
+  - Provides: `ServerHandler`, `#[tool]` macro, `#[tool_router]`, transport implementations
 - **schemars** (v1.0): JSON Schema generation from Rust types
 - **tokio**: Async runtime for concurrent operations
 - **serde/serde_json**: Serialization for parameters
@@ -258,12 +257,13 @@ Error types:
 | MCP Tool | Query Type | Description | Parameters |
 |----------|------------|-------------|------------|
 | `query_node_by_id` | `NodeById` | Retrieve node by UUID | `id`, `reference_ts_millis?` |
-| `query_edge` | `EdgeSummaryBySrcDstName` | Retrieve edge by endpoints and name | `source_id`, `dest_id`, `name`, `reference_ts_millis?` |
+| `query_edge` | `EdgeDetails` | Retrieve edge by endpoints and name | `source_id`, `dest_id`, `name`, `reference_ts_millis?` |
 | `query_outgoing_edges` | `OutgoingEdges` | Get all outgoing edges from a node | `id`, `reference_ts_millis?` |
 | `query_incoming_edges` | `IncomingEdges` | Get all incoming edges to a node | `id`, `reference_ts_millis?` |
-| `query_nodes_by_name` | `NodesByName` | Search nodes by name prefix | `name`, `limit?`, `reference_ts_millis?` |
-| `query_edges_by_name` | `EdgesByName` | Search edges by name prefix | `name`, `limit?`, `reference_ts_millis?` |
-| `query_node_fragments` | `NodeFragmentsByIdTimeRange` | Get node fragments in time range | `id`, `start_ts_millis?`, `end_ts_millis?`, `reference_ts_millis?` |
+| `query_nodes_by_name` | `Nodes` | Search nodes by name (fulltext) | `name`, `limit?`, `reference_ts_millis?` |
+| `query_edges_by_name` | `Edges` | Search edges by name (fulltext) | `name`, `limit?`, `reference_ts_millis?` |
+| `query_node_fragments` | `NodeFragments` | Get node fragments in time range | `id`, `start_ts_millis?`, `end_ts_millis?`, `reference_ts_millis?` |
+| `query_edge_fragments` | `EdgeFragments` | Get edge fragments in time range | `src_id`, `dst_id`, `edge_name`, `start_ts_millis?`, `end_ts_millis?`, `reference_ts_millis?` |
 
 ## Parameter Types
 
