@@ -34,45 +34,68 @@ use std::time::Duration;
 use tokio::sync::OnceCell;
 use types::*;
 
-/// Database initialization function type
-pub type DbInitFn = Box<dyn FnOnce() -> anyhow::Result<(Writer, Reader)> + Send + Sync>;
+/// Generic initialization function type for lazy resources
+pub type ResourceInitFn<R> = Box<dyn FnOnce() -> anyhow::Result<R> + Send + Sync>;
 
-/// Lazy database holder for deferred initialization
-pub struct LazyDatabase {
-    init_fn: std::sync::Mutex<Option<DbInitFn>>,
-    writer: OnceCell<Writer>,
-    reader: OnceCell<Reader>,
+/// Generic lazy resource holder for deferred initialization.
+///
+/// This is essential for MCP servers communicating over stdio transport, where
+/// slow resource initialization (e.g., opening databases, establishing connections)
+/// will cause the agent-tool handshake to timeout and fail. By deferring initialization
+/// until the first tool invocation, the server can complete the MCP handshake quickly
+/// and only pay the initialization cost when actually needed.
+///
+/// The resource is initialized on first access via the `resource()` method.
+/// Initialization is thread-safe and runs at most once.
+///
+/// # Example
+/// ```ignore
+/// // Create lazy resource - this is fast, no initialization yet
+/// let lazy = Arc::new(LazyResource::new(Box::new(|| {
+///     // This expensive initialization runs only on first access
+///     Ok(MyDatabase::open("/path/to/db")?)
+/// })));
+///
+/// // Server can start immediately and complete MCP handshake
+/// let server = MyMcpServer::new(lazy);
+///
+/// // Later, when a tool is invoked:
+/// let resource = lazy.resource().await?;
+/// resource.query(...);
+/// ```
+pub struct LazyResource<R> {
+    init_fn: std::sync::Mutex<Option<ResourceInitFn<R>>>,
+    resource: OnceCell<R>,
 }
 
-impl LazyDatabase {
-    /// Create a new lazy database with an initialization function
-    pub fn new(init_fn: DbInitFn) -> Self {
+impl<R> LazyResource<R> {
+    /// Create a new lazy resource with an initialization function
+    pub fn new(init_fn: ResourceInitFn<R>) -> Self {
         Self {
             init_fn: std::sync::Mutex::new(Some(init_fn)),
-            writer: OnceCell::new(),
-            reader: OnceCell::new(),
+            resource: OnceCell::new(),
         }
     }
 
-    /// Get or initialize the writer
-    pub async fn writer(&self) -> Result<&Writer, McpError> {
+    /// Get or initialize the resource
+    ///
+    /// This method is idempotent - the initialization function runs at most once.
+    /// Subsequent calls return the cached resource.
+    pub async fn resource(&self) -> Result<&R, McpError> {
         self.ensure_initialized().await?;
-        self.writer
+        self.resource
             .get()
-            .ok_or_else(|| McpError::internal_error("Writer not initialized", None))
+            .ok_or_else(|| McpError::internal_error("Resource not initialized", None))
     }
 
-    /// Get or initialize the reader
-    pub async fn reader(&self) -> Result<&Reader, McpError> {
-        self.ensure_initialized().await?;
-        self.reader
-            .get()
-            .ok_or_else(|| McpError::internal_error("Reader not initialized", None))
+    /// Check if the resource has been initialized
+    pub fn is_initialized(&self) -> bool {
+        self.resource.initialized()
     }
 
     async fn ensure_initialized(&self) -> Result<(), McpError> {
         // Check if already initialized
-        if self.writer.initialized() && self.reader.initialized() {
+        if self.resource.initialized() {
             return Ok(());
         }
 
@@ -83,23 +106,25 @@ impl LazyDatabase {
         };
 
         if let Some(init_fn) = init_fn {
-            tracing::info!("Initializing database (lazy initialization on first tool use)...");
-            let (writer, reader) = init_fn().map_err(|e| {
-                McpError::internal_error(format!("Database initialization failed: {}", e), None)
+            tracing::info!("Initializing resource (lazy initialization on first access)...");
+            let resource = init_fn().map_err(|e| {
+                McpError::internal_error(format!("Resource initialization failed: {}", e), None)
             })?;
-            let _ = self.writer.set(writer);
-            let _ = self.reader.set(reader);
-            tracing::info!("Database initialization complete");
+            let _ = self.resource.set(resource);
+            tracing::info!("Resource initialization complete");
         }
 
         Ok(())
     }
 }
 
+/// Type alias for lazy database initialization
+pub type LazyDb = LazyResource<(Writer, Reader)>;
+
 /// MCP Server for Motlie graph database using rmcp SDK
 #[derive(Clone)]
 pub struct MotlieMcpServer {
-    db: Arc<LazyDatabase>,
+    db: Arc<LazyDb>,
     query_timeout: Duration,
     tool_router: ToolRouter<Self>,
 }
@@ -135,12 +160,24 @@ impl MotlieMcpServer {
 #[tool_router]
 impl MotlieMcpServer {
     /// Create a new MCP server instance with lazy database initialization
-    pub fn new(db: Arc<LazyDatabase>, query_timeout: Duration) -> Self {
+    pub fn new(db: Arc<LazyDb>, query_timeout: Duration) -> Self {
         Self {
             db,
             query_timeout,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Get the writer from the lazy database
+    async fn writer(&self) -> Result<&Writer, McpError> {
+        let (writer, _) = self.db.resource().await?;
+        Ok(writer)
+    }
+
+    /// Get the reader from the lazy database
+    async fn reader(&self) -> Result<&Reader, McpError> {
+        let (_, reader) = self.db.resource().await?;
+        Ok(reader)
     }
 
     #[tool(
@@ -150,7 +187,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<AddNodeParams>,
     ) -> Result<CallToolResult, McpError> {
-        let writer = self.db.writer().await?;
+        let writer = self.writer().await?;
         let id = Id::new();
 
         let mutation = AddNode {
@@ -185,7 +222,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<AddEdgeParams>,
     ) -> Result<CallToolResult, McpError> {
-        let writer = self.db.writer().await?;
+        let writer = self.writer().await?;
 
         let source_id = Id::from_str(&params.source_node_id).map_err(|e| {
             McpError::invalid_params(format!("Invalid source node ID: {}", e), None)
@@ -232,7 +269,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<AddNodeFragmentParams>,
     ) -> Result<CallToolResult, McpError> {
-        let writer = self.db.writer().await?;
+        let writer = self.writer().await?;
 
         let id = Id::from_str(&params.id)
             .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
@@ -265,7 +302,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<AddEdgeFragmentParams>,
     ) -> Result<CallToolResult, McpError> {
-        let writer = self.db.writer().await?;
+        let writer = self.writer().await?;
 
         let src_id = Id::from_str(&params.src_id).map_err(|e| {
             McpError::invalid_params(format!("Invalid source node ID: {}", e), None)
@@ -310,7 +347,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<UpdateNodeValidRangeParams>,
     ) -> Result<CallToolResult, McpError> {
-        let writer = self.db.writer().await?;
+        let writer = self.writer().await?;
 
         let id = Id::from_str(&params.id)
             .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
@@ -346,7 +383,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<UpdateEdgeValidRangeParams>,
     ) -> Result<CallToolResult, McpError> {
-        let writer = self.db.writer().await?;
+        let writer = self.writer().await?;
 
         let src_id = Id::from_str(&params.src_id).map_err(|e| {
             McpError::invalid_params(format!("Invalid source node ID: {}", e), None)
@@ -391,7 +428,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<UpdateEdgeWeightParams>,
     ) -> Result<CallToolResult, McpError> {
-        let writer = self.db.writer().await?;
+        let writer = self.writer().await?;
 
         let src_id = Id::from_str(&params.src_id).map_err(|e| {
             McpError::invalid_params(format!("Invalid source node ID: {}", e), None)
@@ -436,7 +473,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<QueryNodeByIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let reader = self.db.reader().await?;
+        let reader = self.reader().await?;
 
         let id = Id::from_str(&params.id)
             .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
@@ -469,7 +506,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<QueryEdgeParams>,
     ) -> Result<CallToolResult, McpError> {
-        let reader = self.db.reader().await?;
+        let reader = self.reader().await?;
 
         let source_id = Id::from_str(&params.source_id).map_err(|e| {
             McpError::invalid_params(format!("Invalid source node ID: {}", e), None)
@@ -518,7 +555,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<QueryOutgoingEdgesParams>,
     ) -> Result<CallToolResult, McpError> {
-        let reader = self.db.reader().await?;
+        let reader = self.reader().await?;
 
         let id = Id::from_str(&params.id)
             .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
@@ -562,7 +599,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<QueryIncomingEdgesParams>,
     ) -> Result<CallToolResult, McpError> {
-        let reader = self.db.reader().await?;
+        let reader = self.reader().await?;
 
         let id = Id::from_str(&params.id)
             .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
@@ -606,7 +643,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<QueryNodesByNameParams>,
     ) -> Result<CallToolResult, McpError> {
-        let reader = self.db.reader().await?;
+        let reader = self.reader().await?;
 
         let query = Nodes::new(params.name.clone(), params.limit.unwrap_or(100) as usize);
 
@@ -646,7 +683,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<QueryEdgesByNameParams>,
     ) -> Result<CallToolResult, McpError> {
-        let reader = self.db.reader().await?;
+        let reader = self.reader().await?;
 
         let query = Edges::new(params.name.clone(), params.limit.unwrap_or(100) as usize);
 
@@ -687,7 +724,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<QueryNodeFragmentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let reader = self.db.reader().await?;
+        let reader = self.reader().await?;
 
         let id = Id::from_str(&params.id)
             .map_err(|e| McpError::invalid_params(format!("Invalid node ID: {}", e), None))?;
@@ -744,7 +781,7 @@ impl MotlieMcpServer {
         &self,
         Parameters(params): Parameters<QueryEdgeFragmentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let reader = self.db.reader().await?;
+        let reader = self.reader().await?;
 
         let src_id = Id::from_str(&params.src_id).map_err(|e| {
             McpError::invalid_params(format!("Invalid source node ID: {}", e), None)

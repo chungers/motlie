@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use motlie_db::{Storage, StorageConfig};
-use motlie_mcp::{stdio, LazyDatabase, MotlieMcpServer, ServiceExt, INFO_TEXT};
+use motlie_mcp::{stdio, LazyResource, MotlieMcpServer, ServiceExt, INFO_TEXT};
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -77,9 +77,10 @@ async fn main() -> Result<()> {
     // Capture configuration for lazy initialization
     let db_path = PathBuf::from(&args.db_path);
 
-    // Create lazy database initializer
-    // The actual database initialization will happen on first tool use
-    let lazy_db = Arc::new(LazyDatabase::new(Box::new(move || {
+    // Create lazy database initializer using LazyResource
+    // The actual database initialization will happen on first tool use,
+    // allowing the MCP handshake to complete quickly over stdio transport.
+    let lazy_db = Arc::new(LazyResource::new(Box::new(move || {
         tracing::info!("Initializing database at: {:?}", db_path);
 
         // Use the unified Storage API - it handles all the complexity internally

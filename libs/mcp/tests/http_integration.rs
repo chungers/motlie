@@ -4,7 +4,7 @@
 //! a real server and making HTTP requests to it.
 
 use motlie_db::{Storage, StorageConfig};
-use motlie_mcp::{HttpConfig, LazyDatabase, MotlieMcpServer};
+use motlie_mcp::{HttpConfig, LazyResource, MotlieMcpServer};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -13,7 +13,7 @@ use tempfile::TempDir;
 fn create_test_server(db_path: &std::path::Path) -> MotlieMcpServer {
     let db_path = db_path.to_path_buf();
 
-    let lazy_db = Arc::new(LazyDatabase::new(Box::new(move || {
+    let lazy_db = Arc::new(LazyResource::new(Box::new(move || {
         // Use the unified Storage API
         let storage = Storage::readwrite(&db_path);
         let handles = storage.ready(StorageConfig::default())?;

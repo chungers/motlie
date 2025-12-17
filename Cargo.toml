@@ -88,8 +88,8 @@ name = "pagerank"
 path = "examples/graph/pagerank.rs"
 
 [[example]]
-name = "mcp"
-path = "examples/mcp/main.rs"
+name = "motlie_db"
+path = "examples/mcp/motlie_db.rs"
 
 [[example]]
 name = "bfs_original"
