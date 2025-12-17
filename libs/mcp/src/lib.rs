@@ -12,13 +12,17 @@
 pub mod http;
 pub mod types;
 
-use motlie_db::{
-    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, DataUrl, EdgeFragmentsByIdTimeRange,
-    EdgeSummary, EdgeSummaryBySrcDstName, EdgesByName, Id, IncomingEdges, MutationRunnable,
-    NodeById, NodeFragmentsByIdTimeRange, NodesByName, NodeSummary, OutgoingEdges, QueryRunnable,
-    Reader, TemporalRange, TimestampMilli, UpdateEdgeValidSinceUntil, UpdateEdgeWeight,
-    UpdateNodeValidSinceUntil, Writer,
+use motlie_db::mutation::{
+    AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, EdgeSummary, NodeSummary, Runnable as MutationRunnable,
+    UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
 };
+use motlie_db::query::{
+    EdgeFragments, Edges, IncomingEdges, NodeById, NodeFragments, Nodes, OutgoingEdges,
+    Runnable as QueryRunnable, EdgeDetails,
+};
+use motlie_db::reader::Reader;
+use motlie_db::writer::Writer;
+use motlie_db::{DataUrl, Id, TemporalRange, TimestampMilli};
 use rmcp::{
     handler::server::tool::ToolRouter, handler::server::wrapper::Parameters, model::*, tool,
     tool_handler, tool_router, ErrorData as McpError, ServerHandler,
@@ -474,14 +478,14 @@ impl MotlieMcpServer {
             McpError::invalid_params(format!("Invalid destination node ID: {}", e), None)
         })?;
 
-        let query = EdgeSummaryBySrcDstName::new(
+        let query = EdgeDetails::new(
             source_id,
             dest_id,
             params.name.clone(),
             params.reference_ts_millis.map(TimestampMilli),
         );
 
-        let (summary, weight) = query
+        let (weight, _src, _dst, _name, summary): (Option<f64>, Id, Id, String, EdgeSummary) = query
             .run(reader, self.query_timeout)
             .await
             .map_err(|e| McpError::internal_error(format!("Failed to query edge: {}", e), None))?;
@@ -521,9 +525,10 @@ impl MotlieMcpServer {
 
         let query = OutgoingEdges::new(id, params.reference_ts_millis.map(TimestampMilli));
 
-        let edges = query.run(reader, self.query_timeout).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to query outgoing edges: {}", e), None)
-        })?;
+        let edges: Vec<(Option<f64>, Id, Id, String)> =
+            query.run(reader, self.query_timeout).await.map_err(|e| {
+                McpError::internal_error(format!("Failed to query outgoing edges: {}", e), None)
+            })?;
 
         tracing::info!(
             "Queried outgoing edges from node: {} (found {})",
@@ -533,7 +538,7 @@ impl MotlieMcpServer {
 
         let edges_list: Vec<serde_json::Value> = edges
             .into_iter()
-            .map(|(weight, _src, dst, name)| {
+            .map(|(weight, _src, dst, name): (Option<f64>, Id, Id, String)| {
                 json!({
                     "target_id": dst.as_str(),
                     "name": name,
@@ -564,9 +569,10 @@ impl MotlieMcpServer {
 
         let query = IncomingEdges::new(id, params.reference_ts_millis.map(TimestampMilli));
 
-        let edges = query.run(reader, self.query_timeout).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to query incoming edges: {}", e), None)
-        })?;
+        let edges: Vec<(Option<f64>, Id, Id, String)> =
+            query.run(reader, self.query_timeout).await.map_err(|e| {
+                McpError::internal_error(format!("Failed to query incoming edges: {}", e), None)
+            })?;
 
         tracing::info!(
             "Queried incoming edges to node: {} (found {})",
@@ -576,7 +582,7 @@ impl MotlieMcpServer {
 
         let edges_list: Vec<serde_json::Value> = edges
             .into_iter()
-            .map(|(weight, _dst, src, name)| {
+            .map(|(weight, _dst, src, name): (Option<f64>, Id, Id, String)| {
                 json!({
                     "source_id": src.as_str(),
                     "name": name,
@@ -602,16 +608,12 @@ impl MotlieMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let reader = self.db.reader().await?;
 
-        let query = NodesByName::new(
-            params.name.clone(),
-            None,
-            params.limit,
-            params.reference_ts_millis.map(TimestampMilli),
-        );
+        let query = Nodes::new(params.name.clone(), params.limit.unwrap_or(100) as usize);
 
-        let nodes = query.run(reader, self.query_timeout).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to query nodes by name: {}", e), None)
-        })?;
+        let nodes: Vec<(Id, String, NodeSummary)> =
+            query.run(reader, self.query_timeout).await.map_err(|e| {
+                McpError::internal_error(format!("Failed to query nodes by name: {}", e), None)
+            })?;
 
         tracing::info!(
             "Queried nodes by name: '{}' (found {})",
@@ -621,7 +623,7 @@ impl MotlieMcpServer {
 
         let nodes_list: Vec<serde_json::Value> = nodes
             .into_iter()
-            .map(|(name, id)| {
+            .map(|(id, name, _summary)| {
                 json!({
                     "name": name,
                     "id": id.as_str()
@@ -646,16 +648,12 @@ impl MotlieMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let reader = self.db.reader().await?;
 
-        let query = EdgesByName::new(
-            params.name.clone(),
-            None,
-            params.limit,
-            params.reference_ts_millis.map(TimestampMilli),
-        );
+        let query = Edges::new(params.name.clone(), params.limit.unwrap_or(100) as usize);
 
-        let edges = query.run(reader, self.query_timeout).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to query edges by name: {}", e), None)
-        })?;
+        let edges: Vec<(Id, Id, String, EdgeSummary)> =
+            query.run(reader, self.query_timeout).await.map_err(|e| {
+                McpError::internal_error(format!("Failed to query edges by name: {}", e), None)
+            })?;
 
         tracing::info!(
             "Queried edges by name: '{}' (found {})",
@@ -665,10 +663,11 @@ impl MotlieMcpServer {
 
         let edges_list: Vec<serde_json::Value> = edges
             .into_iter()
-            .map(|(name, id)| {
+            .map(|(src_id, dst_id, name, _summary)| {
                 json!({
-                    "name": name,
-                    "id": id.as_str()
+                    "source_id": src_id.as_str(),
+                    "dest_id": dst_id.as_str(),
+                    "name": name
                 })
             })
             .collect();
@@ -700,15 +699,16 @@ impl MotlieMcpServer {
             .end_ts_millis
             .map_or(Bound::Unbounded, |ts| Bound::Included(TimestampMilli(ts)));
 
-        let query = NodeFragmentsByIdTimeRange::new(
+        let query = NodeFragments::new(
             id,
             (start_bound, end_bound),
             params.reference_ts_millis.map(TimestampMilli),
         );
 
-        let fragments = query.run(reader, self.query_timeout).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to query node fragments: {}", e), None)
-        })?;
+        let fragments: Vec<(TimestampMilli, DataUrl)> =
+            query.run(reader, self.query_timeout).await.map_err(|e| {
+                McpError::internal_error(format!("Failed to query node fragments: {}", e), None)
+            })?;
 
         tracing::info!(
             "Queried node fragments for node: {} (found {})",
@@ -718,7 +718,7 @@ impl MotlieMcpServer {
 
         let fragments_list: Vec<serde_json::Value> = fragments
             .into_iter()
-            .map(|(ts, content)| {
+            .map(|(ts, content): (TimestampMilli, DataUrl)| {
                 let content_text = content
                     .decode_string()
                     .unwrap_or_else(|_| "Unable to decode content".to_string());
@@ -760,7 +760,7 @@ impl MotlieMcpServer {
             .end_ts_millis
             .map_or(Bound::Unbounded, |ts| Bound::Included(TimestampMilli(ts)));
 
-        let query = EdgeFragmentsByIdTimeRange::new(
+        let query = EdgeFragments::new(
             src_id,
             dst_id,
             params.edge_name.clone(),
@@ -768,9 +768,10 @@ impl MotlieMcpServer {
             params.reference_ts_millis.map(TimestampMilli),
         );
 
-        let fragments = query.run(reader, self.query_timeout).await.map_err(|e| {
-            McpError::internal_error(format!("Failed to query edge fragments: {}", e), None)
-        })?;
+        let fragments: Vec<(TimestampMilli, DataUrl)> =
+            query.run(reader, self.query_timeout).await.map_err(|e| {
+                McpError::internal_error(format!("Failed to query edge fragments: {}", e), None)
+            })?;
 
         tracing::info!(
             "Queried edge fragments for edge {} -> {} '{}' (found {})",
@@ -782,7 +783,7 @@ impl MotlieMcpServer {
 
         let fragments_list: Vec<serde_json::Value> = fragments
             .into_iter()
-            .map(|(ts, content)| {
+            .map(|(ts, content): (TimestampMilli, DataUrl)| {
                 let content_text = content
                     .decode_string()
                     .unwrap_or_else(|_| "Unable to decode content".to_string());

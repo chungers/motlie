@@ -3,7 +3,7 @@
 //! These tests verify the HTTP transport works correctly by starting
 //! a real server and making HTTP requests to it.
 
-use motlie_db::{create_mutation_writer, create_query_reader, Graph, ReaderConfig, Storage, WriterConfig, spawn_graph_consumer_with_graph, spawn_query_consumer_pool_shared};
+use motlie_db::{Storage, StorageConfig};
 use motlie_mcp::{HttpConfig, LazyDatabase, MotlieMcpServer};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,33 +14,11 @@ fn create_test_server(db_path: &std::path::Path) -> MotlieMcpServer {
     let db_path = db_path.to_path_buf();
 
     let lazy_db = Arc::new(LazyDatabase::new(Box::new(move || {
-        let writer_config = WriterConfig {
-            channel_buffer_size: 10,
-        };
-        let reader_config = ReaderConfig {
-            channel_buffer_size: 10,
-        };
+        // Use the unified Storage API
+        let storage = Storage::readwrite(&db_path);
+        let handles = storage.ready(StorageConfig::default())?;
 
-        let mut storage = Storage::readwrite(&db_path);
-        storage.ready()?;
-        let storage = Arc::new(storage);
-        let graph = Arc::new(Graph::new(storage));
-
-        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
-        let _mutation_handle = spawn_graph_consumer_with_graph(
-            mutation_receiver,
-            writer_config,
-            graph.clone(),
-        );
-
-        let (reader, query_receiver) = create_query_reader(reader_config.clone());
-        let _query_handles = spawn_query_consumer_pool_shared(
-            query_receiver,
-            graph.clone(),
-            2,
-        );
-
-        Ok((writer, reader))
+        Ok((handles.writer_clone(), handles.reader_clone()))
     })));
 
     MotlieMcpServer::new(lazy_db, Duration::from_secs(5))
