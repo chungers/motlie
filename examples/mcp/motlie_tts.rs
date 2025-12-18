@@ -155,7 +155,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Graceful shutdown (no-op for TTS, but follows the pattern)
+    // Graceful shutdown - waits for worker to finish speaking
     tracing::info!("Shutting down TTS engine...");
     if let Err(e) = managed_tts.shutdown().await {
         tracing::error!("TTS shutdown error: {}", e);
