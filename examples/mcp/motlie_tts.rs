@@ -25,14 +25,17 @@
 //! 10-30+ seconds to complete. With stdio transport, if the client closes
 //! stdin before speech finishes, the server terminates and speech may be
 //! interrupted. HTTP connections remain open until the response is sent.
+//!
+//! # Graceful Shutdown
+//!
+//! This server properly handles Ctrl+C for graceful shutdown.
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use motlie_mcp::tts::{self, TtsMcpServer};
-use motlie_mcp::{stdio, ServiceExt};
+use motlie_mcp::tts::{TtsEngine, TtsMcpServer};
+use motlie_mcp::{stdio, ManagedResource, ServiceExt};
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// Transport protocol for MCP server
@@ -96,12 +99,12 @@ async fn main() -> Result<()> {
     // Parse command-line arguments
     let args = Args::parse();
 
-    // Create lazy TTS initializer
+    // Create managed TTS resource with proper lifecycle
     // Platform validation happens on first tool use
-    let lazy_tts = Arc::new(tts::create_lazy_tts());
+    let managed_tts = ManagedResource::new(Box::new(|| TtsEngine::new()));
 
     // Build the MCP server
-    let server = TtsMcpServer::new(lazy_tts);
+    let server = TtsMcpServer::new(managed_tts.lazy());
 
     tracing::info!("Starting Motlie TTS MCP server...");
     tracing::info!("Server: motlie-tts-mcp");
@@ -111,6 +114,7 @@ async fn main() -> Result<()> {
     tracing::info!("Transport: {}", args.transport);
 
     // Start the server with the selected transport
+    // Use tokio::select! to handle graceful shutdown on Ctrl+C
     match args.transport {
         Transport::Stdio => {
             tracing::info!("Listening on stdio (standard input/output)");
@@ -119,7 +123,16 @@ async fn main() -> Result<()> {
                 tracing::error!("serving error: {:?}", e);
             })?;
 
-            service.waiting().await?;
+            // Wait for service to complete or Ctrl+C
+            tokio::select! {
+                result = service.waiting() => {
+                    result?;
+                    tracing::info!("Service completed normally");
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received Ctrl+C, initiating graceful shutdown...");
+                }
+            }
         }
         Transport::Http => {
             let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
@@ -129,9 +142,26 @@ async fn main() -> Result<()> {
                 .with_mcp_path(&args.mcp_path)
                 .with_sse_keep_alive(Some(Duration::from_secs(30)));
 
-            motlie_mcp::serve_http(server, http_config).await?;
+            // Run HTTP server until Ctrl+C
+            tokio::select! {
+                result = motlie_mcp::serve_http(server, http_config) => {
+                    result?;
+                    tracing::info!("HTTP server completed normally");
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received Ctrl+C, initiating graceful shutdown...");
+                }
+            }
         }
     }
+
+    // Graceful shutdown (no-op for TTS, but follows the pattern)
+    tracing::info!("Shutting down TTS engine...");
+    if let Err(e) = managed_tts.shutdown().await {
+        tracing::error!("TTS shutdown error: {}", e);
+        return Err(e);
+    }
+    tracing::info!("TTS shutdown complete");
 
     Ok(())
 }
