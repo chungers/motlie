@@ -12,20 +12,27 @@
 //! which binds the parameter to its execution logic. This ensures a 1:1 correspondence
 //! between parameter types and tool implementations.
 //!
-//! # Example: Using the default server
+//! # Example: Using the default server with lifecycle management
 //!
 //! ```ignore
 //! use motlie_mcp::db::{MotlieMcpServer, LazyDb};
-//! use motlie_mcp::LazyResource;
+//! use motlie_mcp::{ManagedResource, LazyResource};
+//! use motlie_db::{Storage, StorageConfig};
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //!
-//! let db = Arc::new(LazyResource::new(Box::new(|| {
-//!     // Initialize database
-//!     Ok((writer, reader))
-//! })));
+//! // Create managed resource for proper lifecycle
+//! let managed_db = ManagedResource::new(Box::new(|| {
+//!     let storage = Storage::readwrite("/path/to/db");
+//!     storage.ready(StorageConfig::default())
+//! }));
 //!
-//! let server = MotlieMcpServer::new(db, Duration::from_secs(30));
+//! let server = MotlieMcpServer::new(managed_db.lazy(), Duration::from_secs(30));
+//!
+//! // Run server...
+//!
+//! // Graceful shutdown (critical for data integrity!)
+//! managed_db.shutdown().await?;
 //! ```
 //!
 //! # Example: Composing tools into a custom server
@@ -47,9 +54,11 @@ pub mod types;
 pub use server::MotlieMcpServer;
 pub use types::*;
 
-use crate::LazyResource;
+use crate::{LazyResource, ResourceLifecycle};
+use async_trait::async_trait;
 use motlie_db::reader::Reader;
 use motlie_db::writer::Writer;
+use motlie_db::ReadWriteHandles;
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,7 +67,31 @@ use std::time::Duration;
 ///
 /// The database is lazily initialized on first tool invocation to allow
 /// fast MCP handshake completion.
-pub type LazyDb = LazyResource<(Writer, Reader)>;
+///
+/// Uses `ReadWriteHandles` to support proper lifecycle management including
+/// graceful shutdown.
+pub type LazyDb = LazyResource<ReadWriteHandles>;
+
+// ============================================================================
+// ResourceLifecycle Implementation
+// ============================================================================
+
+#[async_trait]
+impl ResourceLifecycle for ReadWriteHandles {
+    /// Gracefully shut down the database.
+    ///
+    /// This flushes pending writes, closes background workers, and releases
+    /// the RocksDB lock. Critical for data integrity!
+    async fn shutdown(self) -> anyhow::Result<()> {
+        tracing::info!("Shutting down database handles...");
+        self.shutdown().await?;
+        Ok(())
+    }
+}
+
+// ============================================================================
+// DbResource
+// ============================================================================
 
 /// Resource context for database tool execution.
 ///
@@ -77,14 +110,14 @@ impl DbResource {
 
     /// Get the writer for mutation operations.
     pub async fn writer(&self) -> Result<&Writer, McpError> {
-        let (writer, _) = self.db.resource().await?;
-        Ok(writer)
+        let handles = self.db.resource().await?;
+        Ok(handles.writer())
     }
 
     /// Get the reader for query operations.
     pub async fn reader(&self) -> Result<&Reader, McpError> {
-        let (_, reader) = self.db.resource().await?;
-        Ok(reader)
+        let handles = self.db.resource().await?;
+        Ok(handles.reader())
     }
 
     /// Get the query timeout duration.

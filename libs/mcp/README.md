@@ -8,6 +8,7 @@ This library provides a modular architecture for building MCP servers with suppo
 
 - **Tool Composition**: Combine tools from multiple domains (db, tts, etc.) into a single server
 - **Trait-Based Design**: Parameter types implement `ToolCall` trait, ensuring 1:1 correspondence with implementations
+- **Resource Lifecycle Management**: `ManagedResource` + `ResourceLifecycle` trait for graceful shutdown
 - **Lazy Initialization**: Fast server startup with on-demand resource initialization
 - **Multiple Transports**: stdio (for local integration) and HTTP with SSE (for remote access)
 
@@ -16,14 +17,15 @@ This library provides a modular architecture for building MCP servers with suppo
 ```
 libs/mcp/
 ├── src/
-│   ├── lib.rs          # Core infrastructure: LazyResource, ToolCall trait, re-exports
+│   ├── lib.rs          # Core infrastructure: LazyResource, ManagedResource,
+│   │                   # ResourceLifecycle trait, ToolCall trait, re-exports
 │   ├── http.rs         # Generic HTTP transport for any ServerHandler
 │   ├── db/             # Motlie graph database tools
-│   │   ├── mod.rs      # LazyDb, DbResource, INSTRUCTIONS
+│   │   ├── mod.rs      # LazyDb, DbResource, ResourceLifecycle impl, INSTRUCTIONS
 │   │   ├── types.rs    # Parameter types with ToolCall implementations
 │   │   └── server.rs   # MotlieMcpServer (ready-to-use server)
 │   └── tts/            # Text-to-speech tools (macOS)
-│       ├── mod.rs      # LazyTts, TtsResource, TtsEngine
+│       ├── mod.rs      # LazyTts, TtsResource, TtsEngine, ResourceLifecycle impl
 │       ├── types.rs    # Parameter types with ToolCall implementations
 │       └── server.rs   # TtsMcpServer (ready-to-use server)
 └── examples/
@@ -35,6 +37,8 @@ libs/mcp/
 | Component | Description |
 |-----------|-------------|
 | `LazyResource<R>` | Deferred resource initialization for fast MCP handshake |
+| `ManagedResource<R>` | Wrapper providing full resource lifecycle (init + shutdown) |
+| `ResourceLifecycle` | Trait for resources that require graceful shutdown |
 | `ToolCall` trait | Binds parameter types to their execution logic |
 | `db::MotlieMcpServer` | Ready-to-use server for database tools |
 | `tts::TtsMcpServer` | Ready-to-use server for TTS tools (macOS) |
@@ -60,34 +64,91 @@ This design ensures:
 - **1:1 correspondence**: No sprawling re-implementations across servers
 - **Easy composition**: Any server can delegate via `params.call(&resource).await`
 
-## Quick Start
+### Resource Lifecycle Management
 
-### Using a Pre-built Server
+Resources like databases require proper shutdown to prevent data corruption. The `ResourceLifecycle` trait and `ManagedResource` wrapper provide this:
 
 ```rust
-use motlie_mcp::db::{MotlieMcpServer, LazyDb};
-use motlie_mcp::{LazyResource, serve_http, HttpConfig};
-use std::sync::Arc;
+/// Trait for resources that require graceful shutdown
+#[async_trait]
+pub trait ResourceLifecycle: Send + Sync + Sized {
+    async fn shutdown(self) -> anyhow::Result<()>;
+}
+
+/// Wrapper managing the full lifecycle: lazy init → use → shutdown
+pub struct ManagedResource<R: ResourceLifecycle + Send + Sync + 'static> {
+    lazy: Arc<LazyResource<R>>,
+}
+
+impl<R: ResourceLifecycle + Send + Sync + 'static> ManagedResource<R> {
+    /// Create a new managed resource with a synchronous init function
+    pub fn new(init_fn: ResourceInitFn<R>) -> Self;
+
+    /// Get a clone of the lazy resource Arc for passing to servers
+    pub fn lazy(&self) -> Arc<LazyResource<R>>;
+
+    /// Gracefully shut down the resource (waits for exclusive ownership)
+    pub async fn shutdown(self) -> anyhow::Result<()>;
+}
+```
+
+**Architecture**:
+
+```
+ManagedResource<R: ResourceLifecycle>
+    │
+    └── owns Arc<LazyResource<R>>
+            │
+            └── lazy init → R (resource)
+                    │
+                    └── R::shutdown(self) on ManagedResource::shutdown()
+```
+
+**Shutdown Semantics**:
+- `ManagedResource::shutdown()` uses `Arc::try_unwrap` to ensure exclusive ownership
+- If other Arc references exist, shutdown returns an error
+- Caller is responsible for dropping server instances before calling shutdown
+
+## Quick Start
+
+### Using a Pre-built Server with Lifecycle Management
+
+```rust
+use motlie_mcp::db::MotlieMcpServer;
+use motlie_mcp::{ManagedResource, serve_http, HttpConfig};
+use motlie_db::{Storage, StorageConfig};
 use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let db = Arc::new(LazyResource::new(Box::new(|| {
-        // Initialize database
+    // Create managed resource with proper lifecycle
+    let managed_db = ManagedResource::new(Box::new(|| {
         let storage = Storage::readwrite("/path/to/db");
-        let handles = storage.ready(StorageConfig::default())?;
-        Ok((handles.writer_clone(), handles.reader_clone()))
-    })));
+        storage.ready(StorageConfig::default())
+    }));
 
-    let server = MotlieMcpServer::new(db, Duration::from_secs(30));
-    serve_http(server, HttpConfig::default()).await
+    let server = MotlieMcpServer::new(managed_db.lazy(), Duration::from_secs(30));
+
+    // Run server until Ctrl+C
+    tokio::select! {
+        result = serve_http(server, HttpConfig::default()) => {
+            result?;
+        }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Shutting down...");
+        }
+    }
+
+    // Graceful shutdown - critical for data integrity!
+    managed_db.shutdown().await?;
+    Ok(())
 }
 ```
 
 ### Composing Tools from Multiple Domains
 
 ```rust
-use motlie_mcp::{db, tts, ToolCall, LazyResource, serve_http, HttpConfig};
+use motlie_mcp::{db, tts, ToolCall, ManagedResource};
 use rmcp::{tool, tool_router, tool_handler, ServerHandler, model::*};
 
 #[derive(Clone)]
@@ -109,9 +170,25 @@ impl CombinedServer {
         p.call(&self.tts_resource).await  // Delegate to ToolCall impl
     }
 }
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Create managed resources
+    let managed_db = ManagedResource::new(Box::new(|| { /* ... */ }));
+    let managed_tts = ManagedResource::new(Box::new(|| TtsEngine::new()));
+
+    let server = CombinedServer::new(managed_db.lazy(), managed_tts.lazy());
+
+    // Run server...
+
+    // Shutdown all resources (order matters for dependencies)
+    managed_tts.shutdown().await?;  // TTS first (no dependencies)
+    managed_db.shutdown().await?;   // DB last (may have pending writes)
+    Ok(())
+}
 ```
 
-See `examples/combined_server.rs` for a complete example.
+See `examples/mcp/all.rs` for a complete example.
 
 ## Tool Modules
 
@@ -142,6 +219,8 @@ See `examples/combined_server.rs` for a complete example.
 | `query_node_fragments` | Get node fragments by time range |
 | `query_edge_fragments` | Get edge fragments by time range |
 
+**Resource Lifecycle**: `ReadWriteHandles` implements `ResourceLifecycle`, calling the internal `shutdown()` method which flushes pending writes and closes the RocksDB database cleanly.
+
 ### TTS Tools (`tts`)
 
 Text-to-speech tools using macOS speech synthesis:
@@ -153,6 +232,8 @@ Text-to-speech tools using macOS speech synthesis:
 
 **Platform Support**: macOS only. On other platforms, tools return an error.
 
+**Resource Lifecycle**: `TtsEngine` implements `ResourceLifecycle` as a no-op since it only holds a path string with no cleanup needed.
+
 ## Extending the Library
 
 ### Adding a New Tool Module
@@ -162,13 +243,28 @@ To add a new tool domain (e.g., `search`):
 1. **Create the module structure**:
    ```
    src/search/
-   ├── mod.rs      # LazySearch, SearchResource, INSTRUCTIONS
+   ├── mod.rs      # LazySearch, SearchResource, ResourceLifecycle impl, INSTRUCTIONS
    ├── types.rs    # Parameter types with ToolCall implementations
    └── server.rs   # SearchMcpServer
    ```
 
-2. **Define the resource type** (`mod.rs`):
+2. **Define the resource type with lifecycle** (`mod.rs`):
    ```rust
+   use crate::{LazyResource, ResourceLifecycle};
+   use async_trait::async_trait;
+
+   pub struct SearchEngine { /* ... */ }
+
+   #[async_trait]
+   impl ResourceLifecycle for SearchEngine {
+       async fn shutdown(self) -> anyhow::Result<()> {
+           // Flush indexes, close file handles, etc.
+           self.flush().await?;
+           self.close().await?;
+           Ok(())
+       }
+   }
+
    pub type LazySearch = LazyResource<SearchEngine>;
 
    pub struct SearchResource {
@@ -296,6 +392,26 @@ The `ToolCall` trait ensures every parameter type has exactly one implementation
 - Inconsistent implementations across servers
 - Code duplication when composing servers
 
+### Resource Lifecycle Management
+
+The `ResourceLifecycle` trait + `ManagedResource` wrapper ensure proper cleanup:
+
+| Problem | Solution |
+|---------|----------|
+| Database corruption from unclean shutdown | `ResourceLifecycle::shutdown()` flushes writes |
+| Arc references preventing shutdown | `Arc::try_unwrap` in `ManagedResource::shutdown()` |
+| Forgetting to call shutdown | Clear ownership model - `ManagedResource` owner calls shutdown |
+| Resources with no cleanup needed | No-op `ResourceLifecycle` impl (e.g., `TtsEngine`) |
+
+**Why `ManagedResource` instead of constraining `LazyResource<R: ResourceLifecycle>`?**
+
+| Aspect | Constrained LazyResource | ManagedResource wrapper |
+|--------|--------------------------|-------------------------|
+| Arc::try_unwrap at call site | Caller must handle | Encapsulated |
+| Separation of concerns | LazyResource handles init + shutdown | LazyResource = init, ManagedResource = lifecycle |
+| Flexibility | All R must impl ResourceLifecycle | LazyResource usable without constraint |
+| Ownership clarity | Awkward - Arc shared but shutdown needs ownership | Owner controls lifecycle (RAII-like) |
+
 ### Lazy Resource Initialization
 
 `LazyResource<R>` defers expensive initialization (database connections, etc.) until first tool use. This enables fast MCP handshake completion, critical for stdio transport where slow startup causes timeouts.
@@ -303,15 +419,35 @@ The `ToolCall` trait ensures every parameter type has exactly one implementation
 ### Module Separation
 
 Each tool domain (`db`, `tts`, etc.) is self-contained with:
+- **mod.rs**: Resource types, `ResourceLifecycle` impl, constants
 - **types.rs**: Parameter types + `ToolCall` implementations (the source of truth)
 - **server.rs**: Ready-to-use MCP server (convenience)
-- **mod.rs**: Resource types and constants
 
 This separation enables both standalone servers and tool composition.
 
+## Examples
+
+| Example | Description |
+|---------|-------------|
+| `examples/mcp/motlie_db.rs` | Database-only server with graceful shutdown |
+| `examples/mcp/motlie_tts.rs` | TTS-only server (macOS, HTTP default) |
+| `examples/mcp/all.rs` | Combined server with 17 tools (15 db + 2 tts) |
+
+Run examples:
+```bash
+# Database server
+cargo run --example motlie_db -- --db-path /path/to/db
+
+# TTS server (HTTP default)
+cargo run --example motlie_tts
+
+# Combined server
+cargo run --example motlie_all -- --db-path /path/to/db
+```
+
 ## Documentation
 
-- [docs/DESIGN.md](docs/DESIGN.md) - Detailed architecture and design decisions
+- [TTS Module README](src/tts/README.md) - TTS-specific documentation including stdio limitations
 - [motlie-db README](../db/README.md) - Core database documentation
 - [MCP Specification](https://spec.modelcontextprotocol.io/) - Official MCP protocol specification
 - [rmcp SDK](https://docs.rs/rmcp/latest/rmcp/) - Rust MCP SDK documentation

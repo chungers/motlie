@@ -8,23 +8,28 @@
 //!
 //! ```bash
 //! # Stdio transport (for Claude Desktop, Claude Code, Cursor)
-//! cargo run --example all -- --db-path /path/to/db --transport stdio
+//! cargo run --example motlie_all -- --db-path /path/to/db --transport stdio
 //!
 //! # HTTP transport (for remote access)
-//! cargo run --example all -- --db-path /path/to/db --transport http --port 8080
+//! cargo run --example motlie_all -- --db-path /path/to/db --transport http --port 8080
 //! ```
 //!
 //! # Architecture
 //!
 //! This example demonstrates how to compose tools from multiple modules
 //! (`db` and `tts`) into a single MCP server using the `ToolCall` trait.
+//!
+//! # Graceful Shutdown
+//!
+//! This server properly handles Ctrl+C to gracefully shut down all resources,
+//! ensuring database writes are flushed and no data corruption occurs.
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use motlie_db::{Storage, StorageConfig};
 use motlie_mcp::db::{self, DbResource};
-use motlie_mcp::tts::{self, TtsResource};
-use motlie_mcp::{stdio, LazyResource, ServiceExt, ToolCall};
+use motlie_mcp::tts::{self, TtsEngine, TtsResource};
+use motlie_mcp::{stdio, ManagedResource, ServiceExt, ToolCall};
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
@@ -300,23 +305,23 @@ async fn main() -> Result<()> {
     // Capture configuration for lazy initialization
     let db_path = PathBuf::from(&args.db_path);
 
-    // Create lazy database initializer
-    let lazy_db = Arc::new(LazyResource::new(Box::new(move || {
+    // Create managed database resource with proper lifecycle
+    let managed_db = ManagedResource::new(Box::new(move || {
         tracing::info!("Initializing database at: {:?}", db_path);
 
         let storage = Storage::readwrite(&db_path);
         let handles = storage.ready(StorageConfig::default())?;
 
         tracing::info!("Database initialized successfully");
-        Ok((handles.writer_clone(), handles.reader_clone()))
-    })));
+        Ok(handles)
+    }));
 
-    // Create lazy TTS initializer
-    let lazy_tts = Arc::new(tts::create_lazy_tts());
+    // Create managed TTS resource with proper lifecycle
+    let managed_tts = ManagedResource::new(Box::new(|| TtsEngine::new()));
 
     // Build the combined MCP server
     let query_timeout = Duration::from_secs(args.query_timeout);
-    let server = CombinedServer::new(lazy_db, lazy_tts, query_timeout);
+    let server = CombinedServer::new(managed_db.lazy(), managed_tts.lazy(), query_timeout);
 
     tracing::info!("Starting Combined Motlie MCP server...");
     tracing::info!("Server: motlie-all-mcp");
@@ -327,6 +332,7 @@ async fn main() -> Result<()> {
     tracing::info!("Transport: {}", args.transport);
 
     // Start the server with the selected transport
+    // Use tokio::select! to handle graceful shutdown on Ctrl+C
     match args.transport {
         Transport::Stdio => {
             tracing::info!("Listening on stdio (standard input/output)");
@@ -335,7 +341,16 @@ async fn main() -> Result<()> {
                 tracing::error!("serving error: {:?}", e);
             })?;
 
-            service.waiting().await?;
+            // Wait for service to complete or Ctrl+C
+            tokio::select! {
+                result = service.waiting() => {
+                    result?;
+                    tracing::info!("Service completed normally");
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received Ctrl+C, initiating graceful shutdown...");
+                }
+            }
         }
         Transport::Http => {
             let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
@@ -345,9 +360,35 @@ async fn main() -> Result<()> {
                 .with_mcp_path(&args.mcp_path)
                 .with_sse_keep_alive(Some(Duration::from_secs(30)));
 
-            motlie_mcp::serve_http(server, http_config).await?;
+            // Run HTTP server until Ctrl+C
+            tokio::select! {
+                result = motlie_mcp::serve_http(server, http_config) => {
+                    result?;
+                    tracing::info!("HTTP server completed normally");
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received Ctrl+C, initiating graceful shutdown...");
+                }
+            }
         }
     }
+
+    // Graceful shutdown of all resources
+    // Database shutdown is critical for data integrity!
+    tracing::info!("Shutting down resources...");
+
+    // Shutdown TTS first (quick, no-op)
+    if let Err(e) = managed_tts.shutdown().await {
+        tracing::error!("TTS shutdown error: {}", e);
+    }
+
+    // Shutdown database (important - flushes writes)
+    if let Err(e) = managed_db.shutdown().await {
+        tracing::error!("Database shutdown error: {}", e);
+        return Err(e);
+    }
+
+    tracing::info!("All resources shutdown complete");
 
     Ok(())
 }

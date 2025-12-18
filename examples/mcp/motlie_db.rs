@@ -11,16 +11,20 @@
 //! # HTTP transport (for remote access)
 //! cargo run --example motlie_db -- --db-path /path/to/db --transport http --port 8080
 //! ```
+//!
+//! # Graceful Shutdown
+//!
+//! This server properly handles Ctrl+C to gracefully shut down the database,
+//! ensuring all pending writes are flushed and no data corruption occurs.
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use motlie_db::{Storage, StorageConfig};
 use motlie_mcp::db::MotlieMcpServer;
-use motlie_mcp::{stdio, LazyResource, ServiceExt};
+use motlie_mcp::{stdio, ManagedResource, ServiceExt};
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// Transport protocol for MCP server
@@ -95,22 +99,22 @@ async fn main() -> Result<()> {
     // Capture configuration for lazy initialization
     let db_path = PathBuf::from(&args.db_path);
 
-    // Create lazy database initializer
+    // Create managed database resource with proper lifecycle
     // The actual database initialization happens on first tool use,
     // allowing the MCP handshake to complete quickly.
-    let lazy_db = Arc::new(LazyResource::new(Box::new(move || {
+    let managed_db = ManagedResource::new(Box::new(move || {
         tracing::info!("Initializing database at: {:?}", db_path);
 
         let storage = Storage::readwrite(&db_path);
         let handles = storage.ready(StorageConfig::default())?;
 
         tracing::info!("Database initialized successfully");
-        Ok((handles.writer_clone(), handles.reader_clone()))
-    })));
+        Ok(handles)
+    }));
 
     // Build the MCP server with lazy database
     let query_timeout = Duration::from_secs(args.query_timeout);
-    let server = MotlieMcpServer::new(lazy_db, query_timeout);
+    let server = MotlieMcpServer::new(managed_db.lazy(), query_timeout);
 
     tracing::info!("Starting Motlie Database MCP server...");
     tracing::info!("Server: motlie-db-mcp");
@@ -120,7 +124,8 @@ async fn main() -> Result<()> {
     tracing::info!("Transport: {}", args.transport);
 
     // Start the server with the selected transport
-    match args.transport {
+    // Use tokio::select! to handle graceful shutdown on Ctrl+C
+    let shutdown_result = match args.transport {
         Transport::Stdio => {
             tracing::info!("Listening on stdio (standard input/output)");
 
@@ -128,7 +133,17 @@ async fn main() -> Result<()> {
                 tracing::error!("serving error: {:?}", e);
             })?;
 
-            service.waiting().await?;
+            // Wait for service to complete or Ctrl+C
+            tokio::select! {
+                result = service.waiting() => {
+                    result?;
+                    tracing::info!("Service completed normally");
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received Ctrl+C, initiating graceful shutdown...");
+                }
+            }
+            Ok(())
         }
         Transport::Http => {
             let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
@@ -138,9 +153,27 @@ async fn main() -> Result<()> {
                 .with_mcp_path(&args.mcp_path)
                 .with_sse_keep_alive(Some(Duration::from_secs(30)));
 
-            motlie_mcp::serve_http(server, http_config).await?;
+            // Run HTTP server until Ctrl+C
+            tokio::select! {
+                result = motlie_mcp::serve_http(server, http_config) => {
+                    result?;
+                    tracing::info!("HTTP server completed normally");
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received Ctrl+C, initiating graceful shutdown...");
+                }
+            }
+            Ok(())
         }
-    }
+    };
 
-    Ok(())
+    // Graceful shutdown - critical for data integrity!
+    tracing::info!("Shutting down database...");
+    if let Err(e) = managed_db.shutdown().await {
+        tracing::error!("Database shutdown error: {}", e);
+        return Err(e);
+    }
+    tracing::info!("Database shutdown complete");
+
+    shutdown_result
 }

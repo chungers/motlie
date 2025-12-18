@@ -3,7 +3,7 @@
 //! This crate provides infrastructure for building MCP servers with support for
 //! multiple tool domains. It includes:
 //!
-//! - **Generic infrastructure**: `LazyResource`, `ToolCall` trait, HTTP transport
+//! - **Generic infrastructure**: `LazyResource`, `ManagedResource`, `ToolCall` trait, HTTP transport
 //! - **db**: Motlie graph database tools
 //! - **tts**: Text-to-speech tools (macOS)
 //!
@@ -16,25 +16,35 @@
 //! ## Key Components
 //!
 //! - [`LazyResource<R>`]: Deferred resource initialization for fast MCP handshake
+//! - [`ManagedResource<R>`]: Wrapper providing full resource lifecycle (init + shutdown)
+//! - [`ResourceLifecycle`]: Trait for resources that require graceful shutdown
 //! - [`ToolCall`]: Trait binding parameter types to their execution logic
 //! - [`db::MotlieMcpServer`]: Ready-to-use server for database tools
 //! - [`tts::TtsMcpServer`]: Ready-to-use server for TTS tools
 //! - [`serve_http`]: HTTP transport for any `ServerHandler`
 //!
-//! # Quick Start: Using a Pre-built Server
+//! # Resource Lifecycle
+//!
+//! Resources like databases require proper shutdown to prevent data corruption.
+//! Use [`ManagedResource`] to ensure graceful shutdown:
 //!
 //! ```ignore
-//! use motlie_mcp::db::{MotlieMcpServer, LazyDb};
-//! use motlie_mcp::{LazyResource, serve_http, HttpConfig};
-//! use std::sync::Arc;
-//! use std::time::Duration;
+//! use motlie_mcp::{ManagedResource, ResourceLifecycle};
 //!
-//! let db = Arc::new(LazyResource::new(Box::new(|| {
-//!     Ok((writer, reader))
-//! })));
+//! let managed = ManagedResource::new(|| async {
+//!     Ok(MyDatabase::open("/path/to/db")?)
+//! });
 //!
-//! let server = MotlieMcpServer::new(db, Duration::from_secs(30));
-//! serve_http(server, HttpConfig::default()).await?;
+//! let server = MyServer::new(managed.lazy());
+//!
+//! // Run server...
+//! tokio::select! {
+//!     _ = run_server(server) => {}
+//!     _ = tokio::signal::ctrl_c() => {}
+//! }
+//!
+//! // Graceful shutdown
+//! managed.shutdown().await?;
 //! ```
 //!
 //! # Composing Tools from Multiple Domains
@@ -75,7 +85,10 @@ pub mod tts;
 
 use async_trait::async_trait;
 use rmcp::{model::CallToolResult, ErrorData as McpError};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Mutex;
+use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 /// Generic initialization function type for lazy resources.
@@ -164,6 +177,163 @@ impl<R> LazyResource<R> {
 
         Ok(())
     }
+
+    /// Consume the LazyResource and return the inner resource if initialized.
+    ///
+    /// This is used internally by `ManagedResource` for shutdown.
+    fn into_inner(self) -> Option<R> {
+        self.resource.into_inner()
+    }
+}
+
+// ============================================================================
+// ResourceLifecycle Trait
+// ============================================================================
+
+/// Trait for resources that require graceful shutdown.
+///
+/// Resources like databases need to flush buffers, close file handles, and
+/// wait for background tasks to complete. Implementing this trait ensures
+/// proper cleanup when the MCP server shuts down.
+///
+/// # Example
+///
+/// ```ignore
+/// use motlie_mcp::ResourceLifecycle;
+/// use async_trait::async_trait;
+///
+/// struct MyDatabase { /* ... */ }
+///
+/// #[async_trait]
+/// impl ResourceLifecycle for MyDatabase {
+///     async fn shutdown(self) -> anyhow::Result<()> {
+///         self.flush().await?;
+///         self.close().await?;
+///         Ok(())
+///     }
+/// }
+/// ```
+#[async_trait]
+pub trait ResourceLifecycle: Send + Sync + Sized {
+    /// Perform graceful shutdown of the resource.
+    ///
+    /// This method consumes `self` to ensure the resource cannot be used
+    /// after shutdown. Implementations should:
+    /// - Flush any pending writes
+    /// - Close file handles and network connections
+    /// - Wait for background tasks to complete
+    async fn shutdown(self) -> anyhow::Result<()>;
+}
+
+// ============================================================================
+// ManagedResource
+// ============================================================================
+
+/// Type alias for the async initialization function used by ManagedResource.
+pub type AsyncInitFn<R> = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = anyhow::Result<R>> + Send>> + Send + Sync>;
+
+/// A resource wrapper that manages the full lifecycle: lazy init → use → shutdown.
+///
+/// `ManagedResource` owns the `LazyResource` and provides proper lifecycle management.
+/// It ensures that resources requiring shutdown (like databases) are properly cleaned
+/// up when the server stops.
+///
+/// # Ownership Model
+///
+/// - `ManagedResource` owns the `Arc<LazyResource<R>>`
+/// - Call `lazy()` to get a clone of the Arc for passing to servers
+/// - Call `shutdown()` when done to gracefully shut down the resource
+///
+/// # Example
+///
+/// ```ignore
+/// use motlie_mcp::ManagedResource;
+/// use motlie_db::{Storage, StorageConfig};
+///
+/// // Create managed resource with async initialization
+/// let managed = ManagedResource::new(|| async {
+///     let storage = Storage::readwrite("/path/to/db");
+///     storage.ready(StorageConfig::default())
+/// });
+///
+/// // Pass lazy resource to server
+/// let server = MyServer::new(managed.lazy());
+///
+/// // Run server until Ctrl+C
+/// tokio::select! {
+///     _ = run_server(server) => {}
+///     _ = tokio::signal::ctrl_c() => {
+///         tracing::info!("Shutting down...");
+///     }
+/// }
+///
+/// // Graceful shutdown - this is critical for data integrity!
+/// managed.shutdown().await?;
+/// ```
+pub struct ManagedResource<R: ResourceLifecycle + Send + Sync + 'static> {
+    lazy: Arc<LazyResource<R>>,
+}
+
+impl<R: ResourceLifecycle + Send + Sync + 'static> ManagedResource<R> {
+    /// Create a new managed resource with a synchronous initialization function.
+    ///
+    /// The initialization is deferred until the first tool invocation,
+    /// allowing fast MCP handshake completion.
+    pub fn new(init_fn: ResourceInitFn<R>) -> Self {
+        Self {
+            lazy: Arc::new(LazyResource::new(init_fn)),
+        }
+    }
+
+    /// Get a clone of the lazy resource Arc for passing to servers.
+    ///
+    /// The returned Arc can be cloned and shared across multiple tasks.
+    /// The underlying resource remains owned by this `ManagedResource`.
+    pub fn lazy(&self) -> Arc<LazyResource<R>> {
+        Arc::clone(&self.lazy)
+    }
+
+    /// Check if the resource has been initialized.
+    pub fn is_initialized(&self) -> bool {
+        self.lazy.is_initialized()
+    }
+
+    /// Gracefully shut down the resource.
+    ///
+    /// This method:
+    /// 1. Waits for exclusive ownership of the resource (all Arc clones must be dropped)
+    /// 2. Calls the resource's `shutdown()` method
+    /// 3. Returns any shutdown errors
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The resource is still referenced by other Arc holders
+    /// - The resource's shutdown method fails
+    ///
+    /// # Panics
+    ///
+    /// This method does not panic, but will return an error if shutdown cannot proceed.
+    pub async fn shutdown(self) -> anyhow::Result<()> {
+        match Arc::try_unwrap(self.lazy) {
+            Ok(lazy) => {
+                if let Some(resource) = lazy.into_inner() {
+                    tracing::info!("Shutting down resource...");
+                    resource.shutdown().await?;
+                    tracing::info!("Resource shutdown complete");
+                } else {
+                    tracing::info!("Resource was never initialized, nothing to shut down");
+                }
+                Ok(())
+            }
+            Err(_) => {
+                anyhow::bail!(
+                    "Cannot shutdown: resource is still referenced. \
+                     Ensure all server instances are dropped before calling shutdown."
+                )
+            }
+        }
+    }
 }
 
 /// Trait for MCP tool parameters that can be executed against a resource.
@@ -228,3 +398,6 @@ pub use db::{LazyDb, MotlieMcpServer};
 
 // Re-export DbResource for composition
 pub use db::DbResource;
+
+// Re-export ResourceLifecycle and ManagedResource are already defined in this file
+// (no need for re-export, they are public)

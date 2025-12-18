@@ -13,14 +13,20 @@
 //! These tools are only supported on macOS. The `TtsEngine::new()` constructor
 //! validates the platform at runtime and returns an error on unsupported systems.
 //!
-//! # Example: Using the default server
+//! # Example: Using the default server with lifecycle management
 //!
 //! ```ignore
 //! use motlie_mcp::tts::{TtsMcpServer, create_lazy_tts};
+//! use motlie_mcp::ManagedResource;
 //! use std::sync::Arc;
 //!
-//! let tts = Arc::new(create_lazy_tts());
-//! let server = TtsMcpServer::new(tts);
+//! let managed_tts = ManagedResource::new(Box::new(|| TtsEngine::new()));
+//! let server = TtsMcpServer::new(managed_tts.lazy());
+//!
+//! // Run server...
+//!
+//! // Graceful shutdown (no-op for TTS, but follows the pattern)
+//! managed_tts.shutdown().await?;
 //! ```
 //!
 //! # Example: Composing into a custom server
@@ -42,7 +48,8 @@ pub mod types;
 pub use server::TtsMcpServer;
 pub use types::*;
 
-use crate::LazyResource;
+use crate::{LazyResource, ResourceLifecycle};
+use async_trait::async_trait;
 use rmcp::ErrorData as McpError;
 use std::sync::Arc;
 
@@ -85,6 +92,23 @@ impl TtsEngine {
     /// Get the path to the 'say' command.
     pub fn say_path(&self) -> &str {
         &self.say_path
+    }
+}
+
+// ============================================================================
+// ResourceLifecycle Implementation
+// ============================================================================
+
+#[async_trait]
+impl ResourceLifecycle for TtsEngine {
+    /// Shut down the TTS engine.
+    ///
+    /// This is a no-op since `TtsEngine` only holds a path string and doesn't
+    /// have any resources that need cleanup. However, implementing the trait
+    /// allows `TtsEngine` to be used with `ManagedResource` for consistency.
+    async fn shutdown(self) -> anyhow::Result<()> {
+        tracing::info!("TTS engine shutdown (no-op)");
+        Ok(())
     }
 }
 
