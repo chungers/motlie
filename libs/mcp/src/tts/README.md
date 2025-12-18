@@ -230,23 +230,100 @@ impl ToolCall for SayParams {
 
 This ensures compile-time verification that every parameter type has a corresponding implementation.
 
-## Testing
+## Transport Behavior
 
-### Quick Test (Stdio)
+### Stdio Transport
 
+The stdio transport is commonly used by MCP clients like Claude Desktop, Claude Code, and Cursor.
+
+**Behavior:**
+- Server reads JSON-RPC messages from stdin, writes responses to stdout
+- Server terminates when stdin closes (EOF)
+- The persistent worker ensures speech completes even after stdin closes
+
+**Test results:**
+- Phrases queued before stdin closes are fully spoken
+- Worker continues for 12+ seconds after stdin closes (if needed)
+- Graceful shutdown waits for worker to finish
+
+**Example test:**
 ```bash
 #!/bin/bash
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
 sleep 0.3
 echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 sleep 0.3
-echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"say","arguments":{"phrases":["Hello from the TTS test!"]}}}'
-sleep 0.5  # Can close stdin immediately - speech continues!
+echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"say","arguments":{"phrases":["Phrase one.","Phrase two.","Phrase three."]}}}'
+sleep 0.5  # Stdin closes almost immediately - speech still completes!
 ```
 
-Save as `test.sh`, then run:
+### HTTP Transport
+
+The HTTP transport uses the MCP Streamable HTTP protocol with Server-Sent Events (SSE).
+
+**Behavior:**
+- Server listens on configurable port (default: 8081)
+- Uses session management via `mcp-session-id` header
+- Responses are SSE formatted (`data: {...}`)
+- Tool calls return immediately after queueing (async speech)
+
+**Required headers:**
+```
+Content-Type: application/json
+Accept: application/json, text/event-stream
+mcp-session-id: <session-id>  # Required after initialization
+```
+
+**Session flow:**
+1. Send `initialize` request → receive session ID in `mcp-session-id` response header
+2. Send `notifications/initialized` with session ID header
+3. Send tool calls with session ID header
+
+**Example test with curl:**
 ```bash
-chmod +x test.sh && ./test.sh | cargo run --example motlie_tts -- --transport stdio
+# Start server
+cargo run --example motlie_tts -- --transport http --port 8082
+
+# In another terminal:
+
+# Step 1: Initialize and capture session ID
+HEADERS=$(mktemp)
+curl -s -D "$HEADERS" -X POST http://127.0.0.1:8082/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+
+SESSION_ID=$(grep -i "mcp-session-id" "$HEADERS" | sed 's/.*: //' | tr -d '\r\n')
+
+# Step 2: Send initialized notification
+curl -s -X POST http://127.0.0.1:8082/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+# Step 3: Call say tool
+curl -s -X POST http://127.0.0.1:8082/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"say","arguments":{"phrases":["Hello from HTTP!"]}}}'
 ```
 
-The speech will complete even though stdin closes almost immediately after sending the request.
+**Response format:**
+```
+data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"success\":true,\"message\":\"Successfully queued 1 phrase(s) for speaking\",\"queued_count\":1,\"total_phrases\":1,\"errors\":[]}"}],"isError":false}}
+```
+
+### Transport Comparison
+
+| Aspect | Stdio | HTTP |
+|--------|-------|------|
+| Default port | N/A (stdin/stdout) | 8081 |
+| Session management | Implicit (single session) | Explicit (`mcp-session-id` header) |
+| Response format | JSON-RPC | SSE (`data: {...}`) |
+| Client disconnect | stdin EOF terminates server | Session can be reused |
+| Recommended for | Claude Desktop, CLI tools | Remote access, web clients |
+| Speech reliability | ✅ Persistent worker | ✅ Persistent worker |
+
+Both transports now handle long-running speech correctly thanks to the persistent worker architecture.
