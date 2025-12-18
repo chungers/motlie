@@ -54,6 +54,8 @@ lz4 = "1.28"
 petgraph = "0.6"
 pathfinding = "4.0"
 clap = { version = "4.0", features = ["derive"] }
+async-trait = "0.1"
+rmcp = { version = "0.9", features = ["server", "transport-io", "transport-streamable-http-server"] }
 pmcp = { version = "1.8.4", features = ["schema-generation", "validation", "streamable-http"] }
 log = "0.4"
 tracing = "0.1"
@@ -90,6 +92,14 @@ path = "examples/graph/pagerank.rs"
 [[example]]
 name = "motlie_db"
 path = "examples/mcp/motlie_db.rs"
+
+[[example]]
+name = "motlie_tts"
+path = "examples/mcp/motlie_tts.rs"
+
+[[example]]
+name = "motlie_all"
+path = "examples/mcp/all.rs"
 
 [[example]]
 name = "bfs_original"
