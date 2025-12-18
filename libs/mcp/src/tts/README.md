@@ -28,7 +28,7 @@ Platform validation happens lazily on first tool invocation, allowing the MCP ha
 cargo run --example motlie_tts
 cargo run --example motlie_tts -- --port 8081
 
-# Stdio transport (client must keep stdin open until speech completes)
+# Stdio transport (now reliable - see Architecture section)
 cargo run --example motlie_tts -- --transport stdio
 ```
 
@@ -82,12 +82,14 @@ Speak text aloud using macOS text-to-speech.
 ```json
 {
   "success": true,
-  "message": "Successfully spoke 2 phrase(s)",
-  "spoken_count": 2,
+  "message": "Successfully queued 2 phrase(s) for speaking",
+  "queued_count": 2,
   "total_phrases": 2,
   "errors": []
 }
 ```
+
+**Note:** The response indicates phrases were *queued* for speaking, not that they have finished speaking. The persistent worker processes phrases in order and speech completes asynchronously.
 
 ### `list_voices`
 
@@ -120,62 +122,76 @@ List available text-to-speech voices on the system.
 }
 ```
 
-## Known Limitations
-
-### Stdio Transport and Long-Running Tools
-
-When using **stdio transport**, there is an important limitation with long-running tools like `say`:
-
-**Problem:** The MCP server terminates when stdin closes (EOF). If the client closes the connection before the `say` tool finishes speaking, the tool execution may be interrupted.
-
-**Timeline of the issue:**
-
-```
-1. Client sends "say" request with multiple phrases
-2. Server receives request, starts speaking (takes 10-30 seconds)
-3. Client closes stdin (sends EOF)
-4. Server receives EOF, initiates shutdown
-5. Speech may be interrupted mid-sentence
-```
-
-**Workarounds:**
-
-1. **Use HTTP transport (recommended):**
-   ```bash
-   cargo run --example motlie_tts -- --transport http --port 8081
-   ```
-   HTTP connections remain open until the response is sent, avoiding this issue.
-
-2. **Keep stdin open on the client side:**
-   The client must keep the stdin pipe open until receiving the response. For testing with shell scripts:
-   ```bash
-   {
-     echo '{"jsonrpc":"2.0","id":1,"method":"initialize",...}'
-     sleep 0.3
-     echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-     sleep 0.3
-     echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"say",...}}'
-     sleep 30  # Keep stdin open while speech completes
-   } | cargo run --example motlie_tts -- --transport stdio
-   ```
-
-3. **Use a proper MCP client:**
-   MCP clients like Claude Desktop, Claude Code, and Cursor maintain the connection properly and wait for responses.
-
-**Root Cause:**
-
-This is a limitation of the [rmcp SDK's](https://github.com/modelcontextprotocol/rust-sdk) stdio transport, which terminates the service when stdin closes rather than waiting for in-flight requests to complete. A proper fix would require upstream changes to rmcp.
-
-**This limitation does NOT affect:**
-- HTTP transport
-- Proper MCP clients that maintain connections
-- Short-duration tools that complete before stdin closes
-
 ## Architecture
+
+The TTS module uses a **persistent shell worker** architecture to ensure reliable speech completion, even when the MCP server's stdin closes (common with stdio transport).
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ MCP Server Process                                          │
+│                                                             │
+│  TtsEngine                                                  │
+│  ├── worker_stdin (pipe) ──────┐                           │
+│  └── worker_handle             │                           │
+│                                │                           │
+└────────────────────────────────┼───────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Persistent Shell Worker (/bin/sh)                           │
+│                                                             │
+│  while read phrase voice rate; do                          │
+│      /usr/bin/say [args] -- "$phrase"                      │
+│  done                                                       │
+│                                                             │
+│  (Continues running even if parent stdin closes)           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+1. **On first tool use**: A shell worker process is spawned running an inline script
+2. **When `say` is called**: Phrases are written to the worker's stdin (tab-separated format)
+3. **Worker processing**: The shell reads phrases one at a time and executes `/usr/bin/say` for each
+4. **On shutdown**: The worker's stdin is closed, signaling EOF. The worker finishes speaking all queued phrases before exiting
+
+### Why This Design?
+
+The previous implementation spawned a new `say` process for each phrase. This had a critical problem:
+
+**Problem:** When using stdio transport, the MCP server terminates when stdin closes (EOF). If the client closed the connection before the `say` command finished, speech would be interrupted.
+
+**Solution:** The persistent worker approach ensures:
+- All queued phrases are spoken to completion
+- The worker survives even if the parent MCP server exits
+- Graceful shutdown waits for speech to finish (with 120s timeout)
+
+### Graceful Shutdown
+
+When `ManagedResource::shutdown()` is called:
+
+1. The worker's stdin pipe is closed (signals EOF)
+2. The worker finishes speaking any remaining phrases
+3. The worker exits naturally after the while loop completes
+4. Shutdown waits up to 120 seconds for the worker to finish
+5. If timeout is exceeded, the worker is killed
+
+```rust
+// Example shutdown flow
+let managed_tts = ManagedResource::new(Box::new(|| TtsEngine::new()));
+let server = TtsMcpServer::new(managed_tts.lazy());
+
+// Run server...
+
+// Graceful shutdown - waits for all speech to complete
+managed_tts.shutdown().await?;
+```
+
+## File Structure
 
 ```
 tts/
-├── mod.rs      # LazyTts, TtsResource, TtsEngine, create_lazy_tts()
+├── mod.rs      # TtsEngine with persistent worker, ResourceLifecycle impl
 ├── types.rs    # SayParams, ListVoicesParams with ToolCall implementations
 ├── server.rs   # TtsMcpServer (ready-to-use MCP server)
 └── README.md   # This file
@@ -185,7 +201,7 @@ tts/
 
 | Type | Description |
 |------|-------------|
-| `TtsEngine` | Wrapper around macOS `say` command with platform validation |
+| `TtsEngine` | Manages persistent shell worker for TTS |
 | `LazyTts` | `LazyResource<TtsEngine>` - deferred initialization |
 | `TtsResource` | Resource context passed to `ToolCall::call()` |
 | `TtsMcpServer` | Ready-to-use MCP server exposing both tools |
@@ -203,10 +219,34 @@ impl ToolCall for SayParams {
 
     async fn call(self, res: &TtsResource) -> Result<CallToolResult, McpError> {
         let engine = res.engine().await?;
-        // Execute macOS 'say' command for each phrase
+        // Queue phrases to the persistent worker
+        for phrase in &self.phrases {
+            engine.say(phrase, self.voice.as_deref(), self.rate).await?;
+        }
         // ...
     }
 }
 ```
 
 This ensures compile-time verification that every parameter type has a corresponding implementation.
+
+## Testing
+
+### Quick Test (Stdio)
+
+```bash
+#!/bin/bash
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+sleep 0.3
+echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+sleep 0.3
+echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"say","arguments":{"phrases":["Hello from the TTS test!"]}}}'
+sleep 0.5  # Can close stdin immediately - speech continues!
+```
+
+Save as `test.sh`, then run:
+```bash
+chmod +x test.sh && ./test.sh | cargo run --example motlie_tts -- --transport stdio
+```
+
+The speech will complete even though stdin closes almost immediately after sending the request.

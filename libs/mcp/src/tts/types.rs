@@ -1,7 +1,7 @@
 //! Parameter types and ToolCall implementations for TTS tools.
 //!
 //! Each parameter type implements the `ToolCall` trait, binding it to its
-//! execution logic using the macOS `say` command.
+//! execution logic using the persistent TTS worker process.
 
 use super::TtsResource;
 use crate::ToolCall;
@@ -10,7 +10,6 @@ use rmcp::{model::*, ErrorData as McpError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::process::Stdio;
 use tokio::process::Command;
 
 /// Parameters for speaking text aloud.
@@ -51,7 +50,7 @@ impl ToolCall for SayParams {
             )]));
         }
 
-        let mut spoken_count = 0;
+        let mut queued_count = 0;
         let mut errors: Vec<String> = Vec::new();
 
         for phrase in &self.phrases {
@@ -60,43 +59,17 @@ impl ToolCall for SayParams {
                 continue;
             }
 
-            let mut cmd = Command::new(engine.say_path());
-
-            // Add voice if specified
-            if let Some(ref voice) = self.voice {
-                cmd.arg("-v").arg(voice);
-            }
-
-            // Add rate if specified
-            if let Some(rate) = self.rate {
-                cmd.arg("-r").arg(rate.to_string());
-            }
-
-            // Add the phrase to speak
-            cmd.arg(phrase);
-
-            // Configure process I/O
-            cmd.stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped());
-
-            // Execute and wait for completion
-            match cmd.status().await {
-                Ok(status) if status.success() => {
-                    spoken_count += 1;
-                    tracing::info!("Spoke phrase: \"{}\"", truncate_for_log(phrase, 50));
-                }
-                Ok(status) => {
-                    let msg = format!(
-                        "'say' command failed with status {} for phrase: \"{}\"",
-                        status,
-                        truncate_for_log(phrase, 30)
-                    );
-                    tracing::warn!("{}", msg);
-                    errors.push(msg);
+            // Queue the phrase to the persistent worker
+            match engine
+                .say(phrase, self.voice.as_deref(), self.rate)
+                .await
+            {
+                Ok(()) => {
+                    queued_count += 1;
+                    tracing::info!("Queued phrase: \"{}\"", truncate_for_log(phrase, 50));
                 }
                 Err(e) => {
-                    let msg = format!("Failed to execute 'say' command: {}", e);
+                    let msg = format!("Failed to queue phrase: {}", e);
                     tracing::error!("{}", msg);
                     errors.push(msg);
                 }
@@ -105,11 +78,14 @@ impl ToolCall for SayParams {
 
         let success = errors.is_empty();
         let message = if success {
-            format!("Successfully spoke {} phrase(s)", spoken_count)
+            format!(
+                "Successfully queued {} phrase(s) for speaking",
+                queued_count
+            )
         } else {
             format!(
-                "Spoke {} of {} phrase(s) with {} error(s)",
-                spoken_count,
+                "Queued {} of {} phrase(s) with {} error(s)",
+                queued_count,
                 self.phrases.len(),
                 errors.len()
             )
@@ -119,7 +95,7 @@ impl ToolCall for SayParams {
             json!({
                 "success": success,
                 "message": message,
-                "spoken_count": spoken_count,
+                "queued_count": queued_count,
                 "total_phrases": self.phrases.len(),
                 "errors": errors
             })
