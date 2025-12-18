@@ -166,7 +166,11 @@ The previous implementation spawned a new `say` process for each phrase. This ha
 - The worker survives even if the parent MCP server exits
 - Graceful shutdown waits for speech to finish (with 120s timeout)
 
-### Graceful Shutdown
+### Shutdown Behavior
+
+The persistent worker is designed to handle all shutdown scenarios correctly, including abnormal termination.
+
+#### Normal Shutdown
 
 When `ManagedResource::shutdown()` is called:
 
@@ -186,6 +190,27 @@ let server = TtsMcpServer::new(managed_tts.lazy());
 // Graceful shutdown - waits for all speech to complete
 managed_tts.shutdown().await?;
 ```
+
+#### Abnormal Termination (SIGKILL, crash, etc.)
+
+Even if the parent Rust process is killed abruptly without graceful shutdown:
+
+1. The OS automatically closes all file descriptors when a process dies
+2. This closes the pipe to the worker's stdin
+3. The worker's `while read` receives EOF and exits after finishing current phrase
+4. **No orphaned processes** - the worker cleans up naturally
+
+This design eliminates the need for a `Drop` implementation because the shell script's `while read ... done` pattern naturally handles EOF correctly.
+
+#### Shutdown Scenarios Summary
+
+| Scenario | Worker Behavior | Orphaned? |
+|----------|-----------------|-----------|
+| `ManagedResource::shutdown()` | Finishes all phrases, waits up to 120s | No |
+| Client disconnects (stdin EOF) | Finishes all phrases, exits | No |
+| Parent receives SIGTERM | Graceful shutdown triggered | No |
+| Parent receives SIGKILL | OS closes pipe, worker exits after current phrase | No |
+| Parent crashes/panics | OS closes pipe, worker exits after current phrase | No |
 
 ## File Structure
 
