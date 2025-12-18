@@ -1,11 +1,23 @@
-//! HTTP transport for MCP server using Streamable HTTP protocol
+//! HTTP transport for MCP servers using Streamable HTTP protocol.
 //!
 //! This module provides HTTP transport support using rmcp's `StreamableHttpService`,
 //! which implements the MCP Streamable HTTP protocol with Server-Sent Events (SSE)
 //! for long-lived connections.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use motlie_mcp::{serve_http, HttpConfig};
+//! use motlie_mcp::db::MotlieMcpServer;
+//!
+//! let server = MotlieMcpServer::new(lazy_db, Duration::from_secs(5));
+//! let config = HttpConfig::new("127.0.0.1:8080".parse().unwrap());
+//!
+//! serve_http(server, config).await?;
+//! ```
 
-use crate::MotlieMcpServer;
 use anyhow::Result;
+use rmcp::handler::server::ServerHandler;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, tower::StreamableHttpServerConfig,
     tower::StreamableHttpService,
@@ -14,7 +26,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Configuration for HTTP transport
+/// Configuration for HTTP transport.
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
     /// Address to bind to
@@ -39,7 +51,7 @@ impl Default for HttpConfig {
 }
 
 impl HttpConfig {
-    /// Create a new HTTP config with the given address
+    /// Create a new HTTP config with the given address.
     pub fn new(addr: SocketAddr) -> Self {
         Self {
             addr,
@@ -47,26 +59,26 @@ impl HttpConfig {
         }
     }
 
-    /// Set the SSE keep-alive interval
+    /// Set the SSE keep-alive interval.
     pub fn with_sse_keep_alive(mut self, interval: Option<Duration>) -> Self {
         self.sse_keep_alive = interval;
         self
     }
 
-    /// Set the MCP endpoint path
+    /// Set the MCP endpoint path.
     pub fn with_mcp_path(mut self, path: impl Into<String>) -> Self {
         self.mcp_path = path.into();
         self
     }
 
-    /// Enable or disable stateful session mode
+    /// Enable or disable stateful session mode.
     pub fn with_stateful_mode(mut self, enabled: bool) -> Self {
         self.stateful_mode = enabled;
         self
     }
 }
 
-/// Serve MCP over HTTP with Streamable HTTP transport
+/// Serve an MCP server over HTTP with Streamable HTTP transport.
 ///
 /// This function starts an HTTP server using axum that serves the MCP protocol
 /// over the Streamable HTTP transport. It supports:
@@ -74,19 +86,33 @@ impl HttpConfig {
 /// - SSE keep-alive for long-lived connections
 /// - Graceful shutdown on Ctrl+C
 ///
+/// # Type Parameters
+///
+/// * `S` - Any type implementing `ServerHandler + Clone + Send + Sync + 'static`
+///
 /// # Example
 ///
 /// ```ignore
-/// use motlie_mcp::{MotlieMcpServer, LazyDatabase, http::{serve_http, HttpConfig}};
-/// use std::sync::Arc;
-/// use std::time::Duration;
+/// use motlie_mcp::{serve_http, HttpConfig};
+/// use motlie_mcp::db::MotlieMcpServer;
 ///
 /// let server = MotlieMcpServer::new(lazy_db, Duration::from_secs(5));
-/// let config = HttpConfig::new("127.0.0.1:8080".parse().unwrap());
-///
-/// serve_http(server, config).await?;
+/// serve_http(server, HttpConfig::default()).await?;
 /// ```
-pub async fn serve_http(server: MotlieMcpServer, config: HttpConfig) -> Result<()> {
+///
+/// # Combined Server Example
+///
+/// ```ignore
+/// use motlie_mcp::{serve_http, HttpConfig};
+///
+/// // Any type implementing ServerHandler works
+/// let combined = MyCombinedServer::new(...);
+/// serve_http(combined, HttpConfig::default()).await?;
+/// ```
+pub async fn serve_http<S>(server: S, config: HttpConfig) -> Result<()>
+where
+    S: ServerHandler + Clone + Send + Sync + 'static,
+{
     let server = Arc::new(server);
 
     let http_config = StreamableHttpServerConfig {

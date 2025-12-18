@@ -1955,6 +1955,7 @@ name = "motlie"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "csv",
  "data-url",
@@ -1970,6 +1971,7 @@ dependencies = [
  "pmcp",
  "rand 0.8.5",
  "reqwest",
+ "rmcp",
  "rmp-serde",
  "rocksdb",
  "serde",
@@ -2019,6 +2021,7 @@ name = "motlie-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum 0.8.7",
  "env_logger",
  "log",
@@ -2033,6 +2036,7 @@ dependencies = [
  "tokio-test",
  "tower 0.5.2",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
