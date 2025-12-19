@@ -1588,6 +1588,7 @@ name = "motlie"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "csv",
  "data-url",
@@ -1598,6 +1599,7 @@ dependencies = [
  "pathfinding",
  "petgraph",
  "rand 0.8.5",
+ "rand_chacha 0.3.1",
  "reqwest",
  "rmp-serde",
  "rocksdb",
