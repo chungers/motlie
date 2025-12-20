@@ -587,6 +587,424 @@ See [PERF.md](./PERF.md) for the complete optimization roadmap.
 
 ---
 
+## Pure-RocksDB Architecture (No In-Memory Index)
+
+This section proposes a redesign where RocksDB is the **sole source of truth** with no in-memory index structures. The goal is O(1) lookups, fast BFS traversals, and true disk-based operation at billion-scale.
+
+### Current vs Proposed Architecture
+
+| Aspect | Current | Proposed |
+|--------|---------|----------|
+| Vector storage | In-memory HashMap | RocksDB `vectors` CF |
+| Graph structure | In-memory + RocksDB edges | RocksDB `adjacency` CF |
+| Entry point | In-memory variable | RocksDB `graph_meta` CF |
+| Neighbor count | O(degree) enumeration | RocksDB `edge_counts` CF |
+| Consistency | 10ms sleep hack | WriteBatchWithIndex |
+| Pruning | Inline (blocking) | Background thread |
+
+### Proposed Column Family Schema
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     RocksDB Database                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │ CF: vectors                                               │   │
+│  │ Key:   node_id (16 bytes)                                 │   │
+│  │ Value: f32[1024] binary (4KB)                             │   │
+│  │ Access: Point lookup, MultiGet                            │   │
+│  │ Options: ZSTD compression, large block size               │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │ CF: adjacency                                             │   │
+│  │ Key:   node_id | layer (17 bytes)                         │   │
+│  │ Value: [(neighbor_id, distance), ...] packed              │   │
+│  │        = [(16 bytes, 4 bytes), ...] × max_neighbors       │   │
+│  │ Access: Point lookup (one read = all neighbors)           │   │
+│  │ Options: Prefix bloom filter, smaller blocks              │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │ CF: edge_counts                                           │   │
+│  │ Key:   node_id | layer (17 bytes)                         │   │
+│  │ Value: u32 count (4 bytes)                                │   │
+│  │ Access: Point lookup, atomic merge operator               │   │
+│  │ Options: In-memory, no compression                        │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │ CF: graph_meta                                            │   │
+│  │ Keys:  "entry_point", "max_level", "medoid", "params"     │   │
+│  │ Value: Respective serialized values                       │   │
+│  │ Access: Point lookup (rarely changes)                     │   │
+│  │ Options: In-memory CF, no compression                     │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+#### 1. Packed Adjacency Lists (Not Separate Edge Rows)
+
+**Current**: Each edge is a separate RocksDB row
+```
+Key: src_id | dst_id | edge_name | timestamp
+Value: (temporal_range, weight, summary)
+Result: 32+ rows per node, 32+ reads to get neighbors
+```
+
+**Proposed**: All neighbors packed in single row
+```
+Key: node_id | layer
+Value: [(id1, dist1), (id2, dist2), ..., (idN, distN)]
+Result: 1 row per node per layer, 1 read for all neighbors
+```
+
+**Benefits**:
+- Single read for all neighbors (vs 32+ reads)
+- 50% less storage (no per-edge overhead)
+- Atomic neighbor list updates
+
+**Trade-off**: Must rewrite entire list on update (acceptable for max 64 neighbors)
+
+#### 2. WriteBatchWithIndex for Read-Your-Writes
+
+RocksDB's `WriteBatchWithIndex` allows reading uncommitted writes:
+
+```rust
+// Pseudocode for insert without sleep
+let batch = WriteBatchWithIndex::new();
+
+// Write vector
+batch.put_cf(vectors_cf, node_id, vector_bytes);
+
+// Write edges
+batch.put_cf(adjacency_cf, (node_id, layer), packed_neighbors);
+
+// Read back immediately (sees uncommitted writes!)
+let neighbors = batch.get_cf(adjacency_cf, (neighbor_id, layer));
+
+// Continue building graph...
+
+// Finally commit
+db.write(batch)?;
+```
+
+**Benefits**:
+- Eliminates 10ms sleep entirely
+- Provides read-your-writes consistency
+- Batch can be committed atomically
+
+#### 3. MultiGet for Batch Vector Retrieval
+
+During greedy search, fetch multiple vectors in parallel:
+
+```rust
+// Current: Sequential fetches
+for neighbor_id in neighbors {
+    let vector = get_vector(reader, neighbor_id).await?;  // N round-trips
+}
+
+// Proposed: Single batch fetch
+let keys: Vec<_> = neighbors.iter().map(|id| id.as_bytes()).collect();
+let vectors = db.multi_get_cf(vectors_cf, &keys);  // 1 round-trip
+```
+
+**Benefits**:
+- O(1) round-trips instead of O(N)
+- RocksDB optimizes for parallel disk reads
+- Can prefetch next-hop neighbors
+
+#### 4. Merge Operator for Atomic Count Updates
+
+Use RocksDB merge operator for lock-free count updates:
+
+```rust
+// Define merge operator for edge_counts CF
+fn count_merge(existing: Option<&[u8]>, operand: &[u8]) -> Vec<u8> {
+    let current = existing.map(|b| u32::from_le_bytes(b)).unwrap_or(0);
+    let delta = i32::from_le_bytes(operand);  // +1 or -1
+    let new_count = (current as i32 + delta) as u32;
+    new_count.to_le_bytes().to_vec()
+}
+
+// Usage: Atomic increment
+db.merge_cf(edge_counts_cf, (node_id, layer), (+1i32).to_le_bytes());
+
+// Usage: Atomic decrement
+db.merge_cf(edge_counts_cf, (node_id, layer), (-1i32).to_le_bytes());
+```
+
+**Benefits**:
+- Lock-free concurrent updates
+- O(1) count check (no enumeration)
+- Survives crashes (merge is logged)
+
+### Background Pruning Thread
+
+Decouple pruning from insert path for better throughput:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Insert Thread                             │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Compute neighbors via greedy search                         │
+│  2. Write to adjacency CF (may temporarily exceed limit)        │
+│  3. Merge +N to edge_counts CF                                  │
+│  4. Push node_id to pruning queue                               │
+│  5. Return immediately (don't wait for prune)                   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │  Pruning Queue  │
+                    │   (bounded)     │
+                    └─────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Pruning Thread (Background)                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Loop:                                                          │
+│    1. Batch-dequeue node_ids from queue                         │
+│    2. MultiGet edge_counts for all                              │
+│    3. Filter to over-limit nodes                                │
+│    4. For each over-limit node:                                 │
+│       a. Read adjacency list                                    │
+│       b. MultiGet vectors for RNG distance computation          │
+│       c. Compute pruned neighbor set                            │
+│       d. Write new adjacency list                               │
+│       e. Merge delta to edge_counts                             │
+│    5. Commit batch                                              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Benefits**:
+- Insert is non-blocking (just queue push)
+- Pruning is batched (amortized overhead)
+- Index is eventually consistent (acceptable for ANN)
+- Backpressure via bounded queue
+
+**Consistency Guarantee**: Queries may see temporarily over-connected nodes, but this only affects memory/latency slightly, not correctness.
+
+### BFS Traversal Without Memory Cache
+
+Greedy search using pure RocksDB lookups:
+
+```rust
+async fn greedy_search_pure_rocksdb(
+    db: &DB,
+    query: &[f32],
+    k: usize,
+    ef: usize,
+) -> Result<Vec<(f32, Id)>> {
+    // 1. Get entry point from graph_meta CF (cached in block cache)
+    let entry_point = db.get_cf(graph_meta_cf, "entry_point")?;
+    let max_level = db.get_cf(graph_meta_cf, "max_level")?;
+
+    let mut current = entry_point;
+
+    // 2. Descend through layers (HNSW)
+    for layer in (1..=max_level).rev() {
+        current = greedy_search_layer(db, query, current, layer).await?;
+    }
+
+    // 3. Search layer 0 with beam width = ef
+    let results = beam_search_layer(db, query, current, 0, ef).await?;
+
+    Ok(results.into_iter().take(k).collect())
+}
+
+async fn beam_search_layer(
+    db: &DB,
+    query: &[f32],
+    start: Id,
+    layer: usize,
+    beam_width: usize,
+) -> Result<Vec<(f32, Id)>> {
+    let mut visited = HashSet::new();
+    let mut candidates = BinaryHeap::new();
+    let mut results = Vec::new();
+
+    // Initialize with start
+    let start_vec = db.get_cf(vectors_cf, start)?;
+    let start_dist = euclidean_distance(query, &start_vec);
+    candidates.push((start_dist, start));
+    visited.insert(start);
+
+    while let Some((dist, node)) = candidates.pop() {
+        // Early termination
+        if results.len() >= beam_width && dist > results.last().unwrap().0 {
+            break;
+        }
+
+        results.push((dist, node));
+
+        // Get all neighbors in ONE read
+        let adjacency_key = (node, layer);
+        let neighbors: Vec<(Id, f32)> = db.get_cf(adjacency_cf, adjacency_key)?;
+
+        // Filter unvisited
+        let unvisited: Vec<Id> = neighbors
+            .iter()
+            .filter(|(id, _)| !visited.contains(id))
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Mark visited
+        for id in &unvisited {
+            visited.insert(*id);
+        }
+
+        // BATCH fetch all unvisited vectors (key optimization!)
+        let vectors = db.multi_get_cf(vectors_cf, &unvisited)?;
+
+        // Compute distances and add to candidates
+        for (id, vector) in unvisited.iter().zip(vectors.iter()) {
+            let dist = euclidean_distance(query, vector);
+            candidates.push((dist, *id));
+        }
+
+        // Keep candidates bounded
+        while candidates.len() > beam_width * 2 {
+            candidates.pop();
+        }
+    }
+
+    results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    results.truncate(beam_width);
+    Ok(results)
+}
+```
+
+**Key Optimizations**:
+1. **Single adjacency read**: All neighbors in one lookup
+2. **MultiGet for vectors**: Batch fetch all neighbor vectors
+3. **Block cache**: Hot nodes (entry point) stay in RocksDB block cache
+4. **Prefetching**: While computing distances, prefetch next-hop adjacencies
+
+### Performance Comparison
+
+| Operation | Current | Pure-RocksDB | Improvement |
+|-----------|---------|--------------|-------------|
+| Get all neighbors | 32 reads | **1 read** | 32× |
+| Get N vectors | N reads | **1 MultiGet** | N× |
+| Check neighbor count | O(degree) | **O(1)** | 32× |
+| Insert (with prune) | 15ms | **<1ms** | 15× |
+| Consistency | 10ms sleep | **Immediate** | ∞ |
+| Memory (10M vectors) | 40GB | **<1GB** | 40× |
+
+### Estimated Throughput
+
+| Scale | Current | Pure-RocksDB | Notes |
+|-------|---------|--------------|-------|
+| Insert | 30-68/sec | **5,000-10,000/sec** | No sleep, batched writes |
+| Search | 45-108 QPS | **500-1,000 QPS** | MultiGet, block cache |
+| Memory | O(n) vectors | **O(1) fixed** | Only block cache |
+
+### Reconciliation with Existing Gaps
+
+This design addresses all critical gaps identified in the README:
+
+| Gap | Priority | Pure-RocksDB Solution |
+|-----|----------|----------------------|
+| Read-after-write consistency | 🔴 Critical | **WriteBatchWithIndex** |
+| Connection count tracking | 🔴 Critical | **edge_counts CF + merge operator** |
+| Atomic multi-edge transactions | 🔴 Critical | **WriteBatch atomic commit** |
+| Bidirectional edge atomicity | 🟠 High | **Single adjacency row per node** |
+| Batch vector retrieval | 🟠 High | **MultiGet on vectors CF** |
+| Edge name prefix filtering | 🟡 Medium | **Separate key per layer** |
+| Skip fulltext indexing | 🟡 Medium | **Dedicated vectors CF** |
+
+### Implementation Phases
+
+```
+Phase 1: Schema Migration (1-2 weeks)
+├── Create new column families
+├── Implement packed adjacency format
+├── Add edge_counts CF with merge operator
+└── Migrate graph_meta to CF
+
+Phase 2: WriteBatch Integration (1 week)
+├── Replace sequential writes with WriteBatch
+├── Implement WriteBatchWithIndex for reads
+└── Remove 10ms sleep
+
+Phase 3: MultiGet Optimization (1 week)
+├── Batch vector fetches in greedy_search
+├── Implement prefetching
+└── Tune block cache size
+
+Phase 4: Background Pruning (1 week)
+├── Implement pruning queue
+├── Background pruning thread
+└── Backpressure mechanism
+
+Phase 5: Benchmarking & Tuning (1 week)
+├── Tune RocksDB options per CF
+├── Optimize block sizes
+└── Profile and iterate
+```
+
+### RocksDB Configuration Recommendations
+
+```rust
+// Vectors CF: Large values, read-heavy
+let mut vectors_opts = Options::default();
+vectors_opts.set_compression_type(DBCompressionType::Zstd);
+vectors_opts.set_block_size(64 * 1024);  // 64KB blocks (fits 16 vectors)
+vectors_opts.set_bloom_filter(10, false);
+vectors_opts.set_cache_index_and_filter_blocks(true);
+
+// Adjacency CF: Medium values, read-write balanced
+let mut adjacency_opts = Options::default();
+adjacency_opts.set_compression_type(DBCompressionType::Lz4);
+adjacency_opts.set_block_size(4 * 1024);  // 4KB blocks
+adjacency_opts.set_prefix_bloom_filter(17);  // node_id + layer prefix
+adjacency_opts.set_memtable_prefix_bloom_ratio(0.1);
+
+// Edge Counts CF: Tiny values, write-heavy
+let mut counts_opts = Options::default();
+counts_opts.set_compression_type(DBCompressionType::None);
+counts_opts.set_merge_operator("count_merge", count_merge_fn);
+counts_opts.set_max_write_buffer_number(4);
+counts_opts.set_min_write_buffer_number_to_merge(2);
+
+// Graph Meta CF: Tiny, rarely changes
+let mut meta_opts = Options::default();
+meta_opts.set_compression_type(DBCompressionType::None);
+// Keep entire CF in memory
+```
+
+### Trade-offs and Considerations
+
+| Aspect | Benefit | Cost |
+|--------|---------|------|
+| No in-memory index | Scales to billions | Higher per-op latency |
+| Packed adjacency | 1 read for all neighbors | Must rewrite on update |
+| Background pruning | Non-blocking inserts | Eventually consistent |
+| WriteBatchWithIndex | Immediate visibility | Slightly more complex code |
+| MultiGet | Batch efficiency | Must collect keys first |
+
+### When to Use This Architecture
+
+**Use Pure-RocksDB when:**
+- Dataset exceeds available memory (>10M vectors)
+- Need true disk-based operation
+- Want simpler operational model (single data store)
+- Willing to accept slightly higher search latency
+
+**Stay with In-Memory when:**
+- Dataset fits in memory (<10M vectors)
+- Need lowest possible latency
+- Memory is cheap/available
+- Simpler implementation preferred
+
+---
+
 ## Online Updates Requirement
 
 A critical requirement for production vector search is **online updates** - the ability to add, update, or delete vectors without rebuilding the entire index.
