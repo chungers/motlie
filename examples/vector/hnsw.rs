@@ -250,15 +250,16 @@ impl HnswIndex {
     }
 
     /// Greedy search within a single layer (finds single best)
+    /// Uses async distance computation with DB fallback for robustness
     async fn greedy_search_layer(
-        &self,
+        &mut self,
         reader: &Reader,
         query: &[f32],
         start: Id,
         layer: usize,
     ) -> Result<(Id, f32)> {
         let mut current = start;
-        let mut current_dist = self.compute_distance(query, &current);
+        let mut current_dist = self.compute_distance_async(reader, query, &current).await;
 
         loop {
             let layer_prefix = HnswParams::layer_edge_name(layer);
@@ -266,7 +267,7 @@ impl HnswIndex {
 
             let mut improved = false;
             for (_weight, neighbor_id) in neighbors {
-                let dist = self.compute_distance(query, &neighbor_id);
+                let dist = self.compute_distance_async(reader, query, &neighbor_id).await;
                 if dist < current_dist {
                     current = neighbor_id;
                     current_dist = dist;
@@ -284,8 +285,9 @@ impl HnswIndex {
     }
 
     /// Search within a layer with ef candidates
+    /// Uses async distance computation with DB fallback for robustness
     async fn search_layer(
-        &self,
+        &mut self,
         reader: &Reader,
         query: &[f32],
         entry_points: Vec<Id>,
@@ -298,7 +300,7 @@ impl HnswIndex {
 
         // Initialize with entry points
         for ep in entry_points {
-            let dist = self.compute_distance(query, &ep);
+            let dist = self.compute_distance_async(reader, query, &ep).await;
             visited.insert(ep);
             candidates.push(SearchCandidate {
                 distance: dist,
@@ -327,7 +329,7 @@ impl HnswIndex {
                 }
                 visited.insert(neighbor_id);
 
-                let dist = self.compute_distance(query, &neighbor_id);
+                let dist = self.compute_distance_async(reader, query, &neighbor_id).await;
 
                 // Add to candidates if better than worst result or we need more
                 if results.len() < ef || dist < results.last().unwrap().0 {
@@ -364,6 +366,7 @@ impl HnswIndex {
     }
 
     /// Prune connections if a node exceeds max neighbors
+    /// Uses cached distance computation (called during build when all vectors are cached)
     async fn prune_connections(
         &mut self,
         writer: &Writer,
@@ -389,11 +392,11 @@ impl HnswIndex {
             }
         };
 
-        // Compute distances and sort
+        // Compute distances and sort (use cached version during build)
         let mut with_distances: Vec<(f32, Id)> = neighbors
             .iter()
             .map(|(_, id)| {
-                let dist = self.compute_distance(&node_vector, id);
+                let dist = self.compute_distance_cached(&node_vector, id);
                 (dist, *id)
             })
             .collect();
@@ -409,8 +412,9 @@ impl HnswIndex {
     }
 
     /// Search for k nearest neighbors
+    /// Uses async distance computation with DB fallback for robustness
     pub async fn search(
-        &self,
+        &mut self,
         reader: &Reader,
         query: &[f32],
         k: usize,
@@ -437,13 +441,40 @@ impl HnswIndex {
         Ok(results.into_iter().take(k).collect())
     }
 
-    /// Compute distance between query and a node (uses cache)
-    fn compute_distance(&self, query: &[f32], node_id: &Id) -> f32 {
+    /// Compute distance between query and a node (uses cache only - for build phase)
+    fn compute_distance_cached(&self, query: &[f32], node_id: &Id) -> f32 {
         match self.cache.get(node_id) {
             Some(vector) => (self.distance_fn)(query, vector),
             None => {
-                // This should not happen if all vectors were indexed properly
                 tracing::warn!("Vector not in cache for node {}, returning MAX distance", node_id);
+                f32::MAX
+            }
+        }
+    }
+
+    /// Compute distance between query and a node with DB fallback
+    /// This is the primary method for search - loads from DB if not in cache
+    async fn compute_distance_async(
+        &mut self,
+        reader: &Reader,
+        query: &[f32],
+        node_id: &Id,
+    ) -> f32 {
+        // Check cache first
+        if let Some(vector) = self.cache.get(node_id) {
+            return (self.distance_fn)(query, vector);
+        }
+
+        // Load from database on cache miss
+        match get_vector(reader, *node_id).await {
+            Ok(vector) => {
+                let dist = (self.distance_fn)(query, &vector);
+                // Cache for future use
+                self.cache.insert(*node_id, vector);
+                dist
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load vector for node {}: {}", node_id, e);
                 f32::MAX
             }
         }
@@ -552,8 +583,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Use index's cache for ground truth to ensure consistency
-    let all_vectors = index.get_all_vectors();
+    // Clone vectors for ground truth computation (avoids borrow conflict with mutable search)
+    let all_vectors: HashMap<Id, Vec<f32>> = index.get_all_vectors().clone();
     println!("Vectors in all_vectors HashMap: {}", all_vectors.len());
 
     // Run queries
@@ -566,7 +597,7 @@ async fn main() -> Result<()> {
 
         // Ground truth with brute force using the same vectors as the index
         let gt_start = Instant::now();
-        let ground_truth = brute_force_knn(&query, all_vectors, k, euclidean_distance);
+        let ground_truth = brute_force_knn(&query, &all_vectors, k, euclidean_distance);
         let gt_time = gt_start.elapsed();
 
         // HNSW search

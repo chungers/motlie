@@ -224,7 +224,8 @@ impl VamanaIndex {
             candidates.shuffle(rng);
 
             for neighbor_id in candidates.into_iter().take(num_initial) {
-                let dist = self.compute_distance_by_id(&node_id, &neighbor_id);
+                // During build phase, all vectors are in cache
+                let dist = self.compute_distance_by_id_cached(&node_id, &neighbor_id);
                 add_vector_edge(writer, node_id, neighbor_id, edge_name, dist).await?;
             }
         }
@@ -269,8 +270,9 @@ impl VamanaIndex {
     }
 
     /// Greedy search returning L nearest candidates
+    /// Uses async distance computation with DB fallback for robustness
     async fn greedy_search(
-        &self,
+        &mut self,
         reader: &Reader,
         query: &[f32],
         start: Id,
@@ -280,8 +282,8 @@ impl VamanaIndex {
         let mut candidates: BinaryHeap<SearchCandidate> = BinaryHeap::new();
         let mut results: Vec<(f32, Id)> = Vec::new();
 
-        // Initialize with start node
-        let start_dist = self.compute_distance(query, &start);
+        // Initialize with start node (use async to ensure vector is loaded)
+        let start_dist = self.compute_distance_async(reader, query, &start).await;
         visited.insert(start);
         candidates.push(SearchCandidate {
             distance: start_dist,
@@ -301,7 +303,8 @@ impl VamanaIndex {
                 }
                 visited.insert(neighbor_id);
 
-                let dist = self.compute_distance(query, &neighbor_id);
+                // Use async distance computation with DB fallback
+                let dist = self.compute_distance_async(reader, query, &neighbor_id).await;
 
                 // Check if we should add this candidate
                 let should_add = results.len() < l || {
@@ -343,6 +346,9 @@ impl VamanaIndex {
     ///
     /// An edge (v -> u) is pruned if there exists w such that:
     /// dist(v, w) < dist(v, u) AND dist(w, u) < dist(v, u) * alpha
+    ///
+    /// Note: Uses cached distance computation. Caller must ensure all candidate
+    /// vectors are in cache before calling (done during build phase).
     fn rng_prune(&self, _query: &[f32], mut candidates: Vec<(f32, Id)>) -> Vec<(f32, Id)> {
         // Sort by distance
         candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -364,7 +370,7 @@ impl VamanaIndex {
                 }
 
                 // Condition 2: dist(w, u) < dist(v, u) * alpha
-                let dist_wu = self.compute_distance_by_id(w, &u);
+                let dist_wu = self.compute_distance_by_id_cached(w, &u);
                 if dist_wu < dist_vu * self.params.alpha {
                     is_dominated = true;
                     break;
@@ -399,11 +405,12 @@ impl VamanaIndex {
             None => get_vector(reader, node_id).await?,
         };
 
-        // Convert to (distance, id) format
+        // Convert to (distance, id) format using cached distances
+        // During build phase, all neighbors should already be in cache
         let candidates: Vec<(f32, Id)> = neighbors
             .iter()
             .map(|(_, id)| {
-                let dist = self.compute_distance(&node_vector, id);
+                let dist = self.compute_distance_cached(&node_vector, id);
                 (dist, *id)
             })
             .collect();
@@ -458,8 +465,9 @@ impl VamanaIndex {
     }
 
     /// Search for k nearest neighbors
+    /// Uses async distance computation with DB fallback for robustness
     pub async fn search(
-        &self,
+        &mut self,
         reader: &Reader,
         query: &[f32],
         k: usize,
@@ -474,8 +482,8 @@ impl VamanaIndex {
         Ok(results.into_iter().take(k).collect())
     }
 
-    /// Compute distance between query and a node (uses cache)
-    fn compute_distance(&self, query: &[f32], node_id: &Id) -> f32 {
+    /// Compute distance between query and a node (uses cache only - for build phase)
+    fn compute_distance_cached(&self, query: &[f32], node_id: &Id) -> f32 {
         match self.cache.get(node_id) {
             Some(vector) => (self.distance_fn)(query, vector),
             None => {
@@ -485,11 +493,74 @@ impl VamanaIndex {
         }
     }
 
-    /// Compute distance between two nodes by ID
-    fn compute_distance_by_id(&self, a: &Id, b: &Id) -> f32 {
+    /// Compute distance between query and a node with DB fallback
+    /// This is the primary method for search - loads from DB if not in cache
+    async fn compute_distance_async(
+        &mut self,
+        reader: &Reader,
+        query: &[f32],
+        node_id: &Id,
+    ) -> f32 {
+        // Check cache first
+        if let Some(vector) = self.cache.get(node_id) {
+            return (self.distance_fn)(query, vector);
+        }
+
+        // Load from database on cache miss
+        match get_vector(reader, *node_id).await {
+            Ok(vector) => {
+                let dist = (self.distance_fn)(query, &vector);
+                // Cache for future use
+                self.cache.insert(*node_id, vector);
+                dist
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load vector for node {}: {}", node_id, e);
+                f32::MAX
+            }
+        }
+    }
+
+    /// Compute distance between two nodes by ID (cache only - for build phase)
+    fn compute_distance_by_id_cached(&self, a: &Id, b: &Id) -> f32 {
         match (self.cache.get(a), self.cache.get(b)) {
             (Some(va), Some(vb)) => (self.distance_fn)(va, vb),
             _ => f32::MAX,
+        }
+    }
+
+    /// Compute distance between two nodes by ID with DB fallback
+    async fn compute_distance_by_id_async(
+        &mut self,
+        reader: &Reader,
+        a: &Id,
+        b: &Id,
+    ) -> f32 {
+        // Ensure both vectors are in cache
+        self.ensure_vector_cached(reader, a).await;
+        self.ensure_vector_cached(reader, b).await;
+
+        match (self.cache.get(a), self.cache.get(b)) {
+            (Some(va), Some(vb)) => (self.distance_fn)(va, vb),
+            _ => f32::MAX,
+        }
+    }
+
+    /// Ensure a vector is loaded into cache
+    async fn ensure_vector_cached(&mut self, reader: &Reader, node_id: &Id) {
+        if self.cache.contains(node_id) {
+            return;
+        }
+
+        if let Ok(vector) = get_vector(reader, *node_id).await {
+            self.cache.insert(*node_id, vector);
+        }
+    }
+
+    /// Ensure multiple vectors are loaded into cache
+    async fn ensure_vectors_cached(&mut self, reader: &Reader, node_ids: &[Id]) {
+        for id in node_ids {
+            self.ensure_vector_cached(reader, id).await;
         }
     }
 
@@ -579,8 +650,8 @@ async fn main() -> Result<()> {
     );
     println!("Vectors in cache: {}", index.cache_size());
 
-    // Use index's cache for ground truth to ensure consistency
-    let all_vectors = index.get_all_vectors();
+    // Clone vectors for ground truth computation (avoids borrow conflict with mutable search)
+    let all_vectors: HashMap<Id, Vec<f32>> = index.get_all_vectors().clone();
 
     // Run queries
     println!("\nRunning {} queries...", num_queries);
@@ -592,7 +663,7 @@ async fn main() -> Result<()> {
 
         // Ground truth with brute force using the same vectors as the index
         let gt_start = Instant::now();
-        let ground_truth = brute_force_knn(&query, all_vectors, k, euclidean_distance);
+        let ground_truth = brute_force_knn(&query, &all_vectors, k, euclidean_distance);
         let gt_time = gt_start.elapsed();
 
         // Vamana search
