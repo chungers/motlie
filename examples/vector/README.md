@@ -19,8 +19,22 @@ Both algorithms leverage `motlie_db`'s graph primitives (nodes, edges, weights, 
 | **HNSW Search** | ✅ Working | **100% recall@10** with async distance computation + DB fallback |
 | **Vamana Search** | ✅ Working | ~60% recall@10 with async distance computation + DB fallback |
 | **Memory Efficiency** | ✅ Working | Async distance loads vectors on-demand from DB |
+| **Online Updates (HNSW)** | 🔶 Partial | Incremental insert works but has latency issues |
+| **Online Updates (Vamana)** | ❌ Not Supported | Batch-only construction, requires full rebuild |
+| **Concurrent Access** | ❌ Not Implemented | No read/write synchronization |
+| **Vector Deletion** | ❌ Not Implemented | No delete support in either algorithm |
 
 **Key Finding**: The `motlie_db` Storage API is architecturally suitable for disk-based vector search. Both HNSW and Vamana implementations now use async distance computation with DB fallback.
+
+### Progress Summary
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| **Phase 0** | Basic graph storage mapping | ✅ Complete |
+| **Phase 1** | Fix recall issue (async distance) | ✅ Complete |
+| **Phase 2** | Memory-efficient search | ✅ Complete (basic) |
+| **Phase 3** | Online updates support | 🔶 In Progress |
+| **Phase 4** | Production optimizations | ❌ Not Started |
 
 ### Performance Results
 
@@ -50,6 +64,8 @@ Note: HNSW achieves higher recall due to its hierarchical multi-layer structure 
 | **Memory During Build** | Low (cache current neighbors) | Higher (need all vectors for medoid) |
 | **Search Complexity** | O(log n) layers + O(M·ef) at L0 | O(log n) hops × O(R) neighbors |
 | **Disk Optimization** | Not designed for disk | Designed for SSD (with PQ) |
+| **Online Insert** | ✅ Native support | ❌ Requires FreshDiskANN variant |
+| **Online Delete** | 🔶 Possible with tombstones | ❌ Complex, affects graph quality |
 | **Best For** | In-memory, dynamic updates | Disk-based, static datasets |
 
 ### When to Use Which?
@@ -58,12 +74,14 @@ Note: HNSW achieves higher recall due to its hierarchical multi-layer structure 
 - Dataset fits in memory
 - Need incremental updates (add/remove vectors)
 - Want simpler implementation
+- **Require online updates without index rebuild**
 
 **Choose Vamana when:**
 - Dataset exceeds memory
 - Willing to invest in PQ/compression
 - Building static index (batch construction OK)
 - Targeting SSD-based deployment
+- **Can afford periodic full index rebuilds**
 
 ## Design: Mapping Vector Indices to Graph Structures
 
@@ -504,6 +522,135 @@ async fn compute_distance_async(&mut self, reader: &Reader, query: &[f32], node_
 
 ---
 
+## Online Updates Requirement
+
+A critical requirement for production vector search is **online updates** - the ability to add, update, or delete vectors without rebuilding the entire index.
+
+### Current Online Update Capabilities
+
+| Capability | HNSW | Vamana | Notes |
+|------------|------|--------|-------|
+| **Insert** | 🔶 Partial | ❌ No | HNSW supports incremental insert but with latency issues |
+| **Delete** | ❌ No | ❌ No | Neither implementation supports deletion |
+| **Update** | ❌ No | ❌ No | Would require delete + insert |
+| **Concurrent Read/Write** | ❌ No | ❌ No | No synchronization implemented |
+
+### HNSW Online Insert Analysis
+
+HNSW is designed for incremental updates, but the current implementation has issues:
+
+**What Works:**
+- Insert one vector at a time via `insert()` method
+- Graph structure updated incrementally
+- Entry point updated if new node has higher level
+
+**Current Issues:**
+
+1. **Write Visibility Latency** (Critical)
+   ```rust
+   // hnsw.rs: 10ms sleep between inserts!
+   tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+   ```
+   - Required because RocksDB writes are async
+   - Limits insert throughput to ~100 vectors/sec
+   - **Root cause**: No read-after-write consistency guarantee
+
+2. **Pruning Side Effects**
+   ```rust
+   // Inserting vector A can prune edges of existing vector B
+   self.prune_connections(writer, reader, *neighbor_id, l).await?;
+   ```
+   - Concurrent queries might see inconsistent graph state
+   - No transactional boundary for insert + prune operations
+
+3. **Entry Point Race Condition**
+   ```rust
+   // Entry point can change mid-search
+   if level > self.max_level {
+       self.entry_point = Some(node_id);  // Not atomic with writes
+       self.max_level = level;
+   }
+   ```
+
+4. **Cache Invalidation**
+   - No mechanism to invalidate cached vectors on update/delete
+   - Concurrent searches might use stale data
+
+### Vamana Online Insert Limitations
+
+Vamana requires fundamental changes for online updates:
+
+1. **Medoid Dependency**: Entry point is centroid of all vectors
+   - Adding new vector shifts centroid
+   - Would need periodic medoid recalculation
+
+2. **Batch Construction**: Algorithm makes multiple passes
+   - Pass 1: Random edges for connectivity
+   - Pass 2+: Refine with RNG pruning
+   - Single insert doesn't fit this model
+
+3. **FreshDiskANN Approach** (Not Implemented):
+   - Maintain small "fresh" index for new vectors
+   - Periodically merge into main index
+   - Requires hybrid search across both indices
+
+### Required Changes for Online Updates
+
+#### API Requirements (motlie_db)
+
+| Requirement | Priority | Why |
+|-------------|----------|-----|
+| **Read-after-write consistency** | Critical | Eliminate sleep delays, immediate edge visibility |
+| **Atomic multi-edge transactions** | Critical | Insert + bidirectional edges + prune as single operation |
+| **Connection count tracking** | High | O(1) prune decisions, critical for insert performance |
+| **Soft-delete for nodes** | High | Vector deletion via temporal range |
+| **Batch edge operations** | Medium | Efficient multi-edge insert/prune |
+
+#### Algorithm Requirements
+
+| Requirement | HNSW | Vamana |
+|-------------|------|--------|
+| **Concurrent read/write** | Add RwLock around entry_point, max_level | N/A (batch only) |
+| **Insert transaction** | Group insert + edges + prune atomically | Implement FreshDiskANN |
+| **Delete operation** | Soft-delete node + edges via temporal range | Full rebuild required |
+| **Cache invalidation** | Subscribe to mutation events | N/A |
+
+### Online Update Performance Targets
+
+| Operation | Target Latency | Target Throughput |
+|-----------|---------------|-------------------|
+| Insert | < 10ms | > 1000 vectors/sec |
+| Delete | < 5ms | > 2000 vectors/sec |
+| Search during update | < 20ms (P99) | No degradation |
+
+### Proposed Online Update Architecture
+
+```
+                    ┌─────────────────────────────────────┐
+                    │         Vector Search Index          │
+                    │                                     │
+   Insert ─────────►│  ┌─────────┐    ┌──────────────┐  │
+                    │  │ Write   │───►│ Transaction  │  │
+   Delete ─────────►│  │ Queue   │    │ Processor    │  │
+                    │  └─────────┘    └──────────────┘  │
+                    │        │                │          │
+                    │        ▼                ▼          │
+                    │  ┌─────────────────────────┐      │
+                    │  │    motlie_db (RocksDB)  │      │
+                    │  │  ┌─────┐ ┌─────┐ ┌────┐│      │
+                    │  │  │Nodes│ │Edges│ │Cnts││      │
+                    │  │  └─────┘ └─────┘ └────┘│      │
+                    │  └─────────────────────────┘      │
+                    │        │                          │
+   Search ─────────►│  ┌─────────────────────────┐      │
+                    │  │   Graph Navigator       │      │
+                    │  │   (async distance)      │      │
+                    │  └─────────────────────────┘      │
+                    └─────────────────────────────────────┘
+```
+
+---
+
 ## Viability Assessment: Memory-Efficient Vector Search
 
 ### What the Current API Already Supports
@@ -612,9 +759,104 @@ For datasets exceeding available memory:
 
 ## Required motlie_db Optimizations
 
-The following optimizations would make `motlie_db` more suitable for high-performance vector search:
+The following optimizations would make `motlie_db` suitable for production vector search with **online updates**.
 
-### 1. Batch Vector Retrieval API
+### Priority Legend
+
+| Priority | Meaning |
+|----------|---------|
+| 🔴 **Critical** | Blocking for online updates |
+| 🟠 **High** | Significant performance/functionality impact |
+| 🟡 **Medium** | Quality of life improvement |
+| 🟢 **Low** | Nice to have |
+
+### 1. 🔴 Read-After-Write Consistency
+
+**Current State**: Writer is async; reads may not see recent writes immediately.
+
+**Problem**: HNSW insert requires 10ms sleep between operations:
+```rust
+// hnsw.rs - current workaround
+tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+```
+
+**Needed**: Synchronous write visibility or explicit flush/sync option.
+
+```rust
+// Option A: Sync write mode
+writer.write_sync(AddEdge { ... }).await?;  // Blocks until visible
+
+// Option B: Explicit flush
+writer.flush().await?;  // Ensure all pending writes are visible
+
+// Option C: Read-your-writes guarantee
+let reader = writer.reader_with_writes();  // Sees own pending writes
+```
+
+**Impact**: Enables >1000 inserts/sec (currently limited to ~100/sec due to sleep).
+
+### 2. 🔴 Connection Count Tracking
+
+**Current State**: To check if a node exceeds `M_max` connections, we must enumerate all edges and count.
+
+**Needed**: Atomic connection count per node, updated on edge add/prune.
+
+```rust
+// Proposed: Maintain count in node metadata
+struct NodeMetadata {
+    connection_counts: HashMap<String, usize>,  // layer_name -> count
+}
+
+// Or: Separate counter column family
+// Key: (node_id, layer_name)
+// Value: count
+
+// API usage
+let count = GetConnectionCount::new(node_id, "hnsw_L0")
+    .run(reader, timeout).await?;
+```
+
+**Impact**: O(1) prune decisions instead of O(degree). Critical for fast online inserts.
+
+### 3. 🔴 Atomic Multi-Edge Transactions
+
+**Current State**: Each edge add/prune is a separate mutation. Insert operation requires multiple mutations that can partially fail.
+
+**Needed**: Transaction support for grouping mutations.
+
+```rust
+// Proposed: Transaction API
+let txn = writer.begin_transaction();
+txn.add(AddNode { ... });
+txn.add(AddNodeFragment { ... });
+txn.add(AddEdge { source: a, target: b, ... });
+txn.add(AddEdge { source: b, target: a, ... });  // Reverse edge
+txn.add(UpdateEdgeValidUntil { ... });  // Prune old edge
+txn.commit().await?;  // All or nothing
+```
+
+**Impact**: Graph consistency during inserts. No partial state visible to queries.
+
+### 4. 🟠 Bidirectional Edge Atomicity
+
+**Current State**: Adding a bidirectional edge requires two separate mutations.
+
+**Needed**: Atomic bidirectional edge insertion.
+
+```rust
+// Proposed
+AddBidirectionalEdge {
+    node_a: id1,
+    node_b: id2,
+    name: "hnsw_L0",
+    weight: Some(distance),
+}
+// Atomically creates: id1 → id2 AND id2 → id1
+```
+
+**Impact**: Graph consistency. If one direction fails, we have a broken graph.
+
+### 5. 🟠 Batch Vector Retrieval API
 
 **Current State**: `NodeFragments` query retrieves fragments one node at a time.
 
@@ -632,32 +874,28 @@ let fragments = NodeFragmentsByIdsMulti::new(
 // Returns: HashMap<Id, Vec<(TimestampMilli, FragmentContent)>>
 ```
 
-**Why**: During graph traversal, we need to compute distances to many neighbors. Batch retrieval reduces RocksDB round-trips from O(n) to O(1).
+**Impact**: During graph traversal, batch retrieval reduces RocksDB round-trips from O(n) to O(1).
 
-### 2. Inline Vector Storage in Edges (Small Vectors)
+### 6. 🟠 Soft-Delete for Nodes
 
-**Current State**: Edge values store `(TemporalRange, Option<f64>, EdgeSummary)`.
+**Current State**: No mechanism to mark nodes as deleted while preserving graph structure.
 
-**Needed**: Option to store small payload data directly in edges, avoiding the fragment lookup.
+**Needed**: Temporal soft-delete for nodes that hides them from queries.
 
 ```rust
-// Proposed: EdgeFragment or inline payload
-AddEdge {
-    source_node_id,
-    target_node_id,
-    name: "hnsw_L0",
-    weight: Some(distance),
-    payload: Some(target_vector_bytes),  // New: inline small data
-    ...
+// Proposed: Soft-delete node
+UpdateNodeValidUntil {
+    id: node_id,
+    valid_until: TimestampMilli::now(),
+    reason: "deleted by user",
 }
+
+// Queries with future timestamp see node; past timestamp doesn't
 ```
 
-**Why**: For small vectors or quantized representations (e.g., PQ codes), storing data inline avoids a separate lookup. Not practical for 1024-dim f32 vectors (4KB each), but useful for:
-- Product Quantization (PQ) codes: 32-128 bytes
-- Scalar Quantization (SQ): 256-1024 bytes
-- Graph metadata
+**Impact**: Enables vector deletion without full index rebuild.
 
-### 3. Efficient Edge Enumeration by Prefix
+### 7. 🟡 Edge Name Prefix Filtering
 
 **Current State**: `OutgoingEdges` returns all edges from a node, filtered by temporal range.
 
@@ -671,15 +909,33 @@ OutgoingEdges::new(node_id, None)
     .await?;
 ```
 
-**Why**: HNSW stores edges for multiple layers. Querying layer 0 shouldn't scan layer 1, 2, etc. edges.
+**Impact**: HNSW stores edges for multiple layers. Querying layer 0 shouldn't scan layer 1, 2, etc. edges.
 
-### 4. Vector-Specific Column Family
+### 8. 🟡 Skip Fulltext Indexing for Vectors
 
-**Current State**: Vectors stored as NodeFragments (text-oriented, fulltext-indexed).
+**Current State**: Vectors stored as NodeFragments are fulltext-indexed.
+
+**Needed**: Flag to skip fulltext indexing for binary/vector data.
+
+```rust
+// Proposed: Skip fulltext flag
+AddNodeFragment {
+    id: node_id,
+    content: vector_data,
+    skip_fulltext: true,  // Don't index as text
+    ...
+}
+```
+
+**Impact**: 40-60% faster vector storage. Vectors aren't searchable text anyway.
+
+### 9. 🟢 Vector-Specific Column Family
+
+**Current State**: Vectors stored as NodeFragments (text-oriented).
 
 **Needed**: A dedicated column family optimized for binary vector data:
-- Skip fulltext indexing (vectors aren't searchable text)
-- Optimized compression (vectors compress differently than text)
+- Skip fulltext indexing
+- Optimized compression
 - Optional: SIMD-friendly memory layout
 
 ```rust
@@ -692,65 +948,33 @@ AddNodeVector {
 }
 ```
 
-### 5. Approximate Distance in Edge Weight
+### 10. 🟢 Inline Edge Payload (Small Vectors)
 
-**Current State**: Edge weight stores exact distance as `f64`.
+**Current State**: Edge values store `(TemporalRange, Option<f64>, EdgeSummary)`.
 
-**Consideration**: For ANN, we often only need approximate distances for ranking. Could store:
-- Quantized distance (u16 or u8)
-- Distance bucket/tier
-
-**Trade-off**: Saves space but loses precision. May affect recall for borderline neighbors.
-
-### 6. Connection Count Tracking
-
-**Current State**: To check if a node exceeds `M_max` connections, we must enumerate all edges and count.
-
-**Needed**: Atomic connection count per node, updated on edge add/prune.
+**Needed**: Option to store small payload data directly in edges.
 
 ```rust
-// Proposed: Maintain count in node metadata
-struct NodeMetadata {
-    connection_counts: HashMap<String, usize>,  // layer_name -> count
-}
-
-// Or: Separate counter column family
-// Key: (node_id, layer_name)
-// Value: count
-```
-
-**Why**: Pruning decisions require knowing current neighbor count. Counting via iteration is O(degree).
-
-### 7. Bidirectional Edge Atomicity
-
-**Current State**: Adding a bidirectional edge requires two separate mutations.
-
-**Needed**: Atomic bidirectional edge insertion.
-
-```rust
-// Proposed
-AddBidirectionalEdge {
-    node_a: id1,
-    node_b: id2,
+// Proposed: Inline small payload
+AddEdge {
+    source_node_id,
+    target_node_id,
     name: "hnsw_L0",
     weight: Some(distance),
+    payload: Some(pq_codes),  // 32-128 bytes for PQ codes
+    ...
 }
-// Atomically creates: id1 → id2 AND id2 → id1
 ```
 
-**Why**: Graph consistency. If one direction fails, we have a broken graph.
+**Impact**: Useful for Product Quantization codes (32-128 bytes), not for full vectors (4KB).
 
-### 8. Lazy/Streaming Fragment Content
+### 11. 🟢 Streaming Fragment Content
 
 **Current State**: `NodeFragments` query loads entire fragment content into memory.
 
 **Needed**: Streaming or lazy loading for large fragments.
 
 ```rust
-// For 1024-dim f32 = 4KB per vector
-// 1M vectors = 4GB just for vector data
-// Need to avoid loading all into memory
-
 // Proposed: Streaming iterator
 let stream = NodeFragmentsStream::new(node_id, time_range)
     .run(reader, timeout)
@@ -761,60 +985,135 @@ while let Some((ts, content)) = stream.next().await {
 }
 ```
 
+**Impact**: Only needed for extremely large fragments or memory-constrained environments.
+
 ---
 
 ## Performance Comparison: Current vs Optimized
+
+### Query Performance
 
 | Operation | Current | With Optimizations |
 |-----------|---------|-------------------|
 | Load vector for 1 node | 1 RocksDB read | 1 RocksDB read |
 | Load vectors for N nodes | N RocksDB reads | 1 batch read |
-| Check neighbor count | O(degree) scan | O(1) counter lookup |
-| Add bidirectional edge | 2 mutations | 1 atomic mutation |
 | Query layer-specific edges | Scan all + filter | Prefix scan |
-| Store 1M vectors | Fulltext indexed | Skip fulltext |
+| Search latency (P99) | ~15ms | ~10ms |
+
+### Online Update Performance
+
+| Operation | Current | With Phase 1 | With Phase 3 |
+|-----------|---------|--------------|--------------|
+| Insert throughput | ~100/sec (10ms sleep) | >1000/sec | >5000/sec |
+| Insert latency (P99) | ~15ms | <10ms | <5ms |
+| Check neighbor count | O(degree) scan | O(1) counter | O(1) counter |
+| Add bidirectional edge | 2 mutations | 1 atomic | 1 atomic |
+| Insert atomicity | None | Transaction | Transaction |
+| Concurrent readers | Breaks | Works | Snapshot isolated |
+
+### Storage Performance
+
+| Operation | Current | With Optimizations |
+|-----------|---------|-------------------|
+| Store 1M vectors | Fulltext indexed | Skip fulltext (40-60% faster) |
+| Vector storage size | JSON encoded | Binary (50% smaller) |
+| PQ codes inline | Not possible | In edge payload |
 
 ---
 
 ## Recommended Implementation Priority
 
-### Immediate (Fix Recall Issue) - ✅ COMPLETED
+Priorities are ordered based on enabling **online updates** while maintaining search performance.
 
-Both HNSW and Vamana now use async distance computation with DB fallback:
+### ✅ Phase 0: Foundation (COMPLETED)
 
-| Fix | Status | Implementation |
-|-----|--------|----------------|
-| Async distance + cache on load | ✅ Done | `compute_distance_async()` in both examples |
+| Task | Status | Impact |
+|------|--------|--------|
+| Basic graph storage mapping | ✅ Done | Enables HNSW/Vamana on motlie_db |
+| Fix recall issue (async distance) | ✅ Done | Working search with 60-100% recall |
+| Memory-efficient search | ✅ Done | On-demand vector loading from DB |
 
-**Key changes made**:
-- Added `compute_distance_async()` method with DB fallback
-- Updated `greedy_search_layer()` / `greedy_search()` to use async distance
-- Updated `search_layer()` to use async distance
-- Changed `search()` to take `&mut self` for cache updates
-- Loaded vectors are cached for reuse within search session
+### 🔶 Phase 1: Online Update Enablers (CRITICAL)
 
-### Phase 1: High Impact API Changes
+These are **blocking** requirements for production online updates:
 
-| Optimization | Effort | Impact | Why |
-|--------------|--------|--------|-----|
-| **Batch Fragment Retrieval** | Medium | High | `NodeFragmentsByIdsMulti` with `multi_get_cf()` - reduces O(n) to O(1) round-trips |
-| **Connection Count Tracking** | Medium | High | Atomic counters per (node, edge_name) - enables O(1) pruning decisions |
+| Optimization | Effort | Impact | Why Critical for Online |
+|--------------|--------|--------|------------------------|
+| **Read-after-write consistency** | High | Critical | Eliminate 10ms sleep delays, enable >1000 inserts/sec |
+| **Connection Count Tracking** | Medium | Critical | O(1) prune decisions during insert (currently O(degree)) |
+| **Atomic Multi-Edge Transactions** | Medium | Critical | Insert + bidirectional edges + prune atomically |
+| **Bidirectional Edge Atomicity** | Low | High | Graph consistency during concurrent operations |
 
-### Phase 2: Medium Impact
+**Target Outcome**: HNSW inserts at >1000 vectors/sec with immediate visibility.
 
-| Optimization | Effort | Impact | Why |
-|--------------|--------|--------|-----|
-| **Edge Name Prefix Filtering** | Low | Medium | Add `with_name_prefix()` to `OutgoingEdges` - RocksDB prefix seek |
-| **Skip Fulltext for Vectors** | Medium | Medium | New mutation flag or separate API - 40-60% indexing speedup |
-| **Bidirectional Edge Atomicity** | Low | Medium | Single mutation for A↔B - graph consistency |
-
-### Phase 3: Advanced Optimizations
+### Phase 2: Online Update Quality
 
 | Optimization | Effort | Impact | Why |
 |--------------|--------|--------|-----|
-| **Inline Edge Payload** | Medium | Low | Only useful for quantized vectors (32-256 bytes) |
-| **Streaming Fragments** | High | Low | Only needed for extremely large fragments |
+| **Soft-delete for Nodes** | Medium | High | Enable vector deletion via temporal range |
+| **Batch Fragment Retrieval** | Medium | High | Fast neighbor loading during insert/search |
+| **Cache Invalidation Events** | Medium | High | Notify caches when vectors are updated/deleted |
+| **Edge Name Prefix Filtering** | Low | Medium | Faster HNSW layer queries during insert |
+
+**Target Outcome**: Full CRUD operations on vector index.
+
+### Phase 3: Concurrent Access
+
+| Optimization | Effort | Impact | Why |
+|--------------|--------|--------|-----|
+| **RwLock for Index Metadata** | Low | High | Safe concurrent read during write |
+| **Snapshot Isolation for Queries** | Medium | High | Consistent reads during mutations |
+| **Write Queue with Batching** | Medium | Medium | Amortize transaction overhead |
+
+**Target Outcome**: No search degradation during concurrent updates.
+
+### Phase 4: Production Optimizations
+
+| Optimization | Effort | Impact | Why |
+|--------------|--------|--------|-----|
+| **Skip Fulltext for Vectors** | Medium | Medium | 40-60% indexing speedup |
+| **Product Quantization** | High | High | 50× less memory, faster distance |
 | **Vector-Specific Column Family** | High | Medium | SIMD-aligned storage, binary format |
+| **Streaming Fragments** | High | Low | Only for very large vectors |
+
+### Implementation Roadmap Summary
+
+```
+Phase 0 ──────────────────────────────────────────────────── ✅ DONE
+  └── Basic search working with 60-100% recall
+
+Phase 1 ──────────────────────────────────────────────────── 🔶 NEXT
+  └── Online inserts at >1000/sec
+      ├── Read-after-write consistency (motlie_db)
+      ├── Connection count tracking (motlie_db)
+      └── Atomic multi-edge transactions (motlie_db)
+
+Phase 2 ──────────────────────────────────────────────────── Planned
+  └── Full CRUD support
+      ├── Vector deletion
+      ├── Batch operations
+      └── Cache invalidation
+
+Phase 3 ──────────────────────────────────────────────────── Planned
+  └── Concurrent read/write
+      ├── RwLock for metadata
+      └── Snapshot isolation
+
+Phase 4 ──────────────────────────────────────────────────── Future
+  └── Production scale
+      ├── PQ compression
+      └── Optimized storage
+```
+
+### Key Metrics to Track
+
+| Metric | Current | Phase 1 Target | Phase 3 Target |
+|--------|---------|----------------|----------------|
+| Insert throughput | ~100/sec (10ms sleep) | >1000/sec | >5000/sec |
+| Insert latency (P99) | ~15ms | <10ms | <5ms |
+| Search during insert | Untested | <20ms P99 | <15ms P99 |
+| Concurrent writers | 1 | 1 | Multiple |
+| Delete support | No | No | Yes |
 
 ---
 
