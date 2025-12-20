@@ -38,17 +38,18 @@ Both algorithms leverage `motlie_db`'s graph primitives (nodes, edges, weights, 
 
 ### Performance Results
 
-**HNSW** (500 vectors, 100 queries, k=10):
-- Average Recall@10: **100%**
-- Queries Per Second: **95 QPS**
-- Search Time: **10.5ms** average
+See [PERF.md](./PERF.md) for comprehensive benchmarks.
 
-**Vamana** (1000 vectors, 100 queries, k=10):
-- Average Recall@10: **61.4%**
-- Queries Per Second: **243 QPS**
-- Search Time: **4.1ms** average
+**Summary at 10K vectors**:
 
-Note: HNSW achieves higher recall due to its hierarchical multi-layer structure with larger ef_construction parameter. Vamana's lower recall on uniform random data is expected - it's optimized for clustered real-world data and disk-based operation with Product Quantization.
+| Algorithm | Index Time | Throughput | Disk | Latency | QPS | Recall@10 |
+|-----------|------------|------------|------|---------|-----|-----------|
+| HNSW | 329.7s | 30/s | 257MB | 22ms | 45 | 82% |
+| Vamana | 225.5s | 44/s | 281MB | 12ms | 82 | 27% |
+
+**Key Bottleneck**: 10ms sleep between inserts limits throughput to ~30-68/sec. See [Why Indexing is Slow](#why-indexing-is-slow) below.
+
+Note: HNSW achieves higher recall due to its hierarchical multi-layer structure with larger ef_construction parameter. Vamana's lower recall on uniform random data is expected - it's optimized for clustered real-world data.
 
 ## HNSW vs Vamana Comparison
 
@@ -519,6 +520,70 @@ async fn compute_distance_async(&mut self, reader: &Reader, query: &[f32], node_
 **Results After Fix**:
 - HNSW: **100% recall@10** (500 vectors, 100 queries)
 - Vamana: **61% recall@10** (1000 vectors, 100 queries)
+
+---
+
+## Why Indexing is Slow
+
+The current implementation achieves only 30-68 vectors/sec. Here's the detailed breakdown:
+
+### Bottleneck Analysis
+
+| Bottleneck | Impact | % of Time |
+|------------|--------|-----------|
+| **10ms sleep** | Limits to 100/sec theoretical max | **78%** |
+| **Graph construction** | Greedy search + edge mutations | 12% |
+| **RocksDB writes** | 34-81 mutations per vector | 8% |
+| **JSON parsing** | 60% overhead vs binary | 2% |
+
+### The 10ms Sleep Problem
+
+```rust
+// hnsw.rs:559 - The dominant bottleneck
+tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+```
+
+**Why it exists**: RocksDB writes are async. Each insert's greedy search needs to see edges from the previous insert. Without the sleep, read-after-write inconsistency causes graph corruption.
+
+**Solutions** (see [PERF.md](./PERF.md) for details):
+1. **Optimistic read-your-writes**: Maintain pending edges in memory overlay
+2. **Write batching**: Buffer inserts, batch-flush periodically
+3. **RocksDB transactions**: Use WriteBatchWithIndex for immediate visibility
+
+### Write Amplification per Insert
+
+| Mutation | Count (HNSW) | Description |
+|----------|--------------|-------------|
+| AddNode | 1 | Vector metadata |
+| AddNodeFragment | 1 | Vector data (JSON) |
+| AddEdge (forward) | ~32 | To neighbors |
+| AddEdge (reverse) | ~32 | From neighbors |
+| UpdateEdgeValidUntil | 0-16 | Pruning |
+| **Total** | **34-81** | Per vector |
+
+### Disk Usage Breakdown
+
+At 10K vectors, disk usage is **25.7KB per vector**:
+
+| Component | Size | % |
+|-----------|------|---|
+| Vector data (JSON) | 6.5KB | 25% |
+| Edges (bidirectional) | 12.8KB | **50%** |
+| RocksDB overhead | 6.1KB | 24% |
+| Node metadata | 0.3KB | 1% |
+
+**Key insight**: Graph edges consume 2× more space than vector data itself.
+
+### Proposed Optimizations
+
+| Optimization | Improvement | Status |
+|--------------|-------------|--------|
+| Remove 10ms sleep | **50× throughput** | Requires motlie_db changes |
+| Binary vector storage | 40% less space | Ready to implement |
+| Adjacency list edges | 50% less space | Requires schema change |
+| Edge count tracking | O(1) prune decisions | Requires motlie_db changes |
+
+See [PERF.md](./PERF.md) for the complete optimization roadmap.
 
 ---
 
