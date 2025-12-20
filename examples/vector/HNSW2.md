@@ -692,6 +692,267 @@ async fn filtered_search(
 
 ---
 
+## Comparison: HNSW2 vs Current Implementations
+
+### Architecture Comparison
+
+| Aspect | Current HNSW | Current Vamana | HNSW2 (Proposed) |
+|--------|-------------|----------------|------------------|
+| **ID Format** | UUID (16 bytes) | UUID (16 bytes) | u32 (4 bytes) |
+| **Edge Storage** | Separate rows per edge | Separate rows per edge | Roaring bitmap per node |
+| **Edge Size** | ~200 bytes/edge | ~200 bytes/edge | ~3 bytes/edge (amortized) |
+| **Memory Model** | HashMap cache | HashMap cache | RocksDB block cache |
+| **Consistency** | 10ms sleep | 10ms sleep | WriteBatchWithIndex |
+| **Pruning** | Inline during insert | Inline (RNG heuristic) | Background thread |
+| **Graph Structure** | Multi-layer (0 to L) | Single layer + medoid | Multi-layer (0 to L) |
+| **Online Updates** | Limited (slow) | Not designed for online | Full support |
+| **Deletions** | Not implemented | Not implemented | First-class support |
+
+### Detailed Feature Comparison
+
+| Feature | Current HNSW | Current Vamana | HNSW2 |
+|---------|-------------|----------------|-------|
+| **Insert Throughput** | 30-40/sec | 40-70/sec | 5,000-10,000/sec (target) |
+| **Search QPS** | 45-108 | 82-201 | 500-1,000 (target) |
+| **Recall@10 (1K)** | 99.5% | 57.9% | ~99% (target) |
+| **Disk per Vector** | 25.7KB | ~28KB | ~10KB |
+| **Filtered Search** | Post-filter | Post-filter | Bitmap intersection |
+| **Concurrent Writers** | No (10ms serialization) | No | Yes (merge operators) |
+| **Real-time Updates** | Degraded consistency | Not supported | Full support |
+| **Memory at 1M vectors** | ~4GB (in-memory cache) | ~4GB | ~100MB (block cache) |
+
+### Pros and Cons
+
+#### Current HNSW
+
+**Pros:**
+- High recall (99.5% at 1K vectors)
+- Proven HNSW algorithm with multi-layer structure
+- Simple implementation using existing motlie_db primitives
+- Works with existing UUID-based node system
+
+**Cons:**
+- 10ms sleep between inserts limits throughput to ~100/sec max
+- In-memory HashMap cache consumes 4KB per vector (4GB at 1M)
+- Separate edge rows cause write amplification (34-81 writes per insert)
+- No deletion support
+- No concurrent write support
+- Recall degrades at scale (82% at 10K)
+
+#### Current Vamana
+
+**Pros:**
+- Faster indexing than HNSW (1.65x at 1K)
+- Single-layer structure is simpler
+- RNG pruning is theoretically optimal for navigability
+- Good for batch construction scenarios
+
+**Cons:**
+- Low recall on uniform random data (57.9% at 1K, 26.9% at 10K)
+- Not designed for online updates (requires full rebuild)
+- Same 10ms sleep bottleneck
+- Same write amplification issues
+- Same in-memory cache requirements
+- Medoid computation requires all vectors in memory
+
+#### HNSW2 (Proposed)
+
+**Pros:**
+- 100-200x faster inserts (no sleep, merge operators)
+- 60% less disk usage (roaring bitmaps, binary vectors)
+- 40x less memory (block cache vs HashMap)
+- Native filtered search via bitmap intersection
+- Lock-free concurrent updates
+- First-class deletion support with orphan repair
+- Background pruning doesn't block inserts
+- Scales to 1B+ vectors
+
+**Cons:**
+- More complex implementation (merge operators, background threads)
+- Requires u32 IDs (not UUIDs)
+- Distance recomputation during search (vs cached in edges)
+- New column families (not using existing motlie_db schema)
+- Learning curve for RocksDB merge operators
+- Block cache tuning required for optimal performance
+
+### Engineering Effort Estimate
+
+| Task | Effort | Dependencies | Risk |
+|------|--------|--------------|------|
+| u32 ID allocator with roaring reuse | 2-3 days | roaring-rs | Low |
+| Column family schema setup | 1-2 days | RocksDB | Low |
+| Roaring bitmap merge operator | 3-5 days | RocksDB, bincode | Medium |
+| Port HNSW insert with bitmaps | 3-5 days | Merge operator | Medium |
+| WriteBatchWithIndex for consistency | 2-3 days | RocksDB | Low |
+| Background pruning thread | 3-5 days | Tokio channels | Medium |
+| pending_updates tracking | 2-3 days | - | Low |
+| Orphan repair logic | 2-3 days | Pruning | Low |
+| Delete vector support | 2-3 days | Orphan repair | Low |
+| MultiGet batch fetching | 1-2 days | RocksDB | Low |
+| Filtered search with bitmaps | 2-3 days | - | Low |
+| Block cache tuning | 2-3 days | Profiling | Medium |
+| **Total** | **25-40 days** | - | Medium |
+
+### Online Update Support
+
+#### Current Implementation: Limited
+
+```
+Insert Request → 10ms Sleep → Read Edges → Compute Neighbors
+                    ↓
+              Graph Inconsistent for 10ms
+                    ↓
+              Inline Pruning (Blocking)
+                    ↓
+              Write Edges (34-81 mutations)
+                    ↓
+              Insert Complete
+```
+
+**Problems:**
+1. 10ms sleep serializes all inserts (~100/sec max)
+2. Inline pruning blocks next insert
+3. No read-your-writes guarantee
+4. Cannot delete vectors
+5. Searches during insert see stale graph
+
+#### HNSW2: Full Online Support
+
+```
+Insert Request → Allocate ID → Store Vector
+                    ↓
+              WriteBatchWithIndex (atomic, read-your-writes)
+                    ↓
+              Greedy Search (sees pending writes)
+                    ↓
+              Merge Operator (bitmap add, no read-modify-write)
+                    ↓
+              Mark in pending_updates
+                    ↓
+              Return Immediately (non-blocking)
+
+Background Thread (parallel):
+              Scan pending_updates
+                    ↓
+              Prune if over M_max
+                    ↓
+              Orphan repair if needed
+                    ↓
+              Update entry point if needed
+```
+
+**Benefits:**
+1. No sleep - WriteBatchWithIndex provides read-your-writes
+2. Merge operators eliminate read-modify-write race conditions
+3. Background pruning doesn't block inserts
+4. Searches use consistent snapshot (not affected by concurrent writes)
+5. Deletions mark neighbors for orphan repair
+
+### Minimal Index Rebuild Strategy
+
+#### Current: No Incremental Updates
+
+Both current implementations require full rebuild for any structural change:
+- Adding vector: O(n log n) for HNSW, O(n²) for Vamana
+- Deleting vector: Not supported
+- Updating vector: Not supported
+
+#### HNSW2: Incremental Updates
+
+**Insert (touching <1% of graph):**
+```rust
+// 1. Store new vector
+batch.put_cf(vectors_cf, &id.to_le_bytes(), &vector);
+
+// 2. Find neighbors via greedy search (O(log n))
+let neighbors = greedy_search(&vector, ef_construction);
+
+// 3. Add edges (O(M) merge operations)
+for neighbor in neighbors {
+    batch.merge_cf(edges_cf, &key, EdgeOperation::Add(neighbor));
+    batch.merge_cf(edges_cf, &neighbor_key, EdgeOperation::Add(id));
+    batch.put_cf(pending_updates_cf, &neighbor.to_le_bytes(), &[1]);
+}
+
+// 4. Commit atomically
+db.write(batch)?;
+// No rebuild needed - graph is updated incrementally
+```
+
+**Delete (touching <1% of graph):**
+```rust
+// 1. Get current neighbors
+let neighbors = get_edge_bitmap(id)?;
+
+// 2. Remove from each neighbor's edges
+for neighbor in neighbors.iter() {
+    batch.merge_cf(edges_cf, &neighbor_key, EdgeOperation::Remove(id));
+    batch.put_cf(pending_updates_cf, &neighbor.to_le_bytes(), &[1]);
+}
+
+// 3. Delete vector and edges
+batch.delete_cf(vectors_cf, &id.to_le_bytes());
+batch.delete_cf(edges_cf, &edge_key);
+
+// 4. Background thread repairs orphans
+// Only affected nodes (~M neighbors) need re-linking
+```
+
+**Update (modify vector embedding):**
+```rust
+// 1. Delete old edges
+delete_vector(id)?;
+
+// 2. Insert with new embedding (reuses same ID)
+insert_vector(id, new_vector)?;
+
+// Only touches ~M neighbors, not entire graph
+```
+
+### Comparison: Rebuild Cost
+
+| Operation | Current HNSW | Current Vamana | HNSW2 |
+|-----------|-------------|----------------|-------|
+| Insert 1 vector | O(log n) + 10ms | O(log n) + 10ms | O(log n) |
+| Delete 1 vector | Full rebuild | Full rebuild | O(M) |
+| Update 1 vector | Full rebuild | Full rebuild | O(M) |
+| Nodes touched | All (rebuild) | All (rebuild) | <1% (local) |
+| Downtime | Yes (during rebuild) | Yes | None (online) |
+
+### Migration Path
+
+#### Phase 1: Core Infrastructure (Week 1)
+1. Add roaring-rs dependency
+2. Implement u32 ID allocator
+3. Create column families (vectors, edges, node_meta, graph_meta, pending_updates)
+4. Implement merge operator for bitmap edges
+
+#### Phase 2: HNSW2 Construction (Week 2)
+1. Port insert logic with bitmap edges
+2. Implement greedy search reading from bitmaps
+3. Add WriteBatchWithIndex for consistency
+4. Remove 10ms sleep
+
+#### Phase 3: Online Updates (Week 3)
+1. Implement pending_updates tracking
+2. Build background pruning thread
+3. Add orphan repair logic
+4. Implement delete_vector
+
+#### Phase 4: Optimizations (Week 4)
+1. MultiGet for batch vector fetching
+2. Filtered search with bitmap intersection
+3. Block cache tuning
+4. SIMD distance computation
+
+#### Parallel Development Option
+HNSW2 can be developed alongside existing implementations:
+- New column families don't conflict with existing schema
+- Can run both implementations for A/B comparison
+- Gradual migration: new indexes use HNSW2, existing keep old format
+
+---
+
 ## References
 
 - [hannoy](https://github.com/nnethercott/hannoy) - Production KV-backed HNSW
