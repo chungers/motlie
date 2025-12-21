@@ -1006,20 +1006,335 @@ impl HnswIndex {
 
 ---
 
-## Fulltext Flush
+## Fulltext Module Impact Analysis
 
-If fulltext consistency is also needed:
+The current architecture chains graph → fulltext via MPSC forwarding:
+
+```
+Unified Writer
+     │
+     ▼
+Graph Writer ──► [MPSC] ──► Graph Consumer ──► RocksDB commit
+                                   │
+                                   ▼ (forward via next)
+                            [MPSC] ──► Fulltext Consumer ──► Tantivy commit
+```
+
+### Flush Behavior with Chain
+
+When `flush()` is called, the flush marker flows through the graph consumer only:
+
+```
+writer.flush()
+     │
+     ▼
+Graph Consumer receives FlushMarker
+     │
+     ├──► Process regular mutations
+     ├──► RocksDB commit
+     ├──► Forward regular mutations to Fulltext (async)
+     └──► Signal completion ◄─── flush() returns here
+                │
+                ▼
+         Fulltext Consumer may still be processing!
+```
+
+**Result:** `flush()` guarantees **graph consistency only**, not fulltext.
+
+### Use Case Analysis
+
+| Use Case | Graph-Only Flush OK? | Reason |
+|----------|---------------------|--------|
+| Vector search (HNSW/Vamana) | ✅ Yes | Only reads graph edges/fragments |
+| Graph algorithms | ✅ Yes | Only reads graph data |
+| Graph traversal | ✅ Yes | Only reads nodes/edges |
+| Fulltext search after write | ❌ No | Needs Tantivy indexed |
+| Hybrid queries (graph + fulltext) | ⚠️ Partial | Graph visible, fulltext may lag |
+
+**For vector search, graph-only flush is sufficient.**
+
+---
+
+### Option A: Graph-Only Flush (Recommended for Phase 1)
+
+Keep flush simple, document the limitation clearly:
 
 ```rust
 impl Writer {
-    /// Flush both graph and fulltext stores.
+    /// Flush graph mutations and wait for RocksDB commit.
+    ///
+    /// Returns when all graph mutations are committed and visible to readers.
+    ///
+    /// # Fulltext Consistency
+    ///
+    /// This method only guarantees **graph (RocksDB) consistency**.
+    /// Fulltext indexing continues asynchronously and may not be complete
+    /// when this method returns.
+    ///
+    /// Use `flush_all()` if fulltext search consistency is also required.
+    ///
+    /// # Use Cases
+    ///
+    /// Graph-only flush is sufficient for:
+    /// - Vector search (HNSW, Vamana)
+    /// - Graph traversal and algorithms
+    /// - Node/edge CRUD operations
+    ///
+    /// Full flush (`flush_all()`) is required for:
+    /// - Fulltext search immediately after write
+    /// - Hybrid queries combining graph and fulltext
+    pub async fn flush(&self) -> Result<()> {
+        self.graph_writer.flush().await
+    }
+}
+```
+
+**Pros:**
+- Simple implementation
+- Fast (doesn't wait for Tantivy)
+- Sufficient for vector search (primary use case)
+
+**Cons:**
+- Doesn't guarantee fulltext visibility
+- Users must understand the distinction
+
+**Files impacted:** None beyond original list
+
+---
+
+### Option B: Propagate Flush Through Chain
+
+Forward flush marker to fulltext consumer, signal completion only after both commit:
+
+```rust
+// In Graph Consumer::process_batch()
+async fn process_batch(&self, mutations: Vec<Mutation>) -> Result<()> {
+    let mut regular_mutations = Vec::new();
+    let mut flush_markers = Vec::new();
+
+    for mutation in mutations {
+        match mutation {
+            Mutation::Flush(marker) => flush_markers.push(marker),
+            other => regular_mutations.push(other),
+        }
+    }
+
+    // Process and commit to RocksDB
+    if !regular_mutations.is_empty() {
+        self.processor.process_mutations(&regular_mutations).await?;
+    }
+
+    // Forward EVERYTHING to fulltext (including flush markers)
+    if let Some(next) = &self.next {
+        let mut forward = regular_mutations;
+        forward.extend(flush_markers.into_iter().map(Mutation::Flush));
+        next.send(forward).await?;
+    }
+
+    // Don't signal here - fulltext consumer will signal
+    Ok(())
+}
+
+// In Fulltext Consumer::process_batch()
+async fn process_batch(&self, mutations: Vec<Mutation>) -> Result<()> {
+    let mut regular_mutations = Vec::new();
+    let mut flush_completions = Vec::new();
+
+    for mutation in mutations {
+        match mutation {
+            Mutation::Flush(marker) => {
+                if let Some(c) = marker.take_completion() {
+                    flush_completions.push(c);
+                }
+            }
+            other => regular_mutations.push(other),
+        }
+    }
+
+    // Index in Tantivy
+    if !regular_mutations.is_empty() {
+        self.processor.process_mutations(&regular_mutations).await?;
+    }
+
+    // Signal completion AFTER Tantivy commit
+    for completion in flush_completions {
+        let _ = completion.send(());
+    }
+
+    Ok(())
+}
+```
+
+**Pros:**
+- Single `flush()` guarantees both stores
+- Simpler mental model
+
+**Cons:**
+- Slower (waits for Tantivy indexing)
+- Penalizes graph-only use cases
+- More complex implementation
+
+**Not recommended:** Unnecessarily slow for vector search.
+
+---
+
+### Option C: Two Flush Methods (Recommended for Phase 2)
+
+Provide both options for different use cases:
+
+```rust
+impl Writer {
+    /// Flush graph mutations only (fast).
+    ///
+    /// Sufficient for graph reads, vector search, graph algorithms.
+    /// Fulltext indexing continues asynchronously.
+    pub async fn flush(&self) -> Result<()> {
+        self.graph_writer.flush().await
+    }
+
+    /// Flush both graph and fulltext stores (slower).
+    ///
+    /// Required for fulltext search immediately after write.
+    /// Waits for both RocksDB and Tantivy to commit.
     pub async fn flush_all(&self) -> Result<()> {
+        // Flush graph first
         self.graph_writer.flush().await?;
+
+        // Then flush fulltext
         self.fulltext_writer.flush().await?;
+
         Ok(())
     }
 }
 ```
+
+**Requires:** Adding flush support to fulltext writer.
+
+---
+
+### Fulltext Writer Changes (Phase 2)
+
+If `flush_all()` is needed, modify the fulltext module:
+
+#### Files to Modify
+
+```
+libs/db/src/fulltext/
+├── writer.rs    # Add flush(), modify Consumer
+└── mod.rs       # Re-export if needed
+```
+
+#### `libs/db/src/fulltext/writer.rs`
+
+```rust
+use std::sync::Mutex;
+use tokio::sync::oneshot;
+
+/// Flush marker for fulltext synchronization.
+/// Reuses the same pattern as graph flush.
+pub struct FulltextFlushMarker {
+    completion: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl FulltextFlushMarker {
+    pub fn new(completion: oneshot::Sender<()>) -> Self {
+        Self { completion: Mutex::new(Some(completion)) }
+    }
+
+    pub fn take_completion(&self) -> Option<oneshot::Sender<()>> {
+        self.completion.lock().unwrap().take()
+    }
+}
+
+impl Writer {
+    /// Flush all pending fulltext mutations and wait for Tantivy commit.
+    pub async fn flush(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+
+        // Send flush marker
+        self.sender
+            .send(FulltextFlushMarker::new(tx))
+            .await
+            .context("Failed to send fulltext flush marker")?;
+
+        // Wait for consumer to process
+        rx.await.context("Fulltext flush failed")?;
+
+        Ok(())
+    }
+}
+
+impl<P: Processor> Consumer<P> {
+    async fn process_batch(&self, items: Vec<...>) -> Result<()> {
+        let mut regular_items = Vec::new();
+        let mut flush_completions = Vec::new();
+
+        for item in items {
+            match item {
+                FlushMarker(marker) => {
+                    if let Some(c) = marker.take_completion() {
+                        flush_completions.push(c);
+                    }
+                }
+                other => regular_items.push(other),
+            }
+        }
+
+        // Process regular items (index in Tantivy)
+        if !regular_items.is_empty() {
+            self.processor.process(regular_items).await?;
+        }
+
+        // Signal completion after Tantivy commit
+        for completion in flush_completions {
+            let _ = completion.send(());
+        }
+
+        Ok(())
+    }
+}
+```
+
+---
+
+### Implementation Phases
+
+#### Phase 1: Graph-Only Flush (This PR)
+
+| File | Changes | Fulltext Impact |
+|------|---------|-----------------|
+| `graph/mutation.rs` | +30 lines | None |
+| `graph/writer.rs` | +45 lines | None |
+| `writer.rs` | +15 lines | Document graph-only |
+| `hnsw.rs` | ~5 lines | None |
+| `vamana.rs` | ~3 lines | None |
+
+**Fulltext behavior:** Continues receiving forwarded mutations asynchronously. No changes needed.
+
+**Sufficient for:** Vector search, graph algorithms, CRUD operations.
+
+#### Phase 2: Full Flush (Future PR, If Needed)
+
+| File | Changes | Purpose |
+|------|---------|---------|
+| `fulltext/writer.rs` | +40 lines | Add flush() to fulltext |
+| `writer.rs` | +10 lines | Add flush_all() |
+
+**Required for:** Fulltext search immediately after write.
+
+---
+
+### Decision Matrix
+
+| Requirement | Phase 1 (Graph-Only) | Phase 2 (Full Flush) |
+|-------------|---------------------|----------------------|
+| Vector search consistency | ✅ | ✅ |
+| Graph query consistency | ✅ | ✅ |
+| Fulltext search consistency | ❌ | ✅ |
+| Implementation effort | Low | Medium |
+| Performance impact | None | Adds Tantivy wait |
+
+**Recommendation:** Implement Phase 1 first. Add Phase 2 only if users need fulltext consistency.
 
 ---
 
