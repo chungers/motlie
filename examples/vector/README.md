@@ -40,7 +40,14 @@ Both algorithms leverage `motlie_db`'s graph primitives (nodes, edges, weights, 
 
 See [PERF.md](./PERF.md) for comprehensive benchmarks.
 
-**Summary at 10K vectors**:
+**Summary on SIFT1M benchmark (1K vectors)**:
+
+| Algorithm | Index Time | Throughput | Latency | QPS | Recall@10 |
+|-----------|------------|------------|---------|-----|-----------|
+| HNSW | 21.9s | 45.8/s | 8.29ms | 120.6 | 53.8% |
+| Vamana | 14.8s | 67.7/s | 4.21ms | 237.3 | 58.6% |
+
+**Summary on random data (10K vectors)**:
 
 | Algorithm | Index Time | Throughput | Disk | Latency | QPS | Recall@10 |
 |-----------|------------|------------|------|---------|-----|-----------|
@@ -49,7 +56,25 @@ See [PERF.md](./PERF.md) for comprehensive benchmarks.
 
 **Key Bottleneck**: 10ms sleep between inserts limits throughput to ~30-68/sec. See [Why Indexing is Slow](#why-indexing-is-slow) below.
 
-Note: HNSW achieves higher recall due to its hierarchical multi-layer structure with larger ef_construction parameter. Vamana's lower recall on uniform random data is expected - it's optimized for clustered real-world data.
+Note: On real-world data (SIFT), Vamana outperforms HNSW with higher recall and 2× faster search. On uniform random data, HNSW achieves higher recall due to its hierarchical multi-layer structure.
+
+### Benchmark Datasets
+
+The examples support industry-standard [ANN-Benchmarks](https://ann-benchmarks.com/) datasets for validation:
+
+| Dataset | Dimensions | Vectors | Description |
+|---------|------------|---------|-------------|
+| `sift10k` | 128 | up to 10K | SIFT feature descriptors (subset) |
+| `sift1m` | 128 | up to 1M | Full SIFT1M dataset |
+| `random` | 1024 | configurable | Synthetic uniform random data |
+
+```bash
+# Run with SIFT benchmark
+cargo run --release --example hnsw /tmp/db 1000 100 10 --dataset sift10k
+cargo run --release --example vamana /tmp/db 1000 100 10 --dataset sift10k
+```
+
+The datasets are automatically downloaded from [HuggingFace](https://huggingface.co/datasets/qbo-odp/sift1m) and cached locally.
 
 ## HNSW vs Vamana Comparison
 

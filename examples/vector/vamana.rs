@@ -20,13 +20,21 @@
 //! # Usage
 //!
 //! ```bash
+//! # Synthetic data (default)
 //! cargo run --release --example vamana <db_path> <num_vectors> <num_queries> <k>
+//!
+//! # Benchmark dataset (SIFT1M, SIFT10K)
+//! cargo run --release --example vamana <db_path> <num_vectors> <num_queries> <k> --dataset sift10k
 //! ```
 
 #[path = "common.rs"]
 mod common;
 
+#[path = "benchmark.rs"]
+mod benchmark;
+
 use anyhow::Result;
+use benchmark::{BenchmarkDataset, BenchmarkMetrics, DatasetConfig, DatasetName};
 use common::{
     add_vector_edge, brute_force_knn, compute_recall, euclidean_distance, generate_vector,
     get_neighbors, get_vector, init_storage, prune_edge, store_vector, DistanceFn, VectorCache,
@@ -41,7 +49,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 // ============================================================================
@@ -579,16 +587,35 @@ impl VamanaIndex {
 // Main Entry Point
 // ============================================================================
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
-
+/// Parse command line arguments
+fn parse_args() -> Result<(PathBuf, usize, usize, usize, Option<DatasetName>)> {
     let args: Vec<String> = env::args().collect();
-    if args.len() != 5 {
+
+    // Check for --dataset flag
+    let mut dataset_name: Option<DatasetName> = None;
+    let mut filtered_args: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--dataset" {
+            if i + 1 < args.len() {
+                dataset_name = DatasetName::from_str(&args[i + 1]);
+                if dataset_name.is_none() {
+                    eprintln!("Unknown dataset: {}. Valid options: sift1m, sift10k, random", args[i + 1]);
+                    std::process::exit(1);
+                }
+                i += 2;
+                continue;
+            }
+        }
+        filtered_args.push(args[i].clone());
+        i += 1;
+    }
+
+    if filtered_args.len() != 5 {
         eprintln!(
-            "Usage: {} <db_path> <num_vectors> <num_queries> <k>",
-            args[0]
+            "Usage: {} <db_path> <num_vectors> <num_queries> <k> [--dataset <name>]",
+            filtered_args.get(0).unwrap_or(&"vamana".to_string())
         );
         eprintln!();
         eprintln!("Arguments:");
@@ -597,18 +624,50 @@ async fn main() -> Result<()> {
         eprintln!("  num_queries  - Number of queries to run");
         eprintln!("  k            - Number of nearest neighbors to find");
         eprintln!();
-        eprintln!("Example:");
-        eprintln!("  {} /tmp/vamana_test 1000 100 10", args[0]);
+        eprintln!("Options:");
+        eprintln!("  --dataset <name>  Use benchmark dataset: sift1m, sift10k, random (default: random)");
+        eprintln!();
+        eprintln!("Examples:");
+        eprintln!("  {} /tmp/vamana_test 1000 100 10", filtered_args.get(0).unwrap_or(&"vamana".to_string()));
+        eprintln!("  {} /tmp/vamana_sift 10000 100 10 --dataset sift10k", filtered_args.get(0).unwrap_or(&"vamana".to_string()));
         std::process::exit(1);
     }
 
-    let db_path = Path::new(&args[1]);
-    let num_vectors: usize = args[2].parse()?;
-    let num_queries: usize = args[3].parse()?;
-    let k: usize = args[4].parse()?;
+    let db_path = PathBuf::from(&filtered_args[1]);
+    let num_vectors: usize = filtered_args[2].parse()?;
+    let num_queries: usize = filtered_args[3].parse()?;
+    let k: usize = filtered_args[4].parse()?;
+
+    Ok((db_path, num_vectors, num_queries, k, dataset_name))
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize tracing
+    tracing_subscriber::fmt::init();
+
+    let (db_path, num_vectors, num_queries, k, dataset_name) = parse_args()?;
+
+    // Load benchmark dataset if specified
+    let benchmark_data: Option<BenchmarkDataset> = if let Some(ds_name) = dataset_name {
+        println!("Loading benchmark dataset: {}...", ds_name);
+        let config = DatasetConfig {
+            name: ds_name,
+            num_base: Some(num_vectors),
+            num_queries: Some(num_queries),
+            ground_truth_k: 100,
+            ..Default::default()
+        };
+        Some(benchmark::load_dataset(&config).await?)
+    } else {
+        None
+    };
+
+    let dataset_str = dataset_name.map(|d| d.to_string()).unwrap_or("random".to_string());
 
     println!("=== Vamana (DiskANN) Vector Search Example ===");
     println!("Database path: {:?}", db_path);
+    println!("Dataset: {}", dataset_str);
     println!("Vectors: {}", num_vectors);
     println!("Queries: {}", num_queries);
     println!("K: {}", k);
@@ -616,7 +675,7 @@ async fn main() -> Result<()> {
 
     // Initialize storage
     println!("Initializing storage...");
-    let handles = init_storage(db_path)?;
+    let handles = init_storage(&db_path)?;
     let writer = handles.writer();
     let reader = handles.reader_clone();
 
@@ -626,14 +685,23 @@ async fn main() -> Result<()> {
 
     let mut index = VamanaIndex::new(params.clone());
     let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let mut metrics = BenchmarkMetrics::new(&dataset_str, "Vamana");
+
+    // Build mapping from vector index to node ID (for benchmark validation)
+    let mut index_to_id: Vec<Id> = Vec::with_capacity(num_vectors);
 
     // Generate vectors
     println!("\nGenerating {} vectors...", num_vectors);
     let mut vectors: Vec<(Id, Vec<f32>)> = Vec::new();
 
-    for _ in 0..num_vectors {
+    for i in 0..num_vectors {
         let node_id = Id::new();
-        let vector = generate_vector(&mut rng);
+        let vector = if let Some(ref data) = benchmark_data {
+            data.base_vectors[i].clone()
+        } else {
+            generate_vector(&mut rng)
+        };
+        index_to_id.push(node_id);
         vectors.push((node_id, vector));
     }
 
@@ -643,6 +711,10 @@ async fn main() -> Result<()> {
     index.build(writer, &reader, vectors).await?;
     let index_time = start.elapsed();
 
+    metrics.num_vectors = num_vectors;
+    metrics.build_time_secs = index_time.as_secs_f64();
+    metrics.build_throughput = num_vectors as f64 / index_time.as_secs_f64();
+
     println!(
         "Indexing completed in {:.2}s ({:.2} vectors/sec)",
         index_time.as_secs_f64(),
@@ -650,58 +722,114 @@ async fn main() -> Result<()> {
     );
     println!("Vectors in cache: {}", index.cache_size());
 
-    // Clone vectors for ground truth computation (avoids borrow conflict with mutable search)
+    // Create reverse mapping for benchmark validation
+    let id_to_index: HashMap<Id, usize> = index_to_id.iter()
+        .enumerate()
+        .map(|(idx, id)| (*id, idx))
+        .collect();
+
+    // Clone vectors for ground truth computation (for synthetic data)
     let all_vectors: HashMap<Id, Vec<f32>> = index.get_all_vectors().clone();
 
     // Run queries
-    println!("\nRunning {} queries...", num_queries);
+    let actual_queries = if let Some(ref data) = benchmark_data {
+        data.num_queries().min(num_queries)
+    } else {
+        num_queries
+    };
+
+    println!("\nRunning {} queries...", actual_queries);
     let mut total_recall = 0.0;
-    let mut total_search_time = std::time::Duration::ZERO;
+    let mut search_latencies: Vec<f64> = Vec::with_capacity(actual_queries);
 
-    for i in 0..num_queries {
-        let query = generate_vector(&mut rng);
-
-        // Ground truth with brute force using the same vectors as the index
-        let gt_start = Instant::now();
-        let ground_truth = brute_force_knn(&query, &all_vectors, k, euclidean_distance);
-        let gt_time = gt_start.elapsed();
+    for i in 0..actual_queries {
+        let query = if let Some(ref data) = benchmark_data {
+            data.query_vectors[i].clone()
+        } else {
+            generate_vector(&mut rng)
+        };
 
         // Vamana search
         let search_start = Instant::now();
         let l_search = params.l.max(k * 2);
         let results = index.search(&reader, &query, k, l_search).await?;
         let search_time = search_start.elapsed();
-        total_search_time += search_time;
+        search_latencies.push(search_time.as_secs_f64() * 1000.0);
 
         // Compute recall
-        let gt_ids: Vec<Id> = ground_truth.iter().map(|(_, id)| *id).collect();
-        let result_ids: Vec<Id> = results.iter().map(|(_, id)| *id).collect();
-        let recall = compute_recall(&result_ids, &gt_ids, k);
-        total_recall += recall;
+        let recall = if let Some(ref data) = benchmark_data {
+            // Use benchmark ground truth
+            let result_indices: Vec<(f32, usize)> = results.iter()
+                .filter_map(|(dist, id)| {
+                    id_to_index.get(id).map(|idx| (*dist, *idx))
+                })
+                .collect();
+            data.calculate_recall(i, &result_indices, k)
+        } else {
+            // Use brute force ground truth
+            let ground_truth = brute_force_knn(&query, &all_vectors, k, euclidean_distance);
+            let gt_ids: Vec<Id> = ground_truth.iter().map(|(_, id)| *id).collect();
+            let result_ids: Vec<Id> = results.iter().map(|(_, id)| *id).collect();
+            compute_recall(&result_ids, &gt_ids, k) as f32
+        };
+        total_recall += recall as f64;
+
+        // Debug output for first query
+        if i == 0 {
+            println!("\n  DEBUG Query 0:");
+            if let Some(ref data) = benchmark_data {
+                println!("    Ground truth (first 5 of {}):", data.ground_truth[0].len());
+                for j in 0..5.min(data.ground_truth[0].len()) {
+                    let gt_idx = data.ground_truth[0][j];
+                    println!("      {}: index={}", j, gt_idx);
+                }
+            }
+            println!("    Vamana results ({} results):", results.len());
+            for (j, (dist, id)) in results.iter().take(5).enumerate() {
+                let idx = id_to_index.get(id).map(|i| format!("{}", i)).unwrap_or("?".to_string());
+                println!("      {}: index={}, dist={:.4}", j, idx, dist);
+            }
+            println!();
+        }
 
         if (i + 1) % 10 == 0 {
             println!(
-                "  Query {}/{}: recall@{}={:.3}, search={:.2}ms, brute_force={:.2}ms",
+                "  Query {}/{}: recall@{}={:.3}, search={:.2}ms",
                 i + 1,
-                num_queries,
+                actual_queries,
                 k,
                 recall,
-                search_time.as_secs_f64() * 1000.0,
-                gt_time.as_secs_f64() * 1000.0
+                search_time.as_secs_f64() * 1000.0
             );
         }
     }
 
-    let avg_recall = total_recall / num_queries as f64;
-    let avg_search_ms = total_search_time.as_secs_f64() * 1000.0 / num_queries as f64;
+    let avg_recall = total_recall / actual_queries as f64;
+
+    // Calculate metrics
+    metrics.num_queries = actual_queries;
+    metrics.k = k;
+    metrics.recall_at_k = avg_recall;
+    metrics.set_latency_percentiles(search_latencies);
+
+    // Get disk usage
+    if let Ok(entries) = std::fs::read_dir(&db_path) {
+        let mut total_size = 0u64;
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                total_size += meta.len();
+            }
+        }
+        metrics.disk_usage_bytes = total_size;
+    }
 
     println!("\n=== Results ===");
+    println!("Dataset: {}", dataset_str);
     println!("Average Recall@{}: {:.4}", k, avg_recall);
-    println!("Average Search Time: {:.3} ms", avg_search_ms);
-    println!(
-        "Queries Per Second: {:.1}",
-        num_queries as f64 / total_search_time.as_secs_f64()
-    );
+    println!("Average Search Time: {:.3} ms", metrics.avg_search_latency_ms);
+    println!("P50 Latency: {:.3} ms", metrics.p50_latency_ms);
+    println!("P99 Latency: {:.3} ms", metrics.p99_latency_ms);
+    println!("Queries Per Second: {:.1}", metrics.qps);
     println!("Medoid: {:?}", index.medoid.map(|id| format!("{}", id)));
 
     // Verify node count
@@ -709,6 +837,9 @@ async fn main() -> Result<()> {
         .run(&reader, DEFAULT_TIMEOUT)
         .await?;
     println!("Total nodes in database: {}", nodes.len());
+
+    // Print full metrics
+    metrics.print();
 
     // Shutdown
     handles.shutdown().await?;
