@@ -27,6 +27,34 @@ Using the [SIFT1M dataset](https://huggingface.co/datasets/qbo-odp/sift1m) from 
 | HNSW | 1K | 21.85s | 45.8/s | 8.29ms | 7.44ms | 12.03ms | 120.6 | 0.538 |
 | Vamana | 1K | 14.78s | 67.7/s | 4.21ms | 3.45ms | 6.36ms | 237.3 | 0.586 |
 
+### Comparison with Industry Implementations
+
+How does `motlie_db` compare with production ANN libraries on SIFT1M?
+
+| Implementation | Vectors | Recall@10 | QPS | Latency | Notes |
+|----------------|---------|-----------|-----|---------|-------|
+| **hnswlib** (M=16, ef=100) | 1M | 98.5% | 16,108 | 0.062ms | In-memory, optimized C++ |
+| **hnswlib** (M=16, ef=50) | 1M | 95.0% | 28,021 | 0.036ms | In-memory, optimized C++ |
+| **Faiss HNSW** (ef=64) | 1M | 97.8% | ~30,000 | 0.033ms | In-memory, SIMD optimized |
+| **motlie_db HNSW** | 1K | 53.8% | 121 | 8.29ms | RocksDB-backed, proof-of-concept |
+| **motlie_db Vamana** | 1K | 58.6% | 237 | 4.21ms | RocksDB-backed, proof-of-concept |
+
+*Sources: [hnswlib](https://github.com/nmslib/hnswlib), [Faiss benchmarks](https://github.com/facebookresearch/faiss/wiki/Indexing-1M-vectors), [ANN-Benchmarks](https://ann-benchmarks.com/)*
+
+### Gap Analysis
+
+Our implementation is **100-250× slower** than production libraries. Key reasons:
+
+| Factor | Impact | Production Libraries | motlie_db |
+|--------|--------|---------------------|-----------|
+| **10ms sleep** | 78% of time | No sleep needed | Required for consistency |
+| **Storage** | 10-50× | In-memory arrays | RocksDB (disk-backed) |
+| **SIMD** | 5-10× | AVX2/AVX512 | Scalar loops |
+| **Graph scale** | 2-5× | 1M vectors | 1K vectors (graph less connected) |
+| **Serialization** | 2-3× | Binary arrays | JSON encoding |
+
+**Note**: This is a proof-of-concept demonstrating that graph-based ANN can work on a temporal graph database. For production use, see the [HNSW2 proposal](./HNSW2.md) which targets 5,000-10,000 inserts/sec.
+
 ### Key Observations on SIFT Data
 
 1. **Real-World Data Performance**: On structured SIFT data, both algorithms perform more predictably:
@@ -63,6 +91,20 @@ cargo run --release --example hnsw /tmp/hnsw_sift1m 1000000 1000 10 --dataset si
 | `sift10k` | 128 | 10,000 | 10,000 | SIFT1M subset |
 | `sift1m` | 128 | 1,000,000 | 10,000 | HuggingFace |
 | `random` | 1024 | configurable | configurable | Generated |
+
+### Dataset Downloads
+
+Datasets are **automatically downloaded** on first use and cached in `/tmp/ann_benchmarks/`.
+
+For manual download or offline use:
+
+| Dataset | Size | Download URL |
+|---------|------|--------------|
+| SIFT1M base vectors | 516 MB | https://huggingface.co/datasets/qbo-odp/sift1m/resolve/main/sift_base.fvecs |
+| SIFT1M queries | 5.2 MB | https://huggingface.co/datasets/qbo-odp/sift1m/resolve/main/sift_query.fvecs |
+| SIFT1M ground truth | 4 MB | https://huggingface.co/datasets/qbo-odp/sift1m/resolve/main/sift_groundtruth.ivecs |
+
+Original source (if HuggingFace unavailable): ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz (~170MB compressed)
 
 ---
 
