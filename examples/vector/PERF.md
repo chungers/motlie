@@ -10,14 +10,72 @@ Performance benchmarks for HNSW and Vamana (DiskANN) implementations on `motlie_
 - **OS**: Linux 6.14.0-1015-nvidia
 - **Date**: 2025-12-20
 
-## Test Parameters
+---
+
+## SIFT Benchmark Results (Industry Standard)
+
+Using the [SIFT1M dataset](https://huggingface.co/datasets/qbo-odp/sift1m) from [ANN-Benchmarks](https://ann-benchmarks.com/):
+- **Source**: http://corpus-texmex.irisa.fr/
+- **Dimensions**: 128
+- **Distance Metric**: Euclidean (L2)
+- **Ground Truth**: Pre-computed k=100 nearest neighbors
+
+### SIFT Results Summary
+
+| Algorithm | Vectors | Index Time | Throughput | Latency (avg) | P50 | P99 | QPS | Recall@10 |
+|-----------|---------|------------|------------|---------------|-----|-----|-----|-----------|
+| HNSW | 1K | 21.85s | 45.8/s | 8.29ms | 7.44ms | 12.03ms | 120.6 | 0.538 |
+| Vamana | 1K | 14.78s | 67.7/s | 4.21ms | 3.45ms | 6.36ms | 237.3 | 0.586 |
+
+### Key Observations on SIFT Data
+
+1. **Real-World Data Performance**: On structured SIFT data, both algorithms perform more predictably:
+   - Vamana shows higher recall (58.6%) than on random data (57.9%)
+   - HNSW shows lower recall (53.8%) than on random data (99.5%)
+
+2. **Vamana Outperforms**: On real-world clustered data like SIFT:
+   - 2× faster search (4.21ms vs 8.29ms)
+   - Higher recall (58.6% vs 53.8%)
+   - Faster indexing (67.7/s vs 45.8/s)
+
+3. **Why HNSW Recall is Lower on SIFT**:
+   - Random data is uniformly distributed, making graph navigation easier
+   - SIFT has clustered structure where wrong entry points lead to local optima
+   - Suggests tuning `ef_search` parameter may improve HNSW recall
+
+### Running Benchmark Tests
+
+```bash
+# HNSW with SIFT10K subset
+cargo run --release --example hnsw /tmp/hnsw_sift 1000 100 10 --dataset sift10k
+
+# Vamana with SIFT10K subset
+cargo run --release --example vamana /tmp/vamana_sift 1000 100 10 --dataset sift10k
+
+# Full SIFT1M (requires ~500MB download, ~500MB RAM)
+cargo run --release --example hnsw /tmp/hnsw_sift1m 1000000 1000 10 --dataset sift1m
+```
+
+### Supported Datasets
+
+| Dataset | Dimensions | Vectors | Queries | Source |
+|---------|------------|---------|---------|--------|
+| `sift10k` | 128 | 10,000 | 10,000 | SIFT1M subset |
+| `sift1m` | 128 | 1,000,000 | 10,000 | HuggingFace |
+| `random` | 1024 | configurable | configurable | Generated |
+
+---
+
+## Random Data Results (Original Tests)
+
+### Test Parameters
 
 - **Vector Dimensions**: 1024
 - **K (neighbors)**: 10
 - **Queries**: 100
 - **Distance Metric**: Euclidean (L2)
 
-## Results Summary
+### Results Summary
 
 | Algorithm | Vectors | Index Time | Throughput | Disk Usage | Latency (avg) | QPS | Recall@10 |
 |-----------|---------|------------|------------|------------|---------------|-----|-----------|
