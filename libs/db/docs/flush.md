@@ -958,51 +958,301 @@ impl HnswIndex {
 
 ---
 
-### Implementation Phases
+## Project Plan: Pattern-to-Phase Mapping
 
-#### Phase 1: Flush API (This Document)
-- `flush()` method
-- `send_sync()` convenience method
-- Estimated: 3-5 days
+### Overview
 
-#### Phase 2: Batch Builder
-- `BatchBuilder` struct
-- `batch()` method on Writer
-- Estimated: 1-2 days
-
-#### Phase 3: Transaction Scope
-- `Transaction` struct
-- `QueryExecutor::execute_in_transaction()` trait method
-- Fulltext forwarding after commit
-- Estimated: 1-2 weeks
+| Phase | Patterns Enabled | Effort | Throughput Gain |
+|-------|------------------|--------|-----------------|
+| **Phase 1** | Pattern 1 (fire-and-forget + flush), Pattern 2 (send_sync) | 3-5 days | **10-100x** |
+| **Phase 2** | Pattern 3 (batch builder) | 1-2 days | Ergonomics |
+| **Phase 3** | Pattern 4 (transaction scope) | 1-2 weeks | **100x** (theoretical max) |
+| **Phase 4** | Fulltext flush (flush_all) | 2-3 days | Fulltext consistency |
 
 ---
 
-### Extended Implementation Checklist
+### Phase 1: Flush API (Patterns 1 & 2)
 
-#### Phase 1: Flush
-- [ ] Add `FlushMarker` struct
-- [ ] Add `Flush` variant to Mutation enum
-- [ ] Implement `flush()` on graph::Writer
-- [ ] Implement `send_sync()` on graph::Writer
-- [ ] Implement `flush()` and `send_sync()` on unified Writer
-- [ ] Add tests
+**Patterns Enabled:**
+- **Pattern 1:** Fire-and-forget with explicit flush
+- **Pattern 2:** Synchronous send
 
-#### Phase 2: Batch Builder
-- [ ] Add `BatchBuilder` struct
-- [ ] Implement `batch()` on Writer
-- [ ] Add `add()`, `add_all()`, `send()`, `commit()` methods
-- [ ] Add tests
+**API Surface:**
+```rust
+impl Writer {
+    pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()>;      // Existing
+    pub async fn flush(&self) -> Result<()>;                                // NEW
+    pub async fn send_sync(&self, mutations: Vec<Mutation>) -> Result<()>;  // NEW
+}
+```
 
-#### Phase 3: Transaction Scope
-- [ ] Add `Transaction` struct
-- [ ] Implement `transaction()` on Writer
-- [ ] Add `QueryExecutor::execute_in_transaction()` trait method
-- [ ] Implement for all query types (NodeById, OutgoingEdges, etc.)
+**Usage Examples:**
+```rust
+// Pattern 1: Fire-and-forget + flush
+for batch in batches {
+    writer.send(batch).await?;
+}
+writer.flush().await?;
+
+// Pattern 2: Sync send
+writer.send_sync(mutations).await?;
+// Immediately visible
+```
+
+**Files Modified:**
+| File | Changes |
+|------|---------|
+| `graph/mutation.rs` | +30 lines (FlushMarker, Flush variant) |
+| `graph/writer.rs` | +45 lines (flush, send_sync, Consumer changes) |
+| `writer.rs` | +15 lines (unified flush, send_sync) |
+| `hnsw.rs` | ~5 lines (replace sleep) |
+| `vamana.rs` | ~3 lines (replace sleep) |
+
+**Estimated Effort:** 3-5 days
+
+**Expected Improvement:** 10-100x throughput (eliminates 10ms sleep)
+
+---
+
+### Phase 2: Batch Builder (Pattern 3)
+
+**Pattern Enabled:**
+- **Pattern 3:** Fluent batch builder API
+
+**API Surface:**
+```rust
+impl Writer {
+    pub fn batch(&self) -> BatchBuilder<'_>;  // NEW
+}
+
+impl BatchBuilder<'_> {
+    pub fn add<M: Into<Mutation>>(self, mutation: M) -> Self;
+    pub fn add_all<I>(self, mutations: I) -> Self;
+    pub async fn send(self) -> Result<()>;     // Fire-and-forget
+    pub async fn commit(self) -> Result<()>;   // Wait for visibility
+}
+```
+
+**Usage Example:**
+```rust
+// Pattern 3: Batch builder
+writer.batch()
+    .add(AddNode { ... })
+    .add(AddEdge { ... })
+    .add(AddEdge { ... })
+    .commit().await?;
+```
+
+**Files Modified:**
+| File | Changes |
+|------|---------|
+| `graph/writer.rs` | +50 lines (BatchBuilder struct) |
+| `writer.rs` | +10 lines (batch() method) |
+
+**Estimated Effort:** 1-2 days
+
+**Depends On:** Phase 1 (uses flush/send_sync internally)
+
+---
+
+### Phase 3: Transaction Scope (Pattern 4)
+
+**Pattern Enabled:**
+- **Pattern 4:** True read-your-writes with transaction scope
+
+**API Surface:**
+```rust
+impl Writer {
+    pub fn transaction(&self) -> Transaction<'_>;  // NEW
+}
+
+impl Transaction<'_> {
+    pub fn write<M: Into<Mutation>>(&mut self, mutation: M) -> Result<()>;
+    pub fn read<Q: QueryExecutor>(&self, query: Q) -> Result<Q::Output>;
+    pub async fn commit(self) -> Result<()>;
+    pub fn rollback(self) -> Result<()>;
+}
+```
+
+**Usage Example:**
+```rust
+// Pattern 4: Transaction with read-your-writes
+let txn = writer.transaction();
+
+txn.write(AddNode { id, ... })?;
+txn.write(AddNodeFragment { id, content: vector, ... })?;
+
+// Reads see uncommitted writes!
+let neighbors = greedy_search(&txn, query, ef)?;
+
+for neighbor in neighbors {
+    txn.write(AddEdge { src: id, dst: neighbor, ... })?;
+}
+
+txn.commit().await?;
+```
+
+**Files Modified:**
+| File | Changes |
+|------|---------|
+| `graph/writer.rs` | +80 lines (Transaction struct) |
+| `graph/query.rs` | +100 lines (execute_in_transaction trait) |
+| `graph/reader.rs` | +50 lines (transaction-aware queries) |
+| `writer.rs` | +20 lines (transaction() method) |
+| `hnsw.rs` | +50 lines (refactor to use transactions) |
+| `vamana.rs` | +50 lines (refactor to use transactions) |
+
+**Estimated Effort:** 1-2 weeks
+
+**Key Challenge:** Requires `QueryExecutor::execute_in_transaction()` for all query types.
+
+---
+
+### Phase 4: Fulltext Flush (Optional)
+
+**Feature Enabled:**
+- `flush_all()` for fulltext + graph consistency
+
+**API Surface:**
+```rust
+impl Writer {
+    pub async fn flush(&self) -> Result<()>;      // Graph only (Phase 1)
+    pub async fn flush_all(&self) -> Result<()>;  // Graph + Fulltext (NEW)
+}
+```
+
+**Usage Example:**
+```rust
+// When fulltext search consistency is needed
+writer.send_sync(mutations).await?;
+writer.flush_all().await?;  // Wait for Tantivy too
+
+let results = fulltext_search("query").await?;  // Guaranteed visible
+```
+
+**Files Modified:**
+| File | Changes |
+|------|---------|
+| `fulltext/writer.rs` | +40 lines (flush support) |
+| `writer.rs` | +10 lines (flush_all method) |
+
+**Estimated Effort:** 2-3 days
+
+**When Needed:** Only if users require fulltext search immediately after write.
+
+---
+
+## Complete Implementation Checklist
+
+### Phase 1: Flush API ✅ Unlocks 10-100x Throughput
+
+**Graph Module:**
+- [ ] Add `FlushMarker` struct to `graph/mutation.rs`
+- [ ] Add `Flush(FlushMarker)` variant to `Mutation` enum
+- [ ] Update `MutationExecutor` impl to no-op for Flush
+- [ ] Implement `flush()` on `graph::Writer`
+- [ ] Implement `send_sync()` on `graph::Writer`
+- [ ] Modify `Consumer::process_batch()` to handle flush markers
+- [ ] Add unit tests for flush behavior
+
+**Unified Module:**
+- [ ] Implement `flush()` on unified `Writer`
+- [ ] Implement `send_sync()` on unified `Writer`
+- [ ] Add integration tests
+
+**Examples:**
+- [ ] Replace `sleep(10ms)` with `flush()` in `hnsw.rs`
+- [ ] Replace `sleep(100ms)` with `flush()` in `vamana.rs`
+- [ ] Benchmark and document improvement
+
+### Phase 2: Batch Builder
+
+- [ ] Add `BatchBuilder` struct to `graph/writer.rs`
+- [ ] Implement `batch()` on `graph::Writer`
+- [ ] Implement `add()`, `add_all()` methods
+- [ ] Implement `send()` (delegates to Writer::send)
+- [ ] Implement `commit()` (delegates to Writer::send_sync)
+- [ ] Add `batch()` to unified `Writer`
+- [ ] Add unit tests
+- [ ] Add documentation examples
+
+### Phase 3: Transaction Scope
+
+**Core Transaction:**
+- [ ] Add `Transaction` struct to `graph/writer.rs`
+- [ ] Implement `transaction()` on `graph::Writer`
+- [ ] Implement `write()` method (executes against RocksDB txn)
+- [ ] Implement `commit()` method (commits + forwards to fulltext)
+- [ ] Implement `rollback()` method
+- [ ] Handle auto-rollback on drop
+
+**Query Integration:**
+- [ ] Add `execute_in_transaction()` to `QueryExecutor` trait
+- [ ] Implement for `NodeById`
+- [ ] Implement for `OutgoingEdges`
+- [ ] Implement for `IncomingEdges`
+- [ ] Implement for `NodeFragments`
+- [ ] Implement for remaining query types
+
+**Unified Module:**
+- [ ] Add `transaction()` to unified `Writer`
 - [ ] Handle fulltext forwarding after commit
-- [ ] Add rollback support
-- [ ] Add tests
-- [ ] Update HNSW/Vamana examples
+
+**Examples:**
+- [ ] Refactor `HnswIndex::insert()` to use transaction
+- [ ] Refactor `VamanaIndex::insert()` to use transaction
+- [ ] Benchmark and document improvement
+
+**Tests:**
+- [ ] Transaction commit visibility
+- [ ] Transaction rollback
+- [ ] Read-your-writes within transaction
+- [ ] Concurrent transactions
+
+### Phase 4: Fulltext Flush (If Needed)
+
+- [ ] Add `FulltextFlushMarker` to `fulltext/writer.rs`
+- [ ] Implement `flush()` on `fulltext::Writer`
+- [ ] Modify fulltext `Consumer` to handle flush
+- [ ] Add `flush_all()` to unified `Writer`
+- [ ] Add tests for fulltext consistency
+
+---
+
+## Timeline Summary
+
+```
+Week 1:     Phase 1 (Flush API)
+            ├── Days 1-2: FlushMarker, graph::Writer changes
+            ├── Days 3-4: Unified Writer, tests
+            └── Day 5: Update examples, benchmark
+
+Week 2:     Phase 2 (Batch Builder)
+            ├── Day 1: BatchBuilder implementation
+            └── Day 2: Tests, documentation
+
+Weeks 3-4:  Phase 3 (Transaction Scope)
+            ├── Days 1-3: Transaction struct, write/commit/rollback
+            ├── Days 4-7: QueryExecutor trait extension
+            └── Days 8-10: Examples, tests, documentation
+
+Week 5:     Phase 4 (Fulltext Flush) - If needed
+            ├── Days 1-2: Fulltext flush implementation
+            └── Day 3: Tests, documentation
+```
+
+---
+
+## Success Metrics
+
+| Phase | Metric | Target |
+|-------|--------|--------|
+| Phase 1 | HNSW insert throughput | 1,000-10,000/sec (vs 100/sec) |
+| Phase 1 | Sleep time eliminated | 100% (0ms vs 10ms) |
+| Phase 2 | API ergonomics | Fluent builder pattern |
+| Phase 3 | Read-your-writes latency | 0ms (within transaction) |
+| Phase 3 | HNSW insert throughput | 5,000-10,000/sec |
+| Phase 4 | Fulltext visibility | Immediate after flush_all |
 
 ---
 
