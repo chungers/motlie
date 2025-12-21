@@ -552,27 +552,473 @@ async fn test_hnsw_with_flush() {
 
 ---
 
-## Future Enhancements
+## Batch API Enhancements
 
-### Phase 2: Transaction Scope API
+The `Vec<Mutation>` batch interface can be extended to provide cleaner read-after-write semantics. This section defines a unified API supporting four usage patterns.
 
-For true read-your-writes within a single operation:
+### Unified Writer API
 
 ```rust
-let txn = writer.begin_transaction();
-txn.write(AddNode { ... })?;
-let result = txn.read(NodeById::new(id))?;  // Sees uncommitted write
-txn.commit()?;
+impl Writer {
+    // ========================================================================
+    // Pattern 1: Fire-and-Forget (Async)
+    // ========================================================================
+
+    /// Send mutations asynchronously without waiting for commit.
+    ///
+    /// Returns immediately after enqueueing. Use `flush()` to ensure visibility.
+    /// Best for high-throughput scenarios where eventual consistency is acceptable.
+    pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()>;
+
+    /// Wait for all pending mutations to be committed.
+    pub async fn flush(&self) -> Result<()>;
+
+    // ========================================================================
+    // Pattern 2: Synchronous Send
+    // ========================================================================
+
+    /// Send mutations and wait for commit.
+    ///
+    /// Returns when all mutations are visible to readers.
+    /// Equivalent to `send()` followed by `flush()`.
+    pub async fn send_sync(&self, mutations: Vec<Mutation>) -> Result<()> {
+        self.send(mutations).await?;
+        self.flush().await
+    }
+
+    // ========================================================================
+    // Pattern 3: Batch Builder
+    // ========================================================================
+
+    /// Start building a batch of mutations with fluent API.
+    pub fn batch(&self) -> BatchBuilder<'_>;
+
+    // ========================================================================
+    // Pattern 4: Transaction Scope
+    // ========================================================================
+
+    /// Begin a transaction for read-your-writes semantics.
+    ///
+    /// Writes within the transaction are immediately visible to reads
+    /// within the same transaction, before commit.
+    pub fn transaction(&self) -> Transaction<'_>;
+}
 ```
 
-See [Issue #26](https://github.com/chungers/motlie/issues/26) for full proposal.
+---
 
-### Fulltext Flush
+### Pattern 1: Fire-and-Forget (High Throughput)
 
-If fulltext consistency is needed:
+Best for bulk ingestion where you don't need immediate reads.
 
 ```rust
-writer.flush_all().await?;  // Flush both graph and fulltext
+// Send many batches without waiting
+for batch in mutation_batches {
+    writer.send(batch).await?;
+}
+
+// Flush once at the end
+writer.flush().await?;
+
+// Now all mutations are visible
+let results = query.run(&reader, timeout).await?;
+```
+
+**Characteristics:**
+- Lowest latency per send
+- Highest throughput
+- Must call `flush()` before reads
+- Good for: bulk imports, batch ETL
+
+---
+
+### Pattern 2: Synchronous Send (Simple Consistency)
+
+Best when you need immediate visibility after each batch.
+
+```rust
+// Each send waits for commit
+writer.send_sync(vec![
+    AddNode { id, name, ... }.into(),
+    AddEdge { src, dst, ... }.into(),
+]).await?;
+
+// Immediately visible
+let node = NodeById::new(id).run(&reader, timeout).await?;
+assert!(node.is_some());
+```
+
+**Characteristics:**
+- Simple mental model: send = visible
+- Higher latency than fire-and-forget
+- Good for: interactive operations, CRUD APIs
+
+---
+
+### Pattern 3: Batch Builder (Fluent API)
+
+Best for readable, type-safe batch construction.
+
+```rust
+// Build and commit atomically
+writer.batch()
+    .add(AddNode { id: node1, name: "Alice".into(), ... })
+    .add(AddNode { id: node2, name: "Bob".into(), ... })
+    .add(AddEdge { src: node1, dst: node2, name: "knows".into(), ... })
+    .commit().await?;
+
+// All mutations visible
+let edges = OutgoingEdges::new(node1, None).run(&reader, timeout).await?;
+assert_eq!(edges.len(), 1);
+```
+
+**Or fire-and-forget:**
+
+```rust
+writer.batch()
+    .add(AddNode { ... })
+    .add(AddEdge { ... })
+    .send().await?;  // Async, no wait
+
+// Later...
+writer.flush().await?;
+```
+
+**Implementation:**
+
+```rust
+pub struct BatchBuilder<'a> {
+    writer: &'a Writer,
+    mutations: Vec<Mutation>,
+}
+
+impl<'a> BatchBuilder<'a> {
+    /// Add a mutation to the batch.
+    pub fn add<M: Into<Mutation>>(mut self, mutation: M) -> Self {
+        self.mutations.push(mutation.into());
+        self
+    }
+
+    /// Add multiple mutations to the batch.
+    pub fn add_all<I, M>(mut self, mutations: I) -> Self
+    where
+        I: IntoIterator<Item = M>,
+        M: Into<Mutation>,
+    {
+        self.mutations.extend(mutations.into_iter().map(Into::into));
+        self
+    }
+
+    /// Send batch asynchronously (fire-and-forget).
+    pub async fn send(self) -> Result<()> {
+        if self.mutations.is_empty() {
+            return Ok(());
+        }
+        self.writer.send(self.mutations).await
+    }
+
+    /// Send batch and wait for commit (read-after-write safe).
+    pub async fn commit(self) -> Result<()> {
+        if self.mutations.is_empty() {
+            return Ok(());
+        }
+        self.writer.send_sync(self.mutations).await
+    }
+
+    /// Get the number of mutations in the batch.
+    pub fn len(&self) -> usize {
+        self.mutations.len()
+    }
+
+    /// Check if the batch is empty.
+    pub fn is_empty(&self) -> bool {
+        self.mutations.is_empty()
+    }
+}
+```
+
+**Characteristics:**
+- Readable, self-documenting code
+- Type-safe mutation construction
+- Explicit commit vs send semantics
+- Good for: application code, complex operations
+
+---
+
+### Pattern 4: Transaction Scope (Read-Your-Writes)
+
+Best for operations that need to read uncommitted writes.
+
+```rust
+// Begin transaction
+let txn = writer.transaction();
+
+// Write mutations (not yet committed)
+txn.write(AddNode { id: node_id, name: "Alice".into(), ... })?;
+txn.write(AddNodeFragment { id: node_id, content: vector_data, ... })?;
+
+// Read within transaction sees uncommitted writes!
+let node = txn.read(NodeById::new(node_id))?;
+assert!(node.is_some());  // Visible within transaction
+
+// More writes based on reads
+let edges = txn.read(OutgoingEdges::new(other_node, None))?;
+for (_, neighbor_id, _) in edges {
+    txn.write(AddEdge { src: node_id, dst: neighbor_id, ... })?;
+}
+
+// Atomic commit - all or nothing
+txn.commit().await?;
+
+// Now visible to all readers
+```
+
+**Implementation:**
+
+```rust
+pub struct Transaction<'a> {
+    writer: &'a Writer,
+    storage: Arc<graph::Storage>,
+    txn: rocksdb::Transaction<'a, rocksdb::TransactionDB>,
+    mutations: Vec<Mutation>,  // Track for fulltext forwarding
+}
+
+impl<'a> Transaction<'a> {
+    /// Write a mutation (visible to read() within this transaction).
+    pub fn write<M: Into<Mutation>>(&mut self, mutation: M) -> Result<()> {
+        let m = mutation.into();
+
+        // Execute against RocksDB transaction (not committed yet)
+        m.execute(&self.txn, self.storage.transaction_db()?)?;
+
+        // Track for later fulltext forwarding
+        self.mutations.push(m);
+
+        Ok(())
+    }
+
+    /// Read with visibility of uncommitted writes in this transaction.
+    ///
+    /// Uses RocksDB transaction's read-your-writes capability.
+    pub fn read<Q>(&self, query: Q) -> Result<Q::Output>
+    where
+        Q: QueryExecutor,
+    {
+        query.execute_in_transaction(&self.txn, self.storage.as_ref())
+    }
+
+    /// Commit all changes atomically.
+    ///
+    /// After commit returns, all mutations are visible to readers.
+    pub async fn commit(self) -> Result<()> {
+        // Commit RocksDB transaction
+        self.txn.commit()?;
+
+        // Forward mutations to fulltext consumer (async)
+        if !self.mutations.is_empty() {
+            self.writer.forward_to_fulltext(self.mutations).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Rollback all changes.
+    ///
+    /// Discards all mutations in this transaction.
+    pub fn rollback(self) -> Result<()> {
+        self.txn.rollback()?;
+        Ok(())
+    }
+
+    /// Get the number of mutations in this transaction.
+    pub fn len(&self) -> usize {
+        self.mutations.len()
+    }
+}
+
+// Auto-rollback on drop if not committed
+impl<'a> Drop for Transaction<'a> {
+    fn drop(&mut self) {
+        // Transaction will auto-rollback if not committed
+        // RocksDB handles this internally
+    }
+}
+```
+
+**Required Trait Extension:**
+
+```rust
+pub trait QueryExecutor: Send + Sync {
+    type Output;
+
+    /// Execute query against storage.
+    fn execute(&self, storage: &graph::Storage) -> Result<Self::Output>;
+
+    /// Execute query within a transaction (sees uncommitted writes).
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        storage: &graph::Storage,
+    ) -> Result<Self::Output>;
+}
+```
+
+**Characteristics:**
+- True read-your-writes (zero latency within txn)
+- Atomic multi-mutation transactions
+- Rollback support
+- Good for: HNSW insert, graph algorithms, complex transactions
+
+---
+
+### Pattern Comparison
+
+| Pattern | Latency | Throughput | Read-After-Write | Rollback | Complexity |
+|---------|---------|------------|------------------|----------|------------|
+| 1. Fire-and-forget | Lowest | Highest | After flush | No | Low |
+| 2. Sync send | Medium | Medium | Per-batch | No | Low |
+| 3. Batch builder | Medium | Medium | Per-batch | No | Low |
+| 4. Transaction | Lowest | High | Within txn | Yes | Medium |
+
+---
+
+### Usage Recommendations
+
+| Use Case | Recommended Pattern |
+|----------|---------------------|
+| Bulk data import | Pattern 1 (fire-and-forget + flush) |
+| REST API CRUD | Pattern 2 (send_sync) |
+| Application logic | Pattern 3 (batch builder) |
+| HNSW/Vamana insert | Pattern 4 (transaction) |
+| Graph algorithms | Pattern 4 (transaction) |
+| Simple scripts | Pattern 2 (send_sync) |
+
+---
+
+### HNSW Insert with Transaction (Example)
+
+```rust
+impl HnswIndex {
+    pub async fn insert(
+        &mut self,
+        writer: &Writer,
+        node_id: Id,
+        vector: Vec<f32>,
+    ) -> Result<()> {
+        let txn = writer.transaction();
+
+        // Store vector
+        txn.write(AddNode {
+            id: node_id,
+            name: format!("vec_{}", node_id),
+            ...
+        })?;
+        txn.write(AddNodeFragment {
+            id: node_id,
+            content: FragmentContent::from_f32_vec(&vector),
+            ...
+        })?;
+
+        // Find neighbors (reads see the new node!)
+        let entry_point = self.get_entry_point(&txn)?;
+        let neighbors = self.greedy_search(&txn, &vector, entry_point, self.params.ef_construction)?;
+
+        // Add edges
+        for (dist, neighbor_id) in neighbors.iter().take(self.params.m) {
+            txn.write(AddEdge {
+                src_id: node_id,
+                dst_id: *neighbor_id,
+                weight: *dist,
+                name: "hnsw_L0".into(),
+                ...
+            })?;
+
+            // Bidirectional
+            txn.write(AddEdge {
+                src_id: *neighbor_id,
+                dst_id: node_id,
+                weight: *dist,
+                name: "hnsw_L0".into(),
+                ...
+            })?;
+
+            // Prune if needed (reads current edges from txn)
+            self.prune_connections(&txn, *neighbor_id, 0)?;
+        }
+
+        // Atomic commit
+        txn.commit().await?;
+
+        Ok(())
+    }
+}
+```
+
+**Result:** No sleep needed, true read-your-writes, 100x throughput improvement.
+
+---
+
+### Implementation Phases
+
+#### Phase 1: Flush API (This Document)
+- `flush()` method
+- `send_sync()` convenience method
+- Estimated: 3-5 days
+
+#### Phase 2: Batch Builder
+- `BatchBuilder` struct
+- `batch()` method on Writer
+- Estimated: 1-2 days
+
+#### Phase 3: Transaction Scope
+- `Transaction` struct
+- `QueryExecutor::execute_in_transaction()` trait method
+- Fulltext forwarding after commit
+- Estimated: 1-2 weeks
+
+---
+
+### Extended Implementation Checklist
+
+#### Phase 1: Flush
+- [ ] Add `FlushMarker` struct
+- [ ] Add `Flush` variant to Mutation enum
+- [ ] Implement `flush()` on graph::Writer
+- [ ] Implement `send_sync()` on graph::Writer
+- [ ] Implement `flush()` and `send_sync()` on unified Writer
+- [ ] Add tests
+
+#### Phase 2: Batch Builder
+- [ ] Add `BatchBuilder` struct
+- [ ] Implement `batch()` on Writer
+- [ ] Add `add()`, `add_all()`, `send()`, `commit()` methods
+- [ ] Add tests
+
+#### Phase 3: Transaction Scope
+- [ ] Add `Transaction` struct
+- [ ] Implement `transaction()` on Writer
+- [ ] Add `QueryExecutor::execute_in_transaction()` trait method
+- [ ] Implement for all query types (NodeById, OutgoingEdges, etc.)
+- [ ] Handle fulltext forwarding after commit
+- [ ] Add rollback support
+- [ ] Add tests
+- [ ] Update HNSW/Vamana examples
+
+---
+
+## Fulltext Flush
+
+If fulltext consistency is also needed:
+
+```rust
+impl Writer {
+    /// Flush both graph and fulltext stores.
+    pub async fn flush_all(&self) -> Result<()> {
+        self.graph_writer.flush().await?;
+        self.fulltext_writer.flush().await?;
+        Ok(())
+    }
+}
 ```
 
 ---
