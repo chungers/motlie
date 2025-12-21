@@ -74,7 +74,25 @@ cargo run --release --example hnsw /tmp/db 1000 100 10 --dataset sift10k
 cargo run --release --example vamana /tmp/db 1000 100 10 --dataset sift10k
 ```
 
-The datasets are automatically downloaded from [HuggingFace](https://huggingface.co/datasets/qbo-odp/sift1m) and cached locally.
+The datasets are automatically downloaded from [HuggingFace](https://huggingface.co/datasets/qbo-odp/sift1m) and cached in `/tmp/ann_benchmarks/`.
+
+**Manual download** (if needed):
+- Base vectors (516MB): https://huggingface.co/datasets/qbo-odp/sift1m/resolve/main/sift_base.fvecs
+- Queries (5.2MB): https://huggingface.co/datasets/qbo-odp/sift1m/resolve/main/sift_query.fvecs
+- Ground truth (4MB): https://huggingface.co/datasets/qbo-odp/sift1m/resolve/main/sift_groundtruth.ivecs
+
+### Industry Comparison
+
+How does `motlie_db` compare with production ANN libraries?
+
+| Implementation | Recall@10 | QPS | Notes |
+|----------------|-----------|-----|-------|
+| [hnswlib](https://github.com/nmslib/hnswlib) | 98.5% | 16,108 | In-memory, C++, SIMD |
+| [Faiss HNSW](https://github.com/facebookresearch/faiss) | 97.8% | ~30,000 | In-memory, C++, SIMD |
+| **motlie_db HNSW** | 53.8% | 121 | RocksDB-backed, Rust |
+| **motlie_db Vamana** | 58.6% | 237 | RocksDB-backed, Rust |
+
+We are **100-250× slower** due to: 10ms sleep (78%), disk storage, no SIMD, JSON serialization. This is a proof-of-concept; see [HNSW2.md](./HNSW2.md) for the production design targeting 5,000-10,000 inserts/sec.
 
 ## HNSW vs Vamana Comparison
 
