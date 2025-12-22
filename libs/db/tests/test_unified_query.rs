@@ -86,13 +86,13 @@ async fn populate_test_data(db_path: &std::path::Path, index_path: &std::path::P
     // Insert test data
     insert_test_data(&writer).await;
 
+    // Flush to ensure graph writes are committed
+    writer.flush().await.unwrap();
+
     // Shutdown mutation pipeline
     drop(writer);
     graph_handle.await.unwrap().unwrap();
     fulltext_handle.await.unwrap().unwrap();
-
-    // Wait for data to be flushed
-    tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
 /// Helper to set up a test environment using the unified Storage::ready() API.
@@ -546,13 +546,13 @@ async fn setup_tagged_test_env(
     // Insert test data with tags
     insert_tagged_test_data(&writer).await;
 
+    // Flush to ensure graph writes are committed
+    writer.flush().await.unwrap();
+
     // Shutdown mutation pipeline
     drop(writer);
     graph_handle.await.unwrap().unwrap();
     fulltext_handle.await.unwrap().unwrap();
-
-    // Wait for data to be flushed
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Open storage for reading
     let mut graph_storage = GraphStorage::readonly(&db_path);
