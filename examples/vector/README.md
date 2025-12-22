@@ -56,9 +56,11 @@ See [PERF.md](./PERF.md) for comprehensive benchmarks.
 | Algorithm | Vectors | Index Time | Throughput | Latency | QPS | Recall@10 |
 |-----------|---------|------------|------------|---------|-----|-----------|
 | HNSW | 1K | 21.8s | 45.9/s | 9.9ms | 101 | 52.6% |
-| HNSW | 10K | 272.1s | 36.8/s | 15.1ms | 66 | **80.7%** |
+| HNSW | 10K | 272.1s | 36.8/s | 15.1ms | 66 | 80.7% |
+| HNSW | 100K | 1924.4s | 52.0/s | 16.6ms | 60 | **81.7%** |
 | Vamana | 1K | 16.6s | 60.4/s | 4.3ms | 231 | 61.0% |
-| Vamana | 10K | 179.2s | 55.8/s | 4.8ms | 208 | **77.8%** |
+| Vamana | 10K | 179.2s | 55.8/s | 4.8ms | 208 | 77.8% |
+| Vamana | 100K | 2093.5s | 47.8/s | 8.3ms | 120 | 69.8% |
 
 **Key Update (2025-12-21)**: The 10ms sleep has been replaced with the proper flush() API, providing **correct** read-after-write consistency. Performance is similar (~30-45 vectors/sec) because per-insert flush overhead is ~20-25ms. For higher throughput, batched flush patterns are needed (see [PERF.md](./PERF.md#flush-api-implementation-results)).
 
@@ -96,18 +98,20 @@ How does `motlie_db` compare with production ANN libraries?
 | [hnswlib](https://github.com/nmslib/hnswlib) | SIFT1M | 1M | 98.5% | 16,108 | In-memory, C++, SIMD |
 | [Faiss HNSW](https://github.com/facebookresearch/faiss) | SIFT1M | 1M | 97.8% | ~30,000 | In-memory, C++, SIMD |
 | **motlie_db HNSW** | SIFT | 1K | 52.6% | 101 | RocksDB-backed, Rust |
-| **motlie_db HNSW** | SIFT | 10K | **80.7%** | 66 | RocksDB-backed, Rust |
+| **motlie_db HNSW** | SIFT | 10K | 80.7% | 66 | RocksDB-backed, Rust |
+| **motlie_db HNSW** | SIFT | 100K | **81.7%** | 60 | RocksDB-backed, Rust |
 | **motlie_db HNSW** | Random | 1K | 99.6% | 76 | RocksDB-backed, Rust |
 | **motlie_db Vamana** | SIFT | 1K | 61.0% | 231 | RocksDB-backed, Rust |
-| **motlie_db Vamana** | SIFT | 10K | **77.8%** | 208 | RocksDB-backed, Rust |
+| **motlie_db Vamana** | SIFT | 10K | 77.8% | 208 | RocksDB-backed, Rust |
+| **motlie_db Vamana** | SIFT | 100K | 69.8% | 120 | RocksDB-backed, Rust |
 | **motlie_db Vamana** | Random | 1K | 59.4% | 199 | RocksDB-backed, Rust |
 
 **Key Observations**:
-1. **Scale matters for SIFT**: HNSW recall jumped from 52.6% → **80.7%** (+28%) when scaling from 1K to 10K vectors
-2. **Random data**: Our HNSW achieves 99.6% recall, comparable to industry (after async distance fix)
-3. **Projected at 1M**: Based on scaling trend, expect **90-95%** recall at 100K-1M vectors
+1. **HNSW scales well**: Recall plateaus at ~81-82% from 10K to 100K (52.6% → 80.7% → 81.7%)
+2. **Vamana needs tuning**: Recall dropped at 100K (61% → 77.8% → 69.8%), likely needs larger L parameter
+3. **Random data**: Our HNSW achieves 99.6% recall, comparable to industry (after async distance fix)
 4. **QPS gap**: We are 100-200× slower due to per-query DB I/O (disk vs in-memory)
-5. **Vamana more stable**: Recall improved 61% → 77.8% (+17%), less affected by scale than HNSW
+5. **1M benchmark in progress**: Running to validate final recall at production scale
 
 This is a proof-of-concept. See [HNSW2.md](./HNSW2.md) for production design targeting 5,000-10,000 inserts/sec.
 
@@ -187,11 +191,16 @@ With 1K vectors:
 | Dataset Size | Expected HNSW Layers | Projected Recall | Actual Recall |
 |--------------|---------------------|------------------|---------------|
 | 1K | 2-3 | 50-60% | 52.6% ✅ |
-| 10K | 3-4 | 70-80% | **80.7%** ✅ |
-| 100K | 4-5 | 85-90% | *Projected* |
-| 1M | 5-6 | 95%+ | *Projected* |
+| 10K | 3-4 | 70-80% | 80.7% ✅ |
+| 100K | 4-5 | 85-90% | **81.7%** ✅ |
+| 1M | 5-6 | 95%+ | *In progress...* |
 
-**Validated (2025-12-21)**: Running SIFT 10K confirmed the hypothesis - recall improved from 52.6% to **80.7%** (+28 points). The scaling trend suggests 90%+ recall is achievable at 100K+ vectors.
+**Validated (2025-12-21)**: Running SIFT 10K and 100K confirmed scaling improves recall significantly (52.6% → 80.7% → 81.7%). However, recall plateaus at ~82% rather than reaching 90%+ as projected. The Max Level increased to 3 at 100K (was 2 at 10K).
+
+**Analysis**: The ~82% plateau suggests additional tuning is needed:
+- Increase M from 16 to 32 for denser graphs
+- Increase ef_construction from 200 to 400 for better construction quality
+- Current parameters may be under-connecting the graph
 
 **Why this helps**: More layers = better long-range navigation across clusters.
 
@@ -272,20 +281,22 @@ Vamana's medoid-based entry point is inherently better for clustered data:
 
 | Priority | Improvement | Effort | Expected Gain | Status |
 |----------|-------------|--------|---------------|--------|
-| 1 | Test with 10K+ vectors | Low | +20-30% | ✅ Done (+28%) |
-| 2 | Multi-entry point search | Medium | +20-30% | Pending |
-| 3 | Increase M to 32 | Low | +10-15% | Pending |
-| 4 | Centrality-based level assignment | Medium | +10-15% | Pending |
-| 5 | Hybrid HNSW + Vamana | High | +15-20% | Pending |
+| 1 | Test with 10K+ vectors | Low | +20-30% | ✅ Done (+28% at 10K) |
+| 2 | Test with 100K vectors | Low | +5-10% | ✅ Done (+1% plateau) |
+| 3 | Increase M to 32 | Low | +10-15% | **High priority** - needed to break 82% plateau |
+| 4 | Multi-entry point search | Medium | +20-30% | Pending |
+| 5 | Centrality-based level assignment | Medium | +10-15% | Pending |
+| 6 | Hybrid HNSW + Vamana | High | +15-20% | Pending |
 
 ### Summary
 
 - **Random data**: Our implementation is correct and achieves 99.6% recall
-- **SIFT data at 1K**: 50-60% recall is expected due to cluster navigation issues
-- **SIFT data at 10K**: ✅ **80.7% recall** achieved (validated 2025-12-21)
-- **Scaling validated**: Recall improves with scale as predicted (+28 points from 1K to 10K)
-- **Projected at 1M**: Based on trend, expect **90-95%** recall - competitive with industry
-- **Alternative**: Vamana shows more stable recall across scales (61% → 77.8%)
+- **SIFT data at 1K**: 50-60% recall as expected due to cluster navigation issues
+- **SIFT data at 10K**: ✅ **80.7% recall** - significant improvement
+- **SIFT data at 100K**: ✅ **81.7% recall** - plateaued, needs parameter tuning
+- **HNSW scales well**: 52.6% → 80.7% → 81.7% (1K → 10K → 100K)
+- **Vamana needs tuning**: 61% → 77.8% → 69.8% - recall dropped at 100K, L=100 too small
+- **1M in progress**: Running to validate final recall at production scale
 
 ---
 
