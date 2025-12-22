@@ -199,12 +199,64 @@ pub struct Writer {
 }
 
 impl Writer {
-    /// Send a batch of mutations to be processed.
+    /// Send a batch of mutations to be processed asynchronously.
     ///
     /// Mutations flow through the graph consumer first (persisted to RocksDB),
     /// then are forwarded to the fulltext consumer (indexed in Tantivy).
+    ///
+    /// This method returns immediately after enqueueing the mutations.
+    /// Use `flush()` to wait for graph mutations to be committed.
     pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()> {
         self.inner.send(mutations).await
+    }
+
+    /// Flush all pending mutations and wait for graph commit.
+    ///
+    /// Returns when all mutations sent before this call are committed to
+    /// RocksDB and visible to graph readers.
+    ///
+    /// # Fulltext Consistency
+    ///
+    /// This method only guarantees **graph (RocksDB) consistency**.
+    /// Fulltext indexing continues asynchronously and may not be complete
+    /// when this method returns.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Send mutations
+    /// writer.send(vec![AddNode { ... }.into()]).await?;
+    /// writer.send(vec![AddEdge { ... }.into()]).await?;
+    ///
+    /// // Wait for graph commit
+    /// writer.flush().await?;
+    ///
+    /// // Now safe to read from graph
+    /// let node = NodeById::new(id).run(&reader, timeout).await?;
+    /// ```
+    pub async fn flush(&self) -> Result<()> {
+        self.inner.flush().await
+    }
+
+    /// Send mutations and wait for graph commit.
+    ///
+    /// This is a convenience method equivalent to `send()` followed by `flush()`.
+    /// Returns when all graph mutations are visible to readers.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Send and wait in one call
+    /// writer.send_sync(vec![
+    ///     AddNode { ... }.into(),
+    ///     AddEdge { ... }.into(),
+    /// ]).await?;
+    ///
+    /// // Immediately visible in graph
+    /// let node = NodeById::new(id).run(&reader, timeout).await?;
+    /// ```
+    pub async fn send_sync(&self, mutations: Vec<Mutation>) -> Result<()> {
+        self.inner.send_sync(mutations).await
     }
 
     /// Check if the writer is still active.
