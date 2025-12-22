@@ -7,7 +7,7 @@ use motlie_db::writer::Runnable as MutationRunnable;
 use motlie_db::graph::query::NodeById;
 use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::{Id, TimestampMilli};
-use std::time::Duration;
+use std::time::Duration;  // Still needed for reader timeout
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -35,8 +35,8 @@ async fn test_secondary_instance_basic() {
     .await
     .expect("Failed to add node");
 
-    // Give writer time to flush
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Flush to ensure write is visible
+    writer.flush().await.expect("Failed to flush");
 
     drop(writer);
     writer_handle
@@ -110,7 +110,7 @@ async fn test_secondary_catch_up_sees_new_writes() {
         .await
         .expect("Failed to add node1");
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        writer.flush().await.expect("Failed to flush");
         drop(writer);
         writer_handle.await.unwrap().unwrap();
     }
@@ -142,7 +142,7 @@ async fn test_secondary_catch_up_sees_new_writes() {
         .await
         .expect("Failed to add node2");
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        writer.flush().await.expect("Failed to flush");
         drop(writer);
         writer_handle.await.unwrap().unwrap();
     }
