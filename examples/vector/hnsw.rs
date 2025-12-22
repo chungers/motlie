@@ -621,16 +621,16 @@ async fn main() -> Result<()> {
         index_to_id.push(node_id);
         index.insert(writer, &reader, node_id, vector, &mut rng).await?;
 
-        // Allow writes to propagate before next iteration
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        // Flush to ensure writes are visible before next iteration
+        writer.flush().await?;
 
         if (i + 1) % 100 == 0 {
             println!("  Indexed {}/{} vectors", i + 1, num_vectors);
         }
     }
 
-    // Final sync delay to ensure all writes are visible
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // Final flush to ensure all writes are visible
+    writer.flush().await?;
 
     let index_time = start.elapsed();
     metrics.num_vectors = num_vectors;

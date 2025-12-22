@@ -173,8 +173,8 @@ impl VamanaIndex {
             self.node_ids.push(*node_id);
         }
 
-        // Small delay to ensure writes are visible
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // Flush to ensure writes are visible
+        writer.flush().await?;
 
         // Compute medoid (node closest to centroid)
         self.medoid = Some(self.compute_medoid());
