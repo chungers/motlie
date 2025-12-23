@@ -263,6 +263,37 @@ impl Writer {
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
+
+    /// Begin a transaction for read-your-writes semantics.
+    ///
+    /// The returned Transaction allows interleaved writes and reads
+    /// within a single atomic scope.
+    ///
+    /// See [`graph::writer::Writer::transaction()`](graph::writer::Writer::transaction) for details.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut txn = writer.transaction()?;
+    ///
+    /// txn.write(AddNode { ... })?;
+    /// let result = txn.read(NodeById::new(id, None))?;  // Sees uncommitted AddNode!
+    /// txn.write(AddEdge { ... })?;
+    ///
+    /// txn.commit()?;  // Atomic commit
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns error if storage is not configured or not in read-write mode.
+    pub fn transaction(&self) -> Result<graph::transaction::Transaction<'_>> {
+        self.inner.transaction()
+    }
+
+    /// Check if transactions are supported by this writer.
+    pub fn supports_transactions(&self) -> bool {
+        self.inner.supports_transactions()
+    }
 }
 
 // Deref allows unified Writer to be used where graph::writer::Writer is expected
@@ -336,8 +367,13 @@ impl WriterBuilder {
         let fulltext_handle = spawn_fulltext_consumer(fulltext_rx, self.fulltext);
 
         // Create graph writer and consumer that chains to fulltext
-        let (graph_writer, graph_rx) =
+        let (mut graph_writer, graph_rx) =
             graph::writer::create_mutation_writer(self.config.graph.clone());
+
+        // Configure the writer with storage for transaction support
+        // and forward transaction mutations to fulltext
+        graph_writer.set_storage(self.graph.storage().clone());
+        graph_writer.set_transaction_forward_to(fulltext_tx.clone());
 
         // Spawn graph consumer with chaining to fulltext
         let graph_handle =

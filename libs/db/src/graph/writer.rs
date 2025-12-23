@@ -8,11 +8,20 @@
 //!
 //! Also contains the mutation executor traits (MutationExecutor, Processor)
 //! which define how mutations execute against the storage layer.
+//!
+//! # Transaction Support
+//!
+//! The `Writer` type also supports creating transactions for read-your-writes
+//! semantics via the `transaction()` method. See the [`transaction`](super::transaction)
+//! module for details.
 
 use anyhow::{Context, Result};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use super::mutation::{FlushMarker, Mutation};
+use super::transaction::Transaction;
+use super::Storage;
 
 // ============================================================================
 // MutationExecutor Trait
@@ -142,16 +151,131 @@ impl Default for WriterConfig {
 /// .await?;
 /// ```
 ///
+/// ## Transactions (Read-Your-Writes)
+///
+/// ```rust,ignore
+/// let mut txn = writer.transaction()?;
+///
+/// txn.write(AddNode { id, ... })?;
+/// let result = txn.read(NodeById::new(id, None))?;  // Sees uncommitted AddNode!
+/// txn.write(AddEdge { ... })?;
+///
+/// txn.commit()?;  // Atomic commit
+/// ```
+///
 /// See [Mutation API Guide](../docs/mutation-api-guide.md) for complete documentation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Writer {
     sender: mpsc::Sender<Vec<Mutation>>,
+    /// Storage for creating transactions (optional - only present in read-write mode)
+    storage: Option<Arc<Storage>>,
+    /// Optional sender for transaction mutation forwarding (e.g., to fulltext)
+    transaction_forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
+}
+
+impl std::fmt::Debug for Writer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Writer")
+            .field("sender", &"<mpsc::Sender>")
+            .field("storage", &self.storage.as_ref().map(|_| "<Arc<Storage>>"))
+            .field(
+                "transaction_forward_to",
+                &self.transaction_forward_to.as_ref().map(|_| "<mpsc::Sender>"),
+            )
+            .finish()
+    }
 }
 
 impl Writer {
-    /// Create a new MutationWriter with the given sender
+    /// Create a new MutationWriter with the given sender.
+    ///
+    /// This creates a basic writer without transaction support.
+    /// Use `with_storage()` or `with_transaction_forward_to()` to
+    /// enable transaction features.
     pub fn new(sender: mpsc::Sender<Vec<Mutation>>) -> Self {
-        Writer { sender }
+        Writer {
+            sender,
+            storage: None,
+            transaction_forward_to: None,
+        }
+    }
+
+    /// Create a new MutationWriter with storage for transaction support.
+    pub fn with_storage(sender: mpsc::Sender<Vec<Mutation>>, storage: Arc<Storage>) -> Self {
+        Writer {
+            sender,
+            storage: Some(storage),
+            transaction_forward_to: None,
+        }
+    }
+
+    /// Set the storage for transaction support.
+    pub fn set_storage(&mut self, storage: Arc<Storage>) {
+        self.storage = Some(storage);
+    }
+
+    /// Set the sender for transaction mutation forwarding.
+    ///
+    /// When transactions commit, their mutations will be forwarded
+    /// to this sender (best-effort, non-blocking).
+    pub fn set_transaction_forward_to(&mut self, sender: mpsc::Sender<Vec<Mutation>>) {
+        self.transaction_forward_to = Some(sender);
+    }
+
+    /// Begin a transaction for read-your-writes semantics.
+    ///
+    /// The returned Transaction allows interleaved writes and reads
+    /// within a single atomic scope. Transaction lifetime is tied to
+    /// the Writer's storage.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut txn = writer.transaction()?;
+    ///
+    /// txn.write(AddNode { ... })?;
+    /// let result = txn.read(NodeById::new(id, None))?;  // Sees the AddNode
+    /// txn.write(AddEdge { ... })?;
+    ///
+    /// txn.commit()?;  // Sync commit, best-effort forwarding
+    /// ```
+    ///
+    /// # Concurrent Transactions
+    ///
+    /// To run concurrent transactions, clone the Writer first:
+    ///
+    /// ```rust,ignore
+    /// let writer1 = writer.clone();
+    /// let writer2 = writer.clone();
+    ///
+    /// // Now can create transactions on each
+    /// let txn1 = writer1.transaction()?;
+    /// let txn2 = writer2.transaction()?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Storage is not configured (writer created without storage)
+    /// - Storage is not in read-write mode
+    pub fn transaction(&self) -> Result<Transaction<'_>> {
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Writer not configured with storage for transactions"))?;
+
+        let txn_db = storage.transaction_db()?;
+        let txn = txn_db.transaction();
+
+        Ok(Transaction::new(txn, txn_db, self.transaction_forward_to.clone()))
+    }
+
+    /// Check if transactions are supported by this writer.
+    pub fn supports_transactions(&self) -> bool {
+        self.storage
+            .as_ref()
+            .map(|s| s.is_transactional())
+            .unwrap_or(false)
     }
 
     /// Send a batch of mutations to be processed asynchronously.
@@ -447,10 +571,9 @@ pub fn spawn_consumer<P: Processor + 'static>(
 // ============================================================================
 
 use std::path::Path;
-use std::sync::Arc;
 use tokio::task::JoinHandle;
 
-use super::{Graph, Storage};
+use super::Graph;
 
 /// Create a new graph mutation consumer
 pub fn create_mutation_consumer(
