@@ -64,6 +64,8 @@ num_cpus = "1.16"
 warp = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 rand = "0.8"
+rand_chacha = "0.3"
+base64 = "0.22"
 
 [[example]]
 name = "store"
@@ -128,6 +130,14 @@ path = "examples/tracing/tracing_durability.rs"
 [[example]]
 name = "verify_traces"
 path = "examples/tracing/verify_traces.rs"
+
+[[example]]
+name = "hnsw"
+path = "examples/vector/hnsw.rs"
+
+[[example]]
+name = "vamana"
+path = "examples/vector/vamana.rs"
 
 [[bin]]
 name = "motlie"

@@ -199,17 +199,100 @@ pub struct Writer {
 }
 
 impl Writer {
-    /// Send a batch of mutations to be processed.
+    /// Send a batch of mutations to be processed asynchronously.
     ///
     /// Mutations flow through the graph consumer first (persisted to RocksDB),
     /// then are forwarded to the fulltext consumer (indexed in Tantivy).
+    ///
+    /// This method returns immediately after enqueueing the mutations.
+    /// Use `flush()` to wait for graph mutations to be committed.
     pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()> {
         self.inner.send(mutations).await
+    }
+
+    /// Flush all pending mutations and wait for graph commit.
+    ///
+    /// Returns when all mutations sent before this call are committed to
+    /// RocksDB and visible to graph readers.
+    ///
+    /// # Fulltext Consistency
+    ///
+    /// This method only guarantees **graph (RocksDB) consistency**.
+    /// Fulltext indexing continues asynchronously and may not be complete
+    /// when this method returns.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Send mutations
+    /// writer.send(vec![AddNode { ... }.into()]).await?;
+    /// writer.send(vec![AddEdge { ... }.into()]).await?;
+    ///
+    /// // Wait for graph commit
+    /// writer.flush().await?;
+    ///
+    /// // Now safe to read from graph
+    /// let node = NodeById::new(id).run(&reader, timeout).await?;
+    /// ```
+    pub async fn flush(&self) -> Result<()> {
+        self.inner.flush().await
+    }
+
+    /// Send mutations and wait for graph commit.
+    ///
+    /// This is a convenience method equivalent to `send()` followed by `flush()`.
+    /// Returns when all graph mutations are visible to readers.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Send and wait in one call
+    /// writer.send_sync(vec![
+    ///     AddNode { ... }.into(),
+    ///     AddEdge { ... }.into(),
+    /// ]).await?;
+    ///
+    /// // Immediately visible in graph
+    /// let node = NodeById::new(id).run(&reader, timeout).await?;
+    /// ```
+    pub async fn send_sync(&self, mutations: Vec<Mutation>) -> Result<()> {
+        self.inner.send_sync(mutations).await
     }
 
     /// Check if the writer is still active.
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
+    }
+
+    /// Begin a transaction for read-your-writes semantics.
+    ///
+    /// The returned Transaction allows interleaved writes and reads
+    /// within a single atomic scope.
+    ///
+    /// See [`graph::writer::Writer::transaction()`](graph::writer::Writer::transaction) for details.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut txn = writer.transaction()?;
+    ///
+    /// txn.write(AddNode { ... })?;
+    /// let result = txn.read(NodeById::new(id, None))?;  // Sees uncommitted AddNode!
+    /// txn.write(AddEdge { ... })?;
+    ///
+    /// txn.commit()?;  // Atomic commit
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns error if storage is not configured or not in read-write mode.
+    pub fn transaction(&self) -> Result<graph::transaction::Transaction<'_>> {
+        self.inner.transaction()
+    }
+
+    /// Check if transactions are supported by this writer.
+    pub fn supports_transactions(&self) -> bool {
+        self.inner.supports_transactions()
     }
 }
 
@@ -284,8 +367,13 @@ impl WriterBuilder {
         let fulltext_handle = spawn_fulltext_consumer(fulltext_rx, self.fulltext);
 
         // Create graph writer and consumer that chains to fulltext
-        let (graph_writer, graph_rx) =
+        let (mut graph_writer, graph_rx) =
             graph::writer::create_mutation_writer(self.config.graph.clone());
+
+        // Configure the writer with storage for transaction support
+        // and forward transaction mutations to fulltext
+        graph_writer.set_storage(self.graph.storage().clone());
+        graph_writer.set_transaction_forward_to(fulltext_tx.clone());
 
         // Spawn graph consumer with chaining to fulltext
         let graph_handle =
