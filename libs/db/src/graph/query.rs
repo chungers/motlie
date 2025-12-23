@@ -3,6 +3,12 @@
 //! This module contains only business logic - query type definitions and their
 //! QueryExecutor implementations. Infrastructure (traits, Reader, Consumer, spawn
 //! functions) is in the `reader` module.
+//!
+//! # Transaction Support
+//!
+//! Query types implement [`TransactionQueryExecutor`] to support read-your-writes
+//! semantics within a transaction scope. This allows queries to see uncommitted
+//! mutations in the same transaction.
 
 use anyhow::Result;
 use std::ops::Bound;
@@ -18,6 +24,79 @@ use super::schema::{
 use super::ColumnFamilyRecord;
 use super::Storage;
 use crate::{Id, TimestampMilli};
+
+// ============================================================================
+// TransactionQueryExecutor Trait
+// ============================================================================
+
+/// Trait for queries that can execute within a transaction scope.
+///
+/// Unlike [`QueryExecutor`] (which takes `&Storage` and routes through
+/// MPSC channels), this trait executes directly against an active
+/// RocksDB transaction, enabling read-your-writes semantics.
+///
+/// # When to Use
+///
+/// Use this trait when you need to:
+/// - Read data that was just written in the same transaction
+/// - Execute queries within an atomic transaction scope
+/// - Implement algorithms that interleave reads and writes (e.g., HNSW insert)
+///
+/// # Implementation Pattern
+///
+/// Each query type implements this trait alongside `QueryExecutor`:
+///
+/// ```rust,ignore
+/// impl TransactionQueryExecutor for NodeById {
+///     type Output = (NodeName, NodeSummary);
+///
+///     fn execute_in_transaction(
+///         &self,
+///         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+///         txn_db: &rocksdb::TransactionDB,
+///     ) -> Result<Self::Output> {
+///         let cf = txn_db.cf_handle(Nodes::CF_NAME)?;
+///         // Use txn.get_cf() to see uncommitted writes
+///         let value = txn.get_cf(cf, &key)?;
+///         // ... deserialize and return
+///     }
+/// }
+/// ```
+///
+/// # Example Usage
+///
+/// ```rust,ignore
+/// let mut txn = writer.transaction()?;
+///
+/// // Write a node
+/// txn.write(AddNode { id, ... })?;
+///
+/// // Read sees the uncommitted node!
+/// let (name, summary) = txn.read(NodeById::new(id, None))?;
+///
+/// txn.commit()?;
+/// ```
+pub trait TransactionQueryExecutor: Send + Sync {
+    /// The output type of this query.
+    type Output: Send;
+
+    /// Execute query within a transaction (sees uncommitted writes).
+    ///
+    /// # Arguments
+    ///
+    /// * `txn` - Active RocksDB transaction
+    /// * `txn_db` - TransactionDB for column family handles
+    ///
+    /// # Returns
+    ///
+    /// Query result, which may include data from uncommitted writes
+    /// within the same transaction.
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<Self::Output>;
+}
 
 /// Helper function to check if a timestamp falls within a time range
 fn timestamp_in_range(
@@ -1798,6 +1877,601 @@ impl QueryExecutor for AllEdgesDispatch {
 
     fn timeout(&self) -> Duration {
         self.timeout
+    }
+}
+
+// ============================================================================
+// TransactionQueryExecutor Implementations
+// ============================================================================
+
+/// Implement TransactionQueryExecutor for NodeById
+impl TransactionQueryExecutor for NodeById {
+    type Output = (NodeName, NodeSummary);
+
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<Self::Output> {
+        tracing::debug!(id = %self.id, "Executing NodeById query in transaction");
+
+        // Default None to current time for temporal validity checks
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        let key = schema::NodeCfKey(self.id);
+        let key_bytes = schema::Nodes::key_to_bytes(&key);
+
+        let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+        })?;
+
+        // Use txn.get_cf to see uncommitted writes
+        let value_bytes = txn
+            .get_cf(cf, &key_bytes)?
+            .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
+
+        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+        // Check temporal validity
+        if !schema::is_valid_at_time(&value.0, ref_time) {
+            return Err(anyhow::anyhow!(
+                "Node {} not valid at time {}",
+                self.id,
+                ref_time.0
+            ));
+        }
+
+        Ok((value.1, value.2))
+    }
+}
+
+/// Implement TransactionQueryExecutor for NodesByIdsMulti
+impl TransactionQueryExecutor for NodesByIdsMulti {
+    type Output = Vec<(Id, NodeName, NodeSummary)>;
+
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<Self::Output> {
+        tracing::debug!(count = self.ids.len(), "Executing NodesByIdsMulti query in transaction");
+
+        if self.ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+        })?;
+
+        let mut output = Vec::with_capacity(self.ids.len());
+
+        for id in &self.ids {
+            let key = schema::NodeCfKey(*id);
+            let key_bytes = schema::Nodes::key_to_bytes(&key);
+
+            // Use txn.get_cf for each key (transaction doesn't have multi_get)
+            if let Some(value_bytes) = txn.get_cf(cf, &key_bytes)? {
+                match schema::Nodes::value_from_bytes(&value_bytes) {
+                    Ok(value) => {
+                        if schema::is_valid_at_time(&value.0, ref_time) {
+                            output.push((*id, value.1, value.2));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(id = %id, error = %e, "Failed to deserialize node value");
+                    }
+                }
+            }
+        }
+
+        Ok(output)
+    }
+}
+
+/// Implement TransactionQueryExecutor for NodeFragmentsByIdTimeRange
+impl TransactionQueryExecutor for NodeFragmentsByIdTimeRange {
+    type Output = Vec<(TimestampMilli, FragmentContent)>;
+
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<Self::Output> {
+        tracing::debug!(id = %self.id, time_range = ?self.time_range, "Executing NodeFragmentsByIdTimeRange query in transaction");
+
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        let cf = txn_db
+            .cf_handle(schema::NodeFragments::CF_NAME)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::NodeFragments::CF_NAME
+                )
+            })?;
+
+        // Create prefix for this node's fragments
+        let prefix_key = schema::NodeFragmentCfKey(self.id, TimestampMilli(0));
+        let prefix_bytes = schema::NodeFragments::key_to_bytes(&prefix_key);
+        let prefix_len = std::mem::size_of::<Id>();
+
+        let mut results = Vec::new();
+
+        // Use transaction iterator
+        let iter = txn.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(&prefix_bytes, rocksdb::Direction::Forward),
+        );
+
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+
+            // Check prefix match
+            if key_bytes.len() < prefix_len || &key_bytes[..prefix_len] != &prefix_bytes[..prefix_len]
+            {
+                break;
+            }
+
+            let key: schema::NodeFragmentCfKey =
+                schema::NodeFragments::key_from_bytes(&key_bytes)?;
+            let ts = key.1;
+
+            // Check time range
+            if !timestamp_in_range(ts, &self.time_range) {
+                continue;
+            }
+
+            let value: schema::NodeFragmentCfValue =
+                schema::NodeFragments::value_from_bytes(&value_bytes)?;
+
+            // Check temporal validity
+            if schema::is_valid_at_time(&value.0, ref_time) {
+                results.push((ts, value.1));
+            }
+        }
+
+        Ok(results)
+    }
+}
+
+/// Implement TransactionQueryExecutor for EdgeFragmentsByIdTimeRange
+impl TransactionQueryExecutor for EdgeFragmentsByIdTimeRange {
+    type Output = Vec<(TimestampMilli, FragmentContent)>;
+
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<Self::Output> {
+        tracing::debug!(
+            source_id = %self.source_id,
+            dest_id = %self.dest_id,
+            edge_name = %self.edge_name,
+            time_range = ?self.time_range,
+            "Executing EdgeFragmentsByIdTimeRange query in transaction"
+        );
+
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        let cf = txn_db
+            .cf_handle(schema::EdgeFragments::CF_NAME)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::EdgeFragments::CF_NAME
+                )
+            })?;
+
+        // Create prefix for this edge's fragments
+        let prefix_key = schema::EdgeFragmentCfKey(
+            self.source_id,
+            self.dest_id,
+            self.edge_name.clone(),
+            TimestampMilli(0),
+        );
+        let prefix_bytes = schema::EdgeFragments::key_to_bytes(&prefix_key);
+        // Prefix is src_id + dst_id + edge_name (variable length due to string)
+        // We need to iterate and check key structure
+
+        let mut results = Vec::new();
+
+        let iter = txn.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(&prefix_bytes, rocksdb::Direction::Forward),
+        );
+
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+
+            // Parse key to check if it matches our edge
+            let key: schema::EdgeFragmentCfKey = match schema::EdgeFragments::key_from_bytes(&key_bytes)
+            {
+                Ok(k) => k,
+                Err(_) => break,
+            };
+
+            // Check if this is still our edge
+            if key.0 != self.source_id || key.1 != self.dest_id || key.2 != self.edge_name {
+                break;
+            }
+
+            let ts = key.3;
+
+            // Check time range
+            if !timestamp_in_range(ts, &self.time_range) {
+                continue;
+            }
+
+            let value: schema::EdgeFragmentCfValue =
+                schema::EdgeFragments::value_from_bytes(&value_bytes)?;
+
+            // Check temporal validity
+            if schema::is_valid_at_time(&value.0, ref_time) {
+                results.push((ts, value.1));
+            }
+        }
+
+        Ok(results)
+    }
+}
+
+/// Implement TransactionQueryExecutor for EdgeSummaryBySrcDstName
+impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
+    type Output = (EdgeSummary, Option<f64>);
+
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<Self::Output> {
+        tracing::debug!(
+            source_id = %self.source_id,
+            dest_id = %self.dest_id,
+            name = %self.name,
+            "Executing EdgeSummaryBySrcDstName query in transaction"
+        );
+
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        let cf = txn_db
+            .cf_handle(schema::ForwardEdges::CF_NAME)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ForwardEdges::CF_NAME
+                )
+            })?;
+
+        let key = schema::ForwardEdgeCfKey(
+            self.source_id,
+            self.dest_id,
+            self.name.clone(),
+        );
+        let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
+
+        let value_bytes = txn
+            .get_cf(cf, &key_bytes)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Edge not found: {} -> {} ({})",
+                    self.source_id,
+                    self.dest_id,
+                    self.name
+                )
+            })?;
+
+        let value: schema::ForwardEdgeCfValue =
+            schema::ForwardEdges::value_from_bytes(&value_bytes)?;
+
+        // Check temporal validity
+        if !schema::is_valid_at_time(&value.0, ref_time) {
+            return Err(anyhow::anyhow!(
+                "Edge {} -> {} ({}) not valid at time {}",
+                self.source_id,
+                self.dest_id,
+                self.name,
+                ref_time.0
+            ));
+        }
+
+        Ok((value.2, value.1))
+    }
+}
+
+/// Implement TransactionQueryExecutor for OutgoingEdges
+impl TransactionQueryExecutor for OutgoingEdges {
+    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<Self::Output> {
+        tracing::debug!(id = %self.id, "Executing OutgoingEdges query in transaction");
+
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        let cf = txn_db
+            .cf_handle(schema::ForwardEdges::CF_NAME)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ForwardEdges::CF_NAME
+                )
+            })?;
+
+        // Create prefix for this source node's edges
+        let prefix_key = schema::ForwardEdgeCfKey(
+            self.id,
+            Id::nil(),
+            String::new(),
+        );
+        let prefix_bytes = schema::ForwardEdges::key_to_bytes(&prefix_key);
+        let prefix_len = std::mem::size_of::<Id>(); // Just the source ID
+
+        let mut results = Vec::new();
+
+        let iter = txn.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(&prefix_bytes, rocksdb::Direction::Forward),
+        );
+
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+
+            // Check prefix match (source ID)
+            if key_bytes.len() < prefix_len || &key_bytes[..prefix_len] != &prefix_bytes[..prefix_len]
+            {
+                break;
+            }
+
+            let key: schema::ForwardEdgeCfKey = schema::ForwardEdges::key_from_bytes(&key_bytes)?;
+            let value: schema::ForwardEdgeCfValue =
+                schema::ForwardEdges::value_from_bytes(&value_bytes)?;
+
+            // Check temporal validity
+            if schema::is_valid_at_time(&value.0, ref_time) {
+                results.push((value.1, key.0, key.1, key.2));
+            }
+        }
+
+        Ok(results)
+    }
+}
+
+/// Implement TransactionQueryExecutor for IncomingEdges
+impl TransactionQueryExecutor for IncomingEdges {
+    type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
+
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<Self::Output> {
+        tracing::debug!(id = %self.id, "Executing IncomingEdges query in transaction");
+
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        let cf = txn_db
+            .cf_handle(schema::ReverseEdges::CF_NAME)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ReverseEdges::CF_NAME
+                )
+            })?;
+
+        // Create prefix for this destination node's edges
+        let prefix_key = schema::ReverseEdgeCfKey(
+            self.id,
+            Id::nil(),
+            String::new(),
+        );
+        let prefix_bytes = schema::ReverseEdges::key_to_bytes(&prefix_key);
+        let prefix_len = std::mem::size_of::<Id>(); // Just the destination ID
+
+        let mut results = Vec::new();
+
+        let iter = txn.iterator_cf(
+            cf,
+            rocksdb::IteratorMode::From(&prefix_bytes, rocksdb::Direction::Forward),
+        );
+
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+
+            // Check prefix match (destination ID)
+            if key_bytes.len() < prefix_len || &key_bytes[..prefix_len] != &prefix_bytes[..prefix_len]
+            {
+                break;
+            }
+
+            let key: schema::ReverseEdgeCfKey = schema::ReverseEdges::key_from_bytes(&key_bytes)?;
+            let value: schema::ReverseEdgeCfValue =
+                schema::ReverseEdges::value_from_bytes(&value_bytes)?;
+
+            // Check temporal validity
+            if schema::is_valid_at_time(&value.0, ref_time) {
+                let dest_id = key.0;
+                let source_id = key.1;
+                let edge_name = key.2.clone();
+
+                // Lookup weight from ForwardEdges CF
+                let forward_cf = txn_db
+                    .cf_handle(schema::ForwardEdges::CF_NAME)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Column family '{}' not found",
+                            schema::ForwardEdges::CF_NAME
+                        )
+                    })?;
+
+                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name.clone());
+                let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
+
+                let weight = if let Some(forward_value_bytes) =
+                    txn.get_cf(forward_cf, &forward_key_bytes)?
+                {
+                    let forward_value: schema::ForwardEdgeCfValue =
+                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes)?;
+                    forward_value.1
+                } else {
+                    None
+                };
+
+                results.push((weight, dest_id, source_id, edge_name));
+            }
+        }
+
+        Ok(results)
+    }
+}
+
+/// Implement TransactionQueryExecutor for AllNodes
+impl TransactionQueryExecutor for AllNodes {
+    type Output = Vec<(Id, NodeName, NodeSummary)>;
+
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<Self::Output> {
+        tracing::debug!(limit = self.limit, cursor = ?self.last, "Executing AllNodes query in transaction");
+
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
+        })?;
+
+        let mut results = Vec::with_capacity(self.limit);
+
+        // Determine start position - need to create bytes outside the if-let
+        // to avoid lifetime issues
+        let start_bytes: Option<Vec<u8>> = self.last.as_ref().map(|cursor| {
+            let start_key = schema::NodeCfKey(*cursor);
+            schema::Nodes::key_to_bytes(&start_key)
+        });
+
+        let iter = if let Some(ref bytes) = start_bytes {
+            txn.iterator_cf(cf, rocksdb::IteratorMode::From(bytes, rocksdb::Direction::Forward))
+        } else {
+            txn.iterator_cf(cf, rocksdb::IteratorMode::Start)
+        };
+
+        let mut skip_first = self.last.is_some();
+
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+
+            // Skip the cursor position itself
+            if skip_first {
+                skip_first = false;
+                continue;
+            }
+
+            if results.len() >= self.limit {
+                break;
+            }
+
+            let key: schema::NodeCfKey = schema::Nodes::key_from_bytes(&key_bytes)?;
+            let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)?;
+
+            // Check temporal validity
+            if schema::is_valid_at_time(&value.0, ref_time) {
+                results.push((key.0, value.1, value.2));
+            }
+        }
+
+        Ok(results)
+    }
+}
+
+/// Implement TransactionQueryExecutor for AllEdges
+impl TransactionQueryExecutor for AllEdges {
+    type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
+
+    fn execute_in_transaction(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<Self::Output> {
+        tracing::debug!(limit = self.limit, cursor = ?self.last, "Executing AllEdges query in transaction");
+
+        let ref_time = self
+            .reference_ts_millis
+            .unwrap_or_else(|| TimestampMilli::now());
+
+        let cf = txn_db
+            .cf_handle(schema::ForwardEdges::CF_NAME)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ForwardEdges::CF_NAME
+                )
+            })?;
+
+        let mut results = Vec::with_capacity(self.limit);
+
+        // Determine start position - need to create bytes outside the if-let
+        // to avoid lifetime issues
+        let start_bytes: Option<Vec<u8>> = self.last.as_ref().map(|(src, dst, name)| {
+            let start_key = schema::ForwardEdgeCfKey(*src, *dst, name.clone());
+            schema::ForwardEdges::key_to_bytes(&start_key)
+        });
+
+        let iter = if let Some(ref bytes) = start_bytes {
+            txn.iterator_cf(cf, rocksdb::IteratorMode::From(bytes, rocksdb::Direction::Forward))
+        } else {
+            txn.iterator_cf(cf, rocksdb::IteratorMode::Start)
+        };
+
+        let mut skip_first = self.last.is_some();
+
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+
+            // Skip the cursor position itself
+            if skip_first {
+                skip_first = false;
+                continue;
+            }
+
+            if results.len() >= self.limit {
+                break;
+            }
+
+            let key: schema::ForwardEdgeCfKey = schema::ForwardEdges::key_from_bytes(&key_bytes)?;
+            let value: schema::ForwardEdgeCfValue =
+                schema::ForwardEdges::value_from_bytes(&value_bytes)?;
+
+            // Check temporal validity
+            if schema::is_valid_at_time(&value.0, ref_time) {
+                results.push((value.1, key.0, key.1, key.2));
+            }
+        }
+
+        Ok(results)
     }
 }
 

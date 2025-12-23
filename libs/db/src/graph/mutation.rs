@@ -4,12 +4,85 @@
 //! MutationExecutor implementations. Infrastructure (traits, Writer, Consumer, spawn
 //! functions) is in the `writer` module.
 
+use std::sync::Mutex;
+
 use anyhow::Result;
+use tokio::sync::oneshot;
 
 use super::schema;
 use super::writer::{MutationExecutor, Writer};
 use crate::writer::Runnable;
 use crate::{Id, TimestampMilli};
+
+// ============================================================================
+// Flush Marker
+// ============================================================================
+
+/// Marker for flush synchronization.
+///
+/// Contains a oneshot sender that signals when the flush completes.
+/// Uses `Mutex<Option<...>>` to allow taking ownership from a shared reference,
+/// since `process_batch` receives `&[Mutation]`.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// let (tx, rx) = oneshot::channel();
+/// let marker = FlushMarker::new(tx);
+///
+/// // Later, in consumer:
+/// if let Some(completion) = marker.take_completion() {
+///     completion.send(()).ok();
+/// }
+/// ```
+pub struct FlushMarker {
+    completion: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl FlushMarker {
+    /// Create a new flush marker with completion channel.
+    pub fn new(completion: oneshot::Sender<()>) -> Self {
+        Self {
+            completion: Mutex::new(Some(completion)),
+        }
+    }
+
+    /// Take the completion sender (can only be called once).
+    ///
+    /// Returns `None` if already taken or if the mutex is poisoned.
+    pub fn take_completion(&self) -> Option<oneshot::Sender<()>> {
+        self.completion.lock().ok()?.take()
+    }
+}
+
+impl std::fmt::Debug for FlushMarker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let has_completion = self
+            .completion
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+        f.debug_struct("FlushMarker")
+            .field("has_completion", &has_completion)
+            .finish()
+    }
+}
+
+// FlushMarker cannot be Clone since oneshot::Sender is not Clone
+// We implement a manual Clone that creates an "empty" marker
+impl Clone for FlushMarker {
+    fn clone(&self) -> Self {
+        // Cloning a FlushMarker creates an empty one (no completion channel)
+        // This is intentional - only the original can signal completion
+        Self {
+            completion: Mutex::new(None),
+        }
+    }
+}
+
+// ============================================================================
+// Mutation Enum
+// ============================================================================
 
 #[derive(Debug, Clone)]
 pub enum Mutation {
@@ -20,6 +93,16 @@ pub enum Mutation {
     UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil),
     UpdateEdgeValidSinceUntil(UpdateEdgeValidSinceUntil),
     UpdateEdgeWeight(UpdateEdgeWeight),
+
+    /// Flush marker for synchronization.
+    ///
+    /// When the consumer processes this mutation, it signals completion
+    /// via the oneshot channel. This is used by `Writer::flush()` to wait
+    /// for all pending mutations to be committed.
+    ///
+    /// This mutation is NOT persisted to storage - it only serves as a
+    /// synchronization mechanism.
+    Flush(FlushMarker),
 }
 
 #[derive(Debug, Clone)]
@@ -513,7 +596,15 @@ impl Mutation {
             Mutation::UpdateNodeValidSinceUntil(m) => m.execute(txn, txn_db),
             Mutation::UpdateEdgeValidSinceUntil(m) => m.execute(txn, txn_db),
             Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db),
+            // Flush is not a storage operation - it's handled by the consumer
+            // for synchronization purposes only
+            Mutation::Flush(_) => Ok(()),
         }
+    }
+
+    /// Returns true if this mutation is a Flush marker.
+    pub fn is_flush(&self) -> bool {
+        matches!(self, Mutation::Flush(_))
     }
 }
 
