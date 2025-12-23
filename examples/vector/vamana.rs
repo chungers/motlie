@@ -588,11 +588,12 @@ impl VamanaIndex {
 // ============================================================================
 
 /// Parse command line arguments
-fn parse_args() -> Result<(PathBuf, usize, usize, usize, Option<DatasetName>)> {
+fn parse_args() -> Result<(PathBuf, usize, usize, usize, Option<DatasetName>, usize)> {
     let args: Vec<String> = env::args().collect();
 
-    // Check for --dataset flag
+    // Check for optional flags
     let mut dataset_name: Option<DatasetName> = None;
+    let mut l_param: usize = 100; // Default L parameter
     let mut filtered_args: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -608,13 +609,23 @@ fn parse_args() -> Result<(PathBuf, usize, usize, usize, Option<DatasetName>)> {
                 continue;
             }
         }
+        if args[i] == "--l" || args[i] == "-l" {
+            if i + 1 < args.len() {
+                l_param = args[i + 1].parse().unwrap_or_else(|_| {
+                    eprintln!("Invalid L parameter: {}", args[i + 1]);
+                    std::process::exit(1);
+                });
+                i += 2;
+                continue;
+            }
+        }
         filtered_args.push(args[i].clone());
         i += 1;
     }
 
     if filtered_args.len() != 5 {
         eprintln!(
-            "Usage: {} <db_path> <num_vectors> <num_queries> <k> [--dataset <name>]",
+            "Usage: {} <db_path> <num_vectors> <num_queries> <k> [--dataset <name>] [--l <value>]",
             filtered_args.get(0).unwrap_or(&"vamana".to_string())
         );
         eprintln!();
@@ -626,10 +637,12 @@ fn parse_args() -> Result<(PathBuf, usize, usize, usize, Option<DatasetName>)> {
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --dataset <name>  Use benchmark dataset: sift1m, sift10k, random (default: random)");
+        eprintln!("  --l <value>       Search list size L (default: 100, try 200 for better recall)");
         eprintln!();
         eprintln!("Examples:");
         eprintln!("  {} /tmp/vamana_test 1000 100 10", filtered_args.get(0).unwrap_or(&"vamana".to_string()));
         eprintln!("  {} /tmp/vamana_sift 10000 100 10 --dataset sift10k", filtered_args.get(0).unwrap_or(&"vamana".to_string()));
+        eprintln!("  {} /tmp/vamana_sift 10000 100 10 --dataset sift1m --l 200", filtered_args.get(0).unwrap_or(&"vamana".to_string()));
         std::process::exit(1);
     }
 
@@ -638,7 +651,7 @@ fn parse_args() -> Result<(PathBuf, usize, usize, usize, Option<DatasetName>)> {
     let num_queries: usize = filtered_args[3].parse()?;
     let k: usize = filtered_args[4].parse()?;
 
-    Ok((db_path, num_vectors, num_queries, k, dataset_name))
+    Ok((db_path, num_vectors, num_queries, k, dataset_name, l_param))
 }
 
 #[tokio::main]
@@ -646,7 +659,7 @@ async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
-    let (db_path, num_vectors, num_queries, k, dataset_name) = parse_args()?;
+    let (db_path, num_vectors, num_queries, k, dataset_name, l_param) = parse_args()?;
 
     // Load benchmark dataset if specified
     let benchmark_data: Option<BenchmarkDataset> = if let Some(ds_name) = dataset_name {
@@ -679,8 +692,11 @@ async fn main() -> Result<()> {
     let writer = handles.writer();
     let reader = handles.reader_clone();
 
-    // Create Vamana index
-    let params = VamanaParams::default();
+    // Create Vamana index with custom L parameter
+    let params = VamanaParams {
+        l: l_param,
+        ..Default::default()
+    };
     println!("Vamana Parameters: {:?}", params);
 
     let mut index = VamanaIndex::new(params.clone());

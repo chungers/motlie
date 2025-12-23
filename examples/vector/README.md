@@ -104,17 +104,18 @@ How does `motlie_db` compare with production ANN libraries?
 | **motlie_db HNSW** | SIFT | 100K | 81.7% | 60 | RocksDB-backed, Rust |
 | **motlie_db HNSW** | SIFT | 1M | **95.3%** | 47 | RocksDB-backed, Rust |
 | **motlie_db HNSW** | Random | 1K | 99.6% | 76 | RocksDB-backed, Rust |
-| **motlie_db Vamana** | SIFT | 1K | 61.0% | 231 | RocksDB-backed, Rust |
-| **motlie_db Vamana** | SIFT | 10K | 77.8% | 208 | RocksDB-backed, Rust |
-| **motlie_db Vamana** | SIFT | 100K | 69.8% | 120 | RocksDB-backed, Rust |
-| **motlie_db Vamana** | SIFT | 1M | 68.8% | 103 | RocksDB-backed, Rust |
+| **motlie_db Vamana** (L=100) | SIFT | 1K | 61.0% | 231 | RocksDB-backed, Rust |
+| **motlie_db Vamana** (L=100) | SIFT | 10K | 77.8% | 208 | RocksDB-backed, Rust |
+| **motlie_db Vamana** (L=100) | SIFT | 100K | 69.8% | 120 | RocksDB-backed, Rust |
+| **motlie_db Vamana** (L=100) | SIFT | 1M | 68.8% | 103 | RocksDB-backed, Rust |
+| **motlie_db Vamana** (L=200) | SIFT | 1M | **81.9%** | 74 | RocksDB-backed, Rust, tuned |
 | **motlie_db Vamana** | Random | 1K | 59.4% | 199 | RocksDB-backed, Rust |
 
-**Key Observations (Updated 2025-12-22)**:
+**Key Observations (Updated 2025-12-23)**:
 1. **HNSW at 1M: 95.3% recall!** Only 3.2 points below hnswlib (98.5%) - validates disk-based approach
 2. **HNSW scaling validated**: 52.6% → 80.7% → 81.7% → **95.3%** (1K → 10K → 100K → 1M)
-3. **Vamana plateaus at ~69%**: L=100 parameter too small for 1M vectors, needs L=200+
-4. **QPS gap**: ~300× slower than in-memory due to RocksDB I/O, but acceptable for disk-based use case
+3. **Vamana L=200 at 1M: 81.9% recall** (+13.1% vs L=100's 68.8%) - see [L Parameter Tuning](#vamana-l-parameter-tuning)
+4. **QPS gap**: ~200-300× slower than in-memory due to RocksDB I/O, but acceptable for disk-based use case
 5. **Random data**: 99.6% recall proves correctness; clustered SIFT data is harder but scales well
 
 This is a proof-of-concept. See [HNSW2.md](./HNSW2.md) for production design targeting 5,000-10,000 inserts/sec.
@@ -281,6 +282,22 @@ Vamana's medoid-based entry point is inherently better for clustered data:
 
 **Recommendation**: For small clustered datasets, prefer Vamana over HNSW.
 
+### Vamana L Parameter Tuning
+
+The L parameter controls search list size during graph construction. Larger L improves recall but increases build time:
+
+| Scale | L=100 Recall | L=200 Recall | Improvement | Build Time Increase |
+|-------|--------------|--------------|-------------|---------------------|
+| 1K | 61.0% | 61.1% | +0.1% | 1.36x |
+| 10K | 77.8% | 78.8% | +1.0% | 1.80x |
+| 100K | 69.8% | 76.9% | **+7.1%** | 1.89x |
+| 1M | 68.8% | **81.9%** | **+13.1%** | 1.53x |
+
+**Recommendation**: Use `--l 200` for production workloads:
+```bash
+cargo run --release --example vamana /tmp/db 1000000 100 10 --dataset sift1m --l 200
+```
+
 ### Recall Improvement Roadmap
 
 | Priority | Improvement | Effort | Expected Gain | Status |
@@ -288,18 +305,18 @@ Vamana's medoid-based entry point is inherently better for clustered data:
 | 1 | Test with 10K+ vectors | Low | +20-30% | ✅ Done (+28% at 10K) |
 | 2 | Test with 100K vectors | Low | +5-10% | ✅ Done (+1% plateau) |
 | 3 | Test with 1M vectors | Low | +10-15% | ✅ Done (+13.6% to 95.3%) |
-| 4 | Increase M to 32 | Low | +2-3% | Optional - 95.3% already achieved |
-| 5 | Multi-entry point search | Medium | +1-2% | Optional for marginal gains |
-| 6 | Vamana L parameter tuning | Medium | +20-30% | Needed for Vamana at scale |
+| 4 | Vamana L=200 tuning | Low | +13% | ✅ Done (68.8% → 81.9% at 1M) |
+| 5 | Increase M to 32 | Low | +2-3% | Optional - 95.3% already achieved |
+| 6 | Multi-entry point search | Medium | +1-2% | Optional for marginal gains |
 
 ### Summary
 
 - **HNSW SIFT 1M: 95.3% recall** ✅ - only 3.2 points below hnswlib (98.5%)
 - **HNSW scaling complete**: 52.6% → 80.7% → 81.7% → **95.3%** (1K → 10K → 100K → 1M)
+- **Vamana L=200 at 1M: 81.9% recall** ✅ (+13.1% vs L=100's 68.8%)
 - **Random data**: 99.6% recall proves implementation correctness
-- **Vamana at 1M**: 68.8% recall - L=100 parameter too small, needs L=200+
 - **Disk-based validated**: motlie_db HNSW achieves production-grade recall with RocksDB storage
-- **Build time**: 7 hours for 1M vectors (~40 vec/s) - acceptable for batch indexing
+- **Build time**: HNSW 7 hours, Vamana 15 hours (L=200) for 1M vectors
 
 ---
 
