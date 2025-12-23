@@ -113,7 +113,24 @@ Using the [SIFT1M dataset](https://huggingface.co/datasets/qbo-odp/sift1m) from 
 
 **Key Finding (2025-12-22)**: HNSW achieves **95.3% recall at 1M** - only 3.2 points below hnswlib (98.5%)!
 - HNSW: 52.6% → 80.7% → 81.7% → **95.3%** (1K → 10K → 100K → 1M) - scales excellently
-- Vamana: 61.0% → 77.8% → 69.8% → 68.8% (1K → 10K → 100K → 1M) - plateaus, needs L=200+
+- Vamana (L=100): 61.0% → 77.8% → 69.8% → 68.8% (1K → 10K → 100K → 1M) - plateaus at default L
+
+### Vamana L Parameter Tuning (2025-12-23)
+
+The default L=100 parameter limits Vamana's recall at scale. Testing with L=200 shows significant improvement:
+
+| Scale | L=100 Recall | L=200 Recall | Improvement | L=100 Build | L=200 Build | Build Ratio |
+|-------|--------------|--------------|-------------|-------------|-------------|-------------|
+| 1K | 61.0% | 61.1% | +0.1% | 16.6s | 22.6s | 1.36x |
+| 10K | 77.8% | 78.8% | +1.0% | 179.2s | 323.3s | 1.80x |
+| 100K | 69.8% | 76.9% | **+7.1%** | 2093.5s | 3951.9s | 1.89x |
+| 1M | 68.8% | **81.9%** | **+13.1%** | 9.7h | 14.9h | 1.53x |
+
+**Key Findings**:
+1. **L=200 at 1M**: Recall jumps from 68.8% to **81.9%** (+13.1%) - now comparable to HNSW at 100K
+2. **Build time tradeoff**: 1.5-1.9x longer build time for 7-13% recall improvement
+3. **Latency impact**: ~1.4x worse search latency (13.6ms vs 9.7ms at 1M)
+4. **Recommendation**: Use L=200 for production workloads where recall matters more than build time
 
 ### Comparison with Industry Implementations
 
@@ -128,10 +145,11 @@ How does `motlie_db` compare with production ANN libraries on SIFT1M?
 | **motlie_db HNSW** | 10K | 80.7% | 66 | 15.13ms | RocksDB-backed, Rust |
 | **motlie_db HNSW** | 100K | 81.7% | 60 | 16.57ms | RocksDB-backed, Rust |
 | **motlie_db HNSW** | 1M | **95.3%** | 47 | 21.48ms | RocksDB-backed, Rust |
-| **motlie_db Vamana** | 1K | 61.0% | 237 | 4.21ms | RocksDB-backed, Rust |
-| **motlie_db Vamana** | 10K | 77.8% | 208 | 4.81ms | RocksDB-backed, Rust |
-| **motlie_db Vamana** | 100K | 69.8% | 120 | 8.32ms | RocksDB-backed, Rust |
-| **motlie_db Vamana** | 1M | 68.8% | 103 | 9.70ms | RocksDB-backed, Rust |
+| **motlie_db Vamana** (L=100) | 1K | 61.0% | 237 | 4.21ms | RocksDB-backed, Rust |
+| **motlie_db Vamana** (L=100) | 10K | 77.8% | 208 | 4.81ms | RocksDB-backed, Rust |
+| **motlie_db Vamana** (L=100) | 100K | 69.8% | 120 | 8.32ms | RocksDB-backed, Rust |
+| **motlie_db Vamana** (L=100) | 1M | 68.8% | 103 | 9.70ms | RocksDB-backed, Rust |
+| **motlie_db Vamana** (L=200) | 1M | **81.9%** | 74 | 13.60ms | RocksDB-backed, Rust, tuned |
 
 *Sources: [hnswlib](https://github.com/nmslib/hnswlib), [Faiss benchmarks](https://github.com/facebookresearch/faiss/wiki/Indexing-1M-vectors), [ANN-Benchmarks](https://ann-benchmarks.com/)*
 
