@@ -26,6 +26,7 @@ pub mod mutation;
 pub mod query;
 pub mod reader;
 pub mod schema;
+pub mod transaction;
 pub mod writer;
 
 /// Scan API for iterating over column families with pagination support.
@@ -42,8 +43,9 @@ pub use mutation::{
 pub use crate::writer::Runnable;
 pub use query::{
     EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, IncomingEdges, NodeById,
-    NodeFragmentsByIdTimeRange, OutgoingEdges, Query,
+    NodeFragmentsByIdTimeRange, OutgoingEdges, Query, TransactionQueryExecutor,
 };
+pub use transaction::Transaction;
 pub use crate::reader::Runnable as QueryRunnable;
 pub use reader::{
     // Query consumer functions
@@ -510,6 +512,13 @@ impl Graph {
     /// Create a new GraphProcessor
     pub fn new(storage: Arc<Storage>) -> Self {
         Self { storage }
+    }
+
+    /// Get a reference to the storage.
+    ///
+    /// This is used internally for transaction support.
+    pub fn storage(&self) -> &Arc<Storage> {
+        &self.storage
     }
 }
 

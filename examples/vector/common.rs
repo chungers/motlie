@@ -497,9 +497,16 @@ mod tests {
         for _ in 0..1000 {
             let value = generate_dimension_value(&mut rng);
             assert!(value >= 0.0 && value < 1.0);
-            // Check quantization: value * 1000 should be integer
+            // Check quantization: value * 1000 should be approximately an integer
+            // Use a larger tolerance due to floating point precision
             let scaled = value * QUANTIZATION_INTERVALS as f32;
-            assert!((scaled - scaled.round()).abs() < 1e-6);
+            assert!(
+                (scaled - scaled.round()).abs() < 1e-4,
+                "scaled={} round={} diff={}",
+                scaled,
+                scaled.round(),
+                (scaled - scaled.round()).abs()
+            );
         }
     }
 

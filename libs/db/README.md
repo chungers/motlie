@@ -145,6 +145,167 @@ storage.ready(StorageConfig)  →  ReadOnlyHandles
     └── Sets up: MPMC consumer pools for graph + fulltext + unified queries
 ```
 
+## Flush API and Batch Mutations
+
+The Writer uses an async MPSC channel to decouple mutation sends from RocksDB commits.
+By default, `mutation.run(&writer)` returns immediately after enqueueing - not after the
+data is committed. Use the **Flush API** to ensure read-after-write consistency.
+
+### Writer Methods
+
+| Method | Behavior | Use Case |
+|--------|----------|----------|
+| `send(Vec<Mutation>)` | Fire-and-forget, returns immediately | High-throughput bulk ingestion |
+| `flush()` | Waits for all pending mutations to commit | Read-after-write consistency |
+| `send_sync(Vec<Mutation>)` | `send()` + `flush()` combined | Simple consistency |
+
+### Pattern 1: MutationBatch
+
+Use `MutationBatch` to group multiple mutations into an atomic batch:
+
+```rust
+use motlie_db::mutation::{MutationBatch, AddNode, AddEdge, Runnable};
+use motlie_db::{Id, TimestampMilli};
+
+let alice_id = Id::new();
+let bob_id = Id::new();
+
+// Build a batch of mutations
+MutationBatch(vec![
+    AddNode {
+        id: alice_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Alice".to_string(),
+        summary: NodeSummary::from_text("A person"),
+        valid_range: None,
+    }.into(),
+    AddNode {
+        id: bob_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Bob".to_string(),
+        summary: NodeSummary::from_text("Another person"),
+        valid_range: None,
+    }.into(),
+    AddEdge {
+        source_node_id: alice_id,
+        target_node_id: bob_id,
+        ts_millis: TimestampMilli::now(),
+        name: "knows".to_string(),
+        summary: EdgeSummary::from_text("Alice knows Bob"),
+        weight: Some(1.0),
+        valid_range: None,
+    }.into(),
+]).run(handles.writer()).await?;
+
+// Wait for commit before reading
+handles.writer().flush().await?;
+
+// Now safe to read
+let edges = OutgoingEdges::new(alice_id, None)
+    .run(handles.reader(), timeout)
+    .await?;
+```
+
+### Pattern 2: mutations! Macro
+
+The `mutations!` macro provides cleaner syntax with automatic `.into()` conversion:
+
+```rust
+use motlie_db::{mutations, Id, TimestampMilli};
+use motlie_db::mutation::{AddNode, AddEdge, Runnable, NodeSummary, EdgeSummary};
+
+let alice_id = Id::new();
+let bob_id = Id::new();
+
+// Cleaner syntax - no .into() needed
+mutations![
+    AddNode {
+        id: alice_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Alice".to_string(),
+        summary: NodeSummary::from_text("A person"),
+        valid_range: None,
+    },
+    AddNode {
+        id: bob_id,
+        ts_millis: TimestampMilli::now(),
+        name: "Bob".to_string(),
+        summary: NodeSummary::from_text("Another person"),
+        valid_range: None,
+    },
+    AddEdge {
+        source_node_id: alice_id,
+        target_node_id: bob_id,
+        ts_millis: TimestampMilli::now(),
+        name: "knows".to_string(),
+        summary: EdgeSummary::from_text("Alice knows Bob"),
+        weight: Some(1.0),
+        valid_range: None,
+    },
+].run(handles.writer()).await?;
+
+// Flush and read
+handles.writer().flush().await?;
+```
+
+### Pattern 3: send_sync for Simple Consistency
+
+For cases where you always need immediate consistency, use `send_sync()`:
+
+```rust
+use motlie_db::mutation::{AddNode, Mutation, NodeSummary};
+
+// send_sync = send + flush in one call
+handles.writer().send_sync(vec![
+    Mutation::AddNode(AddNode {
+        id: Id::new(),
+        ts_millis: TimestampMilli::now(),
+        name: "Charlie".to_string(),
+        summary: NodeSummary::from_text("A person"),
+        valid_range: None,
+    }),
+]).await?;
+
+// Immediately visible - no separate flush needed
+```
+
+### Flush Consistency Guarantees
+
+| What `flush()` Guarantees | What It Does NOT Guarantee |
+|---------------------------|----------------------------|
+| Graph data committed to RocksDB | Fulltext indexing complete |
+| Graph queries see the writes | Fulltext search returns new data |
+
+For most use cases (graph traversal, vector search, CRUD), graph-only flush is sufficient.
+Fulltext indexing happens asynchronously and will eventually be consistent.
+
+### Performance Comparison
+
+| Approach | Throughput | Use Case |
+|----------|------------|----------|
+| `send()` without flush | Highest | Bulk import (flush once at end) |
+| `send()` + `flush()` per batch | High | Periodic consistency checkpoints |
+| `send_sync()` per mutation | Medium | Interactive CRUD operations |
+
+### Example: Bulk Import with Final Flush
+
+```rust
+// High-throughput bulk import
+for batch in data_batches {
+    let mutations: Vec<Mutation> = batch.into_iter()
+        .map(|item| AddNode { /* ... */ }.into())
+        .collect();
+
+    // Fire-and-forget for maximum throughput
+    handles.writer().send(mutations).await?;
+}
+
+// Single flush at the end
+handles.writer().flush().await?;
+
+// Now all data is visible
+```
+
 ## Public Type Catalog
 
 ### Core Types (`motlie_db`)
