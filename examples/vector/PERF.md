@@ -73,18 +73,18 @@ The flush() API enables **correct synchronization**, but actual speedup requires
 
 **Recommendation**: For maximum throughput, batch inserts and call flush() once at the end. For real-time consistency, flush() per insert is now correct (vs hopeful with sleep).
 
-### Updated Projections
-
-Based on measured results (flush() API, ~35-55 vectors/sec):
+### Updated Projections (Based on Measured 1M Results)
 
 | Scale | HNSW Index Time | Vamana Index Time | HNSW Recall | Vamana Recall | Disk Usage |
 |-------|-----------------|-------------------|-------------|---------------|------------|
 | 10K | 4.5 min (272s) | 3.0 min (179s) | 80.7% | 77.8% | ~260MB |
-| 100K | 32 min (1924s) | 35 min (2094s) | **81.7%** | 69.8% | ~2.6GB |
-| 1M | ~5.3 hours | ~5.8 hours | *in progress* | *in progress* | ~26GB |
-| 10M | ~2.2 days | ~2.4 days | projected ~85% | projected ~75% | ~260GB |
-| 100M | ~22 days | ~24 days | projected ~88% | projected ~78% | ~2.6TB |
-| 1B | ~220 days | ~240 days | projected ~90% | projected ~80% | ~26TB |
+| 100K | 32 min (1924s) | 35 min (2094s) | 81.7% | 69.8% | ~2.6GB |
+| 1M | 7.0 hours (25071s) | 9.7 hours (34929s) | **95.3%** | 68.8% | ~26GB |
+| 10M | ~2.9 days | ~4.0 days | projected ~97% | projected ~75% | ~260GB |
+| 100M | ~29 days | ~40 days | projected ~98% | projected ~78% | ~2.6TB |
+| 1B | ~290 days | ~400 days | projected ~99% | projected ~80% | ~26TB |
+
+**Key Achievement (2025-12-22)**: HNSW 1M recall of **95.3%** validates that disk-based vector search with motlie_db is production-viable. Only 3.2 points below hnswlib (98.5%).
 
 **Note**: These projections assume current per-insert flush pattern. With optimized batching (Phase 2 of flush API), targets of 5,000-10,000 inserts/sec are achievable.
 
@@ -103,15 +103,17 @@ Using the [SIFT1M dataset](https://huggingface.co/datasets/qbo-odp/sift1m) from 
 | Algorithm | Vectors | Index Time | Throughput | Latency (avg) | P50 | P99 | QPS | Recall@10 |
 |-----------|---------|------------|------------|---------------|-----|-----|-----|-----------|
 | HNSW | 1K | 21.85s | 45.8/s | 8.29ms | 7.44ms | 12.03ms | 120.6 | 0.526 |
-| HNSW | 10K | 272.1s | 36.8/s | 15.13ms | 15.35ms | 23.71ms | 66.1 | **0.807** |
-| HNSW | 100K | 1924.4s | 52.0/s | 16.57ms | 15.56ms | 27.54ms | 60.4 | **0.817** |
+| HNSW | 10K | 272.1s | 36.8/s | 15.13ms | 15.35ms | 23.71ms | 66.1 | 0.807 |
+| HNSW | 100K | 1924.4s | 52.0/s | 16.57ms | 15.56ms | 27.54ms | 60.4 | 0.817 |
+| HNSW | 1M | 25070.5s | 39.9/s | 21.48ms | 21.02ms | 37.17ms | 46.6 | **0.953** |
 | Vamana | 1K | 14.78s | 67.7/s | 4.21ms | 3.45ms | 6.36ms | 237.3 | 0.610 |
-| Vamana | 10K | 179.2s | 55.8/s | 4.81ms | 4.65ms | 8.81ms | 208.0 | **0.778** |
+| Vamana | 10K | 179.2s | 55.8/s | 4.81ms | 4.65ms | 8.81ms | 208.0 | 0.778 |
 | Vamana | 100K | 2093.5s | 47.8/s | 8.32ms | 7.47ms | 14.34ms | 120.2 | 0.698 |
+| Vamana | 1M | 34928.9s | 28.6/s | 9.70ms | 7.13ms | 18.82ms | 103.1 | 0.688 |
 
-**Key Finding (2025-12-21)**: Recall improves dramatically with scale:
-- HNSW: 52.6% → 80.7% → 81.7% (1K → 10K → 100K) - plateaus at ~82%
-- Vamana: 61.0% → 77.8% → 69.8% (1K → 10K → 100K) - peaks at 10K, needs larger L for 100K+
+**Key Finding (2025-12-22)**: HNSW achieves **95.3% recall at 1M** - only 3.2 points below hnswlib (98.5%)!
+- HNSW: 52.6% → 80.7% → 81.7% → **95.3%** (1K → 10K → 100K → 1M) - scales excellently
+- Vamana: 61.0% → 77.8% → 69.8% → 68.8% (1K → 10K → 100K → 1M) - plateaus, needs L=200+
 
 ### Comparison with Industry Implementations
 
@@ -124,10 +126,12 @@ How does `motlie_db` compare with production ANN libraries on SIFT1M?
 | **Faiss HNSW** (ef=64) | 1M | 97.8% | ~30,000 | 0.033ms | In-memory, SIMD optimized |
 | **motlie_db HNSW** | 1K | 52.6% | 121 | 8.29ms | RocksDB-backed, Rust |
 | **motlie_db HNSW** | 10K | 80.7% | 66 | 15.13ms | RocksDB-backed, Rust |
-| **motlie_db HNSW** | 100K | **81.7%** | 60 | 16.57ms | RocksDB-backed, Rust |
+| **motlie_db HNSW** | 100K | 81.7% | 60 | 16.57ms | RocksDB-backed, Rust |
+| **motlie_db HNSW** | 1M | **95.3%** | 47 | 21.48ms | RocksDB-backed, Rust |
 | **motlie_db Vamana** | 1K | 61.0% | 237 | 4.21ms | RocksDB-backed, Rust |
 | **motlie_db Vamana** | 10K | 77.8% | 208 | 4.81ms | RocksDB-backed, Rust |
 | **motlie_db Vamana** | 100K | 69.8% | 120 | 8.32ms | RocksDB-backed, Rust |
+| **motlie_db Vamana** | 1M | 68.8% | 103 | 9.70ms | RocksDB-backed, Rust |
 
 *Sources: [hnswlib](https://github.com/nmslib/hnswlib), [Faiss benchmarks](https://github.com/facebookresearch/faiss/wiki/Indexing-1M-vectors), [ANN-Benchmarks](https://ann-benchmarks.com/)*
 
