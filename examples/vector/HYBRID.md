@@ -1,6 +1,46 @@
 # Hybrid Vector Search Architecture
 
+**Phase 4 - Billion-Scale Production Architecture**
+
 A comprehensive design for production-grade vector search at billion scale with online inserts, low latency, and high recall.
+
+**Last Updated**: 2025-12-24
+
+---
+
+## Document Hierarchy
+
+```
+REQUIREMENTS.md     ← Ground truth for all design decisions
+    ↓
+POC.md              ← Phase 1: Current implementation
+    ↓
+HNSW2.md            ← Phase 2: Optimized HNSW with roaring bitmaps
+    ↓
+IVFPQ.md            ← Phase 3: GPU-accelerated search (optional)
+    ↓
+HYBRID.md (this)    ← Phase 4: Billion-scale production (you are here)
+```
+
+## Target Requirements
+
+This phase is the culmination of all prior work, achieving:
+
+| Requirement | Target | Addressed By |
+|-------------|--------|--------------|
+| **SCALE-1** | 1 billion vectors | PQ compression (8 bytes/vector) |
+| **SCALE-3** | < 64 GB RAM at 1B | In-memory HNSW nav (~50MB) + PQ (8GB) |
+| **LAT-4** | < 10ms P99 insert | Async graph updater |
+| **LAT-3** | < 100ms P99 search at 1B | HNSW navigation + PQ re-rank |
+| **REC-2** | > 95% recall at 1B | Exact distance re-ranking |
+| **THR-1** | > 5,000 inserts/s | Batched async updates |
+| **THR-4** | > 100 QPS at 1B | SIMD PQ distance |
+| **STOR-4** | PQ compression | 512x compression |
+| **STOR-5** | SIMD distance | AVX2/AVX-512 |
+
+See [REQUIREMENTS.md](./REQUIREMENTS.md) for full requirement definitions.
+
+---
 
 ## Executive Summary
 

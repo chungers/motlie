@@ -1,6 +1,43 @@
 # IVF-PQ and GPU-Accelerated Vector Search
 
+**Phase 3 - GPU-Accelerated Search (Optional)**
+
 This document explores Inverted File with Product Quantization (IVF-PQ) and GPU-accelerated alternatives to our current graph-based HNSW/Vamana implementations, with a focus on scaling to 1 billion vectors.
+
+**Last Updated**: 2025-12-24
+
+---
+
+## Document Hierarchy
+
+```
+REQUIREMENTS.md     ← Ground truth for all design decisions
+    ↓
+POC.md              ← Phase 1: Current implementation
+    ↓
+HNSW2.md            ← Phase 2: Optimized HNSW with roaring bitmaps
+    ↓
+IVFPQ.md (this)     ← Phase 3: GPU-accelerated search (you are here)
+    ↓
+HYBRID.md           ← Phase 4: Billion-scale production architecture
+```
+
+## Target Requirements
+
+This phase focuses on achieving:
+
+| Requirement | Target | Current (POC.md) | IVFPQ Target |
+|-------------|--------|------------------|--------------|
+| **THR-3** | > 500 QPS | 47 QPS | 10,000+ QPS (GPU) |
+| **STOR-5** | SIMD distance | Not implemented | CAGRA GPU kernels |
+| **STOR-4** | PQ compression | Not implemented | 512x compression |
+| **UC-2** | Image similarity | 100M vectors | 100M-1B vectors |
+
+See [REQUIREMENTS.md](./REQUIREMENTS.md) for full requirement definitions.
+
+**Note**: This phase is optional and requires GPU infrastructure (NVIDIA CUDA). For CPU-only deployments, skip to [HYBRID.md](./HYBRID.md).
+
+---
 
 ## Table of Contents
 
