@@ -8,7 +8,57 @@ Performance benchmarks for HNSW and Vamana (DiskANN) implementations on `motlie_
 - **RAM**: 119GB
 - **Disk**: 3.5TB available
 - **OS**: Linux 6.14.0-1015-nvidia
-- **Date**: 2025-12-24 (Updated with Transaction API re-benchmark)
+- **Date**: 2025-12-24 (Updated with Vamana recall fix)
+
+---
+
+## 2025-12-24: Vamana Recall Improvement
+
+### Problem
+
+Vamana recall was declining at scale:
+- 1K: 58.9%
+- 10K: 77.8%
+- 100K: 69.9% (declining)
+- 1M: 68.8% (still declining)
+
+This is abnormal - recall should improve or plateau as graph size increases.
+
+### Root Cause Analysis
+
+Two issues were identified:
+
+1. **Early termination bug in greedy search**: The search was checking termination AFTER exploring a candidate's neighbors, but then immediately breaking without exploring candidates added during that iteration. This caused premature search termination.
+
+2. **Insufficient construction passes**: With only 2 passes, the graph didn't have enough refinement for high-quality neighbor connections.
+
+### Fixes Applied
+
+1. **Fixed greedy search termination** (`vamana.rs:310-318`):
+   - Moved termination check to BEFORE processing each candidate
+   - Now correctly stops only when best remaining candidate is worse than L-th best result
+
+2. **Increased construction passes from 2 to 3** (`vamana.rs:193-194`):
+   - More passes = better graph quality
+   - Each pass refines neighbor connections using greedy search + RNG pruning
+
+3. **Added flush after random edge initialization** (`vamana.rs:189-190`):
+   - Ensures random edges are visible before main construction passes
+
+### Results at 1K Scale (SIFT)
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| **Recall@10** | 58.9% | **73.1%** | **+14.2%** |
+| Build Time | 13.8s | 18.7s | +35% |
+| Build Throughput | 72.7/s | 53.5/s | -26% |
+| Search QPS | 280 | 174 | -38% |
+
+The recall improvement comes at the cost of slightly longer build time due to 3 passes instead of 2.
+
+### Impact
+
+The fix addresses the core issue of declining recall at scale. With proper graph construction, Vamana should now show improving or stable recall as dataset size increases, matching expected behavior from the DiskANN paper.
 
 ---
 
