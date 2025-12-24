@@ -3,6 +3,8 @@
 This document analyzes existing GitHub issues against vector search performance requirements
 and evaluates solutions for critical bottlenecks.
 
+**Last Updated**: 2025-12-24
+
 ---
 
 ## Executive Summary
@@ -14,7 +16,7 @@ and evaluates solutions for critical bottlenecks.
 | **Edge Name Filtering** | #21 | Open (Medium) | High - Layer queries |
 | **Batch Reverse Traversal** | #18 | Open (Low-Medium) | Medium |
 | **Graph Stats** | #20 | Open (Low) | Low |
-| **Read-After-Write** | **NONE** | **MISSING** | **CRITICAL - 10ms bottleneck** |
+| **Read-After-Write** | #26 | ✅ **IMPLEMENTED** | Flush API + Transaction API |
 | **Batch Fragment Retrieval** | **NONE** | **MISSING** | High - Vector loading |
 
 ---
@@ -152,13 +154,20 @@ Escalate to High priority. Add vector search use case.
 
 ---
 
-## Part 2: Missing Issue - Read-After-Write Consistency
+## Part 2: Read-After-Write Consistency - ✅ IMPLEMENTED
 
-### The 10ms Bottleneck Problem
+### The 10ms Bottleneck Problem - SOLVED
 
-**No existing GitHub issue covers this critical requirement.**
+**Issue #26**: Read-After-Write Consistency - **✅ IMPLEMENTED** (2025-12-21)
 
-#### Root Cause Analysis
+Both Phase 1 (Flush API) and Phase 2 (Transaction API) have been implemented:
+- `writer.flush().await` - Wait for pending writes to commit
+- `writer.send_sync()` - Send + flush in one call
+- `writer.transaction()` - Full read-your-writes Transaction API
+
+See [flush.md](../../libs/db/docs/flush.md) and [transaction.md](../../libs/db/docs/transaction.md) for implementation details.
+
+#### Historical Root Cause Analysis
 
 The current architecture:
 
@@ -184,26 +193,31 @@ The HNSW insert operation needs to:
 
 Without waiting for the write to commit, the read may see stale data.
 
-#### Current Workaround
+#### Previous Workaround (REMOVED)
 
 ```rust
-// examples/vector/hnsw.rs:625
-tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+// OLD - examples/vector/hnsw.rs:625 (no longer used)
+// tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+// NEW - Proper API calls:
+writer.flush().await?;  // Or use Transaction API for read-your-writes
 ```
 
-This sleep accounts for **78% of indexing time**.
+The sleep workaround has been **removed** from all vector search examples.
 
-#### Impact on Vector Search
+#### Achieved Results
 
-| Metric | Current (with sleep) | Target (no sleep) | Improvement |
-|--------|---------------------|-------------------|-------------|
-| Max throughput | 100 inserts/sec | 10,000+ inserts/sec | **100x** |
-| Actual throughput | 30-68 inserts/sec | 5,000-10,000/sec | **150x** |
-| Index 1M vectors | ~9 hours | ~2 minutes | **270x** |
+| Metric | Old (with sleep) | With Flush API | With Transaction API |
+|--------|-----------------|----------------|---------------------|
+| HNSW 1K throughput | 45.8/s | ~46/s | **103.6/s** (+126%) |
+| HNSW 10K throughput | 36.8/s | ~37/s | **68.1/s** (+85%) |
+| Correctness | Hopeful | **Guaranteed** | **Guaranteed** |
 
 ---
 
-## Part 3: Solutions for Read-After-Write Consistency
+## Part 3: Solutions for Read-After-Write Consistency - HISTORICAL
+
+> **Note**: This section documents the design options that were evaluated. Options B and C have been **implemented**.
 
 ### Option A: Synchronous Processing Mode
 
@@ -239,9 +253,11 @@ impl Writer {
 
 ---
 
-### Option B: Writer Flush API
+### Option B: Writer Flush API - ✅ IMPLEMENTED
 
 **Concept**: Add `flush()` method that waits for all pending mutations to complete.
+
+**Status**: ✅ **Implemented** (2025-12-21) - See [flush.md](../../libs/db/docs/flush.md)
 
 ```rust
 impl Writer {
@@ -271,9 +287,11 @@ impl Writer {
 
 ---
 
-### Option C: Transaction Scope API (Read-Your-Writes)
+### Option C: Transaction Scope API (Read-Your-Writes) - ✅ IMPLEMENTED
 
 **Concept**: Expose RocksDB Transaction directly to callers for read-your-writes.
+
+**Status**: ✅ **Implemented** (2025-12-23) - See [transaction.md](../../libs/db/docs/transaction.md)
 
 ```rust
 // New API
@@ -415,12 +433,12 @@ impl OptimisticWriter {
 
 ---
 
-## Recommended Solution: Combination Approach
+## Recommended Solution: Combination Approach - ✅ IMPLEMENTED
 
-### Phase 1: Quick Win (Option B - Flush API)
+### Phase 1: Quick Win (Option B - Flush API) - ✅ DONE
 
-**Timeline**: 3-5 days
-**Impact**: Eliminates 10ms sleep for batch operations
+**Implemented**: 2025-12-21
+**Impact**: Proper read-after-write consistency (replaces hopeful 10ms sleep)
 
 ```rust
 // Usage pattern for batch indexing
@@ -432,17 +450,16 @@ for batch in vectors.chunks(100) {
 }
 ```
 
-This reduces sleep overhead from 100×10ms = 1000ms to 1×flush = ~50ms per batch.
-**Improvement: 20x throughput for batch operations.**
+**Result**: Same throughput (~30-45/s with per-insert flush), but **guaranteed correctness** instead of hopeful sleep.
 
-### Phase 2: Full Solution (Option C - Transaction Scope)
+### Phase 2: Full Solution (Option C - Transaction Scope) - ✅ DONE
 
-**Timeline**: 1-2 weeks
-**Impact**: True read-your-writes, eliminates all visibility delays
+**Implemented**: 2025-12-23
+**Impact**: True read-your-writes with 2x speedup at small scales
 
 ```rust
-// Usage pattern for HNSW insert
-let txn = writer.begin_transaction();
+// Usage pattern for HNSW insert (now used in examples)
+let mut txn = writer.transaction()?;
 
 txn.write(AddNode { id, name, ... })?;
 txn.write(AddNodeFragment { id, content: vector, ... })?;
@@ -458,7 +475,11 @@ for (dist, neighbor_id) in neighbors.iter().take(m) {
 txn.commit()?;  // Single atomic commit
 ```
 
-**Improvement: Theoretical 100x throughput (limited only by RocksDB I/O).**
+**Result**:
+- HNSW 1K: **2.26x faster** (103.6 vs 45.8 vec/s)
+- HNSW 10K: **1.85x faster** (68.1 vs 36.8 vec/s)
+
+See [PERF.md](./PERF.md#2025-12-24-re-benchmark-transaction-api-performance) for full benchmark results.
 
 ---
 
@@ -503,53 +524,51 @@ let fragments = NodeFragmentsByIdsMulti::new(
 
 ---
 
-## Summary: Recommended Actions
+## Summary: Status & Remaining Actions
 
-### Immediate (This Sprint)
+### ✅ Completed
 
-1. **Create new issue**: Read-After-Write Consistency (Flush API + Transaction Scope)
-   - Priority: P0/Critical
-   - Blocks 100x throughput improvement
+1. **Issue #26**: Read-After-Write Consistency (Flush API + Transaction Scope)
+   - ✅ Flush API implemented (2025-12-21)
+   - ✅ Transaction API implemented (2025-12-23)
+   - ✅ 10ms sleep workaround removed from all examples
+   - ✅ Benchmarks validated: 2.26x speedup at 1K, 1.85x at 10K
+
+### 🔶 In Progress / Pending
 
 2. **Comment on #19** (Degree Queries): Add vector search evidence, request P0 priority
+   - Still needed for O(1) prune decisions
 
 3. **Comment on #17** (OutgoingEdgesMulti): Add vector search as use case
+   - Still needed for batch edge traversal
 
 4. **Create new issue**: NodeFragmentsByIdsMulti (Batch Fragment Retrieval)
    - Priority: High
    - Enables 2.8x search speedup
 
-### Short-term (Next Sprint)
+5. **Comment on #21** (Edge Name Filtering): Add vector search use case
 
-5. **Implement Flush API** (Phase 1 of read-after-write solution)
-   - 3-5 days effort
-   - 20x batch throughput improvement
+### Future Work
 
-6. **Comment on #21** (Edge Name Filtering): Add vector search use case
-
-### Medium-term (Following Sprints)
-
-7. **Implement Transaction Scope API** (Phase 2 of read-after-write solution)
-   - 1-2 weeks effort
-   - 100x theoretical throughput
-
-8. **Implement #19** (Degree Queries)
+6. **Implement #19** (Degree Queries)
    - Unlocks O(1) prune decisions
+   - Critical for >1000 inserts/sec target
 
 ---
 
 ## Appendix: Cost-Benefit Matrix
 
-| Feature | Effort | Throughput Gain | Search Latency | Priority |
-|---------|--------|-----------------|----------------|----------|
-| Flush API | Low | 20x (batch) | - | P0 |
-| Transaction Scope | High | 100x | - | P0 |
-| Degree Queries (#19) | Medium | 15% | - | P0 |
-| Batch Edges (#17) | Medium | - | 2-4x | P0 |
-| Edge Filtering (#21) | Low | - | 40-85% per query | High |
-| Batch Fragments | Medium | - | 2.8x | High |
+| Feature | Effort | Throughput Gain | Search Latency | Priority | Status |
+|---------|--------|-----------------|----------------|----------|--------|
+| Flush API | Low | - | - | P0 | ✅ Done |
+| Transaction Scope | High | 2.26x (1K) | - | P0 | ✅ Done |
+| Degree Queries (#19) | Medium | 15% | - | P0 | Pending |
+| Batch Edges (#17) | Medium | - | 2-4x | P0 | Pending |
+| Edge Filtering (#21) | Low | - | 40-85% per query | High | Pending |
+| Batch Fragments | Medium | - | 2.8x | High | Not Started |
 
 ---
 
-*Generated: 2025-12-21*
+*Originally Generated: 2025-12-21*
+*Last Updated: 2025-12-24*
 *Based on: HNSW/Vamana benchmarks, RocksDB Transaction documentation, motlie_db architecture analysis*
