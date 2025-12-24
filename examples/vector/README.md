@@ -6,58 +6,132 @@ This directory contains implementations of Approximate Nearest Neighbor (ANN) se
 
 | Document | Purpose |
 |----------|---------|
-| **[REQUIREMENTS.md](./REQUIREMENTS.md)** | Ground truth for all design decisions (scale, latency, recall targets) |
+| **[REQUIREMENTS.md](./REQUIREMENTS.md)** | Ground truth for all design decisions (scale, latency, recall, DATA-1) |
 | **[PERF.md](./PERF.md)** | Benchmark results and performance analysis |
 | **[ISSUES.md](./ISSUES.md)** | Known issues and API implementations |
+| **[ALTERNATIVES.md](./ALTERNATIVES.md)** | Alternative architectures analysis (SPFresh, ScaNN, RaBitQ) |
 
 ---
 
-## Evolution Roadmap
+## Project Plan
 
-The vector search implementation follows a phased evolution, with each phase building on the previous:
+### Critical Constraint: DATA-1
+
+Per [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md), motlie_db has **no pre-training data**:
+- Cannot use Product Quantization (requires k-means training)
+- Cannot use ScaNN (requires learned anisotropic loss)
+- Cannot use SPANN/SPFresh (requires cluster centroids)
+- **Can use RaBitQ** (random rotation matrix, no training)
+
+This constraint drives the recommended implementation path.
+
+### Phase Overview
+
+| Phase | Name | Status | Focus | Key Deliverable |
+|-------|------|--------|-------|-----------------|
+| **1** | POC | ✅ **Complete** | Prove feasibility | 95.3% recall at 1M |
+| **2** | HNSW2 | 📋 Designed | Build throughput | 5,000-10,000 inserts/sec |
+| **2a** | RaBitQ | 📋 Designed | Search acceleration | 3-4x QPS improvement |
+| **3** | IVFPQ | ⚠️ Not Viable | GPU acceleration | Violates DATA-1 |
+| **4** | HYBRID | 📋 Designed | Billion scale | 1B vectors, <64GB RAM |
+
+### Recommended Path
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                        Vector Search Evolution                           │
+│                     Recommended Implementation Path                      │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│  Phase 1: POC.md                    ← YOU ARE HERE                       │
-│  ├── Current HNSW/Vamana examples                                        │
-│  ├── RocksDB schema (5 column families)                                  │
+│  Phase 1: POC                       ✅ COMPLETE                          │
+│  ├── HNSW/Vamana on RocksDB                                              │
 │  ├── Flush API & Transaction API                                         │
-│  └── Achieves: 95.3% recall at 1M, ~40 inserts/sec                       │
+│  ├── 95.3% recall at 1M scale                                            │
+│  └── ~40 inserts/sec (baseline)                                          │
 │                                                                          │
-│  Phase 2: HNSW2.md                                                       │
-│  ├── Roaring bitmap edge storage                                         │
-│  ├── RocksDB merge operators                                             │
-│  ├── u32 ID allocation                                                   │
-│  └── Targets: 5,000-10,000 inserts/sec, 500+ QPS                         │
+│  Phase 2: HNSW2 + RaBitQ            📋 NEXT                              │
+│  ├── Roaring bitmap edge storage (125x insert speedup)                   │
+│  ├── RaBitQ binary codes (3-4x QPS, DATA-1 compliant)                    │
+│  ├── u32 ID allocation (4x storage reduction)                            │
+│  ├── RocksDB merge operators (lock-free updates)                         │
+│  └── Target: 5,000-10,000 inserts/sec, 1,500-4,000 QPS                   │
 │                                                                          │
-│  Phase 3: IVFPQ.md (Optional)                                            │
-│  ├── GPU-accelerated search (CAGRA)                                      │
-│  ├── IVF-PQ indexing                                                     │
-│  ├── cuVS integration                                                    │
-│  └── Targets: 10,000+ QPS with GPU                                       │
+│  Phase 3: IVFPQ                     ⚠️ NOT VIABLE (DATA-1)               │
+│  └── Requires training data - see ALTERNATIVES.md                        │
 │                                                                          │
-│  Phase 4: HYBRID.md                                                      │
+│  Phase 4: HYBRID (with RaBitQ)      📋 FUTURE                            │
 │  ├── In-memory HNSW navigation layer                                     │
-│  ├── Product Quantization (512x compression)                             │
+│  ├── RaBitQ compression (replaces PQ due to DATA-1)                      │
 │  ├── Async graph updater                                                 │
-│  └── Targets: 1B vectors, <64GB RAM, <100ms search                       │
+│  └── Target: 1B vectors, <64GB RAM, <100ms search                        │
 │                                                                          │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Phase Details
+
+#### Phase 1: POC ✅ Complete
+
+| Deliverable | Status | Reference |
+|-------------|--------|-----------|
+| HNSW implementation | ✅ Done | `examples/vector/hnsw.rs` |
+| Vamana implementation | ✅ Done | `examples/vector/vamana.rs` |
+| RocksDB schema (5 CFs) | ✅ Done | [POC.md](./POC.md) |
+| Flush API | ✅ Done | [ISSUES.md](./ISSUES.md) |
+| Transaction API | ✅ Done | [ISSUES.md](./ISSUES.md) |
+| SIFT1M benchmark | ✅ Done | [PERF.md](./PERF.md) |
+| 95% recall at 1M | ✅ Achieved | 95.3% recall |
+
+#### Phase 2: HNSW2 + RaBitQ 📋 Designed
+
+| Component | Effort | Status | Reference |
+|-----------|--------|--------|-----------|
+| u32 ID allocator | 2-3 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| Roaring bitmap edges | 3-5 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| Merge operators | 3-5 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| RaBitQ encoder | 1-2 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| SIMD Hamming distance | 0.5 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| Binary codes CF | 0.5 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| **Total** | **~3-4 weeks** | | |
+
+**Key Metrics Target**:
+- Insert: 5,000-10,000 vec/sec (125x improvement)
+- Search: 1,500-4,000 QPS (30-80x improvement)
+- Memory: <1GB for 10M vectors
+
+#### Phase 3: IVFPQ ⚠️ Not Viable
+
+**Blocked by DATA-1**: IVF-PQ requires training centroids and codebooks on representative data.
+
+See [ALTERNATIVES.md](./ALTERNATIVES.md) for analysis. If GPU acceleration is needed in the future and training data becomes available, this phase can be revisited.
+
+#### Phase 4: HYBRID 📋 Designed
+
+| Component | Effort | Status | Reference |
+|-----------|--------|--------|-----------|
+| Navigation layer | 1-2 weeks | 📋 Designed | [HYBRID.md](./HYBRID.md) |
+| RaBitQ integration | 1 week | 📋 Designed | [HYBRID.md](./HYBRID.md) |
+| Async graph updater | 1-2 weeks | 📋 Designed | [HYBRID.md](./HYBRID.md) |
+| SIMD distance | 1 week | 📋 Designed | [HYBRID.md](./HYBRID.md) |
+| 1B scale validation | 2-3 weeks | 📋 Designed | [HYBRID.md](./HYBRID.md) |
+| **Total** | **~6-10 weeks** | | |
+
+**Key Metrics Target**:
+- Scale: 1B vectors
+- Memory: <64GB RAM (with RaBitQ: ~18GB for codes)
+- Search: <100ms P99
+- Insert: 5,000+ vec/sec async
+
 ### Phase Documents
 
-| Phase | Document | Focus | Key Changes |
-|-------|----------|-------|-------------|
-| **1** | [POC.md](./POC.md) | Current state | Schema, Flush API, Transaction API |
-| **2** | [HNSW2.md](./HNSW2.md) | Build throughput | Roaring bitmaps, merge operators |
-| **3** | [IVFPQ.md](./IVFPQ.md) | GPU acceleration | CAGRA, cuVS (optional) |
-| **4** | [HYBRID.md](./HYBRID.md) | Billion scale | PQ compression, async updates |
+| Phase | Document | Focus | DATA-1 Status |
+|-------|----------|-------|---------------|
+| **1** | [POC.md](./POC.md) | Current implementation | ✅ Compliant |
+| **2** | [HNSW2.md](./HNSW2.md) | Build throughput + RaBitQ | ✅ Compliant |
+| **3** | [IVFPQ.md](./IVFPQ.md) | GPU acceleration | ❌ Requires training |
+| **4** | [HYBRID.md](./HYBRID.md) | Billion scale (RaBitQ) | ✅ Compliant |
+| **-** | [ALTERNATIVES.md](./ALTERNATIVES.md) | Architecture analysis | Analysis doc |
 
-**For new developers**: Start with [REQUIREMENTS.md](./REQUIREMENTS.md) to understand targets, then read [POC.md](./POC.md) for current implementation details.
+**For new developers**: Start with [REQUIREMENTS.md](./REQUIREMENTS.md) to understand targets and constraints (especially DATA-1), then read [POC.md](./POC.md) for current implementation.
 
 ---
 
@@ -85,17 +159,6 @@ Both algorithms leverage `motlie_db`'s graph primitives (nodes, edges, weights, 
 | **Vector Deletion** | ❌ Not Implemented | No delete support in either algorithm |
 
 **Key Finding**: The `motlie_db` Storage API is architecturally suitable for disk-based vector search. The flush() API now provides correct read-after-write consistency, enabling proper synchronization during index construction.
-
-### Progress Summary
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| **Phase 0** | Basic graph storage mapping | ✅ Complete |
-| **Phase 1** | Fix recall issue (async distance) | ✅ Complete |
-| **Phase 2** | Memory-efficient search | ✅ Complete |
-| **Phase 3** | Flush API for read-after-write consistency | ✅ Complete |
-| **Phase 4** | Online updates with batched flush | 🔶 In Progress |
-| **Phase 5** | Production optimizations | ❌ Not Started |
 
 ### Performance Results
 
