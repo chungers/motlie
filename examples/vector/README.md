@@ -7,6 +7,7 @@ This directory contains implementations of Approximate Nearest Neighbor (ANN) se
 | Document | Purpose |
 |----------|---------|
 | **[REQUIREMENTS.md](./REQUIREMENTS.md)** | Ground truth for all design decisions (scale, latency, recall, DATA-1) |
+| **[POC.md](./POC.md)** | Current implementation details (Phase 1: schema, APIs, benchmarks) |
 | **[PERF.md](./PERF.md)** | Benchmark results and performance analysis |
 | **[ISSUES.md](./ISSUES.md)** | Known issues and API implementations |
 | **[ALTERNATIVES.md](./ALTERNATIVES.md)** | Alternative architectures analysis (SPFresh, ScaNN, RaBitQ) |
