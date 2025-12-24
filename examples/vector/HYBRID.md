@@ -46,9 +46,14 @@ See [REQUIREMENTS.md](./REQUIREMENTS.md) for full requirement definitions.
 
 This document proposes a hybrid architecture combining:
 - **HNSW2** for navigation layer (small, fast, memory-resident)
-- **Product Quantization (PQ)** for compressed vector storage (512x compression)
+- **RaBitQ** for training-free binary compression (32x compression, DATA-1 compliant)
 - **RocksDB** for durability and efficient disk access
 - **Async graph updater** for decoupling insert latency from graph quality
+
+> **DATA-1 Constraint**: The original design proposed Product Quantization (PQ), which requires
+> training on representative data. Per [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md), motlie_db
+> has no pre-training data available. This document has been updated to use **RaBitQ** instead,
+> which provides training-free compression with theoretical guarantees.
 
 **Target specifications:**
 | Metric | Target |
@@ -1059,6 +1064,243 @@ Key improvements:
 2. Batch processing (amortize overhead)
 3. SIMD PQ distance (8x speedup)
 4. Merge operators (lock-free updates)
+
+---
+
+## DATA-1 Modification: RaBitQ Instead of PQ
+
+### The Problem with PQ
+
+The original HYBRID design used Product Quantization (PQ) for compression:
+
+```
+Original Design (PQ):
+  Training Phase:
+    1. Collect N representative vectors
+    2. Split each vector into M subvectors
+    3. Run k-means on each subspace → codebooks
+    4. Store codebooks for encoding
+
+  Encoding Phase:
+    For each vector v:
+      code = [nearest_centroid(subvector_i) for i in 1..M]
+```
+
+**Problem**: Step 1-3 require representative training data, violating DATA-1.
+
+### The RaBitQ Solution
+
+RaBitQ uses randomization instead of learning:
+
+```
+RaBitQ Design (Training-Free):
+  Initialization (once, at index creation):
+    1. Generate random D×D orthonormal matrix R
+       (via QR decomposition of random Gaussian matrix)
+    2. Store R in metadata
+
+  Encoding Phase:
+    For each vector v:
+      rotated = R × v
+      binary_code = sign(rotated)  // D bits
+```
+
+**Key Insight**: The random rotation "spreads" vector information uniformly across dimensions. The sign quantization then captures the most significant bit of each rotated component.
+
+### Mathematical Guarantee
+
+From [RaBitQ (SIGMOD 2024)](https://arxiv.org/abs/2405.12497):
+
+> Distance estimation error is O(1/√D), which is asymptotically optimal.
+
+| Dimension | Error Bound | Practical Error |
+|-----------|-------------|-----------------|
+| 128 | ~8.8% | 5-7% |
+| 256 | ~6.3% | 4-5% |
+| 512 | ~4.4% | 3-4% |
+| 1024 | ~3.1% | 2-3% |
+
+**Higher dimensions = better compression "for free".**
+
+### Architecture Comparison
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Original HYBRID (PQ)                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Navigation Layer (HNSW)    →  PQ Codes (8 bytes)   →  Full Vectors     │
+│  ~50 MB                         8 GB at 1B              512 GB at 1B    │
+│                                 ❌ Requires training                     │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Modified HYBRID (RaBitQ)                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Navigation Layer (HNSW)    →  RaBitQ Binary        →  Full Vectors     │
+│  ~50 MB                         16 GB at 1B             512 GB at 1B    │
+│                                 ✅ No training needed                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Memory Comparison at 1B Scale
+
+| Component | PQ (Original) | RaBitQ (Modified) | Notes |
+|-----------|---------------|-------------------|-------|
+| Navigation Layer | 50 MB | 50 MB | Same |
+| Compressed Codes | 8 GB | 16 GB | 2x larger |
+| Full Vectors | 512 GB (disk) | 512 GB (disk) | Same |
+| **Total RAM** | **~10 GB** | **~18 GB** | +8 GB |
+| Training Required | Yes | **No** | Critical difference |
+
+**Trade-off**: RaBitQ uses 2x memory for compressed codes, but requires zero training. For DATA-1 compliance, this is acceptable.
+
+### Search Path Modification
+
+```
+Original Search (PQ):
+  1. HNSW navigation → entry region
+  2. Beam search with PQ distance (8-byte codes)
+  3. Re-rank top-100 with exact distance
+
+Modified Search (RaBitQ):
+  1. HNSW navigation → entry region
+  2. Beam search with Hamming distance (D-bit codes, SIMD popcount)
+  3. Re-rank top-100 with exact distance
+```
+
+**Performance Note**: Hamming distance via SIMD popcount is actually faster than PQ table lookups, potentially improving QPS despite larger codes.
+
+### RocksDB Schema Changes
+
+```rust
+// Original: pq_codes CF
+// Key: [16-byte ID]
+// Value: [u8; 8]  // 8 subquantizers × 1 byte = 8 bytes
+
+// Modified: binary_codes CF
+// Key: [4-byte u32 ID]  // Using HNSW2's compact IDs
+// Value: [u8; D/8]      // D bits = D/8 bytes (16 bytes for 128D)
+
+pub const VECTOR_COLUMN_FAMILIES: &[&str] = &[
+    "vectors",        // Full vectors for re-ranking
+    "binary_codes",   // RaBitQ binary codes (replaces pq_codes)
+    "rotation_matrix",// D×D orthonormal matrix (stored once)
+    "graph_edges",    // HNSW neighbor lists (RoaringBitmap)
+    "nav_layer",      // Navigation layer entry points
+    "metadata",       // Index metadata and statistics
+    "pending",        // Pending vectors for async processing
+];
+```
+
+### RaBitQ Implementation
+
+```rust
+/// RaBitQ encoder (training-free)
+pub struct RaBitQEncoder {
+    dimension: usize,
+    /// Random orthonormal rotation matrix (D × D)
+    rotation: Vec<Vec<f32>>,
+}
+
+impl RaBitQEncoder {
+    /// Create encoder with random rotation matrix
+    pub fn new(dimension: usize, seed: u64) -> Self {
+        // Generate random orthonormal matrix via QR decomposition
+        let rotation = generate_random_orthonormal(dimension, seed);
+        Self { dimension, rotation }
+    }
+
+    /// Load encoder from stored rotation matrix
+    pub fn from_stored(rotation: Vec<Vec<f32>>) -> Self {
+        let dimension = rotation.len();
+        Self { dimension, rotation }
+    }
+
+    /// Encode vector to binary (D bits = D/8 bytes)
+    pub fn encode(&self, vector: &[f32]) -> Vec<u8> {
+        debug_assert_eq!(vector.len(), self.dimension);
+
+        // Rotate vector
+        let mut rotated = vec![0.0f32; self.dimension];
+        for i in 0..self.dimension {
+            for j in 0..self.dimension {
+                rotated[i] += self.rotation[i][j] * vector[j];
+            }
+        }
+
+        // Quantize to binary (sign of each component)
+        let mut binary = vec![0u8; self.dimension / 8];
+        for i in 0..self.dimension {
+            if rotated[i] >= 0.0 {
+                binary[i / 8] |= 1 << (i % 8);
+            }
+        }
+        binary
+    }
+
+    /// Approximate distance using Hamming distance
+    /// Returns scaled distance estimate
+    pub fn approximate_distance(code_a: &[u8], code_b: &[u8]) -> f32 {
+        let hamming = hamming_distance_simd(code_a, code_b);
+        // Scale factor from RaBitQ paper
+        let dimension = code_a.len() * 8;
+        let scale = (std::f32::consts::PI / 2.0) / (dimension as f32);
+        (hamming as f32) * scale
+    }
+}
+
+/// SIMD Hamming distance using popcount
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "popcnt")]
+pub unsafe fn hamming_distance_simd(a: &[u8], b: &[u8]) -> u32 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut count = 0u32;
+
+    // Process 8 bytes at a time
+    for i in (0..a.len()).step_by(8) {
+        let chunk_a = u64::from_le_bytes(a[i..i+8].try_into().unwrap_or([0; 8]));
+        let chunk_b = u64::from_le_bytes(b[i..i+8].try_into().unwrap_or([0; 8]));
+        count += (chunk_a ^ chunk_b).count_ones();
+    }
+    count
+}
+```
+
+### Performance Projections (Modified)
+
+| Metric | PQ (Original) | RaBitQ (Modified) | Notes |
+|--------|---------------|-------------------|-------|
+| Encode time | ~10 μs | ~5 μs | Matrix multiply vs table lookup |
+| Distance time | ~200 ns (table) | ~50 ns (popcount) | SIMD popcount faster |
+| Memory at 1B | 8 GB | 16 GB | 2x for codes |
+| QPS at 1B | 500-2,000 | **1,000-5,000** | Faster distance |
+| Training time | Hours | **0** | Critical for DATA-1 |
+
+### Recall Considerations
+
+RaBitQ alone achieves ~70% recall. Combined with HNSW navigation and re-ranking:
+
+| Configuration | Recall@10 | Latency |
+|---------------|-----------|---------|
+| HNSW only | ~95% | 20-30 ms |
+| HNSW + RaBitQ filter | ~95% | 15-25 ms |
+| HNSW + RaBitQ + rerank@100 | **~98%** | 30-50 ms |
+
+The HNSW navigation provides the high recall, RaBitQ accelerates candidate scoring.
+
+### Extended-RaBitQ Option
+
+For scenarios where slightly more memory is acceptable for higher recall:
+
+[Extended-RaBitQ (SIGMOD 2025)](https://arxiv.org/html/2409.09913v1) supports 2-6 bit quantization:
+
+| Bits/Dim | Bytes (128D) | Recall (no rerank) | Training |
+|----------|--------------|---------------------|----------|
+| 1 bit | 16 bytes | ~70% | None |
+| 2 bits | 32 bytes | ~85% | None |
+| 4 bits | 64 bytes | ~92% | None |
+
+Extended-RaBitQ also uses random rotations, maintaining DATA-1 compliance.
 
 ---
 

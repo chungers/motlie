@@ -146,8 +146,39 @@ This document defines the ground truth requirements for motlie_db vector search.
 | **STOR-1** | Disk-based operation (no full memory load) | Complete | P0 |
 | **STOR-2** | RocksDB persistence | Complete | P0 |
 | **STOR-3** | Crash recovery | Complete | P0 |
-| **STOR-4** | Product Quantization compression | Not started | P1 |
+| **STOR-4** | Vector compression (training-free) | Not started | P1 |
 | **STOR-5** | SIMD distance computation | Not started | P1 |
+
+**Note on STOR-4**: Due to DATA-1 constraint below, compression must be training-free. See Section 5.4.
+
+### 5.4 Data Constraints (Critical)
+
+| ID | Requirement | Description | Priority |
+|----|-------------|-------------|----------|
+| **DATA-1** | No pre-training data | System must operate without representative training data | **P0** |
+| **DATA-2** | Unknown data distribution | Cannot assume data distribution (clustered vs uniform) | **P0** |
+| **DATA-3** | Incremental operation | All algorithms must work incrementally (online) | P0 |
+
+**Rationale**: motlie_db is a general-purpose graph database. Vector search must work with any embedding type without prior knowledge of the data distribution. This is fundamentally different from purpose-built vector databases that can pre-train on known datasets.
+
+**Impact on Algorithm Selection**:
+
+| Algorithm/Technique | Training Required | DATA-1 Compliant | Notes |
+|---------------------|-------------------|------------------|-------|
+| HNSW (graph) | No | **Yes** | Builds incrementally |
+| Vamana (graph) | No | **Yes** | Builds incrementally |
+| Product Quantization (PQ) | Yes (k-means codebooks) | **No** | Requires training data |
+| ScaNN (anisotropic) | Yes (learned loss) | **No** | Requires training data |
+| SPANN/SPFresh (clusters) | Yes (k-means centroids) | **No** | Requires training data |
+| **RaBitQ (binary)** | **No** (random rotation) | **Yes** | Training-free quantization |
+| Scalar Quantization | No | **Yes** | Simple but less effective |
+
+**Implication for STOR-4**: Traditional Product Quantization violates DATA-1. Alternatives:
+1. **RaBitQ** - Random rotation matrix (no training), O(1/√D) error bound
+2. **Scalar Quantization** - Min/max normalization (no training), simpler but lower compression
+3. **Online PQ** - Learn codebooks incrementally (complex, violates spirit of DATA-1)
+
+See [ALTERNATIVES.md](./ALTERNATIVES.md) for detailed analysis of training-free approaches.
 
 ---
 
