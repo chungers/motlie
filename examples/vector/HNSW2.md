@@ -1,6 +1,41 @@
 # HNSW2: Hannoy-Inspired Design for RocksDB
 
+**Phase 2 - Optimized Build Throughput**
+
 This document explores adapting [hannoy](https://github.com/nnethercott/hannoy)'s LMDB-backed HNSW design to RocksDB, focusing on compressed bitmap edge storage, zero-copy patterns, and efficient online updates.
+
+**Last Updated**: 2025-12-24
+
+---
+
+## Document Hierarchy
+
+```
+REQUIREMENTS.md     ← Ground truth for all design decisions
+    ↓
+POC.md              ← Phase 1: Current implementation
+    ↓
+HNSW2.md (this)     ← Phase 2: Optimized HNSW (you are here)
+    ↓
+IVFPQ.md            ← Phase 3: GPU-accelerated search (optional)
+    ↓
+HYBRID.md           ← Phase 4: Billion-scale production architecture
+```
+
+## Target Requirements
+
+This phase focuses on achieving:
+
+| Requirement | Target | Current (POC.md) | HNSW2 Target |
+|-------------|--------|------------------|--------------|
+| **THR-1** | > 5,000 inserts/s | 40/s | 5,000-10,000/s |
+| **THR-3** | > 500 QPS | 47 QPS | 500-1,000 QPS |
+| **REC-1** | > 95% recall@10 | 95.3% | > 95% |
+| **SCALE-3** | < 64 GB at 1B | 4GB at 1M | ~10GB at 1M |
+
+See [REQUIREMENTS.md](./REQUIREMENTS.md) for full requirement definitions.
+
+---
 
 ## Background: Hannoy/Arroy Architecture
 

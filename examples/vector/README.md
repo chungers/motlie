@@ -8,9 +8,58 @@ This directory contains implementations of Approximate Nearest Neighbor (ANN) se
 |----------|---------|
 | **[REQUIREMENTS.md](./REQUIREMENTS.md)** | Ground truth for all design decisions (scale, latency, recall targets) |
 | **[PERF.md](./PERF.md)** | Benchmark results and performance analysis |
-| **[HYBRID.md](./HYBRID.md)** | Production architecture for billion-scale |
-| **[ISSUES.md](./ISSUES.md)** | Known issues and solutions |
-| **[HNSW2.md](./HNSW2.md)** | HNSW optimization proposal |
+| **[ISSUES.md](./ISSUES.md)** | Known issues and API implementations |
+
+---
+
+## Evolution Roadmap
+
+The vector search implementation follows a phased evolution, with each phase building on the previous:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Vector Search Evolution                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Phase 1: POC.md                    ← YOU ARE HERE                       │
+│  ├── Current HNSW/Vamana examples                                        │
+│  ├── RocksDB schema (5 column families)                                  │
+│  ├── Flush API & Transaction API                                         │
+│  └── Achieves: 95.3% recall at 1M, ~40 inserts/sec                       │
+│                                                                          │
+│  Phase 2: HNSW2.md                                                       │
+│  ├── Roaring bitmap edge storage                                         │
+│  ├── RocksDB merge operators                                             │
+│  ├── u32 ID allocation                                                   │
+│  └── Targets: 5,000-10,000 inserts/sec, 500+ QPS                         │
+│                                                                          │
+│  Phase 3: IVFPQ.md (Optional)                                            │
+│  ├── GPU-accelerated search (CAGRA)                                      │
+│  ├── IVF-PQ indexing                                                     │
+│  ├── cuVS integration                                                    │
+│  └── Targets: 10,000+ QPS with GPU                                       │
+│                                                                          │
+│  Phase 4: HYBRID.md                                                      │
+│  ├── In-memory HNSW navigation layer                                     │
+│  ├── Product Quantization (512x compression)                             │
+│  ├── Async graph updater                                                 │
+│  └── Targets: 1B vectors, <64GB RAM, <100ms search                       │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase Documents
+
+| Phase | Document | Focus | Key Changes |
+|-------|----------|-------|-------------|
+| **1** | [POC.md](./POC.md) | Current state | Schema, Flush API, Transaction API |
+| **2** | [HNSW2.md](./HNSW2.md) | Build throughput | Roaring bitmaps, merge operators |
+| **3** | [IVFPQ.md](./IVFPQ.md) | GPU acceleration | CAGRA, cuVS (optional) |
+| **4** | [HYBRID.md](./HYBRID.md) | Billion scale | PQ compression, async updates |
+
+**For new developers**: Start with [REQUIREMENTS.md](./REQUIREMENTS.md) to understand targets, then read [POC.md](./POC.md) for current implementation details.
+
+---
 
 ## Overview
 
