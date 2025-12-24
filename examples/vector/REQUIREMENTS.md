@@ -4,11 +4,13 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 ## Document References
 
+- **POC.md** - Current implementation (Phase 1: schema, Flush API, Transaction API)
 - **PERF.md** - Benchmark results and performance analysis
-- **HYBRID.md** - Production architecture design
-- **HNSW2.md** - HNSW optimization proposal
+- **HNSW2.md** - HNSW optimization proposal (Phase 2)
+- **HYBRID.md** - Production architecture design (Phase 4)
+- **ALTERNATIVES.md** - Alternative architectures analysis (SPFresh, ScaNN, RaBitQ)
 - **ISSUES.md** - Known issues and solutions
-- **README.md** - Implementation guide and status
+- **README.md** - Project plan and status
 
 ---
 
