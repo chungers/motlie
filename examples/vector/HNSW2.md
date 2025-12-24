@@ -22,11 +22,13 @@ IVFPQ.md            ← Phase 3: GPU-accelerated search (optional)
 HYBRID.md           ← Phase 4: Billion-scale production architecture
 ```
 
+**Links**: [REQUIREMENTS.md](./REQUIREMENTS.md) → [POC.md](./POC.md) → **HNSW2.md** → [IVFPQ.md](./IVFPQ.md) → [HYBRID.md](./HYBRID.md)
+
 ## Target Requirements
 
 This phase focuses on achieving:
 
-| Requirement | Target | Current (POC.md) | HNSW2 Target |
+| Requirement | Target | Current ([POC.md](./POC.md)) | HNSW2 Target |
 |-------------|--------|------------------|--------------|
 | **THR-1** | > 5,000 inserts/s | 40/s | 5,000-10,000/s |
 | **THR-3** | > 500 QPS | 47 QPS | 500-1,000 QPS |
