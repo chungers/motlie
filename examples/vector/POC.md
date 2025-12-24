@@ -22,6 +22,8 @@ IVFPQ.md            ← Phase 3: GPU-accelerated search (optional)
 HYBRID.md           ← Phase 4: Billion-scale production architecture
 ```
 
+**Links**: [REQUIREMENTS.md](./REQUIREMENTS.md) → **POC.md** → [HNSW2.md](./HNSW2.md) → [IVFPQ.md](./IVFPQ.md) → [HYBRID.md](./HYBRID.md)
+
 ---
 
 ## 1. Current Architecture
@@ -42,7 +44,7 @@ The current implementation uses **5 column families**:
 
 1. **16-byte UUIDs** (ULID format) for node IDs
    - Globally unique, timestamp-sortable
-   - Trade-off: 4x larger than u32 IDs (see HNSW2.md for optimization)
+   - Trade-off: 4x larger than u32 IDs (see [HNSW2.md](./HNSW2.md) for optimization)
 
 2. **Prefix extractors** for efficient range scans
    - `forward_edges`: 16-byte prefix (all edges from a source)
@@ -68,7 +70,7 @@ pub struct AddNodeFragment {
 
 **Current Encoding**: Vectors are JSON-serialized and base64-encoded in DataUrl.
 
-| Metric | Current | Target (HYBRID.md) |
+| Metric | Current | Target ([HYBRID.md](./HYBRID.md)) |
 |--------|---------|-------------------|
 | 128D vector size | ~600 bytes | 8 bytes (PQ compressed) |
 | Compression | None | 75x with PQ (STOR-4) |
@@ -172,7 +174,7 @@ txn.commit()?;
 
 **Location**: `examples/vector/hnsw.rs`
 
-**Parameters** (from REQUIREMENTS.md Section 6.1):
+**Parameters** (from [REQUIREMENTS.md](./REQUIREMENTS.md) Section 6.1):
 
 | Parameter | Current | Description |
 |-----------|---------|-------------|
@@ -191,7 +193,7 @@ txn.commit()?;
 
 **Location**: `examples/vector/vamana.rs`
 
-**Parameters** (from REQUIREMENTS.md Section 6.2):
+**Parameters** (from [REQUIREMENTS.md](./REQUIREMENTS.md) Section 6.2):
 
 | Parameter | Current | Description |
 |-----------|---------|-------------|
@@ -209,7 +211,7 @@ txn.commit()?;
 
 ## 4. Current Performance
 
-### 4.1 Benchmark Results (from PERF.md)
+### 4.1 Benchmark Results (from [PERF.md](./PERF.md))
 
 | Scale | Algorithm | Recall@10 | Build (vec/s) | Search (ms) | QPS |
 |-------|-----------|-----------|---------------|-------------|-----|
@@ -244,7 +246,7 @@ txn.commit()?;
 2. **Sequential edge operations** (no batch API for edges)
 3. **16-byte UUID overhead** (could be 4-byte u32)
 
-**Solutions** (see HNSW2.md, HYBRID.md):
+**Solutions** (see [HNSW2.md](./HNSW2.md), [HYBRID.md](./HYBRID.md)):
 - Batched flush patterns
 - RocksDB merge operators for lock-free edge updates
 - Compact ID allocation
@@ -259,7 +261,7 @@ txn.commit()?;
 2. **Full vector distance computation** (no PQ compression)
 3. **No SIMD optimization** (STOR-5)
 
-**Solutions** (see HYBRID.md):
+**Solutions** (see [HYBRID.md](./HYBRID.md)):
 - Batch NodeFragments API (Issue #17)
 - Product Quantization (STOR-4)
 - SIMD AVX2 distance computation (STOR-5)
@@ -293,7 +295,7 @@ txn.commit()?;
 
 ## 7. Next Steps
 
-### Phase 2: HNSW Optimization (HNSW2.md)
+### Phase 2: HNSW Optimization ([HNSW2.md](./HNSW2.md))
 
 Focus: **Build throughput** (THR-1: 5,000 inserts/sec)
 
@@ -303,7 +305,7 @@ Key Changes:
 - u32 ID allocation
 - In-memory graph layer
 
-### Phase 3: GPU Acceleration (IVFPQ.md)
+### Phase 3: GPU Acceleration ([IVFPQ.md](./IVFPQ.md))
 
 Focus: **Search performance** (THR-3: 500 QPS → 10,000+ QPS)
 
@@ -312,7 +314,7 @@ Key Changes:
 - CAGRA GPU graph
 - cuVS integration
 
-### Phase 4: Production Scale (HYBRID.md)
+### Phase 4: Production Scale ([HYBRID.md](./HYBRID.md))
 
 Focus: **Billion-scale** (SCALE-1: 1B vectors)
 

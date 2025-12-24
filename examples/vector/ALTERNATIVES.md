@@ -1,6 +1,6 @@
 # Alternative Architectures for Vector Search
 
-This document explores alternative approaches to vector search that could complement or replace the current phased design (POC → HNSW2 → IVFPQ → HYBRID).
+This document explores alternative approaches to vector search that could complement or replace the current phased design ([POC](./POC.md) → [HNSW2](./HNSW2.md) → [IVFPQ](./IVFPQ.md) → [HYBRID](./HYBRID.md)).
 
 **Last Updated**: 2025-12-24
 
@@ -80,9 +80,9 @@ Given DATA-1 constraint:
 | Alt A: SPFresh | Promising | **Not viable** | Requires training centroids |
 | Alt B: ScaNN | Not viable | Not viable | Requires learned quantization |
 | Alt B: RaBitQ | **Viable** | **Viable** | Training-free, use this |
-| Current: HYBRID | Promising | **Needs modification** | Replace PQ with RaBitQ |
+| Current: [HYBRID](./HYBRID.md) | Promising | **Needs modification** | Replace PQ with RaBitQ |
 
-**Conclusion**: The **HNSW2 + RaBitQ** combination is the clear winner for DATA-1 compliance.
+**Conclusion**: The **[HNSW2](./HNSW2.md) + RaBitQ** combination is the clear winner for DATA-1 compliance.
 
 ---
 
@@ -260,7 +260,7 @@ This means higher-dimensional embeddings get better compression "for free."
 
 ### Comparison with Current Design
 
-| Aspect | Current (HYBRID.md PQ) | ScaNN + RaBitQ |
+| Aspect | Current ([HYBRID.md](./HYBRID.md) PQ) | ScaNN + RaBitQ |
 |--------|------------------------|----------------|
 | **Compression** | 8 bytes/vector (PQ) | 16 bytes (RaBitQ) or 8 bytes (PQ) |
 | **Theoretical guarantee** | None | O(1/√D) error bound |
@@ -428,7 +428,9 @@ Rather than choosing one approach, consider a **staged hybrid**:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Phase 2 Modification: HNSW2 + RaBitQ
+**Document Links**: [POC.md](./POC.md) | [HNSW2.md](./HNSW2.md) | [HYBRID.md](./HYBRID.md)
+
+### Phase 2 Modification: [HNSW2](./HNSW2.md) + RaBitQ
 
 Add RaBitQ binary codes alongside HNSW2:
 
