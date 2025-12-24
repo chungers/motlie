@@ -186,8 +186,12 @@ impl VamanaIndex {
         self.initialize_random_edges(writer, &mut ChaCha8Rng::seed_from_u64(42))
             .await?;
 
+        // Flush to ensure random edges are visible before main passes
+        writer.flush().await?;
+
         // Multiple passes for better graph quality
-        let num_passes = 2;
+        // More passes = better graph but slower construction
+        let num_passes = 3;
         for pass in 0..num_passes {
             println!("    Pass {}/{}...", pass + 1, num_passes);
 
@@ -207,6 +211,9 @@ impl VamanaIndex {
                     );
                 }
             }
+
+            // Flush at end of each pass to ensure visibility for next pass
+            writer.flush().await?;
         }
 
         Ok(())
@@ -302,6 +309,15 @@ impl VamanaIndex {
         let edge_name = VamanaParams::edge_name();
 
         while let Some(candidate) = candidates.pop() {
+            // Early termination: check BEFORE processing this candidate
+            // If this candidate (the best remaining) is worse than our L-th best, we're done
+            if results.len() >= l {
+                results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                if candidate.distance > results[l - 1].0 {
+                    break;
+                }
+            }
+
             // Get neighbors
             let neighbors = get_neighbors(reader, candidate.id, Some(edge_name)).await?;
 
@@ -337,12 +353,6 @@ impl VamanaIndex {
                         results.pop();
                     }
                 }
-            }
-
-            // Early termination: if candidate is worse than our L-th best, stop
-            results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            if results.len() >= l && candidate.distance > results[l - 1].0 {
-                break;
             }
         }
 
