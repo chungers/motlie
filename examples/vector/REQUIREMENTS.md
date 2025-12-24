@@ -4,13 +4,13 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 ## Document References
 
-- **POC.md** - Current implementation (Phase 1: schema, Flush API, Transaction API)
-- **PERF.md** - Benchmark results and performance analysis
-- **HNSW2.md** - HNSW optimization proposal (Phase 2)
-- **HYBRID.md** - Production architecture design (Phase 4)
-- **ALTERNATIVES.md** - Alternative architectures analysis (SPFresh, ScaNN, RaBitQ)
-- **ISSUES.md** - Known issues and solutions
-- **README.md** - Project plan and status
+- **[POC.md](./POC.md)** - Current implementation (Phase 1: schema, Flush API, Transaction API)
+- **[PERF.md](./PERF.md)** - Benchmark results and performance analysis
+- **[HNSW2.md](./HNSW2.md)** - HNSW optimization proposal (Phase 2)
+- **[HYBRID.md](./HYBRID.md)** - Production architecture design (Phase 4)
+- **[ALTERNATIVES.md](./ALTERNATIVES.md)** - Alternative architectures analysis (SPFresh, ScaNN, RaBitQ)
+- **[ISSUES.md](./ISSUES.md)** - Known issues and solutions
+- **[README.md](./README.md)** - Project plan and status
 
 ---
 
@@ -52,13 +52,13 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 | Scale | Algorithm | Search P50 | Search P99 | Reference |
 |-------|-----------|------------|------------|-----------|
-| 1K | HNSW | 8.6 ms | ~15 ms | PERF.md |
-| 10K | HNSW | 15.4 ms | ~25 ms | PERF.md |
-| 100K | HNSW | 19.0 ms | ~30 ms | PERF.md |
-| 1M | HNSW | 21.5 ms | ~40 ms | PERF.md |
-| 1K | Vamana | 4.7 ms | ~8 ms | PERF.md |
-| 10K | Vamana | 7.0 ms | ~12 ms | PERF.md |
-| 100K | Vamana | 7.1 ms | ~15 ms | PERF.md |
+| 1K | HNSW | 8.6 ms | ~15 ms | [PERF.md](./PERF.md) |
+| 10K | HNSW | 15.4 ms | ~25 ms | [PERF.md](./PERF.md) |
+| 100K | HNSW | 19.0 ms | ~30 ms | [PERF.md](./PERF.md) |
+| 1M | HNSW | 21.5 ms | ~40 ms | [PERF.md](./PERF.md) |
+| 1K | Vamana | 4.7 ms | ~8 ms | [PERF.md](./PERF.md) |
+| 10K | Vamana | 7.0 ms | ~12 ms | [PERF.md](./PERF.md) |
+| 100K | Vamana | 7.1 ms | ~15 ms | [PERF.md](./PERF.md) |
 
 ---
 
@@ -75,14 +75,14 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 | Scale | Algorithm | Recall@10 | Notes | Reference |
 |-------|-----------|-----------|-------|-----------|
-| 1K | HNSW | 52.6% | Below target | PERF.md |
-| 10K | HNSW | 80.7% | Below target | PERF.md |
-| 100K | HNSW | 81.7% | Below target | PERF.md |
-| 1M | HNSW | **95.3%** | **Meets REC-1** | PERF.md |
-| 1K | Vamana (L=100) | 61.0% | Below target | PERF.md |
-| 10K | Vamana (L=100) | 77.8% | Below target | PERF.md |
-| 1M | Vamana (L=200) | 81.9% | Below target | PERF.md |
-| 1K | Random | 99.6% | **Meets REC-3** | PERF.md |
+| 1K | HNSW | 52.6% | Below target | [PERF.md](./PERF.md) |
+| 10K | HNSW | 80.7% | Below target | [PERF.md](./PERF.md) |
+| 100K | HNSW | 81.7% | Below target | [PERF.md](./PERF.md) |
+| 1M | HNSW | **95.3%** | **Meets REC-1** | [PERF.md](./PERF.md) |
+| 1K | Vamana (L=100) | 61.0% | Below target | [PERF.md](./PERF.md) |
+| 10K | Vamana (L=100) | 77.8% | Below target | [PERF.md](./PERF.md) |
+| 1M | Vamana (L=200) | 81.9% | Below target | [PERF.md](./PERF.md) |
+| 1K | Random | 99.6% | **Meets REC-3** | [PERF.md](./PERF.md) |
 
 ### Reference: Industry Baselines
 
@@ -108,14 +108,14 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 | Scale | Algorithm | Insert | Search QPS | Reference |
 |-------|-----------|--------|------------|-----------|
-| 1K | HNSW | 103.6/s | 117 | PERF.md |
-| 10K | HNSW | 68.1/s | 65 | PERF.md |
-| 100K | HNSW | 49.8/s | 53 | PERF.md |
-| 1M | HNSW | 39.9/s | 47 | PERF.md |
-| 1K | Vamana | 72.7/s | 213 | PERF.md |
-| 10K | Vamana | 53.8/s | 143 | PERF.md |
+| 1K | HNSW | 103.6/s | 117 | [PERF.md](./PERF.md) |
+| 10K | HNSW | 68.1/s | 65 | [PERF.md](./PERF.md) |
+| 100K | HNSW | 49.8/s | 53 | [PERF.md](./PERF.md) |
+| 1M | HNSW | 39.9/s | 47 | [PERF.md](./PERF.md) |
+| 1K | Vamana | 72.7/s | 213 | [PERF.md](./PERF.md) |
+| 10K | Vamana | 53.8/s | 143 | [PERF.md](./PERF.md) |
 
-**Gap Analysis**: Current insert throughput (~40-100/s) is 50-100x below THR-1 target (5,000/s). See HYBRID.md for optimization path.
+**Gap Analysis**: Current insert throughput (~40-100/s) is 50-100x below THR-1 target (5,000/s). See [HYBRID.md](./HYBRID.md) for optimization path.
 
 ---
 
@@ -180,7 +180,7 @@ This document defines the ground truth requirements for motlie_db vector search.
 2. **Scalar Quantization** - Min/max normalization (no training), simpler but lower compression
 3. **Online PQ** - Learn codebooks incrementally (complex, violates spirit of DATA-1)
 
-See [ALTERNATIVES.md](./ALTERNATIVES.md) for detailed analysis of training-free approaches.
+See **[ALTERNATIVES.md](./ALTERNATIVES.md)** for detailed analysis of training-free approaches.
 
 ---
 
@@ -287,13 +287,13 @@ All benchmarks must use:
 
 | Requirement | HYBRID.md Section | PERF.md Section | Status |
 |-------------|-------------------|-----------------|--------|
-| SCALE-1 (1B vectors) | Resource Projections | - | Design |
-| LAT-1 (< 20ms P50) | Performance Projections | Current Results | Validated 1M |
-| REC-1 (> 95% recall) | - | Benchmark Results | **Achieved** |
-| THR-1 (5K inserts/s) | Async Updater | - | Not started |
-| FUNC-1 (online insert) | Insert Path | - | Partial |
-| CON-1 (read-after-write) | - | Flush API | **Complete** |
-| STOR-4 (PQ compression) | PQ Module | - | Not started |
+| SCALE-1 (1B vectors) | [HYBRID.md](./HYBRID.md) Resource Projections | - | Design |
+| LAT-1 (< 20ms P50) | [HYBRID.md](./HYBRID.md) Performance Projections | [PERF.md](./PERF.md) Current Results | Validated 1M |
+| REC-1 (> 95% recall) | - | [PERF.md](./PERF.md) Benchmark Results | **Achieved** |
+| THR-1 (5K inserts/s) | [HYBRID.md](./HYBRID.md) Async Updater | - | Not started |
+| FUNC-1 (online insert) | [HYBRID.md](./HYBRID.md) Insert Path | - | Partial |
+| CON-1 (read-after-write) | - | [PERF.md](./PERF.md) Flush API | **Complete** |
+| STOR-4 (PQ compression) | [HYBRID.md](./HYBRID.md) PQ Module | - | Not started |
 
 ---
 
