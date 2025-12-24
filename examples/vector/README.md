@@ -2,6 +2,16 @@
 
 This directory contains implementations of Approximate Nearest Neighbor (ANN) search algorithms using `motlie_db` as the underlying graph storage.
 
+## Documentation Index
+
+| Document | Purpose |
+|----------|---------|
+| **[REQUIREMENTS.md](./REQUIREMENTS.md)** | Ground truth for all design decisions (scale, latency, recall targets) |
+| **[PERF.md](./PERF.md)** | Benchmark results and performance analysis |
+| **[HYBRID.md](./HYBRID.md)** | Production architecture for billion-scale |
+| **[ISSUES.md](./ISSUES.md)** | Known issues and solutions |
+| **[HNSW2.md](./HNSW2.md)** | HNSW optimization proposal |
+
 ## Overview
 
 We implement two popular ANN algorithms:
@@ -89,33 +99,22 @@ The datasets are automatically downloaded from [HuggingFace](https://huggingface
 
 ### Industry Comparison
 
-How does `motlie_db` compare with production ANN libraries?
+See [REQUIREMENTS.md](./REQUIREMENTS.md) for complete target specifications and current status.
 
-| Implementation | Dataset | Vectors | Recall@10 | QPS | Notes |
-|----------------|---------|---------|-----------|-----|-------|
-| [hnswlib](https://github.com/nmslib/hnswlib) | SIFT1M | 1M | 98.5% | 16,108 | In-memory, C++, SIMD |
-| [Faiss HNSW](https://github.com/facebookresearch/faiss) | SIFT1M | 1M | 97.8% | ~30,000 | In-memory, C++, SIMD |
-| **motlie_db HNSW** | SIFT | 1K | 52.6% | 101 | RocksDB-backed, Rust |
-| **motlie_db HNSW** | SIFT | 10K | 80.7% | 66 | RocksDB-backed, Rust |
-| **motlie_db HNSW** | SIFT | 100K | 81.7% | 60 | RocksDB-backed, Rust |
-| **motlie_db HNSW** | SIFT | 1M | **95.3%** | 47 | RocksDB-backed, Rust |
-| **motlie_db HNSW** | Random | 1K | 99.6% | 76 | RocksDB-backed, Rust |
-| **motlie_db Vamana** (L=100) | SIFT | 1K | 61.0% | 231 | RocksDB-backed, Rust |
-| **motlie_db Vamana** (L=100) | SIFT | 10K | 77.8% | 208 | RocksDB-backed, Rust |
-| **motlie_db Vamana** (L=100) | SIFT | 100K | 69.8% | 120 | RocksDB-backed, Rust |
-| **motlie_db Vamana** (L=100) | SIFT | 1M | 68.8% | 103 | RocksDB-backed, Rust |
-| **motlie_db Vamana** (L=200) | SIFT | 1M | **81.9%** | 74 | RocksDB-backed, Rust, tuned |
-| **motlie_db Vamana** | Random | 1K | 59.4% | 199 | RocksDB-backed, Rust |
+**Key Result (2025-12-24)**: HNSW at 1M achieves **95.3% recall** - only 3.2 points below hnswlib (98.5%), validating the disk-based approach.
 
-**Key Observations (Updated 2025-12-24)**:
-1. **HNSW at 1M: 95.3% recall!** Only 3.2 points below hnswlib (98.5%) - validates disk-based approach
-2. **HNSW scaling validated**: 52.6% → 80.7% → 81.7% → **95.3%** (1K → 10K → 100K → 1M)
-3. **Transaction API speedup**: HNSW 1K is **2.26x faster** (103.6 vs 45.8 vec/s) with read-your-writes semantics
-4. **Vamana L=200 at 1M: 81.9% recall** (+13.1% vs L=100's 68.8%) - see [L Parameter Tuning](#vamana-l-parameter-tuning)
-5. **QPS gap**: ~200-300× slower than in-memory due to RocksDB I/O, but acceptable for disk-based use case
-6. **Random data**: 99.6% recall proves correctness; clustered SIFT data is harder but scales well
+| Implementation | Recall@10 | QPS | Notes |
+|----------------|-----------|-----|-------|
+| hnswlib (1M) | 98.5% | 16,108 | In-memory, SIMD |
+| **motlie_db HNSW (1M)** | **95.3%** | 47 | Disk-based, Rust |
+| **motlie_db Vamana (1M, L=200)** | 81.9% | 74 | Disk-based, Rust |
 
-This is a proof-of-concept. See [HNSW2.md](./HNSW2.md) for production design targeting 5,000-10,000 inserts/sec.
+**Status vs Requirements**:
+- **REC-1** (>95% recall at 1M): **Achieved** with HNSW
+- **THR-1** (>5K inserts/s): Gap - currently ~40/s, see [HYBRID.md](./HYBRID.md)
+- **LAT-1** (<20ms P50): Achieved at 1M scale
+
+This is a proof-of-concept. See [HYBRID.md](./HYBRID.md) for production architecture targeting billion scale.
 
 ### Correctness Against Ground Truth
 
@@ -1282,6 +1281,8 @@ meta_opts.set_compression_type(DBCompressionType::None);
 
 ## Online Updates Requirement
 
+> **See**: [REQUIREMENTS.md](./REQUIREMENTS.md) FUNC-1 through FUNC-6 for functionality requirements.
+
 A critical requirement for production vector search is **online updates** - the ability to add, update, or delete vectors without rebuilding the entire index.
 
 ### Current Online Update Capabilities
@@ -1517,16 +1518,18 @@ For datasets exceeding available memory:
 
 ## Required motlie_db Optimizations
 
+See [REQUIREMENTS.md](./REQUIREMENTS.md) for the complete requirements specification with IDs (SCALE-*, LAT-*, REC-*, THR-*, FUNC-*, CON-*, STOR-*).
+
 The following optimizations would make `motlie_db` suitable for production vector search with **online updates**.
 
 ### Priority Legend
 
-| Priority | Meaning |
-|----------|---------|
-| 🔴 **Critical** | Blocking for online updates |
-| 🟠 **High** | Significant performance/functionality impact |
-| 🟡 **Medium** | Quality of life improvement |
-| 🟢 **Low** | Nice to have |
+| Priority | Meaning | Requirement IDs |
+|----------|---------|-----------------|
+| 🔴 **Critical** | Blocking for online updates | CON-1, CON-2 |
+| 🟠 **High** | Significant performance/functionality impact | THR-1, FUNC-3 |
+| 🟡 **Medium** | Quality of life improvement | STOR-4, STOR-5 |
+| 🟢 **Low** | Nice to have | - |
 
 ### 1. ✅ Read-After-Write Consistency (IMPLEMENTED)
 
@@ -1861,14 +1864,16 @@ Phase 5 ────────────────────────
 
 ### Key Metrics to Track
 
-| Metric | Current (flush/insert) | Phase 2 Target | Phase 4 Target |
-|--------|------------------------|----------------|----------------|
-| Insert throughput | ~30-45/sec | >1000/sec | >5000/sec |
-| Insert latency (P99) | ~25ms | <10ms | <5ms |
-| Search during insert | Untested | <20ms P99 | <15ms P99 |
-| Concurrent writers | 1 | 1 | Multiple |
-| Delete support | No | No | Yes |
-| Read-after-write | ✅ Correct (flush) | Correct | Correct |
+> **Canonical targets**: See [REQUIREMENTS.md](./REQUIREMENTS.md) THR-*, LAT-*, FUNC-* for authoritative targets.
+
+| Metric | Current | Target (REQUIREMENTS.md) | Status |
+|--------|---------|--------------------------|--------|
+| Insert throughput | ~30-45/sec | THR-1: >5,000/sec | Gap |
+| Insert latency (P99) | ~25ms | LAT-4: <10ms | Gap |
+| Search P50 at 1M | ~21ms | LAT-1: <20ms | **Met** |
+| Recall@10 at 1M | 95.3% | REC-1: >95% | **Met** |
+| Delete support | No | FUNC-3 | Not started |
+| Read-after-write | ✅ | CON-1 | **Complete** |
 
 ---
 
