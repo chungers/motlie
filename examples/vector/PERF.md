@@ -51,21 +51,27 @@ Two issues were identified:
 |-------|---------------|--------------|--------|
 | 1K | 58.9% | **73.1%** | **+14.2%** |
 | 10K | 77.8% | **83.7%** | **+5.9%** |
+| 100K | 69.9% | **70.7%** | **+0.8%** |
 
 | Scale | Build Time Before | Build Time After | Throughput After |
 |-------|-------------------|------------------|------------------|
 | 1K | 13.8s | 18.7s | 53.5/s |
 | 10K | 185s | 255s | 39.2/s |
+| 100K | 2094s | 2874s | 34.8/s |
 
-### Key Finding: Recall Now Scales Correctly
+### Key Finding: Improved Recall, but 100K Needs Tuning
 
-Before fix (recall declining):
+Before fix (recall declining sharply):
 - 1K: 58.9% → 10K: 77.8% → 100K: 69.9% → 1M: 68.8% ❌
 
-After fix (recall improving):
-- 1K: 73.1% → 10K: 83.7% ✅
+After fix (improved, but 100K still lower than 10K):
+- 1K: 73.1% → 10K: 83.7% → 100K: 70.7%
 
-This confirms the fix addresses the core issue. Recall now improves with scale as expected from the DiskANN paper.
+The 100K recall (70.7%) is higher than before (69.9%) but drops from the 10K peak (83.7%). This suggests:
+1. L=100 may be insufficient for 100K scale (DiskANN paper uses L=125-200 for large datasets)
+2. The search/construction may need scale-aware parameter tuning
+
+Testing with L=200 to validate...
 
 ---
 
