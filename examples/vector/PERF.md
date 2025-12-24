@@ -78,6 +78,17 @@ The 100K recall (70.7%) is higher than before (69.9%) but drops from the 10K pea
 
 L=200 improves recall by **+5.3%** but doubles build time. The DiskANN paper recommends L=125-200 for large datasets.
 
+### Search Performance (After Index Built)
+
+| Scale | L | QPS | Avg Latency | P99 Latency |
+|-------|---|-----|-------------|-------------|
+| 1K | 100 | 174 | 5.7ms | 7.2ms |
+| 10K | 100 | 201 | 5.0ms | 6.9ms |
+| 100K | 100 | 163 | 6.1ms | 13.0ms |
+| 100K | 200 | 88 | 11.3ms | 22.7ms |
+
+Vamana achieves **2-3x higher QPS than HNSW** at all scales due to its single-layer graph structure.
+
 ### Conclusion
 
 The fixes improve recall at all scales, but optimal parameters depend on scale:
