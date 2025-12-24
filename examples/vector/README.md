@@ -42,29 +42,25 @@ Both algorithms leverage `motlie_db`'s graph primitives (nodes, edges, weights, 
 
 See [PERF.md](./PERF.md) for comprehensive benchmarks.
 
-**Summary with flush() API (random data)**:
+**Summary on SIFT benchmark (2025-12-24 Re-benchmark)**:
 
 | Algorithm | Vectors | Index Time | Throughput | Latency | QPS | Recall@10 |
 |-----------|---------|------------|------------|---------|-----|-----------|
-| HNSW | 1K | 24.5s | 40.8/s | 13.1ms | 76 | 99.6% |
-| HNSW | 10K | 337.4s | 29.6/s | 26.3ms | 38 | 81.8% |
-| Vamana | 1K | 12.6s | 79.4/s | 5.0ms | 199 | 59.4% |
-| Vamana | 10K | 229.2s | 43.6/s | 11.0ms | 91 | 22.3% |
-
-**Summary on SIFT benchmark**:
-
-| Algorithm | Vectors | Index Time | Throughput | Latency | QPS | Recall@10 |
-|-----------|---------|------------|------------|---------|-----|-----------|
-| HNSW | 1K | 21.8s | 45.9/s | 9.9ms | 101 | 52.6% |
-| HNSW | 10K | 272.1s | 36.8/s | 15.1ms | 66 | 80.7% |
-| HNSW | 100K | 1924.4s | 52.0/s | 16.6ms | 60 | 81.7% |
+| HNSW | 1K | **9.65s** | **103.6/s** | 8.6ms | 117 | 52.6% |
+| HNSW | 10K | **146.8s** | **68.1/s** | 15.4ms | 65 | 81.1% |
+| HNSW | 100K | 2008.0s | 49.8/s | 19.0ms | 53 | 81.7% |
 | HNSW | 1M | 25070.5s | 39.9/s | 21.5ms | 47 | **95.3%** |
-| Vamana | 1K | 16.6s | 60.4/s | 4.3ms | 231 | 61.0% |
-| Vamana | 10K | 179.2s | 55.8/s | 4.8ms | 208 | 77.8% |
-| Vamana | 100K | 2093.5s | 47.8/s | 8.3ms | 120 | 69.8% |
+| Vamana | 1K | 13.75s | 72.7/s | 4.7ms | 213 | 58.9% |
+| Vamana | 10K | 185.8s | 53.8/s | 7.0ms | 143 | 79.9% |
+| Vamana | 100K | 2153.9s | 46.4/s | 7.1ms | 141 | 69.9% |
 | Vamana | 1M | 34928.9s | 28.6/s | 9.7ms | 103 | 68.8% |
 
-**Key Update (2025-12-21)**: The 10ms sleep has been replaced with the proper flush() API, providing **correct** read-after-write consistency. Performance is similar (~30-45 vectors/sec) because per-insert flush overhead is ~20-25ms. For higher throughput, batched flush patterns are needed (see [PERF.md](./PERF.md#flush-api-implementation-results)).
+**Key Update (2025-12-24)**: Re-benchmark with Transaction API shows significant HNSW improvements at small scales:
+- **HNSW 1K: 2.26x faster** (103.6 vs 45.8 vec/s) - Transaction API reduces sync overhead
+- **HNSW 10K: 1.85x faster** (68.1 vs 36.8 vec/s)
+- **100K+**: Performance converges as graph construction dominates
+
+The Transaction API provides read-your-writes semantics within a single transaction scope, enabling proper batching of mutations. See [PERF.md](./PERF.md#2025-12-24-re-benchmark-transaction-api-performance) for detailed analysis.
 
 Note: On real-world clustered data (SIFT), recall is lower than on random data. See [Recall Analysis](#recall-analysis) for detailed explanation.
 
@@ -111,12 +107,13 @@ How does `motlie_db` compare with production ANN libraries?
 | **motlie_db Vamana** (L=200) | SIFT | 1M | **81.9%** | 74 | RocksDB-backed, Rust, tuned |
 | **motlie_db Vamana** | Random | 1K | 59.4% | 199 | RocksDB-backed, Rust |
 
-**Key Observations (Updated 2025-12-23)**:
+**Key Observations (Updated 2025-12-24)**:
 1. **HNSW at 1M: 95.3% recall!** Only 3.2 points below hnswlib (98.5%) - validates disk-based approach
 2. **HNSW scaling validated**: 52.6% → 80.7% → 81.7% → **95.3%** (1K → 10K → 100K → 1M)
-3. **Vamana L=200 at 1M: 81.9% recall** (+13.1% vs L=100's 68.8%) - see [L Parameter Tuning](#vamana-l-parameter-tuning)
-4. **QPS gap**: ~200-300× slower than in-memory due to RocksDB I/O, but acceptable for disk-based use case
-5. **Random data**: 99.6% recall proves correctness; clustered SIFT data is harder but scales well
+3. **Transaction API speedup**: HNSW 1K is **2.26x faster** (103.6 vs 45.8 vec/s) with read-your-writes semantics
+4. **Vamana L=200 at 1M: 81.9% recall** (+13.1% vs L=100's 68.8%) - see [L Parameter Tuning](#vamana-l-parameter-tuning)
+5. **QPS gap**: ~200-300× slower than in-memory due to RocksDB I/O, but acceptable for disk-based use case
+6. **Random data**: 99.6% recall proves correctness; clustered SIFT data is harder but scales well
 
 This is a proof-of-concept. See [HNSW2.md](./HNSW2.md) for production design targeting 5,000-10,000 inserts/sec.
 
