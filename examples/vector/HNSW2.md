@@ -1,6 +1,41 @@
 # HNSW2: Hannoy-Inspired Design for RocksDB
 
+**Phase 2 - Optimized Build Throughput**
+
 This document explores adapting [hannoy](https://github.com/nnethercott/hannoy)'s LMDB-backed HNSW design to RocksDB, focusing on compressed bitmap edge storage, zero-copy patterns, and efficient online updates.
+
+**Last Updated**: 2025-12-24
+
+---
+
+## Document Hierarchy
+
+```
+REQUIREMENTS.md     ← Ground truth for all design decisions
+    ↓
+POC.md              ← Phase 1: Current implementation
+    ↓
+HNSW2.md (this)     ← Phase 2: Optimized HNSW (you are here)
+    ↓
+IVFPQ.md            ← Phase 3: GPU-accelerated search (optional)
+    ↓
+HYBRID.md           ← Phase 4: Billion-scale production architecture
+```
+
+## Target Requirements
+
+This phase focuses on achieving:
+
+| Requirement | Target | Current (POC.md) | HNSW2 Target |
+|-------------|--------|------------------|--------------|
+| **THR-1** | > 5,000 inserts/s | 40/s | 5,000-10,000/s |
+| **THR-3** | > 500 QPS | 47 QPS | 500-1,000 QPS |
+| **REC-1** | > 95% recall@10 | 95.3% | > 95% |
+| **SCALE-3** | < 64 GB at 1B | 4GB at 1M | ~10GB at 1M |
+
+See [REQUIREMENTS.md](./REQUIREMENTS.md) for full requirement definitions.
+
+---
 
 ## Background: Hannoy/Arroy Architecture
 
@@ -631,6 +666,140 @@ async fn filtered_search(
 | Search (unfiltered) | 45-108 QPS | **500-1,000 QPS** |
 | Search (10% filter) | N/A | **800-1,500 QPS** |
 | Memory (10M vectors) | 40GB | **<1GB** (block cache) |
+
+---
+
+## Enhancement: HNSW2 + RaBitQ (DATA-1 Compliant)
+
+### Context: No Pre-Training Data Constraint
+
+Per [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md), motlie_db cannot assume:
+- Representative training data (DATA-1)
+- Known data distribution (DATA-2)
+
+This eliminates techniques requiring training (PQ, ScaNN, SPANN centroids).
+
+### Why RaBitQ Fits HNSW2
+
+RaBitQ is the only compression technique that:
+1. **Requires no training** - uses random rotation matrix
+2. **Works with any data distribution** - O(1/√D) error bound is data-independent
+3. **Provides SIMD acceleration** - Hamming distance via popcount
+
+### Integration Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                   HNSW2 + RaBitQ Architecture                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  RocksDB Column Families                                       │  │
+│  ├───────────────────────────────────────────────────────────────┤  │
+│  │  CF: vectors        [u32 ID] → [f32; D] (full vectors)        │  │
+│  │  CF: binary_codes   [u32 ID] → [u8; D/8] (RaBitQ codes)       │  │
+│  │  CF: edges          [u32 ID|layer] → RoaringBitmap            │  │
+│  │  CF: rotation       "matrix" → [f32; D×D] (stored once)       │  │
+│  │  CF: metadata       "entry_point", "count", etc.              │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+│  Search Flow:                                                        │
+│    1. HNSW navigation (edges CF) → candidate set                     │
+│    2. RaBitQ filter (binary_codes CF) → refined candidates           │
+│    3. Exact rerank (vectors CF) → final top-k                        │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Storage Comparison (1M vectors, 128D)
+
+| Component | HNSW2 Only | HNSW2 + RaBitQ | Notes |
+|-----------|------------|----------------|-------|
+| Vectors | 512 MB | 512 MB | Full f32 vectors |
+| Binary Codes | - | **16 MB** | 16 bytes per vector |
+| Edges | 100 MB | 100 MB | Roaring bitmaps |
+| **Total** | **612 MB** | **628 MB** | +2.6% for 3x search speedup |
+
+### Search Performance Improvement
+
+Without RaBitQ:
+```
+HNSW beam search at layer 0:
+  For each candidate:
+    1. Get edges (bitmap lookup) - fast
+    2. Load full vector (512 bytes) - slow
+    3. Compute L2 distance - moderate
+  Bottleneck: Vector I/O
+```
+
+With RaBitQ:
+```
+HNSW beam search at layer 0:
+  For each candidate:
+    1. Get edges (bitmap lookup) - fast
+    2. Load binary code (16 bytes) - very fast
+    3. Compute Hamming distance (popcount) - very fast
+  Re-rank top-100 with full vectors
+  Bottleneck: None (balanced)
+```
+
+### Projected Performance Improvement
+
+| Metric | HNSW2 Only | HNSW2 + RaBitQ | Improvement |
+|--------|------------|----------------|-------------|
+| Search QPS | 500-1,000 | **1,500-4,000** | 3-4x |
+| Beam expansion I/O | 512 bytes/vec | 16 bytes/vec | 32x |
+| Distance compute | ~100 ns (L2) | ~10 ns (popcount) | 10x |
+| Memory pressure | High | Low | Significant |
+
+### Implementation Delta
+
+Adding RaBitQ to HNSW2 requires:
+
+```rust
+// 1. Add binary_codes column family
+pub const CF_BINARY_CODES: &str = "binary_codes";
+
+// 2. Add rotation matrix storage (one-time)
+pub const CF_ROTATION: &str = "rotation";
+
+// 3. Encode on insert
+fn insert_vector(id: u32, vector: &[f32]) -> WriteBatch {
+    let mut batch = WriteBatch::new();
+
+    // Store full vector (existing)
+    batch.put_cf(vectors_cf, &id.to_le_bytes(), &serialize_vector(vector));
+
+    // Store binary code (new)
+    let binary = rabitq_encoder.encode(vector);
+    batch.put_cf(binary_codes_cf, &id.to_le_bytes(), &binary);
+
+    // ... edge updates (existing)
+    batch
+}
+
+// 4. Use binary codes in beam search
+fn beam_search(query: &[f32], ef: usize) -> Vec<(f32, u32)> {
+    let query_binary = rabitq_encoder.encode(query);
+
+    // Use Hamming distance for beam expansion
+    // Only load full vectors for final reranking
+}
+```
+
+### Engineering Effort
+
+| Task | Effort | Risk |
+|------|--------|------|
+| Add binary_codes CF | 0.5 days | Low |
+| Implement RaBitQ encoder | 1-2 days | Low |
+| Generate/store rotation matrix | 0.5 days | Low |
+| Modify beam search | 1-2 days | Low |
+| SIMD popcount | 0.5 days | Low |
+| Testing | 1 day | Low |
+| **Total** | **4-6 days** | **Low** |
+
+This is a low-risk, high-reward addition to HNSW2.
 
 ---
 

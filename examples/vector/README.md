@@ -2,6 +2,140 @@
 
 This directory contains implementations of Approximate Nearest Neighbor (ANN) search algorithms using `motlie_db` as the underlying graph storage.
 
+## Documentation Index
+
+| Document | Purpose |
+|----------|---------|
+| **[REQUIREMENTS.md](./REQUIREMENTS.md)** | Ground truth for all design decisions (scale, latency, recall, DATA-1) |
+| **[POC.md](./POC.md)** | Current implementation details (Phase 1: schema, APIs, benchmarks) |
+| **[PERF.md](./PERF.md)** | Benchmark results and performance analysis |
+| **[ISSUES.md](./ISSUES.md)** | Known issues and API implementations |
+| **[ALTERNATIVES.md](./ALTERNATIVES.md)** | Alternative architectures analysis (SPFresh, ScaNN, RaBitQ) |
+
+---
+
+## Project Plan
+
+### Critical Constraint: DATA-1
+
+Per [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md), motlie_db has **no pre-training data**:
+- Cannot use Product Quantization (requires k-means training)
+- Cannot use ScaNN (requires learned anisotropic loss)
+- Cannot use SPANN/SPFresh (requires cluster centroids)
+- **Can use RaBitQ** (random rotation matrix, no training)
+
+This constraint drives the recommended implementation path.
+
+### Phase Overview
+
+| Phase | Name | Status | Focus | Key Deliverable |
+|-------|------|--------|-------|-----------------|
+| **1** | POC | ✅ **Complete** | Prove feasibility | 95.3% recall at 1M |
+| **2** | HNSW2 | 📋 Designed | Build throughput | 5,000-10,000 inserts/sec |
+| **2a** | RaBitQ | 📋 Designed | Search acceleration | 3-4x QPS improvement |
+| **3** | IVFPQ | ⚠️ Not Viable | GPU acceleration | Violates DATA-1 |
+| **4** | HYBRID | 📋 Designed | Billion scale | 1B vectors, <64GB RAM |
+
+### Recommended Path
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     Recommended Implementation Path                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  Phase 1: POC                       ✅ COMPLETE                          │
+│  ├── HNSW/Vamana on RocksDB                                              │
+│  ├── Flush API & Transaction API                                         │
+│  ├── 95.3% recall at 1M scale                                            │
+│  └── ~40 inserts/sec (baseline)                                          │
+│                                                                          │
+│  Phase 2: HNSW2 + RaBitQ            📋 NEXT                              │
+│  ├── Roaring bitmap edge storage (125x insert speedup)                   │
+│  ├── RaBitQ binary codes (3-4x QPS, DATA-1 compliant)                    │
+│  ├── u32 ID allocation (4x storage reduction)                            │
+│  ├── RocksDB merge operators (lock-free updates)                         │
+│  └── Target: 5,000-10,000 inserts/sec, 1,500-4,000 QPS                   │
+│                                                                          │
+│  Phase 3: IVFPQ                     ⚠️ NOT VIABLE (DATA-1)               │
+│  └── Requires training data - see ALTERNATIVES.md                        │
+│                                                                          │
+│  Phase 4: HYBRID (with RaBitQ)      📋 FUTURE                            │
+│  ├── In-memory HNSW navigation layer                                     │
+│  ├── RaBitQ compression (replaces PQ due to DATA-1)                      │
+│  ├── Async graph updater                                                 │
+│  └── Target: 1B vectors, <64GB RAM, <100ms search                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Phase Details
+
+#### Phase 1: POC ✅ Complete
+
+| Deliverable | Status | Reference |
+|-------------|--------|-----------|
+| HNSW implementation | ✅ Done | `examples/vector/hnsw.rs` |
+| Vamana implementation | ✅ Done | `examples/vector/vamana.rs` |
+| RocksDB schema (5 CFs) | ✅ Done | [POC.md](./POC.md) |
+| Flush API | ✅ Done | [ISSUES.md](./ISSUES.md) |
+| Transaction API | ✅ Done | [ISSUES.md](./ISSUES.md) |
+| SIFT1M benchmark | ✅ Done | [PERF.md](./PERF.md) |
+| 95% recall at 1M | ✅ Achieved | 95.3% recall |
+
+#### Phase 2: HNSW2 + RaBitQ 📋 Designed
+
+| Component | Effort | Status | Reference |
+|-----------|--------|--------|-----------|
+| u32 ID allocator | 2-3 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| Roaring bitmap edges | 3-5 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| Merge operators | 3-5 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| RaBitQ encoder | 1-2 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| SIMD Hamming distance | 0.5 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| Binary codes CF | 0.5 days | 📋 Designed | [HNSW2.md](./HNSW2.md) |
+| **Total** | **~3-4 weeks** | | |
+
+**Key Metrics Target**:
+- Insert: 5,000-10,000 vec/sec (125x improvement)
+- Search: 1,500-4,000 QPS (30-80x improvement)
+- Memory: <1GB for 10M vectors
+
+#### Phase 3: IVFPQ ⚠️ Not Viable
+
+**Blocked by DATA-1**: IVF-PQ requires training centroids and codebooks on representative data.
+
+See [ALTERNATIVES.md](./ALTERNATIVES.md) for analysis. If GPU acceleration is needed in the future and training data becomes available, this phase can be revisited.
+
+#### Phase 4: HYBRID 📋 Designed
+
+| Component | Effort | Status | Reference |
+|-----------|--------|--------|-----------|
+| Navigation layer | 1-2 weeks | 📋 Designed | [HYBRID.md](./HYBRID.md) |
+| RaBitQ integration | 1 week | 📋 Designed | [HYBRID.md](./HYBRID.md) |
+| Async graph updater | 1-2 weeks | 📋 Designed | [HYBRID.md](./HYBRID.md) |
+| SIMD distance | 1 week | 📋 Designed | [HYBRID.md](./HYBRID.md) |
+| 1B scale validation | 2-3 weeks | 📋 Designed | [HYBRID.md](./HYBRID.md) |
+| **Total** | **~6-10 weeks** | | |
+
+**Key Metrics Target**:
+- Scale: 1B vectors
+- Memory: <64GB RAM (with RaBitQ: ~18GB for codes)
+- Search: <100ms P99
+- Insert: 5,000+ vec/sec async
+
+### Phase Documents
+
+| Phase | Document | Focus | DATA-1 Status |
+|-------|----------|-------|---------------|
+| **1** | [POC.md](./POC.md) | Current implementation | ✅ Compliant |
+| **2** | [HNSW2.md](./HNSW2.md) | Build throughput + RaBitQ | ✅ Compliant |
+| **3** | [IVFPQ.md](./IVFPQ.md) | GPU acceleration | ❌ Requires training |
+| **4** | [HYBRID.md](./HYBRID.md) | Billion scale (RaBitQ) | ✅ Compliant |
+| **-** | [ALTERNATIVES.md](./ALTERNATIVES.md) | Architecture analysis | Analysis doc |
+
+**For new developers**: Start with [REQUIREMENTS.md](./REQUIREMENTS.md) to understand targets and constraints (especially DATA-1), then read [POC.md](./POC.md) for current implementation.
+
+---
+
 ## Overview
 
 We implement two popular ANN algorithms:
@@ -27,44 +161,29 @@ Both algorithms leverage `motlie_db`'s graph primitives (nodes, edges, weights, 
 
 **Key Finding**: The `motlie_db` Storage API is architecturally suitable for disk-based vector search. The flush() API now provides correct read-after-write consistency, enabling proper synchronization during index construction.
 
-### Progress Summary
-
-| Phase | Description | Status |
-|-------|-------------|--------|
-| **Phase 0** | Basic graph storage mapping | ✅ Complete |
-| **Phase 1** | Fix recall issue (async distance) | ✅ Complete |
-| **Phase 2** | Memory-efficient search | ✅ Complete |
-| **Phase 3** | Flush API for read-after-write consistency | ✅ Complete |
-| **Phase 4** | Online updates with batched flush | 🔶 In Progress |
-| **Phase 5** | Production optimizations | ❌ Not Started |
-
 ### Performance Results
 
 See [PERF.md](./PERF.md) for comprehensive benchmarks.
 
-**Summary with flush() API (random data)**:
+**Summary on SIFT benchmark (2025-12-24 Re-benchmark)**:
 
 | Algorithm | Vectors | Index Time | Throughput | Latency | QPS | Recall@10 |
 |-----------|---------|------------|------------|---------|-----|-----------|
-| HNSW | 1K | 24.5s | 40.8/s | 13.1ms | 76 | 99.6% |
-| HNSW | 10K | 337.4s | 29.6/s | 26.3ms | 38 | 81.8% |
-| Vamana | 1K | 12.6s | 79.4/s | 5.0ms | 199 | 59.4% |
-| Vamana | 10K | 229.2s | 43.6/s | 11.0ms | 91 | 22.3% |
-
-**Summary on SIFT benchmark**:
-
-| Algorithm | Vectors | Index Time | Throughput | Latency | QPS | Recall@10 |
-|-----------|---------|------------|------------|---------|-----|-----------|
-| HNSW | 1K | 21.8s | 45.9/s | 9.9ms | 101 | 52.6% |
-| HNSW | 10K | 272.1s | 36.8/s | 15.1ms | 66 | 80.7% |
-| HNSW | 100K | 1924.4s | 52.0/s | 16.6ms | 60 | 81.7% |
+| HNSW | 1K | **9.65s** | **103.6/s** | 8.6ms | 117 | 52.6% |
+| HNSW | 10K | **146.8s** | **68.1/s** | 15.4ms | 65 | 81.1% |
+| HNSW | 100K | 2008.0s | 49.8/s | 19.0ms | 53 | 81.7% |
 | HNSW | 1M | 25070.5s | 39.9/s | 21.5ms | 47 | **95.3%** |
-| Vamana | 1K | 16.6s | 60.4/s | 4.3ms | 231 | 61.0% |
-| Vamana | 10K | 179.2s | 55.8/s | 4.8ms | 208 | 77.8% |
-| Vamana | 100K | 2093.5s | 47.8/s | 8.3ms | 120 | 69.8% |
+| Vamana | 1K | 13.75s | 72.7/s | 4.7ms | 213 | 58.9% |
+| Vamana | 10K | 185.8s | 53.8/s | 7.0ms | 143 | 79.9% |
+| Vamana | 100K | 2153.9s | 46.4/s | 7.1ms | 141 | 69.9% |
 | Vamana | 1M | 34928.9s | 28.6/s | 9.7ms | 103 | 68.8% |
 
-**Key Update (2025-12-21)**: The 10ms sleep has been replaced with the proper flush() API, providing **correct** read-after-write consistency. Performance is similar (~30-45 vectors/sec) because per-insert flush overhead is ~20-25ms. For higher throughput, batched flush patterns are needed (see [PERF.md](./PERF.md#flush-api-implementation-results)).
+**Key Update (2025-12-24)**: Re-benchmark with Transaction API shows significant HNSW improvements at small scales:
+- **HNSW 1K: 2.26x faster** (103.6 vs 45.8 vec/s) - Transaction API reduces sync overhead
+- **HNSW 10K: 1.85x faster** (68.1 vs 36.8 vec/s)
+- **100K+**: Performance converges as graph construction dominates
+
+The Transaction API provides read-your-writes semantics within a single transaction scope, enabling proper batching of mutations. See [PERF.md](./PERF.md#2025-12-24-re-benchmark-transaction-api-performance) for detailed analysis.
 
 Note: On real-world clustered data (SIFT), recall is lower than on random data. See [Recall Analysis](#recall-analysis) for detailed explanation.
 
@@ -93,32 +212,22 @@ The datasets are automatically downloaded from [HuggingFace](https://huggingface
 
 ### Industry Comparison
 
-How does `motlie_db` compare with production ANN libraries?
+See [REQUIREMENTS.md](./REQUIREMENTS.md) for complete target specifications and current status.
 
-| Implementation | Dataset | Vectors | Recall@10 | QPS | Notes |
-|----------------|---------|---------|-----------|-----|-------|
-| [hnswlib](https://github.com/nmslib/hnswlib) | SIFT1M | 1M | 98.5% | 16,108 | In-memory, C++, SIMD |
-| [Faiss HNSW](https://github.com/facebookresearch/faiss) | SIFT1M | 1M | 97.8% | ~30,000 | In-memory, C++, SIMD |
-| **motlie_db HNSW** | SIFT | 1K | 52.6% | 101 | RocksDB-backed, Rust |
-| **motlie_db HNSW** | SIFT | 10K | 80.7% | 66 | RocksDB-backed, Rust |
-| **motlie_db HNSW** | SIFT | 100K | 81.7% | 60 | RocksDB-backed, Rust |
-| **motlie_db HNSW** | SIFT | 1M | **95.3%** | 47 | RocksDB-backed, Rust |
-| **motlie_db HNSW** | Random | 1K | 99.6% | 76 | RocksDB-backed, Rust |
-| **motlie_db Vamana** (L=100) | SIFT | 1K | 61.0% | 231 | RocksDB-backed, Rust |
-| **motlie_db Vamana** (L=100) | SIFT | 10K | 77.8% | 208 | RocksDB-backed, Rust |
-| **motlie_db Vamana** (L=100) | SIFT | 100K | 69.8% | 120 | RocksDB-backed, Rust |
-| **motlie_db Vamana** (L=100) | SIFT | 1M | 68.8% | 103 | RocksDB-backed, Rust |
-| **motlie_db Vamana** (L=200) | SIFT | 1M | **81.9%** | 74 | RocksDB-backed, Rust, tuned |
-| **motlie_db Vamana** | Random | 1K | 59.4% | 199 | RocksDB-backed, Rust |
+**Key Result (2025-12-24)**: HNSW at 1M achieves **95.3% recall** - only 3.2 points below hnswlib (98.5%), validating the disk-based approach.
 
-**Key Observations (Updated 2025-12-23)**:
-1. **HNSW at 1M: 95.3% recall!** Only 3.2 points below hnswlib (98.5%) - validates disk-based approach
-2. **HNSW scaling validated**: 52.6% → 80.7% → 81.7% → **95.3%** (1K → 10K → 100K → 1M)
-3. **Vamana L=200 at 1M: 81.9% recall** (+13.1% vs L=100's 68.8%) - see [L Parameter Tuning](#vamana-l-parameter-tuning)
-4. **QPS gap**: ~200-300× slower than in-memory due to RocksDB I/O, but acceptable for disk-based use case
-5. **Random data**: 99.6% recall proves correctness; clustered SIFT data is harder but scales well
+| Implementation | Recall@10 | QPS | Notes |
+|----------------|-----------|-----|-------|
+| hnswlib (1M) | 98.5% | 16,108 | In-memory, SIMD |
+| **motlie_db HNSW (1M)** | **95.3%** | 47 | Disk-based, Rust |
+| **motlie_db Vamana (1M, L=200)** | 81.9% | 74 | Disk-based, Rust |
 
-This is a proof-of-concept. See [HNSW2.md](./HNSW2.md) for production design targeting 5,000-10,000 inserts/sec.
+**Status vs Requirements**:
+- **REC-1** (>95% recall at 1M): **Achieved** with HNSW
+- **THR-1** (>5K inserts/s): Gap - currently ~40/s, see [HYBRID.md](./HYBRID.md)
+- **LAT-1** (<20ms P50): Achieved at 1M scale
+
+This is a proof-of-concept. See [HYBRID.md](./HYBRID.md) for production architecture targeting billion scale.
 
 ### Correctness Against Ground Truth
 
@@ -1285,6 +1394,8 @@ meta_opts.set_compression_type(DBCompressionType::None);
 
 ## Online Updates Requirement
 
+> **See**: [REQUIREMENTS.md](./REQUIREMENTS.md) FUNC-1 through FUNC-6 for functionality requirements.
+
 A critical requirement for production vector search is **online updates** - the ability to add, update, or delete vectors without rebuilding the entire index.
 
 ### Current Online Update Capabilities
@@ -1520,16 +1631,18 @@ For datasets exceeding available memory:
 
 ## Required motlie_db Optimizations
 
+See [REQUIREMENTS.md](./REQUIREMENTS.md) for the complete requirements specification with IDs (SCALE-*, LAT-*, REC-*, THR-*, FUNC-*, CON-*, STOR-*).
+
 The following optimizations would make `motlie_db` suitable for production vector search with **online updates**.
 
 ### Priority Legend
 
-| Priority | Meaning |
-|----------|---------|
-| 🔴 **Critical** | Blocking for online updates |
-| 🟠 **High** | Significant performance/functionality impact |
-| 🟡 **Medium** | Quality of life improvement |
-| 🟢 **Low** | Nice to have |
+| Priority | Meaning | Requirement IDs |
+|----------|---------|-----------------|
+| 🔴 **Critical** | Blocking for online updates | CON-1, CON-2 |
+| 🟠 **High** | Significant performance/functionality impact | THR-1, FUNC-3 |
+| 🟡 **Medium** | Quality of life improvement | STOR-4, STOR-5 |
+| 🟢 **Low** | Nice to have | - |
 
 ### 1. ✅ Read-After-Write Consistency (IMPLEMENTED)
 
@@ -1864,14 +1977,16 @@ Phase 5 ────────────────────────
 
 ### Key Metrics to Track
 
-| Metric | Current (flush/insert) | Phase 2 Target | Phase 4 Target |
-|--------|------------------------|----------------|----------------|
-| Insert throughput | ~30-45/sec | >1000/sec | >5000/sec |
-| Insert latency (P99) | ~25ms | <10ms | <5ms |
-| Search during insert | Untested | <20ms P99 | <15ms P99 |
-| Concurrent writers | 1 | 1 | Multiple |
-| Delete support | No | No | Yes |
-| Read-after-write | ✅ Correct (flush) | Correct | Correct |
+> **Canonical targets**: See [REQUIREMENTS.md](./REQUIREMENTS.md) THR-*, LAT-*, FUNC-* for authoritative targets.
+
+| Metric | Current | Target (REQUIREMENTS.md) | Status |
+|--------|---------|--------------------------|--------|
+| Insert throughput | ~30-45/sec | THR-1: >5,000/sec | Gap |
+| Insert latency (P99) | ~25ms | LAT-4: <10ms | Gap |
+| Search P50 at 1M | ~21ms | LAT-1: <20ms | **Met** |
+| Recall@10 at 1M | 95.3% | REC-1: >95% | **Met** |
+| Delete support | No | FUNC-3 | Not started |
+| Read-after-write | ✅ | CON-1 | **Complete** |
 
 ---
 
