@@ -22,6 +22,8 @@ IVFPQ.md            ← Phase 3: GPU-accelerated search (optional)
 HYBRID.md (this)    ← Phase 4: Billion-scale production (you are here)
 ```
 
+**Links**: [REQUIREMENTS.md](./REQUIREMENTS.md) → [POC.md](./POC.md) → [HNSW2.md](./HNSW2.md) → [IVFPQ.md](./IVFPQ.md) → **HYBRID.md**
+
 ## Target Requirements
 
 This phase is the culmination of all prior work, achieving:
