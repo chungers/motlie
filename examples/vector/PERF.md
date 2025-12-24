@@ -67,11 +67,22 @@ Before fix (recall declining sharply):
 After fix (improved, but 100K still lower than 10K):
 - 1K: 73.1% → 10K: 83.7% → 100K: 70.7%
 
-The 100K recall (70.7%) is higher than before (69.9%) but drops from the 10K peak (83.7%). This suggests:
-1. L=100 may be insufficient for 100K scale (DiskANN paper uses L=125-200 for large datasets)
-2. The search/construction may need scale-aware parameter tuning
+The 100K recall (70.7%) is higher than before (69.9%) but drops from the 10K peak (83.7%).
 
-Testing with L=200 to validate...
+### L=200 Test Results (100K)
+
+| L Param | Recall@10 | Build Time | Search Latency | QPS |
+|---------|-----------|------------|----------------|-----|
+| L=100 | 70.7% | 2874s | 6.1ms | 163 |
+| **L=200** | **76.0%** | 5130s | 11.3ms | 88 |
+
+L=200 improves recall by **+5.3%** but doubles build time. The DiskANN paper recommends L=125-200 for large datasets.
+
+### Conclusion
+
+The fixes improve recall at all scales, but optimal parameters depend on scale:
+- Small (1K-10K): L=100 is sufficient
+- Large (100K+): L=200 recommended for better recall
 
 ---
 
