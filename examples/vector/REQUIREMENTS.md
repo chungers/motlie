@@ -283,7 +283,81 @@ All benchmarks must use:
 
 ---
 
-## 10. Traceability Matrix
+## 10. Architecture Assumptions
+
+These assumptions shape the implementation architecture and are derived from project owner decisions.
+
+### 10.1 Temporal Filtering Strategy
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| **ARCH-1** | Vector index is **temporal-agnostic** | Simplifies index, avoids sync complexity |
+| **ARCH-2** | Temporal visibility enforced during re-ranking | Graph RocksDB is source of truth |
+| **ARCH-3** | Over-fetch pattern for filtered queries | Return larger candidate set, filter by `TemporalRange` |
+
+**Design Pattern:**
+
+```
+Vector Search (ef=200) → ID Mapping → Temporal Filter (Graph) → Re-rank → Top-K
+```
+
+**Trade-off Analysis:**
+- Additional O(1) lookup per candidate after ID mapping (~5μs per candidate)
+- For 200 candidates: ~1ms overhead for ID mapping + ~1-2ms for temporal MultiGet
+- Acceptable given recall > latency preference
+
+**Benefits:**
+1. Vector index stays simple and fast
+2. Single source of truth (graph) for visibility
+3. Extensible to other filters (ACL, soft-delete)
+4. Consistent with Tantivy pattern (fulltext defers to graph for visibility)
+
+### 10.2 Internal ID Strategy
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| **ARCH-4** | Vector IDs are **internal** (similar to Tantivy `doc_id`) | Memory efficiency, roaring bitmap compatibility |
+| **ARCH-5** | Bi-directional mapping: internal u32 ↔ ULID | Required for graph integration |
+| **ARCH-6** | Reverse mapping (u32 → ULID) is hot path | Optimized via dense array or mmap |
+
+**Implications:**
+- Vector index uses 4-byte u32 IDs internally (required for RoaringBitmap)
+- API accepts/returns ULIDs; translation is internal
+- Forward mapping (ULID → u32): RocksDB-backed, insert path
+- Reverse mapping (u32 → ULID): Memory-mapped dense array, search path
+
+### 10.3 Hardware Requirements
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| **ARCH-7** | **SSD required** for production at 1B scale | Re-ranking latency, cold-cache performance |
+| **ARCH-8** | 64 GB RAM constraint includes all components | Vector index + graph block cache + ID mapping |
+
+### 10.4 Performance Trade-offs
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| **ARCH-9** | **Recall > Latency** | Quality of results prioritized over speed |
+| **ARCH-10** | Target 98%+ recall, accept 30-50ms latency | Acceptable for semantic search use cases |
+
+**Parameter Implications:**
+
+| Parameter | Latency-Optimized | Recall-Optimized (Chosen) |
+|-----------|-------------------|---------------------------|
+| ef_search | 50-100 | 200-500 |
+| rerank_count | 20-50 | 100-200 |
+| Extended-RaBitQ | 1 bit | 2-4 bits |
+
+### 10.5 Vector Scope
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| **ARCH-11** | Vectors represent node/edge summaries and fragments | Graph entities are the primary data model |
+| **ARCH-12** | Graph RocksDB is source of truth for entity visibility | Temporal range, existence, relationships |
+
+---
+
+## 11. Traceability Matrix
 
 | Requirement | HYBRID.md Section | PERF.md Section | Status |
 |-------------|-------------------|-----------------|--------|
@@ -304,3 +378,4 @@ All benchmarks must use:
 | 2025-12-24 | Initial requirements document | Claude |
 | 2025-12-24 | Added 1M benchmark results | Claude |
 | 2025-12-24 | Linked to HYBRID.md architecture | Claude |
+| 2025-12-25 | Added Section 10: Architecture Assumptions (ARCH-1 to ARCH-12) | Claude Opus 4.5 |
