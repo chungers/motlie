@@ -187,36 +187,65 @@ struct EdgeSummaryBlob(EdgeSummary);
 The visitor pattern (`accept(&mut visitor)`) is rigid and hard to compose. It forces the control flow inside the `scan` module.
 
 **Proposal:**
-Return standard Rust `Iterator`s (synchronous) or `Stream`s (asynchronous).
+Return standard Rust `Iterator`s (synchronous) or `Stream`s (asynchronous). This naturally supports pagination via `IteratorMode::From` (seek).
 
 **Code Example:**
 
 ```rust
 // libs/db/src/graph/scan.rs
 
-pub struct OutgoingEdgeIterator<'a> {
+pub struct NodeIterator<'a> {
     db_iter: rocksdb::DBIterator<'a>,
-    src_id: Id,
-    // ...
+    // Optional: end bound or prefix to stop iteration
 }
 
-impl<'a> Iterator for OutgoingEdgeIterator<'a> {
-    type Item = Result<(DstId, EdgeName, Option<f64>)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // 1. Advance RocksDB iterator
-        // 2. Check prefix (if we moved past src_id, return None)
-        // 3. Deserialize Key/Value
-        // 4. Return Item
+impl<'a> NodeIterator<'a> {
+    pub fn new(db: &'a rocksdb::DB, start_from: Option<Id>) -> Self {
+        let mode = match start_from {
+            Some(id) => {
+                 let key = schema::NodeCfKey(id);
+                 let bytes = schema::Nodes::key_to_bytes(&key);
+                 // Start strictly after the last ID (exclusive pagination)
+                 // Note: Ideally, we seek to bytes + 1 or handle exclusive logic in next()
+                 rocksdb::IteratorMode::From(&bytes, rocksdb::Direction::Forward)
+            }
+            None => rocksdb::IteratorMode::Start,
+        };
+        
+        let db_iter = db.iterator_cf(db.cf_handle(schema::Nodes::CF_NAME).unwrap(), mode);
+        Self { db_iter }
     }
 }
 
-// Usage
-let iter = graph.scan_outgoing(node_id);
-for edge in iter.filter(|e| e.weight > Some(0.5)) {
-    // ...
+impl<'a> Iterator for NodeIterator<'a> {
+    type Item = Result<(Id, NodeName, NodeSummary)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (key_bytes, val_bytes) = self.db_iter.next()?;
+        // Deserialize and return...
+    }
+}
+
+// Usage in AllNodes query
+impl AllNodes {
+    pub fn execute_iter(&self, storage: &Storage) -> Result<Vec<(Id, NodeName, NodeSummary)>> {
+        let iter = NodeIterator::new(storage.db()?, self.last);
+        
+        // Skip the first element if it matches 'last' exactly (exclusive cursor)
+        let iter = if self.last.is_some() {
+             iter.skip_while(|res| res.as_ref().ok().map(|(id,_,_)| Some(*id) == self.last).unwrap_or(false))
+        } else {
+             iter
+        };
+
+        iter.take(self.limit).collect()
+    }
 }
 ```
+
+**Pagination Impact:**
+- **Efficient Seek:** RocksDB's `IteratorMode::From` performs a seek to the precise key, ensuring O(1) start time for any page, avoiding O(N) skips.
+- **Composition:** Pagination logic becomes `iter.skip_while(...).take(limit)`.
 
 ### 5. Fulltext Sync Mechanism
 
@@ -258,3 +287,45 @@ impl Writer {
     }
 }
 ```
+
+## Projected Performance Impact
+
+### 1. Graph Algorithms (BFS, PageRank, Louvain)
+
+These algorithms rely heavily on scanning graph topology (`OutgoingEdges`) and weights, but rarely access metadata (EdgeSummary).
+
+*   **Impact of Blob Separation:** This is the most critical optimization. Currently, scanning edges loads large summary blobs into the RocksDB block cache.
+    *   *Current State:* An edge entry might be ~500 bytes (summary included). 1GB cache holds ~2 million edges.
+    *   *Optimized State:* An edge entry in the "Hot" CF is ~20-30 bytes. 1GB cache holds ~40 million edges.
+    *   *Result:* **10x-20x increase in effective cache capacity** for topology data, leading to significantly fewer disk seeks during traversal.
+*   **Impact of Zero-Copy (`rkyv`):**
+    *   *Current State:* Deserializing 1 million edges allocates 1 million `Vec`s/`String`s (via MessagePack).
+    *   *Optimized State:* Zero allocations during scan.
+    *   *Result:* **~2x-5x throughput improvement** for in-memory scans by eliminating allocator pressure.
+
+**Overall Projection:** Complex graph algorithms on datasets larger than RAM could see **5x-10x end-to-end speedup**.
+
+### 2. Vector Search (HNSW / Vamana)
+
+Vector search involves traversing a graph (navigable small world) to find nearest neighbors. This requires many sequential point lookups (greedy search).
+
+*   **Impact of Direct Read Path (`RunDirect`):**
+    *   *Current State:* Each hop in the graph (lookup node -> get neighbors) incurs a channel round-trip (~10-50µs overhead) plus context switching.
+    *   *Optimized State:* Cached reads are immediate function calls (~1-5µs).
+    *   *Result:* For a search requiring 200 hops, latency drops from ~10ms (overhead dominated) to ~1ms (compute/read dominated).
+*   **Impact of Blob Separation:**
+    *   Similar to graph algorithms, HNSW traversal only needs neighbor IDs and potentially vectors (if stored in graph), not document content. Keeping the traversal graph compact ensures it stays in CPU/L3 cache.
+
+**Overall Projection:** Vector search latency (p99) could decrease by **3x-5x**, enabling high-QPS low-latency applications.
+
+## API Compatibility Assessment
+
+The proposed improvements have been designed to maintain strict backward compatibility with the existing `Runnable` and `Mutation` APIs.
+
+| Improvement | Impact Level | API Changes | Internal Changes |
+| :--- | :--- | :--- | :--- |
+| **Zero-Copy (`rkyv`)** | None | None. Public structs (`NodeSummary`, `Id`) remain standard Rust types. | Serialization logic switches from `rmp_serde` to `rkyv`. Conversion happens transparently in `Reader`/`Writer`. |
+| **Direct Read Path** | Additive | Adds `RunDirect` trait. Existing `Runnable` implementation can be refactored to wrap `RunDirect` for backward compatibility, or remain independent. | New method implementations on `Reader`. |
+| **Blob Separation** | None | None. `AddEdge` and `EdgeSummaryBySrcDstName` structs remain unchanged. | `MutationExecutor` writes to 2 CFs. `QueryExecutor` reads from 2 CFs (if needed). |
+| **Iterator Scans** | None | None. The existing `AllNodes` query can internally utilize the new Iterator to collect results into a `Vec`, preserving the current `async run()` signature. | `scan.rs` refactored from Visitor to Iterator pattern. |
+| **Fulltext Sync** | Additive | Adds `flush_all()`. `flush()` remains unchanged (graph-only). | `FlushMarker` updated to hold dual channels. |
