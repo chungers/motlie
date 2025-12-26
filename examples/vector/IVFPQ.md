@@ -28,10 +28,10 @@ This phase focuses on achieving:
 
 | Requirement | Target | Current (POC.md) | IVFPQ Target |
 |-------------|--------|------------------|--------------|
-| **THR-3** | > 500 QPS | 47 QPS | 10,000+ QPS (GPU) |
-| **STOR-5** | SIMD distance | Not implemented | CAGRA GPU kernels |
-| **STOR-4** | PQ compression | Not implemented | 512x compression |
-| **UC-2** | Image similarity | 100M vectors | 100M-1B vectors |
+| [**THR-3**](./REQUIREMENTS.md#thr-3) | > 500 QPS | 47 QPS | 10,000+ QPS (GPU) |
+| [**STOR-5**](./REQUIREMENTS.md#stor-5) | SIMD distance | Not implemented | CAGRA GPU kernels |
+| [**STOR-4**](./REQUIREMENTS.md#stor-4) | PQ compression | Not implemented | 512x compression |
+| [**UC-2**](./REQUIREMENTS.md#uc-2) | Image similarity | 100M vectors | 100M-1B vectors |
 
 See [REQUIREMENTS.md](./REQUIREMENTS.md) for full requirement definitions.
 

@@ -34,10 +34,10 @@ This phase focuses on achieving:
 
 | Requirement | Target | Current ([POC.md](./POC.md)) | HNSW2 Target |
 |-------------|--------|------------------|--------------|
-| **THR-1** | > 5,000 inserts/s | 40/s | 5,000-10,000/s |
-| **THR-3** | > 500 QPS | 47 QPS | 500-1,000 QPS |
-| **REC-1** | > 95% recall@10 | 95.3% | > 95% |
-| **SCALE-3** | < 64 GB at 1B | 4GB at 1M | ~10GB at 1M |
+| [**THR-1**](./REQUIREMENTS.md#thr-1) | > 5,000 inserts/s | 40/s | 5,000-10,000/s |
+| [**THR-3**](./REQUIREMENTS.md#thr-3) | > 500 QPS | 47 QPS | 500-1,000 QPS |
+| [**REC-1**](./REQUIREMENTS.md#rec-1) | > 95% recall@10 | 95.3% | > 95% |
+| [**SCALE-3**](./REQUIREMENTS.md#scale-3) | < 64 GB at 1B | 4GB at 1M | ~10GB at 1M |
 
 See [REQUIREMENTS.md](./REQUIREMENTS.md) for full requirement definitions.
 
@@ -783,13 +783,13 @@ async fn filtered_search(
 
 ---
 
-## Enhancement: HNSW2 + RaBitQ (DATA-1 Compliant)
+## Enhancement: HNSW2 + RaBitQ ([DATA-1](./REQUIREMENTS.md#data-1) Compliant)
 
 ### Context: No Pre-Training Data Constraint
 
-Per [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md), motlie_db cannot assume:
-- Representative training data (DATA-1)
-- Known data distribution (DATA-2)
+Per [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md#data-1), motlie_db cannot assume:
+- Representative training data ([DATA-1](./REQUIREMENTS.md#data-1))
+- Known data distribution ([DATA-2](./REQUIREMENTS.md#data-2))
 
 This eliminates techniques requiring training (PQ, ScaNN, SPANN centroids).
 
