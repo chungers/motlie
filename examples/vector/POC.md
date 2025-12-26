@@ -73,7 +73,7 @@ pub struct AddNodeFragment {
 | Metric | Current | Target ([HYBRID.md](./HYBRID.md)) |
 |--------|---------|-------------------|
 | 128D vector size | ~600 bytes | 8 bytes (PQ compressed) |
-| Compression | None | 75x with PQ (STOR-4) |
+| Compression | None | 75x with PQ ([STOR-4](./REQUIREMENTS.md#stor-4)) |
 
 ### 1.3 Graph Edge Storage
 
@@ -94,7 +94,7 @@ pub struct ForwardEdgeCfValue(
 
 ## 2. Consistency APIs
 
-### 2.1 Flush API (CON-1)
+### 2.1 Flush API ([CON-1](./REQUIREMENTS.md#con-1))
 
 **Status**: ✅ Implemented (2025-12-21)
 
@@ -118,9 +118,9 @@ writer.flush().await?;  // Blocks until all pending writes are committed
 3. Consumer signals completion after RocksDB commit
 4. Caller blocks on oneshot receiver
 
-**Requirements Addressed**: CON-1 (Read-after-write consistency)
+**Requirements Addressed**: [CON-1](./REQUIREMENTS.md#con-1) (Read-after-write consistency)
 
-### 2.2 Transaction API (CON-1)
+### 2.2 Transaction API ([CON-1](./REQUIREMENTS.md#con-1))
 
 **Status**: ✅ Implemented (2025-12-23)
 
@@ -164,7 +164,7 @@ txn.commit()?;
 - Auto-rollback on drop (if not committed)
 - Optional forwarding to fulltext indexer
 
-**Requirements Addressed**: CON-1 (Read-after-write consistency)
+**Requirements Addressed**: [CON-1](./REQUIREMENTS.md#con-1) (Read-after-write consistency)
 
 ---
 
@@ -227,10 +227,10 @@ txn.commit()?;
 
 | Requirement | Target | Current | Status |
 |-------------|--------|---------|--------|
-| REC-1 (Recall@10 at 1M) | > 95% | 95.3% | ✅ Met |
-| LAT-1 (Search P50 at 1M) | < 20 ms | 21.5 ms | ⚠️ Close |
-| THR-1 (Insert throughput) | > 5,000/s | ~40/s | ❌ Gap: 125x |
-| THR-3 (Search QPS at 1M) | > 500 QPS | 47 QPS | ❌ Gap: 10x |
+| [REC-1](./REQUIREMENTS.md#rec-1) (Recall@10 at 1M) | > 95% | 95.3% | ✅ Met |
+| [LAT-1](./REQUIREMENTS.md#lat-1) (Search P50 at 1M) | < 20 ms | 21.5 ms | ⚠️ Close |
+| [THR-1](./REQUIREMENTS.md#thr-1) (Insert throughput) | > 5,000/s | ~40/s | ❌ Gap: 125x |
+| [THR-3](./REQUIREMENTS.md#thr-3) (Search QPS at 1M) | > 500 QPS | 47 QPS | ❌ Gap: 10x |
 
 ---
 
@@ -239,7 +239,7 @@ txn.commit()?;
 ### 5.1 Build Throughput Bottleneck
 
 **Current**: ~40 inserts/sec at 1M scale
-**Target** (THR-1): 5,000 inserts/sec
+**Target** ([THR-1](./REQUIREMENTS.md#thr-1)): 5,000 inserts/sec
 
 **Root Causes:**
 1. **Per-insert flush overhead** (~20-25ms per flush)
@@ -254,17 +254,17 @@ txn.commit()?;
 ### 5.2 Search QPS Bottleneck
 
 **Current**: 47 QPS at 1M
-**Target** (THR-3): 500 QPS
+**Target** ([THR-3](./REQUIREMENTS.md#thr-3)): 500 QPS
 
 **Root Causes:**
 1. **Sequential vector reads** (no batch fragment API)
 2. **Full vector distance computation** (no PQ compression)
-3. **No SIMD optimization** (STOR-5)
+3. **No SIMD optimization** ([STOR-5](./REQUIREMENTS.md#stor-5))
 
 **Solutions** (see [HYBRID.md](./HYBRID.md)):
 - Batch NodeFragments API (Issue #17)
-- Product Quantization (STOR-4)
-- SIMD AVX2 distance computation (STOR-5)
+- Product Quantization ([STOR-4](./REQUIREMENTS.md#stor-4))
+- SIMD AVX2 distance computation ([STOR-5](./REQUIREMENTS.md#stor-5))
 
 ---
 
@@ -297,7 +297,7 @@ txn.commit()?;
 
 ### Phase 2: HNSW Optimization ([HNSW2.md](./HNSW2.md))
 
-Focus: **Build throughput** (THR-1: 5,000 inserts/sec)
+Focus: **Build throughput** ([THR-1](./REQUIREMENTS.md#thr-1): 5,000 inserts/sec)
 
 Key Changes:
 - Roaring bitmap edge storage
@@ -307,7 +307,7 @@ Key Changes:
 
 ### Phase 3: GPU Acceleration ([IVFPQ.md](./IVFPQ.md))
 
-Focus: **Search performance** (THR-3: 500 QPS → 10,000+ QPS)
+Focus: **Search performance** ([THR-3](./REQUIREMENTS.md#thr-3): 500 QPS → 10,000+ QPS)
 
 Key Changes:
 - IVF-PQ indexing
@@ -316,7 +316,7 @@ Key Changes:
 
 ### Phase 4: Production Scale ([HYBRID.md](./HYBRID.md))
 
-Focus: **Billion-scale** (SCALE-1: 1B vectors)
+Focus: **Billion-scale** ([SCALE-1](./REQUIREMENTS.md#scale-1): 1B vectors)
 
 Key Changes:
 - Hybrid memory/disk architecture
