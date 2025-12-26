@@ -23,17 +23,17 @@ This document challenges that assumption with two alternatives from recent resea
 
 ---
 
-## Critical Constraint: No Pre-Training Data (DATA-1)
+## Critical Constraint: No Pre-Training Data ([DATA-1](./REQUIREMENTS.md#data-1))
 
-**From [REQUIREMENTS.md](./REQUIREMENTS.md) Section 5.4:**
+**From [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md#data-1):**
 
 > motlie_db is a general-purpose graph database. Vector search must work with any embedding type without prior knowledge of the data distribution.
 
 | Requirement | Description |
 |-------------|-------------|
-| **DATA-1** | No representative training data available |
-| **DATA-2** | Unknown data distribution (clustered vs uniform) |
-| **DATA-3** | All algorithms must work incrementally (online) |
+| [**DATA-1**](./REQUIREMENTS.md#data-1) | No representative training data available |
+| [**DATA-2**](./REQUIREMENTS.md#data-2) | Unknown data distribution (clustered vs uniform) |
+| [**DATA-3**](./REQUIREMENTS.md#data-3) | All algorithms must work incrementally (online) |
 
 ### Impact on Alternatives
 
