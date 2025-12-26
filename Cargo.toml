@@ -40,6 +40,7 @@ dtrace-otel = ["motlie-core/dtrace-otel"]
 [dependencies]
 motlie-core = { path = "libs/core" }
 motlie-db = { path = "libs/db" }
+motlie-mcp = { path = "libs/mcp" }
 csv.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
@@ -53,11 +54,18 @@ lz4 = "1.28"
 petgraph = "0.6"
 pathfinding = "4.0"
 clap = { version = "4.0", features = ["derive"] }
+async-trait = "0.1"
+rmcp = { version = "0.9", features = ["server", "transport-io", "transport-streamable-http-server"] }
+pmcp = { version = "1.8.4", features = ["schema-generation", "validation", "streamable-http"] }
+log = "0.4"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+num_cpus = "1.16"
 warp = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 rand = "0.8"
+rand_chacha = "0.3"
+base64 = "0.22"
 
 [[example]]
 name = "store"
@@ -82,6 +90,18 @@ path = "examples/graph/dijkstra.rs"
 [[example]]
 name = "pagerank"
 path = "examples/graph/pagerank.rs"
+
+[[example]]
+name = "motlie_db"
+path = "examples/mcp/motlie_db.rs"
+
+[[example]]
+name = "motlie_tts"
+path = "examples/mcp/motlie_tts.rs"
+
+[[example]]
+name = "motlie_all"
+path = "examples/mcp/all.rs"
 
 [[example]]
 name = "bfs_original"
@@ -110,6 +130,14 @@ path = "examples/tracing/tracing_durability.rs"
 [[example]]
 name = "verify_traces"
 path = "examples/tracing/verify_traces.rs"
+
+[[example]]
+name = "hnsw"
+path = "examples/vector/hnsw.rs"
+
+[[example]]
+name = "vamana"
+path = "examples/vector/vamana.rs"
 
 [[bin]]
 name = "motlie"

@@ -8,11 +8,20 @@
 //!
 //! Also contains the mutation executor traits (MutationExecutor, Processor)
 //! which define how mutations execute against the storage layer.
+//!
+//! # Transaction Support
+//!
+//! The `Writer` type also supports creating transactions for read-your-writes
+//! semantics via the `transaction()` method. See the [`transaction`](super::transaction)
+//! module for details.
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, oneshot};
 
-use super::mutation::Mutation;
+use super::mutation::{FlushMarker, Mutation};
+use super::transaction::Transaction;
+use super::Storage;
 
 // ============================================================================
 // MutationExecutor Trait
@@ -142,35 +151,225 @@ impl Default for WriterConfig {
 /// .await?;
 /// ```
 ///
+/// ## Transactions (Read-Your-Writes)
+///
+/// ```rust,ignore
+/// let mut txn = writer.transaction()?;
+///
+/// txn.write(AddNode { id, ... })?;
+/// let result = txn.read(NodeById::new(id, None))?;  // Sees uncommitted AddNode!
+/// txn.write(AddEdge { ... })?;
+///
+/// txn.commit()?;  // Atomic commit
+/// ```
+///
 /// See [Mutation API Guide](../docs/mutation-api-guide.md) for complete documentation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Writer {
     sender: mpsc::Sender<Vec<Mutation>>,
+    /// Storage for creating transactions (optional - only present in read-write mode)
+    storage: Option<Arc<Storage>>,
+    /// Optional sender for transaction mutation forwarding (e.g., to fulltext)
+    transaction_forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
+}
+
+impl std::fmt::Debug for Writer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Writer")
+            .field("sender", &"<mpsc::Sender>")
+            .field("storage", &self.storage.as_ref().map(|_| "<Arc<Storage>>"))
+            .field(
+                "transaction_forward_to",
+                &self.transaction_forward_to.as_ref().map(|_| "<mpsc::Sender>"),
+            )
+            .finish()
+    }
 }
 
 impl Writer {
-    /// Create a new MutationWriter with the given sender
+    /// Create a new MutationWriter with the given sender.
+    ///
+    /// This creates a basic writer without transaction support.
+    /// Use `with_storage()` or `with_transaction_forward_to()` to
+    /// enable transaction features.
     pub fn new(sender: mpsc::Sender<Vec<Mutation>>) -> Self {
-        Writer { sender }
+        Writer {
+            sender,
+            storage: None,
+            transaction_forward_to: None,
+        }
     }
 
-    /// Send a batch of mutations to be processed.
+    /// Create a new MutationWriter with storage for transaction support.
+    pub fn with_storage(sender: mpsc::Sender<Vec<Mutation>>, storage: Arc<Storage>) -> Self {
+        Writer {
+            sender,
+            storage: Some(storage),
+            transaction_forward_to: None,
+        }
+    }
+
+    /// Set the storage for transaction support.
+    pub fn set_storage(&mut self, storage: Arc<Storage>) {
+        self.storage = Some(storage);
+    }
+
+    /// Set the sender for transaction mutation forwarding.
     ///
-    /// This is a low-level method used internally by the mutation API.
-    /// Most users should use the `MutationRunnable` trait instead:
+    /// When transactions commit, their mutations will be forwarded
+    /// to this sender (best-effort, non-blocking).
+    pub fn set_transaction_forward_to(&mut self, sender: mpsc::Sender<Vec<Mutation>>) {
+        self.transaction_forward_to = Some(sender);
+    }
+
+    /// Begin a transaction for read-your-writes semantics.
+    ///
+    /// The returned Transaction allows interleaved writes and reads
+    /// within a single atomic scope. Transaction lifetime is tied to
+    /// the Writer's storage.
+    ///
+    /// # Example
     ///
     /// ```rust,ignore
-    /// // Single mutation
-    /// AddNode { /* ... */ }.run(&writer).await?;
+    /// let mut txn = writer.transaction()?;
     ///
-    /// // Batch mutations
-    /// mutations![AddNode { /* ... */ }, AddEdge { /* ... */ }].run(&writer).await?;
+    /// txn.write(AddNode { ... })?;
+    /// let result = txn.read(NodeById::new(id, None))?;  // Sees the AddNode
+    /// txn.write(AddEdge { ... })?;
+    ///
+    /// txn.commit()?;  // Sync commit, best-effort forwarding
+    /// ```
+    ///
+    /// # Concurrent Transactions
+    ///
+    /// To run concurrent transactions, clone the Writer first:
+    ///
+    /// ```rust,ignore
+    /// let writer1 = writer.clone();
+    /// let writer2 = writer.clone();
+    ///
+    /// // Now can create transactions on each
+    /// let txn1 = writer1.transaction()?;
+    /// let txn2 = writer2.transaction()?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Storage is not configured (writer created without storage)
+    /// - Storage is not in read-write mode
+    pub fn transaction(&self) -> Result<Transaction<'_>> {
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Writer not configured with storage for transactions"))?;
+
+        let txn_db = storage.transaction_db()?;
+        let txn = txn_db.transaction();
+
+        Ok(Transaction::new(txn, txn_db, self.transaction_forward_to.clone()))
+    }
+
+    /// Check if transactions are supported by this writer.
+    pub fn supports_transactions(&self) -> bool {
+        self.storage
+            .as_ref()
+            .map(|s| s.is_transactional())
+            .unwrap_or(false)
+    }
+
+    /// Send a batch of mutations to be processed asynchronously.
+    ///
+    /// This method returns immediately after enqueueing the mutations.
+    /// Use `flush()` to wait for mutations to be committed, or use
+    /// `send_sync()` to send and wait in one call.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Fire-and-forget (high throughput)
+    /// writer.send(vec![AddNode { ... }.into()]).await?;
+    /// writer.send(vec![AddEdge { ... }.into()]).await?;
+    ///
+    /// // Wait for all to be committed
+    /// writer.flush().await?;
     /// ```
     pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()> {
         self.sender
             .send(mutations)
             .await
             .context("Failed to send mutations to writer queue")
+    }
+
+    /// Flush all pending mutations and wait for commit.
+    ///
+    /// Returns when all mutations sent before this call are committed
+    /// to RocksDB and visible to readers.
+    ///
+    /// # Fulltext Consistency
+    ///
+    /// This method only guarantees **graph (RocksDB) consistency**.
+    /// Fulltext indexing continues asynchronously and may not be complete
+    /// when this method returns.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Send mutations
+    /// writer.send(vec![AddNode { ... }.into()]).await?;
+    /// writer.send(vec![AddEdge { ... }.into()]).await?;
+    ///
+    /// // Wait for all to be committed
+    /// writer.flush().await?;
+    ///
+    /// // Now safe to read
+    /// let node = NodeById::new(id).run(&reader, timeout).await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The writer channel is closed
+    /// - The consumer task has panicked or been dropped
+    pub async fn flush(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+
+        // Send flush marker through the same channel as mutations
+        self.sender
+            .send(vec![Mutation::Flush(FlushMarker::new(tx))])
+            .await
+            .context("Failed to send flush marker - channel closed")?;
+
+        // Wait for consumer to process it
+        rx.await
+            .context("Flush failed - consumer dropped completion channel")?;
+
+        Ok(())
+    }
+
+    /// Send mutations and wait for commit.
+    ///
+    /// This is a convenience method equivalent to `send()` followed by `flush()`.
+    /// Returns when all mutations are visible to readers.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Send and wait in one call
+    /// writer.send_sync(vec![
+    ///     AddNode { ... }.into(),
+    ///     AddEdge { ... }.into(),
+    /// ]).await?;
+    ///
+    /// // Immediately visible
+    /// let node = NodeById::new(id).run(&reader, timeout).await?;
+    /// ```
+    pub async fn send_sync(&self, mutations: Vec<Mutation>) -> Result<()> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
+        self.send(mutations).await?;
+        self.flush().await
     }
 
     /// Check if the writer is still active (receiver hasn't been dropped)
@@ -310,21 +509,47 @@ impl<P: Processor> Consumer<P> {
                         "Processing UpdateEdgeWeight"
                     );
                 }
+                Mutation::Flush(_) => {
+                    tracing::debug!("Processing Flush marker");
+                }
             }
         }
 
         // Process all mutations in a single call
+        // (Flush markers are no-ops in storage but are included for ordering)
         self.processor.process_mutations(mutations).await?;
+
+        // After successful commit, signal completion for any flush markers
+        // This guarantees that all mutations before the flush are now visible to readers
+        for mutation in mutations {
+            if let Mutation::Flush(marker) = mutation {
+                if let Some(completion) = marker.take_completion() {
+                    // Signal that flush is complete - ignore send errors
+                    // (receiver may have been dropped if caller timed out)
+                    let _ = completion.send(());
+                    tracing::debug!("Flush completion signaled");
+                }
+            }
+        }
 
         // Forward the batch to the next consumer in the chain if configured
         // This is a best-effort send - if the buffer is full, we log and continue
+        // Note: We filter out Flush markers when forwarding - they are local to this consumer
         if let Some(sender) = &self.next {
-            if let Err(e) = sender.try_send(mutations.to_vec()) {
-                tracing::warn!(
-                    err = %e,
-                    count = mutations.len(),
-                    "[BUFFER FULL] Next consumer busy, dropping mutations"
-                );
+            let non_flush_mutations: Vec<_> = mutations
+                .iter()
+                .filter(|m| !m.is_flush())
+                .cloned()
+                .collect();
+
+            if !non_flush_mutations.is_empty() {
+                if let Err(e) = sender.try_send(non_flush_mutations) {
+                    tracing::warn!(
+                        err = %e,
+                        count = mutations.len(),
+                        "[BUFFER FULL] Next consumer busy, dropping mutations"
+                    );
+                }
             }
         }
 
@@ -346,10 +571,9 @@ pub fn spawn_consumer<P: Processor + 'static>(
 // ============================================================================
 
 use std::path::Path;
-use std::sync::Arc;
 use tokio::task::JoinHandle;
 
-use super::{Graph, Storage};
+use super::Graph;
 
 /// Create a new graph mutation consumer
 pub fn create_mutation_consumer(
