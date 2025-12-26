@@ -8,11 +8,11 @@
 
 ## 1. Executive Summary
 
-The proposed evolution from the current Proof-of-Concept (POC) to a Hybrid, Billion-Scale architecture is **sound and well-reasoned**, specifically regarding the transition to **RaBitQ** to satisfy the critical `DATA-1` (no pre-training) constraint.
+The proposed evolution from the current Proof-of-Concept (POC) to a Hybrid, Billion-Scale architecture is **sound and well-reasoned**, specifically regarding the transition to **RaBitQ** to satisfy the critical [`DATA-1`](./REQUIREMENTS.md#data-1) (no pre-training) constraint.
 
 The current POC implementation serves its purpose as a baseline but confirms that a naive RocksDB-backed approach (with per-insert flushing) cannot meet the throughput targets (40 insert/s vs 5,000 insert/s target).
 
-**Key Endorsement:** The **[HNSW2](./HNSW2.md) + [RaBitQ](./HYBRID.md)** combination is the most viable path to meeting the 1B scale requirement within the < 64GB RAM constraint while adhering to `DATA-1`.
+**Key Endorsement:** The **[HNSW2](./HNSW2.md) + [RaBitQ](./HYBRID.md)** combination is the most viable path to meeting the 1B scale requirement within the < 64GB RAM constraint while adhering to [`DATA-1`](./REQUIREMENTS.md#data-1).
 
 **Key Risk:** The **ID Mapping (UUID ↔ u32)** required for HNSW2 and bitsets is a significant architectural bottleneck that needs careful design to avoid blowing the memory budget or killing latency.
 
@@ -24,11 +24,11 @@ The requirements defined in [REQUIREMENTS.md](./REQUIREMENTS.md) are ambitious b
 
 | Requirement | Feasibility | Comment |
 |-------------|-------------|---------|
-| **SCALE-1 (1B Vectors)** | **High** | Achievable only with disk-based storage and compression (RaBitQ). |
-| **SCALE-3 (< 64GB RAM)** | **Medium/High Risk** | Pure vectors + graph fits, but **ID Mapping** and **Bloom Filters** will eat significantly into this budget. |
-| **DATA-1 (No Training)** | **Strict** | Correctly disqualifies standard PQ, ScaNN, and cluster-based IVF (unless random projection is used). |
-| **LAT-1 (< 20ms Search)** | **High** | Achievable with HNSW navigation + SIMD distance. |
-| **THR-1 (5k Insert/s)** | **Medium** | Requires moving away from synchronous flushing. The `WriteBatchWithIndex` proposal in HNSW2 is the correct solution. |
+| [**SCALE-1**](./REQUIREMENTS.md#scale-1) (1B Vectors) | **High** | Achievable only with disk-based storage and compression (RaBitQ). |
+| [**SCALE-3**](./REQUIREMENTS.md#scale-3) (< 64GB RAM) | **Medium/High Risk** | Pure vectors + graph fits, but **ID Mapping** and **Bloom Filters** will eat significantly into this budget. |
+| [**DATA-1**](./REQUIREMENTS.md#data-1) (No Training) | **Strict** | Correctly disqualifies standard PQ, ScaNN, and cluster-based IVF (unless random projection is used). |
+| [**LAT-1**](./REQUIREMENTS.md#lat-1) (< 20ms Search) | **High** | Achievable with HNSW navigation + SIMD distance. |
+| [**THR-1**](./REQUIREMENTS.md#thr-1) (5k Insert/s) | **Medium** | Requires moving away from synchronous flushing. The `WriteBatchWithIndex` proposal in HNSW2 is the correct solution. |
 
 ---
 
@@ -46,11 +46,11 @@ The requirements defined in [REQUIREMENTS.md](./REQUIREMENTS.md) are ambitious b
 *   **Risk:** The translation layer between external UUIDs and internal u32 IDs is a critical path.
 
 ### 3.3 IVFPQ (Phase 3) - **Optional / Low Priority**
-*   **Critique:** Standard IVF-PQ requires training centroids (k-means), which violates `DATA-1`. While `IVFPQ.md` mentions it as "optional," it introduces a dual-system architecture (RocksDB + GPU Index) that significantly increases operational complexity.
+*   **Critique:** Standard IVF-PQ requires training centroids (k-means), which violates [`DATA-1`](./REQUIREMENTS.md#data-1). While `IVFPQ.md` mentions it as "optional," it introduces a dual-system architecture (RocksDB + GPU Index) that significantly increases operational complexity.
 *   **Recommendation:** Deprioritize this phase. Focus resources on making the CPU-based `HNSW2 + RaBitQ` fast enough. Only pursue GPU acceleration if CPU metrics fall short *after* optimization, and even then, ensure the quantization method is training-free.
 
 ### 3.4 HYBRID (Phase 4)
-*   **Evolution:** The shift from standard PQ to **RaBitQ** (Random Binary Quantization) in the design is the correct move for `DATA-1` compliance.
+*   **Evolution:** The shift from standard PQ to **RaBitQ** (Random Binary Quantization) in the design is the correct move for [`DATA-1`](./REQUIREMENTS.md#data-1) compliance.
 *   **Architecture:** The "Navigation (HNSW) -> Compressed (RaBitQ) -> Exact (Disk)" funnel is a standard, proven pattern for disk-based vector search (similar to SPANN/DiskANN).
 
 ---
@@ -67,7 +67,7 @@ The analysis in [PERF.md](./PERF.md) is thorough.
 
 ## 5. Critical Risks & Feasibility Analysis
 
-### 5.1 The ID Mapping Problem (SCALE-3 Risk)
+### 5.1 The ID Mapping Problem ([SCALE-3](./REQUIREMENTS.md#scale-3) Risk)
 At 1 Billion vectors, mapping 16-byte UUIDs to 4-byte u32 IDs is expensive.
 *   **In-Memory HashMap:** 1B * (16 + 4 + overhead) ≈ 32GB+. This consumes **50% of your entire memory budget**.
 *   **RocksDB Lookup:** Adds a disk seek (or block cache hit) to *every* insert and search result.
@@ -174,10 +174,10 @@ The implementation should proceed in strict order of dependency and risk.
 **Goal:** Solve the throughput bottleneck.
 1.  **Merge Operators:** Implement RocksDB Merge Operator for `RoaringBitmap`.
 2.  **Core HNSW:** Port insert/search logic to use `u32` IDs and `motlie_db::Transaction`.
-3.  **Validation:** Verify `REC-1` (Recall) and `THR-1` (>5k inserts/s) on mid-sized datasets (10M).
+3.  **Validation:** Verify [`REC-1`](./REQUIREMENTS.md#rec-1) (Recall) and [`THR-1`](./REQUIREMENTS.md#thr-1) (>5k inserts/s) on mid-sized datasets (10M).
 
 ### Phase 3: RaBitQ & Scale (Weeks 5-6)
-**Goal:** Solve the storage/memory bottleneck for 1B scale (`DATA-1`).
+**Goal:** Solve the storage/memory bottleneck for 1B scale ([`DATA-1`](./REQUIREMENTS.md#data-1)).
 1.  **RaBitQ Codec:** Implement random rotation and binarization.
 2.  **Storage:** Add `binary_codes` Column Family.
 3.  **Search Pipeline:** Implement Hamming distance pre-filter + Exact Re-ranking.
@@ -230,10 +230,10 @@ Instead of storing vectors in RocksDB (Row-based), consider a simple append-only
 
 | Gemini Recommendation | Alignment | Comment |
 |----------------------|-----------|---------|
-| HNSW2 + RaBitQ as primary path | ✅ **Full Agreement** | Correct given DATA-1 constraint |
+| HNSW2 + RaBitQ as primary path | ✅ **Full Agreement** | Correct given [DATA-1](./REQUIREMENTS.md#data-1) constraint |
 | ID Mapper as critical risk | ✅ **Full Agreement** | Must prototype early |
 | Transaction API over WriteBatchWithIndex | ✅ **Full Agreement** | Already noted in HNSW2.md header |
-| Deprioritize IVFPQ (Phase 3) | ✅ **Full Agreement** | GPU adds complexity, violates DATA-1 |
+| Deprioritize IVFPQ (Phase 3) | ✅ **Full Agreement** | GPU adds complexity, violates [DATA-1](./REQUIREMENTS.md#data-1) |
 | Phased implementation roadmap | ✅ **Full Agreement** | Risk-first ordering is correct |
 
 ---

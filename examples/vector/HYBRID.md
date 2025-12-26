@@ -30,15 +30,15 @@ This phase is the culmination of all prior work, achieving:
 
 | Requirement | Target | Addressed By |
 |-------------|--------|--------------|
-| **SCALE-1** | 1 billion vectors | PQ compression (8 bytes/vector) |
-| **SCALE-3** | < 64 GB RAM at 1B | In-memory HNSW nav (~50MB) + PQ (8GB) |
-| **LAT-4** | < 10ms P99 insert | Async graph updater |
-| **LAT-3** | < 100ms P99 search at 1B | HNSW navigation + PQ re-rank |
-| **REC-2** | > 95% recall at 1B | Exact distance re-ranking |
-| **THR-1** | > 5,000 inserts/s | Batched async updates |
-| **THR-4** | > 100 QPS at 1B | SIMD PQ distance |
-| **STOR-4** | PQ compression | 512x compression |
-| **STOR-5** | SIMD distance | AVX2/AVX-512 |
+| [**SCALE-1**](./REQUIREMENTS.md#scale-1) | 1 billion vectors | PQ compression (8 bytes/vector) |
+| [**SCALE-3**](./REQUIREMENTS.md#scale-3) | < 64 GB RAM at 1B | In-memory HNSW nav (~50MB) + PQ (8GB) |
+| [**LAT-4**](./REQUIREMENTS.md#lat-4) | < 10ms P99 insert | Async graph updater |
+| [**LAT-3**](./REQUIREMENTS.md#lat-3) | < 100ms P99 search at 1B | HNSW navigation + PQ re-rank |
+| [**REC-2**](./REQUIREMENTS.md#rec-2) | > 95% recall at 1B | Exact distance re-ranking |
+| [**THR-1**](./REQUIREMENTS.md#thr-1) | > 5,000 inserts/s | Batched async updates |
+| [**THR-4**](./REQUIREMENTS.md#thr-4) | > 100 QPS at 1B | SIMD PQ distance |
+| [**STOR-4**](./REQUIREMENTS.md#stor-4) | PQ compression | 512x compression |
+| [**STOR-5**](./REQUIREMENTS.md#stor-5) | SIMD distance | AVX2/AVX-512 |
 
 See [REQUIREMENTS.md](./REQUIREMENTS.md) for full requirement definitions.
 
@@ -48,12 +48,12 @@ See [REQUIREMENTS.md](./REQUIREMENTS.md) for full requirement definitions.
 
 This document proposes a hybrid architecture combining:
 - **HNSW2** for navigation layer (small, fast, memory-resident)
-- **RaBitQ** for training-free binary compression (32x compression, DATA-1 compliant)
+- **RaBitQ** for training-free binary compression (32x compression, [DATA-1](./REQUIREMENTS.md#data-1) compliant)
 - **RocksDB** for durability and efficient disk access
 - **Async graph updater** for decoupling insert latency from graph quality
 
-> **DATA-1 Constraint**: The original design proposed Product Quantization (PQ), which requires
-> training on representative data. Per [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md), motlie_db
+> **[DATA-1](./REQUIREMENTS.md#data-1) Constraint**: The original design proposed Product Quantization (PQ), which requires
+> training on representative data. Per [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md#data-1), motlie_db
 > has no pre-training data available. This document has been updated to use **RaBitQ** instead,
 > which provides training-free compression with theoretical guarantees.
 
@@ -1069,7 +1069,7 @@ Key improvements:
 
 ---
 
-## DATA-1 Modification: RaBitQ Instead of PQ
+## [DATA-1](./REQUIREMENTS.md#data-1) Modification: RaBitQ Instead of PQ
 
 ### The Problem with PQ
 
@@ -1088,7 +1088,7 @@ Original Design (PQ):
       code = [nearest_centroid(subvector_i) for i in 1..M]
 ```
 
-**Problem**: Step 1-3 require representative training data, violating DATA-1.
+**Problem**: Step 1-3 require representative training data, violating [DATA-1](./REQUIREMENTS.md#data-1).
 
 ### The RaBitQ Solution
 
@@ -1154,7 +1154,7 @@ From [RaBitQ (SIGMOD 2024)](https://arxiv.org/abs/2405.12497):
 | **Total RAM** | **~10 GB** | **~18 GB** | +8 GB |
 | Training Required | Yes | **No** | Critical difference |
 
-**Trade-off**: RaBitQ uses 2x memory for compressed codes, but requires zero training. For DATA-1 compliance, this is acceptable.
+**Trade-off**: RaBitQ uses 2x memory for compressed codes, but requires zero training. For [DATA-1](./REQUIREMENTS.md#data-1) compliance, this is acceptable.
 
 ### Search Path Modification
 
@@ -1276,7 +1276,7 @@ pub unsafe fn hamming_distance_simd(a: &[u8], b: &[u8]) -> u32 {
 | Distance time | ~200 ns (table) | ~50 ns (popcount) | SIMD popcount faster |
 | Memory at 1B | 8 GB | 16 GB | 2x for codes |
 | QPS at 1B | 500-2,000 | **1,000-5,000** | Faster distance |
-| Training time | Hours | **0** | Critical for DATA-1 |
+| Training time | Hours | **0** | Critical for [DATA-1](./REQUIREMENTS.md#data-1) |
 
 ### Recall Considerations
 
@@ -1302,7 +1302,7 @@ For scenarios where slightly more memory is acceptable for higher recall:
 | 2 bits | 32 bytes | ~85% | None |
 | 4 bits | 64 bytes | ~92% | None |
 
-Extended-RaBitQ also uses random rotations, maintaining DATA-1 compliance.
+Extended-RaBitQ also uses random rotations, maintaining [DATA-1](./REQUIREMENTS.md#data-1) compliance.
 
 ---
 
