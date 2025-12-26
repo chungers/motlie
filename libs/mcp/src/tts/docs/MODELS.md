@@ -2,19 +2,57 @@
 
 This document captures research findings for local Text-to-Speech (TTS) models suitable for running on MacOS (Apple Silicon) and NVIDIA DGX Spark.
 
-## Executive Summary
+## Primary Engine: Fish Speech (fish-speech.rs)
+
+**Fish Speech is the recommended cross-platform TTS engine for motlie.**
+
+### Why Fish Speech?
+
+| Requirement | Fish Speech |
+|-------------|-------------|
+| **Native Rust** | ✅ Pure Rust via Candle.rs |
+| **Cross-platform** | ✅ MacOS (Metal) + Linux (CUDA) + CPU |
+| **No Python** | ✅ Single ~15MB static binary |
+| **Voice cloning** | ✅ 10-30 second reference audio |
+| **Quality** | ✅ State-of-the-art (0.008 WER, 0.004 CER) |
+| **OpenAI-compatible API** | ✅ `/v1/audio/speech` endpoint |
+
+### Cross-Platform Performance
+
+| Platform | Build Command | Real-time Factor |
+|----------|---------------|------------------|
+| **DGX Spark (CUDA)** | `cargo build --release --features cuda` | ~1:7 (7x faster) |
+| **MacOS (Apple Silicon)** | `cargo build --release --features metal` | ~1:3 (3x faster) |
+| **CPU fallback** | `cargo build --release` | ~1:1 (real-time) |
+
+### Key Correction: MacOS Support
+
+**Fish Speech fully supports MacOS with Metal acceleration via Candle.rs.**
+
+The official Python Fish Speech project notes "macOS coming soon", but this refers to the Python implementation only. The **Rust implementation (fish-speech.rs)** has full Metal support and is recommended for both MacOS and Linux:
+
+```bash
+# MacOS (Apple Silicon)
+cargo build --release --bin server --features metal
+
+# Linux (NVIDIA GPU)
+cargo build --release --bin server --features cuda
+```
+
+---
+
+## Model Comparison Summary
 
 | Model | Rust Native | Voice Cloning | Emotion Control | Best For |
 |-------|-------------|---------------|-----------------|----------|
-| **Fish Speech / OpenAudio** | Yes (Candle) | Yes (10-30s) | No | DGX Spark, highest quality |
-| **Chatterbox** | ONNX only | Yes (5-20s) | Yes | Emotion control, multilingual |
-| **Kokoro** | ONNX | No | No | Lightweight/edge devices |
-| **Piper** | C++ (ONNX) | No | No | Embedded, Raspberry Pi |
+| **Fish Speech / OpenAudio** | ✅ Yes (Candle) | ✅ Yes (10-30s) | ❌ No | **Primary choice** |
+| **Chatterbox** | ⚠️ ONNX only | ✅ Yes (5-20s) | ✅ Yes | Emotion control only |
+| **Kokoro** | ⚠️ ONNX | ❌ No | ❌ No | Lightweight/edge |
+| **Piper** | ⚠️ C++ (ONNX) | ❌ No | ❌ No | Embedded, RPi |
 
-**Recommended:**
-- **DGX Spark**: Fish Speech (fish-speech.rs) - native Rust, CUDA optimized
-- **MacOS**: Fish Speech (fish-speech.rs with Metal) - native Rust, ~3x real-time on M2
-- **If emotion control needed**: Chatterbox (ONNX)
+**Decision:**
+- **Default**: Fish Speech (cross-platform, native Rust, high quality)
+- **If emotion control required**: Chatterbox via ONNX (future consideration)
 
 ---
 
@@ -309,56 +347,101 @@ Lightweight neural TTS optimized for embedded and smart-home applications.
 
 ## Rust Integration Architecture
 
-### Recommended Structure
+### Integration Strategy: Fish Speech
+
+Fish Speech can be integrated in two ways:
+
+#### Option 1: HTTP Client (Recommended for Initial Implementation)
+
+Run fish-speech.rs as a sidecar server and call its OpenAI-compatible API:
+
+```rust
+use reqwest::Client;
+
+pub struct FishSpeechClient {
+    client: Client,
+    base_url: String,  // e.g., "http://localhost:3000"
+}
+
+impl FishSpeechClient {
+    pub async fn synthesize(&self, text: &str, voice: &str) -> anyhow::Result<Vec<u8>> {
+        let resp = self.client
+            .post(format!("{}/v1/audio/speech", self.base_url))
+            .json(&serde_json::json!({
+                "input": text,
+                "voice": voice,
+                "response_format": "wav",
+                "model": "tts-1"
+            }))
+            .send()
+            .await?;
+        Ok(resp.bytes().await?.to_vec())
+    }
+
+    pub async fn clone_voice(&self, name: &str, audio: &[u8], prompt: &str) -> anyhow::Result<()> {
+        // POST /v1/audio/encoding with multipart form
+        let form = reqwest::multipart::Form::new()
+            .text("id", name.to_string())
+            .text("prompt", prompt.to_string())
+            .part("file", reqwest::multipart::Part::bytes(audio.to_vec()));
+
+        self.client
+            .post(format!("{}/v1/audio/encoding", self.base_url))
+            .multipart(form)
+            .send()
+            .await?;
+        Ok(())
+    }
+}
+```
+
+#### Option 2: Embedded (Future)
+
+Vendor fish-speech.rs as a library dependency for single-binary deployment.
+
+### Module Structure
 
 ```
 libs/mcp/src/tts/
-├── mod.rs              # TTS trait + unified interface
-├── fish_speech.rs      # Fish Speech client (HTTP or embedded)
-├── chatterbox_onnx.rs  # Chatterbox via ONNX Runtime
-├── config.rs           # Engine configuration
+├── mod.rs              # Existing TTS module (macOS `say` command)
+├── types.rs            # Existing parameter types
+├── server.rs           # Existing MCP server
+├── fish_speech.rs      # NEW: Fish Speech HTTP client
 └── docs/
-    └── MODELS.md       # This document
+    ├── MODELS.md       # This document
+    └── LINUX.md        # Linux-specific notes
 ```
 
 ### Unified Trait
 
 ```rust
 #[async_trait]
-pub trait TtsEngine: Send + Sync {
-    /// Synthesize text to audio samples
+pub trait TtsBackend: Send + Sync {
+    /// Synthesize text to audio (WAV bytes)
     async fn synthesize(&self, text: &str, voice: &str) -> anyhow::Result<Vec<u8>>;
 
     /// Clone a voice from reference audio
-    async fn clone_voice(&self, name: &str, reference_audio: &[u8]) -> anyhow::Result<String>;
-
-    /// Check if engine supports emotion control
-    fn supports_emotion_control(&self) -> bool;
+    async fn clone_voice(&self, name: &str, reference_audio: &[u8], prompt: &str) -> anyhow::Result<String>;
 
     /// List available voices
     async fn list_voices(&self) -> anyhow::Result<Vec<String>>;
 }
 
-pub enum TtsEngineType {
-    FishSpeech,
-    ChatterboxOnnx,
-}
-
-pub struct TtsConfig {
-    pub engine: TtsEngineType,
-    pub endpoint: Option<String>,  // For HTTP mode
-    pub model_path: Option<String>, // For embedded mode
+pub enum TtsBackendType {
+    /// macOS system `say` command (current implementation)
+    MacOsSay,
+    /// Fish Speech via HTTP (cross-platform)
+    FishSpeech { endpoint: String },
 }
 ```
 
-### Platform Recommendations
+### Platform Deployment
 
-| Platform | Engine | Integration | Performance |
-|----------|--------|-------------|-------------|
-| DGX Spark (CUDA) | Fish Speech | fish-speech.rs (embedded) | ~1:7 real-time |
-| MacOS (Apple Silicon) | Fish Speech | fish-speech.rs with Metal | ~1:3 real-time |
-| MacOS (needs emotion) | Chatterbox | ONNX via `ort` crate | TBD |
-| Edge/Embedded | Kokoro | ONNX via `ort` crate | Real-time on CPU |
+| Platform | Backend | Deployment |
+|----------|---------|------------|
+| **DGX Spark** | Fish Speech | `fish-speech.rs --features cuda` as sidecar |
+| **MacOS** | Fish Speech | `fish-speech.rs --features metal` as sidecar |
+| **MacOS (fallback)** | MacOS Say | Built-in, no external dependencies |
 
 ---
 
@@ -375,27 +458,33 @@ pub struct TtsConfig {
 
 ## Decision Matrix
 
-### When to use Fish Speech
+### Use Fish Speech (Default Choice)
 
-- Need highest quality output
-- Running on NVIDIA GPU (DGX Spark)
-- Want native Rust without Python
-- Multilingual requirements
-- Voice cloning needed
+Fish Speech is the **primary TTS engine** for motlie because:
 
-### When to use Chatterbox
+- ✅ **Cross-platform**: Same codebase for MacOS (Metal) and DGX Spark (CUDA)
+- ✅ **Native Rust**: No Python dependencies, single binary deployment
+- ✅ **High quality**: State-of-the-art WER/CER scores
+- ✅ **Voice cloning**: Zero-shot cloning with 10-30s reference audio
+- ✅ **OpenAI-compatible**: Drop-in API compatibility
+- ✅ **Multilingual**: 8 languages supported
 
-- Need emotion control (unique feature)
-- 23-language requirement
-- Can tolerate ONNX complexity or Python sidecar
-- Want paralinguistic features ([laugh], [cough])
+### Consider Chatterbox (Future)
 
-### When to use Kokoro
+Only if emotion control is a hard requirement:
 
-- Resource-constrained environment
-- Browser deployment needed
-- Don't need voice cloning
-- Prioritize size over features
+- Unique emotion exaggeration control
+- Paralinguistic tags ([laugh], [cough], [chuckle])
+- 23 languages
+- **Trade-off**: Requires ONNX runtime or Python sidecar (no native Rust)
+
+### Consider Kokoro (Edge/Browser)
+
+For extremely resource-constrained environments:
+
+- 82M parameters (smallest)
+- Browser deployment via WebGPU
+- **Trade-off**: No voice cloning
 
 ---
 
