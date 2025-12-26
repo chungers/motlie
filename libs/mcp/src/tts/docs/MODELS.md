@@ -13,7 +13,8 @@ This document captures research findings for local Text-to-Speech (TTS) models s
 
 **Recommended:**
 - **DGX Spark**: Fish Speech (fish-speech.rs) - native Rust, CUDA optimized
-- **MacOS**: Fish Speech (Metal) or Chatterbox (ONNX) depending on emotion control needs
+- **MacOS**: Fish Speech (fish-speech.rs with Metal) - native Rust, ~3x real-time on M2
+- **If emotion control needed**: Chatterbox (ONNX)
 
 ---
 
@@ -67,6 +68,20 @@ GitHub: https://github.com/EndlessReform/fish-speech.rs
 | NVIDIA CUDA | `cargo build --release --features cuda` |
 | Apple Silicon | `cargo build --release --features metal` |
 | CPU | `cargo build --release` |
+
+**Performance (fish-speech.rs):**
+| Platform | Real-time Factor | Notes |
+|----------|------------------|-------|
+| RTX 4090 (CUDA) | ~1:7 | 7x faster than real-time playback |
+| M2 MacBook Air (Metal) | ~1:3 | 3x faster than real-time playback |
+| CPU | ~1:1 | Approximately real-time |
+
+**Candle vs PyTorch (general benchmarks):**
+| Metric | Candle | PyTorch |
+|--------|--------|---------|
+| Inference speed | 35-47% faster | baseline |
+| Peak RAM | 3.2 GB | 4.7 GB |
+| Memory growth | 18 MB/min | 42 MB/min |
 
 **API Endpoints (OpenAI-compatible):**
 
@@ -338,12 +353,12 @@ pub struct TtsConfig {
 
 ### Platform Recommendations
 
-| Platform | Engine | Integration |
-|----------|--------|-------------|
-| DGX Spark (CUDA) | Fish Speech | fish-speech.rs (embedded) or HTTP sidecar |
-| MacOS (Apple Silicon) | Fish Speech | fish-speech.rs with Metal |
-| MacOS (needs emotion) | Chatterbox | ONNX via `ort` crate |
-| Edge/Embedded | Kokoro | ONNX via `ort` crate |
+| Platform | Engine | Integration | Performance |
+|----------|--------|-------------|-------------|
+| DGX Spark (CUDA) | Fish Speech | fish-speech.rs (embedded) | ~1:7 real-time |
+| MacOS (Apple Silicon) | Fish Speech | fish-speech.rs with Metal | ~1:3 real-time |
+| MacOS (needs emotion) | Chatterbox | ONNX via `ort` crate | TBD |
+| Edge/Embedded | Kokoro | ONNX via `ort` crate | Real-time on CPU |
 
 ---
 
@@ -393,3 +408,5 @@ pub struct TtsConfig {
 - ort crate: https://ort.pyke.io/
 - mlx-rs: https://github.com/oxideai/mlx-rs
 - DGX Spark: https://www.nvidia.com/en-us/products/workstations/dgx-spark/
+- Candle vs PyTorch comparison: https://markaicode.com/rust-ai-frameworks-candle-pytorch-comparison-2025/
+- metal-candle: https://github.com/GarthDB/metal-candle
