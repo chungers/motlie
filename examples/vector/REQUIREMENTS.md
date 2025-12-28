@@ -18,11 +18,11 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 | ID | Requirement | Target | Priority |
 |----|-------------|--------|----------|
-| **SCALE-1** | Maximum dataset size | 1 billion vectors | P0 |
-| **SCALE-2** | Vector dimensionality | 128-1024 dimensions | P0 |
-| **SCALE-3** | Memory footprint at 1B | < 64 GB RAM | P0 |
-| **SCALE-4** | Disk footprint at 1B | < 500 GB | P1 |
-| **SCALE-5** | Minimum viable scale | 1M vectors | P0 |
+| <a id="scale-1"></a>**SCALE-1** | Maximum dataset size | 1 billion vectors | P0 |
+| <a id="scale-2"></a>**SCALE-2** | Vector dimensionality | 128-1024 dimensions | P0 |
+| <a id="scale-3"></a>**SCALE-3** | Memory footprint at 1B | < 64 GB RAM | P0 |
+| <a id="scale-4"></a>**SCALE-4** | Disk footprint at 1B | < 500 GB | P1 |
+| <a id="scale-5"></a>**SCALE-5** | Minimum viable scale | 1M vectors | P0 |
 
 ### Scale Projections
 
@@ -42,11 +42,11 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 | ID | Requirement | Target | Priority |
 |----|-------------|--------|----------|
-| **LAT-1** | Search P50 latency at 1M | < 20 ms | P0 |
-| **LAT-2** | Search P99 latency at 1M | < 50 ms | P0 |
-| **LAT-3** | Search P99 latency at 1B | < 100 ms | P1 |
-| **LAT-4** | Insert latency (sync) | < 10 ms P99 | P0 |
-| **LAT-5** | Insert latency (async) | < 1 ms P99 | P1 |
+| <a id="lat-1"></a>**LAT-1** | Search P50 latency at 1M | < 20 ms | P0 |
+| <a id="lat-2"></a>**LAT-2** | Search P99 latency at 1M | < 50 ms | P0 |
+| <a id="lat-3"></a>**LAT-3** | Search P99 latency at 1B | < 100 ms | P1 |
+| <a id="lat-4"></a>**LAT-4** | Insert latency (sync) | < 10 ms P99 | P0 |
+| <a id="lat-5"></a>**LAT-5** | Insert latency (async) | < 1 ms P99 | P1 |
 
 ### Current Latency Results
 
@@ -66,10 +66,10 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 | ID | Requirement | Target | Priority |
 |----|-------------|--------|----------|
-| **REC-1** | Recall@10 at 1M scale | > 95% | P0 |
-| **REC-2** | Recall@10 at 1B scale | > 95% | P1 |
-| **REC-3** | Recall@10 on random data | > 99% | P0 |
-| **REC-4** | Recall@10 on SIFT data | > 90% | P0 |
+| <a id="rec-1"></a>**REC-1** | Recall@10 at 1M scale | > 95% | P0 |
+| <a id="rec-2"></a>**REC-2** | Recall@10 at 1B scale | > 95% | P1 |
+| <a id="rec-3"></a>**REC-3** | Recall@10 on random data | > 99% | P0 |
+| <a id="rec-4"></a>**REC-4** | Recall@10 on SIFT data | > 90% | P0 |
 
 ### Current Recall Results
 
@@ -98,11 +98,11 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 | ID | Requirement | Target | Priority |
 |----|-------------|--------|----------|
-| **THR-1** | Insert throughput (online) | > 5,000 vec/s | P0 |
-| **THR-2** | Insert throughput (batch) | > 10,000 vec/s | P1 |
-| **THR-3** | Search QPS at 1M | > 500 QPS | P0 |
-| **THR-4** | Search QPS at 1B | > 100 QPS | P1 |
-| **THR-5** | Build throughput at 1M | > 1,000 vec/s | P1 |
+| <a id="thr-1"></a>**THR-1** | Insert throughput (online) | > 5,000 vec/s | P0 |
+| <a id="thr-2"></a>**THR-2** | Insert throughput (batch) | > 10,000 vec/s | P1 |
+| <a id="thr-3"></a>**THR-3** | Search QPS at 1M | > 500 QPS | P0 |
+| <a id="thr-4"></a>**THR-4** | Search QPS at 1B | > 100 QPS | P1 |
+| <a id="thr-5"></a>**THR-5** | Build throughput at 1M | > 1,000 vec/s | P1 |
 
 ### Current Throughput Results
 
@@ -125,31 +125,31 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 | ID | Requirement | Status | Priority |
 |----|-------------|--------|----------|
-| **FUNC-1** | Vector insert (online) | Partial | P0 |
-| **FUNC-2** | K-NN search | Complete | P0 |
-| **FUNC-3** | Vector delete | Not started | P1 |
-| **FUNC-4** | Vector update | Not started | P2 |
-| **FUNC-5** | Batch insert | Not started | P1 |
-| **FUNC-6** | Filtered search | Not started | P2 |
+| <a id="func-1"></a>**FUNC-1** | Vector insert (online) | Partial | P0 |
+| <a id="func-2"></a>**FUNC-2** | K-NN search | Complete | P0 |
+| <a id="func-3"></a>**FUNC-3** | Vector delete | Not started | P1 |
+| <a id="func-4"></a>**FUNC-4** | Vector update | Not started | P2 |
+| <a id="func-5"></a>**FUNC-5** | Batch insert | Not started | P1 |
+| <a id="func-6"></a>**FUNC-6** | Filtered search | Not started | P2 |
 
 ### 5.2 Consistency Requirements
 
 | ID | Requirement | Status | Priority |
 |----|-------------|--------|----------|
-| **CON-1** | Read-after-write consistency | Complete | P0 |
-| **CON-2** | Atomic multi-edge transactions | Not started | P1 |
-| **CON-3** | Concurrent read during write | Not started | P1 |
-| **CON-4** | Snapshot isolation for search | Not started | P2 |
+| <a id="con-1"></a>**CON-1** | Read-after-write consistency | Complete | P0 |
+| <a id="con-2"></a>**CON-2** | Atomic multi-edge transactions | Not started | P1 |
+| <a id="con-3"></a>**CON-3** | Concurrent read during write | Not started | P1 |
+| <a id="con-4"></a>**CON-4** | Snapshot isolation for search | Not started | P2 |
 
 ### 5.3 Storage Requirements
 
 | ID | Requirement | Status | Priority |
 |----|-------------|--------|----------|
-| **STOR-1** | Disk-based operation (no full memory load) | Complete | P0 |
-| **STOR-2** | RocksDB persistence | Complete | P0 |
-| **STOR-3** | Crash recovery | Complete | P0 |
-| **STOR-4** | Vector compression (training-free) | Not started | P1 |
-| **STOR-5** | SIMD distance computation | Not started | P1 |
+| <a id="stor-1"></a>**STOR-1** | Disk-based operation (no full memory load) | Complete | P0 |
+| <a id="stor-2"></a>**STOR-2** | RocksDB persistence | Complete | P0 |
+| <a id="stor-3"></a>**STOR-3** | Crash recovery | Complete | P0 |
+| <a id="stor-4"></a>**STOR-4** | Vector compression (training-free) | Not started | P1 |
+| <a id="stor-5"></a>**STOR-5** | SIMD distance computation | Not started | P1 |
 
 **Note on STOR-4**: Due to DATA-1 constraint below, compression must be training-free. See Section 5.4.
 
@@ -157,9 +157,9 @@ This document defines the ground truth requirements for motlie_db vector search.
 
 | ID | Requirement | Description | Priority |
 |----|-------------|-------------|----------|
-| **DATA-1** | No pre-training data | System must operate without representative training data | **P0** |
-| **DATA-2** | Unknown data distribution | Cannot assume data distribution (clustered vs uniform) | **P0** |
-| **DATA-3** | Incremental operation | All algorithms must work incrementally (online) | P0 |
+| <a id="data-1"></a>**DATA-1** | No pre-training data | System must operate without representative training data | **P0** |
+| <a id="data-2"></a>**DATA-2** | Unknown data distribution | Cannot assume data distribution (clustered vs uniform) | **P0** |
+| <a id="data-3"></a>**DATA-3** | Incremental operation | All algorithms must work incrementally (online) | P0 |
 
 **Rationale**: motlie_db is a general-purpose graph database. Vector search must work with any embedding type without prior knowledge of the data distribution. This is fundamentally different from purpose-built vector databases that can pre-train on known datasets.
 
@@ -223,19 +223,19 @@ See **[ALTERNATIVES.md](./ALTERNATIVES.md)** for detailed analysis of training-f
 
 | ID | Use Case | Scale | Latency | Recall | Priority |
 |----|----------|-------|---------|--------|----------|
-| **UC-1** | Semantic document search | 1-10M | < 50ms | > 90% | P0 |
-| **UC-2** | Image similarity search | 1-100M | < 100ms | > 85% | P1 |
-| **UC-3** | Real-time recommendations | 100M-1B | < 50ms | > 80% | P1 |
-| **UC-4** | RAG vector store | 1-10M | < 20ms | > 95% | P0 |
+| <a id="uc-1"></a>**UC-1** | Semantic document search | 1-10M | < 50ms | > 90% | P0 |
+| <a id="uc-2"></a>**UC-2** | Image similarity search | 1-100M | < 100ms | > 85% | P1 |
+| <a id="uc-3"></a>**UC-3** | Real-time recommendations | 100M-1B | < 50ms | > 80% | P1 |
+| <a id="uc-4"></a>**UC-4** | RAG vector store | 1-10M | < 20ms | > 95% | P0 |
 
 ### 7.2 Operational Use Cases
 
 | ID | Use Case | Requirement | Priority |
 |----|----------|-------------|----------|
-| **UC-5** | Online index updates | Insert without rebuild | P0 |
-| **UC-6** | Index persistence | Survive restarts | P0 |
-| **UC-7** | Horizontal scaling | Shard across nodes | P2 |
-| **UC-8** | Index backup/restore | Point-in-time recovery | P2 |
+| <a id="uc-5"></a>**UC-5** | Online index updates | Insert without rebuild | P0 |
+| <a id="uc-6"></a>**UC-6** | Index persistence | Survive restarts | P0 |
+| <a id="uc-7"></a>**UC-7** | Horizontal scaling | Shard across nodes | P2 |
+| <a id="uc-8"></a>**UC-8** | Index backup/restore | Point-in-time recovery | P2 |
 
 ---
 
@@ -283,7 +283,81 @@ All benchmarks must use:
 
 ---
 
-## 10. Traceability Matrix
+## 10. Architecture Assumptions
+
+These assumptions shape the implementation architecture and are derived from project owner decisions.
+
+### 10.1 Temporal Filtering Strategy
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| <a id="arch-1"></a>**ARCH-1** | Vector index is **temporal-agnostic** | Simplifies index, avoids sync complexity |
+| <a id="arch-2"></a>**ARCH-2** | Temporal visibility enforced during re-ranking | Graph RocksDB is source of truth |
+| <a id="arch-3"></a>**ARCH-3** | Over-fetch pattern for filtered queries | Return larger candidate set, filter by `TemporalRange` |
+
+**Design Pattern:**
+
+```
+Vector Search (ef=200) → ID Mapping → Temporal Filter (Graph) → Re-rank → Top-K
+```
+
+**Trade-off Analysis:**
+- Additional O(1) lookup per candidate after ID mapping (~5μs per candidate)
+- For 200 candidates: ~1ms overhead for ID mapping + ~1-2ms for temporal MultiGet
+- Acceptable given recall > latency preference
+
+**Benefits:**
+1. Vector index stays simple and fast
+2. Single source of truth (graph) for visibility
+3. Extensible to other filters (ACL, soft-delete)
+4. Consistent with Tantivy pattern (fulltext defers to graph for visibility)
+
+### 10.2 Internal ID Strategy
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| <a id="arch-4"></a>**ARCH-4** | Vector IDs are **internal** (similar to Tantivy `doc_id`) | Memory efficiency, roaring bitmap compatibility |
+| <a id="arch-5"></a>**ARCH-5** | Bi-directional mapping: internal u32 ↔ ULID | Required for graph integration |
+| <a id="arch-6"></a>**ARCH-6** | Reverse mapping (u32 → ULID) is hot path | Optimized via dense array or mmap |
+
+**Implications:**
+- Vector index uses 4-byte u32 IDs internally (required for RoaringBitmap)
+- API accepts/returns ULIDs; translation is internal
+- Forward mapping (ULID → u32): RocksDB-backed, insert path
+- Reverse mapping (u32 → ULID): Memory-mapped dense array, search path
+
+### 10.3 Hardware Requirements
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| <a id="arch-7"></a>**ARCH-7** | **SSD required** for production at 1B scale | Re-ranking latency, cold-cache performance |
+| <a id="arch-8"></a>**ARCH-8** | 64 GB RAM constraint includes all components | Vector index + graph block cache + ID mapping |
+
+### 10.4 Performance Trade-offs
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| <a id="arch-9"></a>**ARCH-9** | **Recall > Latency** | Quality of results prioritized over speed |
+| <a id="arch-10"></a>**ARCH-10** | Target 98%+ recall, accept 30-50ms latency | Acceptable for semantic search use cases |
+
+**Parameter Implications:**
+
+| Parameter | Latency-Optimized | Recall-Optimized (Chosen) |
+|-----------|-------------------|---------------------------|
+| ef_search | 50-100 | 200-500 |
+| rerank_count | 20-50 | 100-200 |
+| Extended-RaBitQ | 1 bit | 2-4 bits |
+
+### 10.5 Vector Scope
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| <a id="arch-11"></a>**ARCH-11** | Vectors represent node/edge summaries and fragments | Graph entities are the primary data model |
+| <a id="arch-12"></a>**ARCH-12** | Graph RocksDB is source of truth for entity visibility | Temporal range, existence, relationships |
+
+---
+
+## 11. Traceability Matrix
 
 | Requirement | HYBRID.md Section | PERF.md Section | Status |
 |-------------|-------------------|-----------------|--------|
@@ -304,3 +378,5 @@ All benchmarks must use:
 | 2025-12-24 | Initial requirements document | Claude |
 | 2025-12-24 | Added 1M benchmark results | Claude |
 | 2025-12-24 | Linked to HYBRID.md architecture | Claude |
+| 2025-12-25 | Added Section 10: Architecture Assumptions (ARCH-1 to ARCH-12) | Claude Opus 4.5 |
+| 2025-12-25 | Added anchor IDs to all requirements for cross-document linking | Claude Opus 4.5 |
