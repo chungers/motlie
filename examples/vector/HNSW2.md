@@ -4,7 +4,11 @@
 
 This document explores adapting [hannoy](https://github.com/nnethercott/hannoy)'s LMDB-backed HNSW design to RocksDB, focusing on compressed bitmap edge storage, zero-copy patterns, and efficient online updates.
 
-**Last Updated**: 2025-12-24
+**Last Updated**: 2025-12-25
+
+> **Note**: The Transaction API for read-your-writes is already implemented in
+> `libs/db/src/graph/transaction.rs`. This obviates the need for `WriteBatchWithIndex`
+> mentioned in hannoy's design. HNSW2 should use the existing Transaction API directly.
 
 ---
 
@@ -30,10 +34,10 @@ This phase focuses on achieving:
 
 | Requirement | Target | Current ([POC.md](./POC.md)) | HNSW2 Target |
 |-------------|--------|------------------|--------------|
-| **THR-1** | > 5,000 inserts/s | 40/s | 5,000-10,000/s |
-| **THR-3** | > 500 QPS | 47 QPS | 500-1,000 QPS |
-| **REC-1** | > 95% recall@10 | 95.3% | > 95% |
-| **SCALE-3** | < 64 GB at 1B | 4GB at 1M | ~10GB at 1M |
+| [**THR-1**](./REQUIREMENTS.md#thr-1) | > 5,000 inserts/s | 40/s | 5,000-10,000/s |
+| [**THR-3**](./REQUIREMENTS.md#thr-3) | > 500 QPS | 47 QPS | 500-1,000 QPS |
+| [**REC-1**](./REQUIREMENTS.md#rec-1) | > 95% recall@10 | 95.3% | > 95% |
+| [**SCALE-3**](./REQUIREMENTS.md#scale-3) | < 64 GB at 1B | 4GB at 1M | ~10GB at 1M |
 
 See [REQUIREMENTS.md](./REQUIREMENTS.md) for full requirement definitions.
 
@@ -108,7 +112,7 @@ Storage: ~50-200 bytes (compressed, depends on density)
 | **Compression** | None built-in | ZSTD, LZ4, etc. | RocksDB can compress vectors |
 | **Column Families** | Single namespace | Multiple CFs | RocksDB can isolate data types |
 | **Merge Operators** | None | Custom merge functions | RocksDB can update bitmaps atomically |
-| **Transactions** | Full ACID | WriteBatch, OptimisticTxn | Different consistency model |
+| **Transactions** | Full ACID | TransactionDB, WriteBatch | Full ACID via Transaction API |
 
 ### Key Challenge: No Memory Mapping
 
@@ -214,6 +218,114 @@ impl IdAllocator {
     }
 }
 ```
+
+---
+
+## Serialization Strategy
+
+HNSW2 uses different serialization strategies optimized for each data type:
+
+### Overview
+
+| Column Family | Data Type | Serialization | Rationale |
+|---------------|-----------|---------------|-----------|
+| `vectors` | `f32[dim]` | Raw bytes | Already minimal, no overhead |
+| `edges` | `RoaringBitmap` | Native roaring | Optimized compression + set ops |
+| `distances` | `f32` | Raw bytes (4 bytes) | Trivial size |
+| `node_meta` | Struct | **rkyv** | Zero-copy field access |
+| `graph_meta` | Struct | **rkyv** | Zero-copy field access |
+| `pending_updates` | Enum | Raw byte | Single byte marker |
+
+### Vectors: Raw Bytes
+
+Vectors are stored as raw `f32` arrays with no serialization overhead:
+
+```rust
+// Write
+let bytes: &[u8] = bytemuck::cast_slice(&vector);
+txn.put_cf(vectors_cf, &id.to_le_bytes(), bytes)?;
+
+// Read (zero-copy with PinnableSlice)
+let bytes = txn.get_cf(vectors_cf, &id.to_le_bytes())?;
+let vector: &[f32] = bytemuck::cast_slice(&bytes);
+```
+
+### Edges: Roaring Bitmap Native Serialization
+
+Roaring bitmaps have their own optimized format—do NOT use rkyv:
+
+```rust
+// Write
+let mut buf = Vec::new();
+bitmap.serialize_into(&mut buf)?;
+txn.put_cf(edges_cf, &key, &buf)?;
+
+// Read
+let bytes = txn.get_cf(edges_cf, &key)?;
+let bitmap = RoaringBitmap::deserialize_from(&bytes)?;
+```
+
+**Why not rkyv for edges?**
+- Roaring uses run-length encoding and container optimization
+- Access is via methods (`contains`, `iter`), not field access
+- Merge operators require roaring's native format
+
+### Metadata: rkyv Zero-Copy
+
+Metadata structures use rkyv for consistency with motlie_db hot CFs:
+
+```rust
+use rkyv::{Archive, Deserialize, Serialize};
+
+/// Per-node metadata (stored in node_meta CF)
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[archive(check_bytes)]
+pub struct NodeMeta {
+    pub max_layer: u8,
+    pub flags: u8,           // e.g., deleted, needs_repair
+    pub created_at: u64,     // Timestamp for debugging
+}
+
+/// Global graph metadata (stored in graph_meta CF)
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[archive(check_bytes)]
+pub struct GraphMeta {
+    pub entry_point: u32,
+    pub max_level: u8,
+    pub node_count: u64,
+    pub ef_construction: u16,
+    pub m: u16,
+    pub m_max: u16,
+}
+
+// Zero-copy read
+fn get_node_meta(txn: &Transaction, id: u32) -> Result<&ArchivedNodeMeta> {
+    let bytes = txn.get_cf(node_meta_cf, &id.to_le_bytes())?;
+    let archived = rkyv::check_archived_root::<NodeMeta>(&bytes)?;
+    Ok(archived)
+}
+
+// Write
+fn put_node_meta(txn: &mut Transaction, id: u32, meta: &NodeMeta) -> Result<()> {
+    let bytes = rkyv::to_bytes::<_, 64>(meta)?;
+    txn.put_cf(node_meta_cf, &id.to_le_bytes(), &bytes)?;
+    Ok(())
+}
+```
+
+### Why This Split?
+
+| Concern | Vectors | Edges | Metadata |
+|---------|---------|-------|----------|
+| **Size** | 4KB (1024-dim) | 50-200 bytes | 20-50 bytes |
+| **Access** | Whole array | Set operations | Field access |
+| **Updates** | Replace | Merge operator | Replace |
+| **Compression** | Optional (ZSTD) | Built-in (roaring) | None (small) |
+
+This matches the hybrid serialization strategy proposed for motlie_db graph storage:
+- Hot paths use zero-copy (rkyv for metadata, raw for vectors)
+- Specialized formats where beneficial (roaring for edges)
+- No unnecessary overhead
 
 ---
 
@@ -671,13 +783,13 @@ async fn filtered_search(
 
 ---
 
-## Enhancement: HNSW2 + RaBitQ (DATA-1 Compliant)
+## Enhancement: HNSW2 + RaBitQ ([DATA-1](./REQUIREMENTS.md#data-1) Compliant)
 
 ### Context: No Pre-Training Data Constraint
 
-Per [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md), motlie_db cannot assume:
-- Representative training data (DATA-1)
-- Known data distribution (DATA-2)
+Per [REQUIREMENTS.md Section 5.4](./REQUIREMENTS.md#data-1), motlie_db cannot assume:
+- Representative training data ([DATA-1](./REQUIREMENTS.md#data-1))
+- Known data distribution ([DATA-2](./REQUIREMENTS.md#data-2))
 
 This eliminates techniques requiring training (PQ, ScaNN, SPANN centroids).
 
@@ -816,8 +928,8 @@ This is a low-risk, high-reward addition to HNSW2.
 ### Phase 2: HNSW Construction (1-2 weeks)
 - [ ] Port HNSW insert with bitmap edges
 - [ ] Implement greedy search with bitmap neighbors
-- [ ] Add WriteBatch for atomic operations
-- [ ] Remove 10ms sleep with WriteBatchWithIndex
+- [ ] Use existing Transaction API for atomic read-your-writes
+- [ ] Remove 10ms sleep (Transaction API provides read-your-writes)
 
 ### Phase 3: Online Updates (1 week)
 - [ ] Implement pending_updates tracking
@@ -873,7 +985,7 @@ This is a low-risk, high-reward addition to HNSW2.
 | **Edge Storage** | Separate rows per edge | Separate rows per edge | Roaring bitmap per node |
 | **Edge Size** | ~200 bytes/edge | ~200 bytes/edge | ~3 bytes/edge (amortized) |
 | **Memory Model** | HashMap cache | HashMap cache | RocksDB block cache |
-| **Consistency** | 10ms sleep | 10ms sleep | WriteBatchWithIndex |
+| **Consistency** | 10ms sleep | 10ms sleep | Transaction API (read-your-writes) |
 | **Pruning** | Inline during insert | Inline (RNG heuristic) | Background thread |
 | **Graph Structure** | Multi-layer (0 to L) | Single layer + medoid | Multi-layer (0 to L) |
 | **Online Updates** | Limited (slow) | Not designed for online | Full support |
@@ -954,7 +1066,7 @@ This is a low-risk, high-reward addition to HNSW2.
 | Column family schema setup | 1-2 days | RocksDB | Low |
 | Roaring bitmap merge operator | 3-5 days | RocksDB, bincode | Medium |
 | Port HNSW insert with bitmaps | 3-5 days | Merge operator | Medium |
-| WriteBatchWithIndex for consistency | 2-3 days | RocksDB | Low |
+| Integrate with Transaction API | 1-2 days | motlie_db | Low |
 | Background pruning thread | 3-5 days | Tokio channels | Medium |
 | pending_updates tracking | 2-3 days | - | Low |
 | Orphan repair logic | 2-3 days | Pruning | Low |
@@ -989,16 +1101,22 @@ Insert Request → 10ms Sleep → Read Edges → Compute Neighbors
 
 #### HNSW2: Full Online Support
 
+Uses the existing motlie_db Transaction API (`libs/db/src/graph/transaction.rs`):
+
 ```
-Insert Request → Allocate ID → Store Vector
+Insert Request → Allocate ID
                     ↓
-              WriteBatchWithIndex (atomic, read-your-writes)
+              txn = writer.transaction()
                     ↓
-              Greedy Search (sees pending writes)
+              txn.write(StoreVector { id, vector })
                     ↓
-              Merge Operator (bitmap add, no read-modify-write)
+              neighbors = txn.read(GreedySearch { ... })  // Sees uncommitted!
                     ↓
-              Mark in pending_updates
+              txn.write(AddEdges { bitmap merge })
+                    ↓
+              txn.write(MarkPending { id })
+                    ↓
+              txn.commit()  // Atomic
                     ↓
               Return Immediately (non-blocking)
 
@@ -1013,7 +1131,7 @@ Background Thread (parallel):
 ```
 
 **Benefits:**
-1. No sleep - WriteBatchWithIndex provides read-your-writes
+1. No sleep - Transaction API provides read-your-writes
 2. Merge operators eliminate read-modify-write race conditions
 3. Background pruning doesn't block inserts
 4. Searches use consistent snapshot (not affected by concurrent writes)
@@ -1101,8 +1219,8 @@ insert_vector(id, new_vector)?;
 #### Phase 2: HNSW2 Construction (Week 2)
 1. Port insert logic with bitmap edges
 2. Implement greedy search reading from bitmaps
-3. Add WriteBatchWithIndex for consistency
-4. Remove 10ms sleep
+3. Integrate with existing Transaction API for read-your-writes
+4. Remove 10ms sleep (Transaction API provides consistency)
 
 #### Phase 3: Online Updates (Week 3)
 1. Implement pending_updates tracking
