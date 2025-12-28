@@ -203,6 +203,623 @@ cargo bench -p motlie-db -- transaction_vs_channel --baseline before_direct
 **Implementation Note:**
 Per the evaluation in "Direct Read Path vs Transaction API for 1B Vector Scale" section below, this optimization is **deferred**. The Transaction API already provides synchronous reads for HNSW operations, and channel overhead is negligible (<0.1%) at billion-scale. The benchmark infrastructure is in place for future evaluation if point lookup latency becomes a bottleneck.
 
+---
+
+## RocksDB Block Cache: Technical Reference
+
+> **Purpose:** This section documents RocksDB's block cache behavior to inform schema design decisions, particularly for blob separation and variable-length key handling. Understanding these mechanics is essential for optimizing cache efficiency.
+>
+> **Sources:** [RocksDB Block Cache Wiki](https://github.com/facebook/rocksdb/wiki/Block-Cache), [BlockBasedTable Format](https://github.com/facebook/rocksdb/wiki/Rocksdb-BlockBasedTable-Format), [BlobDB Wiki](https://github.com/facebook/rocksdb/wiki/BlobDB), [RocksDB Tuning Guide](https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide)
+
+### What Gets Cached: Blocks, Not Key-Value Pairs
+
+**Critical insight:** RocksDB's block cache stores **uncompressed data blocks**, not individual key-value pairs. Each block contains multiple key-value entries packed together.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Data Block (~4KB default)                │
+├─────────────────────────────────────────────────────────────┤
+│  [key1][value1] [key2][value2] [key3][value3] ... [keyN]    │
+│                                                             │
+│  Keys are delta-encoded (prefix compression)                │
+│  Values are stored inline with their keys                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Implications for our design:**
+
+| Observation | Impact on motlie_db |
+|-------------|---------------------|
+| **Entire block is loaded** | If one edge in a block has a 2KB summary, the entire block (containing that edge + neighbors) is loaded |
+| **Block = cache unit** | Large values reduce effective cache capacity (fewer key-values per cached block) |
+| **Keys and values together** | Cannot cache keys separately from values; blob separation requires separate CFs |
+
+### Block Size and Variable-Length Data
+
+**Default block size:** 4KB (uncompressed), configurable via `block_size` option.
+
+**Variable-length handling:** RocksDB handles variable-length keys and values natively:
+
+1. **Keys:** Delta-encoded with restart points every 16 keys (configurable via `block_restart_interval`)
+   - First key in restart interval: stored fully
+   - Subsequent keys: stored as (shared_prefix_len, suffix_len, suffix_bytes)
+   - **Long edge names impact:** Variable-length edge names reduce prefix compression effectiveness
+
+2. **Values:** Stored inline after each key, length-prefixed
+   - No alignment requirements
+   - No maximum length (but large values should use BlobDB)
+
+**Delta encoding example:**
+```
+Key 1: "edge:src123:dst456:follows"     → stored fully (restart point)
+Key 2: "edge:src123:dst456:likes"       → shared=21, suffix="likes"
+Key 3: "edge:src123:dst789:follows"     → shared=13, suffix="dst789:follows"
+```
+
+### Block Cache vs Bloom Filter (Not the Same)
+
+| Component | Purpose | What It Stores |
+|-----------|---------|----------------|
+| **Block Cache** | Avoid re-reading blocks from disk | Uncompressed data blocks |
+| **Bloom Filter** | Avoid reading files that don't contain a key | Probabilistic bit array (~10 bits/key) |
+| **OS Page Cache** | Kernel-level file caching | Compressed blocks (SST file contents) |
+
+**Key distinction:** Bloom filters help avoid unnecessary I/O by answering "might this file contain key X?" Block cache speeds up repeated access to the same data blocks.
+
+### Cache Eviction and Block Reload
+
+**Eviction policy:** LRU (Least Recently Used) with optional priority tiers.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    LRU Block Cache                          │
+├─────────────────────────────────────────────────────────────┤
+│  High Priority Pool (index, filters, compression dict)      │
+│  ─────────────────────────────────────────────────────────  │
+│  Low Priority Pool (data blocks)                            │
+│  ─────────────────────────────────────────────────────────  │
+│  Bottom Priority (blobs from BlobDB)                        │
+└─────────────────────────────────────────────────────────────┘
+         ↑                                            ↓
+      Insert                                       Evict
+```
+
+**What happens on cache eviction:**
+1. Block is removed from cache (memory freed)
+2. Next access requires:
+   - Disk read (SST file)
+   - Decompression (if compression enabled)
+   - CRC32 checksum verification
+   - Block loaded back into cache
+
+**Cost of reload:** ~100-500µs for SSD, ~5-10ms for HDD, plus CPU for decompression/checksum.
+
+### Implications for rkyv Zero-Copy Deserialization
+
+**Question:** How does rkyv benefit if blocks can be evicted?
+
+**Answer:** rkyv's benefit is **per-access**, not per-cache-lifetime:
+
+| Scenario | rmp_serde (current) | rkyv (proposed) |
+|----------|---------------------|-----------------|
+| **Block in cache** | Decompress → Deserialize → Allocate structs | Cast pointer → Zero-copy access |
+| **Block evicted** | Disk read → Decompress → Deserialize → Allocate | Disk read → Decompress → Cast pointer |
+| **Scan 1000 edges** | 1000 deserializations, 1000 allocations | 1000 pointer casts, 0 allocations |
+
+**Key insight:** Even with cache eviction, rkyv eliminates allocation churn. The block reload cost is paid regardless of serialization format, but rkyv avoids the additional deserialization cost after the block is loaded.
+
+**Caveat:** rkyv requires uncompressed data to achieve zero-copy. Our hybrid strategy (rkyv for hot CFs, rmp+LZ4 for cold CFs) addresses this.
+
+### Implications for Variable-Length Edge Names
+
+**Current schema:** `ForwardEdgeCfKey(SrcId, DstId, EdgeName)` where `EdgeName` is a `String`.
+
+**Block cache impact of long edge names:**
+
+| Edge Name Length | Key Size | Keys per 4KB Block | Cache Efficiency |
+|------------------|----------|---------------------|------------------|
+| 8 bytes ("follows") | 40 bytes | ~100 keys | High |
+| 32 bytes ("user_interaction_type_v2") | 64 bytes | ~62 keys | Medium |
+| 128 bytes (long descriptive name) | 160 bytes | ~25 keys | Low |
+
+**Delta encoding helps but has limits:**
+- Only prefix compression (shared prefix removed)
+- Different edge names from same source share `src_id` prefix (16 bytes)
+- Restart points every 16 keys reset compression
+
+**Recommendations:**
+1. Keep edge names short (< 32 bytes) for optimal cache density
+2. Consider edge name interning (map names → small integers) for high-cardinality names
+3. For very long names, store name in value and use hash in key
+
+### Implications for Vector (f32[]) Storage
+
+**Question:** How should f32 vectors (for HNSW) be stored and cached?
+
+**Vector sizes:**
+| Dimensions | Size (f32) | Size (f16) | Vectors per 4KB Block |
+|------------|------------|------------|------------------------|
+| 128 | 512 bytes | 256 bytes | 7-8 |
+| 256 | 1024 bytes | 512 bytes | 3-4 |
+| 512 | 2048 bytes | 1024 bytes | 1-2 |
+| 768 (OpenAI) | 3072 bytes | 1536 bytes | 1 |
+| 1536 (OpenAI large) | 6144 bytes | 3072 bytes | 0 (exceeds block) |
+
+**Recommendations:**
+
+1. **Use BlobDB for vectors > 1KB:** RocksDB's integrated BlobDB stores large values in separate blob files, keeping the LSM tree compact. From [BlobDB Wiki](https://github.com/facebook/rocksdb/wiki/BlobDB): "Storing large values outside of the LSM significantly reduces the size of the LSM which improves caching."
+
+2. **Separate vector CF from graph topology:** Keep HNSW edge topology in one CF (small, hot) and vectors in another CF (large, accessed per-search).
+
+3. **Consider quantization:** f16 or int8 quantization halves/quarters storage while maintaining search quality.
+
+4. **Block size tuning for vectors:** If vectors dominate a CF, increase `block_size` to 16KB or 32KB to reduce index overhead.
+
+**BlobDB cache behavior:**
+- Blobs get "bottom" priority in cache (below data blocks)
+- This is appropriate: vector access is typically sequential (greedy search), not random
+- Hot vectors naturally stay in OS page cache
+
+### Configuration Recommendations
+
+Based on the above analysis, recommended RocksDB settings for motlie_db:
+
+```rust
+// Block cache: ~1/3 of available memory
+let cache = Cache::new_lru_cache(1 * 1024 * 1024 * 1024)?; // 1GB
+
+let mut block_opts = BlockBasedOptions::default();
+block_opts.set_block_cache(&cache);
+block_opts.set_block_size(4 * 1024); // 4KB for graph data
+block_opts.set_cache_index_and_filter_blocks(true);
+block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+
+// For vector CF (if using BlobDB)
+let mut vector_opts = Options::default();
+vector_opts.set_enable_blob_files(true);
+vector_opts.set_min_blob_size(512); // Vectors > 512 bytes → blob file
+vector_opts.set_blob_compression_type(CompressionType::None); // Vectors don't compress well
+```
+
+### Summary: Design Principles from Block Cache Behavior
+
+| Principle | Rationale |
+|-----------|-----------|
+| **Separate hot from cold data** | Block cache loads entire blocks; large cold values evict hot data |
+| **Keep keys short** | Keys share blocks with values; long keys reduce cache density |
+| **Use BlobDB for large values** | Keeps LSM compact, improves compaction speed, natural cache priority |
+| **rkyv for hot CFs only** | Zero-copy requires uncompressed data; cold CFs benefit from LZ4 |
+| **Tune block size per CF** | Graph topology: 4KB, Vectors: 16-32KB |
+
+---
+
+## Name Interning: Optimizing Arbitrary-Length Names for Cache Efficiency
+
+> **Problem Statement:** The requirement to support arbitrary node and edge names (potentially 100+ bytes) conflicts with the need for compact keys to maximize block cache efficiency. This section explores design options to satisfy both requirements.
+
+### Current Schema Analysis
+
+**Current key structures:**
+```rust
+// Nodes: Fixed 16-byte key (optimal)
+NodeCfKey(Id)                           // 16 bytes
+
+// Forward Edges: Variable-length key (problematic)
+ForwardEdgeCfKey(SrcId, DstId, EdgeName) // 32 bytes + len(EdgeName)
+
+// Reverse Edges: Variable-length key (problematic)
+ReverseEdgeCfKey(DstId, SrcId, EdgeName) // 32 bytes + len(EdgeName)
+```
+
+**Nodes store name in value** (already optimal for keys):
+```rust
+NodeCfValue(TemporalRange, NodeName, NodeSummary)  // Name in value, not key
+```
+
+### Typical Name Length Analysis
+
+Based on graph database naming conventions from [Neo4j Cypher Manual](https://neo4j.com/docs/cypher-manual/current/syntax/naming/):
+
+| Category | Examples | Typical Length | Max Observed |
+|----------|----------|----------------|--------------|
+| **Relationship types** | `FOLLOWS`, `LIKES`, `HAS_PERMISSION` | 8-20 bytes | 50 bytes |
+| **Semantic relationships** | `WORKED_AT_COMPANY`, `IS_PARENT_OF` | 15-30 bytes | 80 bytes |
+| **Domain-specific** | `IAM_ROLE_BINDING_V2`, `VECTOR_SIMILARITY` | 20-40 bytes | 100 bytes |
+| **User-defined labels** | `customer_interaction_2024_q1` | 25-50 bytes | 200 bytes |
+| **Node names** | Entity names, document titles | 20-100 bytes | Unbounded |
+
+**Key insight:** Edge names (relationship types) are typically shorter and more repetitive than node names. A knowledge graph with 1M edges might have only 50-100 distinct edge types.
+
+### Impact Quantification
+
+**Block cache density with current schema:**
+
+| Edge Name Length | Key Size | Value Size | Entry Size | Edges per 4KB Block |
+|------------------|----------|------------|------------|---------------------|
+| 8 bytes | 40 bytes | ~30 bytes | 70 bytes | ~58 |
+| 32 bytes | 64 bytes | ~30 bytes | 94 bytes | ~43 |
+| 64 bytes | 96 bytes | ~30 bytes | 126 bytes | ~32 |
+| 128 bytes | 160 bytes | ~30 bytes | 190 bytes | ~21 |
+
+**Delta encoding partially mitigates this:**
+- Edges from same source share 16-byte `src_id` prefix
+- But different edge names reset prefix sharing
+- Restart points every 16 keys limit compression gains
+
+---
+
+### Design Option 1: Name Interning with Hash Keys
+
+**Concept:** Replace variable-length names with fixed-length hashes in keys; store full names in a separate metadata CF.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Name Metadata CF (names)                                       │
+│  Key: [hash: 8 bytes]                                           │
+│  Value: [full_name: String]                                     │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Forward Edges CF (forward_edges)                               │
+│  Key: [src_id: 16] + [dst_id: 16] + [name_hash: 8] = 40 bytes  │
+│  Value: [temporal_range] + [weight] + [has_summary]             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Hash function choice:** Use 8-byte truncated BLAKE3 or xxHash64.
+- [BLAKE3](https://github.com/BLAKE3-team/BLAKE3/) achieves ~100ns for small inputs per benchmarks
+- xxHash64 achieves ~10-20ns for small inputs
+- 8 bytes provides 2^64 namespace (~18 quintillion) - collision probability negligible for typical graphs
+
+**Implementation:**
+
+```rust
+// libs/db/src/graph/schema.rs
+
+/// 8-byte name hash for compact keys
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NameHash([u8; 8]);
+
+impl NameHash {
+    pub fn from_name(name: &str) -> Self {
+        let full_hash = blake3::hash(name.as_bytes());
+        let mut truncated = [0u8; 8];
+        truncated.copy_from_slice(&full_hash.as_bytes()[..8]);
+        NameHash(truncated)
+    }
+}
+
+/// Names metadata CF
+pub(crate) struct Names;
+pub(crate) struct NamesCfKey(pub(crate) NameHash);
+pub(crate) struct NamesCfValue(pub(crate) String);
+
+/// Forward edges with interned names
+pub(crate) struct ForwardEdgeCfKey(
+    pub(crate) SrcId,      // 16 bytes
+    pub(crate) DstId,      // 16 bytes
+    pub(crate) NameHash,   // 8 bytes (was: variable String)
+);
+```
+
+**Write path changes:**
+```rust
+impl MutationExecutor for AddEdge {
+    fn execute(&self, txn: &Transaction, txn_db: &TransactionDB) -> Result<()> {
+        let name_hash = NameHash::from_name(&self.name);
+
+        // 1. Write to names CF (idempotent - same hash = same name)
+        let names_cf = txn_db.cf_handle(Names::CF_NAME)?;
+        txn.put_cf(names_cf,
+            name_hash.as_bytes(),
+            Names::value_to_bytes(&NamesCfValue(self.name.clone()))?)?;
+
+        // 2. Write to forward_edges with hash key
+        let edge_key = ForwardEdgeCfKey(self.src, self.dst, name_hash);
+        // ... rest of write logic
+    }
+}
+```
+
+**Read path changes:**
+```rust
+impl OutgoingEdges {
+    fn execute(&self, storage: &Storage) -> Result<Vec<EdgeResult>> {
+        let db = storage.db()?;
+        let edges_cf = db.cf_handle(ForwardEdges::CF_NAME)?;
+        let names_cf = db.cf_handle(Names::CF_NAME)?;
+
+        let mut results = Vec::new();
+        for (key_bytes, value_bytes) in db.prefix_iterator_cf(edges_cf, self.src.as_bytes()) {
+            let key = ForwardEdges::key_from_bytes(&key_bytes)?;
+
+            // Resolve name hash → full name (extra lookup)
+            let name = if let Some(name_bytes) = db.get_cf(names_cf, key.2.as_bytes())? {
+                Names::value_from_bytes(&name_bytes)?.0
+            } else {
+                return Err(anyhow!("Orphan name hash: {:?}", key.2));
+            };
+
+            results.push((key.0, key.1, name, ...));
+        }
+        Ok(results)
+    }
+}
+```
+
+**Pros:**
+| Benefit | Impact |
+|---------|--------|
+| **Fixed key size** | 40 bytes vs 32+N bytes; predictable cache density |
+| **Better prefix compression** | All edges from same (src, dst) share 32-byte prefix |
+| **Separate name caching** | Names CF can be pinned in cache (small, hot) |
+| **Collision-safe** | 8-byte hash with full name stored; can verify if paranoid |
+
+**Cons:**
+| Cost | Mitigation |
+|------|------------|
+| **Extra write per edge** | Names CF write is idempotent; often hits existing entry |
+| **Extra read per edge** | Cache names CF aggressively; implement in-memory LRU |
+| **Hash computation** | ~100ns per name; negligible vs µs-scale I/O |
+| **Complexity** | Encapsulate in `NameHash` type; hide from API users |
+
+---
+
+### Design Option 2: Hybrid Approach with Length Threshold
+
+**Concept:** Use full names for short strings, hash for long strings. Best of both worlds.
+
+```rust
+/// Name representation: inline for short names, hash for long names
+#[derive(Clone, Serialize, Deserialize)]
+pub enum NameKey {
+    /// Names ≤ 24 bytes stored inline (no extra lookup)
+    Inline([u8; 24], u8),  // 24 bytes + 1 byte length = 25 bytes
+
+    /// Names > 24 bytes stored as hash (requires lookup)
+    Hashed(NameHash),      // 8 bytes + 1 byte tag = 9 bytes
+}
+
+impl NameKey {
+    pub fn from_name(name: &str) -> Self {
+        if name.len() <= 24 {
+            let mut buf = [0u8; 24];
+            buf[..name.len()].copy_from_slice(name.as_bytes());
+            NameKey::Inline(buf, name.len() as u8)
+        } else {
+            NameKey::Hashed(NameHash::from_name(name))
+        }
+    }
+
+    pub fn resolve(&self, names_cf: &CF) -> Result<String> {
+        match self {
+            NameKey::Inline(buf, len) => {
+                Ok(String::from_utf8(buf[..*len as usize].to_vec())?)
+            }
+            NameKey::Hashed(hash) => {
+                // Lookup in names CF
+                ...
+            }
+        }
+    }
+}
+```
+
+**Key sizes:**
+| Name Length | NameKey Size | Total Edge Key | Notes |
+|-------------|--------------|----------------|-------|
+| 8 bytes | 25 bytes | 57 bytes | Inline, no lookup |
+| 24 bytes | 25 bytes | 57 bytes | Inline, no lookup |
+| 32 bytes | 9 bytes | 41 bytes | Hashed, requires lookup |
+| 128 bytes | 9 bytes | 41 bytes | Hashed, requires lookup |
+
+**Pros:**
+- Common short names (FOLLOWS, LIKES) avoid any extra I/O
+- Long names still get cache-efficient keys
+- Gradual migration path
+
+**Cons:**
+- Variable key size (25 or 9 bytes for name component)
+- Enum tag adds complexity
+- Prefix compression less effective with variable sizes
+
+---
+
+### Design Option 3: In-Memory Name Cache with Lazy Resolution
+
+**Concept:** Keep current schema but add application-level caching to amortize name lookup cost.
+
+```rust
+/// Thread-local name cache
+pub struct NameCache {
+    hash_to_name: DashMap<NameHash, Arc<String>>,
+    name_to_hash: DashMap<Arc<String>, NameHash>,
+}
+
+impl NameCache {
+    /// Get or compute hash, caching the mapping
+    pub fn intern(&self, name: &str) -> NameHash {
+        if let Some(hash) = self.name_to_hash.get(name) {
+            return *hash;
+        }
+
+        let hash = NameHash::from_name(name);
+        let name = Arc::new(name.to_string());
+        self.hash_to_name.insert(hash, name.clone());
+        self.name_to_hash.insert(name, hash);
+        hash
+    }
+
+    /// Resolve hash to name (from cache or DB)
+    pub fn resolve(&self, hash: NameHash, db: &DB) -> Result<Arc<String>> {
+        if let Some(name) = self.hash_to_name.get(&hash) {
+            return Ok(name.clone());
+        }
+
+        // Fallback to DB lookup
+        let name = db.get_cf(names_cf, hash.as_bytes())?
+            .ok_or_else(|| anyhow!("Unknown name hash"))?;
+        let name = Arc::new(String::from_utf8(name)?);
+        self.hash_to_name.insert(hash, name.clone());
+        Ok(name)
+    }
+}
+```
+
+**Pros:**
+- Minimal schema changes
+- Amortizes lookup cost across queries
+- Can be added incrementally
+
+**Cons:**
+- Still pays key size cost in RocksDB
+- Cache coherency concerns in multi-process scenarios
+- Memory overhead for cache
+
+---
+
+### Cost-Benefit Analysis
+
+**Assumptions for analysis:**
+- 1M edges, 100 distinct edge types, 10K distinct node names
+- Average edge name: 20 bytes, Average node name: 50 bytes
+- Block cache: 1GB, SSD read: 100µs, Hash compute: 100ns, Cached lookup: 1µs
+
+**Option 1: Full Name Interning**
+
+| Operation | Current Cost | With Interning | Delta |
+|-----------|--------------|----------------|-------|
+| **Write edge** | 1 put | 2 puts (edge + name) | +1 put (~10µs) |
+| **Scan 100 edges** | 100 key deserializations | 100 key deserializations + 100 name lookups | +100 lookups |
+| | (variable key sizes) | (if names cached: +100µs) | |
+| | | (if names uncached: +10ms) | |
+| **Block cache efficiency** | ~43 edges/block (32-byte names) | ~58 edges/block (fixed 40-byte keys) | **+35%** |
+| **1GB cache capacity** | ~11M edges | ~15M edges | **+4M edges** |
+
+**Break-even analysis:**
+- Extra name lookups cost ~1µs each (cached) or ~100µs (uncached)
+- Cache efficiency gain: 35% more edges in cache
+- **If cache hit rate improves by >3-5%, the extra lookups are paid for**
+
+For workloads with high locality (BFS, PageRank, HNSW), the improved cache density provides 10-20% throughput improvement that exceeds the name resolution overhead.
+
+**Option 2: Hybrid Threshold (24 bytes)**
+
+| Metric | Value |
+|--------|-------|
+| % of edge types that fit inline | ~80% (FOLLOWS, LIKES, HAS_*, etc.) |
+| % requiring hash lookup | ~20% (long domain-specific names) |
+| Effective lookups per 100 edges | ~20 (vs 100 for full interning) |
+| Key size variance | 57 bytes (inline) vs 41 bytes (hashed) |
+
+**Recommendation:** Hybrid is a good compromise if the workload has predictable naming patterns.
+
+---
+
+### Recommended Design: Option 1 (Full Name Interning)
+
+**Rationale:**
+
+1. **Predictable performance:** Fixed key sizes enable reliable capacity planning
+2. **Simplest mental model:** All names go through the same path
+3. **Future-proof:** Works regardless of how long names become
+4. **Name cache is tiny:** 100 edge types × 50 bytes = 5KB (easily pinned)
+5. **Write overhead is minimal:** Most edges reuse existing name entries
+
+**Implementation priorities:**
+
+1. **In-memory name cache (required):** Cache name lookups to avoid per-edge I/O
+2. **Names CF with high cache priority:** Pin in block cache high-pri pool
+3. **Bloom filter on names CF:** Avoid disk reads for cache misses on new names
+4. **Lazy hash verification (optional):** Store hash→name; verify on read if paranoid about collisions
+
+**Schema migration path:**
+
+```
+Phase 1: Add Names CF alongside existing schema
+Phase 2: Dual-write (old variable keys + new hashed keys)
+Phase 3: Migrate reads to use hashed keys with name resolution
+Phase 4: Drop old variable-key columns
+```
+
+### Updated Key Layout with Name Interning
+
+```
+After Name Interning:
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Names CF (small, hot, pinned in cache)                         │
+│  Key:   [name_hash: 8 bytes]                                    │
+│  Value: [name: String] (LZ4 compressed)                         │
+│  Size:  ~5-50KB for typical graph (100-1000 distinct names)     │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Nodes CF                                                        │
+│  Key:   [id: 16 bytes]                                          │
+│  Value: [temporal] + [name_hash: 8] + [has_summary]             │
+│  Note:  Node names now use hash; full name in Names CF          │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Forward Edges Hot CF                                            │
+│  Key:   [src: 16] + [dst: 16] + [name_hash: 8] = 40 bytes      │
+│  Value: [temporal] + [weight] + [has_summary] (~20 bytes)       │
+│  Density: ~68 edges per 4KB block (was ~43 with 32-byte names) │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Cache efficiency improvement:**
+
+| Metric | Before (variable names) | After (name interning) | Improvement |
+|--------|-------------------------|------------------------|-------------|
+| Edge key size | 32 + avg(20) = 52 bytes | 40 bytes (fixed) | -23% |
+| Edges per 4KB block | ~43 | ~58 | **+35%** |
+| Edges per 1GB cache | ~11M | ~15M | **+4M edges** |
+| Prefix compression | Moderate | Excellent (32-byte shared prefix) | Better |
+
+#### Benchmark Validation Plan
+
+**Benchmark:** `prefix_scans_by_position` and `prefix_scans_by_degree` in `libs/db/benches/db_operations.rs`
+
+**Pre-Implementation Baseline:**
+```bash
+cargo bench -p motlie-db -- prefix_scans --save-baseline before_interning
+cargo bench -p motlie-db -- batch_scan_throughput --save-baseline before_interning
+```
+
+**Key Metrics to Capture:**
+
+| Metric | Benchmark Test | Expected Current | Expected After |
+|--------|---------------|------------------|----------------|
+| Edges per 4KB block | (calculated) | ~43 | ~58 |
+| Prefix scan latency | `prefix_scans_by_degree/10_edges` | ~X µs | ~0.85X µs |
+| Batch scan throughput | `batch_scan_throughput/5000_nodes` | ~X scans/s | ~1.15X scans/s |
+| Write throughput | `writes/medium` | ~X ops/s | ~0.95X ops/s |
+
+**Post-Implementation Validation:**
+```bash
+cargo bench -p motlie-db -- prefix_scans --baseline before_interning
+cargo bench -p motlie-db -- batch_scan_throughput --baseline before_interning
+```
+
+**Success Criteria:**
+- [ ] Edge key size is exactly 40 bytes (16 + 16 + 8)
+- [ ] `prefix_scans_*` show **10-20% improvement** due to better cache density
+- [ ] `batch_scan_throughput` shows **10-15% improvement**
+- [ ] Write throughput regression **< 10%** (acceptable for name CF writes)
+- [ ] Name resolution from cache adds **< 1µs per edge** on average
+
+**Name Cache Verification:**
+```rust
+// In tests: verify cache hit rate
+let cache = NameCache::new();
+// After warming with 100 distinct names...
+assert!(cache.hit_rate() > 0.99); // 99%+ hit rate expected
+```
+
+---
+
 ### 3. Blob Separation & Cache Locality
 
 **Problem:**
@@ -1271,22 +1888,21 @@ cargo bench -p motlie-db -- --baseline before_<optimization>
 
 ### Validation Checklist by Optimization
 
-#### Recommendation #1: Zero-Copy Serialization (rkyv)
+#### Phase 1: Name Interning (NEW - Priority 1)
 | Step | Command | Status |
 |------|---------|--------|
-| Capture baseline | `cargo bench -p motlie-db -- serialization_overhead --save-baseline before_rkyv` | ⬜ |
-| Implement rkyv for hot CFs | (code changes) | ⬜ |
-| Validate improvement | `cargo bench -p motlie-db -- serialization_overhead --baseline before_rkyv` | ⬜ |
-| Validate batch scan improvement | `cargo bench -p motlie-db -- batch_scan_throughput --baseline before_rkyv` | ⬜ |
-| **Target:** 10-50x deserialize improvement | | ⬜ |
+| Capture baseline | `cargo bench -p motlie-db -- prefix_scans --save-baseline before_interning` | ⬜ |
+| Add `Names` CF with `NameHash` type | (schema.rs changes) | ⬜ |
+| Update `ForwardEdgeCfKey` to use `NameHash` | (schema.rs changes) | ⬜ |
+| Update `ReverseEdgeCfKey` to use `NameHash` | (schema.rs changes) | ⬜ |
+| Update `NodeCfValue` to use `NameHash` for name | (schema.rs changes) | ⬜ |
+| Implement in-memory `NameCache` | (new module) | ⬜ |
+| Update mutation executor to dual-write | (mutation.rs changes) | ⬜ |
+| Update query executor with name resolution | (query.rs changes) | ⬜ |
+| Validate scan improvement | `cargo bench -p motlie-db -- prefix_scans --baseline before_interning` | ⬜ |
+| **Target:** 35% more edges per cache block, fixed key sizes | | ⬜ |
 
-#### Recommendation #2: Direct Read Path (Deferred)
-| Step | Command | Status |
-|------|---------|--------|
-| Capture baseline | `cargo bench -p motlie-db -- transaction_vs_channel --save-baseline before_direct` | ⬜ |
-| **Status:** Deferred per evaluation | See "Direct Read Path vs Transaction API" section | ⏸️ |
-
-#### Recommendation #3: Blob Separation (Priority 1)
+#### Phase 2: Blob Separation (Priority 2)
 | Step | Command | Status |
 |------|---------|--------|
 | Capture baseline | `cargo bench -p motlie-db -- value_size_impact --save-baseline before_blob_sep` | ⬜ |
@@ -1298,64 +1914,113 @@ cargo bench -p motlie-db -- --baseline before_<optimization>
 | Validate write regression | `cargo bench -p motlie-db -- write_throughput_by_size --baseline before_blob_sep` | ⬜ |
 | **Target:** 5-10x scan improvement, <30% write regression | | ⬜ |
 
-#### Recommendation #4: Iterator-Based Scan API
+#### Phase 3: Zero-Copy Serialization (rkyv) (Priority 3)
 | Step | Command | Status |
 |------|---------|--------|
-| Capture baseline | `cargo bench -p motlie-db -- scan_position_independence --save-baseline before_iterator` | ⬜ |
-| Refactor to iterator pattern | (code changes) | ⬜ |
-| Validate no regression | `cargo bench -p motlie-db -- scan_position_independence --baseline before_iterator` | ⬜ |
-| **Target:** No regression, improved ergonomics | | ⬜ |
+| Capture baseline | `cargo bench -p motlie-db -- serialization_overhead --save-baseline before_rkyv` | ⬜ |
+| Implement rkyv for hot CFs | (code changes) | ⬜ |
+| Validate improvement | `cargo bench -p motlie-db -- serialization_overhead --baseline before_rkyv` | ⬜ |
+| Validate batch scan improvement | `cargo bench -p motlie-db -- batch_scan_throughput --baseline before_rkyv` | ⬜ |
+| **Target:** 10-50x deserialize improvement | | ⬜ |
 
-#### Recommendation #5: Fulltext Sync Mechanism
+#### Deferred: Direct Read Path
 | Step | Command | Status |
 |------|---------|--------|
-| Create integration tests | `libs/db/tests/test_fulltext_consistency.rs` | ⬜ |
-| Implement `flush_all()` | (code changes) | ⬜ |
-| Validate consistency | `cargo test -p motlie-db test_flush_all` | ⬜ |
-| **Target:** Consistent fulltext visibility after `flush_all()` | | ⬜ |
+| **Status:** Deferred | Transaction API provides sync reads for HNSW; channel overhead negligible at scale | ⏸️ |
+| Re-evaluate trigger | If point lookup latency becomes bottleneck in profiling | ⏸️ |
+
+#### Deferred: Iterator-Based Scan API
+| Step | Command | Status |
+|------|---------|--------|
+| **Status:** Deferred | Ergonomic improvement; current visitor pattern already achieves O(1) seek | ⏸️ |
+| Re-evaluate trigger | When refactoring scan module for other reasons | ⏸️ |
+
+#### Deferred: Fulltext Sync Mechanism
+| Step | Command | Status |
+|------|---------|--------|
+| **Status:** Deferred | Requires comprehensive strategy for fulltext + vector index commits | ⏸️ |
+| **Dependency:** Complete vector index implementation first | | ⏸️ |
+| **Note:** Will design unified commit semantics for graph, fulltext, and vector indices | | ⏸️ |
 
 ### Implementation Order
 
-Based on impact and dependencies:
+Based on impact, dependencies, and practical implementation sequence:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ Phase 1: Blob Separation (#3)                                   │
-│   - Highest impact: 10-20x cache efficiency                     │
-│   - No dependencies                                             │
-│   - Enables rkyv for hot CFs                                    │
+│ Phase 1: Name Interning (NEW)                                   │
+│   - Fixed 40-byte edge keys (was 32 + variable)                 │
+│   - 35% more edges per cache block                              │
+│   - Enables excellent prefix compression                        │
+│   - Deduplicates names across edges                             │
+│   - Foundation for all subsequent optimizations                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ Phase 2: Zero-Copy Serialization (#1)                           │
-│   - High impact: 2-5x scan throughput                           │
-│   - Depends on: Blob Separation (apply rkyv to hot CFs only)    │
+│ Phase 2: Blob Separation                                        │
+│   - Split hot (topology/weights) from cold (summaries)          │
+│   - 10-20x cache efficiency for graph algorithms                │
+│   - Depends on: Phase 1 (schema stabilization)                  │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ Phase 3: Ergonomic Improvements (#4, #5)                        │
-│   - Low impact: Code quality, correctness                       │
-│   - No dependencies                                             │
+│ Phase 3: Zero-Copy Serialization (rkyv)                         │
+│   - Apply rkyv to hot CFs only                                  │
+│   - 2-5x scan throughput improvement                            │
+│   - Depends on: Phase 2 (hot CFs identified and isolated)       │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│ Phase 4: Direct Read Path (#2) - If Needed                      │
-│   - Deferred: Negligible benefit at scale                       │
-│   - Re-evaluate if point lookup becomes bottleneck              │
+│ Deferred: Ergonomic & Consistency Improvements                  │
+│   - Direct Read Path: Re-evaluate if profiling shows need       │
+│   - Iterator API: Refactor when touching scan module            │
+│   - Fulltext Sync: Design unified commit after vector impl      │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Phase Dependencies
+
+```
+Name Interning ──┬──► Blob Separation ──► rkyv Serialization
+                 │
+                 └──► (Enables predictable key sizes for all CFs)
+```
+
+**Why Name Interning First:**
+1. **Schema foundation:** All subsequent optimizations benefit from fixed-size keys
+2. **Low risk:** Additive change (new Names CF) with clear migration path
+3. **Immediate benefit:** 35% cache density improvement
+4. **Deduplication:** Names stored once, referenced everywhere
+
+**Why Blob Separation Second:**
+1. **Depends on stable schema:** Name interning must be complete
+2. **Highest cache impact:** 10-20x for graph algorithm workloads
+3. **Enables rkyv:** Hot CFs can be uncompressed for zero-copy
+
+**Why rkyv Third:**
+1. **Depends on blob separation:** Only hot CFs use rkyv
+2. **Cold CFs keep LZ4:** Summaries compress well, rarely accessed
+3. **Incremental:** Can apply to one CF at a time
 
 ### Expected Cumulative Impact
 
-| Optimization | Cache Efficiency | Scan Throughput | Point Lookup | Write Overhead |
-|--------------|------------------|-----------------|--------------|----------------|
-| Current baseline | 1x | 1x | 1x | 0% |
-| + Blob Separation | **10-20x** | 5-10x | 1x | +10-20% |
-| + rkyv | 10-20x | **10-50x** | 2-5x | +10-20% |
-| + Iterator Scans | 10-20x | 10-50x | 2-5x | +10-20% |
-| **Total** | **10-20x** | **10-50x** | **2-5x** | **+10-20%** |
+| Optimization | Cache Efficiency | Scan Throughput | Key Size | Write Overhead |
+|--------------|------------------|-----------------|----------|----------------|
+| Current baseline | 1x | 1x | Variable | 0% |
+| + **Name Interning** | **1.35x** | 1.1x | Fixed 40B | +5% (name CF writes) |
+| + Blob Separation | **15-25x** | 5-10x | Fixed 40B | +10-15% |
+| + rkyv | 15-25x | **10-50x** | Fixed 40B | +10-15% |
+| **Total** | **15-25x** | **10-50x** | **Fixed** | **+10-15%** |
+
+### Deferred Items Summary
+
+| Item | Reason for Deferral | Re-evaluation Trigger |
+|------|---------------------|----------------------|
+| **Direct Read Path** | Transaction API already provides sync reads; channel overhead <0.1% at 1B scale | Profiling shows point lookup as bottleneck |
+| **Iterator-Based Scan API** | Ergonomic improvement; current visitor achieves O(1) seek | Refactoring scan module for other reasons |
+| **Fulltext Sync** | Needs comprehensive strategy for graph + fulltext + vector commits | After vector index implementation complete |
 
 ---
