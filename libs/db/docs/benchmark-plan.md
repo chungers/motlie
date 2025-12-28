@@ -1,378 +1,426 @@
 # Database Performance Benchmark Plan
 
+> **Last Updated:** December 27, 2025
+> **Status:** ✅ Implemented with optimization evaluation framework
+
 ## Overview
 
-Benchmarks to compare MessagePack vs Direct Encoding for keys across various database sizes and query patterns.
+This benchmark suite provides comprehensive performance measurement for:
+1. **Baseline Operations** - Current read/write performance
+2. **Optimization Evaluation** - Metrics to compare before/after optimization implementations
+
+The benchmarks are designed to validate the performance improvements outlined in [REVIEW.md](../REVIEW.md).
+
+## Planned Optimizations (from REVIEW.md)
+
+| Optimization | Impact | Priority | Benchmark Coverage |
+|--------------|--------|----------|-------------------|
+| **Blob Separation** | 10-20x cache efficiency | 1 | `value_size_impact/*` |
+| **Zero-Copy (rkyv)** | 2-5x scan throughput | 3 | `serialization_overhead/*` |
+| **Direct Read Path** | 3-5x point lookup | 2 (deferred) | `transaction_vs_channel/*` |
+| **Iterator Scans** | Ergonomic, minor perf | 5 | N/A (code quality) |
+| **Fulltext Sync** | Consistency | 4 | N/A (correctness) |
 
 ## Benchmark Structure
 
-### Using Criterion (Rust standard)
+### File: `libs/db/benches/db_operations.rs`
 
-**File**: `libs/db/benches/db_operations.rs`
+The benchmark file is organized into two groups:
 
-### Benchmark Scenarios
+#### Baseline Benchmarks (existing)
+- `bench_writes` - Write throughput at various scales
+- `bench_point_lookups` - Point lookup latency
+- `bench_prefix_scans_by_position` - Scan performance by key position
+- `bench_prefix_scans_by_degree` - Scan performance by result set size
+- `bench_scan_position_independence` - Verify O(K) scan behavior
 
-#### 1. **Write Operations**
-- **Small**: 100 nodes, 500 edges (5 edges/node avg)
-- **Medium**: 1,000 nodes, 10,000 edges (10 edges/node avg)
-- **Large**: 10,000 nodes, 100,000 edges (10 edges/node avg)
-- **XLarge**: 50,000 nodes, 500,000 edges (10 edges/node avg)
+#### Optimization Evaluation Benchmarks (new)
+- `bench_serialization_overhead` - Isolate rmp_serde + LZ4 cost
+- `bench_value_size_impact` - Measure blob separation benefit
+- `bench_transaction_vs_channel` - Compare dispatch overhead
+- `bench_batch_scan_throughput` - Graph algorithm simulation
+- `bench_write_throughput_by_size` - Write performance by payload size
 
-**Measures**:
-- Time to write all nodes
-- Time to write all edges
-- Total throughput (ops/sec)
-- Database size on disk
+---
 
-#### 2. **Point Lookup Operations**
-Test direct key lookups by ID:
-- Node by ID
-- Edge by ID
-- Random vs sequential access patterns
+## Baseline Benchmarks
 
-**Measures**:
-- Average lookup latency
-- P50, P95, P99 percentiles
+### 1. Write Operations (`bench_writes`)
+
+Tests write throughput at various scales.
+
+| Scale | Nodes | Edges | Use Case |
+|-------|-------|-------|----------|
+| Small | 100 | 1,000 | Unit test equivalent |
+| Medium | 1,000 | 10,000 | Integration test |
+| Large | 5,000 | 50,000 | Realistic workload |
+
+**Metrics:**
+- Total write time
 - Throughput (ops/sec)
 
-#### 3. **Prefix Scan Operations** ⚡ CRITICAL
-Test the main use case for direct encoding:
-- Get all edges FROM a node (forward_edges scan)
-- Get all edges TO a node (reverse_edges scan)
-- Get all fragments for a node (fragments scan)
+### 2. Point Lookup Operations (`bench_point_lookups`)
 
-**Query patterns**:
-- Hot nodes (high degree, many edges)
-- Average nodes (moderate degree)
-- Cold nodes (low degree, few edges)
-- Early in database (low ID values)
-- Late in database (high ID values)
-- Middle of database
+Tests direct key lookups by ID at different database positions.
 
-**Measures**:
-- Scan latency by node position
-- Scan latency by node degree
-- Total scanned keys (verify correctness)
-- Deserialization overhead
+**Test Cases:**
+- Node lookup at early position (10%)
+- Node lookup at middle position (50%)
+- Node lookup at late position (90%)
 
-#### 4. **Mixed Workload**
-Realistic mix:
-- 70% reads (prefix scans + point lookups)
-- 30% writes
+**Metrics:**
+- Average lookup latency
+- Position independence (should be O(1))
 
-### Comparison Matrix
+### 3. Prefix Scan Operations (`bench_prefix_scans_*`)
 
-| Encoding | Small | Medium | Large | XLarge |
-|----------|-------|--------|-------|--------|
-| MessagePack Keys | ✓ | ✓ | ✓ | ✓ |
-| Direct Encoding | ✓ | ✓ | ✓ | ✓ |
+Tests the core use case for direct encoding: scanning edges from a node.
 
-## Implementation Approach
+**Test Dimensions:**
+- Database size: 1K, 10K nodes
+- Node position: early, middle, late
+- Node degree: 1, 10, 50 edges
 
-### Phase 1: Add Criterion Dependency
+**Metrics:**
+- Scan latency by position (should be O(K), not O(N))
+- Scan latency by degree (should scale with result set)
 
-**File**: `libs/db/Cargo.toml`
+### 4. Scan Position Independence (`bench_scan_position_independence`)
 
-```toml
-[dev-dependencies]
-tempfile = "3.14"
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+Proves that scan performance is independent of key position.
 
-[[bench]]
-name = "db_operations"
-harness = false
+**Test Cases:**
+- Scan at 0%, 10%, 25%, 50%, 75%, 90%, 99% positions
+
+**Expected Result:**
+All positions should have similar latency (±10%).
+
+---
+
+## Optimization Evaluation Benchmarks
+
+### 5. Serialization Overhead (`bench_serialization_overhead`)
+
+Isolates the cost of the current serialization pipeline to quantify rkyv benefits.
+
+**Pipeline Components:**
+```
+Write: rmp_serde::to_vec → LZ4 compress
+Read:  LZ4 decompress → rmp_serde::from_slice
 ```
 
-### Phase 2: Create Benchmark Harness
+**Test Cases (by payload size):**
+- DataUrl creation: 50, 200, 500, 2000 bytes
+- MessagePack serialize/deserialize
+- LZ4 compress/decompress
+- Full pipeline (combined)
 
-**File**: `libs/db/benches/db_operations.rs`
+**Metrics:**
+- Per-operation latency for each component
+- Memory allocation count (via allocator profiling)
 
-```rust
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use motlie_db::{Storage, WriterConfig, ReaderConfig, AddNode, AddEdge, Id};
-use tempfile::TempDir;
-use std::time::Duration;
+**Expected Results After rkyv:**
+| Component | Current | After rkyv | Improvement |
+|-----------|---------|------------|-------------|
+| Deserialize 500 bytes | ~5µs | ~0.1µs | 50x |
+| Deserialize 2000 bytes | ~15µs | ~0.1µs | 150x |
+| Allocations per edge | 3-5 | 0 | ∞ |
 
-// Helper to create test database
-async fn create_test_db(
-    temp_dir: &TempDir,
-    num_nodes: usize,
-    avg_edges_per_node: usize,
-) -> Storage {
-    let storage = Storage::new(temp_dir.path().to_path_buf(), false);
-    storage.ready().await.unwrap();
+### 6. Value Size Impact (`bench_value_size_impact`)
 
-    // Create nodes
-    let node_ids: Vec<Id> = (0..num_nodes)
-        .map(|i| {
-            let id = Id::new();
-            let node = AddNode {
-                id,
-                name: format!("node_{}", i),
-                ts_millis: motlie_db::TimestampMilli::now(),
-            };
-            // Write node...
-            id
-        })
-        .collect();
+Measures how scan performance degrades with larger values, quantifying blob separation benefit.
 
-    // Create edges
-    for (i, &src_id) in node_ids.iter().enumerate() {
-        for j in 0..avg_edges_per_node {
-            let dst_idx = (i + j + 1) % num_nodes;
-            let dst_id = node_ids[dst_idx];
+**Test Cases:**
+- 0 bytes summary (topology only)
+- 100 bytes summary (small metadata)
+- 500 bytes summary (typical content)
+- 2000 bytes summary (large content)
 
-            let edge = AddEdge {
-                id: Id::new(),
-                source_node_id: src_id,
-                target_node_id: dst_id,
-                name: format!("edge_{}", j),
-                ts_millis: motlie_db::TimestampMilli::now(),
-            };
-            // Write edge...
-        }
-    }
-
-    storage.close().await.unwrap();
-    storage
-}
-
-// Benchmark 1: Write operations
-fn bench_writes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("writes");
-
-    for size in [100, 1_000, 10_000].iter() {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{}_nodes", size)),
-            size,
-            |b, &size| {
-                b.to_async(tokio::runtime::Runtime::new().unwrap())
-                    .iter(|| async {
-                        let temp_dir = TempDir::new().unwrap();
-                        create_test_db(&temp_dir, size, 10).await
-                    });
-            },
-        );
-    }
-
-    group.finish();
-}
-
-// Benchmark 2: Point lookups
-fn bench_point_lookups(c: &mut Criterion) {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let temp_dir = TempDir::new().unwrap();
-
-    // Pre-populate database
-    let storage = rt.block_on(create_test_db(&temp_dir, 10_000, 10));
-
-    let mut group = c.benchmark_group("point_lookups");
-
-    group.bench_function("node_by_id", |b| {
-        b.to_async(&rt).iter(|| async {
-            // Query random node by ID
-            black_box(/* query */)
-        });
-    });
-
-    group.finish();
-}
-
-// Benchmark 3: Prefix scans (CRITICAL)
-fn bench_prefix_scans(c: &mut Criterion) {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-
-    let mut group = c.benchmark_group("prefix_scans");
-    group.measurement_time(Duration::from_secs(10));
-
-    for db_size in [1_000, 10_000, 100_000].iter() {
-        for node_position in ["early", "middle", "late"].iter() {
-            for node_degree in [1, 10, 100].iter() {
-                let param = format!("{}nodes_{}_{}_edges", db_size, node_position, node_degree);
-
-                group.bench_with_input(
-                    BenchmarkId::from_parameter(&param),
-                    &(db_size, node_position, node_degree),
-                    |b, &(size, pos, degree)| {
-                        // Setup database with specific characteristics
-                        let temp_dir = TempDir::new().unwrap();
-                        let storage = rt.block_on(create_test_db(&temp_dir, *size, 10));
-
-                        // Select target node based on position
-                        let target_node_idx = match *pos {
-                            "early" => size / 10,
-                            "middle" => size / 2,
-                            "late" => size * 9 / 10,
-                            _ => unreachable!(),
-                        };
-
-                        b.to_async(&rt).iter(|| async {
-                            // Scan edges from node
-                            black_box(/* scan operation */)
-                        });
-                    },
-                );
-            }
-        }
-    }
-
-    group.finish();
-}
-
-// Benchmark 4: Scan position impact
-fn bench_scan_by_position(c: &mut Criterion) {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let temp_dir = TempDir::new().unwrap();
-
-    // Create 100K edge database
-    let storage = rt.block_on(create_test_db(&temp_dir, 10_000, 10));
-
-    let mut group = c.benchmark_group("scan_position");
-
-    // Test scanning nodes at different positions in the key space
-    for position_pct in [0, 10, 25, 50, 75, 90, 99].iter() {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("{}pct", position_pct)),
-            position_pct,
-            |b, &pct| {
-                b.to_async(&rt).iter(|| async {
-                    // Scan node at specific position
-                    black_box(/* scan */)
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
-
-criterion_group!(
-    benches,
-    bench_writes,
-    bench_point_lookups,
-    bench_prefix_scans,
-    bench_scan_by_position
-);
-criterion_main!(benches);
-```
-
-### Phase 3: Add Comparison Benchmarks
-
-Create two versions:
-1. **Before**: Current MessagePack implementation
-2. **After**: Direct encoding implementation
-
-Run both and compare:
-```bash
-# Baseline (MessagePack)
-cargo bench --bench db_operations -- --save-baseline msgpack
-
-# After implementing direct encoding
-cargo bench --bench db_operations -- --baseline msgpack
-```
-
-### Phase 4: Key Metrics to Track
-
-#### Write Performance
+**Metrics:**
+- Scan latency per edge
 - Throughput (edges/sec)
-- Latency per operation
-- Database size on disk
 
-#### Read Performance - Point Lookups
-- Latency (P50, P95, P99)
-- Throughput (queries/sec)
+**Expected Results:**
+| Summary Size | Current | After Blob Separation | Improvement |
+|--------------|---------|----------------------|-------------|
+| 0 bytes | ~50µs | ~50µs | 1x (baseline) |
+| 500 bytes | ~150µs | ~50µs | 3x |
+| 2000 bytes | ~400µs | ~50µs | 8x |
 
-#### Read Performance - Prefix Scans ⚡
-- **Scan latency by database size** (expect O(N) → O(K) improvement)
-- **Scan latency by node position** (expect early nodes slow, late nodes very slow → all O(K))
-- **Keys scanned vs keys returned** (expect N scanned → K scanned)
-- **Throughput** (scans/sec)
+### 7. Transaction vs Channel Dispatch (`bench_transaction_vs_channel`)
 
-### Expected Results
+Compares channel-based async queries with synchronous transaction reads.
 
-#### MessagePack Keys (Before)
+**Test Cases:**
+- Channel-based NodeById (early, middle, late)
+- Channel-based OutgoingEdges (early, middle, late)
+- Transaction-based reads (future, when Transaction supports direct reads)
 
-| DB Size | Node Position | Edges | Keys Scanned | Latency |
-|---------|--------------|-------|--------------|---------|
-| 100K    | Early (10%)  | 10    | ~10K         | ~10ms   |
-| 100K    | Middle (50%) | 10    | ~50K         | ~50ms   |
-| 100K    | Late (90%)   | 10    | ~90K         | ~90ms   |
+**Metrics:**
+- Per-query latency
+- Channel overhead component
 
-**Problem**: Latency grows with node position in database (O(N))
+**Expected Results:**
+| Query Type | Channel | Direct | Overhead |
+|------------|---------|--------|----------|
+| NodeById (cached) | ~60µs | ~5µs | 12x |
+| OutgoingEdges | ~100µs | ~50µs | 2x |
 
-#### Direct Encoding (After)
+**Note:** The REVIEW.md evaluation concluded that Direct Read Path should be deferred because:
+1. Transaction API already provides sync reads for mutations
+2. Channel overhead is negligible at 1B scale (0.01% of search latency)
+3. Risk of misuse breaking transaction semantics
 
-| DB Size | Node Position | Edges | Keys Scanned | Latency |
-|---------|--------------|-------|--------------|---------|
-| 100K    | Early (10%)  | 10    | ~10          | ~0.1ms  |
-| 100K    | Middle (50%) | 10    | ~10          | ~0.1ms  |
-| 100K    | Late (90%)   | 10    | ~10          | ~0.1ms  |
+### 8. Batch Scan Throughput (`bench_batch_scan_throughput`)
 
-**Improvement**: Latency independent of node position (O(K))
+Simulates graph algorithm workloads (BFS, PageRank) with sequential scans.
 
-### Visualization
+**Test Cases:**
+- 1K nodes, 100 scans
+- 5K nodes, 100 scans
+- 10K nodes, 100 scans
 
-Criterion will generate HTML reports at `target/criterion/`:
-- Performance graphs
-- Statistical analysis
-- Comparison between baselines
+**Metrics:**
+- Total edges scanned
+- Throughput (scans/sec)
+- Latency distribution
 
-## Additional Instrumentation
+**Expected Results After Blob Separation + rkyv:**
+| DB Size | Current | Optimized | Improvement |
+|---------|---------|-----------|-------------|
+| 1K nodes | ~500ms | ~50ms | 10x |
+| 10K nodes | ~5s | ~500ms | 10x |
 
-### Add counters to track:
+### 9. Write Throughput by Size (`bench_write_throughput_by_size`)
 
-```rust
-struct ScanMetrics {
-    keys_scanned: u64,
-    keys_matched: u64,
-    keys_deserialized: u64,
-    scan_duration: Duration,
-}
-```
+Measures write performance impact of blob separation (dual CF writes).
 
-Include in benchmark output to verify:
-- MessagePack: `keys_scanned >> keys_matched`
-- Direct encoding: `keys_scanned == keys_matched`
+**Test Cases:**
+- 0 bytes summary
+- 100 bytes summary
+- 500 bytes summary
+
+**Metrics:**
+- Write throughput (nodes+edges per second)
+- Comparison before/after blob separation
+
+**Expected Results:**
+Blob separation adds ~10-20% write overhead due to dual CF writes, but this is acceptable given the 10x+ read improvement.
+
+---
 
 ## Running Benchmarks
 
+### Full Suite
 ```bash
-# Run all benchmarks
-cargo bench --bench db_operations
+cargo bench --manifest-path libs/db/Cargo.toml
+```
+
+### Specific Benchmark Group
+```bash
+# Run baseline benchmarks only
+cargo bench --manifest-path libs/db/Cargo.toml -- baseline_benches
+
+# Run optimization evaluation benchmarks only
+cargo bench --manifest-path libs/db/Cargo.toml -- optimization_benches
 
 # Run specific benchmark
-cargo bench --bench db_operations -- prefix_scans
+cargo bench --manifest-path libs/db/Cargo.toml -- serialization_overhead
+cargo bench --manifest-path libs/db/Cargo.toml -- value_size_impact
+```
 
-# Save baseline
-cargo bench --bench db_operations -- --save-baseline before
+### Before/After Comparison
 
-# Compare against baseline
-cargo bench --bench db_operations -- --baseline before
+#### Step 1: Establish Baseline
+```bash
+cargo bench --manifest-path libs/db/Cargo.toml -- --save-baseline before
+```
 
-# Generate flamegraphs (requires cargo-flamegraph)
+#### Step 2: Implement Optimization
+(Make code changes)
+
+#### Step 3: Compare
+```bash
+cargo bench --manifest-path libs/db/Cargo.toml -- --baseline before
+```
+
+### Generate Flamegraphs
+```bash
+# Requires: cargo install flamegraph
 cargo flamegraph --bench db_operations -- --bench
 ```
 
+---
+
+## Optimization Implementation Workflow
+
+### Phase 1: Blob Separation
+
+**Implementation Steps:**
+1. Add new column families: `forward_edges_hot`, `edge_summaries`, `nodes_hot`, `node_summaries`
+2. Modify `MutationExecutor` to write to both CFs
+3. Modify scan queries to read hot CF only
+4. Modify point lookups to join hot + cold when summary needed
+
+**Benchmark Workflow:**
+```bash
+# Before
+cargo bench --manifest-path libs/db/Cargo.toml -- value_size_impact --save-baseline before_blob_sep
+
+# Implement blob separation
+
+# After
+cargo bench --manifest-path libs/db/Cargo.toml -- value_size_impact --baseline before_blob_sep
+```
+
+**Expected Improvement:**
+- `value_size_impact/500_bytes_summary`: 3x faster
+- `value_size_impact/2000_bytes_summary`: 8x faster
+- `batch_scan_throughput/*`: 5-10x faster
+
+### Phase 2: Zero-Copy Serialization (rkyv)
+
+**Implementation Steps:**
+1. Add `rkyv` dependency
+2. Create hot CF schema with rkyv derives
+3. Remove LZ4 compression for hot CFs
+4. Keep LZ4 + rmp_serde for cold CFs
+
+**Benchmark Workflow:**
+```bash
+# Before
+cargo bench --manifest-path libs/db/Cargo.toml -- serialization_overhead --save-baseline before_rkyv
+
+# Implement rkyv for hot CFs
+
+# After
+cargo bench --manifest-path libs/db/Cargo.toml -- serialization_overhead --baseline before_rkyv
+```
+
+**Expected Improvement:**
+- `serialization_overhead/full_deserialize_*`: 10-50x faster
+- `batch_scan_throughput/*`: Additional 2-5x improvement
+
+---
+
+## Key Metrics to Track
+
+### Per-Optimization Metrics
+
+| Metric | Benchmark | Blob Sep Target | rkyv Target |
+|--------|-----------|-----------------|-------------|
+| Edge scan latency | `value_size_impact` | 3-8x faster | 2-5x faster |
+| Batch throughput | `batch_scan_throughput` | 5-10x faster | 2-5x faster |
+| Deserialize time | `serialization_overhead` | No change | 10-50x faster |
+| Write throughput | `write_throughput_by_size` | -10% to -20% | No change |
+
+### Cache Efficiency Metrics
+
+| Metric | Current | After Blob Sep | Calculation |
+|--------|---------|----------------|-------------|
+| Edge entry size | ~500 bytes | ~30 bytes | 16x smaller |
+| Edges per 1GB cache | ~2M | ~33M | 16x more |
+| Cache hit rate | Varies | Higher | Depends on workload |
+
+---
+
+## Interpreting Results
+
+### Good Signs
+- `value_size_impact`: Flat latency across all summary sizes after blob separation
+- `serialization_overhead`: Significant reduction in `full_deserialize_*` after rkyv
+- `batch_scan_throughput`: Linear scaling with database size
+- `scan_position_independence`: All positions within ±10% of each other
+
+### Warning Signs
+- `value_size_impact`: Latency scales linearly with summary size (blob separation not working)
+- `write_throughput_by_size`: >30% regression (dual CF write too expensive)
+- Position-dependent scan latency (prefix extraction misconfigured)
+
+---
+
+## HTML Reports
+
+Criterion generates detailed HTML reports at:
+```
+target/criterion/<benchmark_name>/report/index.html
+```
+
+These include:
+- Performance graphs over time
+- Statistical analysis (mean, median, std dev)
+- Regression detection
+- Comparison with baselines
+
+---
+
 ## Integration with CI
 
-Optional: Add benchmark regression detection:
+### GitHub Actions Workflow (Optional)
+
 ```yaml
 # .github/workflows/benchmark.yml
-- name: Run benchmarks
-  run: cargo bench --bench db_operations -- --save-baseline main
+name: Benchmarks
 
-- name: Check for regressions
-  run: cargo bench --bench db_operations -- --baseline main
+on:
+  push:
+    branches: [main, feature/*]
+  pull_request:
+    branches: [main]
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Run benchmarks
+        run: cargo bench --manifest-path libs/db/Cargo.toml -- --noplot
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: target/criterion/
 ```
+
+### Regression Detection
+
+To detect performance regressions on PRs:
+```bash
+# On main branch
+cargo bench --manifest-path libs/db/Cargo.toml -- --save-baseline main
+
+# On PR branch
+cargo bench --manifest-path libs/db/Cargo.toml -- --baseline main
+```
+
+Criterion will report if any benchmark regressed significantly.
+
+---
 
 ## Summary
 
-This benchmark plan:
-1. ✅ Tests various database sizes (100 to 500K edges)
-2. ✅ Focuses on prefix scan performance (the critical improvement)
-3. ✅ Measures position impact (proves O(N) → O(K) improvement)
-4. ✅ Provides comparison framework (before/after)
-5. ✅ Generates detailed reports and visualizations
-6. ✅ Tracks key metrics (keys scanned, latency, throughput)
+This benchmark plan provides:
+1. ✅ Baseline performance metrics for current implementation
+2. ✅ Optimization-specific benchmarks to validate improvements
+3. ✅ Before/after comparison framework
+4. ✅ Clear expected results for each optimization
+5. ✅ CI integration guidance
 
-The benchmarks will provide concrete evidence of the performance improvement from switching to direct encoding for keys.
+The benchmarks enable data-driven decisions about which optimizations to pursue and verify that implementations achieve expected gains.
+
+### Priority Implementation Order
+
+Based on REVIEW.md analysis:
+
+| Priority | Optimization | Expected Gain | Effort | Benchmark |
+|----------|--------------|---------------|--------|-----------|
+| 1 | Blob Separation | 10-20x cache | Medium | `value_size_impact` |
+| 2 | Zero-Copy (rkyv) | 2-5x scan | High | `serialization_overhead` |
+| 3 | Direct Read Path | Deferred | - | See REVIEW.md §Evaluation |
+| 4 | Fulltext Sync | Correctness | Low | N/A |
+| 5 | Iterator Scans | Ergonomics | Medium | N/A |

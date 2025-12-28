@@ -72,6 +72,37 @@ pub fn get_edge_weight_zero_copy(bytes: &[u8]) -> Option<f64> {
 - **Zero Allocations:** Reading a node or edge becomes purely pointer arithmetic.
 - **Partial Reads:** If you only need `weight`, you never pay the cost of processing the `summary` string.
 
+#### Benchmark Validation Plan
+
+**Benchmark:** `serialization_overhead` in `libs/db/benches/db_operations.rs`
+
+**Pre-Implementation Baseline:**
+```bash
+cargo bench -p motlie-db -- serialization_overhead --save-baseline before_rkyv
+```
+
+**Key Metrics to Capture:**
+| Metric | Benchmark Test | Expected Current | Expected After |
+|--------|---------------|------------------|----------------|
+| MessagePack deserialize (500 bytes) | `rmp_deserialize_500_bytes` | ~3-5µs | N/A (removed) |
+| LZ4 decompress (500 bytes) | `lz4_decompress_500_bytes` | ~1-2µs | N/A (hot CFs) |
+| Full pipeline deserialize | `full_deserialize_500_bytes` | ~5-8µs | ~0.1µs |
+| Full pipeline deserialize (2000 bytes) | `full_deserialize_2000_bytes` | ~15-20µs | ~0.1µs |
+
+**Post-Implementation Validation:**
+```bash
+cargo bench -p motlie-db -- serialization_overhead --baseline before_rkyv
+```
+
+**Success Criteria:**
+- [ ] `full_deserialize_*` benchmarks show **10-50x improvement** for hot data
+- [ ] No regression in cold data (summaries) serialization
+- [ ] `batch_scan_throughput` shows **2-5x improvement** due to reduced allocations
+
+**Conditional Dependencies:**
+- Requires **Blob Separation (#3)** to be implemented first
+- rkyv only applies to hot CFs; cold CFs retain rmp_serde + LZ4
+
 ### 2. Direct Read Path (Trait-Based)
 
 **Problem:**
@@ -142,6 +173,36 @@ let node = NodeById::new(id, None).run_direct(&reader)?;
 - **API Consistency:** Keeps the "Command Pattern" where the struct defines the parameters.
 - **Performance:** Eliminates channel RTT and context switching for hot-path lookups.
 
+#### Benchmark Validation Plan
+
+**Benchmark:** `transaction_vs_channel` in `libs/db/benches/db_operations.rs`
+
+**Pre-Implementation Baseline:**
+```bash
+cargo bench -p motlie-db -- transaction_vs_channel --save-baseline before_direct
+```
+
+**Key Metrics to Capture:**
+| Metric | Benchmark Test | Expected Current | Expected After |
+|--------|---------------|------------------|----------------|
+| Channel NodeById (cached) | `channel_node_by_id_middle` | ~50-80µs | N/A (baseline) |
+| Channel OutgoingEdges | `channel_outgoing_edges_middle` | ~80-150µs | N/A (baseline) |
+| Direct NodeById (cached) | `direct_node_by_id_middle` | N/A | ~5-15µs |
+| Direct OutgoingEdges | `direct_outgoing_edges_middle` | N/A | ~30-60µs |
+
+**Post-Implementation Validation:**
+```bash
+cargo bench -p motlie-db -- transaction_vs_channel --baseline before_direct
+```
+
+**Success Criteria:**
+- [ ] `direct_node_by_id_*` shows **5-10x improvement** over channel-based
+- [ ] `direct_outgoing_edges_*` shows **2-3x improvement** over channel-based
+- [ ] No regression in channel-based benchmarks (existing API unaffected)
+
+**Implementation Note:**
+Per the evaluation in "Direct Read Path vs Transaction API for 1B Vector Scale" section below, this optimization is **deferred**. The Transaction API already provides synchronous reads for HNSW operations, and channel overhead is negligible (<0.1%) at billion-scale. The benchmark infrastructure is in place for future evaluation if point lookup latency becomes a bottleneck.
+
 ### 3. Blob Separation & Cache Locality
 
 **Problem:**
@@ -180,6 +241,60 @@ struct EdgeSummaryBlob(EdgeSummary);
 **Benefits:**
 - **Cache Efficiency:** Block cache stores ~25x more edges per megabyte.
 - **Scan Speed:** Iterators process significantly less data bandwidth.
+
+#### Benchmark Validation Plan
+
+**Benchmark:** `value_size_impact` and `batch_scan_throughput` in `libs/db/benches/db_operations.rs`
+
+**Pre-Implementation Baseline:**
+```bash
+cargo bench -p motlie-db -- value_size_impact --save-baseline before_blob_sep
+cargo bench -p motlie-db -- batch_scan_throughput --save-baseline before_blob_sep
+cargo bench -p motlie-db -- write_throughput_by_size --save-baseline before_blob_sep
+```
+
+**Key Metrics to Capture:**
+
+*Value Size Impact (scan performance by summary size):*
+| Metric | Benchmark Test | Expected Current | Expected After |
+|--------|---------------|------------------|----------------|
+| Scan with 0 byte summary | `value_size_impact/0_bytes_summary` | ~50µs | ~50µs (baseline) |
+| Scan with 100 byte summary | `value_size_impact/100_bytes_summary` | ~80µs | ~50µs |
+| Scan with 500 byte summary | `value_size_impact/500_bytes_summary` | ~150µs | ~50µs |
+| Scan with 2000 byte summary | `value_size_impact/2000_bytes_summary` | ~400µs | ~50µs |
+
+*Batch Scan Throughput (graph algorithm simulation):*
+| Metric | Benchmark Test | Expected Current | Expected After |
+|--------|---------------|------------------|----------------|
+| 1K nodes, 100 scans | `batch_scan_throughput/1000_nodes_100_scans` | ~500ms | ~100ms |
+| 5K nodes, 100 scans | `batch_scan_throughput/5000_nodes_100_scans` | ~2s | ~400ms |
+| 10K nodes, 100 scans | `batch_scan_throughput/10000_nodes_100_scans` | ~5s | ~1s |
+
+*Write Throughput (regression check):*
+| Metric | Benchmark Test | Expected Current | Expected After |
+|--------|---------------|------------------|----------------|
+| Write with 0 byte summary | `write_throughput_by_size/0_bytes_summary` | baseline | -5% to +5% |
+| Write with 500 byte summary | `write_throughput_by_size/500_bytes_summary` | baseline | -10% to -20% |
+
+**Post-Implementation Validation:**
+```bash
+cargo bench -p motlie-db -- value_size_impact --baseline before_blob_sep
+cargo bench -p motlie-db -- batch_scan_throughput --baseline before_blob_sep
+cargo bench -p motlie-db -- write_throughput_by_size --baseline before_blob_sep
+```
+
+**Success Criteria:**
+- [ ] `value_size_impact/*` shows **flat latency** across all summary sizes (within ±15%)
+- [ ] `batch_scan_throughput/*` shows **5-10x improvement** for topology-only scans
+- [ ] `write_throughput_by_size/*` shows **<30% regression** (acceptable trade-off)
+- [ ] Cache efficiency calculation validates **10-20x more edges per GB cache**
+
+**Cache Efficiency Verification:**
+```bash
+# Before: edge entry ~500 bytes → ~2M edges per 1GB
+# After:  edge entry ~30 bytes → ~33M edges per 1GB
+# Run with RocksDB statistics enabled to verify block cache hit rates
+```
 
 ### 4. Iterator-Based Scan API
 
@@ -247,6 +362,39 @@ impl AllNodes {
 - **Efficient Seek:** RocksDB's `IteratorMode::From` performs a seek to the precise key, ensuring O(1) start time for any page, avoiding O(N) skips.
 - **Composition:** Pagination logic becomes `iter.skip_while(...).take(limit)`.
 
+#### Benchmark Validation Plan
+
+**Benchmark:** `scan_position_independence` in `libs/db/benches/db_operations.rs`
+
+**Note:** This is primarily an **ergonomic improvement**, not a performance optimization. The current visitor pattern already achieves O(1) seek time via `IteratorMode::From`. The benchmark validates that the refactor maintains this performance characteristic.
+
+**Pre-Implementation Baseline:**
+```bash
+cargo bench -p motlie-db -- scan_position_independence --save-baseline before_iterator
+```
+
+**Key Metrics to Capture:**
+| Metric | Benchmark Test | Expected Current | Expected After |
+|--------|---------------|------------------|----------------|
+| Scan at 0% position | `scan_position_independence/0pct` | ~X µs | ~X µs (no change) |
+| Scan at 50% position | `scan_position_independence/50pct` | ~X µs | ~X µs (no change) |
+| Scan at 99% position | `scan_position_independence/99pct` | ~X µs | ~X µs (no change) |
+
+**Post-Implementation Validation:**
+```bash
+cargo bench -p motlie-db -- scan_position_independence --baseline before_iterator
+```
+
+**Success Criteria:**
+- [ ] All position benchmarks remain **within ±10%** of each other (position independence preserved)
+- [ ] No regression vs baseline (iterator refactor doesn't add overhead)
+- [ ] Code ergonomics improved (iterator composition vs visitor callbacks)
+
+**Code Quality Metrics (non-benchmark):**
+- [ ] Lines of code reduced in `scan.rs`
+- [ ] Pagination logic simplified to `iter.take(limit).collect()`
+- [ ] RocksDB iterator lifetime correctly managed across async boundaries
+
 ### 5. Fulltext Sync Mechanism
 
 **Problem:**
@@ -287,6 +435,54 @@ impl Writer {
     }
 }
 ```
+
+#### Benchmark Validation Plan
+
+**Note:** This is a **correctness improvement**, not a performance optimization. There are no performance benchmarks for this feature. Validation is done through integration tests.
+
+**Test File:** `libs/db/tests/test_fulltext_consistency.rs` (to be created)
+
+**Validation Tests:**
+```rust
+#[tokio::test]
+async fn test_flush_all_ensures_fulltext_visibility() {
+    let storage = Storage::readwrite(temp_dir.path());
+    let handles = storage.ready(config)?;
+
+    // Write a node
+    AddNode { id, name: "searchable".into(), ... }.run(handles.writer()).await?;
+
+    // flush() only guarantees graph visibility
+    handles.writer().flush().await?;
+
+    // Fulltext search may NOT find it yet (eventual consistency)
+    // This is expected behavior per current design
+
+    // flush_all() guarantees both graph AND fulltext visibility
+    handles.writer().flush_all().await?;
+
+    // Now fulltext search MUST find it
+    let results = fulltext_search("searchable").run(handles.reader()).await?;
+    assert_eq!(results.len(), 1);
+}
+
+#[tokio::test]
+async fn test_flush_does_not_block_on_fulltext() {
+    // Verify that flush() returns quickly even if fulltext is slow
+    // This preserves the original design intent of eventual consistency
+}
+```
+
+**Success Criteria:**
+- [ ] `test_flush_all_ensures_fulltext_visibility` passes consistently (no flakiness)
+- [ ] `test_flush_does_not_block_on_fulltext` confirms original design intent preserved
+- [ ] Existing tests using `flush()` continue to pass (backward compatible)
+
+**Design Decision Required:**
+Before implementation, clarify design intent:
+- Current: Eventual consistency (graph→fulltext uses `try_send`, drops under load)
+- Proposed: Strong consistency option via `flush_all()`
+- Alternative: Background reconciliation for missed mutations
 
 ## Projected Performance Impact
 
@@ -1046,5 +1242,120 @@ These are small, fixed-size structures where zero-copy access provides marginal 
 **For motlie_db graph storage**: rkyv + blob separation is the primary optimization (10x-20x cache efficiency).
 
 **For HNSW2**: Roaring bitmaps provide equivalent optimization for edge storage. rkyv applies only to small metadata structures for consistency.
+
+---
+
+## Benchmark Validation Summary
+
+All optimization recommendations include benchmark validation plans. This section provides a consolidated view for tracking implementation progress.
+
+### Benchmark Infrastructure
+
+**Location:** `libs/db/benches/db_operations.rs`
+
+**Benchmark Groups:**
+- `baseline_benches` - Core performance metrics (existing)
+- `optimization_benches` - Optimization evaluation metrics (new)
+
+**Running Benchmarks:**
+```bash
+# Run all benchmarks
+cargo bench -p motlie-db
+
+# Run specific optimization benchmark
+cargo bench -p motlie-db -- <benchmark_name>
+
+# Compare against baseline
+cargo bench -p motlie-db -- --baseline before_<optimization>
+```
+
+### Validation Checklist by Optimization
+
+#### Recommendation #1: Zero-Copy Serialization (rkyv)
+| Step | Command | Status |
+|------|---------|--------|
+| Capture baseline | `cargo bench -p motlie-db -- serialization_overhead --save-baseline before_rkyv` | ⬜ |
+| Implement rkyv for hot CFs | (code changes) | ⬜ |
+| Validate improvement | `cargo bench -p motlie-db -- serialization_overhead --baseline before_rkyv` | ⬜ |
+| Validate batch scan improvement | `cargo bench -p motlie-db -- batch_scan_throughput --baseline before_rkyv` | ⬜ |
+| **Target:** 10-50x deserialize improvement | | ⬜ |
+
+#### Recommendation #2: Direct Read Path (Deferred)
+| Step | Command | Status |
+|------|---------|--------|
+| Capture baseline | `cargo bench -p motlie-db -- transaction_vs_channel --save-baseline before_direct` | ⬜ |
+| **Status:** Deferred per evaluation | See "Direct Read Path vs Transaction API" section | ⏸️ |
+
+#### Recommendation #3: Blob Separation (Priority 1)
+| Step | Command | Status |
+|------|---------|--------|
+| Capture baseline | `cargo bench -p motlie-db -- value_size_impact --save-baseline before_blob_sep` | ⬜ |
+| Capture baseline | `cargo bench -p motlie-db -- batch_scan_throughput --save-baseline before_blob_sep` | ⬜ |
+| Capture baseline | `cargo bench -p motlie-db -- write_throughput_by_size --save-baseline before_blob_sep` | ⬜ |
+| Implement hot/cold CF split | (code changes) | ⬜ |
+| Validate scan improvement | `cargo bench -p motlie-db -- value_size_impact --baseline before_blob_sep` | ⬜ |
+| Validate batch throughput | `cargo bench -p motlie-db -- batch_scan_throughput --baseline before_blob_sep` | ⬜ |
+| Validate write regression | `cargo bench -p motlie-db -- write_throughput_by_size --baseline before_blob_sep` | ⬜ |
+| **Target:** 5-10x scan improvement, <30% write regression | | ⬜ |
+
+#### Recommendation #4: Iterator-Based Scan API
+| Step | Command | Status |
+|------|---------|--------|
+| Capture baseline | `cargo bench -p motlie-db -- scan_position_independence --save-baseline before_iterator` | ⬜ |
+| Refactor to iterator pattern | (code changes) | ⬜ |
+| Validate no regression | `cargo bench -p motlie-db -- scan_position_independence --baseline before_iterator` | ⬜ |
+| **Target:** No regression, improved ergonomics | | ⬜ |
+
+#### Recommendation #5: Fulltext Sync Mechanism
+| Step | Command | Status |
+|------|---------|--------|
+| Create integration tests | `libs/db/tests/test_fulltext_consistency.rs` | ⬜ |
+| Implement `flush_all()` | (code changes) | ⬜ |
+| Validate consistency | `cargo test -p motlie-db test_flush_all` | ⬜ |
+| **Target:** Consistent fulltext visibility after `flush_all()` | | ⬜ |
+
+### Implementation Order
+
+Based on impact and dependencies:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 1: Blob Separation (#3)                                   │
+│   - Highest impact: 10-20x cache efficiency                     │
+│   - No dependencies                                             │
+│   - Enables rkyv for hot CFs                                    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 2: Zero-Copy Serialization (#1)                           │
+│   - High impact: 2-5x scan throughput                           │
+│   - Depends on: Blob Separation (apply rkyv to hot CFs only)    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 3: Ergonomic Improvements (#4, #5)                        │
+│   - Low impact: Code quality, correctness                       │
+│   - No dependencies                                             │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Phase 4: Direct Read Path (#2) - If Needed                      │
+│   - Deferred: Negligible benefit at scale                       │
+│   - Re-evaluate if point lookup becomes bottleneck              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Expected Cumulative Impact
+
+| Optimization | Cache Efficiency | Scan Throughput | Point Lookup | Write Overhead |
+|--------------|------------------|-----------------|--------------|----------------|
+| Current baseline | 1x | 1x | 1x | 0% |
+| + Blob Separation | **10-20x** | 5-10x | 1x | +10-20% |
+| + rkyv | 10-20x | **10-50x** | 2-5x | +10-20% |
+| + Iterator Scans | 10-20x | 10-50x | 2-5x | +10-20% |
+| **Total** | **10-20x** | **10-50x** | **2-5x** | **+10-20%** |
 
 ---
