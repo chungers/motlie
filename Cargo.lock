@@ -1964,6 +1964,7 @@ dependencies = [
  "csv",
  "data-url",
  "env_logger",
+ "lazy_static",
  "log",
  "lz4",
  "motlie-core",
