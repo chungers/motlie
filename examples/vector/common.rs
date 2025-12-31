@@ -8,8 +8,8 @@
 
 #![allow(dead_code)]
 
-// SIMD-optimized distance module
-pub mod distance;
+// Re-export SIMD-optimized distance module from motlie-core
+pub use motlie_core::distance;
 
 use anyhow::Result;
 use motlie_db::mutation::{

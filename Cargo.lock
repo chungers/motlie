@@ -2001,9 +2001,14 @@ dependencies = [
 name = "motlie-core"
 version = "0.1.0"
 dependencies = [
+ "clap",
+ "lazy_static",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "simsimd",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",

@@ -16,25 +16,40 @@
 //! ## Usage
 //!
 //! ```rust
-//! use crate::distance::DISTANCE;
+//! use motlie_core::distance::DISTANCE;
+//!
+//! let vec_a = vec![1.0, 2.0, 3.0, 4.0];
+//! let vec_b = vec![5.0, 6.0, 7.0, 8.0];
 //!
 //! let dist = DISTANCE.euclidean_squared(&vec_a, &vec_b);
 //! println!("Using SIMD level: {}", DISTANCE.level());
 //! ```
+//!
+//! ## Feature Flags
+//!
+//! | Feature | Description |
+//! |---------|-------------|
+//! | `simd-runtime` | Runtime CPU detection (portable binaries) |
+//! | `simd-native` | Hint that `-C target-cpu=native` is used |
+//! | `simd-avx2` | Force AVX2+FMA (x86_64) |
+//! | `simd-avx512` | Force AVX-512 (DGX Spark) |
+//! | `simd-neon` | Force NEON (ARM64) |
+//! | `simd-none` | Scalar fallback only |
+//! | `simd-simsimd` | SimSIMD C library for comparison |
 
-mod scalar;
+pub mod scalar;
 
 #[cfg(all(target_arch = "x86_64", any(simd_level = "avx2", simd_level = "runtime")))]
-mod avx2;
+pub mod avx2;
 
 #[cfg(all(target_arch = "x86_64", any(simd_level = "avx512", simd_level = "runtime")))]
-mod avx512;
+pub mod avx512;
 
 #[cfg(all(target_arch = "aarch64", simd_level = "neon"))]
-mod neon;
+pub mod neon;
 
 #[cfg(simd_level = "runtime")]
-mod runtime;
+pub mod runtime;
 
 // Comprehensive test suite for all SIMD implementations
 #[cfg(test)]
