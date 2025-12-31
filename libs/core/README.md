@@ -11,7 +11,11 @@ Core utilities and infrastructure for the Motlie workspace.
 
 ## Distance
 
-The `distance` module provides hardware-accelerated distance functions with automatic platform detection.
+The `distance` module provides hardware-accelerated distance functions that **automatically select the optimal implementation** for your platform at compile time.
+
+### Zero-Configuration Optimization
+
+Simply call the distance functions - the library handles platform detection:
 
 ```rust
 use motlie_core::distance::{euclidean_squared, cosine, dot, simd_level};
@@ -19,17 +23,26 @@ use motlie_core::distance::{euclidean_squared, cosine, dot, simd_level};
 let a = vec![1.0, 2.0, 3.0, 4.0];
 let b = vec![5.0, 6.0, 7.0, 8.0];
 
+// These calls automatically use the best SIMD implementation available
 let dist = euclidean_squared(&a, &b);
 let cos_dist = cosine(&a, &b);
 let dot_prod = dot(&a, &b);
 
-println!("SIMD level: {}", simd_level());  // "NEON", "AVX2+FMA", etc.
+println!("SIMD level: {}", simd_level());  // "NEON", "AVX2+FMA", "AVX-512", etc.
 ```
 
-**Supported platforms:**
-- x86_64: AVX-512, AVX2+FMA, runtime detection
-- ARM64: NEON (Apple Silicon, AWS Graviton)
-- Fallback: Auto-vectorized scalar
+### Automatic Platform Selection
+
+The `build.rs` script detects your target platform and selects the optimal implementation:
+
+| Platform | Implementation | Speedup |
+|----------|----------------|---------|
+| x86_64 + AVX-512 (DGX Spark, Intel Xeon) | AVX-512 intrinsics | 5-8x |
+| x86_64 + AVX2 (most modern x86) | AVX2+FMA intrinsics | 3-5x |
+| ARM64 (Apple Silicon, AWS Graviton) | NEON intrinsics | 2-6x |
+| Other / Fallback | Auto-vectorized scalar | baseline |
+
+**No code changes required** - the same API works everywhere, with the best available optimization.
 
 **Performance Benchmarks (ARM64 NEON):**
 

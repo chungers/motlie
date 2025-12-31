@@ -40,19 +40,19 @@
 //! | `simd-none` | Scalar fallback only |
 //! | `simd-simsimd` | SimSIMD C library for comparison |
 
-pub mod scalar;
+mod scalar;
 
 #[cfg(all(target_arch = "x86_64", any(simd_level = "avx2", simd_level = "runtime")))]
-pub mod avx2;
+mod avx2;
 
 #[cfg(all(target_arch = "x86_64", any(simd_level = "avx512", simd_level = "runtime")))]
-pub mod avx512;
+mod avx512;
 
 #[cfg(all(target_arch = "aarch64", simd_level = "neon"))]
-pub mod neon;
+mod neon;
 
 #[cfg(simd_level = "runtime")]
-pub mod runtime;
+mod runtime;
 
 // Comprehensive test suite for all SIMD implementations
 #[cfg(test)]
