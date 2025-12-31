@@ -8,14 +8,22 @@ Hardware-accelerated vector distance functions for `motlie-core`.
 
 ## Overview
 
-The `motlie_core::distance` module provides SIMD-optimized distance computation with automatic platform detection:
+The `motlie_core::distance` module provides **automatic SIMD optimization** with **compile-time platform detection**. The public API (`euclidean_squared`, `cosine`, `dot`, `euclidean`) automatically dispatches to the best available implementation - no configuration required.
+
+### How It Works
+
+1. **Compile-time detection**: `build.rs` analyzes target architecture and sets `simd_level` cfg
+2. **Conditional compilation**: Only the optimal implementation is compiled into the binary
+3. **Automatic fallback**: Falls back to scalar when SIMD unavailable
+
+### Platform Support
 
 | Platform | SIMD Level | Register Width | Elements/Op |
 |----------|------------|----------------|-------------|
 | x86_64 + AVX-512 | AVX-512 | 512-bit | 16 f32s |
 | x86_64 + AVX2 | AVX2+FMA | 256-bit | 8 f32s |
 | ARM64 (Apple Silicon, Graviton) | NEON | 128-bit | 4 f32s |
-| Other | Scalar | - | 1 f32 |
+| Other | Scalar (auto-vectorized) | - | 1 f32 |
 
 ---
 
@@ -124,18 +132,35 @@ RUSTFLAGS='-C target-cpu=native' cargo bench -p motlie-core
 
 ## Implementation Details
 
+### Architecture
+
+The module uses **conditional compilation** to select the optimal implementation at build time.
+All implementation modules are **internal** (not exported) - the public API consists only of the module-level functions.
+
 ### Module Structure
 
 ```
 libs/core/src/distance/
-├── mod.rs       # Main dispatcher with compile-time SIMD selection
-├── scalar.rs    # Portable fallback (auto-vectorized)
-├── neon.rs      # ARM64 NEON intrinsics
-├── avx2.rs      # x86_64 AVX2+FMA intrinsics
-├── avx512.rs    # x86_64 AVX-512 intrinsics
-├── runtime.rs   # Runtime CPU detection
+├── mod.rs       # Public API + internal dispatcher
+├── scalar.rs    # [internal] Portable fallback (auto-vectorized)
+├── neon.rs      # [internal] ARM64 NEON intrinsics
+├── avx2.rs      # [internal] x86_64 AVX2+FMA intrinsics
+├── avx512.rs    # [internal] x86_64 AVX-512 intrinsics
+├── runtime.rs   # [internal] Runtime CPU detection
 └── tests.rs     # Comprehensive test suite (26 tests)
 ```
+
+### Public API
+
+| Function | Description |
+|----------|-------------|
+| `euclidean_squared(a, b)` | Squared Euclidean distance |
+| `euclidean(a, b)` | Euclidean (L2) distance |
+| `cosine(a, b)` | Cosine distance |
+| `dot(a, b)` | Dot product |
+| `simd_level()` | Active SIMD implementation name |
+
+All functions automatically dispatch to the best available implementation.
 
 ### Dispatch Strategy
 
@@ -145,6 +170,25 @@ The `build.rs` script detects the target platform and sets `simd_level` cfg:
 2. Check target features from `RUSTFLAGS`
 3. Auto-detect based on target architecture
 4. Fall back to runtime detection or scalar
+
+**Conditional compilation example:**
+```rust
+// In mod.rs - only one branch compiles per target
+#[cfg(simd_level = "neon")]
+{
+    unsafe { neon::euclidean_squared(a, b) }
+}
+
+#[cfg(simd_level = "avx2")]
+{
+    unsafe { avx2::euclidean_squared(a, b) }
+}
+
+#[cfg(simd_level = "scalar")]
+{
+    scalar::euclidean_squared(a, b)
+}
+```
 
 ### Test Coverage
 
@@ -196,8 +240,8 @@ We chose custom intrinsics because:
 ### Check Active SIMD Level
 
 ```rust
-use motlie_core::distance::DISTANCE;
-println!("Using: {}", DISTANCE.level());
+use motlie_core::distance::simd_level;
+println!("Using: {}", simd_level());
 ```
 
 ### Force Specific SIMD Level
@@ -216,7 +260,7 @@ cargo build -vv 2>&1 | grep "SIMD:"
 |-------|-------|----------|
 | "Scalar" on x86_64 | AVX2 not enabled | Add `--features simd-runtime` or use RUSTFLAGS |
 | Build error on ARM | Missing NEON feature | Usually auto-detected; check target triple |
-| Performance regression | Wrong SIMD level | Check `DISTANCE.level()` at runtime |
+| Performance regression | Wrong SIMD level | Check `simd_level()` at runtime |
 
 ---
 
