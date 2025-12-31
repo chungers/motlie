@@ -38,17 +38,17 @@ default = []
 dtrace-otel = ["motlie-core/dtrace-otel"]
 
 # SIMD dispatch strategy for vector distance computation
-# See examples/vector/SIMD.md for details
-simd-runtime = []           # Runtime CPU detection (portable binaries)
-simd-native = []            # Hint that -C target-cpu=native is used
-simd-avx2 = []              # x86_64 AVX2+FMA (most x86 servers)
-simd-avx512 = []            # x86_64 AVX-512 (DGX Spark, newer Intel/AMD)
-simd-neon = []              # ARM64 NEON (macOS Apple Silicon, Linux ARM)
-simd-none = []              # Scalar fallback only (for debugging/testing)
+# See libs/core/docs/SIMD.md for details
+simd-runtime = ["motlie-core/simd-runtime"]
+simd-native = ["motlie-core/simd-native"]
+simd-avx2 = ["motlie-core/simd-avx2"]
+simd-avx512 = ["motlie-core/simd-avx512"]
+simd-neon = ["motlie-core/simd-neon"]
+simd-none = ["motlie-core/simd-none"]
 
 # Alternative SIMD libraries for benchmarking comparison
-simd-pulp = ["pulp"]        # Pulp crate with auto-multiversioning
-simd-simsimd = ["simsimd"]  # SimSIMD C library bindings
+simd-pulp = ["pulp"]
+simd-simsimd = ["motlie-core/simd-simsimd"]
 
 [dependencies]
 motlie-core = { path = "libs/core" }
