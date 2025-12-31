@@ -6,7 +6,39 @@ Core utilities and infrastructure for the Motlie workspace.
 
 | Module | Description |
 |--------|-------------|
+| `distance` | SIMD-optimized vector distance computation (Euclidean, Cosine, Dot) |
 | `telemetry` | Tracing subscriber initialization for development and production |
+
+## Distance
+
+The `distance` module provides hardware-accelerated distance functions with automatic platform detection.
+
+```rust
+use motlie_core::distance::{euclidean_squared, cosine, dot, DISTANCE};
+
+let a = vec![1.0, 2.0, 3.0, 4.0];
+let b = vec![5.0, 6.0, 7.0, 8.0];
+
+let dist = euclidean_squared(&a, &b);
+let cos_dist = cosine(&a, &b);
+let dot_prod = dot(&a, &b);
+
+println!("SIMD level: {}", DISTANCE.level());  // "NEON", "AVX2+FMA", etc.
+```
+
+**Supported platforms:**
+- x86_64: AVX-512, AVX2+FMA, runtime detection
+- ARM64: NEON (Apple Silicon, AWS Graviton)
+- Fallback: Auto-vectorized scalar
+
+**Performance (ARM64 NEON, 1024-dim):**
+
+| Function | Baseline | SIMD | Speedup |
+|----------|----------|------|---------|
+| Euclidean | 485.8 ns | 237.4 ns | **2.05x** |
+| Cosine | 1428.8 ns | 247.3 ns | **5.78x** |
+
+See [docs/SIMD.md](docs/SIMD.md) for full documentation.
 
 ## Telemetry
 
