@@ -2,11 +2,14 @@
 //!
 //! This module provides:
 //! - Synthetic vector data generation (1024-dim, quantized to 1000 intervals)
-//! - Distance functions (Euclidean, Cosine, Inner Product)
+//! - Distance functions (Euclidean, Cosine, Inner Product) with SIMD acceleration
 //! - Vector storage/retrieval using NodeFragments
 //! - Graph construction helpers
 
 #![allow(dead_code)]
+
+// SIMD-optimized distance module
+pub mod distance;
 
 use anyhow::Result;
 use motlie_db::mutation::{
@@ -38,51 +41,42 @@ pub const QUANTIZATION_INTERVALS: u32 = 1000;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ============================================================================
-// Distance Metrics
+// Distance Metrics (SIMD-accelerated)
 // ============================================================================
 
+// Re-export the global SIMD dispatcher for direct use
+#[allow(unused_imports)]
+pub use distance::DISTANCE;
+
 /// Compute Euclidean (L2) distance between two vectors
+///
+/// Uses SIMD acceleration when available (AVX-512, AVX2+FMA, or NEON).
 #[inline]
 pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum::<f32>()
-        .sqrt()
+    distance::euclidean(a, b)
 }
 
 /// Compute squared Euclidean distance (faster, no sqrt)
+///
+/// Uses SIMD acceleration when available (AVX-512, AVX2+FMA, or NEON).
 #[inline]
 pub fn euclidean_distance_squared(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum::<f32>()
+    distance::euclidean_squared(a, b)
 }
 
 /// Compute cosine distance: 1 - cosine_similarity
+///
+/// Uses SIMD acceleration when available (AVX-512, AVX2+FMA, or NEON).
 #[inline]
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
-
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
-
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 1.0; // Maximum distance for zero vectors
-    }
-
-    1.0 - (dot / (norm_a * norm_b))
+    distance::cosine(a, b)
 }
 
 /// Compute negative inner product (for max inner product search)
 #[inline]
 pub fn negative_inner_product(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
-    -a.iter().zip(b.iter()).map(|(x, y)| x * y).sum::<f32>()
+    -distance::dot(a, b)
 }
 
 /// Distance function type
