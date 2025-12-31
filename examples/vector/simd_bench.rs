@@ -17,6 +17,15 @@
 //!
 //! # Compare with target features
 //! RUSTFLAGS='-C target-feature=+avx2,+fma' cargo build --release --example simd_bench
+//!
+//! # Run with Pulp crate (portable SIMD with auto-multiversioning)
+//! cargo build --release --example simd_bench --features simd-pulp
+//!
+//! # Run with SimSIMD (C library bindings, highly optimized)
+//! cargo build --release --example simd_bench --features simd-simsimd
+//!
+//! # Run with all SIMD libraries for full comparison
+//! cargo build --release --example simd_bench --features simd-pulp,simd-simsimd
 //! ```
 //!
 //! ## Output
@@ -310,6 +319,82 @@ unsafe fn cosine_distance_neon(a: &[f32], b: &[f32]) -> f32 {
 }
 
 // ============================================================================
+// Pulp Crate Implementations (Optional)
+// ============================================================================
+
+/// Euclidean squared distance using Pulp's auto-dispatch SIMD
+#[cfg(feature = "simd-pulp")]
+#[inline(never)]
+fn euclidean_squared_pulp(a: &[f32], b: &[f32]) -> f32 {
+    use pulp::Arch;
+
+    let arch = Arch::new();
+    arch.dispatch(|| {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| {
+                let d = x - y;
+                d * d
+            })
+            .sum::<f32>()
+    })
+}
+
+/// Cosine distance using Pulp's auto-dispatch SIMD
+#[cfg(feature = "simd-pulp")]
+#[inline(never)]
+fn cosine_distance_pulp(a: &[f32], b: &[f32]) -> f32 {
+    use pulp::Arch;
+
+    let arch = Arch::new();
+    arch.dispatch(|| {
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return 1.0;
+        }
+
+        1.0 - (dot / (norm_a * norm_b))
+    })
+}
+
+// ============================================================================
+// SimSIMD Crate Implementations (Optional)
+// ============================================================================
+
+/// Euclidean squared distance using SimSIMD
+#[cfg(feature = "simd-simsimd")]
+#[inline(never)]
+fn euclidean_squared_simsimd(a: &[f32], b: &[f32]) -> f32 {
+    use simsimd::SpatialSimilarity;
+
+    // SimSIMD trait methods are called as f32::l2sq(&[f32], &[f32]) -> Option<f64>
+    <f32 as SpatialSimilarity>::l2sq(a, b).unwrap_or(f64::MAX) as f32
+}
+
+/// Cosine distance using SimSIMD
+#[cfg(feature = "simd-simsimd")]
+#[inline(never)]
+fn cosine_distance_simsimd(a: &[f32], b: &[f32]) -> f32 {
+    use simsimd::SpatialSimilarity;
+
+    // SimSIMD returns Option<f64>, we need to convert
+    <f32 as SpatialSimilarity>::cos(a, b).unwrap_or(1.0) as f32
+}
+
+/// Dot product using SimSIMD
+#[cfg(feature = "simd-simsimd")]
+#[allow(dead_code)]
+#[inline(never)]
+fn dot_product_simsimd(a: &[f32], b: &[f32]) -> f32 {
+    use simsimd::SpatialSimilarity;
+
+    <f32 as SpatialSimilarity>::dot(a, b).unwrap_or(0.0) as f32
+}
+
+// ============================================================================
 // Benchmark Infrastructure
 // ============================================================================
 
@@ -441,6 +526,21 @@ fn main() {
     println!("- **Count**: {} vector pairs", args.count);
     println!("- **Warmup**: {} iterations", args.warmup);
     println!("- **Benchmark iterations**: {}", args.iterations);
+
+    // Show optional features
+    println!();
+    println!("### Optional Libraries");
+    println!();
+    #[cfg(feature = "simd-pulp")]
+    println!("- **Pulp**: Enabled (auto-dispatch SIMD)");
+    #[cfg(not(feature = "simd-pulp"))]
+    println!("- **Pulp**: Disabled (use --features simd-pulp)");
+
+    #[cfg(feature = "simd-simsimd")]
+    println!("- **SimSIMD**: Enabled (C library bindings)");
+    #[cfg(not(feature = "simd-simsimd"))]
+    println!("- **SimSIMD**: Disabled (use --features simd-simsimd)");
+
     println!();
 
     // Run benchmarks for each dimension
@@ -532,6 +632,32 @@ fn run_dimension_benchmark(
         ));
     }
 
+    // Pulp crate (optional - auto-dispatched SIMD)
+    #[cfg(feature = "simd-pulp")]
+    {
+        results.push(benchmark(
+            "Pulp (auto-dispatch)",
+            &vectors_a,
+            &vectors_b,
+            warmup,
+            iterations,
+            euclidean_squared_pulp,
+        ));
+    }
+
+    // SimSIMD crate (optional - C library bindings)
+    #[cfg(feature = "simd-simsimd")]
+    {
+        results.push(benchmark(
+            "SimSIMD",
+            &vectors_a,
+            &vectors_b,
+            warmup,
+            iterations,
+            euclidean_squared_simsimd,
+        ));
+    }
+
     // Print results
     let baseline = &results[0];
 
@@ -599,6 +725,32 @@ fn run_dimension_benchmark(
             warmup,
             iterations,
             |a, b| unsafe { cosine_distance_neon(a, b) },
+        ));
+    }
+
+    // Pulp crate (optional - auto-dispatched SIMD)
+    #[cfg(feature = "simd-pulp")]
+    {
+        cosine_results.push(benchmark(
+            "Pulp (auto-dispatch)",
+            &vectors_a,
+            &vectors_b,
+            warmup,
+            iterations,
+            cosine_distance_pulp,
+        ));
+    }
+
+    // SimSIMD crate (optional - C library bindings)
+    #[cfg(feature = "simd-simsimd")]
+    {
+        cosine_results.push(benchmark(
+            "SimSIMD",
+            &vectors_a,
+            &vectors_b,
+            warmup,
+            iterations,
+            cosine_distance_simsimd,
         ));
     }
 

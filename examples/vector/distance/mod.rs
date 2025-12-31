@@ -36,6 +36,10 @@ mod neon;
 #[cfg(simd_level = "runtime")]
 mod runtime;
 
+// Comprehensive test suite for all SIMD implementations
+#[cfg(test)]
+mod tests;
+
 use lazy_static::lazy_static;
 
 // ============================================================================
@@ -253,72 +257,4 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     DISTANCE.dot(a, b)
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn approx_eq(a: f32, b: f32, epsilon: f32) -> bool {
-        (a - b).abs() < epsilon
-    }
-
-    #[test]
-    fn test_euclidean_squared() {
-        let a = vec![1.0, 2.0, 3.0, 4.0];
-        let b = vec![5.0, 6.0, 7.0, 8.0];
-
-        // Expected: (1-5)^2 + (2-6)^2 + (3-7)^2 + (4-8)^2 = 16 + 16 + 16 + 16 = 64
-        let result = euclidean_squared(&a, &b);
-        assert!(approx_eq(result, 64.0, 1e-5), "Got {}", result);
-    }
-
-    #[test]
-    fn test_euclidean() {
-        let a = vec![0.0, 0.0, 0.0];
-        let b = vec![3.0, 4.0, 0.0];
-
-        // Expected: sqrt(9 + 16) = 5
-        let result = euclidean(&a, &b);
-        assert!(approx_eq(result, 5.0, 1e-5), "Got {}", result);
-    }
-
-    #[test]
-    fn test_cosine_same_direction() {
-        let a = vec![1.0, 2.0, 3.0];
-        let b = vec![2.0, 4.0, 6.0]; // Same direction, different magnitude
-
-        // Expected: 0 (same direction = no angular distance)
-        let result = cosine(&a, &b);
-        assert!(approx_eq(result, 0.0, 1e-5), "Got {}", result);
-    }
-
-    #[test]
-    fn test_cosine_orthogonal() {
-        let a = vec![1.0, 0.0];
-        let b = vec![0.0, 1.0];
-
-        // Expected: 1 (orthogonal = maximum angular distance)
-        let result = cosine(&a, &b);
-        assert!(approx_eq(result, 1.0, 1e-5), "Got {}", result);
-    }
-
-    #[test]
-    fn test_dot() {
-        let a = vec![1.0, 2.0, 3.0];
-        let b = vec![4.0, 5.0, 6.0];
-
-        // Expected: 1*4 + 2*5 + 3*6 = 4 + 10 + 18 = 32
-        let result = dot(&a, &b);
-        assert!(approx_eq(result, 32.0, 1e-5), "Got {}", result);
-    }
-
-    #[test]
-    fn test_simd_level() {
-        let level = DISTANCE.level();
-        println!("SIMD level: {}", level);
-        assert!(!level.is_empty());
-    }
-}
+// Tests are in tests.rs - comprehensive test suite for all SIMD implementations
