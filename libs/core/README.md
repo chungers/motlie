@@ -31,14 +31,28 @@ println!("SIMD level: {}", DISTANCE.level());  // "NEON", "AVX2+FMA", etc.
 - ARM64: NEON (Apple Silicon, AWS Graviton)
 - Fallback: Auto-vectorized scalar
 
-**Performance (ARM64 NEON, 1024-dim):**
+**Performance Benchmarks (ARM64 NEON):**
 
-| Function | Baseline | SIMD | Speedup |
-|----------|----------|------|---------|
-| Euclidean | 485.8 ns | 237.4 ns | **2.05x** |
-| Cosine | 1428.8 ns | 247.3 ns | **5.78x** |
+| Distance | Dimension | Baseline (ns) | SIMD (ns) | Speedup |
+|----------|-----------|---------------|-----------|---------|
+| Euclidean | 128 | 39.4 | 28.2 | **1.39x** |
+| Euclidean | 256 | 90.2 | 58.2 | **1.55x** |
+| Euclidean | 512 | 220.9 | 119.0 | **1.86x** |
+| Euclidean | 1024 | 485.8 | 237.4 | **2.05x** |
+| Cosine | 128 | 96.8 | 28.4 | **3.41x** |
+| Cosine | 256 | 252.4 | 58.2 | **4.34x** |
+| Cosine | 512 | 655.1 | 117.0 | **5.60x** |
+| Cosine | 1024 | 1428.8 | 247.3 | **5.78x** |
 
-See [docs/SIMD.md](docs/SIMD.md) for full documentation.
+**Expected Performance (x86_64):**
+
+| Implementation | 128-dim (ns) | 1024-dim (ns) | Speedup |
+|----------------|--------------|---------------|---------|
+| Baseline | ~50 | ~400 | 1x |
+| AVX2 + FMA | ~15 | ~80 | 3-5x |
+| AVX-512 | ~10 | ~50 | 5-8x |
+
+See [src/distance/README.md](src/distance/README.md) for full documentation.
 
 ## Telemetry
 
