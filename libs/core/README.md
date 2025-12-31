@@ -14,7 +14,7 @@ Core utilities and infrastructure for the Motlie workspace.
 The `distance` module provides hardware-accelerated distance functions with automatic platform detection.
 
 ```rust
-use motlie_core::distance::{euclidean_squared, cosine, dot, DISTANCE};
+use motlie_core::distance::{euclidean_squared, cosine, dot, simd_level};
 
 let a = vec![1.0, 2.0, 3.0, 4.0];
 let b = vec![5.0, 6.0, 7.0, 8.0];
@@ -23,7 +23,7 @@ let dist = euclidean_squared(&a, &b);
 let cos_dist = cosine(&a, &b);
 let dot_prod = dot(&a, &b);
 
-println!("SIMD level: {}", DISTANCE.level());  // "NEON", "AVX2+FMA", etc.
+println!("SIMD level: {}", simd_level());  // "NEON", "AVX2+FMA", etc.
 ```
 
 **Supported platforms:**

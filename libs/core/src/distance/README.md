@@ -22,18 +22,18 @@ The `motlie_core::distance` module provides SIMD-optimized distance computation 
 ## Quick Start
 
 ```rust
-use motlie_core::distance::{DISTANCE, euclidean_squared, cosine, dot};
+use motlie_core::distance::{euclidean_squared, cosine, dot, simd_level};
 
 let vec_a = vec![1.0, 2.0, 3.0, 4.0];
 let vec_b = vec![5.0, 6.0, 7.0, 8.0];
 
-// Use convenience functions
+// Use module-level functions (idiomatic API)
 let dist = euclidean_squared(&vec_a, &vec_b);
 let cos_dist = cosine(&vec_a, &vec_b);
 let dot_prod = dot(&vec_a, &vec_b);
 
 // Check which SIMD level is active
-println!("SIMD level: {}", DISTANCE.level());  // e.g., "NEON", "AVX2+FMA"
+println!("Using SIMD: {}", simd_level());  // e.g., "NEON", "AVX2+FMA"
 ```
 
 ---
@@ -48,20 +48,7 @@ println!("SIMD level: {}", DISTANCE.level());  // e.g., "NEON", "AVX2+FMA"
 | `euclidean(a, b)` | Euclidean (L2) distance | `√Σ(a[i] - b[i])²` |
 | `cosine(a, b)` | Cosine distance | `1 - (a·b)/(‖a‖·‖b‖)` |
 | `dot(a, b)` | Dot product | `Σ(a[i] · b[i])` |
-
-### DISTANCE Singleton
-
-```rust
-use motlie_core::distance::DISTANCE;
-
-// Get SIMD level name
-DISTANCE.level()  // "AVX-512", "AVX2+FMA", "NEON", or "Scalar"
-
-// Use dispatcher methods directly
-DISTANCE.euclidean_squared(&a, &b)
-DISTANCE.cosine(&a, &b)
-DISTANCE.dot(&a, &b)
-```
+| `simd_level()` | Active SIMD implementation | `&'static str` |
 
 ---
 

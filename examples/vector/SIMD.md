@@ -8,11 +8,11 @@
 The SIMD-optimized distance functions are now available via `motlie_core::distance`:
 
 ```rust
-use motlie_core::distance::{DISTANCE, euclidean_squared, cosine, dot};
+use motlie_core::distance::{euclidean_squared, cosine, dot, simd_level};
 
-// Use the global dispatcher
-let dist = DISTANCE.euclidean_squared(&vec_a, &vec_b);
-println!("Using SIMD level: {}", DISTANCE.level());
+// Use module-level functions (idiomatic API)
+let dist = euclidean_squared(&vec_a, &vec_b);
+println!("Using SIMD: {}", simd_level());
 
 // Or use convenience functions
 let dist = euclidean_squared(&vec_a, &vec_b);

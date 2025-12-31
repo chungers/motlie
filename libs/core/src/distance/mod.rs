@@ -6,24 +6,27 @@
 //! - **NEON**: ARM64 (macOS Apple Silicon, Linux ARM)
 //! - **Scalar**: Portable fallback
 //!
+//! ## Usage
+//!
+//! ```rust
+//! use motlie_core::distance::{euclidean_squared, cosine, dot, simd_level};
+//!
+//! let vec_a = vec![1.0, 2.0, 3.0, 4.0];
+//! let vec_b = vec![5.0, 6.0, 7.0, 8.0];
+//!
+//! let dist = euclidean_squared(&vec_a, &vec_b);
+//! let cos_dist = cosine(&vec_a, &vec_b);
+//! let dot_prod = dot(&vec_a, &vec_b);
+//!
+//! println!("Using SIMD: {}", simd_level());
+//! ```
+//!
 //! ## Dispatch Strategy
 //!
 //! The SIMD level is selected by `build.rs` based on:
 //! 1. Explicit feature flags (`--features simd-avx512`)
 //! 2. Target features (`RUSTFLAGS='-C target-feature=+avx2,+fma'`)
 //! 3. Target architecture auto-detection
-//!
-//! ## Usage
-//!
-//! ```rust
-//! use motlie_core::distance::DISTANCE;
-//!
-//! let vec_a = vec![1.0, 2.0, 3.0, 4.0];
-//! let vec_b = vec![5.0, 6.0, 7.0, 8.0];
-//!
-//! let dist = DISTANCE.euclidean_squared(&vec_a, &vec_b);
-//! println!("Using SIMD level: {}", DISTANCE.level());
-//! ```
 //!
 //! ## Feature Flags
 //!
@@ -236,40 +239,117 @@ impl Default for Distance {
     }
 }
 
-// Global singleton for distance computation
+// Global singleton for distance computation (internal)
 lazy_static! {
-    /// Global distance computation dispatcher
-    ///
-    /// Uses the SIMD level determined at compile time by `build.rs`.
-    pub static ref DISTANCE: Distance = Distance::new();
+    static ref DISPATCHER: Distance = Distance::new();
 }
 
 // ============================================================================
-// Convenience Functions
+// Public API
 // ============================================================================
 
-/// Compute squared Euclidean distance using the global dispatcher
+/// Compute squared Euclidean distance between two vectors
+///
+/// Returns `sum((a[i] - b[i])^2)` for all i.
+///
+/// # Example
+///
+/// ```
+/// use motlie_core::distance::euclidean_squared;
+///
+/// let a = vec![1.0, 2.0, 3.0];
+/// let b = vec![4.0, 5.0, 6.0];
+/// let dist = euclidean_squared(&a, &b);
+/// assert!((dist - 27.0).abs() < 1e-5);
+/// ```
 #[inline]
 pub fn euclidean_squared(a: &[f32], b: &[f32]) -> f32 {
-    DISTANCE.euclidean_squared(a, b)
+    DISPATCHER.euclidean_squared(a, b)
 }
 
-/// Compute Euclidean distance using the global dispatcher
+/// Compute Euclidean (L2) distance between two vectors
+///
+/// Returns `sqrt(sum((a[i] - b[i])^2))`.
+///
+/// # Example
+///
+/// ```
+/// use motlie_core::distance::euclidean;
+///
+/// let a = vec![0.0, 0.0];
+/// let b = vec![3.0, 4.0];
+/// let dist = euclidean(&a, &b);
+/// assert!((dist - 5.0).abs() < 1e-5);
+/// ```
 #[inline]
 pub fn euclidean(a: &[f32], b: &[f32]) -> f32 {
-    DISTANCE.euclidean(a, b)
+    DISPATCHER.euclidean(a, b)
 }
 
-/// Compute cosine distance using the global dispatcher
+/// Compute cosine distance between two vectors
+///
+/// Returns `1 - (a · b) / (||a|| * ||b||)`.
+///
+/// - Returns 0 for identical directions
+/// - Returns 1 for orthogonal vectors
+/// - Returns 2 for opposite directions
+/// - Returns 1 for zero vectors (undefined, max distance)
+///
+/// # Example
+///
+/// ```
+/// use motlie_core::distance::cosine;
+///
+/// let a = vec![1.0, 0.0];
+/// let b = vec![1.0, 0.0];  // Same direction
+/// assert!(cosine(&a, &b).abs() < 1e-5);
+///
+/// let c = vec![0.0, 1.0];  // Orthogonal
+/// assert!((cosine(&a, &c) - 1.0).abs() < 1e-5);
+/// ```
 #[inline]
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    DISTANCE.cosine(a, b)
+    DISPATCHER.cosine(a, b)
 }
 
-/// Compute dot product using the global dispatcher
+/// Compute dot product of two vectors
+///
+/// Returns `sum(a[i] * b[i])`.
+///
+/// # Example
+///
+/// ```
+/// use motlie_core::distance::dot;
+///
+/// let a = vec![1.0, 2.0, 3.0];
+/// let b = vec![4.0, 5.0, 6.0];
+/// let product = dot(&a, &b);
+/// assert!((product - 32.0).abs() < 1e-5);  // 1*4 + 2*5 + 3*6 = 32
+/// ```
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
-    DISTANCE.dot(a, b)
+    DISPATCHER.dot(a, b)
+}
+
+/// Returns the active SIMD implementation level
+///
+/// Possible values:
+/// - `"AVX-512"` - x86_64 with AVX-512
+/// - `"AVX2+FMA"` - x86_64 with AVX2 and FMA
+/// - `"NEON"` - ARM64 NEON
+/// - `"Scalar"` - Portable fallback
+/// - `"AVX-512 (runtime)"` / `"AVX2+FMA (runtime)"` / `"Scalar (runtime)"` - Runtime detected
+///
+/// # Example
+///
+/// ```
+/// use motlie_core::distance::simd_level;
+///
+/// println!("Using SIMD: {}", simd_level());
+/// ```
+#[inline]
+pub fn simd_level() -> &'static str {
+    DISPATCHER.level()
 }
 
 // Tests are in tests.rs - comprehensive test suite for all SIMD implementations
