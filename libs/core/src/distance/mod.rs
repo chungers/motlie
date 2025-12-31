@@ -61,14 +61,15 @@ mod tests;
 use lazy_static::lazy_static;
 
 // ============================================================================
-// Distance Dispatcher
+// SIMD Dispatcher (internal)
 // ============================================================================
 
-/// SIMD-optimized distance computation dispatcher
+/// SIMD-optimized distance computation dispatcher.
 ///
 /// Automatically selects the best implementation based on compile-time
-/// configuration set by `build.rs`.
-pub struct Distance {
+/// configuration set by `build.rs`. This struct is internal - use the
+/// module-level functions (`euclidean_squared`, `cosine`, `dot`, etc.) instead.
+struct SimdDispatcher {
     #[cfg(simd_level = "runtime")]
     variant: runtime::Variant,
 
@@ -76,7 +77,7 @@ pub struct Distance {
     _phantom: std::marker::PhantomData<()>,
 }
 
-impl Distance {
+impl SimdDispatcher {
     /// Create a new distance dispatcher
     ///
     /// For compile-time dispatch, this is a no-op.
@@ -233,7 +234,7 @@ impl Distance {
     }
 }
 
-impl Default for Distance {
+impl Default for SimdDispatcher {
     fn default() -> Self {
         Self::new()
     }
@@ -241,7 +242,7 @@ impl Default for Distance {
 
 // Global singleton for distance computation (internal)
 lazy_static! {
-    static ref DISPATCHER: Distance = Distance::new();
+    static ref DISPATCHER: SimdDispatcher = SimdDispatcher::new();
 }
 
 // ============================================================================
