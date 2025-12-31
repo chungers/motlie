@@ -16,7 +16,7 @@
 //! cargo bench -p motlie-core --features simd-simsimd
 //! ```
 
-use motlie_core::distance::{self, DISTANCE};
+use motlie_core::distance::{self, simd_level};
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use std::time::{Duration, Instant};
@@ -133,7 +133,7 @@ fn main() {
     println!();
     println!("## System Information");
     println!();
-    println!("- **SIMD Level**: {}", DISTANCE.level());
+    println!("- **SIMD Level**: {}", simd_level());
     #[cfg(target_arch = "x86_64")]
     {
         println!("- **Architecture**: x86_64");
@@ -194,7 +194,7 @@ fn run_dimension_benchmark(dim: usize, count: usize, warmup: usize, iterations: 
 
     // SIMD dispatcher
     results.push(benchmark(
-        &format!("SIMD ({})", DISTANCE.level()),
+        &format!("SIMD ({})", simd_level()),
         &vectors_a,
         &vectors_b,
         warmup,
@@ -248,7 +248,7 @@ fn run_dimension_benchmark(dim: usize, count: usize, warmup: usize, iterations: 
     ));
 
     cosine_results.push(benchmark(
-        &format!("SIMD ({})", DISTANCE.level()),
+        &format!("SIMD ({})", simd_level()),
         &vectors_a,
         &vectors_b,
         warmup,

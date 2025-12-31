@@ -973,15 +973,14 @@ examples/vector/distance/
 ### Usage in Code
 
 ```rust
-use crate::common::distance::{DISTANCE, euclidean_squared, cosine};
+use crate::common::distance::{euclidean_squared, cosine, simd_level};
 
-// Using convenience functions (recommended)
+// Using module-level functions (idiomatic API)
 let dist = euclidean_squared(&vec_a, &vec_b);
 let cos_dist = cosine(&vec_a, &vec_b);
 
-// Using the global dispatcher directly
-println!("SIMD level: {}", DISTANCE.level());
-let dist = DISTANCE.euclidean_squared(&vec_a, &vec_b);
+// Check which SIMD implementation is active
+println!("SIMD level: {}", simd_level());
 ```
 
 ## File Structure

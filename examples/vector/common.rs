@@ -44,9 +44,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 // Distance Metrics (SIMD-accelerated)
 // ============================================================================
 
-// Re-export the global SIMD dispatcher for direct use
-#[allow(unused_imports)]
-pub use distance::DISTANCE;
+// Re-export simd_level for checking the active SIMD implementation
+pub use distance::simd_level;
 
 /// Compute Euclidean (L2) distance between two vectors
 ///
