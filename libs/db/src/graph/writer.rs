@@ -27,6 +27,8 @@ use super::Storage;
 // MutationExecutor Trait
 // ============================================================================
 
+use super::name_hash::NameCache;
+
 /// Trait for mutations to execute themselves directly against storage.
 ///
 /// This trait defines HOW to write the mutation to the database.
@@ -42,6 +44,22 @@ pub trait MutationExecutor: Send + Sync {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
     ) -> Result<()>;
+
+    /// Execute this mutation with access to the name cache.
+    ///
+    /// The cache is used to:
+    /// 1. Skip redundant Names CF writes for already-interned names
+    /// 2. Intern new names for future lookups
+    ///
+    /// Default implementation delegates to `execute()` (ignoring the cache).
+    fn execute_with_cache(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _cache: &NameCache,
+    ) -> Result<()> {
+        self.execute(txn, txn_db)
+    }
 }
 
 // ============================================================================
@@ -266,8 +284,9 @@ impl Writer {
 
         let txn_db = storage.transaction_db()?;
         let txn = txn_db.transaction();
+        let name_cache = storage.name_cache().clone();
 
-        Ok(Transaction::new(txn, txn_db, self.transaction_forward_to.clone()))
+        Ok(Transaction::new(txn, txn_db, self.transaction_forward_to.clone(), name_cache))
     }
 
     /// Check if transactions are supported by this writer.

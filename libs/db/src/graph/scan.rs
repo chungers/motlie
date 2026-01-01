@@ -22,13 +22,58 @@
 use anyhow::Result;
 use rocksdb::{Direction, IteratorMode};
 
+use super::name_hash::NameHash;
 use super::ColumnFamilyRecord;
 use super::schema::{
-    self, is_valid_at_time, DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary,
-    SrcId, TemporalRange,
+    self, is_valid_at_time, DstId, EdgeName, EdgeSummary, FragmentContent, Names, NamesCfKey,
+    NodeName, NodeSummary, SrcId, TemporalRange,
 };
 use super::Storage;
 use crate::{Id, TimestampMilli};
+
+// ============================================================================
+// Name Resolution Helpers
+// ============================================================================
+
+/// Resolve a NameHash to its full String name.
+///
+/// Uses the in-memory NameCache first for O(1) lookup, falling back to
+/// Names CF lookup only for cache misses. On cache miss, the name is
+/// added to the cache for future lookups.
+fn resolve_name(storage: &Storage, name_hash: NameHash) -> Result<String> {
+    // Check cache first (O(1) DashMap lookup)
+    let cache = storage.name_cache();
+    if let Some(name) = cache.get(&name_hash) {
+        return Ok((*name).clone());
+    }
+
+    // Cache miss: fetch from Names CF
+    let key_bytes = Names::key_to_bytes(&NamesCfKey(name_hash));
+
+    let value_bytes = if let Ok(db) = storage.db() {
+        let names_cf = db
+            .cf_handle(Names::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
+        db.get_cf(names_cf, &key_bytes)?
+    } else {
+        let txn_db = storage.transaction_db()?;
+        let names_cf = txn_db
+            .cf_handle(Names::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
+        txn_db.get_cf(names_cf, &key_bytes)?
+    };
+
+    let value_bytes = value_bytes
+        .ok_or_else(|| anyhow::anyhow!("Name not found for hash: {}", name_hash))?;
+
+    let value = Names::value_from_bytes(&value_bytes)?;
+    let name = value.0;
+
+    // Populate cache for future lookups
+    cache.insert(name_hash, name.clone());
+
+    Ok(name)
+}
 
 // ============================================================================
 // Visitor Trait
@@ -361,9 +406,11 @@ impl Visitable for AllNodes {
             |key_bytes, value_bytes| {
                 let key = schema::Nodes::key_from_bytes(key_bytes)?;
                 let value = schema::Nodes::value_from_bytes(value_bytes)?;
+                // Resolve NameHash to String
+                let name = resolve_name(storage, value.1)?;
                 Ok(NodeRecord {
                     id: key.0,
-                    name: value.1,
+                    name,
                     summary: value.2,
                     valid_range: value.0,
                 })
@@ -384,19 +431,25 @@ impl Visitable for AllEdges {
     ) -> Result<usize> {
         tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllEdges scan");
 
+        // Convert String cursor to NameHash for key construction
         let seek_key = self
             .last
             .as_ref()
             .map(|(src, dst, name)| {
+                let name_hash = NameHash::from_name(name);
                 schema::ForwardEdges::key_to_bytes(&schema::ForwardEdgeCfKey(
                     *src,
                     *dst,
-                    name.clone(),
+                    name_hash,
                 ))
             })
             .unwrap_or_default();
 
-        let last_cursor = self.last.clone();
+        // Pre-compute cursor key hash for comparison
+        let last_cursor_hash = self.last.as_ref().map(|(src, dst, name)| {
+            let name_hash = NameHash::from_name(name);
+            (*src, *dst, name_hash)
+        });
 
         iterate_and_visit::<schema::ForwardEdges, _, _, _, _>(
             storage,
@@ -406,9 +459,9 @@ impl Visitable for AllEdges {
             self.reverse,
             self.reference_ts_millis,
             |key_bytes| {
-                if let Some((src, dst, name)) = &last_cursor {
+                if let Some((src, dst, name_hash)) = &last_cursor_hash {
                     let cursor_key = schema::ForwardEdges::key_to_bytes(
-                        &schema::ForwardEdgeCfKey(*src, *dst, name.clone()),
+                        &schema::ForwardEdgeCfKey(*src, *dst, *name_hash),
                     );
                     key_bytes == cursor_key.as_slice()
                 } else {
@@ -418,10 +471,12 @@ impl Visitable for AllEdges {
             |key_bytes, value_bytes| {
                 let key = schema::ForwardEdges::key_from_bytes(key_bytes)?;
                 let value = schema::ForwardEdges::value_from_bytes(value_bytes)?;
+                // Resolve NameHash to String
+                let name = resolve_name(storage, key.2)?;
                 Ok(EdgeRecord {
                     src_id: key.0,
                     dst_id: key.1,
-                    name: key.2,
+                    name,
                     summary: value.2,
                     weight: value.1,
                     valid_range: value.0,
@@ -443,19 +498,25 @@ impl Visitable for AllReverseEdges {
     ) -> Result<usize> {
         tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllReverseEdges scan");
 
+        // Convert String cursor to NameHash for key construction
         let seek_key = self
             .last
             .as_ref()
             .map(|(dst, src, name)| {
+                let name_hash = NameHash::from_name(name);
                 schema::ReverseEdges::key_to_bytes(&schema::ReverseEdgeCfKey(
                     *dst,
                     *src,
-                    name.clone(),
+                    name_hash,
                 ))
             })
             .unwrap_or_default();
 
-        let last_cursor = self.last.clone();
+        // Pre-compute cursor key hash for comparison
+        let last_cursor_hash = self.last.as_ref().map(|(dst, src, name)| {
+            let name_hash = NameHash::from_name(name);
+            (*dst, *src, name_hash)
+        });
 
         iterate_and_visit::<schema::ReverseEdges, _, _, _, _>(
             storage,
@@ -465,9 +526,9 @@ impl Visitable for AllReverseEdges {
             self.reverse,
             self.reference_ts_millis,
             |key_bytes| {
-                if let Some((dst, src, name)) = &last_cursor {
+                if let Some((dst, src, name_hash)) = &last_cursor_hash {
                     let cursor_key = schema::ReverseEdges::key_to_bytes(
-                        &schema::ReverseEdgeCfKey(*dst, *src, name.clone()),
+                        &schema::ReverseEdgeCfKey(*dst, *src, *name_hash),
                     );
                     key_bytes == cursor_key.as_slice()
                 } else {
@@ -477,10 +538,12 @@ impl Visitable for AllReverseEdges {
             |key_bytes, value_bytes| {
                 let key = schema::ReverseEdges::key_from_bytes(key_bytes)?;
                 let value = schema::ReverseEdges::value_from_bytes(value_bytes)?;
+                // Resolve NameHash to String
+                let name = resolve_name(storage, key.2)?;
                 Ok(ReverseEdgeRecord {
                     dst_id: key.0,
                     src_id: key.1,
-                    name: key.2,
+                    name,
                     valid_range: value.0,
                 })
             },
@@ -552,20 +615,26 @@ impl Visitable for AllEdgeFragments {
     ) -> Result<usize> {
         tracing::debug!(limit = self.limit, reverse = self.reverse, has_cursor = self.last.is_some(), "Executing AllEdgeFragments scan");
 
+        // Convert String cursor to NameHash for key construction
         let seek_key = self
             .last
             .as_ref()
             .map(|(src, dst, name, ts)| {
+                let name_hash = NameHash::from_name(name);
                 schema::EdgeFragments::key_to_bytes(&schema::EdgeFragmentCfKey(
                     *src,
                     *dst,
-                    name.clone(),
+                    name_hash,
                     *ts,
                 ))
             })
             .unwrap_or_default();
 
-        let last_cursor = self.last.clone();
+        // Pre-compute cursor key hash for comparison
+        let last_cursor_hash = self.last.as_ref().map(|(src, dst, name, ts)| {
+            let name_hash = NameHash::from_name(name);
+            (*src, *dst, name_hash, *ts)
+        });
 
         iterate_and_visit::<schema::EdgeFragments, _, _, _, _>(
             storage,
@@ -575,9 +644,9 @@ impl Visitable for AllEdgeFragments {
             self.reverse,
             self.reference_ts_millis,
             |key_bytes| {
-                if let Some((src, dst, name, ts)) = &last_cursor {
+                if let Some((src, dst, name_hash, ts)) = &last_cursor_hash {
                     let cursor_key = schema::EdgeFragments::key_to_bytes(
-                        &schema::EdgeFragmentCfKey(*src, *dst, name.clone(), *ts),
+                        &schema::EdgeFragmentCfKey(*src, *dst, *name_hash, *ts),
                     );
                     key_bytes == cursor_key.as_slice()
                 } else {
@@ -587,10 +656,12 @@ impl Visitable for AllEdgeFragments {
             |key_bytes, value_bytes| {
                 let key = schema::EdgeFragments::key_from_bytes(key_bytes)?;
                 let value = schema::EdgeFragments::value_from_bytes(value_bytes)?;
+                // Resolve NameHash to String
+                let edge_name = resolve_name(storage, key.2)?;
                 Ok(EdgeFragmentRecord {
                     src_id: key.0,
                     dst_id: key.1,
-                    edge_name: key.2,
+                    edge_name,
                     timestamp: key.3,
                     content: value.1,
                     valid_range: value.0,

@@ -451,7 +451,7 @@ fn verify_mode_main(db_path: &str) -> Result<()> {
         "edge_fragments",
         "forward_edges",
         "reverse_edges",
-        "edge_names",
+        "names", // Stores hash -> name mappings for name interning
     ];
     let db = DB::open_cf_for_read_only(
         &rocksdb::Options::default(),
@@ -657,9 +657,11 @@ fn verify_nodes(db: &DB, expected: &ExpectedData) -> Result<bool> {
         let (_key, value) = item.context("Failed to read from nodes CF")?;
         db_node_count += 1;
 
-        // Deserialize to extract node name (now directly from the tuple)
-        if let Ok((node_name, _markdown_content)) = deserialize_node_value(&value) {
-            db_node_names.insert(node_name);
+        // Deserialize to extract node name hash, then resolve to actual name
+        if let Ok((name_hash, _markdown_content)) = deserialize_node_value(&value) {
+            if let Ok(node_name) = resolve_name_from_db(db, name_hash) {
+                db_node_names.insert(node_name);
+            }
         }
     }
 
@@ -702,8 +704,10 @@ fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
     for item in db.iterator_cf(nodes_cf, rocksdb::IteratorMode::Start) {
         let (key, value) = item.context("Failed to read from nodes CF")?;
         let node_id = deserialize_node_id(&key)?;
-        if let Ok((node_name, _markdown_content)) = deserialize_node_value(&value) {
-            id_to_name.insert(node_id, node_name);
+        if let Ok((name_hash, _markdown_content)) = deserialize_node_value(&value) {
+            if let Ok(node_name) = resolve_name_from_db(db, name_hash) {
+                id_to_name.insert(node_id, node_name);
+            }
         }
     }
 
@@ -719,9 +723,12 @@ fn verify_edges(db: &DB, expected: &ExpectedData) -> Result<bool> {
         let (key, _value) = item.context("Failed to read from forward_edges CF")?;
         db_edge_count += 1;
 
-        // Deserialize key to get source_id, target_id, edge_name
+        // Deserialize key to get source_id, target_id, edge_name_hash
         // The key contains the canonical edge information
-        let (source_id, target_id, edge_name) = deserialize_forward_edge_key(&key)?;
+        let (source_id, target_id, edge_name_hash) = deserialize_forward_edge_key(&key)?;
+
+        // Resolve edge name hash to actual name
+        let edge_name = resolve_name_from_db(db, edge_name_hash)?;
 
         // Map IDs to names
         if let (Some(source_name), Some(target_name)) =
@@ -884,12 +891,15 @@ fn deserialize_node_id(bytes: &[u8]) -> Result<IdBytes> {
     Ok(id_bytes)
 }
 
-fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
+/// NameHash representation - 8-byte xxHash64
+type NameHashBytes = [u8; 8];
+
+fn deserialize_node_value(bytes: &[u8]) -> Result<(NameHashBytes, String)> {
     #[derive(serde::Deserialize)]
     struct TemporalRange(Option<u64>, Option<u64>);
 
     #[derive(serde::Deserialize)]
-    struct NodeCfValue(Option<TemporalRange>, String, NodeSummary);
+    struct NodeCfValue(Option<TemporalRange>, NameHashBytes, NodeSummary);
 
     #[derive(serde::Deserialize)]
     struct NodeSummary(DataUrl);
@@ -904,7 +914,7 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
     let value: NodeCfValue =
         rmp_serde::from_slice(&decompressed).context("Failed to deserialize node value")?;
 
-    let node_name = value.1;
+    let name_hash = value.1;
     // Decode the data URL to get the actual content
     let data_url_str = &value.2 .0 .0;
     let parsed = data_url::DataUrl::process(data_url_str).context("Failed to parse data URL")?;
@@ -913,14 +923,29 @@ fn deserialize_node_value(bytes: &[u8]) -> Result<(String, String)> {
         .context("Failed to decode data URL")?;
     let content = String::from_utf8(body).context("Failed to convert bytes to UTF-8")?;
 
-    Ok((node_name, content))
+    Ok((name_hash, content))
 }
 
-fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, String)> {
-    // Keys are now stored as: [src_id (16)] + [dst_id (16)] + [name UTF-8 bytes]
-    if bytes.len() < 32 {
+fn resolve_name_from_db(db: &DB, name_hash: NameHashBytes) -> Result<String> {
+    let names_cf = db.cf_handle("names").context("Names CF not found")?;
+    let key = name_hash;
+    if let Some(value_bytes) = db.get_cf(names_cf, &key)? {
+        // Value is LZ4-compressed MessagePack of NamesCfValue(String)
+        let decompressed = lz4::block::decompress(&value_bytes, None)
+            .context("Failed to decompress name value")?;
+        let name: String = rmp_serde::from_slice(&decompressed)
+            .context("Failed to deserialize name value")?;
+        Ok(name)
+    } else {
+        anyhow::bail!("Name not found for hash: {:?}", name_hash)
+    }
+}
+
+fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, NameHashBytes)> {
+    // Keys are now stored as: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes
+    if bytes.len() != 40 {
         anyhow::bail!(
-            "Invalid forward edge key length: expected >= 32, got {}",
+            "Invalid forward edge key length: expected 40, got {}",
             bytes.len()
         );
     }
@@ -931,10 +956,10 @@ fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, Strin
     let mut dst_id_bytes = [0u8; 16];
     dst_id_bytes.copy_from_slice(&bytes[16..32]);
 
-    let name_bytes = &bytes[32..];
-    let name = String::from_utf8(name_bytes.to_vec()).context("Invalid UTF-8 in edge name")?;
+    let mut name_hash = [0u8; 8];
+    name_hash.copy_from_slice(&bytes[32..40]);
 
-    Ok((src_id_bytes, dst_id_bytes, name))
+    Ok((src_id_bytes, dst_id_bytes, name_hash))
 }
 
 fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {

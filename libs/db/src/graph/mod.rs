@@ -23,6 +23,7 @@ use rocksdb::{Options, TransactionDB, TransactionDBOptions, DB};
 
 // Submodules
 pub mod mutation;
+pub mod name_hash;
 pub mod query;
 pub mod reader;
 pub mod schema;
@@ -65,6 +66,7 @@ pub use reader::{
     Reader,
     ReaderConfig,
 };
+pub use name_hash::{NameCache, NameHash};
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 pub use writer::{
     // Mutation consumer functions
@@ -236,6 +238,21 @@ impl StorageOptions {
     }
 }
 
+/// Configuration for name cache pre-warming
+#[derive(Debug, Clone)]
+pub struct NameCacheConfig {
+    /// Maximum number of names to pre-load from Names CF on startup.
+    /// Set to 0 to disable pre-warming.
+    /// Default: 1000
+    pub prewarm_limit: usize,
+}
+
+impl Default for NameCacheConfig {
+    fn default() -> Self {
+        Self { prewarm_limit: 1000 }
+    }
+}
+
 /// Graph-specific storage
 pub struct Storage {
     db_path: PathBuf,
@@ -244,6 +261,10 @@ pub struct Storage {
     db: Option<DatabaseHandle>,
     mode: StorageMode,
     column_families: &'static [&'static str],
+    /// Thread-safe name cache for interning and resolution
+    name_cache: std::sync::Arc<NameCache>,
+    /// Configuration for name cache behavior
+    name_cache_config: NameCacheConfig,
 }
 
 impl Storage {
@@ -256,6 +277,8 @@ impl Storage {
             db: None,
             mode: StorageMode::ReadOnly,
             column_families: ALL_COLUMN_FAMILIES,
+            name_cache: std::sync::Arc::new(NameCache::new()),
+            name_cache_config: NameCacheConfig::default(),
         }
     }
 
@@ -268,6 +291,8 @@ impl Storage {
             db: None,
             mode: StorageMode::ReadWrite,
             column_families: ALL_COLUMN_FAMILIES,
+            name_cache: std::sync::Arc::new(NameCache::new()),
+            name_cache_config: NameCacheConfig::default(),
         }
     }
 
@@ -284,6 +309,8 @@ impl Storage {
             db: None,
             mode: StorageMode::ReadWrite,
             column_families: ALL_COLUMN_FAMILIES,
+            name_cache: std::sync::Arc::new(NameCache::new()),
+            name_cache_config: NameCacheConfig::default(),
         }
     }
 
@@ -321,7 +348,24 @@ impl Storage {
                 secondary_path: PathBuf::from(secondary_path),
             },
             column_families: ALL_COLUMN_FAMILIES,
+            name_cache: std::sync::Arc::new(NameCache::new()),
+            name_cache_config: NameCacheConfig::default(),
         }
+    }
+
+    /// Set the name cache configuration.
+    ///
+    /// Must be called before `ready()` to take effect.
+    pub fn with_name_cache_config(mut self, config: NameCacheConfig) -> Self {
+        self.name_cache_config = config;
+        self
+    }
+
+    /// Get a reference to the name cache.
+    ///
+    /// The cache is pre-warmed during `ready()` if `prewarm_limit > 0`.
+    pub fn name_cache(&self) -> &std::sync::Arc<NameCache> {
+        &self.name_cache
     }
 
     /// Close the database
@@ -369,6 +413,10 @@ impl Storage {
         // Create column family descriptors with encapsulated options
         use rocksdb::ColumnFamilyDescriptor;
         let cf_descriptors = vec![
+            ColumnFamilyDescriptor::new(
+                schema::Names::CF_NAME,
+                schema::Names::column_family_options(),
+            ),
             ColumnFamilyDescriptor::new(
                 schema::Nodes::CF_NAME,
                 schema::Nodes::column_family_options(),
@@ -421,8 +469,81 @@ impl Storage {
             }
         }
 
+        // Pre-warm the name cache if configured
+        if self.name_cache_config.prewarm_limit > 0 {
+            let loaded = self.prewarm_name_cache()?;
+            tracing::info!(
+                "[Storage] Pre-warmed name cache with {} entries (limit: {})",
+                loaded,
+                self.name_cache_config.prewarm_limit
+            );
+        }
+
         tracing::info!("[Storage] Ready");
         Ok(())
+    }
+
+    /// Pre-warm the name cache by loading entries from the Names CF.
+    ///
+    /// Returns the number of entries loaded.
+    fn prewarm_name_cache(&self) -> Result<usize> {
+        use rocksdb::IteratorMode;
+
+        let limit = self.name_cache_config.prewarm_limit;
+        let mut loaded = 0;
+
+        // Get iterator based on storage mode
+        if let Ok(db) = self.db() {
+            let names_cf = db
+                .cf_handle(schema::Names::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
+
+            for item in db.iterator_cf(names_cf, IteratorMode::Start) {
+                if loaded >= limit {
+                    break;
+                }
+
+                let (key_bytes, value_bytes) = item?;
+
+                // Parse key (NameHash) and value (name string)
+                if key_bytes.len() == 8 {
+                    let mut hash_bytes = [0u8; 8];
+                    hash_bytes.copy_from_slice(&key_bytes);
+                    let hash = NameHash::from_bytes(hash_bytes);
+
+                    if let Ok(value) = schema::Names::value_from_bytes(&value_bytes) {
+                        self.name_cache.insert(hash, value.0);
+                        loaded += 1;
+                    }
+                }
+            }
+        } else if let Ok(txn_db) = self.transaction_db() {
+            let names_cf = txn_db
+                .cf_handle(schema::Names::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
+
+            for item in txn_db.iterator_cf(names_cf, IteratorMode::Start) {
+                if loaded >= limit {
+                    break;
+                }
+
+                let (key_bytes, value_bytes) = item?;
+
+                // Parse key (NameHash) and value (name string)
+                if key_bytes.len() == 8 {
+                    let mut hash_bytes = [0u8; 8];
+                    hash_bytes.copy_from_slice(&key_bytes);
+                    let hash = NameHash::from_bytes(hash_bytes);
+
+                    if let Ok(value) = schema::Names::value_from_bytes(&value_bytes) {
+                        self.name_cache.insert(hash, value.0);
+                        loaded += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(loaded)
     }
 
     /// Get a reference to the underlying DB (only works in readonly or secondary mode)
@@ -541,13 +662,14 @@ impl Processor for Graph {
 
         tracing::info!(count = mutations.len(), "[Graph] About to insert mutations");
 
-        // Get transaction
+        // Get transaction and name cache
         let txn_db = self.storage.transaction_db()?;
         let txn = txn_db.transaction();
+        let name_cache = self.storage.name_cache();
 
-        // Each mutation executes itself - no match needed!
+        // Each mutation executes itself with cache access for name deduplication
         for mutation in mutations {
-            mutation.execute(&txn, txn_db)?;
+            mutation.execute_with_cache(&txn, txn_db, name_cache)?;
         }
 
         // Single commit for all mutations
