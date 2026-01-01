@@ -1,5 +1,6 @@
 use super::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
 use super::name_hash::NameHash;
+use super::BlockCacheConfig;
 use super::ColumnFamilyRecord;
 use super::ValidRangePatchable;
 use crate::DataUrl;
@@ -77,6 +78,37 @@ impl Names {
         block_opts.set_bloom_filter(10.0, false); // 10 bits per key
         opts.set_block_based_table_factory(&block_opts);
 
+        opts
+    }
+
+    /// Configure RocksDB options with shared block cache.
+    ///
+    /// Names CF is small and hot - use high cache priority to keep it in memory.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        // Cache index and filter blocks for Names CF
+        // Note: The Rust bindings don't expose high_priority setting, but setting
+        // cache_index_and_filter_blocks=true keeps metadata in cache which helps.
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        // Enable bloom filter for fast point lookups
+        block_opts.set_bloom_filter(10.0, false); // 10 bits per key
+
+        opts.set_block_based_table_factory(&block_opts);
         opts
     }
 }
@@ -226,6 +258,31 @@ impl ColumnFamilyRecord for Nodes {
     }
 }
 
+impl Nodes {
+    /// Configure RocksDB options with shared block cache.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with graph block size
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
 /// Node fragments column family (renamed from Fragments for clarity).
 pub(crate) struct NodeFragments;
 #[derive(Serialize, Deserialize)]
@@ -285,6 +342,41 @@ impl ColumnFamilyRecord for NodeFragments {
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
 
         // Enable prefix bloom filter for fast prefix existence checks
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl NodeFragments {
+    /// Configure RocksDB options with shared block cache.
+    ///
+    /// Fragment CFs use larger block size for variable-length content.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with fragment block size (larger for variable content)
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.fragment_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [Id (16 bytes)] + [TimestampMilli (8 bytes)]
+        // Use 16-byte prefix to scan all fragments for a given Id
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
         opts.set_memtable_prefix_bloom_ratio(0.2);
 
         opts
@@ -365,6 +457,41 @@ impl ColumnFamilyRecord for EdgeFragments {
     }
 }
 
+impl EdgeFragments {
+    /// Configure RocksDB options with shared block cache.
+    ///
+    /// Fragment CFs use larger block size for variable-length content.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with fragment block size (larger for variable content)
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.fragment_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [timestamp (8)] = 48 bytes
+        // Use 32-byte prefix (src_id + dst_id) to scan all fragments for a given edge topology
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
 impl ColumnFamilyRecord for ForwardEdges {
     const CF_NAME: &'static str = "forward_edges";
     type Key = ForwardEdgeCfKey;
@@ -428,6 +555,39 @@ impl ColumnFamilyRecord for ForwardEdges {
     }
 }
 
+impl ForwardEdges {
+    /// Configure RocksDB options with shared block cache.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with graph block size
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes
+        // Use 16-byte prefix to scan all edges from a source node
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
 impl ColumnFamilyRecord for ReverseEdges {
     const CF_NAME: &'static str = "reverse_edges";
     type Key = ReverseEdgeCfKey;
@@ -485,6 +645,39 @@ impl ColumnFamilyRecord for ReverseEdges {
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
 
         // Enable prefix bloom filter for O(1) prefix existence check
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl ReverseEdges {
+    /// Configure RocksDB options with shared block cache.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with graph block size
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes
+        // Use 16-byte prefix to scan all edges to a destination node
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
         opts.set_memtable_prefix_bloom_ratio(0.2);
 
         opts
