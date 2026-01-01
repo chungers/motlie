@@ -37,6 +37,19 @@ description = "Motlie workspace with examples"
 default = []
 dtrace-otel = ["motlie-core/dtrace-otel"]
 
+# SIMD dispatch strategy for vector distance computation
+# See libs/core/docs/SIMD.md for details
+simd-runtime = ["motlie-core/simd-runtime"]
+simd-native = ["motlie-core/simd-native"]
+simd-avx2 = ["motlie-core/simd-avx2"]
+simd-avx512 = ["motlie-core/simd-avx512"]
+simd-neon = ["motlie-core/simd-neon"]
+simd-none = ["motlie-core/simd-none"]
+
+# Alternative SIMD libraries for benchmarking comparison
+simd-pulp = ["pulp"]
+simd-simsimd = ["motlie-core/simd-simsimd"]
+
 [dependencies]
 motlie-core = { path = "libs/core" }
 motlie-db = { path = "libs/db" }
@@ -66,6 +79,11 @@ reqwest = { version = "0.12", features = ["json"] }
 rand = "0.8"
 rand_chacha = "0.3"
 base64 = "0.22"
+lazy_static = "1.4"
+
+# Optional SIMD libraries for benchmarking
+pulp = { version = "0.18", optional = true }
+simsimd = { version = "6", optional = true }
 
 [[example]]
 name = "store"
@@ -138,6 +156,10 @@ path = "examples/vector/hnsw.rs"
 [[example]]
 name = "vamana"
 path = "examples/vector/vamana.rs"
+
+[[example]]
+name = "simd_bench"
+path = "examples/vector/simd_bench.rs"
 
 [[bin]]
 name = "motlie"

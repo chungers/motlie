@@ -6,7 +6,66 @@ Core utilities and infrastructure for the Motlie workspace.
 
 | Module | Description |
 |--------|-------------|
+| `distance` | SIMD-optimized vector distance computation (Euclidean, Cosine, Dot) |
 | `telemetry` | Tracing subscriber initialization for development and production |
+
+## Distance
+
+The `distance` module provides hardware-accelerated distance functions that **automatically select the optimal implementation** for your platform at compile time.
+
+### Zero-Configuration Optimization
+
+Simply call the distance functions - the library handles platform detection:
+
+```rust
+use motlie_core::distance::{euclidean_squared, cosine, dot, simd_level};
+
+let a = vec![1.0, 2.0, 3.0, 4.0];
+let b = vec![5.0, 6.0, 7.0, 8.0];
+
+// These calls automatically use the best SIMD implementation available
+let dist = euclidean_squared(&a, &b);
+let cos_dist = cosine(&a, &b);
+let dot_prod = dot(&a, &b);
+
+println!("SIMD level: {}", simd_level());  // "NEON", "AVX2+FMA", "AVX-512", etc.
+```
+
+### Automatic Platform Selection
+
+The `build.rs` script detects your target platform and selects the optimal implementation:
+
+| Platform | Implementation | Speedup |
+|----------|----------------|---------|
+| x86_64 + AVX-512 (DGX Spark, Intel Xeon) | AVX-512 intrinsics | 5-8x |
+| x86_64 + AVX2 (most modern x86) | AVX2+FMA intrinsics | 3-5x |
+| ARM64 (Apple Silicon, AWS Graviton) | NEON intrinsics | 2-6x |
+| Other / Fallback | Auto-vectorized scalar | baseline |
+
+**No code changes required** - the same API works everywhere, with the best available optimization.
+
+**Performance Benchmarks (ARM64 NEON):**
+
+| Distance | Dimension | Baseline (ns) | SIMD (ns) | Speedup |
+|----------|-----------|---------------|-----------|---------|
+| Euclidean | 128 | 39.4 | 28.2 | **1.39x** |
+| Euclidean | 256 | 90.2 | 58.2 | **1.55x** |
+| Euclidean | 512 | 220.9 | 119.0 | **1.86x** |
+| Euclidean | 1024 | 485.8 | 237.4 | **2.05x** |
+| Cosine | 128 | 96.8 | 28.4 | **3.41x** |
+| Cosine | 256 | 252.4 | 58.2 | **4.34x** |
+| Cosine | 512 | 655.1 | 117.0 | **5.60x** |
+| Cosine | 1024 | 1428.8 | 247.3 | **5.78x** |
+
+**Expected Performance (x86_64):**
+
+| Implementation | 128-dim (ns) | 1024-dim (ns) | Speedup |
+|----------------|--------------|---------------|---------|
+| Baseline | ~50 | ~400 | 1x |
+| AVX2 + FMA | ~15 | ~80 | 3-5x |
+| AVX-512 | ~10 | ~50 | 5-8x |
+
+See [src/distance/README.md](src/distance/README.md) for full documentation.
 
 ## Telemetry
 

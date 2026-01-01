@@ -666,8 +666,9 @@ fn parse_args() -> Result<(PathBuf, usize, usize, usize, Option<DatasetName>, us
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
+    // Initialize tracing with build info
+    motlie_core::telemetry::init_dev_subscriber_with_env_filter();
+    motlie_core::telemetry::log_build_info();
 
     let (db_path, num_vectors, num_queries, k, dataset_name, l_param) = parse_args()?;
 

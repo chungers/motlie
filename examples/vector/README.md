@@ -9,6 +9,7 @@ This directory contains implementations of Approximate Nearest Neighbor (ANN) se
 | **[REQUIREMENTS.md](./REQUIREMENTS.md)** | Ground truth for all design decisions (scale, latency, recall, DATA-1) |
 | **[POC.md](./POC.md)** | Current implementation details (Phase 1: schema, APIs, benchmarks) |
 | **[PERF.md](./PERF.md)** | Benchmark results and performance analysis |
+| **[SIMD.md](./SIMD.md)** | SIMD acceleration for distance computation (1.4-5.8x speedup) |
 | **[ISSUES.md](./ISSUES.md)** | Known issues and API implementations |
 | **[ALTERNATIVES.md](./ALTERNATIVES.md)** | Alternative architectures analysis (SPFresh, ScaNN, RaBitQ) |
 
@@ -32,7 +33,8 @@ This constraint drives the recommended implementation path.
 |-------|------|--------|-------|-----------------|
 | **1** | POC | ✅ **Complete** | Prove feasibility | 95.3% recall at 1M |
 | **2** | HNSW2 | 📋 Designed | Build throughput | 5,000-10,000 inserts/sec |
-| **2a** | RaBitQ | 📋 Designed | Search acceleration | 3-4x QPS improvement |
+| **2a** | SIMD | ✅ **Complete** | Distance acceleration | 1.4-5.8x speedup |
+| **2b** | RaBitQ | 📋 Designed | Search acceleration | 3-4x QPS improvement |
 | **3** | IVFPQ | ⚠️ Not Viable | GPU acceleration | Violates DATA-1 |
 | **4** | HYBRID | 📋 Designed | Billion scale | 1B vectors, <64GB RAM |
 
@@ -49,7 +51,13 @@ This constraint drives the recommended implementation path.
 │  ├── 95.3% recall at 1M scale                                            │
 │  └── ~40 inserts/sec (baseline)                                          │
 │                                                                          │
-│  Phase 2: HNSW2 + RaBitQ            📋 NEXT                              │
+│  Phase 2a: SIMD Distance            ✅ COMPLETE                          │
+│  ├── AVX-512/AVX2/NEON implementations                                   │
+│  ├── build.rs platform auto-detection                                    │
+│  ├── 1.4-5.8x distance speedup (ARM64 NEON validated)                    │
+│  └── Expected 3-5x on x86 AVX2, 5-8x on AVX-512                          │
+│                                                                          │
+│  Phase 2b: HNSW2 + RaBitQ           📋 NEXT                              │
 │  ├── Roaring bitmap edge storage (125x insert speedup)                   │
 │  ├── RaBitQ binary codes (3-4x QPS, DATA-1 compliant)                    │
 │  ├── u32 ID allocation (4x storage reduction)                            │
@@ -82,7 +90,27 @@ This constraint drives the recommended implementation path.
 | SIFT1M benchmark | ✅ Done | [PERF.md](./PERF.md) |
 | 95% recall at 1M | ✅ Achieved | 95.3% recall |
 
-#### Phase 2: HNSW2 + RaBitQ 📋 Designed
+#### Phase 2a: SIMD Distance Acceleration ✅ Complete
+
+| Component | Status | Reference |
+|-----------|--------|-----------|
+| build.rs platform detection | ✅ Done | `build.rs` |
+| Cargo.toml feature flags | ✅ Done | `Cargo.toml` |
+| NEON implementation | ✅ Done | `distance/neon.rs` |
+| AVX2+FMA implementation | ✅ Done | `distance/avx2.rs` |
+| AVX-512 implementation | ✅ Done | `distance/avx512.rs` |
+| Runtime detection | ✅ Done | `distance/runtime.rs` |
+| Integration with common.rs | ✅ Done | `common.rs` |
+
+**Measured Results (ARM64 NEON)**:
+- Euclidean 1024d: 485.8 ns → 237.4 ns (**2.05x speedup**)
+- Cosine 1024d: 1428.8 ns → 247.3 ns (**5.78x speedup**)
+
+**Expected for x86**:
+- AVX2+FMA: 3-5x speedup
+- AVX-512: 5-8x speedup
+
+#### Phase 2b: HNSW2 + RaBitQ 📋 Designed
 
 | Component | Effort | Status | Reference |
 |-----------|--------|--------|-----------|
@@ -127,7 +155,8 @@ See [ALTERNATIVES.md](./ALTERNATIVES.md) for analysis. If GPU acceleration is ne
 | Phase | Document | Focus | DATA-1 Status |
 |-------|----------|-------|---------------|
 | **1** | [POC.md](./POC.md) | Current implementation | ✅ Compliant |
-| **2** | [HNSW2.md](./HNSW2.md) | Build throughput + RaBitQ | ✅ Compliant |
+| **2a** | [SIMD.md](./SIMD.md) | Distance acceleration | ✅ Complete |
+| **2b** | [HNSW2.md](./HNSW2.md) | Build throughput + RaBitQ | ✅ Compliant |
 | **3** | [IVFPQ.md](./IVFPQ.md) | GPU acceleration | ❌ Requires training |
 | **4** | [HYBRID.md](./HYBRID.md) | Billion scale (RaBitQ) | ✅ Compliant |
 | **-** | [ALTERNATIVES.md](./ALTERNATIVES.md) | Architecture analysis | Analysis doc |
@@ -841,14 +870,136 @@ We support:
 
 Default: **Euclidean distance**
 
+---
+
+## SIMD Acceleration
+
+The vector search implementation includes SIMD-optimized distance functions for significant performance improvements. See [SIMD.md](./SIMD.md) for detailed documentation.
+
+### Measured Speedups (ARM64 NEON)
+
+| Distance | Dimension | Before | After | Speedup |
+|----------|-----------|--------|-------|---------|
+| Euclidean | 128 | 39.4 ns | 28.2 ns | **1.39x** |
+| Euclidean | 1024 | 485.8 ns | 237.4 ns | **2.05x** |
+| Cosine | 128 | 96.8 ns | 28.4 ns | **3.41x** |
+| Cosine | 1024 | 1428.8 ns | 247.3 ns | **5.78x** |
+
+### Build Configuration
+
+The project uses a `build.rs` script for automatic platform detection and SIMD level selection.
+
+#### How build.rs Works
+
+The build script (`build.rs` in the project root) automatically detects your target platform and sets the appropriate SIMD level:
+
+1. **Platform Detection**: Reads `CARGO_CFG_TARGET_ARCH` to determine architecture (x86_64, aarch64)
+2. **Feature Detection**: Checks `CARGO_CFG_TARGET_FEATURE` for available SIMD features (avx2, avx512f, fma)
+3. **cfg Flag Output**: Sets `simd_level` cfg flag (avx512, avx2, neon, scalar, runtime)
+
+```rust
+// build.rs sets these cfg flags:
+// - simd_level="avx512"  for x86_64 with AVX-512
+// - simd_level="avx2"    for x86_64 with AVX2+FMA
+// - simd_level="neon"    for aarch64 (ARM64)
+// - simd_level="runtime" for runtime CPU detection
+// - simd_level="scalar"  for fallback
+```
+
+#### Build Commands
+
+```bash
+# Default build (auto-detects platform)
+# - macOS Apple Silicon → NEON
+# - Linux aarch64 → NEON
+# - Linux x86_64 → Runtime detection
+cargo build --release
+
+# DGX Spark or x86 with AVX-512
+cargo build --release --features simd-avx512
+
+# x86 with AVX2+FMA (most modern x86 servers)
+cargo build --release --features simd-avx2
+
+# ARM64 with NEON (explicit)
+cargo build --release --features simd-neon
+
+# Portable binary with runtime CPU detection
+cargo build --release --features simd-runtime
+
+# Maximum performance for current CPU
+RUSTFLAGS='-C target-cpu=native' cargo build --release --features simd-native
+
+# Force scalar fallback (for testing/debugging)
+cargo build --release --features simd-none
+```
+
+#### Feature Flags
+
+| Feature | Description | Use Case |
+|---------|-------------|----------|
+| `simd-avx512` | Force AVX-512 (512-bit vectors) | DGX Spark, newer Intel Xeon |
+| `simd-avx2` | Force AVX2+FMA (256-bit vectors) | Most x86_64 servers |
+| `simd-neon` | Force NEON (128-bit vectors) | Apple Silicon, AWS Graviton |
+| `simd-runtime` | Runtime CPU detection | Portable binaries |
+| `simd-native` | Hint for `-C target-cpu=native` | Maximum local performance |
+| `simd-none` | Scalar fallback only | Debugging, testing |
+
+#### Verifying SIMD Level
+
+```bash
+# Build and run - the output shows which SIMD level is active
+cargo run --release --example simd_bench
+
+# Output includes:
+# - **Architecture**: aarch64 (ARM64)
+# - **NEON**: Assumed available
+```
+
+### Distance Module Structure
+
+The SIMD implementation is in `examples/vector/distance/`:
+
+```
+examples/vector/distance/
+├── mod.rs      # Main dispatcher with compile-time cfg dispatch
+├── scalar.rs   # Portable fallback (auto-vectorized by compiler)
+├── avx2.rs     # x86_64 AVX2+FMA intrinsics (256-bit, 8 f32s)
+├── avx512.rs   # x86_64 AVX-512 intrinsics (512-bit, 16 f32s)
+├── neon.rs     # ARM64 NEON intrinsics (128-bit, 4 f32s)
+└── runtime.rs  # Runtime CPU detection for portable binaries
+```
+
+### Usage in Code
+
+```rust
+use crate::common::distance::{euclidean_squared, cosine, simd_level};
+
+// Using module-level functions (idiomatic API)
+let dist = euclidean_squared(&vec_a, &vec_b);
+let cos_dist = cosine(&vec_a, &vec_b);
+
+// Check which SIMD implementation is active
+println!("SIMD level: {}", simd_level());
+```
+
 ## File Structure
 
 ```
 examples/vector/
-├── README.md           # This file
-├── common.rs           # Shared utilities (data generation, distance functions)
-├── hnsw.rs             # HNSW implementation
-└── vamana.rs           # Vamana (DiskANN) implementation
+├── README.md              # This file
+├── SIMD.md                # SIMD acceleration documentation
+├── common.rs              # Shared utilities (data generation, distance functions)
+├── distance/              # SIMD-optimized distance module
+│   ├── mod.rs             # Main dispatcher with compile-time cfg
+│   ├── scalar.rs          # Portable fallback implementation
+│   ├── avx2.rs            # x86_64 AVX2+FMA intrinsics
+│   ├── avx512.rs          # x86_64 AVX-512 intrinsics
+│   ├── neon.rs            # ARM64 NEON intrinsics
+│   └── runtime.rs         # Runtime CPU detection
+├── hnsw.rs                # HNSW implementation
+├── vamana.rs              # Vamana (DiskANN) implementation
+└── simd_bench.rs          # SIMD performance benchmark
 ```
 
 ## Usage
