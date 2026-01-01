@@ -15,15 +15,99 @@ use std::ops::Bound;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
+use super::name_hash::NameHash;
 use super::reader::{Processor, QueryExecutor, QueryProcessor};
 use super::scan::{self, Visitable};
 use crate::reader::Runnable;
 use super::schema::{
-    self, DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId,
+    self, DstId, EdgeName, EdgeSummary, FragmentContent, Names, NamesCfKey,
+    NodeName, NodeSummary, SrcId,
 };
 use super::ColumnFamilyRecord;
 use super::Storage;
 use crate::{Id, TimestampMilli};
+
+// ============================================================================
+// Name Resolution Helpers
+// ============================================================================
+
+/// Resolve a NameHash to its full String name.
+///
+/// Uses the in-memory NameCache first for O(1) lookup, falling back to
+/// Names CF lookup only for cache misses. On cache miss, the name is
+/// added to the cache for future lookups.
+///
+/// This is the primary function for QueryExecutor implementations that
+/// have access to Storage.
+fn resolve_name(storage: &Storage, name_hash: NameHash) -> Result<String> {
+    // Check cache first (O(1) DashMap lookup)
+    let cache = storage.name_cache();
+    if let Some(name) = cache.get(&name_hash) {
+        return Ok((*name).clone());
+    }
+
+    // Cache miss: fetch from Names CF
+    let key_bytes = Names::key_to_bytes(&NamesCfKey(name_hash));
+
+    let value_bytes = if let Ok(db) = storage.db() {
+        let names_cf = db
+            .cf_handle(Names::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
+        db.get_cf(names_cf, &key_bytes)?
+    } else {
+        let txn_db = storage.transaction_db()?;
+        let names_cf = txn_db
+            .cf_handle(Names::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
+        txn_db.get_cf(names_cf, &key_bytes)?
+    };
+
+    let value_bytes = value_bytes
+        .ok_or_else(|| anyhow::anyhow!("Name not found for hash: {}", name_hash))?;
+
+    let value = Names::value_from_bytes(&value_bytes)?;
+    let name = value.0;
+
+    // Populate cache for future lookups
+    cache.insert(name_hash, name.clone());
+
+    Ok(name)
+}
+
+/// Resolve a NameHash from a Transaction (sees uncommitted writes).
+///
+/// For TransactionQueryExecutor implementations that need read-your-writes
+/// semantics. Uses cache first, then falls back to transaction lookup.
+fn resolve_name_from_txn(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    name_hash: NameHash,
+    cache: &super::name_hash::NameCache,
+) -> Result<String> {
+    // Check cache first (O(1) DashMap lookup)
+    if let Some(name) = cache.get(&name_hash) {
+        return Ok((*name).clone());
+    }
+
+    // Cache miss: fetch from transaction (sees uncommitted writes)
+    let names_cf = txn_db
+        .cf_handle(Names::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
+
+    let key_bytes = Names::key_to_bytes(&NamesCfKey(name_hash));
+
+    let value_bytes = txn
+        .get_cf(names_cf, &key_bytes)?
+        .ok_or_else(|| anyhow::anyhow!("Name not found for hash: {}", name_hash))?;
+
+    let value = Names::value_from_bytes(&value_bytes)?;
+    let name = value.0;
+
+    // Populate cache for future lookups
+    cache.insert(name_hash, name.clone());
+
+    Ok(name)
+}
 
 // ============================================================================
 // TransactionQueryExecutor Trait
@@ -86,6 +170,7 @@ pub trait TransactionQueryExecutor: Send + Sync {
     ///
     /// * `txn` - Active RocksDB transaction
     /// * `txn_db` - TransactionDB for column family handles
+    /// * `cache` - Name cache for efficient hash-to-name resolution
     ///
     /// # Returns
     ///
@@ -95,6 +180,7 @@ pub trait TransactionQueryExecutor: Send + Sync {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output>;
 }
 
@@ -1194,7 +1280,10 @@ impl QueryExecutor for NodeByIdDispatch {
             ));
         }
 
-        Ok((value.1, value.2))
+        // Resolve NameHash to String (uses cache)
+        let node_name = resolve_name(storage, value.1)?;
+
+        Ok((node_name, value.2))
     }
 
     fn timeout(&self) -> Duration {
@@ -1245,7 +1334,8 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
         };
 
         // Parse results, skipping missing entries and temporally invalid nodes
-        let mut output = Vec::with_capacity(results.len());
+        // Collect valid entries with their NameHash first, then resolve names
+        let mut valid_entries: Vec<(Id, NameHash, NodeSummary)> = Vec::with_capacity(results.len());
         for (id, result) in params.ids.iter().zip(results) {
             match result {
                 Ok(Some(value_bytes)) => {
@@ -1253,7 +1343,7 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
                         Ok(value) => {
                             // Check temporal validity - skip invalid nodes
                             if schema::is_valid_at_time(&value.0, ref_time) {
-                                output.push((*id, value.1, value.2));
+                                valid_entries.push((*id, value.1, value.2));
                             } else {
                                 tracing::trace!(
                                     id = %id,
@@ -1275,6 +1365,13 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
                     tracing::warn!(id = %id, error = %e, "RocksDB error fetching node");
                 }
             }
+        }
+
+        // Resolve NameHashes to Strings (uses cache)
+        let mut output = Vec::with_capacity(valid_entries.len());
+        for (id, name_hash, summary) in valid_entries {
+            let node_name = resolve_name(storage, name_hash)?;
+            output.push((id, node_name, summary));
         }
 
         Ok(output)
@@ -1389,29 +1486,26 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch {
 
         let source_id = params.source_id;
         let dest_id = params.dest_id;
-        let edge_name = &params.edge_name;
+        // Convert edge_name String to NameHash for key construction
+        let edge_name_hash = NameHash::from_name(&params.edge_name);
         let mut fragments: Vec<(TimestampMilli, FragmentContent)> = Vec::new();
 
         // Construct optimal starting key based on start bound
-        // EdgeFragmentCfKey: (SrcId, DstId, EdgeName, TimestampMilli)
+        // EdgeFragmentCfKey: (SrcId, DstId, NameHash, TimestampMilli) - now fixed 40 bytes
         let start_key = match &params.time_range.0 {
             Bound::Unbounded => {
-                let name_bytes = edge_name.as_bytes();
-                let mut key = Vec::with_capacity(32 + name_bytes.len() + 8);
-                key.extend_from_slice(&source_id.into_bytes());
-                key.extend_from_slice(&dest_id.into_bytes());
-                key.extend_from_slice(name_bytes);
-                key.extend_from_slice(&0u64.to_be_bytes());
-                key
+                schema::EdgeFragments::key_to_bytes(
+                    &schema::EdgeFragmentCfKey(source_id, dest_id, edge_name_hash, TimestampMilli(0)),
+                )
             }
             Bound::Included(start_ts) => schema::EdgeFragments::key_to_bytes(
-                &schema::EdgeFragmentCfKey(source_id, dest_id, edge_name.clone(), *start_ts),
+                &schema::EdgeFragmentCfKey(source_id, dest_id, edge_name_hash, *start_ts),
             ),
             Bound::Excluded(start_ts) => {
                 schema::EdgeFragments::key_to_bytes(&schema::EdgeFragmentCfKey(
                     source_id,
                     dest_id,
-                    edge_name.clone(),
+                    edge_name_hash,
                     TimestampMilli(start_ts.0 + 1),
                 ))
             }
@@ -1422,8 +1516,8 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch {
             let key: schema::EdgeFragmentCfKey = schema::EdgeFragments::key_from_bytes(&key_bytes)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-            // Check if we're still in the same edge (source_id, dest_id, edge_name)
-            if key.0 != source_id || key.1 != dest_id || key.2 != *edge_name {
+            // Check if we're still in the same edge (source_id, dest_id, edge_name_hash)
+            if key.0 != source_id || key.1 != dest_id || key.2 != edge_name_hash {
                 break;
             }
 
@@ -1485,8 +1579,10 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
         let source_id = params.source_id;
         let dest_id = params.dest_id;
         let name = &params.name;
+        // Convert edge name to NameHash for key construction
+        let name_hash = NameHash::from_name(name);
 
-        let key = schema::ForwardEdgeCfKey(source_id, dest_id, name.clone());
+        let key = schema::ForwardEdgeCfKey(source_id, dest_id, name_hash);
         let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
 
         let value_bytes = if let Ok(db) = storage.db() {
@@ -1559,7 +1655,8 @@ impl QueryExecutor for OutgoingEdgesDispatch {
             .unwrap_or_else(|| TimestampMilli::now());
 
         let id = params.id;
-        let mut edges: Vec<(Option<f64>, SrcId, DstId, EdgeName)> = Vec::new();
+        // Collect edges with NameHash first, then resolve to String
+        let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
         let prefix = id.into_bytes();
 
         if let Ok(db) = storage.db() {
@@ -1597,9 +1694,9 @@ impl QueryExecutor for OutgoingEdgesDispatch {
                 }
 
                 let dest_id = key.1;
-                let edge_name = key.2;
+                let edge_name_hash = key.2;
                 let weight = value.1;
-                edges.push((weight, source_id, dest_id, edge_name));
+                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
             }
         } else {
             let txn_db = storage.transaction_db()?;
@@ -1639,12 +1736,18 @@ impl QueryExecutor for OutgoingEdgesDispatch {
                 }
 
                 let dest_id = key.1;
-                let edge_name = key.2;
+                let edge_name_hash = key.2;
                 let weight = value.1;
-                edges.push((weight, source_id, dest_id, edge_name));
+                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
             }
         }
 
+        // Resolve NameHashes to Strings (uses cache)
+        let mut edges = Vec::with_capacity(edges_with_hash.len());
+        for (weight, src_id, dst_id, name_hash) in edges_with_hash {
+            let edge_name = resolve_name(storage, name_hash)?;
+            edges.push((weight, src_id, dst_id, edge_name));
+        }
         Ok(edges)
     }
 
@@ -1668,7 +1771,8 @@ impl QueryExecutor for IncomingEdgesDispatch {
             .unwrap_or_else(|| TimestampMilli::now());
 
         let id = params.id;
-        let mut edges: Vec<(Option<f64>, DstId, SrcId, EdgeName)> = Vec::new();
+        // Collect edges with NameHash, then resolve to String
+        let mut edges_with_hash: Vec<(Option<f64>, DstId, SrcId, NameHash)> = Vec::new();
         let prefix = id.into_bytes();
 
         if let Ok(db) = storage.db() {
@@ -1713,12 +1817,12 @@ impl QueryExecutor for IncomingEdgesDispatch {
                 }
 
                 let source_id = key.1;
-                let edge_name = key.2.clone();
+                let edge_name_hash = key.2;
 
                 // Lookup weight from ForwardEdges CF
-                // ReverseEdgeCfKey is (dst_id, src_id, edge_name)
-                // ForwardEdgeCfKey is (src_id, dst_id, edge_name)
-                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name.clone());
+                // ReverseEdgeCfKey is (dst_id, src_id, NameHash)
+                // ForwardEdgeCfKey is (src_id, dst_id, NameHash)
+                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
                 let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
 
                 let weight = if let Some(forward_value_bytes) =
@@ -1733,7 +1837,7 @@ impl QueryExecutor for IncomingEdgesDispatch {
                     None
                 };
 
-                edges.push((weight, dest_id, source_id, edge_name));
+                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
             }
         } else {
             let txn_db = storage.transaction_db()?;
@@ -1782,12 +1886,12 @@ impl QueryExecutor for IncomingEdgesDispatch {
                 }
 
                 let source_id = key.1;
-                let edge_name = key.2.clone();
+                let edge_name_hash = key.2;
 
                 // Lookup weight from ForwardEdges CF
-                // ReverseEdgeCfKey is (dst_id, src_id, edge_name)
-                // ForwardEdgeCfKey is (src_id, dst_id, edge_name)
-                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name.clone());
+                // ReverseEdgeCfKey is (dst_id, src_id, NameHash)
+                // ForwardEdgeCfKey is (src_id, dst_id, NameHash)
+                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
                 let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
 
                 let weight = if let Some(forward_value_bytes) =
@@ -1802,10 +1906,16 @@ impl QueryExecutor for IncomingEdgesDispatch {
                     None
                 };
 
-                edges.push((weight, dest_id, source_id, edge_name));
+                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
             }
         }
 
+        // Resolve NameHashes to Strings (uses cache)
+        let mut edges = Vec::with_capacity(edges_with_hash.len());
+        for (weight, dst_id, src_id, name_hash) in edges_with_hash {
+            let edge_name = resolve_name(storage, name_hash)?;
+            edges.push((weight, dst_id, src_id, edge_name));
+        }
         Ok(edges)
     }
 
@@ -1892,6 +2002,7 @@ impl TransactionQueryExecutor for NodeById {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output> {
         tracing::debug!(id = %self.id, "Executing NodeById query in transaction");
 
@@ -1924,7 +2035,9 @@ impl TransactionQueryExecutor for NodeById {
             ));
         }
 
-        Ok((value.1, value.2))
+        // Resolve NameHash to String (uses cache)
+        let node_name = resolve_name_from_txn(txn, txn_db, value.1, cache)?;
+        Ok((node_name, value.2))
     }
 }
 
@@ -1936,6 +2049,7 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output> {
         tracing::debug!(count = self.ids.len(), "Executing NodesByIdsMulti query in transaction");
 
@@ -1951,7 +2065,8 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
             anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
         })?;
 
-        let mut output = Vec::with_capacity(self.ids.len());
+        // Collect entries with NameHash first
+        let mut entries_with_hash: Vec<(Id, NameHash, NodeSummary)> = Vec::with_capacity(self.ids.len());
 
         for id in &self.ids {
             let key = schema::NodeCfKey(*id);
@@ -1962,7 +2077,7 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
                 match schema::Nodes::value_from_bytes(&value_bytes) {
                     Ok(value) => {
                         if schema::is_valid_at_time(&value.0, ref_time) {
-                            output.push((*id, value.1, value.2));
+                            entries_with_hash.push((*id, value.1, value.2));
                         }
                     }
                     Err(e) => {
@@ -1970,6 +2085,13 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
                     }
                 }
             }
+        }
+
+        // Resolve NameHashes to Strings (uses cache)
+        let mut output = Vec::with_capacity(entries_with_hash.len());
+        for (id, name_hash, summary) in entries_with_hash {
+            let node_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
+            output.push((id, node_name, summary));
         }
 
         Ok(output)
@@ -1984,6 +2106,7 @@ impl TransactionQueryExecutor for NodeFragmentsByIdTimeRange {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
+        _cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output> {
         tracing::debug!(id = %self.id, time_range = ?self.time_range, "Executing NodeFragmentsByIdTimeRange query in transaction");
 
@@ -2052,6 +2175,7 @@ impl TransactionQueryExecutor for EdgeFragmentsByIdTimeRange {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
+        _cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output> {
         tracing::debug!(
             source_id = %self.source_id,
@@ -2074,16 +2198,18 @@ impl TransactionQueryExecutor for EdgeFragmentsByIdTimeRange {
                 )
             })?;
 
+        // Convert edge_name String to NameHash for key construction
+        let edge_name_hash = NameHash::from_name(&self.edge_name);
+
         // Create prefix for this edge's fragments
         let prefix_key = schema::EdgeFragmentCfKey(
             self.source_id,
             self.dest_id,
-            self.edge_name.clone(),
+            edge_name_hash,
             TimestampMilli(0),
         );
         let prefix_bytes = schema::EdgeFragments::key_to_bytes(&prefix_key);
-        // Prefix is src_id + dst_id + edge_name (variable length due to string)
-        // We need to iterate and check key structure
+        // Prefix is src_id + dst_id + name_hash (now fixed 40 bytes)
 
         let mut results = Vec::new();
 
@@ -2103,7 +2229,7 @@ impl TransactionQueryExecutor for EdgeFragmentsByIdTimeRange {
             };
 
             // Check if this is still our edge
-            if key.0 != self.source_id || key.1 != self.dest_id || key.2 != self.edge_name {
+            if key.0 != self.source_id || key.1 != self.dest_id || key.2 != edge_name_hash {
                 break;
             }
 
@@ -2135,6 +2261,7 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
+        _cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output> {
         tracing::debug!(
             source_id = %self.source_id,
@@ -2156,10 +2283,13 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
                 )
             })?;
 
+        // Convert edge name to NameHash for key construction
+        let name_hash = NameHash::from_name(&self.name);
+
         let key = schema::ForwardEdgeCfKey(
             self.source_id,
             self.dest_id,
-            self.name.clone(),
+            name_hash,
         );
         let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
 
@@ -2200,6 +2330,7 @@ impl TransactionQueryExecutor for OutgoingEdges {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output> {
         tracing::debug!(id = %self.id, "Executing OutgoingEdges query in transaction");
 
@@ -2216,39 +2347,40 @@ impl TransactionQueryExecutor for OutgoingEdges {
                 )
             })?;
 
-        // Create prefix for this source node's edges
-        let prefix_key = schema::ForwardEdgeCfKey(
-            self.id,
-            Id::nil(),
-            String::new(),
-        );
-        let prefix_bytes = schema::ForwardEdges::key_to_bytes(&prefix_key);
-        let prefix_len = std::mem::size_of::<Id>(); // Just the source ID
-
-        let mut results = Vec::new();
+        // Use source ID as prefix for iteration
+        let prefix = self.id.into_bytes();
+        // Collect edges with NameHash first
+        let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
 
         let iter = txn.iterator_cf(
             cf,
-            rocksdb::IteratorMode::From(&prefix_bytes, rocksdb::Direction::Forward),
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
         );
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
 
-            // Check prefix match (source ID)
-            if key_bytes.len() < prefix_len || &key_bytes[..prefix_len] != &prefix_bytes[..prefix_len]
-            {
+            let key: schema::ForwardEdgeCfKey = schema::ForwardEdges::key_from_bytes(&key_bytes)?;
+
+            // Check if still same source
+            if key.0 != self.id {
                 break;
             }
 
-            let key: schema::ForwardEdgeCfKey = schema::ForwardEdges::key_from_bytes(&key_bytes)?;
             let value: schema::ForwardEdgeCfValue =
                 schema::ForwardEdges::value_from_bytes(&value_bytes)?;
 
             // Check temporal validity
             if schema::is_valid_at_time(&value.0, ref_time) {
-                results.push((value.1, key.0, key.1, key.2));
+                edges_with_hash.push((value.1, key.0, key.1, key.2));
             }
+        }
+
+        // Resolve NameHashes to Strings (uses cache)
+        let mut results = Vec::with_capacity(edges_with_hash.len());
+        for (weight, src_id, dst_id, name_hash) in edges_with_hash {
+            let edge_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
+            results.push((weight, src_id, dst_id, edge_name));
         }
 
         Ok(results)
@@ -2263,6 +2395,7 @@ impl TransactionQueryExecutor for IncomingEdges {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output> {
         tracing::debug!(id = %self.id, "Executing IncomingEdges query in transaction");
 
@@ -2270,7 +2403,7 @@ impl TransactionQueryExecutor for IncomingEdges {
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let cf = txn_db
+        let reverse_cf = txn_db
             .cf_handle(schema::ReverseEdges::CF_NAME)
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -2279,32 +2412,35 @@ impl TransactionQueryExecutor for IncomingEdges {
                 )
             })?;
 
-        // Create prefix for this destination node's edges
-        let prefix_key = schema::ReverseEdgeCfKey(
-            self.id,
-            Id::nil(),
-            String::new(),
-        );
-        let prefix_bytes = schema::ReverseEdges::key_to_bytes(&prefix_key);
-        let prefix_len = std::mem::size_of::<Id>(); // Just the destination ID
+        let forward_cf = txn_db
+            .cf_handle(schema::ForwardEdges::CF_NAME)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Column family '{}' not found",
+                    schema::ForwardEdges::CF_NAME
+                )
+            })?;
 
-        let mut results = Vec::new();
+        // Use destination ID as prefix for iteration
+        let prefix = self.id.into_bytes();
+        // Collect edges with NameHash first
+        let mut edges_with_hash: Vec<(Option<f64>, DstId, SrcId, NameHash)> = Vec::new();
 
         let iter = txn.iterator_cf(
-            cf,
-            rocksdb::IteratorMode::From(&prefix_bytes, rocksdb::Direction::Forward),
+            reverse_cf,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
         );
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
 
-            // Check prefix match (destination ID)
-            if key_bytes.len() < prefix_len || &key_bytes[..prefix_len] != &prefix_bytes[..prefix_len]
-            {
+            let key: schema::ReverseEdgeCfKey = schema::ReverseEdges::key_from_bytes(&key_bytes)?;
+
+            // Check if still same destination
+            if key.0 != self.id {
                 break;
             }
 
-            let key: schema::ReverseEdgeCfKey = schema::ReverseEdges::key_from_bytes(&key_bytes)?;
             let value: schema::ReverseEdgeCfValue =
                 schema::ReverseEdges::value_from_bytes(&value_bytes)?;
 
@@ -2312,19 +2448,10 @@ impl TransactionQueryExecutor for IncomingEdges {
             if schema::is_valid_at_time(&value.0, ref_time) {
                 let dest_id = key.0;
                 let source_id = key.1;
-                let edge_name = key.2.clone();
+                let edge_name_hash = key.2;
 
                 // Lookup weight from ForwardEdges CF
-                let forward_cf = txn_db
-                    .cf_handle(schema::ForwardEdges::CF_NAME)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Column family '{}' not found",
-                            schema::ForwardEdges::CF_NAME
-                        )
-                    })?;
-
-                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name.clone());
+                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
                 let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
 
                 let weight = if let Some(forward_value_bytes) =
@@ -2337,8 +2464,15 @@ impl TransactionQueryExecutor for IncomingEdges {
                     None
                 };
 
-                results.push((weight, dest_id, source_id, edge_name));
+                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
             }
+        }
+
+        // Resolve NameHashes to Strings (uses cache)
+        let mut results = Vec::with_capacity(edges_with_hash.len());
+        for (weight, dst_id, src_id, name_hash) in edges_with_hash {
+            let edge_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
+            results.push((weight, dst_id, src_id, edge_name));
         }
 
         Ok(results)
@@ -2353,6 +2487,7 @@ impl TransactionQueryExecutor for AllNodes {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output> {
         tracing::debug!(limit = self.limit, cursor = ?self.last, "Executing AllNodes query in transaction");
 
@@ -2399,7 +2534,9 @@ impl TransactionQueryExecutor for AllNodes {
 
             // Check temporal validity
             if schema::is_valid_at_time(&value.0, ref_time) {
-                results.push((key.0, value.1, value.2));
+                // Resolve NameHash to String (uses cache)
+                let node_name = resolve_name_from_txn(txn, txn_db, value.1, cache)?;
+                results.push((key.0, node_name, value.2));
             }
         }
 
@@ -2415,6 +2552,7 @@ impl TransactionQueryExecutor for AllEdges {
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
     ) -> Result<Self::Output> {
         tracing::debug!(limit = self.limit, cursor = ?self.last, "Executing AllEdges query in transaction");
 
@@ -2431,12 +2569,11 @@ impl TransactionQueryExecutor for AllEdges {
                 )
             })?;
 
-        let mut results = Vec::with_capacity(self.limit);
-
         // Determine start position - need to create bytes outside the if-let
-        // to avoid lifetime issues
+        // to avoid lifetime issues. Convert name to NameHash for cursor.
         let start_bytes: Option<Vec<u8>> = self.last.as_ref().map(|(src, dst, name)| {
-            let start_key = schema::ForwardEdgeCfKey(*src, *dst, name.clone());
+            let name_hash = NameHash::from_name(name);
+            let start_key = schema::ForwardEdgeCfKey(*src, *dst, name_hash);
             schema::ForwardEdges::key_to_bytes(&start_key)
         });
 
@@ -2447,6 +2584,8 @@ impl TransactionQueryExecutor for AllEdges {
         };
 
         let mut skip_first = self.last.is_some();
+        // Collect edges with NameHash first
+        let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
@@ -2457,7 +2596,7 @@ impl TransactionQueryExecutor for AllEdges {
                 continue;
             }
 
-            if results.len() >= self.limit {
+            if edges_with_hash.len() >= self.limit {
                 break;
             }
 
@@ -2467,8 +2606,15 @@ impl TransactionQueryExecutor for AllEdges {
 
             // Check temporal validity
             if schema::is_valid_at_time(&value.0, ref_time) {
-                results.push((value.1, key.0, key.1, key.2));
+                edges_with_hash.push((value.1, key.0, key.1, key.2));
             }
+        }
+
+        // Resolve NameHashes to Strings (uses cache)
+        let mut results = Vec::with_capacity(edges_with_hash.len());
+        for (weight, src_id, dst_id, name_hash) in edges_with_hash {
+            let edge_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
+            results.push((weight, src_id, dst_id, edge_name));
         }
 
         Ok(results)

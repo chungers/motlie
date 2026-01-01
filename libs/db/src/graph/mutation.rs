@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
+use super::name_hash::NameHash;
 use super::schema;
 use super::writer::{MutationExecutor, Writer};
 use crate::writer::Runnable;
@@ -232,6 +233,67 @@ pub struct UpdateEdgeWeight {
 // Helper Functions - Shared logic for mutation execution
 // ============================================================================
 
+/// Helper function to write a name to the Names CF.
+///
+/// This is idempotent: writing the same name twice has no effect since
+/// the same hash always maps to the same name.
+fn write_name_to_cf(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    name: &str,
+) -> Result<NameHash> {
+    use super::schema::{Names, NamesCfKey, NamesCfValue};
+
+    let name_hash = NameHash::from_name(name);
+
+    let names_cf = txn_db
+        .cf_handle(Names::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Names::CF_NAME))?;
+
+    let key_bytes = Names::key_to_bytes(&NamesCfKey(name_hash));
+    let value_bytes = Names::value_to_bytes(&NamesCfValue(name.to_string()))?;
+
+    txn.put_cf(names_cf, key_bytes, value_bytes)?;
+
+    Ok(name_hash)
+}
+
+/// Helper function to write a name to the Names CF with cache optimization.
+///
+/// Uses the cache to:
+/// 1. Check if the name is already interned (skip DB write)
+/// 2. Intern new names for future lookups
+///
+/// Returns the NameHash and whether a DB write was performed.
+fn write_name_to_cf_cached(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    name: &str,
+    cache: &super::name_hash::NameCache,
+) -> Result<NameHash> {
+    use super::schema::{Names, NamesCfKey, NamesCfValue};
+
+    // Check cache first - if already interned, skip DB write
+    let (name_hash, is_new) = cache.intern_if_new(name);
+
+    if is_new {
+        // New name - write to Names CF
+        let names_cf = txn_db
+            .cf_handle(Names::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Names::CF_NAME))?;
+
+        let key_bytes = Names::key_to_bytes(&NamesCfKey(name_hash));
+        let value_bytes = Names::value_to_bytes(&NamesCfValue(name.to_string()))?;
+
+        txn.put_cf(names_cf, key_bytes, value_bytes)?;
+        tracing::trace!(name = %name, "Wrote new name to Names CF");
+    } else {
+        tracing::trace!(name = %name, "Name already cached, skipping DB write");
+    }
+
+    Ok(name_hash)
+}
+
 /// Helper function to update TemporalRange for a single node.
 /// Updates the Nodes CF.
 fn update_node_valid_range(
@@ -264,12 +326,15 @@ fn update_node_valid_range(
 
 /// Helper function to update TemporalRange for a single edge in ForwardEdges and ReverseEdges CFs.
 /// This is the core logic shared by UpdateEdgeValidSinceUntil and UpdateNodeValidSinceUntil.
+///
+/// Note: This function accepts a NameHash directly. The caller is responsible for
+/// computing the hash from the edge name string.
 fn update_edge_valid_range(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     src_id: Id,
     dst_id: Id,
-    edge_name: &schema::EdgeName,
+    name_hash: NameHash,
     new_range: schema::TemporalRange,
 ) -> Result<()> {
     use super::{ColumnFamilyRecord, ValidRangePatchable};
@@ -280,15 +345,15 @@ fn update_edge_valid_range(
         .cf_handle(ForwardEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
 
-    let forward_key = ForwardEdgeCfKey(src_id, dst_id, edge_name.clone());
+    let forward_key = ForwardEdgeCfKey(src_id, dst_id, name_hash);
     let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
 
     let forward_value_bytes = txn.get_cf(forward_cf, &forward_key_bytes)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "ForwardEdge not found: src={}, dst={}, name={}",
+            "ForwardEdge not found: src={}, dst={}, name_hash={}",
             src_id,
             dst_id,
-            edge_name
+            name_hash
         )
     })?;
 
@@ -301,15 +366,15 @@ fn update_edge_valid_range(
         .cf_handle(ReverseEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
 
-    let reverse_key = ReverseEdgeCfKey(dst_id, src_id, edge_name.clone());
+    let reverse_key = ReverseEdgeCfKey(dst_id, src_id, name_hash);
     let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
 
     let reverse_value_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "ReverseEdge not found: src={}, dst={}, name={}",
+            "ReverseEdge not found: src={}, dst={}, name_hash={}",
             src_id,
             dst_id,
-            edge_name
+            name_hash
         )
     })?;
 
@@ -321,12 +386,12 @@ fn update_edge_valid_range(
 }
 
 /// Helper function to find all edges connected to a node.
-/// Returns a deduplicated list of (src_id, dst_id, edge_name) tuples.
+/// Returns a deduplicated list of (src_id, dst_id, name_hash) tuples.
 fn find_connected_edges(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
-) -> Result<Vec<(Id, Id, schema::EdgeName)>> {
+) -> Result<Vec<(Id, Id, NameHash)>> {
     use super::ColumnFamilyRecord;
     use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
 
@@ -357,7 +422,7 @@ fn find_connected_edges(
         let (key_bytes, _) = item?;
         let key: ReverseEdgeCfKey = ReverseEdges::key_from_bytes(&key_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize ReverseEdge key: {}", e))?;
-        // ReverseEdgeCfKey is (dst_id, src_id, edge_name), extract as (src_id, dst_id, name)
+        // ReverseEdgeCfKey is (dst_id, src_id, name_hash), extract as (src_id, dst_id, name_hash)
         edge_topologies.push((key.1, key.0, key.2));
     }
 
@@ -380,6 +445,33 @@ impl MutationExecutor for AddNode {
 
         use super::ColumnFamilyRecord;
         use super::schema::Nodes;
+
+        // Write name to Names CF (idempotent)
+        write_name_to_cf(txn, txn_db, &self.name)?;
+
+        // Write to Nodes CF
+        let nodes_cf = txn_db
+            .cf_handle(Nodes::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
+        let (node_key, node_value) = Nodes::create_bytes(self)?;
+        txn.put_cf(nodes_cf, node_key, node_value)?;
+
+        Ok(())
+    }
+
+    fn execute_with_cache(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
+    ) -> Result<()> {
+        tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation (cached)");
+
+        use super::ColumnFamilyRecord;
+        use super::schema::Nodes;
+
+        // Write name to Names CF with cache optimization
+        write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
 
         // Write to Nodes CF
         let nodes_cf = txn_db
@@ -407,6 +499,45 @@ impl MutationExecutor for AddEdge {
 
         use super::ColumnFamilyRecord;
         use super::schema::{ForwardEdges, ReverseEdges};
+
+        // Write name to Names CF (idempotent)
+        write_name_to_cf(txn, txn_db, &self.name)?;
+
+        // Write to ForwardEdges CF
+        let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
+        })?;
+        let (forward_key, forward_value) = ForwardEdges::create_bytes(self)?;
+        txn.put_cf(forward_cf, forward_key, forward_value)?;
+
+        // Write to ReverseEdges CF
+        let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", ReverseEdges::CF_NAME)
+        })?;
+        let (reverse_key, reverse_value) = ReverseEdges::create_bytes(self)?;
+        txn.put_cf(reverse_cf, reverse_key, reverse_value)?;
+
+        Ok(())
+    }
+
+    fn execute_with_cache(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
+    ) -> Result<()> {
+        tracing::debug!(
+            src = %self.source_node_id,
+            dst = %self.target_node_id,
+            name = %self.name,
+            "Executing AddEdge mutation (cached)"
+        );
+
+        use super::ColumnFamilyRecord;
+        use super::schema::{ForwardEdges, ReverseEdges};
+
+        // Write name to Names CF with cache optimization
+        write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
 
         // Write to ForwardEdges CF
         let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
@@ -470,6 +601,39 @@ impl MutationExecutor for AddEdgeFragment {
         use super::ColumnFamilyRecord;
         use super::schema::EdgeFragments;
 
+        // Write name to Names CF (idempotent)
+        write_name_to_cf(txn, txn_db, &self.edge_name)?;
+
+        let cf = txn_db.cf_handle(EdgeFragments::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME)
+        })?;
+        let (key, value) = EdgeFragments::create_bytes(self)?;
+        txn.put_cf(cf, key, value)?;
+
+        Ok(())
+    }
+
+    fn execute_with_cache(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
+    ) -> Result<()> {
+        tracing::debug!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            edge_name = %self.edge_name,
+            ts = %self.ts_millis.0,
+            content_len = self.content.as_ref().len(),
+            "Executing AddEdgeFragment mutation (cached)"
+        );
+
+        use super::ColumnFamilyRecord;
+        use super::schema::EdgeFragments;
+
+        // Write name to Names CF with cache optimization
+        write_name_to_cf_cached(txn, txn_db, &self.edge_name, cache)?;
+
         let cf = txn_db.cf_handle(EdgeFragments::CF_NAME).ok_or_else(|| {
             anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME)
         })?;
@@ -492,7 +656,7 @@ impl MutationExecutor for UpdateNodeValidSinceUntil {
         // 1. Update the node (1 operation)
         update_node_valid_range(txn, txn_db, node_id, new_range)?;
 
-        // 2. Find all connected edges (N edges)
+        // 2. Find all connected edges (N edges) - returns (src_id, dst_id, name_hash)
         let edges = find_connected_edges(txn, txn_db, node_id)?;
 
         tracing::info!(
@@ -502,8 +666,8 @@ impl MutationExecutor for UpdateNodeValidSinceUntil {
         );
 
         // 3. Update each edge (N × 2 operations = 2N operations)
-        for (src_id, dst_id, edge_name) in edges {
-            update_edge_valid_range(txn, txn_db, src_id, dst_id, &edge_name, new_range)?;
+        for (src_id, dst_id, name_hash) in edges {
+            update_edge_valid_range(txn, txn_db, src_id, dst_id, name_hash, new_range)?;
         }
 
         Ok(())
@@ -524,13 +688,16 @@ impl MutationExecutor for UpdateEdgeValidSinceUntil {
             "Executing UpdateEdgeValidSinceUntil mutation"
         );
 
+        // Compute hash from edge name
+        let name_hash = NameHash::from_name(&self.name);
+
         // Simply delegate to the helper
         update_edge_valid_range(
             txn,
             txn_db,
             self.src_id,
             self.dst_id,
-            &self.name,
+            name_hash,
             self.temporal_range,
         )
     }
@@ -557,7 +724,9 @@ impl MutationExecutor for UpdateEdgeWeight {
             anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
         })?;
 
-        let key = ForwardEdgeCfKey(self.src_id, self.dst_id, self.name.clone());
+        // Compute hash from edge name
+        let name_hash = NameHash::from_name(&self.name);
+        let key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash);
         let key_bytes = ForwardEdges::key_to_bytes(&key);
 
         // Read current value
@@ -598,6 +767,29 @@ impl Mutation {
             Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db),
             // Flush is not a storage operation - it's handled by the consumer
             // for synchronization purposes only
+            Mutation::Flush(_) => Ok(()),
+        }
+    }
+
+    /// Execute this mutation with access to the name cache.
+    ///
+    /// Uses the cache to:
+    /// 1. Skip redundant Names CF writes for already-interned names
+    /// 2. Intern new names for future lookups
+    pub fn execute_with_cache(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        cache: &super::name_hash::NameCache,
+    ) -> Result<()> {
+        match self {
+            Mutation::AddNode(m) => m.execute_with_cache(txn, txn_db, cache),
+            Mutation::AddEdge(m) => m.execute_with_cache(txn, txn_db, cache),
+            Mutation::AddNodeFragment(m) => m.execute(txn, txn_db), // No names
+            Mutation::AddEdgeFragment(m) => m.execute_with_cache(txn, txn_db, cache),
+            Mutation::UpdateNodeValidSinceUntil(m) => m.execute(txn, txn_db), // No new names
+            Mutation::UpdateEdgeValidSinceUntil(m) => m.execute(txn, txn_db), // No new names
+            Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db), // No new names
             Mutation::Flush(_) => Ok(()),
         }
     }
