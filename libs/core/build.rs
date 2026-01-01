@@ -1,4 +1,6 @@
-//! Build script for SIMD feature detection
+//! Build script for SIMD feature detection and build metadata
+//!
+//! ## SIMD Detection
 //!
 //! Detects target platform and sets appropriate cfg flags:
 //! - `simd_level="avx512"` - x86_64 with AVX-512 (DGX Spark)
@@ -6,6 +8,12 @@
 //! - `simd_level="neon"` - aarch64 (macOS Apple Silicon)
 //! - `simd_level="runtime"` - Runtime detection
 //! - `simd_level="scalar"` - Fallback
+//!
+//! ## Build Metadata
+//!
+//! Also sets environment variables for build info:
+//! - `MOTLIE_GIT_HASH` - Short git commit hash
+//! - `MOTLIE_BUILD_TIMESTAMP` - Build timestamp (RFC 3339)
 //!
 //! ## Usage
 //!
@@ -24,8 +32,51 @@
 //! ```
 
 use std::env;
+use std::process::Command;
 
 fn main() {
+    // ========================================================================
+    // Build Metadata
+    // ========================================================================
+
+    // Get git commit hash
+    let git_hash = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Check if working directory is dirty
+    let git_dirty = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    let git_hash_full = if git_dirty {
+        format!("{}-dirty", git_hash)
+    } else {
+        git_hash
+    };
+
+    // Get build timestamp
+    let build_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    // Set environment variables for the build
+    println!("cargo:rustc-env=MOTLIE_GIT_HASH={}", git_hash_full);
+    println!("cargo:rustc-env=MOTLIE_BUILD_TIMESTAMP={}", build_timestamp);
+
+    // Rerun if git HEAD changes
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/index");
+
+    // ========================================================================
+    // SIMD Detection
+    // ========================================================================
+
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
