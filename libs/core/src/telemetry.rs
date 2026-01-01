@@ -1,10 +1,26 @@
-//! Telemetry module providing tracing subscriber initialization for dev and production builds.
+//! Telemetry module providing tracing subscriber initialization and build metadata.
 //!
-//! This module provides two subscriber initialization functions:
-//! - `init_dev_subscriber()` - Simple stderr logging for development
-//! - `init_otel_subscriber()` - OpenTelemetry integration for production (requires `dtrace-otel` feature)
+//! This module provides:
+//! - Subscriber initialization for dev and production
+//! - Build metadata (git hash, SIMD level, version, etc.)
 //!
-//! # Usage
+//! # Build Metadata
+//!
+//! ```no_run
+//! use motlie_core::telemetry::{BuildInfo, log_build_info};
+//!
+//! fn main() {
+//!     // Get build info
+//!     let info = BuildInfo::current();
+//!     println!("Version: {} ({})", info.version, info.git_hash);
+//!     println!("SIMD: {}", info.simd_level);
+//!
+//!     // Or log it at startup
+//!     log_build_info();
+//! }
+//! ```
+//!
+//! # Subscriber Initialization
 //!
 //! ## Development (simple stderr logging)
 //! ```no_run
@@ -35,8 +51,163 @@
 //! }
 //! ```
 
+use crate::distance;
 use tracing::Level;
 use tracing_subscriber::fmt;
+
+// ============================================================================
+// Build Metadata
+// ============================================================================
+
+/// Build and runtime information for the binary.
+///
+/// Provides metadata about the build that is useful for debugging,
+/// observability, and version tracking.
+///
+/// # Example
+///
+/// ```no_run
+/// use motlie_core::telemetry::BuildInfo;
+///
+/// let info = BuildInfo::current();
+/// println!("Running {} v{}", info.package_name, info.version);
+/// println!("Git: {}", info.git_hash);
+/// println!("SIMD: {}", info.simd_level);
+/// println!("Built: {}", info.build_timestamp);
+/// ```
+#[derive(Debug, Clone)]
+pub struct BuildInfo {
+    /// Package name from Cargo.toml
+    pub package_name: &'static str,
+    /// Package version from Cargo.toml
+    pub version: &'static str,
+    /// Git commit hash (short, with "-dirty" suffix if uncommitted changes)
+    pub git_hash: &'static str,
+    /// Build timestamp (RFC 3339 format)
+    pub build_timestamp: &'static str,
+    /// Target architecture (e.g., "x86_64", "aarch64")
+    pub target_arch: &'static str,
+    /// Target OS (e.g., "linux", "macos", "windows")
+    pub target_os: &'static str,
+    /// Active SIMD implementation (e.g., "NEON", "AVX2+FMA", "Scalar")
+    pub simd_level: &'static str,
+    /// Build profile (e.g., "debug", "release")
+    pub profile: &'static str,
+}
+
+impl BuildInfo {
+    /// Get build information for the current binary.
+    ///
+    /// This information is captured at compile time and reflects
+    /// the state of the repository when the binary was built.
+    pub fn current() -> Self {
+        Self {
+            package_name: env!("CARGO_PKG_NAME"),
+            version: env!("CARGO_PKG_VERSION"),
+            git_hash: env!("MOTLIE_GIT_HASH"),
+            build_timestamp: env!("MOTLIE_BUILD_TIMESTAMP"),
+            target_arch: std::env::consts::ARCH,
+            target_os: std::env::consts::OS,
+            simd_level: distance::simd_level(),
+            profile: if cfg!(debug_assertions) { "debug" } else { "release" },
+        }
+    }
+
+    /// Format build info as a single-line summary.
+    ///
+    /// Example: `motlie-core v0.1.0 (abc1234) [NEON, aarch64-linux, release]`
+    pub fn summary(&self) -> String {
+        format!(
+            "{} v{} ({}) [{}, {}-{}, {}]",
+            self.package_name,
+            self.version,
+            self.git_hash,
+            self.simd_level,
+            self.target_arch,
+            self.target_os,
+            self.profile,
+        )
+    }
+
+    /// Format build info as multiple lines for detailed output.
+    pub fn detailed(&self) -> String {
+        format!(
+            "Package:    {} v{}\n\
+             Git:        {}\n\
+             Built:      {}\n\
+             Target:     {}-{}\n\
+             SIMD:       {}\n\
+             Profile:    {}",
+            self.package_name,
+            self.version,
+            self.git_hash,
+            self.build_timestamp,
+            self.target_arch,
+            self.target_os,
+            self.simd_level,
+            self.profile,
+        )
+    }
+}
+
+impl std::fmt::Display for BuildInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.summary())
+    }
+}
+
+/// Log build information at INFO level.
+///
+/// Call this at application startup to record build metadata in logs/traces.
+///
+/// # Example
+///
+/// ```no_run
+/// use motlie_core::telemetry;
+///
+/// fn main() {
+///     telemetry::init_dev_subscriber();
+///     telemetry::log_build_info();
+///     // Application code...
+/// }
+/// ```
+pub fn log_build_info() {
+    let info = BuildInfo::current();
+    tracing::info!(
+        package = info.package_name,
+        version = info.version,
+        git_hash = info.git_hash,
+        build_timestamp = info.build_timestamp,
+        target_arch = info.target_arch,
+        target_os = info.target_os,
+        simd_level = info.simd_level,
+        profile = info.profile,
+        "Build info"
+    );
+}
+
+/// Print build information to stderr (for use before logging is initialized).
+///
+/// # Example
+///
+/// ```no_run
+/// use motlie_core::telemetry;
+///
+/// fn main() {
+///     // Print build info before logging setup
+///     telemetry::print_build_info();
+///
+///     telemetry::init_dev_subscriber();
+///     // Application code...
+/// }
+/// ```
+pub fn print_build_info() {
+    eprintln!("{}", BuildInfo::current().detailed());
+}
+
+// ============================================================================
+// Tracing Subscribers
+// ============================================================================
 
 /// Guard that ensures proper shutdown of OpenTelemetry on drop.
 ///
@@ -196,9 +367,21 @@ pub fn init_otel_subscriber(
         .with_endpoint(endpoint)
         .build()?;
 
-    // Create resource with service name (using the standard semantic convention key)
+    // Get build info for resource attributes
+    let build_info = BuildInfo::current();
+
+    // Create resource with service name and build metadata
+    // Using OpenTelemetry semantic conventions where applicable
     let resource = Resource::new(vec![
         KeyValue::new("service.name", service_name.to_string()),
+        KeyValue::new("service.version", build_info.version.to_string()),
+        KeyValue::new("deployment.environment", build_info.profile.to_string()),
+        // Custom attributes for motlie-specific metadata
+        KeyValue::new("motlie.git_hash", build_info.git_hash.to_string()),
+        KeyValue::new("motlie.build_timestamp", build_info.build_timestamp.to_string()),
+        KeyValue::new("motlie.simd_level", build_info.simd_level.to_string()),
+        KeyValue::new("host.arch", build_info.target_arch.to_string()),
+        KeyValue::new("os.type", build_info.target_os.to_string()),
     ]);
 
     // Build the tracer provider with batch export and resource
@@ -279,9 +462,21 @@ pub fn init_otel_subscriber_with_env_filter(
         .with_endpoint(endpoint)
         .build()?;
 
-    // Create resource with service name (using the standard semantic convention key)
+    // Get build info for resource attributes
+    let build_info = BuildInfo::current();
+
+    // Create resource with service name and build metadata
+    // Using OpenTelemetry semantic conventions where applicable
     let resource = Resource::new(vec![
         KeyValue::new("service.name", service_name.to_string()),
+        KeyValue::new("service.version", build_info.version.to_string()),
+        KeyValue::new("deployment.environment", build_info.profile.to_string()),
+        // Custom attributes for motlie-specific metadata
+        KeyValue::new("motlie.git_hash", build_info.git_hash.to_string()),
+        KeyValue::new("motlie.build_timestamp", build_info.build_timestamp.to_string()),
+        KeyValue::new("motlie.simd_level", build_info.simd_level.to_string()),
+        KeyValue::new("host.arch", build_info.target_arch.to_string()),
+        KeyValue::new("os.type", build_info.target_os.to_string()),
     ]);
 
     // Build the tracer provider with batch export and resource

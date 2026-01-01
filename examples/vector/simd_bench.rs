@@ -33,6 +33,7 @@
 //! Results are printed in markdown table format for easy inclusion in SIMD.md.
 
 use clap::Parser;
+use motlie_core::telemetry::BuildInfo;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use std::time::{Duration, Instant};
@@ -485,8 +486,17 @@ fn main() {
         .filter_map(|s| s.trim().parse().ok())
         .collect();
 
-    // Print system info
+    // Print build info
+    let build_info = BuildInfo::current();
     println!("# SIMD Distance Benchmark");
+    println!();
+    println!("## Build Information");
+    println!();
+    println!("- **Version**: {} ({})", build_info.version, build_info.git_hash);
+    println!("- **Built**: {}", build_info.build_timestamp);
+    println!("- **SIMD Level**: {}", build_info.simd_level);
+    println!("- **Target**: {}-{}", build_info.target_arch, build_info.target_os);
+    println!("- **Profile**: {}", build_info.profile);
     println!();
     println!("## System Information");
     println!();

@@ -8,8 +8,9 @@
 
 #![allow(dead_code)]
 
-// Re-export SIMD-optimized distance module from motlie-core
+// Re-export from motlie-core
 pub use motlie_core::distance;
+pub use motlie_core::telemetry::{BuildInfo, log_build_info, print_build_info};
 
 use anyhow::Result;
 use motlie_db::mutation::{

@@ -1,60 +1,35 @@
 # SIMD Acceleration for Vector Distance Computations
 
-> **Note**: The SIMD distance computation module has been moved to `libs/core/src/distance/`.
-> See [libs/core/docs/SIMD.md](../../libs/core/docs/SIMD.md) for the full documentation.
+> **Note**: The SIMD distance module is now part of `motlie-core`.
+> See [libs/core/src/distance/README.md](../../libs/core/src/distance/README.md) for full documentation.
 
-## Quick Reference
-
-The SIMD-optimized distance functions are now available via `motlie_core::distance`:
+## Quick Start
 
 ```rust
 use motlie_core::distance::{euclidean_squared, cosine, dot, simd_level};
 
-// Use module-level functions (idiomatic API)
-let dist = euclidean_squared(&vec_a, &vec_b);
-println!("Using SIMD: {}", simd_level());
+let a = vec![1.0, 2.0, 3.0, 4.0];
+let b = vec![5.0, 6.0, 7.0, 8.0];
 
-// Or use convenience functions
-let dist = euclidean_squared(&vec_a, &vec_b);
-let cos_dist = cosine(&vec_a, &vec_b);
-let dot_prod = dot(&vec_a, &vec_b);
-```
+// Functions automatically use optimal SIMD for your platform
+let dist = euclidean_squared(&a, &b);
+let cos_dist = cosine(&a, &b);
+let dot_prod = dot(&a, &b);
 
-## Feature Flags
-
-SIMD dispatch is controlled via feature flags on `motlie-core`:
-
-```bash
-# macOS Apple Silicon (auto-detects NEON)
-cargo build --release
-
-# DGX Spark (AVX-512)
-cargo build --release --features simd-avx512
-
-# Portable binary with runtime detection
-cargo build --release --features simd-runtime
-
-# Maximum performance for current CPU
-RUSTFLAGS='-C target-cpu=native' cargo build --release --features simd-native
+println!("Using: {}", simd_level());  // "NEON", "AVX2+FMA", "AVX-512", etc.
 ```
 
 ## Benchmarks
 
-Run the distance benchmark:
-
 ```bash
-# Run benchmark from libs/core
+# Run the motlie-core benchmark
 cargo bench -p motlie-core
 
-# Run the standalone simd_bench example
+# Run the standalone example benchmark
 cargo run --release --example simd_bench
 ```
 
-## Performance Summary (ARM64 NEON)
+## Documentation
 
-| Distance | Dim | Baseline (ns) | SIMD (ns) | Speedup |
-|----------|-----|---------------|-----------|---------|
-| Euclidean | 1024 | 485.8 | 237.4 | **2.05x** |
-| Cosine | 1024 | 1428.8 | 247.3 | **5.78x** |
-
-See the full documentation at [libs/core/docs/SIMD.md](../../libs/core/docs/SIMD.md).
+- **Full documentation**: [libs/core/src/distance/README.md](../../libs/core/src/distance/README.md)
+- **Benchmark details**: [libs/core/benches/README.md](../../libs/core/benches/README.md)
