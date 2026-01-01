@@ -39,6 +39,7 @@ Some recommendations from the review were analyzed and deprioritized for now.  T
 ┌─────────────────────────────────────────────────────────────────┐
 │ Prioritized and Committed                                       │
 │ Phase 1: Name Interning ✅ COMPLETED (January 1, 2026)          │
+│   - Phase 1.4: Block Cache Configuration Tuning ⬜ NOT STARTED  │
 │   - Phase 1.5: NameCache Integration ✅ COMPLETED               │
 │ Phase 2: Blob Separation                                        │
 │ Phase 3: Zero-Copy Serialization (rkyv)                         │
@@ -1050,6 +1051,56 @@ AFTER:
 - `libs/db/src/graph/scan.rs` - Name resolution in all scan implementations
 - `libs/db/src/graph/tests.rs` - Updated tests for new schema
 - `examples/store/main.rs` - Updated for new schema
+
+---
+
+#### Phase 1.4: Block Cache Configuration Tuning
+
+**Status:** ⬜ NOT STARTED
+
+**Goal:** Optimize RocksDB block cache settings for the new fixed-size key schema to maximize cache efficiency.
+
+**Background:** See [Appendix: Technical Reference: RocksDB Block Cache](#technical-reference-rocksdb-block-cache) for detailed analysis.
+
+**Key Configuration Points:**
+
+| Setting | Current | Recommended | Rationale |
+|---------|---------|-------------|-----------|
+| Block cache size | Default | ~1/3 of available memory | Balance memory usage vs hit rate |
+| Block size (graph CFs) | 4KB | 4KB | Optimal for 40-byte fixed keys |
+| Block size (vector CFs) | 4KB | 16-32KB | Larger blocks for sequential vector access |
+| Cache index/filter blocks | false | true | Keep hot metadata in cache |
+| Pin L0 filter/index | false | true | Avoid eviction of newest data |
+| Names CF priority | default | high | Pin in high-priority pool for fast resolution |
+
+**Tasks:**
+
+| Task | File | Status |
+|------|------|--------|
+| Add block cache configuration to StorageConfig | `src/graph/mod.rs` | ⬜ |
+| Configure cache size based on system memory | `src/graph/mod.rs` | ⬜ |
+| Set block size per CF (4KB graph, 16KB vectors) | `src/graph/mod.rs` | ⬜ |
+| Enable cache_index_and_filter_blocks | `src/graph/mod.rs` | ⬜ |
+| Pin L0 filter and index blocks | `src/graph/mod.rs` | ⬜ |
+| Set Names CF to high cache priority | `src/graph/mod.rs` | ⬜ |
+| Add benchmarks to validate cache hit rate | `benches/db_operations.rs` | ⬜ |
+
+**Expected Benefits:**
+- Higher cache hit rate with fixed 40-byte keys (more keys per block)
+- Names CF pinned in memory for O(1) resolution
+- Better separation of hot (graph topology) vs cold (vectors) data
+
+**Reference Code (from Appendix):**
+```rust
+// Block cache: ~1/3 of available memory
+let cache = Cache::new_lru_cache(1 * 1024 * 1024 * 1024)?; // 1GB
+
+let mut block_opts = BlockBasedOptions::default();
+block_opts.set_block_cache(&cache);
+block_opts.set_block_size(4 * 1024); // 4KB for graph data
+block_opts.set_cache_index_and_filter_blocks(true);
+block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+```
 
 ---
 
