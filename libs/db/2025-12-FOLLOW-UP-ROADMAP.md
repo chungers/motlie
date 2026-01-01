@@ -141,13 +141,15 @@ Name Interning ──┬──► Blob Separation ──► rkyv Serialization
 | Optimization | Cache Efficiency | Scan Throughput | Key Size | Write Overhead |
 |--------------|------------------|-----------------|----------|----------------|
 | Current baseline | 1x | 1x | Variable | 0% |
-| + **Name Interning** ✅ | **1.35x** (theoretical) | 0.5-0.7x (current*) | Fixed 40B | +32-46% (measured) |
+| + **Name Interning + NameCache** ✅ | **1.35x** (theoretical) | ~1x (with cache) | Fixed 40B | +25% (measured) |
+| + **Block Cache Tuning** ✅ | 1.35x | ~1x | Fixed 40B | +25% |
 | + Blob Separation | **15-25x** | 5-10x | Fixed 40B | +10-15% |
 | + rkyv | 15-25x | **10-50x** | Fixed 40B | +10-15% |
 | **Total** | **15-25x** | **10-50x** | **Fixed** | **+10-15%** |
 
-*Note: Current name interning implementation has per-edge name resolution overhead.
-Phase 1.5 optimization (in-memory NameCache integration) will address scan throughput regression.
+*Note: Phase 1 (Name Interning) with Phase 1.4 (Block Cache Tuning) and Phase 1.5 (NameCache Integration)
+are complete. Scan throughput is now at ~1x baseline (was +184% regression before cache integration).
+Batch scans are **22.5% faster** than baseline due to cache efficiency.
 
 ----------------------------------------------------------------------------------------
 
@@ -960,7 +962,7 @@ AFTER:
 ├── node_fragments  (unchanged - no name in key)
 ```
 
-**Step 1.1: Foundation**
+#### Phase 1.1: Foundation
 | Task | File | Status |
 |------|------|--------|
 | Add `xxhash-rust` and `dashmap` dependencies | `Cargo.toml` | ✅ |
@@ -971,7 +973,7 @@ AFTER:
 | Unit tests for NameHash (8 tests) | `src/graph/name_hash.rs` | ✅ |
 | Unit tests for NameCache (10 tests) | `src/graph/name_hash.rs` | ✅ |
 
-**Step 1.2: Schema Migration**
+#### Phase 1.2: Schema Migration
 | Task | File | Status |
 |------|------|--------|
 | Update `ForwardEdgeCfKey` to use `NameHash` | `src/graph/schema.rs` | ✅ |
@@ -1002,10 +1004,10 @@ AFTER:
 | Update `AllEdgeFragments` scan with name resolution | `src/graph/scan.rs` | ✅ |
 | Update `examples/store` for new schema | `examples/store/main.rs` | ✅ |
 
-**Step 1.3: Validation**
+#### Phase 1.3: Validation
 | Task | Command | Status |
 |------|---------|--------|
-| Run all unit tests | `cargo test -p motlie-db --lib` | ✅ 196 passed |
+| Run all unit tests | `cargo test -p motlie-db --lib` | ✅ 198 passed |
 | Run all doctests | `cargo test -p motlie-db --doc` | ✅ 11 passed |
 | Verify examples work | `./target/release/examples/store` | ✅ store + verify modes |
 | Run prefix_scans benchmark | `cargo bench -p motlie-db -- prefix_scans` | ✅ see below |
