@@ -253,6 +253,49 @@ impl Default for NameCacheConfig {
     }
 }
 
+/// Configuration for RocksDB block cache.
+///
+/// RocksDB's block cache stores uncompressed data blocks (~4KB each).
+/// Sharing a single cache across all column families allows RocksDB to
+/// dynamically allocate memory based on access patterns.
+///
+/// See [RocksDB Block Cache Wiki](https://github.com/facebook/rocksdb/wiki/Block-Cache)
+/// for detailed documentation.
+#[derive(Debug, Clone)]
+pub struct BlockCacheConfig {
+    /// Total block cache size in bytes.
+    /// Default: 256MB. Production deployments should tune to ~1/3 of available memory.
+    pub cache_size_bytes: usize,
+
+    /// Block size for graph column families (Nodes, ForwardEdges, ReverseEdges, Names).
+    /// Default: 4KB. Optimal for 40-byte fixed keys (~100 keys per block).
+    pub graph_block_size: usize,
+
+    /// Block size for fragment column families (NodeFragments, EdgeFragments).
+    /// Default: 16KB. Better for larger variable-length content.
+    pub fragment_block_size: usize,
+
+    /// Whether to cache index and filter blocks in the block cache.
+    /// Default: true. Keeps hot metadata in cache for faster lookups.
+    pub cache_index_and_filter_blocks: bool,
+
+    /// Whether to pin L0 filter and index blocks in cache.
+    /// Default: true. Prevents eviction of newest (most likely accessed) data.
+    pub pin_l0_filter_and_index: bool,
+}
+
+impl Default for BlockCacheConfig {
+    fn default() -> Self {
+        Self {
+            cache_size_bytes: 256 * 1024 * 1024,  // 256MB
+            graph_block_size: 4 * 1024,            // 4KB
+            fragment_block_size: 16 * 1024,        // 16KB
+            cache_index_and_filter_blocks: true,
+            pin_l0_filter_and_index: true,
+        }
+    }
+}
+
 /// Graph-specific storage
 pub struct Storage {
     db_path: PathBuf,
@@ -265,6 +308,10 @@ pub struct Storage {
     name_cache: std::sync::Arc<NameCache>,
     /// Configuration for name cache behavior
     name_cache_config: NameCacheConfig,
+    /// Shared block cache across all column families
+    block_cache: Option<rocksdb::Cache>,
+    /// Configuration for block cache behavior
+    block_cache_config: BlockCacheConfig,
 }
 
 impl Storage {
@@ -279,6 +326,8 @@ impl Storage {
             column_families: ALL_COLUMN_FAMILIES,
             name_cache: std::sync::Arc::new(NameCache::new()),
             name_cache_config: NameCacheConfig::default(),
+            block_cache: None,
+            block_cache_config: BlockCacheConfig::default(),
         }
     }
 
@@ -293,6 +342,8 @@ impl Storage {
             column_families: ALL_COLUMN_FAMILIES,
             name_cache: std::sync::Arc::new(NameCache::new()),
             name_cache_config: NameCacheConfig::default(),
+            block_cache: None,
+            block_cache_config: BlockCacheConfig::default(),
         }
     }
 
@@ -311,6 +362,8 @@ impl Storage {
             column_families: ALL_COLUMN_FAMILIES,
             name_cache: std::sync::Arc::new(NameCache::new()),
             name_cache_config: NameCacheConfig::default(),
+            block_cache: None,
+            block_cache_config: BlockCacheConfig::default(),
         }
     }
 
@@ -350,6 +403,8 @@ impl Storage {
             column_families: ALL_COLUMN_FAMILIES,
             name_cache: std::sync::Arc::new(NameCache::new()),
             name_cache_config: NameCacheConfig::default(),
+            block_cache: None,
+            block_cache_config: BlockCacheConfig::default(),
         }
     }
 
@@ -358,6 +413,29 @@ impl Storage {
     /// Must be called before `ready()` to take effect.
     pub fn with_name_cache_config(mut self, config: NameCacheConfig) -> Self {
         self.name_cache_config = config;
+        self
+    }
+
+    /// Set the block cache configuration.
+    ///
+    /// Must be called before `ready()` to take effect.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use motlie_db::graph::{Storage, BlockCacheConfig};
+    /// use std::path::Path;
+    ///
+    /// let config = BlockCacheConfig {
+    ///     cache_size_bytes: 512 * 1024 * 1024, // 512MB
+    ///     ..Default::default()
+    /// };
+    ///
+    /// let mut storage = Storage::readwrite(Path::new("/data/db"))
+    ///     .with_block_cache_config(config);
+    /// storage.ready().unwrap();
+    /// ```
+    pub fn with_block_cache_config(mut self, config: BlockCacheConfig) -> Self {
+        self.block_cache_config = config;
         self
     }
 
@@ -410,32 +488,44 @@ impl Storage {
             Ok(false) => {}
         }
 
-        // Create column family descriptors with encapsulated options
+        // Create shared block cache for all column families
+        let cache = rocksdb::Cache::new_lru_cache(self.block_cache_config.cache_size_bytes);
+        self.block_cache = Some(cache);
+        let cache_ref = self.block_cache.as_ref().unwrap();
+
+        tracing::info!(
+            "[Storage] Created shared block cache: {} MB, graph_block_size: {} KB, fragment_block_size: {} KB",
+            self.block_cache_config.cache_size_bytes / (1024 * 1024),
+            self.block_cache_config.graph_block_size / 1024,
+            self.block_cache_config.fragment_block_size / 1024
+        );
+
+        // Create column family descriptors with shared cache and tuned options
         use rocksdb::ColumnFamilyDescriptor;
         let cf_descriptors = vec![
             ColumnFamilyDescriptor::new(
                 schema::Names::CF_NAME,
-                schema::Names::column_family_options(),
+                schema::Names::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
             ColumnFamilyDescriptor::new(
                 schema::Nodes::CF_NAME,
-                schema::Nodes::column_family_options(),
+                schema::Nodes::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
             ColumnFamilyDescriptor::new(
                 schema::NodeFragments::CF_NAME,
-                schema::NodeFragments::column_family_options(),
+                schema::NodeFragments::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
             ColumnFamilyDescriptor::new(
                 schema::EdgeFragments::CF_NAME,
-                schema::EdgeFragments::column_family_options(),
+                schema::EdgeFragments::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
             ColumnFamilyDescriptor::new(
                 schema::ForwardEdges::CF_NAME,
-                schema::ForwardEdges::column_family_options(),
+                schema::ForwardEdges::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
             ColumnFamilyDescriptor::new(
                 schema::ReverseEdges::CF_NAME,
-                schema::ReverseEdges::column_family_options(),
+                schema::ReverseEdges::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
         ];
 
