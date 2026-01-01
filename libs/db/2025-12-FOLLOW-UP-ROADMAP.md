@@ -1066,40 +1066,112 @@ AFTER:
 
 | Setting | Current | Recommended | Rationale |
 |---------|---------|-------------|-----------|
-| Block cache size | Default | ~1/3 of available memory | Balance memory usage vs hit rate |
-| Block size (graph CFs) | 4KB | 4KB | Optimal for 40-byte fixed keys |
-| Block size (vector CFs) | 4KB | 16-32KB | Larger blocks for sequential vector access |
+| Block cache size | Default (~8MB) | 256MB default, configurable | Conservative default; users tune for their workload |
+| Block size (graph CFs) | 4KB | 4KB | Optimal for 40-byte fixed keys (~100 keys/block) |
+| Block size (fragment CFs) | 4KB | 16KB | Better for larger variable-length content |
 | Cache index/filter blocks | false | true | Keep hot metadata in cache |
 | Pin L0 filter/index | false | true | Avoid eviction of newest data |
-| Names CF priority | default | high | Pin in high-priority pool for fast resolution |
+| Names CF priority | default | high | Keep name resolution fast; small CF, frequently accessed |
+| Shared cache | No | Yes | RocksDB recommends sharing cache across CFs for better memory utilization |
 
-**Tasks:**
+**Design Decisions:**
 
-| Task | File | Status |
-|------|------|--------|
-| Add block cache configuration to StorageConfig | `src/graph/mod.rs` | ⬜ |
-| Configure cache size based on system memory | `src/graph/mod.rs` | ⬜ |
-| Set block size per CF (4KB graph, 16KB vectors) | `src/graph/mod.rs` | ⬜ |
-| Enable cache_index_and_filter_blocks | `src/graph/mod.rs` | ⬜ |
-| Pin L0 filter and index blocks | `src/graph/mod.rs` | ⬜ |
-| Set Names CF to high cache priority | `src/graph/mod.rs` | ⬜ |
-| Add benchmarks to validate cache hit rate | `benches/db_operations.rs` | ⬜ |
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Single shared cache | Yes | RocksDB best practice; allows dynamic allocation across CFs based on access patterns |
+| Default cache size | 256MB | Conservative default that works for most workloads; production deployments should tune to ~1/3 of available memory |
+| Graph CF block size | 4KB | With 40-byte fixed keys, we get ~100 keys/block - optimal density |
+| Fragment CF block size | 16KB | NodeFragments/EdgeFragments contain larger variable-length content; larger blocks reduce index overhead |
+| Names CF high priority | Yes | Names CF is small but accessed on every name resolution; keep it hot |
+
+**Implementation Plan:**
+
+**Step 1.4.1: Add BlockCacheConfig struct** (`src/graph/mod.rs`)
+| Task | Status |
+|------|--------|
+| Define `BlockCacheConfig` struct with cache_size_bytes, graph_block_size, fragment_block_size, cache_index_and_filter_blocks, pin_l0_filter_and_index | ⬜ |
+| Add `Default` impl with sensible defaults (256MB cache, 4KB graph, 16KB fragment) | ⬜ |
+| Add `block_cache: Option<rocksdb::Cache>` field to Storage struct | ⬜ |
+| Add `block_cache_config: BlockCacheConfig` field to Storage struct | ⬜ |
+
+**Step 1.4.2: Update Storage constructors** (`src/graph/mod.rs`)
+| Task | Status |
+|------|--------|
+| Update `Storage::new_readonly()` to accept and store BlockCacheConfig | ⬜ |
+| Update `Storage::new_readwrite()` to accept and store BlockCacheConfig | ⬜ |
+| Update `Storage::new_secondary()` to accept and store BlockCacheConfig | ⬜ |
+| Add `with_block_cache_config()` builder method | ⬜ |
+
+**Step 1.4.3: Create shared cache in Storage::ready()** (`src/graph/mod.rs`)
+| Task | Status |
+|------|--------|
+| Create `rocksdb::Cache::new_lru_cache()` before opening DB | ⬜ |
+| Store cache in `self.block_cache` | ⬜ |
+| Pass cache reference to CF descriptor creation | ⬜ |
+
+**Step 1.4.4: Update per-CF options** (`src/graph/schema.rs`)
+| Task | Status |
+|------|--------|
+| Update `Names::column_family_options()` to accept cache & config, set high priority | ⬜ |
+| Update `Nodes::column_family_options()` to accept cache & config, use graph_block_size | ⬜ |
+| Update `ForwardEdges::column_family_options()` to accept cache & config, use graph_block_size | ⬜ |
+| Update `ReverseEdges::column_family_options()` to accept cache & config, use graph_block_size | ⬜ |
+| Update `NodeFragments::column_family_options()` to accept cache & config, use fragment_block_size | ⬜ |
+| Update `EdgeFragments::column_family_options()` to accept cache & config, use fragment_block_size | ⬜ |
+
+**Step 1.4.5: Update CF descriptor creation** (`src/graph/mod.rs`)
+| Task | Status |
+|------|--------|
+| Modify `Storage::ready()` to pass cache and config to each CF's column_family_options() | ⬜ |
+
+**Step 1.4.6: Add benchmarks** (`benches/db_operations.rs`)
+| Task | Status |
+|------|--------|
+| Add benchmark comparing default vs tuned cache configuration | ⬜ |
+| Add benchmark measuring cache hit rate with RocksDB statistics | ⬜ |
+
+**Files to Modify:**
+
+| File | Changes |
+|------|---------|
+| `src/graph/mod.rs` | Add BlockCacheConfig, update Storage struct, update constructors, update ready() |
+| `src/graph/schema.rs` | Update all 6 column_family_options() methods to accept cache & config |
+| `benches/db_operations.rs` | Add cache validation benchmarks |
 
 **Expected Benefits:**
 - Higher cache hit rate with fixed 40-byte keys (more keys per block)
 - Names CF pinned in memory for O(1) resolution
-- Better separation of hot (graph topology) vs cold (vectors) data
+- Better separation of hot (graph topology) vs cold (fragment) data
+- Shared cache allows RocksDB to dynamically balance memory across CFs
 
-**Reference Code (from Appendix):**
+**Reference Code:**
 ```rust
-// Block cache: ~1/3 of available memory
-let cache = Cache::new_lru_cache(1 * 1024 * 1024 * 1024)?; // 1GB
+/// Configuration for RocksDB block cache
+#[derive(Debug, Clone)]
+pub struct BlockCacheConfig {
+    /// Total block cache size in bytes. Default: 256MB.
+    pub cache_size_bytes: usize,
+    /// Block size for graph CFs (Nodes, Edges, Names). Default: 4KB.
+    pub graph_block_size: usize,
+    /// Block size for fragment CFs (NodeFragments, EdgeFragments). Default: 16KB.
+    pub fragment_block_size: usize,
+    /// Cache index and filter blocks. Default: true.
+    pub cache_index_and_filter_blocks: bool,
+    /// Pin L0 filter and index blocks in cache. Default: true.
+    pub pin_l0_filter_and_index: bool,
+}
 
-let mut block_opts = BlockBasedOptions::default();
-block_opts.set_block_cache(&cache);
-block_opts.set_block_size(4 * 1024); // 4KB for graph data
-block_opts.set_cache_index_and_filter_blocks(true);
-block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+impl Default for BlockCacheConfig {
+    fn default() -> Self {
+        Self {
+            cache_size_bytes: 256 * 1024 * 1024, // 256MB
+            graph_block_size: 4 * 1024,          // 4KB
+            fragment_block_size: 16 * 1024,      // 16KB
+            cache_index_and_filter_blocks: true,
+            pin_l0_filter_and_index: true,
+        }
+    }
+}
 ```
 
 ---
