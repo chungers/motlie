@@ -153,7 +153,7 @@ Batch scans are **22.5% faster** than baseline due to cache efficiency.
 
 ----------------------------------------------------------------------------------------
 
-## Name Interning: Optimizing Arbitrary-Length Names for Cache Efficiency
+## PHASE 1 -- Name Interning: Optimizing Arbitrary-Length Names for Cache Efficiency
 
 > **Problem Statement:** The requirement to support arbitrary node and edge names (potentially 100+ bytes) conflicts with the need for compact keys to maximize block cache efficiency. This section explores design options to satisfy both requirements.
 
@@ -621,149 +621,798 @@ let cache = NameCache::new();
 assert!(cache.hit_rate() > 0.99); // 99%+ hit rate expected
 ```
 
-
 ---------------------------------------------------------
 
-## Proposed Architecture: Hybrid Serialization Strategy
+## PHASE 2 -- Blob Separation
 
 **Date:** December 25, 2025
+**Compatibility:** Breaking change. No migration.
+**Status:** ⬜ Not Started
+
+### Design Review (January 2, 2026)
+
+**Assessment:** ✅ Design is sound with clarifications below.
+
+| Aspect | Status | Notes |
+|--------|--------|-------|
+| Hot/Cold separation | ✅ Sound | Summaries rarely accessed during traversal |
+| SummaryHash design | ✅ Clarified | Content-addressable hash (like NameHash) for deduplication |
+| Key schema | ✅ Clarified | Summary CFs use content hash as key |
+| Cache efficiency | ✅ Realistic | 10-20x improvement for graph algorithm workloads |
+
+**Key Design Decisions:**
+
+1. **SummaryHash = Content Hash:** Use xxHash64 of summary content (same pattern as NameHash). Benefits:
+   - Deduplication: identical summaries stored once
+   - Performance: ~10-20ns hash computation, negligible vs I/O
+   - Consistency: matches Phase 1 approach
+
+2. **Summary CF Keys:** Use `SummaryHash` (content hash) as key, not parent entity key. This enables:
+   - Cross-entity deduplication (rare but possible)
+   - Simple key structure (8 bytes fixed)
+   - No need to store parent reference in value
+
+3. **Hot Value Size:** After blob separation:
+   - NodeCfValue: ~26 bytes (temporal: 17, name_hash: 8, summary_hash: 9 optional)
+   - ForwardEdgeCfValue: ~35 bytes (temporal: 17, weight: 9, summary_hash: 9)
+   - Compared to current ~200-500 bytes with inline summaries
 
 ### Overview
+
+Basic idea:
+  - "Hot" CF's have small, fixed-sized keys and values to improve cache locality and density.
+  - "Cold" CF's contain blobs keyed by content hash (xxHash64). The hash is stored as `Option<SummaryHash>` in the Hot CF value.
 
 Combine blob separation with a hybrid serialization approach:
 
 | Data Category | Column Family | Serialization | Compression | Access Pattern |
 |---------------|---------------|---------------|-------------|----------------|
-| **Hot** (topology, weights, temporal) | `forward_edges_hot`, `nodes_hot` | rkyv | None | Zero-copy, high-frequency traversal |
-| **Cold** (summaries, content) | `edge_summaries`, `node_summaries` | rmp_serde | LZ4 | Full deser, infrequent access |
+| **Hot** (topology, weights, temporal) | `forward_edges`, `nodes` | rkyv (Phase 3) | None | Zero-copy, high-frequency traversal |
+| **Cold** (summaries, content) | `node_summaries` (**new**), `edge_summaries` (**new**) | rmp_serde | LZ4 | Full deser, infrequent access |
 | **Fragments** (historical content) | `node_fragments`, `edge_fragments` | rmp_serde | LZ4 | Full deser, rare access |
 
 This resolves the LZ4/rkyv conflict by applying each serialization strategy where it's most effective.
 
-### Schema Design
+### SummaryHash Type Definition
 
-#### Hot Column Families (rkyv, no compression)
+Following the NameHash pattern from Phase 1:
 
 ```rust
-// libs/db/src/graph/schema_hot.rs
+// libs/db/src/graph/summary_hash.rs
 
-use rkyv::{Archive, Deserialize, Serialize};
+use xxhash_rust::xxh64::xxh64;
 
-/// Hot edge data - optimized for graph traversal
-/// Size: ~30 bytes per edge (vs ~500 bytes with summary)
-#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+/// 8-byte content hash for summary deduplication using xxHash64.
+///
+/// Unlike NameHash (which hashes the name string), SummaryHash hashes
+/// the serialized summary content. This enables:
+/// - Deduplication of identical summaries across nodes/edges
+/// - Fixed 8-byte key for summary CFs
+/// - Efficient content-addressable storage
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SummaryHash([u8; 8]);
+
+impl SummaryHash {
+    /// Create a SummaryHash from serialized summary bytes.
+    ///
+    /// The input should be the rmp_serde serialized summary content.
+    pub fn from_bytes(content: &[u8]) -> Self {
+        let hash = xxh64(content, 0);  // seed = 0
+        SummaryHash(hash.to_be_bytes())
+    }
+
+    /// Create a SummaryHash from a NodeSummary.
+    pub fn from_node_summary(summary: &NodeSummary) -> Result<Self> {
+        let bytes = rmp_serde::to_vec(summary)?;
+        Ok(Self::from_bytes(&bytes))
+    }
+
+    /// Create a SummaryHash from an EdgeSummary.
+    pub fn from_edge_summary(summary: &EdgeSummary) -> Result<Self> {
+        let bytes = rmp_serde::to_vec(summary)?;
+        Ok(Self::from_bytes(&bytes))
+    }
+
+    /// Get the raw bytes of the hash.
+    pub fn as_bytes(&self) -> &[u8; 8] {
+        &self.0
+    }
+
+    /// Create from raw bytes.
+    pub fn from_raw(bytes: [u8; 8]) -> Self {
+        SummaryHash(bytes)
+    }
+}
+
+impl Serialize for SummaryHash {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SummaryHash {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let bytes: [u8; 8] = Deserialize::deserialize(deserializer)?;
+        Ok(SummaryHash(bytes))
+    }
+}
+```
+
+### Schema Design - Blob Separation Column Family Layout
+
+```
+Before (current - after Phase 1):
+├── names           (NameHash → Name)  ~50 bytes
+├── nodes           (Id → TemporalRange + NameHash + Summary)  ~200-500 bytes
+├── forward_edges   (Src+Dst+NameHash → TemporalRange + Weight + Summary)  ~200-500 bytes
+├── reverse_edges   (Dst+Src+NameHash → TemporalRange)  ~30 bytes
+├── node_fragments  (Id+Ts → Content)  variable
+└── edge_fragments  (Src+Dst+NameHash+Ts → Content)  variable
+
+After (Phase 2):
+├── names           (NameHash → Name)  ~50 bytes [unchanged]
+├── nodes           (Id → TemporalRange + NameHash + SummaryHash?)  ~26 bytes [HOT]
+├── node_summaries  (SummaryHash → NodeSummary)  variable [COLD, NEW]
+├── forward_edges   (Src+Dst+NameHash → TemporalRange + Weight + SummaryHash?)  ~35 bytes [HOT]
+├── edge_summaries  (SummaryHash → EdgeSummary)  variable [COLD, NEW]
+├── reverse_edges   (Dst+Src+NameHash → TemporalRange)  ~30 bytes [HOT]
+├── node_fragments  (Id+Ts → Content)  variable [COLD, unchanged]
+└── edge_fragments  (Src+Dst+NameHash+Ts → Content)  variable [COLD, unchanged]
+```
+
+**Nodes CF -- Before (current)**
+```rust
+/// Nodes column family.
+pub(crate) struct Nodes;
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NodeCfKey(pub(crate) Id);
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NodeCfValue(
+    pub(crate) Option<TemporalRange>,
+    pub(crate) NameHash, // Node name stored as hash; full name in Names CF
+    pub(crate) NodeSummary,
+);
+```
+
+**Nodes CF -- After (Phase 2)**
+```rust
+/// Nodes column family ==> Hot access
+pub(crate) struct Nodes;
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NodeCfKey(pub(crate) Id);
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct NodeCfValue(
+    pub(crate) Option<TemporalRange>,
+    pub(crate) NameHash,              // Node name hash; full name in Names CF
+    pub(crate) Option<SummaryHash>,   // Content hash; full summary in NodeSummaries CF
+);
+
+/// [New] NodeSummaries column family ==> Cold access
+pub(crate) struct NodeSummaries;
+
+pub(crate) struct NodeSummaryCfKey(pub(crate) SummaryHash);  // 8 bytes, content-addressable
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct NodeSummaryCfValue(pub(crate) NodeSummary);
+```
+
+**ForwardEdges CF -- Before (current)**
+```rust
+/// Forward edges column family.
+pub(crate) struct ForwardEdges;
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ForwardEdgeCfKey(
+    pub(crate) SrcId,
+    pub(crate) DstId,
+    pub(crate) NameHash, // Edge name hash; full name in Names CF
+);
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ForwardEdgeCfValue(
+    pub(crate) Option<TemporalRange>, // Field 0: Temporal validity
+    pub(crate) Option<f64>,           // Field 1: Optional weight
+    pub(crate) EdgeSummary,           // Field 2: Edge summary (inline)
+);
+```
+
+**ForwardEdges CF -- After (Phase 2)**
+```rust
+/// Forward edges column family ==> Hot access
+pub(crate) struct ForwardEdges;
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ForwardEdgeCfKey(
+    pub(crate) SrcId,
+    pub(crate) DstId,
+    pub(crate) NameHash, // Edge name hash; full name in Names CF
+);
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ForwardEdgeCfValue(
+    pub(crate) Option<TemporalRange>, // Field 0: Temporal validity
+    pub(crate) Option<f64>,           // Field 1: Optional weight
+    pub(crate) Option<SummaryHash>,   // Field 2: Content hash; full summary in EdgeSummaries CF
+);
+
+/// [New] EdgeSummaries column family ==> Cold access
+pub(crate) struct EdgeSummaries;
+
+pub(crate) struct EdgeSummaryCfKey(pub(crate) SummaryHash);  // 8 bytes, content-addressable
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct EdgeSummaryCfValue(pub(crate) EdgeSummary);
+```
+
+### Write Path (Phase 2)
+
+```rust
+impl MutationExecutor for AddNode {
+    fn execute(&self, txn: &Transaction, txn_db: &TransactionDB) -> Result<()> {
+        // 1. Write name to Names CF (existing Phase 1 logic)
+        let name_hash = write_name_to_cf_cached(&self.name, txn, txn_db, cache)?;
+
+        // 2. Compute summary hash and write to NodeSummaries CF if non-empty
+        let summary_hash = if !self.summary.is_empty() {
+            let hash = SummaryHash::from_node_summary(&self.summary)?;
+            let summaries_cf = txn_db.cf_handle(NodeSummaries::CF_NAME)?;
+
+            // Content-addressable: same content = same hash = idempotent write
+            txn.put_cf(
+                summaries_cf,
+                hash.as_bytes(),
+                NodeSummaries::value_to_bytes(&NodeSummaryCfValue(self.summary.clone()))?,
+            )?;
+            Some(hash)
+        } else {
+            None
+        };
+
+        // 3. Write to Nodes CF (hot) with hash references
+        let nodes_cf = txn_db.cf_handle(Nodes::CF_NAME)?;
+        let key = NodeCfKey(self.id);
+        let value = NodeCfValue(self.valid_range, name_hash, summary_hash);
+        txn.put_cf(nodes_cf, Nodes::key_to_bytes(&key), Nodes::value_to_bytes(&value)?)?;
+
+        Ok(())
+    }
+}
+
+impl MutationExecutor for AddEdge {
+    fn execute(&self, txn: &Transaction, txn_db: &TransactionDB) -> Result<()> {
+        // 1. Write edge name to Names CF (existing Phase 1 logic)
+        let name_hash = write_name_to_cf_cached(&self.name, txn, txn_db, cache)?;
+
+        // 2. Compute summary hash and write to EdgeSummaries CF if non-empty
+        let summary_hash = if !self.summary.is_empty() {
+            let hash = SummaryHash::from_edge_summary(&self.summary)?;
+            let summaries_cf = txn_db.cf_handle(EdgeSummaries::CF_NAME)?;
+
+            txn.put_cf(
+                summaries_cf,
+                hash.as_bytes(),
+                EdgeSummaries::value_to_bytes(&EdgeSummaryCfValue(self.summary.clone()))?,
+            )?;
+            Some(hash)
+        } else {
+            None
+        };
+
+        // 3. Write to ForwardEdges CF (hot)
+        let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME)?;
+        let key = ForwardEdgeCfKey(self.source_node_id, self.target_node_id, name_hash);
+        let value = ForwardEdgeCfValue(self.valid_range, self.weight, summary_hash);
+        txn.put_cf(forward_cf, ForwardEdges::key_to_bytes(&key), ForwardEdges::value_to_bytes(&value)?)?;
+
+        // 4. Write to ReverseEdges CF (hot, no summary)
+        let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME)?;
+        let reverse_key = ReverseEdgeCfKey(self.target_node_id, self.source_node_id, name_hash);
+        let reverse_value = ReverseEdgeCfValue(self.valid_range);
+        txn.put_cf(reverse_cf, ReverseEdges::key_to_bytes(&reverse_key), ReverseEdges::value_to_bytes(&reverse_value)?)?;
+
+        Ok(())
+    }
+}
+```
+
+### Read Path (Phase 2)
+
+```rust
+impl NodeById {
+    pub fn execute(&self, storage: &Storage, include_summary: bool) -> Result<NodeResult> {
+        let db = storage.db()?;
+
+        // 1. Read from Nodes CF (hot, fast)
+        let nodes_cf = db.cf_handle(Nodes::CF_NAME)?;
+        let key_bytes = Nodes::key_to_bytes(&NodeCfKey(self.id));
+        let value_bytes = db.get_cf(nodes_cf, &key_bytes)?
+            .ok_or_else(|| anyhow!("Node not found"))?;
+        let value = Nodes::value_from_bytes(&value_bytes)?;
+
+        // 2. Resolve name from cache (existing Phase 1 logic)
+        let name = storage.name_cache().resolve(value.1, db)?;
+
+        // 3. Optionally fetch summary from cold CF
+        let summary = if include_summary {
+            if let Some(summary_hash) = value.2 {
+                let summaries_cf = db.cf_handle(NodeSummaries::CF_NAME)?;
+                let summary_bytes = db.get_cf(summaries_cf, summary_hash.as_bytes())?
+                    .ok_or_else(|| anyhow!("Summary not found for hash {:?}", summary_hash))?;
+                NodeSummaries::value_from_bytes(&summary_bytes)?.0
+            } else {
+                NodeSummary::empty()
+            }
+        } else {
+            NodeSummary::empty()  // Skip cold CF read entirely
+        };
+
+        Ok(NodeResult { id: self.id, name, temporal_range: value.0, summary })
+    }
+}
+
+impl OutgoingEdges {
+    /// Fast traversal: only read hot CF, skip summaries
+    pub fn execute_topology_only(&self, storage: &Storage) -> Result<Vec<(DstId, Option<f64>)>> {
+        let db = storage.db()?;
+        let cf = db.cf_handle(ForwardEdges::CF_NAME)?;
+
+        let prefix = self.src_id.as_bytes();
+        let mut results = Vec::new();
+
+        for item in db.prefix_iterator_cf(cf, prefix) {
+            let (key_bytes, value_bytes) = item?;
+            let key = ForwardEdges::key_from_bytes(&key_bytes)?;
+            let value = ForwardEdges::value_from_bytes(&value_bytes)?;
+
+            // Check temporal validity
+            if !value.0.as_ref().map_or(true, |tr| tr.is_valid_now()) {
+                continue;
+            }
+
+            results.push((key.1, value.1));  // (dst_id, weight)
+        }
+
+        Ok(results)
+    }
+
+    /// Full edge details: read both hot and cold CFs
+    pub fn execute_with_summaries(&self, storage: &Storage) -> Result<Vec<EdgeResult>> {
+        let db = storage.db()?;
+        let edges_cf = db.cf_handle(ForwardEdges::CF_NAME)?;
+        let summaries_cf = db.cf_handle(EdgeSummaries::CF_NAME)?;
+
+        // ... similar pattern, fetch summaries for edges that have them
+    }
+}
+```
+
+### Implementation Plan (Phase 2)
+
+| Step | Description | Files |
+|------|-------------|-------|
+| 2.1 | Add `SummaryHash` type (following NameHash pattern) | `src/graph/summary_hash.rs` |
+| 2.2 | Add `NodeSummaries` CF struct | `src/graph/schema.rs` |
+| 2.3 | Add `EdgeSummaries` CF struct | `src/graph/schema.rs` |
+| 2.4 | Update `NodeCfValue` (replace NodeSummary with Option<SummaryHash>) | `src/graph/schema.rs` |
+| 2.5 | Update `ForwardEdgeCfValue` (replace EdgeSummary with Option<SummaryHash>) | `src/graph/schema.rs` |
+| 2.6 | Add new CFs to `ALL_COLUMN_FAMILIES` | `src/graph/mod.rs` |
+| 2.7 | Update `Storage::ready()` with new CF descriptors | `src/graph/mod.rs` |
+| 2.8 | Update `AddNode` executor (write summary to cold CF) | `src/graph/mutation.rs` |
+| 2.9 | Update `AddEdge` executor (write summary to cold CF) | `src/graph/mutation.rs` |
+| 2.10 | Update `NodeById` query (optional summary fetch) | `src/graph/query.rs` |
+| 2.11 | Update `OutgoingEdges` query (add topology-only mode) | `src/graph/query.rs` |
+| 2.12 | Update scan implementations | `src/graph/scan.rs` |
+| 2.13 | Update tests | `src/graph/tests.rs` |
+| 2.14 | Run benchmarks, validate 5-10x scan improvement | |
+
+### Expected Results (Phase 2)
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Hot value size (nodes) | ~200-500 bytes | ~26 bytes | **10-20x smaller** |
+| Hot value size (edges) | ~200-500 bytes | ~35 bytes | **10-15x smaller** |
+| Edges per 4KB block | ~8-20 | ~100+ | **5-10x denser** |
+| Topology scan (1M edges) | ~500ms | ~50-100ms | **5-10x faster** |
+| Write throughput | baseline | -20-30% | Acceptable tradeoff |
+
+---------------------------------------------------------
+
+## PHASE 3 -- Hybrid Serialization Strategy (rkyv)
+
+**Compatibility:** Breaking change. No migration.
+**Status:** ⬜ Not Started
+**Dependency:** Requires Phase 2 (Blob Separation) to be complete.
+
+### Design Review (January 2, 2026)
+
+**Assessment:** ✅ Design is sound with clarifications below.
+
+| Aspect | Status | Notes |
+|--------|--------|-------|
+| Hot-only rkyv | ✅ Sound | Cold CFs benefit from LZ4 compression |
+| HotColumnFamilyRecord trait | ✅ Sound | Clean abstraction for zero-copy access |
+| rkyv version | ✅ Clarified | Use rkyv 0.7 (stable) |
+| check_bytes | ✅ Decision | Keep enabled for safety (~50ns overhead acceptable) |
+| Nested types | ✅ Will handle | TimestampMilli needs rkyv derives |
+
+**Key Design Decisions:**
+
+1. **rkyv 0.7 (stable):** Use the current stable version, not 0.8 (breaking changes).
+
+2. **`#[archive(check_bytes)]` enabled:** Keep validation for safety.
+   - Adds ~10-50ns per deserialization
+   - For 1M edge scan: 10-50ms additional overhead
+   - Acceptable tradeoff: 20M+ edges/second still achievable
+   - RocksDB has CRC32 checksums, but rkyv validation catches schema mismatches
+
+3. **Nested type handling:** All types used in rkyv-enabled structs need derives:
+   - `TemporalRange` → add rkyv derives
+   - `TimestampMilli(u64)` → add rkyv derives (wrapper around u64)
+   - `NameHash([u8; 8])` → add rkyv derives
+   - `SummaryHash([u8; 8])` → add rkyv derives
+
+### Overview
+
+Apply zero-copy serialization to hot column families while keeping cold CFs compressed:
+
+| Column Family | Serialization | Compression | Access Pattern |
+|---------------|---------------|-------------|----------------|
+| `nodes` | **rkyv** | None | Zero-copy traversal |
+| `forward_edges` | **rkyv** | None | Zero-copy traversal |
+| `reverse_edges` | **rkyv** | None | Zero-copy traversal |
+| `names` | rmp_serde | LZ4 | Cached in memory |
+| `node_summaries` | rmp_serde | LZ4 | Cold access |
+| `edge_summaries` | rmp_serde | LZ4 | Cold access |
+| `node_fragments` | rmp_serde | LZ4 | Cold access |
+| `edge_fragments` | rmp_serde | LZ4 | Cold access |
+
+### Dependencies
+
+Add to `Cargo.toml`:
+```toml
+[dependencies]
+rkyv = { version = "0.7", features = ["validation", "strict"] }
+```
+
+### Type Definitions with rkyv
+
+All nested types must have rkyv derives:
+
+```rust
+// libs/db/src/graph/schema.rs
+
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+
+/// Timestamp in milliseconds since Unix epoch.
+/// Must have rkyv derives for use in hot CF values.
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[archive(check_bytes)]
-pub struct ForwardEdgeHotValue {
-    pub valid_range: Option<ArchivedTemporalRange>,
+#[archive_attr(derive(Debug, PartialEq, Eq, PartialOrd, Ord))]
+pub struct TimestampMilli(pub u64);
+
+/// Temporal validity range.
+/// Must have rkyv derives for use in hot CF values.
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug, PartialEq, Eq))]
+pub struct TemporalRange(pub Option<TimestampMilli>, pub Option<TimestampMilli>);
+
+/// 8-byte name hash (xxHash64).
+/// Must have rkyv derives for use in hot CF values.
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy, PartialEq, Eq, Hash, Debug))]
+pub struct NameHash([u8; 8]);
+
+/// 8-byte summary content hash (xxHash64).
+/// Must have rkyv derives for use in hot CF values.
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy, PartialEq, Eq, Hash, Debug))]
+pub struct SummaryHash([u8; 8]);
+```
+
+### Hot CF Value Types with rkyv
+
+```rust
+// libs/db/src/graph/schema.rs
+
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+
+/// Node value - optimized for graph traversal (hot path)
+/// Size: ~26 bytes (vs ~200-500 bytes with inline summary)
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Debug, Clone)]
+#[archive(check_bytes)]
+pub(crate) struct NodeCfValue {
+    pub temporal_range: Option<TemporalRange>,
+    pub name_hash: NameHash,
+    pub summary_hash: Option<SummaryHash>,
+}
+
+/// Forward edge value - optimized for graph traversal (hot path)
+/// Size: ~35 bytes (vs ~200-500 bytes with inline summary)
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Debug, Clone)]
+#[archive(check_bytes)]
+pub(crate) struct ForwardEdgeCfValue {
+    pub temporal_range: Option<TemporalRange>,
     pub weight: Option<f64>,
-    pub has_summary: bool,  // Flag to indicate cold data exists
+    pub summary_hash: Option<SummaryHash>,
 }
 
-/// Hot node data - optimized for lookups
-#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+/// Reverse edge value - minimal for reverse lookups
+/// Size: ~17 bytes
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
+#[derive(Debug, Clone)]
 #[archive(check_bytes)]
-pub struct NodeHotValue {
-    pub valid_range: Option<ArchivedTemporalRange>,
-    pub name: ArchivedString,  // rkyv's zero-copy string
-    pub has_summary: bool,
-}
-
-/// rkyv-compatible temporal range
-#[derive(Archive, Deserialize, Serialize, Debug, Clone, Copy)]
-#[archive(check_bytes)]
-pub struct ArchivedTemporalRange {
-    pub start: Option<u64>,
-    pub until: Option<u64>,
+pub(crate) struct ReverseEdgeCfValue {
+    pub temporal_range: Option<TemporalRange>,
 }
 ```
 
-#### Cold Column Families (rmp_serde + LZ4)
-
-```rust
-// libs/db/src/graph/schema_cold.rs
-
-use serde::{Deserialize, Serialize};
-
-/// Cold edge data - summaries stored separately
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct EdgeSummaryColdValue(pub DataUrl);
-
-/// Cold node data - summaries stored separately
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NodeSummaryColdValue(pub DataUrl);
-```
-
-### Trait Design
+### HotColumnFamilyRecord Trait
 
 ```rust
 // libs/db/src/graph/mod.rs
 
-/// Trait for hot column families using rkyv (zero-copy)
-pub(crate) trait HotColumnFamily {
+use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::ser::serializers::AllocSerializer;
+use rkyv::validation::validators::DefaultValidator;
+use rkyv::CheckBytes;
+
+/// Trait for hot column families using rkyv (zero-copy serialization).
+///
+/// Hot CFs store small, frequently-accessed data (topology, weights, temporal ranges).
+/// Values are serialized with rkyv for zero-copy access during graph traversal.
+pub(crate) trait HotColumnFamilyRecord {
     const CF_NAME: &'static str;
     type Key;
-    type Value: rkyv::Archive + rkyv::Serialize<...>;
+    type Value: Archive + Serialize<AllocSerializer<256>>
+    where
+        <Self::Value as Archive>::Archived: CheckBytes<DefaultValidator<'static>>;
 
+    /// Serialize key to bytes (unchanged from ColumnFamilyRecord)
     fn key_to_bytes(key: &Self::Key) -> Vec<u8>;
+
+    /// Deserialize key from bytes (unchanged from ColumnFamilyRecord)
     fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key>;
 
-    /// Zero-copy value access - returns archived reference
+    /// Zero-copy value access - returns archived reference without allocation.
+    ///
+    /// This is the hot path for graph traversal. The returned reference
+    /// is valid as long as the input bytes are valid.
     fn value_archived(bytes: &[u8]) -> Result<&<Self::Value as Archive>::Archived> {
         rkyv::check_archived_root::<Self::Value>(bytes)
-            .map_err(|e| anyhow::anyhow!("Archive validation failed: {}", e))
+            .map_err(|e| anyhow::anyhow!("rkyv validation failed: {}", e))
     }
 
-    /// Full deserialization when mutation is needed
-    fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value> {
+    /// Full deserialization when mutation/ownership is needed.
+    ///
+    /// This allocates and copies data. Use sparingly.
+    fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value>
+    where
+        <Self::Value as Archive>::Archived: Deserialize<Self::Value, rkyv::Infallible>,
+    {
         let archived = Self::value_archived(bytes)?;
-        Ok(archived.deserialize(&mut rkyv::Infallible)?)
+        Ok(archived.deserialize(&mut rkyv::Infallible).expect("Infallible"))
     }
 
+    /// Serialize value to bytes using rkyv.
     fn value_to_bytes(value: &Self::Value) -> Result<rkyv::AlignedVec> {
-        Ok(rkyv::to_bytes::<_, 256>(value)?)
-    }
-}
-
-/// Trait for cold column families using rmp_serde + LZ4 (existing pattern)
-pub(crate) trait ColdColumnFamily {
-    const CF_NAME: &'static str;
-    type Key;
-    type Value: Serialize + DeserializeOwned;
-
-    fn key_to_bytes(key: &Self::Key) -> Vec<u8>;
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key>;
-
-    fn value_to_bytes(value: &Self::Value) -> Result<Vec<u8>> {
-        let msgpack = rmp_serde::to_vec(value)?;
-        Ok(lz4::block::compress(&msgpack, None, true)?)
-    }
-
-    fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value> {
-        let decompressed = lz4::block::decompress(bytes, None)?;
-        Ok(rmp_serde::from_slice(&decompressed)?)
+        rkyv::to_bytes::<_, 256>(value)
+            .map_err(|e| anyhow::anyhow!("rkyv serialization failed: {}", e))
     }
 }
 ```
 
-### Column Family Layout
+### Temporal Validity Check on Archived Data
 
-```
-Before (current):
-├── nodes           (Id → TemporalRange + Name + Summary)  ~200-500 bytes
-├── forward_edges   (Src+Dst+Name → TemporalRange + Weight + Summary)  ~200-500 bytes
-├── reverse_edges   (Dst+Src+Name → TemporalRange)  ~30 bytes
-├── node_fragments  (Id+Ts → Content)  variable
-└── edge_fragments  (Src+Dst+Name+Ts → Content)  variable
+```rust
+// libs/db/src/graph/schema.rs
 
-After (proposed):
-├── nodes_hot       (Id → TemporalRange + Name + has_summary)  ~50 bytes [rkyv]
-├── node_summaries  (Id → Summary)  variable [rmp+lz4]
-├── forward_edges_hot (Src+Dst+Name → TemporalRange + Weight + has_summary)  ~30 bytes [rkyv]
-├── edge_summaries  (Src+Dst+Name → Summary)  variable [rmp+lz4]
-├── reverse_edges   (Dst+Src+Name → TemporalRange)  ~30 bytes [rkyv]
-├── node_fragments  (Id+Ts → Content)  variable [rmp+lz4]
-└── edge_fragments  (Src+Dst+Name+Ts → Content)  variable [rmp+lz4]
+impl ArchivedTemporalRange {
+    /// Check if this temporal range is valid at the given timestamp.
+    ///
+    /// Works directly on archived data without deserialization.
+    pub fn is_valid_at(&self, ts: TimestampMilli) -> bool {
+        let start_ok = match &self.0 {
+            Some(start) => ts.0 >= start.0,
+            None => true,
+        };
+        let end_ok = match &self.1 {
+            Some(end) => ts.0 < end.0,
+            None => true,
+        };
+        start_ok && end_ok
+    }
+
+    /// Check if this temporal range is currently valid.
+    pub fn is_valid_now(&self) -> bool {
+        let now = TimestampMilli::now();
+        self.is_valid_at(now)
+    }
+}
+
+impl ArchivedNodeCfValue {
+    /// Check temporal validity without deserialization.
+    pub fn is_valid_at(&self, ts: TimestampMilli) -> bool {
+        self.temporal_range
+            .as_ref()
+            .map_or(true, |tr| tr.is_valid_at(ts))
+    }
+}
+
+impl ArchivedForwardEdgeCfValue {
+    /// Check temporal validity without deserialization.
+    pub fn is_valid_at(&self, ts: TimestampMilli) -> bool {
+        self.temporal_range
+            .as_ref()
+            .map_or(true, |tr| tr.is_valid_at(ts))
+    }
+
+    /// Get weight without deserialization.
+    pub fn weight(&self) -> Option<f64> {
+        self.weight
+    }
+}
 ```
+
+### Zero-Copy Read Path
+
+```rust
+impl OutgoingEdges {
+    /// Zero-copy graph traversal - the hot path for algorithms like BFS, PageRank.
+    ///
+    /// Returns (dst_id, weight) pairs without deserializing edge values.
+    pub fn execute_zero_copy(&self, storage: &Storage) -> Result<Vec<(DstId, Option<f64>)>> {
+        let db = storage.db()?;
+        let cf = db.cf_handle(ForwardEdges::CF_NAME)?;
+
+        let prefix = self.src_id.as_bytes();
+        let now = TimestampMilli::now();
+        let mut results = Vec::new();
+
+        for item in db.prefix_iterator_cf(cf, prefix) {
+            let (key_bytes, value_bytes) = item?;
+
+            // Zero-copy: just validate and cast, no allocation
+            let archived = ForwardEdges::value_archived(&value_bytes)?;
+
+            // Check temporal validity directly on archived data
+            if !archived.is_valid_at(now) {
+                continue;
+            }
+
+            // Extract data without full deserialization
+            let key = ForwardEdges::key_from_bytes(&key_bytes)?;
+            results.push((key.1, archived.weight()));
+        }
+
+        Ok(results)
+    }
+}
+
+impl AllEdges {
+    /// Zero-copy scan for graph algorithms.
+    ///
+    /// Iterates all edges without deserializing values.
+    pub fn execute_zero_copy<F>(&self, storage: &Storage, mut visitor: F) -> Result<()>
+    where
+        F: FnMut(SrcId, DstId, NameHash, Option<f64>) -> bool,
+    {
+        let db = storage.db()?;
+        let cf = db.cf_handle(ForwardEdges::CF_NAME)?;
+        let now = TimestampMilli::now();
+
+        for item in db.iterator_cf(cf, IteratorMode::Start) {
+            let (key_bytes, value_bytes) = item?;
+
+            // Zero-copy access
+            let archived = ForwardEdges::value_archived(&value_bytes)?;
+
+            if !archived.is_valid_at(now) {
+                continue;
+            }
+
+            let key = ForwardEdges::key_from_bytes(&key_bytes)?;
+
+            // Call visitor with extracted data
+            if !visitor(key.0, key.1, key.2, archived.weight()) {
+                break;  // Early termination
+            }
+        }
+
+        Ok(())
+    }
+}
+```
+
+### Write Path (unchanged structure, rkyv serialization)
+
+```rust
+impl MutationExecutor for AddEdge {
+    fn execute(&self, txn: &Transaction, txn_db: &TransactionDB) -> Result<()> {
+        // ... name and summary hash logic from Phase 2 ...
+
+        // Write to ForwardEdges CF using rkyv serialization
+        let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME)?;
+        let key = ForwardEdgeCfKey(self.source_node_id, self.target_node_id, name_hash);
+        let value = ForwardEdgeCfValue {
+            temporal_range: self.valid_range,
+            weight: self.weight,
+            summary_hash,
+        };
+
+        // rkyv serialization - creates AlignedVec
+        let value_bytes = ForwardEdges::value_to_bytes(&value)?;
+        txn.put_cf(forward_cf, ForwardEdges::key_to_bytes(&key), &value_bytes)?;
+
+        // ... reverse edge logic ...
+
+        Ok(())
+    }
+}
+```
+
+### Implementation Plan (Phase 3)
+
+| Step | Description | Files |
+|------|-------------|-------|
+| 3.1 | Add `rkyv = "0.7"` dependency | `Cargo.toml` |
+| 3.2 | Add rkyv derives to `TimestampMilli` | `src/lib.rs` or `src/graph/schema.rs` |
+| 3.3 | Add rkyv derives to `TemporalRange` | `src/graph/schema.rs` |
+| 3.4 | Add rkyv derives to `NameHash` | `src/graph/name_hash.rs` |
+| 3.5 | Add rkyv derives to `SummaryHash` | `src/graph/summary_hash.rs` |
+| 3.6 | Define `HotColumnFamilyRecord` trait | `src/graph/mod.rs` |
+| 3.7 | Update `NodeCfValue` with rkyv derives | `src/graph/schema.rs` |
+| 3.8 | Update `ForwardEdgeCfValue` with rkyv derives | `src/graph/schema.rs` |
+| 3.9 | Update `ReverseEdgeCfValue` with rkyv derives | `src/graph/schema.rs` |
+| 3.10 | Implement `HotColumnFamilyRecord` for Nodes | `src/graph/schema.rs` |
+| 3.11 | Implement `HotColumnFamilyRecord` for ForwardEdges | `src/graph/schema.rs` |
+| 3.12 | Implement `HotColumnFamilyRecord` for ReverseEdges | `src/graph/schema.rs` |
+| 3.13 | Add `is_valid_at()` to archived types | `src/graph/schema.rs` |
+| 3.14 | Update write path to use rkyv serialization | `src/graph/mutation.rs` |
+| 3.15 | Add zero-copy query methods | `src/graph/query.rs` |
+| 3.16 | Add zero-copy scan methods | `src/graph/scan.rs` |
+| 3.17 | Update tests | `src/graph/tests.rs` |
+| 3.18 | Run benchmarks, validate 10-50x improvement | |
+
+### Expected Results (Phase 3)
+
+| Metric | Before (rmp_serde) | After (rkyv) | Improvement |
+|--------|-------------------|--------------|-------------|
+| Deserialization per edge | ~500ns | ~10ns | **50x faster** |
+| Allocations per edge scan | 1 | 0 | **Zero alloc** |
+| Edge scan (1M edges) | ~500ms | ~10-50ms | **10-50x faster** |
+| BFS traversal (100K nodes) | ~2s | ~200ms | **10x faster** |
+| Storage size | baseline | +10% | Uncompressed hot CFs |
+
+### Trade-offs
+
+| Aspect | Benefit | Cost |
+|--------|---------|------|
+| Zero-copy access | 10-50x faster reads | ~10% larger storage (no compression) |
+| Validation overhead | Safety against corruption | ~50ns per access |
+| Schema evolution | Fast access | Must handle versioning carefully |
+| Code complexity | Performance | Two serialization paths to maintain |
+
+#### Cold Column Families (rmp_serde + LZ4)
+
+These schema types (schema.rs) already implement the `ColumnFamilyRecord` trait for rmp_serde and LZ4 compression.
+
+  - NodeSummaries
+  - EdgeSummaries
+  - NodeFragments
+  - EdgeFragments
 
 ### Read Path Examples
 
