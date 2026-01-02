@@ -44,9 +44,11 @@
 //! For concurrent transactions, clone the `Writer` first (cheap - just Arc clones).
 
 use anyhow::{Context, Result};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use super::mutation::Mutation;
+use super::name_hash::NameCache;
 use super::query::TransactionQueryExecutor;
 
 /// A transaction scope for read-your-writes operations.
@@ -100,6 +102,9 @@ pub struct Transaction<'a> {
     /// Optional sender to forward mutations on commit.
     /// If None, mutations are not forwarded anywhere.
     forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
+
+    /// Name cache for efficient hash-to-name resolution.
+    name_cache: Arc<NameCache>,
 }
 
 impl<'a> Transaction<'a> {
@@ -110,12 +115,14 @@ impl<'a> Transaction<'a> {
         txn: rocksdb::Transaction<'a, rocksdb::TransactionDB>,
         txn_db: &'a rocksdb::TransactionDB,
         forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
+        name_cache: Arc<NameCache>,
     ) -> Self {
         Self {
             txn: Some(txn),
             txn_db,
             mutations: Vec::new(),
             forward_to,
+            name_cache,
         }
     }
 
@@ -203,7 +210,7 @@ impl<'a> Transaction<'a> {
             anyhow::anyhow!("Transaction already finished (committed or rolled back)")
         })?;
 
-        query.execute_in_transaction(txn, self.txn_db)
+        query.execute_in_transaction(txn, self.txn_db, &self.name_cache)
     }
 
     /// Commit all changes atomically (sync).

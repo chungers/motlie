@@ -1190,9 +1190,11 @@ use tokio::time::Duration;
         // Verify we can deserialize the value
         let value_bytes = result.unwrap();
         let value = Nodes::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
-        let node_name = &value.1; // NodeName is now field 1 (after temporal_range)
+        let node_name_hash = &value.1; // NodeName is now NameHash (field 1 after temporal_range)
         let content = value.2.decode_string().expect("Failed to decode DataUrl"); // NodeSummary is field 2
-        assert_eq!(node_name, "test_node", "Node name should match");
+        // Check that the name hash matches the expected hash
+        use crate::graph::NameHash;
+        assert_eq!(*node_name_hash, NameHash::from_name("test_node"), "Node name hash should match");
         assert!(
             content.contains("test summary"),
             "Node value should contain the node summary"
@@ -1205,12 +1207,14 @@ use tokio::time::Duration;
     #[test]
     fn test_lz4_compression_round_trip() {
         use crate::graph::schema::{NodeCfValue, NodeSummary, Nodes};
+        use crate::graph::NameHash;
         use crate::DataUrl;
 
-        // Create a simple test value
+        // Create a simple test value with NameHash
+        let name_hash = NameHash::from_name("test_node");
         let test_value = NodeCfValue(
             None,
-            "test_node".to_string(),
+            name_hash,
             DataUrl::from_markdown("test content"),
         );
 
@@ -1228,6 +1232,7 @@ use tokio::time::Duration;
             Nodes::value_from_bytes(&compressed_bytes).expect("Failed to decompress");
 
         // Verify
-        assert_eq!(test_value.0, decompressed_value.0, "Node name should match");
+        assert_eq!(test_value.0, decompressed_value.0, "Temporal range should match");
+        assert_eq!(test_value.1, decompressed_value.1, "Name hash should match");
     }
 

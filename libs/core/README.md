@@ -121,6 +121,230 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `DTRACE_ENDPOINT` | OTLP collector endpoint URL | None (required for otel) |
 | `DTRACE_SERVICE_NAME` | Service name for traces | Application-defined |
 
+## Build and Subsystem Configuration Reporting
+
+The telemetry module provides infrastructure for binaries to report build metadata and subsystem configurations via an `info` command. This enables operators to inspect binary versions, feature flags, SIMD optimizations, and subsystem-specific settings.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  motlie_core::telemetry                                                  │
+│  ┌─────────────────┐  ┌──────────────────────────────────────────────┐  │
+│  │   BuildInfo     │  │  SubsystemInfo trait                         │  │
+│  │   (core info)   │  │  - name() -> &'static str                    │  │
+│  │                 │  │  - info_lines() -> Vec<(label, value)>       │  │
+│  └─────────────────┘  └──────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────┘
+                                     │
+                ┌────────────────────┼────────────────────┐
+                ▼                    ▼                    ▼
+┌───────────────────────┐  ┌─────────────────┐  ┌─────────────────────┐
+│  motlie_db::graph     │  │  motlie_db::     │  │  (future)           │
+│  SystemInfo           │  │  fulltext        │  │  VectorIndexInfo    │
+│  impl SubsystemInfo   │  │  SystemInfo      │  │  impl SubsystemInfo │
+│                       │  │  impl Subsystem  │  │                     │
+│  - BlockCacheConfig   │  │  Info            │  │  - HNSW params      │
+│  - NameCacheConfig    │  │                  │  │  - Vector dims      │
+│  - Column families    │  │  - Writer heap   │  │                     │
+│                       │  │  - Threads       │  │                     │
+└───────────────────────┘  └─────────────────┘  └─────────────────────┘
+```
+
+### Design Principles
+
+| Principle | Description |
+|-----------|-------------|
+| **Extensible** | Subsystems implement `SubsystemInfo` trait to register their config |
+| **Compile-time safe** | Only linked subsystems appear in output |
+| **Decoupled** | Core telemetry module doesn't depend on subsystems |
+| **Consistent** | Unified formatting across all subsystem info |
+
+### Core Build Info
+
+`BuildInfo` captures compile-time metadata about the binary:
+
+```rust
+use motlie_core::telemetry::BuildInfo;
+
+let info = BuildInfo::current();
+println!("Version: {} ({})", info.version, info.git_hash);
+println!("SIMD: {}", info.simd_level);
+println!("Features: {}", info.features);
+println!("Target: {}-{}", info.target_arch, info.target_os);
+```
+
+**Available fields:**
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `package_name` | Cargo package name | `"motlie"` |
+| `version` | Package version | `"0.1.0"` |
+| `git_hash` | Short commit hash (with `-dirty` suffix if uncommitted) | `"d38f53f-dirty"` |
+| `build_timestamp` | RFC 3339 build time | `"2026-01-01T15:30:00Z"` |
+| `target_arch` | CPU architecture | `"aarch64"`, `"x86_64"` |
+| `target_os` | Operating system | `"macos"`, `"linux"` |
+| `simd_level` | Active SIMD implementation | `"NEON"`, `"AVX2+FMA"` |
+| `features` | Enabled Cargo features | `"simd-neon,dtrace-otel"` |
+| `profile` | Build profile | `"release"`, `"debug"` |
+
+### SubsystemInfo Trait
+
+Subsystems implement this trait to expose their configuration:
+
+```rust
+/// Trait for subsystems to provide configuration info for the `info` command.
+pub trait SubsystemInfo {
+    /// Short name of the subsystem (e.g., "Graph DB", "Fulltext")
+    fn name(&self) -> &'static str;
+
+    /// Key-value pairs describing the subsystem's configuration.
+    /// Returns Vec of (label, value) tuples for display.
+    fn info_lines(&self) -> Vec<(&'static str, String)>;
+}
+```
+
+### Implementing SubsystemInfo
+
+Example implementation for the graph database subsystem:
+
+```rust
+// In motlie_db::graph
+
+use motlie_core::telemetry::SubsystemInfo;
+
+/// Configuration info for the graph database subsystem.
+pub struct SystemInfo {
+    pub block_cache_config: BlockCacheConfig,
+    pub name_cache_config: NameCacheConfig,
+    pub column_families: Vec<&'static str>,
+}
+
+impl SubsystemInfo for SystemInfo {
+    fn name(&self) -> &'static str {
+        "Graph Database (RocksDB)"
+    }
+
+    fn info_lines(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("Block Cache Size", format_bytes(self.block_cache_config.cache_size_bytes)),
+            ("Graph Block Size", format_bytes(self.block_cache_config.graph_block_size)),
+            ("Fragment Block Size", format_bytes(self.block_cache_config.fragment_block_size)),
+            ("Cache Index/Filter", self.block_cache_config.cache_index_and_filter_blocks.to_string()),
+            ("Pin L0 Blocks", self.block_cache_config.pin_l0_filter_and_index.to_string()),
+            ("Name Cache Prewarm", self.name_cache_config.prewarm_limit.to_string()),
+            ("Column Families", self.column_families.join(", ")),
+        ]
+    }
+}
+```
+
+### Using in a Binary
+
+Binaries compose core build info with subsystem info:
+
+```rust
+use motlie_core::telemetry::{BuildInfo, format_subsystem_info};
+
+fn handle_info_command() {
+    // Core build info
+    println!("{}", BuildInfo::current().detailed());
+
+    // Subsystem info (only for subsystems compiled into this binary)
+    let graph_info = motlie_db::graph::SystemInfo::default();
+    println!("{}", format_subsystem_info(&graph_info));
+
+    let fulltext_info = motlie_db::fulltext::SystemInfo::default();
+    println!("{}", format_subsystem_info(&fulltext_info));
+}
+```
+
+### Example Output
+
+```
+$ motlie info
+Package:    motlie v0.1.0
+Git:        d38f53f
+Built:      2026-01-01T15:30:00Z
+Target:     aarch64-macos
+SIMD:       NEON
+Features:   simd-neon
+Profile:    release
+
+[Graph Database (RocksDB)]
+  Block Cache Size:    256 MB
+  Graph Block Size:    4 KB
+  Fragment Block Size: 16 KB
+  Cache Index/Filter:  true
+  Pin L0 Blocks:       true
+  Name Cache Prewarm:  1000
+  Column Families:     names, nodes, forward_edges, reverse_edges, node_fragments, edge_fragments
+
+[Fulltext Search (Tantivy)]
+  Writer Heap Size:    47 MB
+  Indexing Threads:    auto (num CPUs)
+  Stored Fields:       true
+  BM25 Scoring:        true
+  Faceted Search:      true
+  Fuzzy Search:        true
+```
+
+### Adding a New Subsystem
+
+To add configuration reporting for a new subsystem:
+
+1. **Create an info struct** in your subsystem module:
+   ```rust
+   pub struct MySubsystemInfo {
+       pub setting_a: usize,
+       pub setting_b: String,
+   }
+   ```
+
+2. **Implement `SubsystemInfo`**:
+   ```rust
+   impl motlie_core::telemetry::SubsystemInfo for MySubsystemInfo {
+       fn name(&self) -> &'static str {
+           "My Subsystem"
+       }
+
+       fn info_lines(&self) -> Vec<(&'static str, String)> {
+           vec![
+               ("Setting A", self.setting_a.to_string()),
+               ("Setting B", self.setting_b.clone()),
+           ]
+       }
+   }
+   ```
+
+3. **Re-export from your library's public API**:
+   ```rust
+   // In lib.rs
+   pub use my_module::MySubsystemInfo;
+   ```
+
+4. **Add to the binary's info command**:
+   ```rust
+   let my_info = my_crate::MySubsystemInfo::default();
+   println!("{}", format_subsystem_info(&my_info));
+   ```
+
+### Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Trait-based approach | Allows any subsystem to plug in without modifying core |
+| `Vec<(&'static str, String)>` for info | Simple, flexible for varying data types |
+| Explicit listing in binary | Clear visibility; compile-time safety; no magic registration |
+| Default configs shown | Useful for operators to know compiled-in defaults |
+| No dynamic registry | If a subsystem isn't linked, it won't appear—no runtime errors |
+
+### Future Enhancements
+
+- **Runtime config overlay**: Show actual runtime values if Storage is open
+- **JSON output**: Machine-readable format for automation
+- **Health checks**: Subsystems could expose health status via similar trait
+
 ## Integration Guide
 
 This section covers how to integrate telemetry in binaries (applications) and libraries.

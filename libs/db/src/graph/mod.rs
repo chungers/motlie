@@ -23,6 +23,7 @@ use rocksdb::{Options, TransactionDB, TransactionDBOptions, DB};
 
 // Submodules
 pub mod mutation;
+pub mod name_hash;
 pub mod query;
 pub mod reader;
 pub mod schema;
@@ -65,6 +66,7 @@ pub use reader::{
     Reader,
     ReaderConfig,
 };
+pub use name_hash::{NameCache, NameHash};
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 pub use writer::{
     // Mutation consumer functions
@@ -236,6 +238,129 @@ impl StorageOptions {
     }
 }
 
+/// Configuration for name cache pre-warming
+#[derive(Debug, Clone)]
+pub struct NameCacheConfig {
+    /// Maximum number of names to pre-load from Names CF on startup.
+    /// Set to 0 to disable pre-warming.
+    /// Default: 1000
+    pub prewarm_limit: usize,
+}
+
+impl Default for NameCacheConfig {
+    fn default() -> Self {
+        Self { prewarm_limit: 1000 }
+    }
+}
+
+/// Configuration for RocksDB block cache.
+///
+/// RocksDB's block cache stores uncompressed data blocks (~4KB each).
+/// Sharing a single cache across all column families allows RocksDB to
+/// dynamically allocate memory based on access patterns.
+///
+/// See [RocksDB Block Cache Wiki](https://github.com/facebook/rocksdb/wiki/Block-Cache)
+/// for detailed documentation.
+#[derive(Debug, Clone)]
+pub struct BlockCacheConfig {
+    /// Total block cache size in bytes.
+    /// Default: 256MB. Production deployments should tune to ~1/3 of available memory.
+    pub cache_size_bytes: usize,
+
+    /// Block size for graph column families (Nodes, ForwardEdges, ReverseEdges, Names).
+    /// Default: 4KB. Optimal for 40-byte fixed keys (~100 keys per block).
+    pub graph_block_size: usize,
+
+    /// Block size for fragment column families (NodeFragments, EdgeFragments).
+    /// Default: 16KB. Better for larger variable-length content.
+    pub fragment_block_size: usize,
+
+    /// Whether to cache index and filter blocks in the block cache.
+    /// Default: true. Keeps hot metadata in cache for faster lookups.
+    pub cache_index_and_filter_blocks: bool,
+
+    /// Whether to pin L0 filter and index blocks in cache.
+    /// Default: true. Prevents eviction of newest (most likely accessed) data.
+    pub pin_l0_filter_and_index: bool,
+}
+
+impl Default for BlockCacheConfig {
+    fn default() -> Self {
+        Self {
+            cache_size_bytes: 256 * 1024 * 1024,  // 256MB
+            graph_block_size: 4 * 1024,            // 4KB
+            fragment_block_size: 16 * 1024,        // 16KB
+            cache_index_and_filter_blocks: true,
+            pin_l0_filter_and_index: true,
+        }
+    }
+}
+
+/// Static configuration info for the graph database subsystem.
+///
+/// Used by the `motlie info` command to display graph DB settings.
+/// Implements [`motlie_core::telemetry::SubsystemInfo`] for consistent formatting.
+///
+/// # Example
+///
+/// ```ignore
+/// use motlie_db::graph::SystemInfo;
+/// use motlie_core::telemetry::{format_subsystem_info, SubsystemInfo};
+///
+/// let info = SystemInfo::default();
+/// println!("{}", format_subsystem_info(&info));
+/// ```
+#[derive(Debug, Clone)]
+pub struct SystemInfo {
+    /// Block cache configuration
+    pub block_cache_config: BlockCacheConfig,
+    /// Name cache configuration
+    pub name_cache_config: NameCacheConfig,
+    /// List of column families
+    pub column_families: Vec<&'static str>,
+}
+
+impl Default for SystemInfo {
+    fn default() -> Self {
+        Self {
+            block_cache_config: BlockCacheConfig::default(),
+            name_cache_config: NameCacheConfig::default(),
+            column_families: ALL_COLUMN_FAMILIES.to_vec(),
+        }
+    }
+}
+
+impl motlie_core::telemetry::SubsystemInfo for SystemInfo {
+    fn name(&self) -> &'static str {
+        "Graph Database (RocksDB)"
+    }
+
+    fn info_lines(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("Block Cache Size", format_bytes(self.block_cache_config.cache_size_bytes)),
+            ("Graph Block Size", format_bytes(self.block_cache_config.graph_block_size)),
+            ("Fragment Block Size", format_bytes(self.block_cache_config.fragment_block_size)),
+            ("Cache Index/Filter", self.block_cache_config.cache_index_and_filter_blocks.to_string()),
+            ("Pin L0 Blocks", self.block_cache_config.pin_l0_filter_and_index.to_string()),
+            ("Name Cache Prewarm", self.name_cache_config.prewarm_limit.to_string()),
+            ("Column Families", self.column_families.join(", ")),
+        ]
+    }
+}
+
+/// Format a byte count as a human-readable string.
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{} GB", bytes / (1024 * 1024 * 1024))
+    } else if bytes >= 1024 * 1024 {
+        format!("{} MB", bytes / (1024 * 1024))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 /// Graph-specific storage
 pub struct Storage {
     db_path: PathBuf,
@@ -244,6 +369,14 @@ pub struct Storage {
     db: Option<DatabaseHandle>,
     mode: StorageMode,
     column_families: &'static [&'static str],
+    /// Thread-safe name cache for interning and resolution
+    name_cache: std::sync::Arc<NameCache>,
+    /// Configuration for name cache behavior
+    name_cache_config: NameCacheConfig,
+    /// Shared block cache across all column families
+    block_cache: Option<rocksdb::Cache>,
+    /// Configuration for block cache behavior
+    block_cache_config: BlockCacheConfig,
 }
 
 impl Storage {
@@ -256,6 +389,10 @@ impl Storage {
             db: None,
             mode: StorageMode::ReadOnly,
             column_families: ALL_COLUMN_FAMILIES,
+            name_cache: std::sync::Arc::new(NameCache::new()),
+            name_cache_config: NameCacheConfig::default(),
+            block_cache: None,
+            block_cache_config: BlockCacheConfig::default(),
         }
     }
 
@@ -268,6 +405,10 @@ impl Storage {
             db: None,
             mode: StorageMode::ReadWrite,
             column_families: ALL_COLUMN_FAMILIES,
+            name_cache: std::sync::Arc::new(NameCache::new()),
+            name_cache_config: NameCacheConfig::default(),
+            block_cache: None,
+            block_cache_config: BlockCacheConfig::default(),
         }
     }
 
@@ -284,6 +425,10 @@ impl Storage {
             db: None,
             mode: StorageMode::ReadWrite,
             column_families: ALL_COLUMN_FAMILIES,
+            name_cache: std::sync::Arc::new(NameCache::new()),
+            name_cache_config: NameCacheConfig::default(),
+            block_cache: None,
+            block_cache_config: BlockCacheConfig::default(),
         }
     }
 
@@ -321,7 +466,49 @@ impl Storage {
                 secondary_path: PathBuf::from(secondary_path),
             },
             column_families: ALL_COLUMN_FAMILIES,
+            name_cache: std::sync::Arc::new(NameCache::new()),
+            name_cache_config: NameCacheConfig::default(),
+            block_cache: None,
+            block_cache_config: BlockCacheConfig::default(),
         }
+    }
+
+    /// Set the name cache configuration.
+    ///
+    /// Must be called before `ready()` to take effect.
+    pub fn with_name_cache_config(mut self, config: NameCacheConfig) -> Self {
+        self.name_cache_config = config;
+        self
+    }
+
+    /// Set the block cache configuration.
+    ///
+    /// Must be called before `ready()` to take effect.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use motlie_db::graph::{Storage, BlockCacheConfig};
+    /// use std::path::Path;
+    ///
+    /// let config = BlockCacheConfig {
+    ///     cache_size_bytes: 512 * 1024 * 1024, // 512MB
+    ///     ..Default::default()
+    /// };
+    ///
+    /// let mut storage = Storage::readwrite(Path::new("/data/db"))
+    ///     .with_block_cache_config(config);
+    /// storage.ready().unwrap();
+    /// ```
+    pub fn with_block_cache_config(mut self, config: BlockCacheConfig) -> Self {
+        self.block_cache_config = config;
+        self
+    }
+
+    /// Get a reference to the name cache.
+    ///
+    /// The cache is pre-warmed during `ready()` if `prewarm_limit > 0`.
+    pub fn name_cache(&self) -> &std::sync::Arc<NameCache> {
+        &self.name_cache
     }
 
     /// Close the database
@@ -366,28 +553,44 @@ impl Storage {
             Ok(false) => {}
         }
 
-        // Create column family descriptors with encapsulated options
+        // Create shared block cache for all column families
+        let cache = rocksdb::Cache::new_lru_cache(self.block_cache_config.cache_size_bytes);
+        self.block_cache = Some(cache);
+        let cache_ref = self.block_cache.as_ref().unwrap();
+
+        tracing::info!(
+            "[Storage] Created shared block cache: {} MB, graph_block_size: {} KB, fragment_block_size: {} KB",
+            self.block_cache_config.cache_size_bytes / (1024 * 1024),
+            self.block_cache_config.graph_block_size / 1024,
+            self.block_cache_config.fragment_block_size / 1024
+        );
+
+        // Create column family descriptors with shared cache and tuned options
         use rocksdb::ColumnFamilyDescriptor;
         let cf_descriptors = vec![
             ColumnFamilyDescriptor::new(
+                schema::Names::CF_NAME,
+                schema::Names::column_family_options_with_cache(cache_ref, &self.block_cache_config),
+            ),
+            ColumnFamilyDescriptor::new(
                 schema::Nodes::CF_NAME,
-                schema::Nodes::column_family_options(),
+                schema::Nodes::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
             ColumnFamilyDescriptor::new(
                 schema::NodeFragments::CF_NAME,
-                schema::NodeFragments::column_family_options(),
+                schema::NodeFragments::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
             ColumnFamilyDescriptor::new(
                 schema::EdgeFragments::CF_NAME,
-                schema::EdgeFragments::column_family_options(),
+                schema::EdgeFragments::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
             ColumnFamilyDescriptor::new(
                 schema::ForwardEdges::CF_NAME,
-                schema::ForwardEdges::column_family_options(),
+                schema::ForwardEdges::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
             ColumnFamilyDescriptor::new(
                 schema::ReverseEdges::CF_NAME,
-                schema::ReverseEdges::column_family_options(),
+                schema::ReverseEdges::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
         ];
 
@@ -421,8 +624,81 @@ impl Storage {
             }
         }
 
+        // Pre-warm the name cache if configured
+        if self.name_cache_config.prewarm_limit > 0 {
+            let loaded = self.prewarm_name_cache()?;
+            tracing::info!(
+                "[Storage] Pre-warmed name cache with {} entries (limit: {})",
+                loaded,
+                self.name_cache_config.prewarm_limit
+            );
+        }
+
         tracing::info!("[Storage] Ready");
         Ok(())
+    }
+
+    /// Pre-warm the name cache by loading entries from the Names CF.
+    ///
+    /// Returns the number of entries loaded.
+    fn prewarm_name_cache(&self) -> Result<usize> {
+        use rocksdb::IteratorMode;
+
+        let limit = self.name_cache_config.prewarm_limit;
+        let mut loaded = 0;
+
+        // Get iterator based on storage mode
+        if let Ok(db) = self.db() {
+            let names_cf = db
+                .cf_handle(schema::Names::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
+
+            for item in db.iterator_cf(names_cf, IteratorMode::Start) {
+                if loaded >= limit {
+                    break;
+                }
+
+                let (key_bytes, value_bytes) = item?;
+
+                // Parse key (NameHash) and value (name string)
+                if key_bytes.len() == 8 {
+                    let mut hash_bytes = [0u8; 8];
+                    hash_bytes.copy_from_slice(&key_bytes);
+                    let hash = NameHash::from_bytes(hash_bytes);
+
+                    if let Ok(value) = schema::Names::value_from_bytes(&value_bytes) {
+                        self.name_cache.insert(hash, value.0);
+                        loaded += 1;
+                    }
+                }
+            }
+        } else if let Ok(txn_db) = self.transaction_db() {
+            let names_cf = txn_db
+                .cf_handle(schema::Names::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
+
+            for item in txn_db.iterator_cf(names_cf, IteratorMode::Start) {
+                if loaded >= limit {
+                    break;
+                }
+
+                let (key_bytes, value_bytes) = item?;
+
+                // Parse key (NameHash) and value (name string)
+                if key_bytes.len() == 8 {
+                    let mut hash_bytes = [0u8; 8];
+                    hash_bytes.copy_from_slice(&key_bytes);
+                    let hash = NameHash::from_bytes(hash_bytes);
+
+                    if let Ok(value) = schema::Names::value_from_bytes(&value_bytes) {
+                        self.name_cache.insert(hash, value.0);
+                        loaded += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(loaded)
     }
 
     /// Get a reference to the underlying DB (only works in readonly or secondary mode)
@@ -541,13 +817,14 @@ impl Processor for Graph {
 
         tracing::info!(count = mutations.len(), "[Graph] About to insert mutations");
 
-        // Get transaction
+        // Get transaction and name cache
         let txn_db = self.storage.transaction_db()?;
         let txn = txn_db.transaction();
+        let name_cache = self.storage.name_cache();
 
-        // Each mutation executes itself - no match needed!
+        // Each mutation executes itself with cache access for name deduplication
         for mutation in mutations {
-            mutation.execute(&txn, txn_db)?;
+            mutation.execute_with_cache(&txn, txn_db, name_cache)?;
         }
 
         // Single commit for all mutations

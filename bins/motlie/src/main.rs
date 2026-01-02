@@ -16,6 +16,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Display build and configuration information
+    Info,
     /// Database inspection commands
     Db(db::Command),
     /// Fulltext search commands
@@ -33,13 +35,27 @@ fn main() {
 
     let cli = Cli::parse();
 
-    tracing::info!("starting");
-
     match cli.command {
+        Commands::Info => {
+            use motlie_core::telemetry::{format_subsystem_info, BuildInfo};
+
+            // Core build info
+            println!("{}", BuildInfo::current().detailed());
+
+            // Graph database subsystem info
+            let graph_info = motlie_db::graph::SystemInfo::default();
+            println!("{}", format_subsystem_info(&graph_info));
+
+            // Fulltext search subsystem info
+            let fulltext_info = motlie_db::fulltext::SystemInfo::default();
+            println!("{}", format_subsystem_info(&fulltext_info));
+        }
         Commands::Db(args) => {
+            tracing::info!("starting");
             db::run(&args);
         }
         Commands::Fulltext(args) => {
+            tracing::info!("starting");
             fulltext::run(&args);
         }
     }
