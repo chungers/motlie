@@ -1,11 +1,14 @@
 use super::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
 use super::name_hash::NameHash;
+use super::summary_hash::SummaryHash;
 use super::BlockCacheConfig;
 use super::ColumnFamilyRecord;
+use super::HotColumnFamilyRecord;
 use super::ValidRangePatchable;
 use crate::DataUrl;
 use crate::Id;
 use crate::TimestampMilli;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 // Re-export TemporalRange and related types from crate root for convenience
@@ -113,15 +116,26 @@ impl Names {
     }
 }
 
-/// Nodes column family.
+/// Nodes column family (HOT - optimized for graph traversal).
+///
+/// After Phase 2 blob separation:
+/// - Value contains `Option<SummaryHash>` instead of inline `NodeSummary`
+/// - Full summary content is stored in `NodeSummaries` CF (COLD)
+/// - Value size reduced from ~200-500 bytes to ~26 bytes
 pub(crate) struct Nodes;
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeCfKey(pub(crate) Id);
+
+/// Node value - optimized for graph traversal (hot path)
+/// Size: ~26 bytes (vs ~200-500 bytes with inline summary)
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 #[derive(Serialize, Deserialize)]
+#[archive(check_bytes)]
 pub(crate) struct NodeCfValue(
     pub(crate) Option<TemporalRange>,
-    pub(crate) NameHash, // Node name stored as hash; full name in Names CF
-    pub(crate) NodeSummary,
+    pub(crate) NameHash,            // Node name hash; full name in Names CF
+    pub(crate) Option<SummaryHash>, // Content hash; full summary in NodeSummaries CF
 );
 
 impl ValidRangePatchable for Nodes {
@@ -130,13 +144,14 @@ impl ValidRangePatchable for Nodes {
         old_value: &[u8],
         new_range: TemporalRange,
     ) -> Result<Vec<u8>, anyhow::Error> {
-        use crate::graph::ColumnFamilyRecord;
+        use crate::graph::HotColumnFamilyRecord;
 
         let mut value = Nodes::value_from_bytes(old_value)
-            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
         value.0 = Some(new_range);
         Nodes::value_to_bytes(&value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+            .map(|aligned_vec| aligned_vec.to_vec())
+            .map_err(|e| anyhow::anyhow!("Failed to serialize value: {}", e))
     }
 }
 
@@ -151,13 +166,14 @@ impl ValidRangePatchable for ForwardEdges {
         old_value: &[u8],
         new_range: TemporalRange,
     ) -> Result<Vec<u8>, anyhow::Error> {
-        use crate::graph::ColumnFamilyRecord;
+        use crate::graph::HotColumnFamilyRecord;
 
         let mut value = ForwardEdges::value_from_bytes(old_value)
-            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
         value.0 = Some(new_range);
         ForwardEdges::value_to_bytes(&value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+            .map(|aligned_vec| aligned_vec.to_vec())
+            .map_err(|e| anyhow::anyhow!("Failed to serialize value: {}", e))
     }
 }
 
@@ -167,29 +183,41 @@ impl ValidRangePatchable for ReverseEdges {
         old_value: &[u8],
         new_range: TemporalRange,
     ) -> Result<Vec<u8>, anyhow::Error> {
-        use crate::graph::ColumnFamilyRecord;
+        use crate::graph::HotColumnFamilyRecord;
 
         let mut value = ReverseEdges::value_from_bytes(old_value)
-            .map_err(|e| anyhow::anyhow!("Failed to decompress and deserialize value: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
         value.0 = Some(new_range);
         ReverseEdges::value_to_bytes(&value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize and compress value: {}", e))
+            .map(|aligned_vec| aligned_vec.to_vec())
+            .map_err(|e| anyhow::anyhow!("Failed to serialize value: {}", e))
     }
 }
 
-/// Forward edges column family (enhanced with weight and summary).
+/// Forward edges column family (HOT - optimized for graph traversal).
+///
+/// After Phase 2 blob separation:
+/// - Value contains `Option<SummaryHash>` instead of inline `EdgeSummary`
+/// - Full summary content is stored in `EdgeSummaries` CF (COLD)
+/// - Value size reduced from ~200-500 bytes to ~35 bytes
 pub(crate) struct ForwardEdges;
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfKey(
     pub(crate) SrcId,
     pub(crate) DstId,
-    pub(crate) NameHash, // Edge name stored as hash; full name in Names CF
+    pub(crate) NameHash, // Edge name hash; full name in Names CF
 );
+
+/// Forward edge value - optimized for graph traversal (hot path)
+/// Size: ~35 bytes (vs ~200-500 bytes with inline summary)
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 #[derive(Serialize, Deserialize)]
+#[archive(check_bytes)]
 pub(crate) struct ForwardEdgeCfValue(
     pub(crate) Option<TemporalRange>, // Field 0: Temporal validity
     pub(crate) Option<f64>,           // Field 1: Optional weight
-    pub(crate) EdgeSummary,           // Field 2: Edge summary
+    pub(crate) Option<SummaryHash>,   // Field 2: Content hash; full summary in EdgeSummaries CF
 );
 
 /// Reverse edges column family (index only).
@@ -200,7 +228,11 @@ pub(crate) struct ReverseEdgeCfKey(
     pub(crate) SrcId,
     pub(crate) NameHash, // Edge name stored as hash; full name in Names CF
 );
+/// Reverse edge value - minimal for reverse lookups
+/// Size: ~17 bytes
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 #[derive(Serialize, Deserialize)]
+#[archive(check_bytes)]
 pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<TemporalRange>);
 
 /// Edge fragments column family.
@@ -221,44 +253,33 @@ pub type NodeSummary = DataUrl;
 pub type EdgeSummary = DataUrl;
 pub type FragmentContent = DataUrl;
 
-impl ColumnFamilyRecord for Nodes {
-    const CF_NAME: &'static str = "nodes";
-    type Key = NodeCfKey;
-    type Value = NodeCfValue;
-    type CreateOp = AddNode;
+impl Nodes {
+    pub const CF_NAME: &'static str = "nodes";
 
-    fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
+    /// Create key-value pair from AddNode mutation.
+    pub fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
         let name_hash = NameHash::from_name(&args.name);
-        let value = NodeCfValue(
-            args.valid_range.clone(),
-            name_hash,
-            args.summary.clone(),
-        );
+
+        // Compute summary hash if summary is non-empty
+        let summary_hash = if !args.summary.is_empty() {
+            SummaryHash::from_summary(&args.summary).ok()
+        } else {
+            None
+        };
+
+        let value = NodeCfValue(args.valid_range.clone(), name_hash, summary_hash);
         (key, value)
     }
 
-    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // NodeCfKey(Id) -> just the 16-byte Id
-        key.0.into_bytes().to_vec()
+    /// Create and serialize to bytes (key bytes, value bytes).
+    pub fn create_bytes(args: &AddNode) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+        let (key, value) = Self::record_from(args);
+        let key_bytes = <Self as HotColumnFamilyRecord>::key_to_bytes(&key);
+        let value_bytes = <Self as HotColumnFamilyRecord>::value_to_bytes(&value)?.to_vec();
+        Ok((key_bytes, value_bytes))
     }
 
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
-        if bytes.len() != 16 {
-            anyhow::bail!("Invalid NodeCfKey length: expected 16, got {}", bytes.len());
-        }
-        let mut id_bytes = [0u8; 16];
-        id_bytes.copy_from_slice(bytes);
-        Ok(NodeCfKey(Id::from_bytes(id_bytes)))
-    }
-
-    fn column_family_options() -> rocksdb::Options {
-        // Point lookups by Id only, no prefix scanning needed
-        rocksdb::Options::default()
-    }
-}
-
-impl Nodes {
     /// Configure RocksDB options with shared block cache.
     pub fn column_family_options_with_cache(
         cache: &rocksdb::Cache,
@@ -280,6 +301,25 @@ impl Nodes {
 
         opts.set_block_based_table_factory(&block_opts);
         opts
+    }
+}
+
+impl HotColumnFamilyRecord for Nodes {
+    const CF_NAME: &'static str = "nodes";
+    type Key = NodeCfKey;
+    type Value = NodeCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        key.0.into_bytes().to_vec()
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
+        if bytes.len() != 16 {
+            anyhow::bail!("Invalid NodeCfKey length: expected 16, got {}", bytes.len());
+        }
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(bytes);
+        Ok(NodeCfKey(Id::from_bytes(id_bytes)))
     }
 }
 
@@ -492,22 +532,73 @@ impl EdgeFragments {
     }
 }
 
-impl ColumnFamilyRecord for ForwardEdges {
-    const CF_NAME: &'static str = "forward_edges";
-    type Key = ForwardEdgeCfKey;
-    type Value = ForwardEdgeCfValue;
-    type CreateOp = AddEdge;
+impl ForwardEdges {
+    pub const CF_NAME: &'static str = "forward_edges";
 
-    fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
+    /// Create key-value pair from AddEdge mutation.
+    pub fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let name_hash = NameHash::from_name(&args.name);
         let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, name_hash);
-        let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, args.summary.clone());
+
+        // Compute summary hash if summary is non-empty
+        let summary_hash = if !args.summary.is_empty() {
+            SummaryHash::from_summary(&args.summary).ok()
+        } else {
+            None
+        };
+
+        let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, summary_hash);
         (key, value)
     }
 
+    /// Create and serialize to bytes (key bytes, value bytes).
+    pub fn create_bytes(args: &AddEdge) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+        let (key, value) = Self::record_from(args);
+        let key_bytes = <Self as HotColumnFamilyRecord>::key_to_bytes(&key);
+        let value_bytes = <Self as HotColumnFamilyRecord>::value_to_bytes(&value)?.to_vec();
+        Ok((key_bytes, value_bytes))
+    }
+
+    /// Configure RocksDB options with shared block cache.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with graph block size
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes
+        // Use 16-byte prefix to scan all edges from a source node
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl HotColumnFamilyRecord for ForwardEdges {
+    const CF_NAME: &'static str = "forward_edges";
+    type Key = ForwardEdgeCfKey;
+    type Value = ForwardEdgeCfValue;
+
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         // ForwardEdgeCfKey(SrcId, DstId, NameHash)
-        // Layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes FIXED
+        // Layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes
         let mut bytes = Vec::with_capacity(40);
         bytes.extend_from_slice(&key.0.into_bytes());
         bytes.extend_from_slice(&key.1.into_bytes());
@@ -515,7 +606,7 @@ impl ColumnFamilyRecord for ForwardEdges {
         bytes
     }
 
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
         if bytes.len() != 40 {
             anyhow::bail!(
                 "Invalid ForwardEdgeCfKey length: expected 40, got {}",
@@ -538,24 +629,27 @@ impl ColumnFamilyRecord for ForwardEdges {
             NameHash::from_bytes(name_hash_bytes),
         ))
     }
-
-    fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-
-        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes
-        // Use 16-byte prefix to scan all edges from a source node
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
-
-        // Enable prefix bloom filter for O(1) prefix existence check
-        opts.set_memtable_prefix_bloom_ratio(0.2);
-
-        opts
-    }
 }
 
-impl ForwardEdges {
+impl ReverseEdges {
+    pub const CF_NAME: &'static str = "reverse_edges";
+
+    /// Create key-value pair from AddEdge mutation.
+    pub fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
+        let name_hash = NameHash::from_name(&args.name);
+        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, name_hash);
+        let value = ReverseEdgeCfValue(args.valid_range.clone());
+        (key, value)
+    }
+
+    /// Create and serialize to bytes (key bytes, value bytes).
+    pub fn create_bytes(args: &AddEdge) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+        let (key, value) = Self::record_from(args);
+        let key_bytes = <Self as HotColumnFamilyRecord>::key_to_bytes(&key);
+        let value_bytes = <Self as HotColumnFamilyRecord>::value_to_bytes(&value)?.to_vec();
+        Ok((key_bytes, value_bytes))
+    }
+
     /// Configure RocksDB options with shared block cache.
     pub fn column_family_options_with_cache(
         cache: &rocksdb::Cache,
@@ -579,8 +673,8 @@ impl ForwardEdges {
 
         opts.set_block_based_table_factory(&block_opts);
 
-        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes
-        // Use 16-byte prefix to scan all edges from a source node
+        // Key layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes
+        // Use 16-byte prefix to scan all edges to a destination node
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
         opts.set_memtable_prefix_bloom_ratio(0.2);
 
@@ -588,22 +682,14 @@ impl ForwardEdges {
     }
 }
 
-impl ColumnFamilyRecord for ReverseEdges {
+impl HotColumnFamilyRecord for ReverseEdges {
     const CF_NAME: &'static str = "reverse_edges";
     type Key = ReverseEdgeCfKey;
     type Value = ReverseEdgeCfValue;
-    type CreateOp = AddEdge;
-
-    fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
-        let name_hash = NameHash::from_name(&args.name);
-        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, name_hash);
-        let value = ReverseEdgeCfValue(args.valid_range.clone());
-        (key, value)
-    }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         // ReverseEdgeCfKey(DstId, SrcId, NameHash)
-        // Layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes FIXED
+        // Layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes
         let mut bytes = Vec::with_capacity(40);
         bytes.extend_from_slice(&key.0.into_bytes());
         bytes.extend_from_slice(&key.1.into_bytes());
@@ -611,7 +697,7 @@ impl ColumnFamilyRecord for ReverseEdges {
         bytes
     }
 
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
         if bytes.len() != 40 {
             anyhow::bail!(
                 "Invalid ReverseEdgeCfKey length: expected 40, got {}",
@@ -634,37 +720,88 @@ impl ColumnFamilyRecord for ReverseEdges {
             NameHash::from_bytes(name_hash_bytes),
         ))
     }
+}
 
-    fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
+// ============================================================================
+// Cold Column Families for Blob Separation (Phase 2)
+// ============================================================================
 
+/// NodeSummaries column family (COLD - infrequently accessed).
+///
+/// Stores node summary content keyed by content hash (SummaryHash).
+/// Content-addressable: identical summaries stored once, referenced by hash.
+///
+/// Key: SummaryHash (8 bytes, content-addressable)
+/// Value: NodeSummary (DataUrl, rmp_serde + LZ4 compressed)
+pub(crate) struct NodeSummaries;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct NodeSummaryCfKey(pub(crate) SummaryHash);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct NodeSummaryCfValue(pub(crate) NodeSummary);
+
+impl NodeSummaries {
+    pub const CF_NAME: &'static str = "node_summaries";
+
+    /// Serialize the key to bytes (8 bytes, fixed size).
+    pub fn key_to_bytes(key: &NodeSummaryCfKey) -> Vec<u8> {
+        key.0.as_bytes().to_vec()
+    }
+
+    /// Deserialize the key from bytes.
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<NodeSummaryCfKey, anyhow::Error> {
+        if bytes.len() != SummaryHash::SIZE {
+            anyhow::bail!(
+                "Invalid NodeSummaryCfKey length: expected {}, got {}",
+                SummaryHash::SIZE,
+                bytes.len()
+            );
+        }
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(bytes);
+        Ok(NodeSummaryCfKey(SummaryHash::from_bytes(hash_bytes)))
+    }
+
+    /// Serialize the value to bytes (LZ4 compressed MessagePack).
+    pub fn value_to_bytes(value: &NodeSummaryCfValue) -> Result<Vec<u8>, anyhow::Error> {
+        let msgpack_bytes = rmp_serde::to_vec(value)?;
+        let compressed = lz4::block::compress(&msgpack_bytes, None, true)?;
+        Ok(compressed)
+    }
+
+    /// Deserialize the value from bytes.
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<NodeSummaryCfValue, anyhow::Error> {
+        let decompressed = lz4::block::decompress(bytes, None)?;
+        let value: NodeSummaryCfValue = rmp_serde::from_slice(&decompressed)?;
+        Ok(value)
+    }
+
+    /// Configure RocksDB options for this column family.
+    ///
+    /// NodeSummaries is a COLD CF - optimize for space, not speed.
+    pub fn column_family_options() -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
 
-        // Key layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes
-        // Use 16-byte prefix to scan all edges to a destination node
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
-
-        // Enable prefix bloom filter for O(1) prefix existence check
-        opts.set_memtable_prefix_bloom_ratio(0.2);
+        // Enable bloom filter for point lookups by hash
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_bloom_filter(10.0, false);
+        opts.set_block_based_table_factory(&block_opts);
 
         opts
     }
-}
 
-impl ReverseEdges {
     /// Configure RocksDB options with shared block cache.
     pub fn column_family_options_with_cache(
         cache: &rocksdb::Cache,
         config: &BlockCacheConfig,
     ) -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
         let mut opts = rocksdb::Options::default();
         let mut block_opts = rocksdb::BlockBasedOptions::default();
 
-        // Shared block cache with graph block size
+        // Shared block cache with larger block size for cold data
         block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.graph_block_size);
+        block_opts.set_block_size(config.fragment_block_size); // Use fragment size for cold CFs
 
         if config.cache_index_and_filter_blocks {
             block_opts.set_cache_index_and_filter_blocks(true);
@@ -673,13 +810,102 @@ impl ReverseEdges {
             block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
         }
 
+        // Enable bloom filter for point lookups
+        block_opts.set_bloom_filter(10.0, false);
+
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+/// EdgeSummaries column family (COLD - infrequently accessed).
+///
+/// Stores edge summary content keyed by content hash (SummaryHash).
+/// Content-addressable: identical summaries stored once, referenced by hash.
+///
+/// Key: SummaryHash (8 bytes, content-addressable)
+/// Value: EdgeSummary (DataUrl, rmp_serde + LZ4 compressed)
+pub(crate) struct EdgeSummaries;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct EdgeSummaryCfKey(pub(crate) SummaryHash);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct EdgeSummaryCfValue(pub(crate) EdgeSummary);
+
+impl EdgeSummaries {
+    pub const CF_NAME: &'static str = "edge_summaries";
+
+    /// Serialize the key to bytes (8 bytes, fixed size).
+    pub fn key_to_bytes(key: &EdgeSummaryCfKey) -> Vec<u8> {
+        key.0.as_bytes().to_vec()
+    }
+
+    /// Deserialize the key from bytes.
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<EdgeSummaryCfKey, anyhow::Error> {
+        if bytes.len() != SummaryHash::SIZE {
+            anyhow::bail!(
+                "Invalid EdgeSummaryCfKey length: expected {}, got {}",
+                SummaryHash::SIZE,
+                bytes.len()
+            );
+        }
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(bytes);
+        Ok(EdgeSummaryCfKey(SummaryHash::from_bytes(hash_bytes)))
+    }
+
+    /// Serialize the value to bytes (LZ4 compressed MessagePack).
+    pub fn value_to_bytes(value: &EdgeSummaryCfValue) -> Result<Vec<u8>, anyhow::Error> {
+        let msgpack_bytes = rmp_serde::to_vec(value)?;
+        let compressed = lz4::block::compress(&msgpack_bytes, None, true)?;
+        Ok(compressed)
+    }
+
+    /// Deserialize the value from bytes.
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<EdgeSummaryCfValue, anyhow::Error> {
+        let decompressed = lz4::block::decompress(bytes, None)?;
+        let value: EdgeSummaryCfValue = rmp_serde::from_slice(&decompressed)?;
+        Ok(value)
+    }
+
+    /// Configure RocksDB options for this column family.
+    ///
+    /// EdgeSummaries is a COLD CF - optimize for space, not speed.
+    pub fn column_family_options() -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+
+        // Enable bloom filter for point lookups by hash
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_bloom_filter(10.0, false);
         opts.set_block_based_table_factory(&block_opts);
 
-        // Key layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes
-        // Use 16-byte prefix to scan all edges to a destination node
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
-        opts.set_memtable_prefix_bloom_ratio(0.2);
+        opts
+    }
 
+    /// Configure RocksDB options with shared block cache.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with larger block size for cold data
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.fragment_block_size); // Use fragment size for cold CFs
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        // Enable bloom filter for point lookups
+        block_opts.set_bloom_filter(10.0, false);
+
+        opts.set_block_based_table_factory(&block_opts);
         opts
     }
 }
@@ -690,7 +916,9 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     Names::CF_NAME,
     Nodes::CF_NAME,
     NodeFragments::CF_NAME,
+    NodeSummaries::CF_NAME,  // Phase 2: Cold CF for node summaries
     EdgeFragments::CF_NAME,
+    EdgeSummaries::CF_NAME,  // Phase 2: Cold CF for edge summaries
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
 ];

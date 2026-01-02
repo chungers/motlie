@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
+use rkyv::validation::validators::DefaultValidator;
+use rkyv::{Archive, CheckBytes, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use rocksdb::{Options, TransactionDB, TransactionDBOptions, DB};
@@ -27,6 +29,7 @@ pub mod name_hash;
 pub mod query;
 pub mod reader;
 pub mod schema;
+pub mod summary_hash;
 pub mod transaction;
 pub mod writer;
 
@@ -67,6 +70,7 @@ pub use reader::{
     ReaderConfig,
 };
 pub use name_hash::{NameCache, NameHash};
+pub use summary_hash::SummaryHash;
 pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
 pub use writer::{
     // Mutation consumer functions
@@ -142,6 +146,75 @@ pub(crate) trait ColumnFamilyRecord {
     /// Each implementer specifies their own prefix extractor and bloom filter settings.
     fn column_family_options() -> rocksdb::Options {
         rocksdb::Options::default()
+    }
+}
+
+// ============================================================================
+// Hot Column Family Record Trait (rkyv zero-copy serialization)
+// ============================================================================
+
+/// Trait for hot column families using rkyv (zero-copy serialization).
+///
+/// Hot CFs store small, frequently-accessed data (topology, weights, temporal ranges).
+/// Values are serialized with rkyv for zero-copy access during graph traversal.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Zero-copy access (hot path)
+/// let archived = Nodes::value_archived(&value_bytes)?;
+/// if archived.temporal_range.as_ref().map_or(true, |tr| tr.is_valid_at(now)) {
+///     // Use archived data directly without allocation
+/// }
+///
+/// // Full deserialization when ownership is needed (cold path)
+/// let value: NodeCfValue = Nodes::value_from_bytes(&value_bytes)?;
+/// ```
+pub(crate) trait HotColumnFamilyRecord {
+    /// Column family name (constant for each implementor)
+    const CF_NAME: &'static str;
+
+    /// The key type for this column family
+    type Key;
+
+    /// The value type for this column family (must implement rkyv traits)
+    type Value: Archive + RkyvSerialize<rkyv::ser::serializers::AllocSerializer<256>>;
+
+    /// Serialize key to bytes.
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8>;
+
+    /// Deserialize key from bytes.
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key>;
+
+    /// Zero-copy value access - returns archived reference without allocation.
+    ///
+    /// This is the hot path for graph traversal. The returned reference
+    /// is valid as long as the input bytes are valid.
+    fn value_archived(bytes: &[u8]) -> Result<&<Self::Value as Archive>::Archived>
+    where
+        <Self::Value as Archive>::Archived: for<'a> CheckBytes<DefaultValidator<'a>>,
+    {
+        rkyv::check_archived_root::<Self::Value>(bytes)
+            .map_err(|e| anyhow::anyhow!("rkyv validation failed: {}", e))
+    }
+
+    /// Full deserialization when mutation/ownership is needed.
+    ///
+    /// This allocates and copies data. Use sparingly - prefer value_archived()
+    /// for read-only access.
+    fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value>
+    where
+        <Self::Value as Archive>::Archived: for<'a> CheckBytes<DefaultValidator<'a>>,
+        <Self::Value as Archive>::Archived: RkyvDeserialize<Self::Value, rkyv::Infallible>,
+    {
+        let archived = Self::value_archived(bytes)?;
+        Ok(archived.deserialize(&mut rkyv::Infallible).expect("Infallible"))
+    }
+
+    /// Serialize value to bytes using rkyv.
+    fn value_to_bytes(value: &Self::Value) -> Result<rkyv::AlignedVec> {
+        rkyv::to_bytes::<_, 256>(value)
+            .map_err(|e| anyhow::anyhow!("rkyv serialization failed: {}", e))
     }
 }
 
@@ -580,9 +653,19 @@ impl Storage {
                 schema::NodeFragments::CF_NAME,
                 schema::NodeFragments::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
+            // Phase 2: Cold CF for node summaries
+            ColumnFamilyDescriptor::new(
+                schema::NodeSummaries::CF_NAME,
+                schema::NodeSummaries::column_family_options_with_cache(cache_ref, &self.block_cache_config),
+            ),
             ColumnFamilyDescriptor::new(
                 schema::EdgeFragments::CF_NAME,
                 schema::EdgeFragments::column_family_options_with_cache(cache_ref, &self.block_cache_config),
+            ),
+            // Phase 2: Cold CF for edge summaries
+            ColumnFamilyDescriptor::new(
+                schema::EdgeSummaries::CF_NAME,
+                schema::EdgeSummaries::column_family_options_with_cache(cache_ref, &self.block_cache_config),
             ),
             ColumnFamilyDescriptor::new(
                 schema::ForwardEdges::CF_NAME,

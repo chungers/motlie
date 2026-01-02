@@ -18,10 +18,12 @@ use tokio::sync::oneshot;
 use super::name_hash::NameHash;
 use super::reader::{Processor, QueryExecutor, QueryProcessor};
 use super::scan::{self, Visitable};
+use super::HotColumnFamilyRecord;
+use super::summary_hash::SummaryHash;
 use crate::reader::Runnable;
 use super::schema::{
-    self, DstId, EdgeName, EdgeSummary, FragmentContent, Names, NamesCfKey,
-    NodeName, NodeSummary, SrcId,
+    self, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey, FragmentContent,
+    Names, NamesCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey, SrcId,
 };
 use super::ColumnFamilyRecord;
 use super::Storage;
@@ -107,6 +109,126 @@ fn resolve_name_from_txn(
     cache.insert(name_hash, name.clone());
 
     Ok(name)
+}
+
+/// Resolve a node summary from the NodeSummaries cold CF.
+///
+/// If the summary_hash is None or the summary is not found, returns an empty DataUrl.
+fn resolve_node_summary(
+    storage: &Storage,
+    summary_hash: Option<SummaryHash>,
+) -> Result<NodeSummary> {
+    let Some(hash) = summary_hash else {
+        return Ok(NodeSummary::from_text(""));
+    };
+
+    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
+
+    let value_bytes = if let Ok(db) = storage.db() {
+        let summaries_cf = db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        db.get_cf(summaries_cf, &key_bytes)?
+    } else {
+        let txn_db = storage.transaction_db()?;
+        let summaries_cf = txn_db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        txn_db.get_cf(summaries_cf, &key_bytes)?
+    };
+
+    match value_bytes {
+        Some(bytes) => {
+            let value = NodeSummaries::value_from_bytes(&bytes)?;
+            Ok(value.0)
+        }
+        None => Ok(NodeSummary::from_text("")),
+    }
+}
+
+/// Resolve an edge summary from the EdgeSummaries cold CF.
+///
+/// If the summary_hash is None or the summary is not found, returns an empty DataUrl.
+fn resolve_edge_summary(
+    storage: &Storage,
+    summary_hash: Option<SummaryHash>,
+) -> Result<EdgeSummary> {
+    let Some(hash) = summary_hash else {
+        return Ok(EdgeSummary::from_text(""));
+    };
+
+    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
+
+    let value_bytes = if let Ok(db) = storage.db() {
+        let summaries_cf = db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        db.get_cf(summaries_cf, &key_bytes)?
+    } else {
+        let txn_db = storage.transaction_db()?;
+        let summaries_cf = txn_db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        txn_db.get_cf(summaries_cf, &key_bytes)?
+    };
+
+    match value_bytes {
+        Some(bytes) => {
+            let value = EdgeSummaries::value_from_bytes(&bytes)?;
+            Ok(value.0)
+        }
+        None => Ok(EdgeSummary::from_text("")),
+    }
+}
+
+/// Resolve an edge summary from a transaction context (for read-your-writes).
+fn resolve_edge_summary_from_txn(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    summary_hash: Option<SummaryHash>,
+) -> Result<EdgeSummary> {
+    let Some(hash) = summary_hash else {
+        return Ok(EdgeSummary::from_text(""));
+    };
+
+    let summaries_cf = txn_db
+        .cf_handle(EdgeSummaries::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+
+    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
+
+    match txn.get_cf(summaries_cf, &key_bytes)? {
+        Some(bytes) => {
+            let value = EdgeSummaries::value_from_bytes(&bytes)?;
+            Ok(value.0)
+        }
+        None => Ok(EdgeSummary::from_text("")),
+    }
+}
+
+/// Resolve a node summary from a transaction context (for read-your-writes).
+fn resolve_node_summary_from_txn(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    summary_hash: Option<SummaryHash>,
+) -> Result<NodeSummary> {
+    let Some(hash) = summary_hash else {
+        return Ok(NodeSummary::from_text(""));
+    };
+
+    let summaries_cf = txn_db
+        .cf_handle(NodeSummaries::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+
+    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
+
+    match txn.get_cf(summaries_cf, &key_bytes)? {
+        Some(bytes) => {
+            let value = NodeSummaries::value_from_bytes(&bytes)?;
+            Ok(value.0)
+        }
+        None => Ok(NodeSummary::from_text("")),
+    }
 }
 
 // ============================================================================
@@ -1283,7 +1405,10 @@ impl QueryExecutor for NodeByIdDispatch {
         // Resolve NameHash to String (uses cache)
         let node_name = resolve_name(storage, value.1)?;
 
-        Ok((node_name, value.2))
+        // Resolve summary from cold CF
+        let summary = resolve_node_summary(storage, value.2)?;
+
+        Ok((node_name, summary))
     }
 
     fn timeout(&self) -> Duration {
@@ -1334,8 +1459,8 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
         };
 
         // Parse results, skipping missing entries and temporally invalid nodes
-        // Collect valid entries with their NameHash first, then resolve names
-        let mut valid_entries: Vec<(Id, NameHash, NodeSummary)> = Vec::with_capacity(results.len());
+        // Collect valid entries with their NameHash and SummaryHash first, then resolve
+        let mut valid_entries: Vec<(Id, NameHash, Option<SummaryHash>)> = Vec::with_capacity(results.len());
         for (id, result) in params.ids.iter().zip(results) {
             match result {
                 Ok(Some(value_bytes)) => {
@@ -1367,10 +1492,11 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
             }
         }
 
-        // Resolve NameHashes to Strings (uses cache)
+        // Resolve NameHashes to Strings and SummaryHashes to Summaries
         let mut output = Vec::with_capacity(valid_entries.len());
-        for (id, name_hash, summary) in valid_entries {
+        for (id, name_hash, summary_hash) in valid_entries {
             let node_name = resolve_name(storage, name_hash)?;
+            let summary = resolve_node_summary(storage, summary_hash)?;
             output.push((id, node_name, summary));
         }
 
@@ -1630,9 +1756,10 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
             ));
         }
 
-        // ForwardEdgeCfValue is (temporal_range, weight, summary)
-        // Return (summary, weight)
-        Ok((value.2.clone(), value.1))
+        // ForwardEdgeCfValue is (temporal_range, weight, summary_hash)
+        // Return (summary, weight) - resolve summary from cold CF
+        let summary = resolve_edge_summary(storage, value.2)?;
+        Ok((summary, value.1))
     }
 
     fn timeout(&self) -> Duration {
@@ -2037,7 +2164,9 @@ impl TransactionQueryExecutor for NodeById {
 
         // Resolve NameHash to String (uses cache)
         let node_name = resolve_name_from_txn(txn, txn_db, value.1, cache)?;
-        Ok((node_name, value.2))
+        // Resolve SummaryHash to NodeSummary (from cold CF)
+        let summary = resolve_node_summary_from_txn(txn, txn_db, value.2)?;
+        Ok((node_name, summary))
     }
 }
 
@@ -2065,8 +2194,8 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
             anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
         })?;
 
-        // Collect entries with NameHash first
-        let mut entries_with_hash: Vec<(Id, NameHash, NodeSummary)> = Vec::with_capacity(self.ids.len());
+        // Collect entries with NameHash and SummaryHash first
+        let mut entries_with_hash: Vec<(Id, NameHash, Option<SummaryHash>)> = Vec::with_capacity(self.ids.len());
 
         for id in &self.ids {
             let key = schema::NodeCfKey(*id);
@@ -2087,10 +2216,11 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
             }
         }
 
-        // Resolve NameHashes to Strings (uses cache)
+        // Resolve NameHashes to Strings and SummaryHashes to Summaries
         let mut output = Vec::with_capacity(entries_with_hash.len());
-        for (id, name_hash, summary) in entries_with_hash {
+        for (id, name_hash, summary_hash) in entries_with_hash {
             let node_name = resolve_name_from_txn(txn, txn_db, name_hash, cache)?;
+            let summary = resolve_node_summary_from_txn(txn, txn_db, summary_hash)?;
             output.push((id, node_name, summary));
         }
 
@@ -2318,7 +2448,9 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
             ));
         }
 
-        Ok((value.2, value.1))
+        // Resolve SummaryHash to EdgeSummary (from cold CF)
+        let summary = resolve_edge_summary_from_txn(txn, txn_db, value.2)?;
+        Ok((summary, value.1))
     }
 }
 
@@ -2536,7 +2668,9 @@ impl TransactionQueryExecutor for AllNodes {
             if schema::is_valid_at_time(&value.0, ref_time) {
                 // Resolve NameHash to String (uses cache)
                 let node_name = resolve_name_from_txn(txn, txn_db, value.1, cache)?;
-                results.push((key.0, node_name, value.2));
+                // Resolve SummaryHash to NodeSummary (from cold CF)
+                let summary = resolve_node_summary_from_txn(txn, txn_db, value.2)?;
+                results.push((key.0, node_name, summary));
             }
         }
 
