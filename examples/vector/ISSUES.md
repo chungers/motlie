@@ -17,7 +17,7 @@ and evaluates solutions for critical bottlenecks.
 | **Batch Reverse Traversal** | #18 | Open (Low-Medium) | Medium |
 | **Graph Stats** | #20 | Open (Low) | Low |
 | **Read-After-Write** | #26 | ✅ **IMPLEMENTED** | Flush API + Transaction API |
-| **Batch Fragment Retrieval** | **NONE** | **MISSING** | High - Vector loading |
+| **Batch Fragment Retrieval** | **#35** | Open (High) | High - Vector loading |
 
 ---
 
@@ -483,7 +483,7 @@ See [PERF.md](./PERF.md#2025-12-24-re-benchmark-transaction-api-performance) for
 
 ---
 
-## Part 4: Missing Issue - Batch Fragment Retrieval
+## Part 4: Issue #35 - Batch Fragment Retrieval
 
 ### The Problem
 
@@ -542,7 +542,7 @@ let fragments = NodeFragmentsByIdsMulti::new(
 3. **Comment on #17** (OutgoingEdgesMulti): Add vector search as use case
    - Still needed for batch edge traversal
 
-4. **Create new issue**: NodeFragmentsByIdsMulti (Batch Fragment Retrieval)
+4. **Issue #35 Created**: NodeFragmentsByIdsMulti (Batch Fragment Retrieval)
    - Priority: High
    - Enables 2.8x search speedup
 
@@ -565,10 +565,10 @@ let fragments = NodeFragmentsByIdsMulti::new(
 | Degree Queries (#19) | Medium | 15% | - | P0 | Pending |
 | Batch Edges (#17) | Medium | - | 2-4x | P0 | Pending |
 | Edge Filtering (#21) | Low | - | 40-85% per query | High | Pending |
-| Batch Fragments | Medium | - | 2.8x | High | Not Started |
+| Batch Fragments (#35) | Medium | - | 2.8x | High | Issue Created |
 
 ---
 
 *Originally Generated: 2025-12-21*
-*Last Updated: 2025-12-24*
+*Last Updated: 2026-01-02*
 *Based on: HNSW/Vamana benchmarks, RocksDB Transaction documentation, motlie_db architecture analysis*
