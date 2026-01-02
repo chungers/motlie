@@ -91,6 +91,8 @@ pub struct BuildInfo {
     pub target_os: &'static str,
     /// Active SIMD implementation (e.g., "NEON", "AVX2+FMA", "Scalar")
     pub simd_level: &'static str,
+    /// Enabled Cargo features (comma-separated, or "default" if none)
+    pub features: &'static str,
     /// Build profile (e.g., "debug", "release")
     pub profile: &'static str,
 }
@@ -109,6 +111,7 @@ impl BuildInfo {
             target_arch: std::env::consts::ARCH,
             target_os: std::env::consts::OS,
             simd_level: distance::simd_level(),
+            features: env!("MOTLIE_FEATURES"),
             profile: if cfg!(debug_assertions) { "debug" } else { "release" },
         }
     }
@@ -137,6 +140,7 @@ impl BuildInfo {
              Built:      {}\n\
              Target:     {}-{}\n\
              SIMD:       {}\n\
+             Features:   {}\n\
              Profile:    {}",
             self.package_name,
             self.version,
@@ -145,6 +149,7 @@ impl BuildInfo {
             self.target_arch,
             self.target_os,
             self.simd_level,
+            self.features,
             self.profile,
         )
     }
@@ -181,6 +186,7 @@ pub fn log_build_info() {
         target_arch = info.target_arch,
         target_os = info.target_os,
         simd_level = info.simd_level,
+        features = info.features,
         profile = info.profile,
         "Build info"
     );
@@ -203,6 +209,65 @@ pub fn log_build_info() {
 /// ```
 pub fn print_build_info() {
     eprintln!("{}", BuildInfo::current().detailed());
+}
+
+// ============================================================================
+// Subsystem Configuration Reporting
+// ============================================================================
+
+/// Trait for subsystems to provide their configuration info for the `info` command.
+///
+/// Subsystems like graph database, fulltext search, or vector index implement
+/// this trait to expose their runtime configuration in a consistent format.
+///
+/// # Example
+///
+/// ```ignore
+/// use motlie_core::telemetry::SubsystemInfo;
+///
+/// pub struct MySubsystemInfo {
+///     pub cache_size: usize,
+/// }
+///
+/// impl SubsystemInfo for MySubsystemInfo {
+///     fn name(&self) -> &'static str {
+///         "My Subsystem"
+///     }
+///
+///     fn info_lines(&self) -> Vec<(&'static str, String)> {
+///         vec![
+///             ("Cache Size", format!("{} MB", self.cache_size / (1024 * 1024))),
+///         ]
+///     }
+/// }
+/// ```
+pub trait SubsystemInfo {
+    /// Short name of the subsystem (e.g., "Graph DB", "Fulltext", "Vector Index")
+    fn name(&self) -> &'static str;
+
+    /// Key-value pairs describing the subsystem's configuration.
+    /// Each tuple is (label, value) for display.
+    fn info_lines(&self) -> Vec<(&'static str, String)>;
+}
+
+/// Format subsystem info for display.
+///
+/// Outputs the subsystem name as a section header followed by
+/// indented key-value pairs.
+///
+/// # Example Output
+///
+/// ```text
+/// [Graph Database (RocksDB)]
+///   Block Cache Size:    256 MB
+///   Graph Block Size:    4 KB
+/// ```
+pub fn format_subsystem_info(subsystem: &dyn SubsystemInfo) -> String {
+    let mut output = format!("\n[{}]", subsystem.name());
+    for (label, value) in subsystem.info_lines() {
+        output.push_str(&format!("\n  {:<20} {}", format!("{}:", label), value));
+    }
+    output
 }
 
 // ============================================================================

@@ -141,12 +141,13 @@ The telemetry module provides infrastructure for binaries to report build metada
                 ▼                    ▼                    ▼
 ┌───────────────────────┐  ┌─────────────────┐  ┌─────────────────────┐
 │  motlie_db::graph     │  │  motlie_db::     │  │  (future)           │
-│  GraphDbInfo          │  │  fulltext        │  │  VectorIndexInfo    │
-│  impl SubsystemInfo   │  │  FulltextInfo    │  │  impl SubsystemInfo │
+│  SystemInfo           │  │  fulltext        │  │  VectorIndexInfo    │
+│  impl SubsystemInfo   │  │  SystemInfo      │  │  impl SubsystemInfo │
 │                       │  │  impl Subsystem  │  │                     │
 │  - BlockCacheConfig   │  │  Info            │  │  - HNSW params      │
 │  - NameCacheConfig    │  │                  │  │  - Vector dims      │
-│  - Column families    │  │  - Index path    │  │                     │
+│  - Column families    │  │  - Writer heap   │  │                     │
+│                       │  │  - Threads       │  │                     │
 └───────────────────────┘  └─────────────────┘  └─────────────────────┘
 ```
 
@@ -213,13 +214,13 @@ Example implementation for the graph database subsystem:
 use motlie_core::telemetry::SubsystemInfo;
 
 /// Configuration info for the graph database subsystem.
-pub struct GraphDbInfo {
+pub struct SystemInfo {
     pub block_cache_config: BlockCacheConfig,
     pub name_cache_config: NameCacheConfig,
     pub column_families: Vec<&'static str>,
 }
 
-impl SubsystemInfo for GraphDbInfo {
+impl SubsystemInfo for SystemInfo {
     fn name(&self) -> &'static str {
         "Graph Database (RocksDB)"
     }
@@ -243,19 +244,18 @@ impl SubsystemInfo for GraphDbInfo {
 Binaries compose core build info with subsystem info:
 
 ```rust
-use motlie_core::telemetry::{BuildInfo, SubsystemInfo, format_subsystem_info};
+use motlie_core::telemetry::{BuildInfo, format_subsystem_info};
 
 fn handle_info_command() {
     // Core build info
     println!("{}", BuildInfo::current().detailed());
 
     // Subsystem info (only for subsystems compiled into this binary)
-    let graph_info = motlie_db::GraphDbInfo::default();
+    let graph_info = motlie_db::graph::SystemInfo::default();
     println!("{}", format_subsystem_info(&graph_info));
 
-    // Future: add more subsystems as they're implemented
-    // let fulltext_info = motlie_db::FulltextInfo::default();
-    // println!("{}", format_subsystem_info(&fulltext_info));
+    let fulltext_info = motlie_db::fulltext::SystemInfo::default();
+    println!("{}", format_subsystem_info(&fulltext_info));
 }
 ```
 
@@ -279,6 +279,14 @@ Profile:    release
   Pin L0 Blocks:       true
   Name Cache Prewarm:  1000
   Column Families:     names, nodes, forward_edges, reverse_edges, node_fragments, edge_fragments
+
+[Fulltext Search (Tantivy)]
+  Writer Heap Size:    47 MB
+  Indexing Threads:    auto (num CPUs)
+  Stored Fields:       true
+  BM25 Scoring:        true
+  Faceted Search:      true
+  Fuzzy Search:        true
 ```
 
 ### Adding a New Subsystem
