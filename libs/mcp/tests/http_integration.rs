@@ -18,7 +18,7 @@ fn create_test_server(db_path: &std::path::Path) -> MotlieMcpServer {
         let storage = Storage::readwrite(&db_path);
         let handles = storage.ready(StorageConfig::default())?;
 
-        Ok((handles.writer_clone(), handles.reader_clone()))
+        Ok(handles)
     })));
 
     MotlieMcpServer::new(lazy_db, Duration::from_secs(5))
