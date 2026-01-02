@@ -12,6 +12,7 @@ use tokio::sync::oneshot;
 use super::name_hash::NameHash;
 use super::schema;
 use super::writer::{MutationExecutor, Writer};
+use super::HotColumnFamilyRecord;
 use crate::writer::Runnable;
 use crate::{Id, TimestampMilli};
 
@@ -302,7 +303,7 @@ fn update_node_valid_range(
     node_id: Id,
     new_range: schema::TemporalRange,
 ) -> Result<()> {
-    use super::{ColumnFamilyRecord, ValidRangePatchable};
+    use super::ValidRangePatchable;
     use super::schema::{NodeCfKey, Nodes};
 
     // Patch Nodes CF
@@ -337,7 +338,7 @@ fn update_edge_valid_range(
     name_hash: NameHash,
     new_range: schema::TemporalRange,
 ) -> Result<()> {
-    use super::{ColumnFamilyRecord, ValidRangePatchable};
+    use super::ValidRangePatchable;
     use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
 
     // Patch ForwardEdges CF
@@ -392,7 +393,7 @@ fn find_connected_edges(
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
 ) -> Result<Vec<(Id, Id, NameHash)>> {
-    use super::ColumnFamilyRecord;
+
     use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
 
     let mut edge_topologies = Vec::new();
@@ -443,13 +444,27 @@ impl MutationExecutor for AddNode {
     ) -> Result<()> {
         tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation");
 
-        use super::ColumnFamilyRecord;
-        use super::schema::Nodes;
+    
+        use super::schema::{Nodes, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
+        use super::summary_hash::SummaryHash;
 
         // Write name to Names CF (idempotent)
         write_name_to_cf(txn, txn_db, &self.name)?;
 
-        // Write to Nodes CF
+        // Write summary to NodeSummaries CF (cold) if non-empty
+        if !self.summary.is_empty() {
+            if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
+                let summaries_cf = txn_db
+                    .cf_handle(NodeSummaries::CF_NAME)
+                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeSummaries::CF_NAME))?;
+                let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(summary_hash));
+                let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(self.summary.clone()))?;
+                // Content-addressable: same content = same hash = idempotent write
+                txn.put_cf(summaries_cf, summary_key, summary_value)?;
+            }
+        }
+
+        // Write to Nodes CF (hot)
         let nodes_cf = txn_db
             .cf_handle(Nodes::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
@@ -467,13 +482,26 @@ impl MutationExecutor for AddNode {
     ) -> Result<()> {
         tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation (cached)");
 
-        use super::ColumnFamilyRecord;
-        use super::schema::Nodes;
+    
+        use super::schema::{Nodes, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
+        use super::summary_hash::SummaryHash;
 
         // Write name to Names CF with cache optimization
         write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
 
-        // Write to Nodes CF
+        // Write summary to NodeSummaries CF (cold) if non-empty
+        if !self.summary.is_empty() {
+            if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
+                let summaries_cf = txn_db
+                    .cf_handle(NodeSummaries::CF_NAME)
+                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeSummaries::CF_NAME))?;
+                let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(summary_hash));
+                let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(self.summary.clone()))?;
+                txn.put_cf(summaries_cf, summary_key, summary_value)?;
+            }
+        }
+
+        // Write to Nodes CF (hot)
         let nodes_cf = txn_db
             .cf_handle(Nodes::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
@@ -497,20 +525,34 @@ impl MutationExecutor for AddEdge {
             "Executing AddEdge mutation"
         );
 
-        use super::ColumnFamilyRecord;
-        use super::schema::{ForwardEdges, ReverseEdges};
+    
+        use super::schema::{ForwardEdges, ReverseEdges, EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
+        use super::summary_hash::SummaryHash;
 
         // Write name to Names CF (idempotent)
         write_name_to_cf(txn, txn_db, &self.name)?;
 
-        // Write to ForwardEdges CF
+        // Write summary to EdgeSummaries CF (cold) if non-empty
+        if !self.summary.is_empty() {
+            if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
+                let summaries_cf = txn_db
+                    .cf_handle(EdgeSummaries::CF_NAME)
+                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeSummaries::CF_NAME))?;
+                let summary_key = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(summary_hash));
+                let summary_value = EdgeSummaries::value_to_bytes(&EdgeSummaryCfValue(self.summary.clone()))?;
+                // Content-addressable: same content = same hash = idempotent write
+                txn.put_cf(summaries_cf, summary_key, summary_value)?;
+            }
+        }
+
+        // Write to ForwardEdges CF (hot)
         let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
             anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
         })?;
         let (forward_key, forward_value) = ForwardEdges::create_bytes(self)?;
         txn.put_cf(forward_cf, forward_key, forward_value)?;
 
-        // Write to ReverseEdges CF
+        // Write to ReverseEdges CF (hot)
         let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).ok_or_else(|| {
             anyhow::anyhow!("Column family '{}' not found", ReverseEdges::CF_NAME)
         })?;
@@ -533,20 +575,33 @@ impl MutationExecutor for AddEdge {
             "Executing AddEdge mutation (cached)"
         );
 
-        use super::ColumnFamilyRecord;
-        use super::schema::{ForwardEdges, ReverseEdges};
+    
+        use super::schema::{ForwardEdges, ReverseEdges, EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
+        use super::summary_hash::SummaryHash;
 
         // Write name to Names CF with cache optimization
         write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
 
-        // Write to ForwardEdges CF
+        // Write summary to EdgeSummaries CF (cold) if non-empty
+        if !self.summary.is_empty() {
+            if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
+                let summaries_cf = txn_db
+                    .cf_handle(EdgeSummaries::CF_NAME)
+                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeSummaries::CF_NAME))?;
+                let summary_key = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(summary_hash));
+                let summary_value = EdgeSummaries::value_to_bytes(&EdgeSummaryCfValue(self.summary.clone()))?;
+                txn.put_cf(summaries_cf, summary_key, summary_value)?;
+            }
+        }
+
+        // Write to ForwardEdges CF (hot)
         let forward_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
             anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
         })?;
         let (forward_key, forward_value) = ForwardEdges::create_bytes(self)?;
         txn.put_cf(forward_cf, forward_key, forward_value)?;
 
-        // Write to ReverseEdges CF
+        // Write to ReverseEdges CF (hot)
         let reverse_cf = txn_db.cf_handle(ReverseEdges::CF_NAME).ok_or_else(|| {
             anyhow::anyhow!("Column family '{}' not found", ReverseEdges::CF_NAME)
         })?;
@@ -717,7 +772,7 @@ impl MutationExecutor for UpdateEdgeWeight {
             "Executing UpdateEdgeWeight mutation"
         );
 
-        use super::ColumnFamilyRecord;
+    
         use super::schema::{ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges};
 
         let cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {

@@ -1,5 +1,6 @@
 use ferroid::base32::Base32UlidExt;
 use ferroid::id::ULID;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 // Graph module - RocksDB-based graph storage
@@ -44,7 +45,12 @@ impl std::error::Error for IdError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Id([u8; 16]);
 
+/// Timestamp in milliseconds since Unix epoch.
+/// Has rkyv derives for use in hot CF values.
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord))]
 pub struct TimestampMilli(pub u64);
 
 /// Type alias for the start timestamp of a valid temporal range
@@ -73,7 +79,12 @@ pub type UntilTimestamp = TimestampMilli;
 /// let ts = TimestampMilli(1500);
 /// assert!(range.unwrap().is_valid_at(ts));
 /// ```
+/// Temporal validity range.
+/// Has rkyv derives for use in hot CF values.
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug, Clone, Copy, PartialEq, Eq))]
 pub struct TemporalRange(pub Option<StartTimestamp>, pub Option<UntilTimestamp>);
 
 impl TemporalRange {
@@ -292,6 +303,14 @@ impl DataUrl {
         let parsed = data_url::DataUrl::process(&self.0)
             .map_err(|e| DataUrlError(format!("Parse error: {}", e)))?;
         Ok(parsed.mime_type().to_string())
+    }
+
+    /// Check if this DataUrl contains empty content.
+    ///
+    /// Returns true if the decoded content is empty or if decoding fails.
+    /// This is useful for determining whether to store a summary hash.
+    pub fn is_empty(&self) -> bool {
+        self.decode_bytes().map_or(true, |bytes| bytes.is_empty())
     }
 }
 

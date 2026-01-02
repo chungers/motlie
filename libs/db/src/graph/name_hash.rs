@@ -20,6 +20,7 @@
 //! - `Names` CF: Persistent storage of hash→name mappings in RocksDB
 
 use dashmap::DashMap;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -43,7 +44,12 @@ use xxhash_rust::xxh64::xxh64;
 /// let hash2 = NameHash::from_name("FOLLOWS");
 /// assert_eq!(hash, hash2);
 /// ```
+/// 8-byte name hash (xxHash64).
+/// Has rkyv derives for use in hot CF values.
+#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy, PartialEq, Eq, Hash, Debug))]
 pub struct NameHash([u8; 8]);
 
 impl NameHash {
