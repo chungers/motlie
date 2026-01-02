@@ -2028,6 +2028,7 @@ dependencies = [
  "ferroid",
  "flume",
  "lz4",
+ "motlie-core",
  "rmp-serde",
  "rocksdb",
  "serde",

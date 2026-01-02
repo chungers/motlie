@@ -14,6 +14,7 @@
 //! Also sets environment variables for build info:
 //! - `MOTLIE_GIT_HASH` - Short git commit hash
 //! - `MOTLIE_BUILD_TIMESTAMP` - Build timestamp (RFC 3339)
+//! - `MOTLIE_FEATURES` - Comma-separated list of enabled Cargo features
 //!
 //! ## Usage
 //!
@@ -65,9 +66,43 @@ fn main() {
     // Get build timestamp
     let build_timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
+    // Collect enabled features
+    let mut features = Vec::new();
+    if env::var("CARGO_FEATURE_DTRACE_OTEL").is_ok() {
+        features.push("dtrace-otel");
+    }
+    if env::var("CARGO_FEATURE_SIMD_RUNTIME").is_ok() {
+        features.push("simd-runtime");
+    }
+    if env::var("CARGO_FEATURE_SIMD_NATIVE").is_ok() {
+        features.push("simd-native");
+    }
+    if env::var("CARGO_FEATURE_SIMD_AVX2").is_ok() {
+        features.push("simd-avx2");
+    }
+    if env::var("CARGO_FEATURE_SIMD_AVX512").is_ok() {
+        features.push("simd-avx512");
+    }
+    if env::var("CARGO_FEATURE_SIMD_NEON").is_ok() {
+        features.push("simd-neon");
+    }
+    if env::var("CARGO_FEATURE_SIMD_NONE").is_ok() {
+        features.push("simd-none");
+    }
+    if env::var("CARGO_FEATURE_SIMD_SIMSIMD").is_ok() {
+        features.push("simd-simsimd");
+    }
+
+    let features_str = if features.is_empty() {
+        "default".to_string()
+    } else {
+        features.join(",")
+    };
+
     // Set environment variables for the build
     println!("cargo:rustc-env=MOTLIE_GIT_HASH={}", git_hash_full);
     println!("cargo:rustc-env=MOTLIE_BUILD_TIMESTAMP={}", build_timestamp);
+    println!("cargo:rustc-env=MOTLIE_FEATURES={}", features_str);
 
     // Rerun if git HEAD changes
     println!("cargo:rerun-if-changed=.git/HEAD");

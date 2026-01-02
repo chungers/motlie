@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 // Users access via fully qualified paths: motlie_db::graph::*
 pub mod graph;
 
+
 // Fulltext module - Tantivy-based fulltext search
 // Users access via fully qualified paths: motlie_db::fulltext::*
 pub mod fulltext;
