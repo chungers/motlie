@@ -1,4 +1,6 @@
 use super::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
+use super::name_hash::NameHash;
+use super::BlockCacheConfig;
 use super::ColumnFamilyRecord;
 use super::ValidRangePatchable;
 use crate::DataUrl;
@@ -9,6 +11,108 @@ use serde::{Deserialize, Serialize};
 // Re-export TemporalRange and related types from crate root for convenience
 pub use crate::{is_valid_at_time, StartTimestamp, TemporalRange, UntilTimestamp};
 
+// ============================================================================
+// Names Column Family (for name interning)
+// ============================================================================
+
+/// Names column family for storing hash→name mappings.
+///
+/// This CF enables name interning: variable-length names are replaced with
+/// fixed 8-byte hashes in edge and node keys, while the full names are
+/// stored here for resolution.
+///
+/// Key: NameHash (8 bytes)
+/// Value: String (the full name)
+pub(crate) struct Names;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct NamesCfKey(pub(crate) NameHash);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct NamesCfValue(pub(crate) String);
+
+impl Names {
+    pub const CF_NAME: &'static str = "names";
+
+    /// Serialize the key to bytes (8 bytes, fixed size).
+    pub fn key_to_bytes(key: &NamesCfKey) -> Vec<u8> {
+        key.0.as_bytes().to_vec()
+    }
+
+    /// Deserialize the key from bytes.
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<NamesCfKey, anyhow::Error> {
+        if bytes.len() != NameHash::SIZE {
+            anyhow::bail!(
+                "Invalid NamesCfKey length: expected {}, got {}",
+                NameHash::SIZE,
+                bytes.len()
+            );
+        }
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(bytes);
+        Ok(NamesCfKey(NameHash::from_bytes(hash_bytes)))
+    }
+
+    /// Serialize the value to bytes (LZ4 compressed MessagePack).
+    pub fn value_to_bytes(value: &NamesCfValue) -> Result<Vec<u8>, anyhow::Error> {
+        let msgpack_bytes = rmp_serde::to_vec(value)?;
+        let compressed = lz4::block::compress(&msgpack_bytes, None, true)?;
+        Ok(compressed)
+    }
+
+    /// Deserialize the value from bytes.
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<NamesCfValue, anyhow::Error> {
+        let decompressed = lz4::block::decompress(bytes, None)?;
+        let value: NamesCfValue = rmp_serde::from_slice(&decompressed)?;
+        Ok(value)
+    }
+
+    /// Configure RocksDB options for this column family.
+    ///
+    /// Names CF is small and hot - optimize for point lookups.
+    pub fn column_family_options() -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+
+        // Enable bloom filter for fast point lookups
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_bloom_filter(10.0, false); // 10 bits per key
+        opts.set_block_based_table_factory(&block_opts);
+
+        opts
+    }
+
+    /// Configure RocksDB options with shared block cache.
+    ///
+    /// Names CF is small and hot - use high cache priority to keep it in memory.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        // Cache index and filter blocks for Names CF
+        // Note: The Rust bindings don't expose high_priority setting, but setting
+        // cache_index_and_filter_blocks=true keeps metadata in cache which helps.
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        // Enable bloom filter for fast point lookups
+        block_opts.set_bloom_filter(10.0, false); // 10 bits per key
+
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
 /// Nodes column family.
 pub(crate) struct Nodes;
 #[derive(Serialize, Deserialize)]
@@ -16,7 +120,7 @@ pub(crate) struct NodeCfKey(pub(crate) Id);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeCfValue(
     pub(crate) Option<TemporalRange>,
-    pub(crate) NodeName,
+    pub(crate) NameHash, // Node name stored as hash; full name in Names CF
     pub(crate) NodeSummary,
 );
 
@@ -76,7 +180,11 @@ impl ValidRangePatchable for ReverseEdges {
 /// Forward edges column family (enhanced with weight and summary).
 pub(crate) struct ForwardEdges;
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ForwardEdgeCfKey(pub(crate) SrcId, pub(crate) DstId, pub(crate) EdgeName);
+pub(crate) struct ForwardEdgeCfKey(
+    pub(crate) SrcId,
+    pub(crate) DstId,
+    pub(crate) NameHash, // Edge name stored as hash; full name in Names CF
+);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfValue(
     pub(crate) Option<TemporalRange>, // Field 0: Temporal validity
@@ -87,7 +195,11 @@ pub(crate) struct ForwardEdgeCfValue(
 /// Reverse edges column family (index only).
 pub(crate) struct ReverseEdges;
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ReverseEdgeCfKey(pub(crate) DstId, pub(crate) SrcId, pub(crate) EdgeName);
+pub(crate) struct ReverseEdgeCfKey(
+    pub(crate) DstId,
+    pub(crate) SrcId,
+    pub(crate) NameHash, // Edge name stored as hash; full name in Names CF
+);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<TemporalRange>);
 
@@ -97,7 +209,7 @@ pub(crate) struct EdgeFragments;
 pub(crate) struct EdgeFragmentCfKey(
     pub(crate) SrcId,
     pub(crate) DstId,
-    pub(crate) EdgeName,
+    pub(crate) NameHash, // Edge name stored as hash; full name in Names CF
     pub(crate) TimestampMilli,
 );
 #[derive(Serialize, Deserialize)]
@@ -117,9 +229,10 @@ impl ColumnFamilyRecord for Nodes {
 
     fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
+        let name_hash = NameHash::from_name(&args.name);
         let value = NodeCfValue(
             args.valid_range.clone(),
-            args.name.clone(),
+            name_hash,
             args.summary.clone(),
         );
         (key, value)
@@ -142,6 +255,31 @@ impl ColumnFamilyRecord for Nodes {
     fn column_family_options() -> rocksdb::Options {
         // Point lookups by Id only, no prefix scanning needed
         rocksdb::Options::default()
+    }
+}
+
+impl Nodes {
+    /// Configure RocksDB options with shared block cache.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with graph block size
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+        opts
     }
 }
 
@@ -210,6 +348,41 @@ impl ColumnFamilyRecord for NodeFragments {
     }
 }
 
+impl NodeFragments {
+    /// Configure RocksDB options with shared block cache.
+    ///
+    /// Fragment CFs use larger block size for variable-length content.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with fragment block size (larger for variable content)
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.fragment_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [Id (16 bytes)] + [TimestampMilli (8 bytes)]
+        // Use 16-byte prefix to scan all fragments for a given Id
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
 impl ColumnFamilyRecord for EdgeFragments {
     const CF_NAME: &'static str = "edge_fragments";
     type Key = EdgeFragmentCfKey;
@@ -217,10 +390,11 @@ impl ColumnFamilyRecord for EdgeFragments {
     type CreateOp = AddEdgeFragment;
 
     fn record_from(args: &AddEdgeFragment) -> (EdgeFragmentCfKey, EdgeFragmentCfValue) {
+        let name_hash = NameHash::from_name(&args.edge_name);
         let key = EdgeFragmentCfKey(
             args.src_id,
             args.dst_id,
-            args.edge_name.clone(),
+            name_hash,
             args.ts_millis,
         );
         let value = EdgeFragmentCfValue(args.valid_range.clone(), args.content.clone());
@@ -228,21 +402,20 @@ impl ColumnFamilyRecord for EdgeFragments {
     }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // EdgeFragmentCfKey(SrcId, DstId, EdgeName, TimestampMilli)
-        // Layout: [src_id (16)] + [dst_id (16)] + [edge_name UTF-8 variable] + [timestamp (8)]
-        let name_bytes = key.2.as_bytes();
-        let mut bytes = Vec::with_capacity(40 + name_bytes.len());
+        // EdgeFragmentCfKey(SrcId, DstId, NameHash, TimestampMilli)
+        // Layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [timestamp (8)] = 48 bytes FIXED
+        let mut bytes = Vec::with_capacity(48);
         bytes.extend_from_slice(&key.0.into_bytes());
         bytes.extend_from_slice(&key.1.into_bytes());
-        bytes.extend_from_slice(name_bytes);
+        bytes.extend_from_slice(key.2.as_bytes());
         bytes.extend_from_slice(&key.3 .0.to_be_bytes());
         bytes
     }
 
     fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
-        if bytes.len() < 40 {
+        if bytes.len() != 48 {
             anyhow::bail!(
-                "Invalid EdgeFragmentCfKey length: expected >= 40, got {}",
+                "Invalid EdgeFragmentCfKey length: expected 48, got {}",
                 bytes.len()
             );
         }
@@ -253,18 +426,17 @@ impl ColumnFamilyRecord for EdgeFragments {
         let mut dst_id_bytes = [0u8; 16];
         dst_id_bytes.copy_from_slice(&bytes[16..32]);
 
-        let name_end = bytes.len() - 8;
-        let name = String::from_utf8(bytes[32..name_end].to_vec())
-            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
+        let mut name_hash_bytes = [0u8; 8];
+        name_hash_bytes.copy_from_slice(&bytes[32..40]);
 
         let mut ts_bytes = [0u8; 8];
-        ts_bytes.copy_from_slice(&bytes[name_end..]);
+        ts_bytes.copy_from_slice(&bytes[40..48]);
         let timestamp = u64::from_be_bytes(ts_bytes);
 
         Ok(EdgeFragmentCfKey(
             Id::from_bytes(src_id_bytes),
             Id::from_bytes(dst_id_bytes),
-            name,
+            NameHash::from_bytes(name_hash_bytes),
             TimestampMilli(timestamp),
         ))
     }
@@ -274,11 +446,46 @@ impl ColumnFamilyRecord for EdgeFragments {
 
         let mut opts = rocksdb::Options::default();
 
-        // Key layout: [src_id (16)] + [dst_id (16)] + [edge_name (variable)] + [timestamp (8)]
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [timestamp (8)] = 48 bytes
         // Use 32-byte prefix (src_id + dst_id) to scan all fragments for a given edge topology
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
 
         // Enable prefix bloom filter for fast prefix existence checks
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl EdgeFragments {
+    /// Configure RocksDB options with shared block cache.
+    ///
+    /// Fragment CFs use larger block size for variable-length content.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with fragment block size (larger for variable content)
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.fragment_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [timestamp (8)] = 48 bytes
+        // Use 32-byte prefix (src_id + dst_id) to scan all fragments for a given edge topology
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
         opts.set_memtable_prefix_bloom_ratio(0.2);
 
         opts
@@ -292,26 +499,26 @@ impl ColumnFamilyRecord for ForwardEdges {
     type CreateOp = AddEdge;
 
     fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
-        let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, args.name.clone());
+        let name_hash = NameHash::from_name(&args.name);
+        let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, name_hash);
         let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, args.summary.clone());
         (key, value)
     }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // ForwardEdgeCfKey(EdgeSourceId, EdgeDestinationId, EdgeName)
-        // Layout: [src_id (16)] + [dst_id (16)] + [name UTF-8 bytes]
-        let name_bytes = key.2.as_bytes();
-        let mut bytes = Vec::with_capacity(32 + name_bytes.len());
+        // ForwardEdgeCfKey(SrcId, DstId, NameHash)
+        // Layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes FIXED
+        let mut bytes = Vec::with_capacity(40);
         bytes.extend_from_slice(&key.0.into_bytes());
         bytes.extend_from_slice(&key.1.into_bytes());
-        bytes.extend_from_slice(name_bytes);
+        bytes.extend_from_slice(key.2.as_bytes());
         bytes
     }
 
     fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
-        if bytes.len() < 32 {
+        if bytes.len() != 40 {
             anyhow::bail!(
-                "Invalid ForwardEdgeCfKey length: expected >= 32, got {}",
+                "Invalid ForwardEdgeCfKey length: expected 40, got {}",
                 bytes.len()
             );
         }
@@ -322,14 +529,13 @@ impl ColumnFamilyRecord for ForwardEdges {
         let mut dst_id_bytes = [0u8; 16];
         dst_id_bytes.copy_from_slice(&bytes[16..32]);
 
-        let name_bytes = &bytes[32..];
-        let name = String::from_utf8(name_bytes.to_vec())
-            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
+        let mut name_hash_bytes = [0u8; 8];
+        name_hash_bytes.copy_from_slice(&bytes[32..40]);
 
         Ok(ForwardEdgeCfKey(
             Id::from_bytes(src_id_bytes),
             Id::from_bytes(dst_id_bytes),
-            name,
+            NameHash::from_bytes(name_hash_bytes),
         ))
     }
 
@@ -338,11 +544,44 @@ impl ColumnFamilyRecord for ForwardEdges {
 
         let mut opts = rocksdb::Options::default();
 
-        // Key layout: [src_id (16)] + [dst_id (16)] + [name (variable)]
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes
         // Use 16-byte prefix to scan all edges from a source node
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
 
         // Enable prefix bloom filter for O(1) prefix existence check
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl ForwardEdges {
+    /// Configure RocksDB options with shared block cache.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with graph block size
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes
+        // Use 16-byte prefix to scan all edges from a source node
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
         opts.set_memtable_prefix_bloom_ratio(0.2);
 
         opts
@@ -356,26 +595,26 @@ impl ColumnFamilyRecord for ReverseEdges {
     type CreateOp = AddEdge;
 
     fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
-        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, args.name.clone());
+        let name_hash = NameHash::from_name(&args.name);
+        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, name_hash);
         let value = ReverseEdgeCfValue(args.valid_range.clone());
         (key, value)
     }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // ReverseEdgeCfKey(EdgeDestinationId, EdgeSourceId, EdgeName)
-        // Layout: [dst_id (16)] + [src_id (16)] + [name UTF-8 bytes]
-        let name_bytes = key.2.as_bytes();
-        let mut bytes = Vec::with_capacity(32 + name_bytes.len());
+        // ReverseEdgeCfKey(DstId, SrcId, NameHash)
+        // Layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes FIXED
+        let mut bytes = Vec::with_capacity(40);
         bytes.extend_from_slice(&key.0.into_bytes());
         bytes.extend_from_slice(&key.1.into_bytes());
-        bytes.extend_from_slice(name_bytes);
+        bytes.extend_from_slice(key.2.as_bytes());
         bytes
     }
 
     fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
-        if bytes.len() < 32 {
+        if bytes.len() != 40 {
             anyhow::bail!(
-                "Invalid ReverseEdgeCfKey length: expected >= 32, got {}",
+                "Invalid ReverseEdgeCfKey length: expected 40, got {}",
                 bytes.len()
             );
         }
@@ -386,14 +625,13 @@ impl ColumnFamilyRecord for ReverseEdges {
         let mut src_id_bytes = [0u8; 16];
         src_id_bytes.copy_from_slice(&bytes[16..32]);
 
-        let name_bytes = &bytes[32..];
-        let name = String::from_utf8(name_bytes.to_vec())
-            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in EdgeName: {}", e))?;
+        let mut name_hash_bytes = [0u8; 8];
+        name_hash_bytes.copy_from_slice(&bytes[32..40]);
 
         Ok(ReverseEdgeCfKey(
             Id::from_bytes(dst_id_bytes),
             Id::from_bytes(src_id_bytes),
-            name,
+            NameHash::from_bytes(name_hash_bytes),
         ))
     }
 
@@ -402,7 +640,7 @@ impl ColumnFamilyRecord for ReverseEdges {
 
         let mut opts = rocksdb::Options::default();
 
-        // Key layout: [dst_id (16)] + [src_id (16)] + [name (variable)]
+        // Key layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes
         // Use 16-byte prefix to scan all edges to a destination node
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
 
@@ -413,9 +651,43 @@ impl ColumnFamilyRecord for ReverseEdges {
     }
 }
 
+impl ReverseEdges {
+    /// Configure RocksDB options with shared block cache.
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &BlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with graph block size
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes
+        // Use 16-byte prefix to scan all edges to a destination node
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
 /// All column families used in the database.
 /// This is the authoritative list that should be used when opening the database.
 pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
+    Names::CF_NAME,
     Nodes::CF_NAME,
     NodeFragments::CF_NAME,
     EdgeFragments::CF_NAME,
@@ -484,6 +756,8 @@ mod tests {
         ];
 
         // Generate key-value pairs and serialize the keys
+        // Note: With NameHash, names are hashed to 8-byte values, so sort order
+        // is by hash value, not alphabetical string order.
         let serialized_keys: Vec<(Vec<u8>, EdgeName)> = edges
             .iter()
             .map(|args| {
@@ -499,22 +773,28 @@ mod tests {
         // Sort by the serialized byte representation (lexicographic order)
         sorted_keys.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Verify that sorting by bytes doesn't change the order we expect:
-        // - Keys should be ordered by (source_id, destination_id, name)
-        // - MessagePack serialization should preserve this ordering
+        // Verify that sorting by bytes produces a consistent ordering:
+        // - Keys should be ordered by (source_id, destination_id, name_hash)
+        // - With NameHash, edge_a and edge_z may sort in any order based on their hash values
 
-        // Expected order based on key structure (source, dest, name):
-        // 1. ([0..], [0..], "edge_a")
-        // 2. ([0..], [0..], "edge_z")
-        // 3. ([0..], [1..], "edge_b")
-        // 4. ([1..], [0..], "edge_c")
-        // 5. ([1..], [1..], "edge_d")
+        // With NameHash, the first 32 bytes are still src_id + dst_id.
+        // All edges from source [0..] should come before edges from source [1..]
+        // Edges with same source sorted by dest, then by name_hash.
 
-        assert_eq!(sorted_keys[0].1, "edge_a");
-        assert_eq!(sorted_keys[1].1, "edge_z");
-        assert_eq!(sorted_keys[2].1, "edge_b");
-        assert_eq!(sorted_keys[3].1, "edge_c");
-        assert_eq!(sorted_keys[4].1, "edge_d");
+        // All [0..] source edges (indices 0,1,2 in original) should be first
+        // Check that source IDs are properly grouped:
+        let src0_edges: Vec<_> = sorted_keys
+            .iter()
+            .filter(|(k, _)| k[..16] == [0u8; 16])
+            .collect();
+        let src1_edges: Vec<_> = sorted_keys
+            .iter()
+            .filter(|(k, _)| k[..16] == [1u8; 16])
+            .collect();
+
+        // We should have 3 edges from source [0..] and 2 from source [1..]
+        assert_eq!(src0_edges.len(), 3, "Should have 3 edges from source [0..]");
+        assert_eq!(src1_edges.len(), 2, "Should have 2 edges from source [1..]");
 
         // Verify that the serialized keys are actually in lexicographic order
         for i in 0..sorted_keys.len() - 1 {
