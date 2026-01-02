@@ -23,10 +23,13 @@ use anyhow::Result;
 use rocksdb::{Direction, IteratorMode};
 
 use super::name_hash::NameHash;
+use super::summary_hash::SummaryHash;
 use super::ColumnFamilyRecord;
+use super::HotColumnFamilyRecord;
 use super::schema::{
-    self, is_valid_at_time, DstId, EdgeName, EdgeSummary, FragmentContent, Names, NamesCfKey,
-    NodeName, NodeSummary, SrcId, TemporalRange,
+    self, is_valid_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
+    FragmentContent, Names, NamesCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,
+    SrcId, TemporalRange,
 };
 use super::Storage;
 use crate::{Id, TimestampMilli};
@@ -73,6 +76,74 @@ fn resolve_name(storage: &Storage, name_hash: NameHash) -> Result<String> {
     cache.insert(name_hash, name.clone());
 
     Ok(name)
+}
+
+// ============================================================================
+// Summary Resolution Helpers
+// ============================================================================
+
+/// Resolve a SummaryHash to its full NodeSummary from the cold CF.
+///
+/// Returns an empty summary if the hash is None or the summary is not found.
+fn resolve_node_summary(storage: &Storage, summary_hash: Option<SummaryHash>) -> Result<NodeSummary> {
+    let Some(hash) = summary_hash else {
+        return Ok(NodeSummary::from_text(""));
+    };
+
+    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
+
+    let value_bytes = if let Ok(db) = storage.db() {
+        let summaries_cf = db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        db.get_cf(summaries_cf, &key_bytes)?
+    } else {
+        let txn_db = storage.transaction_db()?;
+        let summaries_cf = txn_db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        txn_db.get_cf(summaries_cf, &key_bytes)?
+    };
+
+    match value_bytes {
+        Some(bytes) => {
+            let value = NodeSummaries::value_from_bytes(&bytes)?;
+            Ok(value.0)
+        }
+        None => Ok(NodeSummary::from_text("")),
+    }
+}
+
+/// Resolve a SummaryHash to its full EdgeSummary from the cold CF.
+///
+/// Returns an empty summary if the hash is None or the summary is not found.
+fn resolve_edge_summary(storage: &Storage, summary_hash: Option<SummaryHash>) -> Result<EdgeSummary> {
+    let Some(hash) = summary_hash else {
+        return Ok(EdgeSummary::from_text(""));
+    };
+
+    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
+
+    let value_bytes = if let Ok(db) = storage.db() {
+        let summaries_cf = db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        db.get_cf(summaries_cf, &key_bytes)?
+    } else {
+        let txn_db = storage.transaction_db()?;
+        let summaries_cf = txn_db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        txn_db.get_cf(summaries_cf, &key_bytes)?
+    };
+
+    match value_bytes {
+        Some(bytes) => {
+            let value = EdgeSummaries::value_from_bytes(&bytes)?;
+            Ok(value.0)
+        }
+        None => Ok(EdgeSummary::from_text("")),
+    }
 }
 
 // ============================================================================
@@ -368,6 +439,119 @@ where
     Ok(count)
 }
 
+/// Internal helper to run iteration over a hot column family (rkyv serialized).
+/// Same as `iterate_and_visit` but for HotColumnFamilyRecord types.
+fn iterate_and_visit_hot<CF, R, V, F, G>(
+    storage: &Storage,
+    seek_key: Vec<u8>,
+    limit: usize,
+    skip_cursor: bool,
+    reverse: bool,
+    reference_ts_millis: Option<TimestampMilli>,
+    cursor_matches: impl Fn(&[u8]) -> bool,
+    transform: F,
+    get_valid_range: G,
+    visitor: &mut V,
+) -> Result<usize>
+where
+    CF: HotColumnFamilyRecord,
+    V: Visitor<R>,
+    F: Fn(&[u8], &[u8]) -> Result<R>,
+    G: Fn(&R) -> &Option<TemporalRange>,
+{
+    let direction = if reverse {
+        Direction::Reverse
+    } else {
+        Direction::Forward
+    };
+
+    let mode = if seek_key.is_empty() {
+        if reverse {
+            IteratorMode::End
+        } else {
+            IteratorMode::Start
+        }
+    } else {
+        IteratorMode::From(&seek_key, direction)
+    };
+
+    let mut count = 0;
+    let mut skipped_cursor = !skip_cursor;
+
+    // Handle readonly/secondary mode
+    if let Ok(db) = storage.db() {
+        let cf = db.cf_handle(CF::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME)
+        })?;
+
+        for item in db.iterator_cf(cf, mode) {
+            if count >= limit {
+                break;
+            }
+
+            let (key_bytes, value_bytes) = item?;
+
+            // Skip the cursor record if needed
+            if !skipped_cursor && cursor_matches(&key_bytes) {
+                skipped_cursor = true;
+                continue;
+            }
+            skipped_cursor = true;
+
+            let record = transform(&key_bytes, &value_bytes)?;
+
+            // Check temporal validity if reference time is specified
+            if let Some(ref_ts) = reference_ts_millis {
+                if !is_valid_at_time(get_valid_range(&record), ref_ts) {
+                    continue; // Skip invalid records but don't count them
+                }
+            }
+
+            count += 1;
+            if !visitor.visit(&record) {
+                break;
+            }
+        }
+    } else {
+        // Handle readwrite mode (TransactionDB)
+        let txn_db = storage.transaction_db()?;
+        let cf = txn_db.cf_handle(CF::CF_NAME).ok_or_else(|| {
+            anyhow::anyhow!("Column family '{}' not found", CF::CF_NAME)
+        })?;
+
+        for item in txn_db.iterator_cf(cf, mode) {
+            if count >= limit {
+                break;
+            }
+
+            let (key_bytes, value_bytes) = item?;
+
+            // Skip the cursor record if needed
+            if !skipped_cursor && cursor_matches(&key_bytes) {
+                skipped_cursor = true;
+                continue;
+            }
+            skipped_cursor = true;
+
+            let record = transform(&key_bytes, &value_bytes)?;
+
+            // Check temporal validity if reference time is specified
+            if let Some(ref_ts) = reference_ts_millis {
+                if !is_valid_at_time(get_valid_range(&record), ref_ts) {
+                    continue; // Skip invalid records but don't count them
+                }
+            }
+
+            count += 1;
+            if !visitor.visit(&record) {
+                break;
+            }
+        }
+    }
+
+    Ok(count)
+}
+
 // ============================================================================
 // Visitable Implementations
 // ============================================================================
@@ -389,7 +573,7 @@ impl Visitable for AllNodes {
 
         let last_id = self.last;
 
-        iterate_and_visit::<schema::Nodes, _, _, _, _>(
+        iterate_and_visit_hot::<schema::Nodes, _, _, _, _>(
             storage,
             seek_key,
             self.limit,
@@ -408,10 +592,12 @@ impl Visitable for AllNodes {
                 let value = schema::Nodes::value_from_bytes(value_bytes)?;
                 // Resolve NameHash to String
                 let name = resolve_name(storage, value.1)?;
+                // Resolve SummaryHash to NodeSummary
+                let summary = resolve_node_summary(storage, value.2)?;
                 Ok(NodeRecord {
                     id: key.0,
                     name,
-                    summary: value.2,
+                    summary,
                     valid_range: value.0,
                 })
             },
@@ -451,7 +637,7 @@ impl Visitable for AllEdges {
             (*src, *dst, name_hash)
         });
 
-        iterate_and_visit::<schema::ForwardEdges, _, _, _, _>(
+        iterate_and_visit_hot::<schema::ForwardEdges, _, _, _, _>(
             storage,
             seek_key,
             self.limit,
@@ -473,11 +659,13 @@ impl Visitable for AllEdges {
                 let value = schema::ForwardEdges::value_from_bytes(value_bytes)?;
                 // Resolve NameHash to String
                 let name = resolve_name(storage, key.2)?;
+                // Resolve SummaryHash to EdgeSummary
+                let summary = resolve_edge_summary(storage, value.2)?;
                 Ok(EdgeRecord {
                     src_id: key.0,
                     dst_id: key.1,
                     name,
-                    summary: value.2,
+                    summary,
                     weight: value.1,
                     valid_range: value.0,
                 })
@@ -518,7 +706,7 @@ impl Visitable for AllReverseEdges {
             (*dst, *src, name_hash)
         });
 
-        iterate_and_visit::<schema::ReverseEdges, _, _, _, _>(
+        iterate_and_visit_hot::<schema::ReverseEdges, _, _, _, _>(
             storage,
             seek_key,
             self.limit,

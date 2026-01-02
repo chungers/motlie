@@ -1,4 +1,4 @@
-use crate::graph::{ColumnFamilyRecord, Graph, Storage};
+use crate::graph::{ColumnFamilyRecord, Graph, HotColumnFamilyRecord, Storage};
 use crate::graph::mutation::{
     AddEdge, AddNode, AddNodeFragment, UpdateEdgeValidSinceUntil,
     UpdateNodeValidSinceUntil,
@@ -1191,13 +1191,14 @@ use tokio::time::Duration;
         let value_bytes = result.unwrap();
         let value = Nodes::value_from_bytes(&value_bytes).expect("Failed to deserialize value");
         let node_name_hash = &value.1; // NodeName is now NameHash (field 1 after temporal_range)
-        let content = value.2.decode_string().expect("Failed to decode DataUrl"); // NodeSummary is field 2
+        // Note: value.2 is now Option<SummaryHash> - the actual summary is stored in NodeSummaries CF
         // Check that the name hash matches the expected hash
         use crate::graph::NameHash;
         assert_eq!(*node_name_hash, NameHash::from_name("test_node"), "Node name hash should match");
+        // The summary hash should be Some (since we provided a non-empty summary)
         assert!(
-            content.contains("test summary"),
-            "Node value should contain the node summary"
+            value.2.is_some(),
+            "Summary hash should be present for non-empty summary"
         );
     }
 
@@ -1208,14 +1209,19 @@ use tokio::time::Duration;
     fn test_lz4_compression_round_trip() {
         use crate::graph::schema::{NodeCfValue, NodeSummary, Nodes};
         use crate::graph::NameHash;
+        use crate::graph::SummaryHash;
         use crate::DataUrl;
 
-        // Create a simple test value with NameHash
+        // Create a test summary and compute its hash
+        let summary = DataUrl::from_markdown("test content");
+        let summary_hash = SummaryHash::from_summary(&summary).ok();
+
+        // Create a simple test value with NameHash and SummaryHash
         let name_hash = NameHash::from_name("test_node");
         let test_value = NodeCfValue(
             None,
             name_hash,
-            DataUrl::from_markdown("test content"),
+            summary_hash,
         );
 
         // Serialize and compress
@@ -1234,5 +1240,826 @@ use tokio::time::Duration;
         // Verify
         assert_eq!(test_value.0, decompressed_value.0, "Temporal range should match");
         assert_eq!(test_value.1, decompressed_value.1, "Name hash should match");
+        assert_eq!(test_value.2, decompressed_value.2, "Summary hash should match");
+    }
+
+    // =========================================================================
+    // Phase 2: Blob Separation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_summary_hash_content_addressable() {
+        use crate::graph::SummaryHash;
+        use crate::DataUrl;
+
+        // Same content should produce the same hash
+        let summary1 = DataUrl::from_markdown("This is a test summary");
+        let summary2 = DataUrl::from_markdown("This is a test summary");
+        let hash1 = SummaryHash::from_summary(&summary1).unwrap();
+        let hash2 = SummaryHash::from_summary(&summary2).unwrap();
+        assert_eq!(hash1, hash2, "Same content should produce same hash");
+
+        // Different content should produce different hashes
+        let summary3 = DataUrl::from_markdown("This is a different summary");
+        let hash3 = SummaryHash::from_summary(&summary3).unwrap();
+        assert_ne!(hash1, hash3, "Different content should produce different hash");
+    }
+
+    #[test]
+    fn test_summary_hash_to_bytes_round_trip() {
+        use crate::graph::SummaryHash;
+        use crate::DataUrl;
+
+        let summary = DataUrl::from_markdown("Test content for hash");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+
+        // Convert to bytes and back
+        let bytes = hash.as_bytes();
+        assert_eq!(bytes.len(), 8, "SummaryHash should be 8 bytes");
+
+        let recovered = SummaryHash::from_bytes(*bytes);
+        assert_eq!(hash, recovered, "Round-trip should preserve hash");
+    }
+
+    #[test]
+    fn test_node_summaries_cf_round_trip() {
+        use crate::graph::schema::{NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue, NodeSummary};
+        use crate::graph::SummaryHash;
+        use crate::DataUrl;
+
+        // Create a summary and its hash
+        let summary = DataUrl::from_markdown("Node summary content for testing");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+
+        // Create CF key and value
+        let key = NodeSummaryCfKey(hash);
+        let value = NodeSummaryCfValue(summary.clone());
+
+        // Serialize
+        let key_bytes = NodeSummaries::key_to_bytes(&key);
+        let value_bytes = NodeSummaries::value_to_bytes(&value).unwrap();
+
+        // Deserialize
+        let recovered_key = NodeSummaries::key_from_bytes(&key_bytes).unwrap();
+        let recovered_value = NodeSummaries::value_from_bytes(&value_bytes).unwrap();
+
+        assert_eq!(key.0, recovered_key.0, "Key hash should match");
+        assert_eq!(
+            value.0.decode_string().unwrap(),
+            recovered_value.0.decode_string().unwrap(),
+            "Value summary should match"
+        );
+    }
+
+    #[test]
+    fn test_edge_summaries_cf_round_trip() {
+        use crate::graph::schema::{EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue, EdgeSummary};
+        use crate::graph::SummaryHash;
+        use crate::DataUrl;
+
+        // Create a summary and its hash
+        let summary = DataUrl::from_markdown("Edge summary content for testing");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+
+        // Create CF key and value
+        let key = EdgeSummaryCfKey(hash);
+        let value = EdgeSummaryCfValue(summary.clone());
+
+        // Serialize
+        let key_bytes = EdgeSummaries::key_to_bytes(&key);
+        let value_bytes = EdgeSummaries::value_to_bytes(&value).unwrap();
+
+        // Deserialize
+        let recovered_key = EdgeSummaries::key_from_bytes(&key_bytes).unwrap();
+        let recovered_value = EdgeSummaries::value_from_bytes(&value_bytes).unwrap();
+
+        assert_eq!(key.0, recovered_key.0, "Key hash should match");
+        assert_eq!(
+            value.0.decode_string().unwrap(),
+            recovered_value.0.decode_string().unwrap(),
+            "Value summary should match"
+        );
+    }
+
+    #[test]
+    fn test_empty_summary_produces_none_hash() {
+        use crate::graph::schema::NodeSummary;
+        use crate::DataUrl;
+
+        // Empty summary (from_text("")) should not produce a SummaryHash in mutations
+        // The mutation executor checks `is_empty()` before computing hash
+        let empty_summary = DataUrl::from_text("");
+        assert!(empty_summary.is_empty(), "Empty DataUrl should report is_empty()");
+
+        let nonempty_summary = DataUrl::from_text("content");
+        assert!(!nonempty_summary.is_empty(), "Non-empty DataUrl should not report is_empty()");
+    }
+
+    // =========================================================================
+    // Phase 2: End-to-End Tests for Empty Summary Handling
+    // =========================================================================
+
+    #[test]
+    fn test_add_node_with_no_summary_and_query() {
+        use crate::graph::mutation::AddNode;
+        use crate::graph::query::{NodeById, TransactionQueryExecutor};
+        use crate::graph::writer::MutationExecutor;
+        use crate::graph::Storage;
+        use crate::{DataUrl, Id, TimestampMilli};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().unwrap();
+
+        // Create a node with an empty summary
+        let node_id = Id::new();
+        let empty_summary = DataUrl::from_text("");
+
+        let add_node = AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli(0),
+            name: "EmptyNode".to_string(),
+            summary: empty_summary.clone(),
+            valid_range: None,
+        };
+
+        // Execute the mutation and query in the same transaction
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+
+        add_node.execute(&txn, txn_db).unwrap();
+
+        // Query the node back using transaction executor
+        let query = NodeById::new(node_id, None);
+        let result = query.execute_in_transaction(&txn, txn_db, storage.name_cache());
+
+        assert!(result.is_ok(), "Query should succeed for node with empty summary");
+        let (name, summary) = result.unwrap();
+        assert_eq!(name, "EmptyNode", "Node name should match");
+        // Empty summary should be returned as empty DataUrl
+        assert!(summary.is_empty(), "Summary should be empty for node with no summary");
+
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn test_add_edge_with_no_summary_and_query() {
+        use crate::graph::mutation::{AddEdge, AddNode};
+        use crate::graph::query::{EdgeSummaryBySrcDstName, TransactionQueryExecutor};
+        use crate::graph::writer::MutationExecutor;
+        use crate::graph::Storage;
+        use crate::{DataUrl, Id, TimestampMilli};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().unwrap();
+
+        // Create source and destination nodes first
+        let src_id = Id::new();
+        let dst_id = Id::new();
+
+        let add_src = AddNode {
+            id: src_id,
+            ts_millis: TimestampMilli(0),
+            name: "SourceNode".to_string(),
+            summary: DataUrl::from_text("source"),
+            valid_range: None,
+        };
+
+        let add_dst = AddNode {
+            id: dst_id,
+            ts_millis: TimestampMilli(0),
+            name: "DestNode".to_string(),
+            summary: DataUrl::from_text("dest"),
+            valid_range: None,
+        };
+
+        // Create an edge with an empty summary
+        let empty_summary = DataUrl::from_text("");
+        let add_edge = AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: TimestampMilli(0),
+            name: "CONNECTS".to_string(),
+            summary: empty_summary.clone(),
+            weight: Some(1.5),
+            valid_range: None,
+        };
+
+        // Execute the mutations and query in the same transaction
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+
+        add_src.execute(&txn, txn_db).unwrap();
+        add_dst.execute(&txn, txn_db).unwrap();
+        add_edge.execute(&txn, txn_db).unwrap();
+
+        // Query the edge back using transaction executor
+        let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, "CONNECTS".to_string(), None);
+        let result = query.execute_in_transaction(&txn, txn_db, storage.name_cache());
+
+        assert!(result.is_ok(), "Query should succeed for edge with empty summary");
+        let (summary, weight) = result.unwrap();
+        assert!(summary.is_empty(), "Summary should be empty for edge with no summary");
+        assert_eq!(weight, Some(1.5), "Weight should match");
+
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn test_add_node_with_summary_and_query() {
+        use crate::graph::mutation::AddNode;
+        use crate::graph::query::{NodeById, TransactionQueryExecutor};
+        use crate::graph::writer::MutationExecutor;
+        use crate::graph::Storage;
+        use crate::{DataUrl, Id, TimestampMilli};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().unwrap();
+
+        // Create a node with a non-empty summary
+        let node_id = Id::new();
+        let summary_content = "This is a detailed summary for the node.";
+        let node_summary = DataUrl::from_markdown(summary_content);
+
+        let add_node = AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli(0),
+            name: "SummaryNode".to_string(),
+            summary: node_summary.clone(),
+            valid_range: None,
+        };
+
+        // Execute the mutation and query in the same transaction
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+
+        add_node.execute(&txn, txn_db).unwrap();
+
+        // Query the node back using transaction executor
+        let query = NodeById::new(node_id, None);
+        let result = query.execute_in_transaction(&txn, txn_db, storage.name_cache());
+
+        assert!(result.is_ok(), "Query should succeed for node with summary");
+        let (name, summary) = result.unwrap();
+        assert_eq!(name, "SummaryNode", "Node name should match");
+        assert!(!summary.is_empty(), "Summary should not be empty");
+        let decoded = summary.decode_string().unwrap();
+        assert!(decoded.contains(summary_content), "Summary content should match");
+
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn test_add_edge_with_summary_and_query() {
+        use crate::graph::mutation::{AddEdge, AddNode};
+        use crate::graph::query::{EdgeSummaryBySrcDstName, TransactionQueryExecutor};
+        use crate::graph::writer::MutationExecutor;
+        use crate::graph::Storage;
+        use crate::{DataUrl, Id, TimestampMilli};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().unwrap();
+
+        // Create source and destination nodes first
+        let src_id = Id::new();
+        let dst_id = Id::new();
+
+        let add_src = AddNode {
+            id: src_id,
+            ts_millis: TimestampMilli(0),
+            name: "SourceNode".to_string(),
+            summary: DataUrl::from_text("source"),
+            valid_range: None,
+        };
+
+        let add_dst = AddNode {
+            id: dst_id,
+            ts_millis: TimestampMilli(0),
+            name: "DestNode".to_string(),
+            summary: DataUrl::from_text("dest"),
+            valid_range: None,
+        };
+
+        // Create an edge with a non-empty summary
+        let edge_summary_content = "This edge represents a strong connection.";
+        let edge_summary = DataUrl::from_markdown(edge_summary_content);
+        let add_edge = AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: TimestampMilli(0),
+            name: "STRONG_LINK".to_string(),
+            summary: edge_summary.clone(),
+            weight: Some(9.9),
+            valid_range: None,
+        };
+
+        // Execute the mutations and query in the same transaction
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+
+        add_src.execute(&txn, txn_db).unwrap();
+        add_dst.execute(&txn, txn_db).unwrap();
+        add_edge.execute(&txn, txn_db).unwrap();
+
+        // Query the edge back using transaction executor
+        let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, "STRONG_LINK".to_string(), None);
+        let result = query.execute_in_transaction(&txn, txn_db, storage.name_cache());
+
+        assert!(result.is_ok(), "Query should succeed for edge with summary");
+        let (summary, weight) = result.unwrap();
+        assert!(!summary.is_empty(), "Summary should not be empty");
+        let decoded: String = summary.decode_string().unwrap();
+        assert!(decoded.contains(edge_summary_content), "Summary content should match");
+        assert_eq!(weight, Some(9.9), "Weight should match");
+
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn test_summary_deduplication() {
+        use crate::graph::mutation::AddNode;
+        use crate::graph::query::{NodeById, TransactionQueryExecutor};
+        use crate::graph::writer::MutationExecutor;
+        use crate::graph::Storage;
+        use crate::graph::SummaryHash;
+        use crate::{DataUrl, Id, TimestampMilli};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().unwrap();
+
+        // Create two nodes with the SAME summary content
+        let shared_summary = DataUrl::from_markdown("This is a shared summary.");
+        let node1_id = Id::new();
+        let node2_id = Id::new();
+
+        let add_node1 = AddNode {
+            id: node1_id,
+            ts_millis: TimestampMilli(0),
+            name: "Node1".to_string(),
+            summary: shared_summary.clone(),
+            valid_range: None,
+        };
+
+        let add_node2 = AddNode {
+            id: node2_id,
+            ts_millis: TimestampMilli(0),
+            name: "Node2".to_string(),
+            summary: shared_summary.clone(),
+            valid_range: None,
+        };
+
+        // Execute the mutations
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+
+        add_node1.execute(&txn, txn_db).unwrap();
+        add_node2.execute(&txn, txn_db).unwrap();
+
+        // Both nodes should return the same summary content
+        let query1 = NodeById::new(node1_id, None);
+        let query2 = NodeById::new(node2_id, None);
+
+        let (_, summary1) = query1.execute_in_transaction(&txn, txn_db, storage.name_cache()).unwrap();
+        let (_, summary2) = query2.execute_in_transaction(&txn, txn_db, storage.name_cache()).unwrap();
+
+        let decoded1: String = summary1.decode_string().unwrap();
+        let decoded2: String = summary2.decode_string().unwrap();
+        assert_eq!(
+            decoded1,
+            decoded2,
+            "Both nodes should have the same summary content"
+        );
+
+        // Verify deduplication: same content produces same hash
+        let hash1 = SummaryHash::from_summary(&shared_summary).unwrap();
+        let hash2 = SummaryHash::from_summary(&shared_summary).unwrap();
+        assert_eq!(hash1, hash2, "Same content should produce same hash (deduplication)");
+
+        txn.commit().unwrap();
+    }
+
+    /// Test that verifies:
+    /// 1. Two nodes with same summary are stored as distinct nodes
+    /// 2. Both nodes share the same summary_hash pointing to one NodeSummaries entry
+    /// 3. After updating one node's summary, two distinct summaries exist
+    /// 4. Each node points to the correct summary
+    #[test]
+    fn test_summary_sharing_and_update() {
+        use crate::graph::mutation::AddNode;
+        use crate::graph::schema::{
+            NodeCfKey, NodeCfValue, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue, Nodes,
+        };
+        use crate::graph::writer::MutationExecutor;
+        use crate::graph::ColumnFamilyRecord;
+        use crate::graph::Storage;
+        use crate::graph::SummaryHash;
+        use crate::{DataUrl, Id, TimestampMilli};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().unwrap();
+
+        // Create two nodes with the SAME summary content
+        let shared_summary = DataUrl::from_markdown("This is a shared summary for testing.");
+        let node1_id = Id::new();
+        let node2_id = Id::new();
+
+        let add_node1 = AddNode {
+            id: node1_id,
+            ts_millis: TimestampMilli(100),
+            name: "Node1".to_string(),
+            summary: shared_summary.clone(),
+            valid_range: None,
+        };
+
+        let add_node2 = AddNode {
+            id: node2_id,
+            ts_millis: TimestampMilli(200),
+            name: "Node2".to_string(),
+            summary: shared_summary.clone(),
+            valid_range: None,
+        };
+
+        // Execute the mutations
+        let txn_db = storage.transaction_db().unwrap();
+        let txn = txn_db.transaction();
+
+        add_node1.execute(&txn, txn_db).unwrap();
+        add_node2.execute(&txn, txn_db).unwrap();
+        txn.commit().unwrap();
+
+        // ========================================================================
+        // STEP 1: Verify two distinct nodes exist in Nodes CF
+        // ========================================================================
+        let txn = txn_db.transaction();
+
+        // Read node1 raw value from Nodes CF
+        let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+        let key1 = Nodes::key_to_bytes(&NodeCfKey(node1_id));
+        let raw1 = txn.get_for_update_cf(&cf, &key1, true).unwrap().unwrap();
+        let value1: NodeCfValue = Nodes::value_from_bytes(&raw1).unwrap();
+
+        // Read node2 raw value from Nodes CF
+        let key2 = Nodes::key_to_bytes(&NodeCfKey(node2_id));
+        let raw2 = txn.get_for_update_cf(&cf, &key2, true).unwrap().unwrap();
+        let value2: NodeCfValue = Nodes::value_from_bytes(&raw2).unwrap();
+
+        // Verify they are distinct nodes
+        assert_ne!(node1_id, node2_id, "Nodes should have different IDs");
+
+        // ========================================================================
+        // STEP 2: Verify both nodes share the SAME summary_hash
+        // ========================================================================
+        let hash1 = value1.2.expect("Node1 should have a summary hash");
+        let hash2 = value2.2.expect("Node2 should have a summary hash");
+        assert_eq!(hash1, hash2, "Both nodes should share the same summary_hash");
+
+        // ========================================================================
+        // STEP 3: Count entries in NodeSummaries CF - should be exactly 1
+        // ========================================================================
+        let summary_cf = txn_db.cf_handle(NodeSummaries::CF_NAME).unwrap();
+        let mut summary_count = 0;
+        let iter = txn.iterator_cf(&summary_cf, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let _ = item.unwrap();
+            summary_count += 1;
+        }
+        assert_eq!(
+            summary_count, 1,
+            "Should have exactly 1 summary entry (shared by both nodes)"
+        );
+
+        // Verify the summary content
+        let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash1));
+        let summary_raw = txn.get_cf(&summary_cf, &summary_key).unwrap().unwrap();
+        let summary_value: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&summary_raw).unwrap();
+        let decoded: String = summary_value.0.decode_string().unwrap();
+        assert!(
+            decoded.contains("shared summary"),
+            "Summary content should match"
+        );
+
+        txn.commit().unwrap();
+
+        // ========================================================================
+        // STEP 4: Update node1's summary to a different value
+        // ========================================================================
+        let new_summary = DataUrl::from_markdown("This is a NEW summary for Node1 only.");
+
+        // We need to use the mutation path - let's re-add node1 with a new summary
+        // (In practice this would be an UpdateNode mutation, but for simplicity we test
+        // by directly writing to the CFs)
+        let txn = txn_db.transaction();
+
+        // Write new summary to NodeSummaries CF
+        let new_hash = SummaryHash::from_summary(&new_summary).unwrap();
+        let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(new_hash));
+        let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(new_summary.clone())).unwrap();
+        txn.put_cf(&summary_cf, &summary_key, &summary_value).unwrap();
+
+        // Update node1 to point to new summary_hash
+        let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+        let new_value1 = NodeCfValue(value1.0, value1.1, Some(new_hash));
+        let value_bytes = Nodes::value_to_bytes(&new_value1).unwrap();
+        txn.put_cf(&cf, &key1, &value_bytes).unwrap();
+
+        txn.commit().unwrap();
+
+        // ========================================================================
+        // STEP 5: Verify now TWO summaries exist in NodeSummaries CF
+        // ========================================================================
+        let txn = txn_db.transaction();
+        let summary_cf = txn_db.cf_handle(NodeSummaries::CF_NAME).unwrap();
+        let mut summary_count = 0;
+        let iter = txn.iterator_cf(&summary_cf, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let _ = item.unwrap();
+            summary_count += 1;
+        }
+        assert_eq!(
+            summary_count, 2,
+            "Should now have 2 summary entries (original + new)"
+        );
+
+        // ========================================================================
+        // STEP 6: Verify each node points to the correct summary
+        // ========================================================================
+        // Re-read node1
+        let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+        let raw1 = txn.get_cf(&cf, &key1).unwrap().unwrap();
+        let value1: NodeCfValue = Nodes::value_from_bytes(&raw1).unwrap();
+        let node1_hash = value1.2.expect("Node1 should have a summary hash");
+
+        // Re-read node2
+        let raw2 = txn.get_cf(&cf, &key2).unwrap().unwrap();
+        let value2: NodeCfValue = Nodes::value_from_bytes(&raw2).unwrap();
+        let node2_hash = value2.2.expect("Node2 should have a summary hash");
+
+        // Node1 should have new_hash, Node2 should have original hash1
+        assert_eq!(node1_hash, new_hash, "Node1 should point to new summary");
+        assert_eq!(node2_hash, hash1, "Node2 should still point to original summary");
+        assert_ne!(
+            node1_hash, node2_hash,
+            "Nodes should now point to different summaries"
+        );
+
+        // Verify node1's summary content
+        let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(node1_hash));
+        let summary_raw = txn.get_cf(&summary_cf, &summary_key).unwrap().unwrap();
+        let summary_value: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&summary_raw).unwrap();
+        let decoded: String = summary_value.0.decode_string().unwrap();
+        assert!(
+            decoded.contains("NEW summary"),
+            "Node1 should have new summary content"
+        );
+
+        // Verify node2's summary content
+        let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(node2_hash));
+        let summary_raw = txn.get_cf(&summary_cf, &summary_key).unwrap().unwrap();
+        let summary_value: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&summary_raw).unwrap();
+        let decoded: String = summary_value.0.decode_string().unwrap();
+        assert!(
+            decoded.contains("shared summary"),
+            "Node2 should still have original summary content"
+        );
+
+        txn.commit().unwrap();
+    }
+
+    // ============================================================================
+    // Phase 3: rkyv Zero-Copy Serialization Tests
+    // ============================================================================
+
+    /// Test rkyv serialization round-trip for NodeCfValue
+    #[test]
+    fn test_rkyv_node_value_round_trip() {
+        use crate::graph::schema::{NodeCfValue, Nodes};
+        use crate::graph::name_hash::NameHash;
+        use crate::graph::summary_hash::SummaryHash;
+        use crate::{DataUrl, TemporalRange, TimestampMilli};
+
+        // Create a NodeCfValue with all fields populated
+        let name_hash = NameHash::from_name("test_node");
+        let summary = DataUrl::from_text("Test summary content");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+        let temporal_range = TemporalRange::valid_between(
+            TimestampMilli(1000),
+            TimestampMilli(2000),
+        );
+
+        let original = NodeCfValue(temporal_range, name_hash, Some(summary_hash));
+
+        // Serialize with rkyv
+        let bytes = Nodes::value_to_bytes(&original).expect("rkyv serialize");
+
+        // Deserialize with rkyv
+        let recovered: NodeCfValue = Nodes::value_from_bytes(&bytes).expect("rkyv deserialize");
+
+        // Verify all fields match
+        assert_eq!(original.0, recovered.0, "TemporalRange should match");
+        assert_eq!(original.1, recovered.1, "NameHash should match");
+        assert_eq!(original.2, recovered.2, "SummaryHash should match");
+    }
+
+    /// Test rkyv zero-copy access for NodeCfValue
+    #[test]
+    fn test_rkyv_node_value_zero_copy_access() {
+        use crate::graph::schema::{NodeCfValue, Nodes};
+        use crate::graph::name_hash::NameHash;
+        use crate::graph::summary_hash::SummaryHash;
+        use crate::{DataUrl, TemporalRange, TimestampMilli};
+
+        let name_hash = NameHash::from_name("zero_copy_node");
+        let summary = DataUrl::from_text("Zero copy test");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+        let temporal_range = TemporalRange::valid_from(TimestampMilli(5000));
+
+        let original = NodeCfValue(temporal_range.clone(), name_hash, Some(summary_hash));
+        let bytes = Nodes::value_to_bytes(&original).expect("serialize");
+
+        // Access archived data without full deserialization
+        let archived = Nodes::value_archived(&bytes).expect("zero-copy access");
+
+        // Verify we can read fields from archived reference
+        // The archived temporal_range should match
+        assert!(archived.0.is_some(), "Archived temporal range should be Some");
+
+        // SummaryHash comparison through archived
+        assert!(archived.2.is_some(), "Archived summary hash should be Some");
+
+        // Verify we can deserialize and get matching data
+        let recovered: NodeCfValue = Nodes::value_from_bytes(&bytes).expect("deserialize");
+        assert_eq!(recovered.1, name_hash, "NameHash should match after full deserialize");
+    }
+
+    /// Test rkyv serialization round-trip for ForwardEdgeCfValue
+    #[test]
+    fn test_rkyv_forward_edge_value_round_trip() {
+        use crate::graph::schema::{ForwardEdgeCfValue, ForwardEdges};
+        use crate::graph::summary_hash::SummaryHash;
+        use crate::{DataUrl, TemporalRange, TimestampMilli};
+
+        let summary = DataUrl::from_text("Edge summary");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+        let temporal_range = TemporalRange::valid_between(
+            TimestampMilli(100),
+            TimestampMilli(200),
+        );
+
+        let original = ForwardEdgeCfValue(temporal_range, Some(3.14), Some(summary_hash));
+
+        // Serialize with rkyv
+        let bytes = ForwardEdges::value_to_bytes(&original).expect("rkyv serialize");
+
+        // Deserialize with rkyv
+        let recovered: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&bytes).expect("rkyv deserialize");
+
+        // Verify all fields match
+        assert_eq!(original.0, recovered.0, "TemporalRange should match");
+        assert_eq!(original.1, recovered.1, "Weight should match");
+        assert_eq!(original.2, recovered.2, "SummaryHash should match");
+    }
+
+    /// Test rkyv zero-copy access for ForwardEdgeCfValue with weight
+    #[test]
+    fn test_rkyv_forward_edge_zero_copy_weight() {
+        use crate::graph::schema::{ForwardEdgeCfValue, ForwardEdges};
+
+        let weight = Some(2.718);
+        let original = ForwardEdgeCfValue(None, weight, None);
+        let bytes = ForwardEdges::value_to_bytes(&original).expect("serialize");
+
+        // Access archived data without full deserialization
+        let archived = ForwardEdges::value_archived(&bytes).expect("zero-copy access");
+
+        // Verify weight through archived reference
+        assert!(archived.1.is_some(), "Archived weight should be Some");
+        assert_eq!(archived.1, Some(2.718), "Archived weight value should match");
+    }
+
+    /// Test rkyv serialization round-trip for ReverseEdgeCfValue
+    #[test]
+    fn test_rkyv_reverse_edge_value_round_trip() {
+        use crate::graph::schema::{ReverseEdgeCfValue, ReverseEdges};
+        use crate::{TemporalRange, TimestampMilli};
+
+        let temporal_range = TemporalRange::valid_until(TimestampMilli(9999));
+
+        let original = ReverseEdgeCfValue(temporal_range);
+
+        // Serialize with rkyv
+        let bytes = ReverseEdges::value_to_bytes(&original).expect("rkyv serialize");
+
+        // Deserialize with rkyv
+        let recovered: ReverseEdgeCfValue = ReverseEdges::value_from_bytes(&bytes).expect("rkyv deserialize");
+
+        // Verify temporal range matches
+        assert_eq!(original.0, recovered.0, "TemporalRange should match");
+    }
+
+    /// Test rkyv handles None values correctly
+    #[test]
+    fn test_rkyv_none_values() {
+        use crate::graph::schema::{NodeCfValue, Nodes, ForwardEdgeCfValue, ForwardEdges};
+        use crate::graph::name_hash::NameHash;
+
+        // NodeCfValue with None summary_hash
+        let name_hash = NameHash::from_name("no_summary");
+        let node_value = NodeCfValue(None, name_hash, None);
+        let bytes = Nodes::value_to_bytes(&node_value).expect("serialize");
+        let recovered: NodeCfValue = Nodes::value_from_bytes(&bytes).expect("deserialize");
+        assert!(recovered.0.is_none(), "TemporalRange should be None");
+        assert!(recovered.2.is_none(), "SummaryHash should be None");
+
+        // ForwardEdgeCfValue with all None
+        let edge_value = ForwardEdgeCfValue(None, None, None);
+        let bytes = ForwardEdges::value_to_bytes(&edge_value).expect("serialize");
+        let recovered: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&bytes).expect("deserialize");
+        assert!(recovered.0.is_none(), "TemporalRange should be None");
+        assert!(recovered.1.is_none(), "Weight should be None");
+        assert!(recovered.2.is_none(), "SummaryHash should be None");
+    }
+
+    /// Test rkyv serialized size is reasonable
+    #[test]
+    fn test_rkyv_compact_size() {
+        use crate::graph::schema::{NodeCfValue, Nodes, ForwardEdgeCfValue, ForwardEdges};
+        use crate::graph::name_hash::NameHash;
+        use crate::graph::summary_hash::SummaryHash;
+        use crate::DataUrl;
+
+        // NodeCfValue with rkyv includes alignment padding
+        // Fields: TemporalRange (Option), NameHash (8), Option<SummaryHash> (8)
+        // rkyv aligned size is typically 64 bytes for this structure
+        let name_hash = NameHash::from_name("test");
+        let node_value = NodeCfValue(None, name_hash, None);
+        let bytes = Nodes::value_to_bytes(&node_value).expect("serialize");
+        assert!(
+            bytes.len() <= 80,
+            "NodeCfValue size should be reasonable: got {} bytes",
+            bytes.len()
+        );
+        // Verify it's smaller than MessagePack+LZ4 would be for this data
+        // (MessagePack alone for this would be ~30-40 bytes, but rkyv trades size for speed)
+
+        // ForwardEdgeCfValue with all fields
+        let summary = DataUrl::from_text("x");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+        let edge_value = ForwardEdgeCfValue(None, Some(1.0), Some(summary_hash));
+        let bytes = ForwardEdges::value_to_bytes(&edge_value).expect("serialize");
+        assert!(
+            bytes.len() <= 80,
+            "ForwardEdgeCfValue size should be reasonable: got {} bytes",
+            bytes.len()
+        );
+
+        // Log actual sizes for documentation
+        println!("NodeCfValue (minimal): {} bytes", Nodes::value_to_bytes(&node_value).unwrap().len());
+        println!("ForwardEdgeCfValue (with weight+summary): {} bytes", bytes.len());
+    }
+
+    /// Test key serialization for hot CFs
+    #[test]
+    fn test_hot_cf_key_serialization() {
+        use crate::graph::schema::{
+            NodeCfKey, Nodes,
+            ForwardEdgeCfKey, ForwardEdges,
+            ReverseEdgeCfKey, ReverseEdges,
+        };
+        use crate::graph::name_hash::NameHash;
+        use crate::Id;
+
+        // Node key: 16 bytes (Id)
+        let node_id = Id::new();
+        let node_key = NodeCfKey(node_id);
+        let bytes = Nodes::key_to_bytes(&node_key);
+        assert_eq!(bytes.len(), 16, "NodeCfKey should be 16 bytes");
+        let recovered = Nodes::key_from_bytes(&bytes).expect("deserialize");
+        assert_eq!(node_key.0, recovered.0, "Node key should round-trip");
+
+        // Forward edge key: 40 bytes (16 + 16 + 8)
+        let src_id = Id::new();
+        let dst_id = Id::new();
+        let name_hash = NameHash::from_name("edge");
+        let forward_key = ForwardEdgeCfKey(src_id, dst_id, name_hash);
+        let bytes = ForwardEdges::key_to_bytes(&forward_key);
+        assert_eq!(bytes.len(), 40, "ForwardEdgeCfKey should be 40 bytes");
+        let recovered = ForwardEdges::key_from_bytes(&bytes).expect("deserialize");
+        assert_eq!(forward_key.0, recovered.0, "Src ID should match");
+        assert_eq!(forward_key.1, recovered.1, "Dst ID should match");
+        assert_eq!(forward_key.2, recovered.2, "NameHash should match");
+
+        // Reverse edge key: 40 bytes (16 + 16 + 8)
+        let reverse_key = ReverseEdgeCfKey(dst_id, src_id, name_hash);
+        let bytes = ReverseEdges::key_to_bytes(&reverse_key);
+        assert_eq!(bytes.len(), 40, "ReverseEdgeCfKey should be 40 bytes");
+        let recovered = ReverseEdges::key_from_bytes(&bytes).expect("deserialize");
+        assert_eq!(reverse_key.0, recovered.0, "Dst ID should match");
+        assert_eq!(reverse_key.1, recovered.1, "Src ID should match");
+        assert_eq!(reverse_key.2, recovered.2, "NameHash should match");
     }
 

@@ -25,6 +25,9 @@ tantivy = "0.22"
 # Name interning (Phase 1 optimization)
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 dashmap = "6"
+# Zero-copy serialization for hot CFs (Phase 3)
+rkyv = { version = "0.7", features = ["validation", "strict"] }
+bytecheck = { version = "0.6" }
 
 [dev-dependencies]
 tempfile = "3.14"
