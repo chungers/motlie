@@ -34,7 +34,7 @@ pub use config::{HnswConfig, RaBitQConfig, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
-pub use schema::ALL_COLUMN_FAMILIES;
+pub use schema::{Schema, ALL_COLUMN_FAMILIES};
 
 // Internal re-exports
 pub(crate) use error::Result;

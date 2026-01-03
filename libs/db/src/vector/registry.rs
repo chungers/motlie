@@ -14,7 +14,7 @@ use rocksdb::{IteratorMode, TransactionDB};
 
 use super::distance::Distance;
 use super::embedding::{Embedding, EmbeddingBuilder};
-use super::schema::{EmbeddingRegistry as EmbeddingRegistryCf, EmbeddingRegistryCfKey, EmbeddingRegistryCfValue};
+use super::schema::{EmbeddingSpecs, EmbeddingSpecsCfKey, EmbeddingSpecsCfValue};
 
 // ============================================================================
 // EmbeddingFilter
@@ -133,8 +133,8 @@ impl EmbeddingRegistry {
     /// since we expect <1000 embeddings total.
     pub fn prewarm(&self, db: &TransactionDB) -> Result<usize> {
         let cf = db
-            .cf_handle(EmbeddingRegistryCf::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingRegistryCf::CF_NAME))?;
+            .cf_handle(EmbeddingSpecs::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
 
         let iter = db.iterator_cf(&cf, IteratorMode::Start);
 
@@ -144,19 +144,19 @@ impl EmbeddingRegistry {
         for item in iter {
             let (key_bytes, value_bytes) = item?;
 
-            let key = EmbeddingRegistryCf::key_from_bytes(&key_bytes)?;
-            let value = EmbeddingRegistryCf::value_from_bytes(&value_bytes)?;
+            let key = EmbeddingSpecs::key_from_bytes(&key_bytes)?;
+            let value = EmbeddingSpecs::value_from_bytes(&value_bytes)?;
 
             let code = key.0;
             let embedding = Embedding::new(
                 code,
-                value.model.clone(),
-                value.dim,
-                value.distance,
+                value.0.clone(), // model
+                value.1,         // dim
+                value.2,         // distance
                 None,
             );
 
-            let spec_key = (value.model, value.dim, value.distance);
+            let spec_key = (value.0, value.1, value.2);
             self.by_spec.insert(spec_key, embedding.clone());
             self.by_code.insert(code, embedding);
 
@@ -200,20 +200,20 @@ impl EmbeddingRegistry {
 
         // Persist to RocksDB
         let cf = db
-            .cf_handle(EmbeddingRegistryCf::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingRegistryCf::CF_NAME))?;
+            .cf_handle(EmbeddingSpecs::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
 
-        let key = EmbeddingRegistryCfKey(code);
-        let value = EmbeddingRegistryCfValue {
-            model: builder.model.clone(),
-            dim: builder.dim,
-            distance: builder.distance,
-        };
+        let key = EmbeddingSpecsCfKey(code);
+        let value = EmbeddingSpecsCfValue(
+            builder.model.clone(), // model
+            builder.dim,           // dim
+            builder.distance,      // distance
+        );
 
         db.put_cf(
             &cf,
-            EmbeddingRegistryCf::key_to_bytes(&key),
-            EmbeddingRegistryCf::value_to_bytes(&value)?,
+            EmbeddingSpecs::key_to_bytes(&key),
+            EmbeddingSpecs::value_to_bytes(&value)?,
         )?;
 
         // Create embedding
