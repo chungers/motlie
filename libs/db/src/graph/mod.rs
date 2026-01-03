@@ -71,7 +71,7 @@ pub use reader::{
 };
 pub use name_hash::{NameCache, NameHash};
 pub use summary_hash::SummaryHash;
-pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
+pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, Schema, SrcId};
 pub use writer::{
     // Mutation consumer functions
     create_mutation_consumer,

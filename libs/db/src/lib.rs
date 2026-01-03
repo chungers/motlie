@@ -19,6 +19,10 @@ pub mod fulltext;
 // Users access via: motlie_db::provider::ColumnFamilyProvider
 pub mod provider;
 
+// Storage builder for composing modular ColumnFamilyProvider implementations
+// Users access via: motlie_db::storage_builder::{StorageBuilder, SharedStorage}
+pub mod storage_builder;
+
 // Unified storage module - combines graph and fulltext
 // Users access via: motlie_db::Storage, motlie_db::StorageConfig, etc.
 mod storage;
