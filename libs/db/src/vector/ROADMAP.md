@@ -192,7 +192,7 @@ independent of `motlie_db::graph` column families. All vector CFs use the `vecto
 ### Design Principles
 
 1. **Namespace Isolation**: All CF names prefixed with `vector/` to avoid collisions
-2. **Multi-Embedding Support**: Keys include `embedding_code` to support multiple embedding spaces
+2. **Multi-Embedding Support**: Keys include `embedding` to support multiple embedding spaces
    (e.g., `qwen3`, `gemma`, `openai-ada-002`) in the same database
 3. **No Graph Module Changes**: Vector module is self-contained; does not modify graph CFs
 4. **Shared RocksDB Instance**: Uses same `TransactionDB` as graph module for efficiency
@@ -203,23 +203,55 @@ An **embedding namespace** identifies a specific embedding model/configuration:
 
 ```rust
 /// Embedding namespace identifier (e.g., "qwen3", "gemma", "openai-ada-002")
-/// Max 32 bytes, stored as fixed-size array for efficient key encoding
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct EmbeddingSpace([u8; 32]);
+/// Uses u64 for register-aligned keys; mapped from string names via registry.
+///
+/// Design rationale (ARCH-14):
+/// - u64 is register-aligned for fast key comparison
+/// - 8 bytes vs 32 bytes saves ~192 GB at 1B scale
+/// - <1000 embedding models expected; u64 is more than sufficient
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Embedding(u64);
 
-impl EmbeddingSpace {
-    pub fn new(name: &str) -> Self {
-        assert!(name.len() <= 32, "Embedding code max 32 bytes");
-        let mut code = [0u8; 32];
-        code[..name.len()].copy_from_slice(name.as_bytes());
-        EmbeddingSpace(code)
+impl Embedding {
+    /// Create from numeric ID (used internally after registry lookup)
+    pub fn from_id(id: u64) -> Self {
+        Embedding(id)
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    pub fn to_be_bytes(&self) -> [u8; 8] {
+        self.0.to_be_bytes()
+    }
+}
+
+/// Registry for embedding name <-> ID mapping
+/// Stored in vector/embedding_registry CF
+pub struct EmbeddingRegistry {
+    // name -> id mapping (in-memory cache)
+    name_to_id: HashMap<String, u64>,
+    // id -> name mapping
+    id_to_name: HashMap<u64, String>,
+    next_id: AtomicU64,
+}
+
+impl EmbeddingRegistry {
+    /// Get or create embedding ID for a name
+    pub fn get_or_create(&self, name: &str) -> Embedding {
+        if let Some(&id) = self.name_to_id.get(name) {
+            return Embedding(id);
+        }
+        // Allocate new ID and persist to CF
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        // ... persist to RocksDB ...
+        Embedding(id)
     }
 }
 ```
+
+**Note**: Internal vec_ids use u32 (not u64) because RoaringBitmap edge storage requires u32 values (ARCH-15). This limits each embedding space to 4B vectors, acceptable for SCALE-1 target.
 
 ### Column Family Layout
 
@@ -230,8 +262,15 @@ impl EmbeddingSpace {
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ CF: vector/embedding_registry                                           │ │
+│  │ Key:   [embedding_id: u64] = 8 bytes                                   │ │
+│  │ Value: embedding name string (e.g., "qwen3", "openai-ada-002")         │ │
+│  │ Purpose: Embedding ID <-> name mapping                                 │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/vectors                                                      │ │
-│  │ Key:   [embedding_code: 32] + [node_id: u32] = 36 bytes                │ │
+│  │ Key:   [embedding: u64] + [vec_id: u32] = 12 bytes                    │ │
 │  │ Value: f32[dim] binary (e.g., 512 bytes for 128D)                      │ │
 │  │ Access: Point lookup, MultiGet for re-ranking                          │ │
 │  │ Options: LZ4 compression, 16KB blocks                                  │ │
@@ -239,7 +278,7 @@ impl EmbeddingSpace {
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/edges                                                        │ │
-│  │ Key:   [embedding_code: 32] + [node_id: u32] + [layer: u8] = 37 bytes  │ │
+│  │ Key:   [embedding: u64] + [vec_id: u32] + [layer: u8] = 13 bytes      │ │
 │  │ Value: RoaringBitmap serialized (~50-200 bytes)                        │ │
 │  │ Access: Point lookup, merge operator for updates                       │ │
 │  │ Options: No compression (already compact), merge operator enabled      │ │
@@ -247,15 +286,15 @@ impl EmbeddingSpace {
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/binary_codes                                                 │ │
-│  │ Key:   [embedding_code: 32] + [node_id: u32] = 36 bytes                │ │
+│  │ Key:   [embedding: u64] + [vec_id: u32] = 12 bytes                    │ │
 │  │ Value: [u8; code_size] (e.g., 16 bytes for 128-dim 1-bit RaBitQ)       │ │
 │  │ Access: Sequential scan during beam search                             │ │
 │  │ Options: No compression, 4KB blocks                                    │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │ CF: vector/node_meta                                                    │ │
-│  │ Key:   [embedding_code: 32] + [node_id: u32] = 36 bytes                │ │
+│  │ CF: vector/vec_meta                                                    │ │
+│  │ Key:   [embedding: u64] + [vec_id: u32] = 12 bytes                    │ │
 │  │ Value: { max_layer: u8, flags: u8, created_at: u64 } (~10 bytes)       │ │
 │  │ Access: Point lookup                                                   │ │
 │  │ Options: No compression (small values)                                 │ │
@@ -263,7 +302,7 @@ impl EmbeddingSpace {
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/graph_meta                                                   │ │
-│  │ Key:   [embedding_code: 32] + [field: 8] = 40 bytes                    │ │
+│  │ Key:   [embedding: u64] + [field: u8] = 9 bytes                        │ │
 │  │ Value: Varies by field (entry_point, max_level, count, config)         │ │
 │  │ Access: Point lookup (rarely changes)                                  │ │
 │  │ Options: No compression                                                │ │
@@ -271,28 +310,29 @@ impl EmbeddingSpace {
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/id_forward                                                   │ │
-│  │ Key:   [embedding_code: 32] + [ulid: 16] = 48 bytes                    │ │
-│  │ Value: [node_id: u32] = 4 bytes                                        │ │
-│  │ Purpose: ULID -> internal u32 mapping (insert path)                    │ │
+│  │ Key:   [embedding: u64] + [ulid: 16] = 24 bytes                        │ │
+│  │ Value: [vec_id: u32] = 4 bytes                                        │ │
+│  │ Purpose: (embedding, ULID) -> internal u32 mapping (insert path)       │ │
+│  │ Note: Embedding prefix required per FUNC-7 (multi-embedding support)   │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/id_reverse                                                   │ │
-│  │ Key:   [embedding_code: 32] + [node_id: u32] = 36 bytes                │ │
+│  │ Key:   [embedding: u64] + [vec_id: u32] = 12 bytes                    │ │
 │  │ Value: [ulid: 16] = 16 bytes                                           │ │
-│  │ Purpose: internal u32 -> ULID mapping (search path, hot)               │ │
+│  │ Purpose: (embedding, vec_id) -> ULID mapping (search path, hot)       │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/id_alloc                                                     │ │
-│  │ Key:   [embedding_code: 32] + [field: 8] = 40 bytes                    │ │
+│  │ Key:   [embedding: u64] + [field: u8] = 9 bytes                        │ │
 │  │ Value: next_id (u32) or free_bitmap (RoaringBitmap serialized)         │ │
 │  │ Purpose: ID allocator persistence per embedding namespace              │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/pending                                                      │ │
-│  │ Key:   [embedding_code: 32] + [timestamp: u64] + [node_id: u32] = 44   │ │
+│  │ Key:   [embedding: u64] + [timestamp: u64] + [vec_id: u32] = 20 bytes │ │
 │  │ Value: empty (vector already stored in vector/vectors)                 │ │
 │  │ Purpose: Async graph updater pending queue                             │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
@@ -300,12 +340,73 @@ impl EmbeddingSpace {
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+**Storage Savings** (vs 32-byte embedding prefix):
+
+| CF | Old Key Size | New Key Size | Savings/Key | At 1B keys |
+|----|--------------|--------------|-------------|------------|
+| vectors | 36 bytes | 12 bytes | 24 bytes | 24 GB |
+| edges | 37 bytes | 13 bytes | 24 bytes | 72 GB (3 layers avg) |
+| binary_codes | 36 bytes | 12 bytes | 24 bytes | 24 GB |
+| vec_meta | 36 bytes | 12 bytes | 24 bytes | 24 GB |
+| id_forward | 48 bytes | 24 bytes | 24 bytes | 24 GB |
+| id_reverse | 36 bytes | 12 bytes | 24 bytes | 24 GB |
+| **Total** | | | | **~192 GB** |
+
+### CF Key Summary
+
+| CF | Key | Size | Value | Purpose |
+|----|-----|------|-------|---------|
+| embedding_registry | `[id: u64]` | 8 | name string | ID ↔ name mapping |
+| vectors | `[emb: u64] + [vec_id: u32]` | 12 | f32[dim] | Raw vectors |
+| edges | `[emb: u64] + [vec_id: u32] + [layer: u8]` | 13 | RoaringBitmap | HNSW graph edges |
+| binary_codes | `[emb: u64] + [vec_id: u32]` | 12 | u8[code_size] | RaBitQ codes |
+| vec_meta | `[emb: u64] + [vec_id: u32]` | 12 | {layer, flags} | Per-vector metadata |
+| graph_meta | `[emb: u64] + [field: u8]` | 9 | varies | Entry point, stats |
+| id_forward | `[emb: u64] + [ulid: 16]` | 24 | vec_id (u32) | ULID → vec_id |
+| id_reverse | `[emb: u64] + [vec_id: u32]` | 12 | ulid (16) | vec_id → ULID |
+| id_alloc | `[emb: u64] + [field: u8]` | 9 | u32 / bitmap | ID allocator state |
+| pending | `[emb: u64] + [ts: u64] + [vec_id: u32]` | 20 | empty | Async insert queue |
+
+### Key Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Embedding ID | u64 (8 bytes) | Register-aligned, sufficient for <1000 models (ARCH-14) |
+| Vec ID | u32 (4 bytes) | RoaringBitmap constraint, 4B vectors/space (ARCH-15) |
+| ULID | 16 bytes | External doc ID, globally unique |
+| Embedding in id_forward/id_reverse | **Yes** | Required for multi-embedding (FUNC-7, ARCH-16) |
+
+### Edge Storage Design
+
+Edges use `RoaringBitmap<u32>` storing neighbor vec_ids:
+- Vec IDs are **local to each embedding space** (u32, not globally unique)
+- Edge key includes embedding prefix to isolate graphs between embedding spaces
+- Neighbor IDs inside the bitmap are just u32 (no embedding prefix inside bitmap)
+
+```
+Edge key:   (embedding=1, node=5, layer=0)
+Edge value: RoaringBitmap{3, 7, 12, 45, ...}
+                         ↑ u32 vec_ids within same embedding space
+```
+
+### Why Embedding Prefix in id_forward/id_reverse?
+
+Per FUNC-7 (multi-embedding support), the same document (ULID) can exist in multiple embedding spaces:
+
+```
+Document ULID_abc:
+  - In "qwen3" space: vec_id = 5
+  - In "gemma" space: vec_id = 1000
+```
+
+Without embedding prefix, we couldn't distinguish which vec_id belongs to which space. The id_forward lookup is: "Given this ULID **in this embedding space**, what's its vec_id?"
+
 ### Multi-Embedding Example
 
 ```rust
 // Create vector indices for different embedding models
-let qwen3 = EmbeddingSpace::new("qwen3");
-let gemma = EmbeddingSpace::new("gemma");
+let qwen3 = Embedding::new("qwen3");
+let gemma = Embedding::new("gemma");
 
 // Insert same document with different embeddings
 let doc_ulid = Id::new();
@@ -328,7 +429,7 @@ pub mod cf {
     pub const VECTORS: &str = "vector/vectors";
     pub const EDGES: &str = "vector/edges";
     pub const BINARY_CODES: &str = "vector/binary_codes";
-    pub const NODE_META: &str = "vector/node_meta";
+    pub const NODE_META: &str = "vector/vec_meta";
     pub const GRAPH_META: &str = "vector/graph_meta";
     pub const ID_FORWARD: &str = "vector/id_forward";
     pub const ID_REVERSE: &str = "vector/id_reverse";
@@ -363,7 +464,7 @@ complete independence in its column families and operations.
 │  │ • nodes CF                  │    │ • vector/vectors CF         │        │
 │  │ • forward_edges CF          │    │ • vector/edges CF           │        │
 │  │ • reverse_edges CF          │    │ • vector/binary_codes CF    │        │
-│  │ • names CF                  │    │ • vector/node_meta CF       │        │
+│  │ • names CF                  │    │ • vector/vec_meta CF       │        │
 │  │ • node_summaries CF         │    │ • vector/id_* CFs           │        │
 │  │ • edge_summaries CF         │    │ • vector/pending CF         │        │
 │  └──────────────┬──────────────┘    └──────────────┬──────────────┘        │
@@ -389,7 +490,7 @@ pub struct VectorStorage {
     db: Arc<TransactionDB>,
 
     /// Per-embedding-namespace state
-    indices: RwLock<HashMap<EmbeddingSpace, IndexState>>,
+    indices: RwLock<HashMap<Embedding, IndexState>>,
 }
 
 struct IndexState {
@@ -417,7 +518,7 @@ impl VectorStorage {
     }
 
     /// Create or get an embedding namespace
-    pub fn get_or_create_index(&self, code: &EmbeddingSpace, config: HnswConfig) -> Result<()> {
+    pub fn get_or_create_index(&self, code: &Embedding, config: HnswConfig) -> Result<()> {
         let mut indices = self.indices.write().unwrap();
         if !indices.contains_key(code) {
             let state = IndexState::load_or_create(&self.db, code, config)?;
@@ -457,7 +558,7 @@ If the caller needs temporal or other filtering, they handle it after search:
 
 ```rust
 // Application code (not in vector module)
-let results = vector_storage.search(&embedding_code, &query, k * 3, ef)?;
+let results = vector_storage.search(&embedding, &query, k * 3, ef)?;
 
 // Caller applies temporal filter using graph storage
 let visible_results: Vec<_> = results.into_iter()
@@ -691,7 +792,7 @@ pub struct VectorStorage {
     db: Arc<TransactionDB>,
 
     /// Per-embedding-namespace state
-    indices: RwLock<HashMap<EmbeddingSpace, IndexState>>,
+    indices: RwLock<HashMap<Embedding, IndexState>>,
 }
 
 impl VectorStorage {
@@ -699,13 +800,13 @@ impl VectorStorage {
     pub fn open(graph: &Storage) -> Result<Self>;
 
     /// Insert vector for a ULID in a specific embedding namespace
-    pub fn insert(&self, code: &EmbeddingSpace, ulid: Id, vector: &[f32]) -> Result<()>;
+    pub fn insert(&self, code: &Embedding, ulid: Id, vector: &[f32]) -> Result<()>;
 
     /// Search returns (distance, ULID) - caller handles any filtering
-    pub fn search(&self, code: &EmbeddingSpace, query: &[f32], k: usize, ef: usize) -> Result<Vec<(f32, Id)>>;
+    pub fn search(&self, code: &Embedding, query: &[f32], k: usize, ef: usize) -> Result<Vec<(f32, Id)>>;
 
     /// Delete vector from namespace
-    pub fn delete(&self, code: &EmbeddingSpace, ulid: Id) -> Result<()>;
+    pub fn delete(&self, code: &Embedding, ulid: Id) -> Result<()>;
 }
 ```
 
@@ -728,7 +829,7 @@ mod foundation_tests {
     fn test_module_exports() {
         // Verify public types are accessible
         let _config = VectorConfig::default();
-        let _code = EmbeddingSpace::new("test");
+        let _code = Embedding::new("test");
     }
 
     /// Test: VectorStorage opens with shared graph DB
@@ -755,22 +856,24 @@ mod foundation_tests {
         }
     }
 
-    /// Test: EmbeddingSpace handles various inputs
+    /// Test: Embedding ID creation and serialization
     #[test]
-    fn test_embedding_code() {
-        let code = EmbeddingSpace::new("qwen3");
-        assert_eq!(&code.as_bytes()[..5], b"qwen3");
-        assert_eq!(code.as_bytes()[5..], [0u8; 27]);
+    fn test_embedding() {
+        let registry = EmbeddingRegistry::new();
 
-        // Max length
-        let max_code = EmbeddingSpace::new("a]".repeat(16).as_str());
-        assert_eq!(max_code.as_bytes().len(), 32);
-    }
+        // Get or create embedding ID
+        let qwen = registry.get_or_create("qwen3");
+        let gemma = registry.get_or_create("gemma");
 
-    #[test]
-    #[should_panic(expected = "max 32 bytes")]
-    fn test_embedding_code_too_long() {
-        EmbeddingSpace::new(&"x".repeat(33));
+        // IDs should be different
+        assert_ne!(qwen.as_u64(), gemma.as_u64());
+
+        // Same name returns same ID
+        let qwen2 = registry.get_or_create("qwen3");
+        assert_eq!(qwen.as_u64(), qwen2.as_u64());
+
+        // Serialization is 8 bytes
+        assert_eq!(qwen.to_be_bytes().len(), 8);
     }
 
     /// Test: Multiple embedding namespaces are isolated
@@ -779,8 +882,8 @@ mod foundation_tests {
         let tmp = TempDir::new().unwrap();
         let storage = setup_vector_storage(tmp.path());
 
-        let qwen = EmbeddingSpace::new("qwen3");
-        let gemma = EmbeddingSpace::new("gemma");
+        let qwen = Embedding::new("qwen3");
+        let gemma = Embedding::new("gemma");
 
         // Insert same ULID with different embeddings
         let ulid = Id::new();
@@ -801,8 +904,266 @@ mod foundation_tests {
 - [ ] Module compilation and exports
 - [ ] VectorStorage initialization with shared DB
 - [ ] CF naming conventions (`vector/` prefix)
-- [ ] EmbeddingSpace creation and validation
+- [ ] Embedding creation and validation
 - [ ] Namespace isolation between embedding models
+
+### Task 0.3: EmbeddingRegistry Pre-warming
+
+Pre-warm EmbeddingRegistry during `ready()`, following the NameCache pattern in `graph/name_hash.rs`:
+
+```rust
+// libs/db/src/vector/embedding.rs
+
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+/// Thread-safe bidirectional embedding name <-> ID cache
+/// Pattern: Similar to graph::NameCache (libs/db/src/graph/name_hash.rs:123-249)
+pub struct EmbeddingRegistry {
+    /// ID -> name mapping
+    id_to_name: DashMap<u64, Arc<String>>,
+    /// Name -> ID mapping
+    name_to_id: DashMap<Arc<String>, u64>,
+    /// Next available ID (monotonic)
+    next_id: AtomicU64,
+}
+
+impl EmbeddingRegistry {
+    pub fn new() -> Self {
+        Self {
+            id_to_name: DashMap::new(),
+            name_to_id: DashMap::new(),
+            next_id: AtomicU64::new(0),
+        }
+    }
+
+    /// Pre-warm by loading ALL entries from embedding_registry CF
+    /// Unlike NameCache (which limits to N entries), we load everything
+    /// since we expect <1000 embeddings total
+    pub fn prewarm(&self, db: &TransactionDB) -> Result<usize> {
+        let cf = db.cf_handle(cf::EMBEDDING_REGISTRY)?;
+        let iter = db.iterator_cf(cf, IteratorMode::Start);
+
+        let mut count = 0u64;
+        let mut max_id = 0u64;
+
+        for item in iter {
+            let (key, value) = item?;
+            let id = u64::from_be_bytes(key[..8].try_into()?);
+            let name: String = String::from_utf8(value.to_vec())?;
+
+            self.id_to_name.insert(id, Arc::new(name.clone()));
+            self.name_to_id.insert(Arc::new(name), id);
+
+            max_id = max_id.max(id);
+            count += 1;
+        }
+
+        // Set next_id to max + 1
+        self.next_id.store(max_id + 1, Ordering::SeqCst);
+
+        Ok(count as usize)
+    }
+
+    /// Get existing or create new embedding ID
+    pub fn get_or_create(&self, name: &str, db: &TransactionDB) -> Result<Embedding> {
+        // Fast path: already cached
+        if let Some(id) = self.name_to_id.get(name) {
+            return Ok(Embedding::from_id(*id));
+        }
+
+        // Slow path: allocate new ID and persist
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let name_arc = Arc::new(name.to_string());
+
+        // Persist to RocksDB
+        let cf = db.cf_handle(cf::EMBEDDING_REGISTRY)?;
+        db.put_cf(cf, &id.to_be_bytes(), name.as_bytes())?;
+
+        // Update cache
+        self.id_to_name.insert(id, name_arc.clone());
+        self.name_to_id.insert(name_arc, id);
+
+        Ok(Embedding::from_id(id))
+    }
+
+    /// Lookup name by ID (for debugging/logging)
+    pub fn get_name(&self, id: u64) -> Option<Arc<String>> {
+        self.id_to_name.get(&id).map(|r| r.clone())
+    }
+}
+```
+
+**Acceptance Criteria:**
+- [ ] EmbeddingRegistry loads all entries during `ready()`
+- [ ] Lookup is O(1) via DashMap (no DB hit after prewarm)
+- [ ] New embeddings are persisted immediately
+- [ ] Thread-safe concurrent access
+
+### Task 0.4: ColumnFamilyProvider Trait (Mix-in Pattern)
+
+Enable vector module to register its CFs with shared RocksDB **without** modifying graph module code:
+
+```rust
+// libs/db/src/schema.rs (new shared module)
+
+use rocksdb::{ColumnFamilyDescriptor, Options, Cache};
+
+/// Trait for modules that provide column families to the shared RocksDB instance
+///
+/// Design rationale:
+/// - Graph module shouldn't know about vector-specific CFs
+/// - Vector module needs to share the same TransactionDB (design principle #4)
+/// - Each module registers its own CFs and initialization logic
+pub trait ColumnFamilyProvider: Send + Sync {
+    /// Module name for logging (e.g., "graph", "vector")
+    fn name(&self) -> &'static str;
+
+    /// Returns all CF descriptors for this module
+    fn column_family_descriptors(
+        &self,
+        cache: Option<&Cache>,
+        block_size: usize,
+    ) -> Vec<ColumnFamilyDescriptor>;
+
+    /// Called after DB is opened to initialize module-specific state
+    /// (e.g., pre-warm caches, validate schema)
+    fn on_ready(&self, db: &TransactionDB) -> Result<()> {
+        Ok(()) // Default: no-op
+    }
+}
+
+// libs/db/src/graph/schema.rs
+impl ColumnFamilyProvider for graph::Schema {
+    fn name(&self) -> &'static str { "graph" }
+
+    fn column_family_descriptors(&self, cache: Option<&Cache>, block_size: usize)
+        -> Vec<ColumnFamilyDescriptor>
+    {
+        vec![
+            // Names, Nodes, NodeFragments, ForwardEdges, ReverseEdges, etc.
+        ]
+    }
+
+    fn on_ready(&self, db: &TransactionDB) -> Result<()> {
+        // Pre-warm NameCache (existing logic)
+        self.name_cache.prewarm(db, self.config.prewarm_limit)?;
+        Ok(())
+    }
+}
+
+// libs/db/src/vector/schema.rs
+impl ColumnFamilyProvider for vector::Schema {
+    fn name(&self) -> &'static str { "vector" }
+
+    fn column_family_descriptors(&self, cache: Option<&Cache>, block_size: usize)
+        -> Vec<ColumnFamilyDescriptor>
+    {
+        vec![
+            // embedding_registry, vectors, edges, binary_codes, vec_meta, etc.
+        ]
+    }
+
+    fn on_ready(&self, db: &TransactionDB) -> Result<()> {
+        // Pre-warm EmbeddingRegistry (loads ALL entries, <1000 expected)
+        let count = self.embedding_registry.prewarm(db)?;
+        tracing::info!(count, "Pre-warmed EmbeddingRegistry");
+        Ok(())
+    }
+}
+```
+
+**Unified Storage Builder:**
+
+```rust
+// libs/db/src/storage.rs
+// Exposed as: motlie_db::StorageBuilder (root crate, not in graph:: or vector::)
+
+pub struct StorageBuilder {
+    path: PathBuf,
+    providers: Vec<Box<dyn ColumnFamilyProvider>>,
+    cache_config: BlockCacheConfig,
+}
+
+impl StorageBuilder {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            providers: Vec::new(),
+            cache_config: Default::default(),
+        }
+    }
+
+    /// Register graph module CFs
+    pub fn with_graph(mut self, config: GraphConfig) -> Self {
+        self.providers.push(Box::new(graph::Schema::new(config)));
+        self
+    }
+
+    /// Register vector module CFs (optional)
+    pub fn with_vector(mut self, config: VectorConfig) -> Self {
+        self.providers.push(Box::new(vector::Schema::new(config)));
+        self
+    }
+
+    /// Open DB with all registered providers
+    pub fn open(self) -> Result<Storage> {
+        // 1. Create shared block cache
+        let cache = Cache::new_lru_cache(self.cache_config.capacity);
+
+        // 2. Collect all CF descriptors from all providers
+        let mut cf_descriptors = vec![
+            ColumnFamilyDescriptor::new("default", Options::default()),
+        ];
+        for provider in &self.providers {
+            cf_descriptors.extend(
+                provider.column_family_descriptors(Some(&cache), self.cache_config.block_size)
+            );
+        }
+
+        // 3. Open single DB with all CFs
+        let db = TransactionDB::open_cf_descriptors(&db_opts, &self.path, cf_descriptors)?;
+        let db = Arc::new(db);
+
+        // 4. Call on_ready for each provider (pre-warm caches, etc.)
+        for provider in &self.providers {
+            provider.on_ready(&db)?;
+            tracing::info!(module = provider.name(), "Storage ready");
+        }
+
+        Ok(Storage { db, providers: self.providers })
+    }
+}
+
+// Usage:
+use motlie_db::{StorageBuilder, GraphConfig, VectorConfig};
+
+let storage = StorageBuilder::new("/data/motlie")
+    .with_graph(GraphConfig::default())
+    .with_vector(VectorConfig::default())  // Optional!
+    .open()?;
+```
+
+**Why This Design:**
+
+| Concern | Resolution |
+|---------|------------|
+| Crate location | `StorageBuilder` in `motlie_db::` root (not graph:: or vector::) |
+| Graph module unchanged | Graph implements trait, no vector imports |
+| Vector CFs registered cleanly | Vector implements same trait |
+| Shared block cache | Single Cache instance passed to all providers |
+| Shared TransactionDB | One DB opened with all CFs |
+| Pre-warm isolation | Each module's `on_ready()` handles its own caches |
+| Optional vector support | `with_vector()` is opt-in; graph-only builds work |
+
+**Acceptance Criteria:**
+- [ ] `ColumnFamilyProvider` trait in `motlie_db::schema` (shared module)
+- [ ] `StorageBuilder` in `motlie_db::storage` (root, composes all modules)
+- [ ] Graph module implements trait (refactor existing CF init)
+- [ ] Vector module implements trait (new)
+- [ ] Vector module is optional (graph-only builds compile)
+- [ ] Integration test: graph + vector CFs in same DB
 
 ---
 
@@ -1033,7 +1394,7 @@ mod id_tests {
         // First session: allocate some IDs
         {
             let storage = setup_vector_storage(tmp.path());
-            let code = EmbeddingSpace::new("test");
+            let code = Embedding::new("test");
 
             for i in 0..100 {
                 let ulid = Id::new();
@@ -1045,7 +1406,7 @@ mod id_tests {
         // Second session: verify state recovered
         {
             let storage = setup_vector_storage(tmp.path());
-            let code = EmbeddingSpace::new("test");
+            let code = Embedding::new("test");
 
             // New allocation should continue from 100
             let ulid = Id::new();
@@ -1060,7 +1421,7 @@ mod id_tests {
     #[test]
     fn test_forward_mapping() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
         let ulid = Id::new();
 
         storage.insert(&code, ulid, &[1.0; 128]).unwrap();
@@ -1073,7 +1434,7 @@ mod id_tests {
     #[test]
     fn test_reverse_mapping() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
         let ulid = Id::new();
 
         storage.insert(&code, ulid, &[1.0; 128]).unwrap();
@@ -1088,7 +1449,7 @@ mod id_tests {
     #[test]
     fn test_batch_ulid_resolution() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let ulids: Vec<Id> = (0..100).map(|_| Id::new()).collect();
         for (i, ulid) in ulids.iter().enumerate() {
@@ -1168,17 +1529,18 @@ Replace explicit edge lists with compressed bitmaps:
 // libs/db/src/vector/schema.rs
 
 /// HNSW graph edges using RoaringBitmap
-/// Key: [node_id: u32 | layer: u8] = 5 bytes
+/// Key: [embedding: u64] + [vec_id: u32] + [layer: u8] = 13 bytes
 /// Value: RoaringBitmap serialized (~50-200 bytes)
 pub struct GraphEdges;
 
 impl ColumnFamilyRecord for GraphEdges {
     const CF_NAME: &'static str = cf::EDGES;  // "vector/edges"
 
-    fn key_to_bytes(node_id: u32, layer: u8) -> [u8; 5] {
-        let mut key = [0u8; 5];
-        key[0..4].copy_from_slice(&node_id.to_be_bytes());
-        key[4] = layer;
+    fn key_to_bytes(embedding: &Embedding, vec_id: u32, layer: u8) -> [u8; 13] {
+        let mut key = [0u8; 13];
+        key[0..8].copy_from_slice(&embedding.to_be_bytes());
+        key[8..12].copy_from_slice(&vec_id.to_be_bytes());
+        key[12] = layer;
         key
     }
 }
@@ -1253,7 +1615,7 @@ Store raw vectors for exact distance computation:
 
 ```rust
 /// Full vector storage (raw f32 bytes)
-/// Key: [node_id: u32] = 4 bytes
+/// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
 /// Value: [f32; D] as raw bytes (e.g., 512 bytes for 128D)
 pub struct Vectors;
 
@@ -1290,21 +1652,21 @@ Store per-node HNSW metadata:
 
 ```rust
 /// Per-node HNSW metadata
-/// Key: [node_id: u32] = 4 bytes
-/// Value: NodeMeta (rkyv serialized, ~8 bytes)
+/// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
+/// Value: VecMeta (rkyv serialized, ~8 bytes)
 #[derive(Archive, Deserialize, Serialize)]
-pub struct NodeMeta {
+pub struct VecMeta {
     pub max_layer: u8,
     pub flags: u8,           // deleted, needs_repair, etc.
     pub created_at: u64,     // Timestamp for debugging
 }
 
-pub struct NodeMetaCF;
+pub struct VecMetaCF;
 
-impl HotColumnFamilyRecord for NodeMetaCF {
-    const CF_NAME: &'static str = cf::NODE_META;  // "vector/node_meta"
+impl HotColumnFamilyRecord for VecMetaCF {
+    const CF_NAME: &'static str = cf::NODE_META;  // "vector/vec_meta"
     type Key = u32;
-    type Value = NodeMeta;
+    type Value = VecMeta;
 }
 ```
 
@@ -1360,7 +1722,7 @@ impl VectorStorage {
         let level = self.random_level();
 
         // 5. Store node metadata
-        self.store_node_meta(internal_id, level)?;
+        self.store_vec_meta(internal_id, level)?;
 
         // 6. Greedy search from entry point
         let neighbors_by_layer = self.greedy_search_layers(vector, level)?;
@@ -1379,15 +1741,15 @@ impl VectorStorage {
         Ok(())
     }
 
-    fn add_bidirectional_edges(&self, node: u32, neighbors: &[u32], layer: u8) -> Result<()> {
+    fn add_bidirectional_edges(&self, vec_id: u32, neighbors: &[u32], layer: u8) -> Result<()> {
         // Use merge operators - no read-modify-write!
-        let key = GraphEdges::key_to_bytes(node, layer);
+        let key = GraphEdges::key_to_bytes(vec_id, layer);
         self.db.merge_cf(self.edges_cf, &key, EdgeOp::AddBatch(neighbors.to_vec()))?;
 
         // Reverse edges
         for &neighbor in neighbors {
             let neighbor_key = GraphEdges::key_to_bytes(neighbor, layer);
-            self.db.merge_cf(self.edges_cf, &neighbor_key, EdgeOp::Add(node))?;
+            self.db.merge_cf(self.edges_cf, &neighbor_key, EdgeOp::Add(vec_id))?;
         }
 
         Ok(())
@@ -1412,7 +1774,7 @@ layers containing exponentially fewer nodes.
 // libs/db/src/vector/navigation.rs
 
 /// Navigation layer metadata stored in graph_meta CF
-/// Key: [embedding_code: 32] + "layer_info"
+/// Key: [embedding: u64] + "layer_info"
 #[derive(Archive, Deserialize, Serialize)]
 pub struct NavigationLayerInfo {
     /// Entry point for each layer (node with highest layer assignment)
@@ -1456,11 +1818,11 @@ impl NavigationLayerInfo {
     }
 
     /// Update entry point if new node has higher layer
-    pub fn maybe_update_entry(&mut self, node_id: u32, node_layer: u8) -> bool {
+    pub fn maybe_update_entry(&mut self, vec_id: u32, node_layer: u8) -> bool {
         if node_layer > self.max_layer || self.entry_points.is_empty() {
             // Extend entry_points vector to accommodate new layer
             while self.entry_points.len() <= node_layer as usize {
-                self.entry_points.push(node_id);
+                self.entry_points.push(vec_id);
             }
             self.max_layer = node_layer;
             true
@@ -1495,7 +1857,7 @@ impl VectorStorage {
     /// 4. At layer 0, expand beam search to ef candidates
     pub fn search(
         &self,
-        code: &EmbeddingSpace,
+        code: &Embedding,
         query: &[f32],
         k: usize,
         ef: usize,
@@ -1539,7 +1901,7 @@ impl VectorStorage {
     /// Beam search at layer 0 for final candidate expansion
     fn beam_search_layer0(
         &self,
-        code: &EmbeddingSpace,
+        code: &Embedding,
         query: &[f32],
         entry: u32,
         k: usize,
@@ -1640,7 +2002,7 @@ use lru::LruCache;
 /// Total cache: ~50-100MB for layers 2+
 pub struct NavigationCache {
     /// Per-embedding-code caches
-    caches: RwLock<HashMap<EmbeddingSpace, LayerCache>>,
+    caches: RwLock<HashMap<Embedding, LayerCache>>,
 
     /// Configuration
     config: NavigationCacheConfig,
@@ -1672,7 +2034,7 @@ impl Default for NavigationCacheConfig {
 
 struct LayerCache {
     /// Full in-memory storage for layers >= min_cached_layer
-    /// Key: (layer, node_id) -> neighbors bitmap
+    /// Key: (layer, vec_id) -> neighbors bitmap
     upper_layers: HashMap<(u8, u32), RoaringBitmap>,
 
     /// LRU cache for frequently accessed layer-0/1 nodes
@@ -1693,7 +2055,7 @@ impl NavigationCache {
     /// Load or create cache for an embedding namespace
     pub fn get_or_load(
         &self,
-        code: &EmbeddingSpace,
+        code: &Embedding,
         db: &TransactionDB,
     ) -> Result<()> {
         let mut caches = self.caches.write().unwrap();
@@ -1710,8 +2072,8 @@ impl NavigationCache {
     /// Get neighbors with cache lookup
     pub fn get_neighbors_cached(
         &self,
-        code: &EmbeddingSpace,
-        node_id: u32,
+        code: &Embedding,
+        vec_id: u32,
         layer: u8,
         db: &TransactionDB,
     ) -> Result<RoaringBitmap> {
@@ -1719,7 +2081,7 @@ impl NavigationCache {
         if let Some(cache) = caches.get(code) {
             // Check upper layer cache
             if layer >= self.config.min_cached_layer {
-                if let Some(bitmap) = cache.upper_layers.get(&(layer, node_id)) {
+                if let Some(bitmap) = cache.upper_layers.get(&(layer, vec_id)) {
                     return Ok(bitmap.clone());
                 }
             }
@@ -1730,21 +2092,21 @@ impl NavigationCache {
         drop(caches);
 
         // Fallback to RocksDB
-        self.load_from_db(code, node_id, layer, db)
+        self.load_from_db(code, vec_id, layer, db)
     }
 
     /// Invalidate cache entry on edge update
-    pub fn invalidate(&self, code: &EmbeddingSpace, node_id: u32, layer: u8) {
+    pub fn invalidate(&self, code: &Embedding, vec_id: u32, layer: u8) {
         let mut caches = self.caches.write().unwrap();
         if let Some(cache) = caches.get_mut(code) {
-            cache.upper_layers.remove(&(layer, node_id));
-            cache.hot_cache.pop(&(layer, node_id));
+            cache.upper_layers.remove(&(layer, vec_id));
+            cache.hot_cache.pop(&(layer, vec_id));
         }
     }
 
     fn load_layer_cache(
         &self,
-        code: &EmbeddingSpace,
+        code: &Embedding,
         db: &TransactionDB,
     ) -> Result<LayerCache> {
         let mut upper_layers = HashMap::new();
@@ -1755,11 +2117,11 @@ impl NavigationCache {
         // Load all nodes from layers >= min_cached_layer
         for layer in self.config.min_cached_layer..=nav_info.max_layer {
             let nodes = self.scan_layer_nodes(code, layer, db)?;
-            for (node_id, bitmap) in nodes {
+            for (vec_id, bitmap) in nodes {
                 if upper_layers.len() >= self.config.max_cached_nodes {
                     break;
                 }
-                upper_layers.insert((layer, node_id), bitmap);
+                upper_layers.insert((layer, vec_id), bitmap);
             }
         }
 
@@ -1820,7 +2182,7 @@ mod hnsw_tests {
     #[test]
     fn test_roaring_bitmap_edge_storage() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Add edges
         storage.add_edge(&code, 0, 1, 0).unwrap();
@@ -1837,7 +2199,7 @@ mod hnsw_tests {
     #[test]
     fn test_edge_storage_compression() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Add 32 neighbors (typical M_max)
         for i in 1..=32 {
@@ -1856,7 +2218,7 @@ mod hnsw_tests {
     #[test]
     fn test_merge_operator_add() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Concurrent adds via merge
         storage.merge_add_edge(&code, 0, 1, 0).unwrap();
@@ -1870,7 +2232,7 @@ mod hnsw_tests {
     #[test]
     fn test_merge_operator_batch() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Batch add via merge
         let neighbors: Vec<u32> = (1..=10).collect();
@@ -1883,7 +2245,7 @@ mod hnsw_tests {
     #[test]
     fn test_merge_operator_remove() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         storage.merge_add_edges_batch(&code, 0, &[1, 2, 3, 4, 5], 0).unwrap();
         storage.merge_remove_edge(&code, 0, 3, 0).unwrap();
@@ -1900,7 +2262,7 @@ mod hnsw_tests {
     #[test]
     fn test_insert_single_vector() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
         let ulid = Id::new();
 
         storage.insert(&code, ulid, &[1.0; 128]).unwrap();
@@ -1915,7 +2277,7 @@ mod hnsw_tests {
     #[test]
     fn test_insert_multiple_vectors() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let mut rng = ChaCha20Rng::seed_from_u64(42);
         let vectors: Vec<Vec<f32>> = (0..100)
@@ -1934,7 +2296,7 @@ mod hnsw_tests {
     #[test]
     fn test_insert_creates_bidirectional_edges() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert 10 vectors
         let ulids: Vec<Id> = (0..10).map(|i| {
@@ -1944,12 +2306,12 @@ mod hnsw_tests {
         }).collect();
 
         // Check that edges are bidirectional
-        for node_id in 0u32..10 {
-            let neighbors = storage.get_neighbors(&code, node_id, 0).unwrap();
+        for vec_id in 0u32..10 {
+            let neighbors = storage.get_neighbors(&code, vec_id, 0).unwrap();
             for neighbor in neighbors.iter() {
                 let reverse = storage.get_neighbors(&code, neighbor, 0).unwrap();
-                assert!(reverse.contains(node_id),
-                    "Edge {}->{} missing reverse edge", node_id, neighbor);
+                assert!(reverse.contains(vec_id),
+                    "Edge {}->{} missing reverse edge", vec_id, neighbor);
             }
         }
     }
@@ -1980,7 +2342,7 @@ mod hnsw_tests {
     #[test]
     fn test_entry_point_tracking() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert vectors - should automatically set entry point
         for i in 0..100 {
@@ -1996,7 +2358,7 @@ mod hnsw_tests {
     #[test]
     fn test_layer_descent_search() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert enough vectors to create multiple layers
         let mut rng = ChaCha20Rng::seed_from_u64(42);
@@ -2023,7 +2385,7 @@ mod hnsw_tests {
     #[test]
     fn test_recall_random_data() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let mut rng = ChaCha20Rng::seed_from_u64(42);
         let vectors: Vec<(Id, Vec<f32>)> = (0..1000)
@@ -2078,7 +2440,7 @@ mod hnsw_tests {
 
         let (vectors, queries, ground_truth) = load_sift(&sift_path.unwrap());
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("sift");
+        let code = Embedding::new("sift");
 
         for (i, vec) in vectors.iter().enumerate() {
             let ulid = Id::from_u128(i as u128);
@@ -2107,7 +2469,7 @@ mod hnsw_tests {
     #[test]
     fn test_navigation_cache_loads_upper_layers() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert 10K vectors to create multi-layer structure
         let mut rng = ChaCha20Rng::seed_from_u64(42);
@@ -2130,7 +2492,7 @@ mod hnsw_tests {
     #[test]
     fn test_cache_invalidation() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
         let cache = NavigationCache::new(NavigationCacheConfig::default());
 
         // Insert and cache
@@ -2160,7 +2522,7 @@ mod hnsw_tests {
         // First session: insert vectors
         let ulids: Vec<Id> = {
             let storage = setup_vector_storage(tmp.path());
-            let code = EmbeddingSpace::new("test");
+            let code = Embedding::new("test");
 
             let mut rng = ChaCha20Rng::seed_from_u64(42);
             (0..100).map(|_| {
@@ -2174,7 +2536,7 @@ mod hnsw_tests {
         // Second session: verify recovery
         {
             let storage = setup_vector_storage(tmp.path());
-            let code = EmbeddingSpace::new("test");
+            let code = Embedding::new("test");
 
             // All vectors should be searchable
             assert_eq!(storage.count(&code).unwrap(), 100);
@@ -2213,7 +2575,7 @@ mod hnsw_tests {
 #[bench]
 fn bench_insert_throughput(b: &mut Bencher) {
     let storage = setup_vector_storage_temp();
-    let code = EmbeddingSpace::new("bench");
+    let code = Embedding::new("bench");
     let mut rng = ChaCha20Rng::seed_from_u64(42);
 
     b.iter(|| {
@@ -2227,7 +2589,7 @@ fn bench_insert_throughput(b: &mut Bencher) {
 #[bench]
 fn bench_search_latency_1k(b: &mut Bencher) {
     let storage = setup_with_vectors(1_000);
-    let code = EmbeddingSpace::new("bench");
+    let code = Embedding::new("bench");
     let query = random_vector(128);
 
     b.iter(|| {
@@ -2239,7 +2601,7 @@ fn bench_search_latency_1k(b: &mut Bencher) {
 #[bench]
 fn bench_search_latency_100k(b: &mut Bencher) {
     let storage = setup_with_vectors(100_000);
-    let code = EmbeddingSpace::new("bench");
+    let code = Embedding::new("bench");
     let query = random_vector(128);
 
     b.iter(|| {
@@ -2285,12 +2647,12 @@ impl VectorStorage {
     /// O(1) degree query - RoaringBitmap tracks cardinality
     pub fn get_degree(
         &self,
-        code: &EmbeddingSpace,
-        node_id: u32,
+        code: &Embedding,
+        vec_id: u32,
         layer: u8,
     ) -> Result<usize> {
         let cf = self.db.cf_handle(cf::EDGES)?;
-        let key = self.make_edge_key(code, node_id, layer);
+        let key = self.make_edge_key(code, vec_id, layer);
 
         match self.db.get_cf(cf, &key)? {
             Some(bytes) => {
@@ -2304,12 +2666,12 @@ impl VectorStorage {
     /// Efficient prune check - no full edge deserialization
     pub fn needs_pruning(
         &self,
-        code: &EmbeddingSpace,
-        node_id: u32,
+        code: &Embedding,
+        vec_id: u32,
         layer: u8,
         m_max: usize,
     ) -> Result<bool> {
-        Ok(self.get_degree(code, node_id, layer)? > m_max)
+        Ok(self.get_degree(code, vec_id, layer)? > m_max)
     }
 }
 ```
@@ -2334,14 +2696,14 @@ impl VectorStorage {
     /// Batch fetch neighbors for beam search candidates
     pub fn get_neighbors_batch(
         &self,
-        code: &EmbeddingSpace,
-        node_ids: &[u32],
+        code: &Embedding,
+        vec_ids: &[u32],
         layer: u8,
     ) -> Result<HashMap<u32, Vec<u32>>> {
         let cf = self.db.cf_handle(cf::EDGES)?;
 
         // Build keys for MultiGet
-        let keys: Vec<Vec<u8>> = node_ids.iter()
+        let keys: Vec<Vec<u8>> = vec_ids.iter()
             .map(|&id| self.make_edge_key(code, id, layer))
             .collect();
 
@@ -2349,8 +2711,8 @@ impl VectorStorage {
         let results = self.db.multi_get_cf(cf, &keys);
 
         // Deserialize bitmaps
-        let mut neighbors = HashMap::with_capacity(node_ids.len());
-        for (node_id, result) in node_ids.iter().zip(results.into_iter()) {
+        let mut neighbors = HashMap::with_capacity(vec_ids.len());
+        for (vec_id, result) in vec_ids.iter().zip(results.into_iter()) {
             let neighbor_ids: Vec<u32> = match result? {
                 Some(bytes) => {
                     let bitmap = RoaringBitmap::deserialize_from(&*bytes)?;
@@ -2358,7 +2720,7 @@ impl VectorStorage {
                 }
                 None => Vec::new(),
             };
-            neighbors.insert(*node_id, neighbor_ids);
+            neighbors.insert(*vec_id, neighbor_ids);
         }
 
         Ok(neighbors)
@@ -2381,13 +2743,13 @@ impl VectorStorage {
     /// Batch load vectors for distance computation
     pub fn get_vectors_batch(
         &self,
-        code: &EmbeddingSpace,
-        node_ids: &[u32],
+        code: &Embedding,
+        vec_ids: &[u32],
     ) -> Result<Vec<(u32, Vec<f32>)>> {
         let cf = self.db.cf_handle(cf::VECTORS)?;
 
-        // Build keys: [embedding_code: 32] + [node_id: u32]
-        let keys: Vec<Vec<u8>> = node_ids.iter()
+        // Build keys: [embedding: u64] + [vec_id: u32]
+        let keys: Vec<Vec<u8>> = vec_ids.iter()
             .map(|&id| self.make_vector_key(code, id))
             .collect();
 
@@ -2396,7 +2758,7 @@ impl VectorStorage {
 
         // Convert to vectors
         let vectors: Vec<(u32, Vec<f32>)> = results.into_iter()
-            .zip(node_ids.iter())
+            .zip(vec_ids.iter())
             .filter_map(|(result, &id)| {
                 result.ok().flatten().map(|bytes| {
                     let vector: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
@@ -2409,17 +2771,17 @@ impl VectorStorage {
     }
 
     /// Key construction helper
-    fn make_vector_key(&self, code: &EmbeddingSpace, node_id: u32) -> Vec<u8> {
-        let mut key = Vec::with_capacity(36);
-        key.extend_from_slice(code.as_bytes());
-        key.extend_from_slice(&node_id.to_be_bytes());
+    fn make_vector_key(&self, code: &Embedding, vec_id: u32) -> Vec<u8> {
+        let mut key = Vec::with_capacity(12);  // u64 + u32
+        key.extend_from_slice(&code.to_be_bytes());
+        key.extend_from_slice(&vec_id.to_be_bytes());
         key
     }
 
-    fn make_edge_key(&self, code: &EmbeddingSpace, node_id: u32, layer: u8) -> Vec<u8> {
-        let mut key = Vec::with_capacity(37);
-        key.extend_from_slice(code.as_bytes());
-        key.extend_from_slice(&node_id.to_be_bytes());
+    fn make_edge_key(&self, code: &Embedding, vec_id: u32, layer: u8) -> Vec<u8> {
+        let mut key = Vec::with_capacity(13);  // u64 + u32 + u8
+        key.extend_from_slice(&code.to_be_bytes());
+        key.extend_from_slice(&vec_id.to_be_bytes());
         key.push(layer);
         key
     }
@@ -2441,16 +2803,16 @@ impl VectorStorage {
     /// Batch resolve internal u32 IDs to ULIDs
     pub fn resolve_ulids_batch(
         &self,
-        code: &EmbeddingSpace,
+        code: &Embedding,
         internal_ids: &[u32],
     ) -> Result<Vec<Option<Id>>> {
         let cf = self.db.cf_handle(cf::ID_REVERSE)?;
 
-        // Build keys: [embedding_code: 32] + [node_id: u32]
+        // Build keys: [embedding: u64] + [vec_id: u32]
         let keys: Vec<Vec<u8>> = internal_ids.iter()
             .map(|&id| {
-                let mut key = Vec::with_capacity(36);
-                key.extend_from_slice(code.as_bytes());
+                let mut key = Vec::with_capacity(12);  // u64 + u32
+                key.extend_from_slice(&code.to_be_bytes());
                 key.extend_from_slice(&id.to_be_bytes());
                 key
             })
@@ -2493,7 +2855,7 @@ mod batch_tests {
     #[test]
     fn test_degree_query_o1() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Add varying numbers of edges
         for node in 0..10u32 {
@@ -2512,7 +2874,7 @@ mod batch_tests {
     #[test]
     fn test_degree_query_no_read_amplification() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Add 1000 edges
         for i in 0..1000u32 {
@@ -2537,7 +2899,7 @@ mod batch_tests {
     #[test]
     fn test_batch_neighbor_fetch() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Create graph structure
         for node in 0..100u32 {
@@ -2559,7 +2921,7 @@ mod batch_tests {
     #[test]
     fn test_batch_fetch_multiget_efficiency() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Setup
         for node in 0..1000u32 {
@@ -2597,7 +2959,7 @@ mod batch_tests {
     #[test]
     fn test_batch_vector_retrieval() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert vectors
         let mut rng = ChaCha20Rng::seed_from_u64(42);
@@ -2621,7 +2983,7 @@ mod batch_tests {
     #[test]
     fn test_batch_vector_for_reranking() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Setup - insert vectors with known values
         for i in 0..100u32 {
@@ -2648,7 +3010,7 @@ mod batch_tests {
     #[test]
     fn test_batch_ulid_resolution() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert with known ULIDs
         let ulids: Vec<Id> = (0..100).map(|_| Id::new()).collect();
@@ -2669,7 +3031,7 @@ mod batch_tests {
     #[test]
     fn test_batch_resolution_handles_missing() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert only some IDs
         for i in 0..50u32 {
@@ -2711,7 +3073,7 @@ fn bench_multiget_neighbors_100(b: &mut Bencher) {
     let nodes: Vec<u32> = (0..100).collect();
 
     b.iter(|| {
-        storage.batch_get_neighbors(&EmbeddingSpace::new("bench"), &nodes, 0).unwrap()
+        storage.batch_get_neighbors(&Embedding::new("bench"), &nodes, 0).unwrap()
     });
 }
 // Target: < 1ms for 100 nodes
@@ -2722,7 +3084,7 @@ fn bench_batch_vector_retrieval_100(b: &mut Bencher) {
     let ids: Vec<u32> = (0..100).collect();
 
     b.iter(|| {
-        storage.batch_get_vectors(&EmbeddingSpace::new("bench"), &ids).unwrap()
+        storage.batch_get_vectors(&Embedding::new("bench"), &ids).unwrap()
     });
 }
 // Target: < 2ms for 100 vectors (128D)
@@ -2904,7 +3266,7 @@ impl RaBitQ {
 
 ```rust
 /// Binary codes storage
-/// Key: [node_id: u32] = 4 bytes
+/// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
 /// Value: [u8; code_size] (e.g., 16 bytes for 128-dim 1-bit)
 pub struct BinaryCodes;
 
@@ -3146,7 +3508,7 @@ mod rabitq_tests {
     #[test]
     fn test_distance_estimation_ordering() {
         let storage = setup_rabitq_storage();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert vectors with known distances from origin
         let mut rng = ChaCha20Rng::seed_from_u64(42);
@@ -3193,7 +3555,7 @@ mod rabitq_tests {
     #[test]
     fn test_recall_with_reranking() {
         let storage = setup_rabitq_storage();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let mut rng = ChaCha20Rng::seed_from_u64(42);
         let vectors: Vec<(Id, Vec<f32>)> = (0..1000)
@@ -3239,7 +3601,7 @@ mod rabitq_tests {
     #[test]
     fn test_binary_code_storage_size() {
         let storage = setup_rabitq_storage();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert 1000 vectors
         let mut rng = ChaCha20Rng::seed_from_u64(42);
@@ -3301,7 +3663,7 @@ fn bench_approximate_search_1k(b: &mut Bencher) {
     let query = random_vector(128);
 
     b.iter(|| {
-        storage.search_approximate(&EmbeddingSpace::new("bench"), &query, 100).unwrap()
+        storage.search_approximate(&Embedding::new("bench"), &query, 100).unwrap()
     });
 }
 // Target: < 0.5ms (vs ~5ms for full distance)
@@ -3315,7 +3677,7 @@ fn test_data1_compliance_no_training() {
     // by using it immediately on random vectors
 
     let storage = VectorStorage::open_temp().unwrap();
-    let code = EmbeddingSpace::new("test");
+    let code = Embedding::new("test");
 
     // NO training phase - just insert and search immediately
     let mut rng = ChaCha20Rng::seed_from_u64(42);
@@ -3338,7 +3700,7 @@ fn test_data1_compliance_no_training() {
     assert!(results.len() >= 1);
 
     // Works with any embedding model without training
-    let different_space = EmbeddingSpace::new("openai-ada");
+    let different_space = Embedding::new("openai-ada");
     let ada_vec: Vec<f32> = (0..1536).map(|_| rng.gen()).collect();  // 1536D
     // Would work if we supported variable dimensions
 }
@@ -3405,7 +3767,7 @@ impl VectorStorage {
     /// Insert with async graph update (low latency)
     pub fn insert_async(
         &self,
-        code: &EmbeddingSpace,
+        code: &Embedding,
         ulid: Id,
         vector: &[f32],
     ) -> Result<()> {
@@ -3428,7 +3790,7 @@ impl VectorStorage {
     /// Insert with sync graph update (higher latency, immediate connectivity)
     pub fn insert_sync(
         &self,
-        code: &EmbeddingSpace,
+        code: &Embedding,
         ulid: Id,
         vector: &[f32],
     ) -> Result<()> {
@@ -3458,11 +3820,11 @@ The pending queue tracks vectors awaiting graph integration:
 // libs/db/src/vector/schema.rs
 
 /// Pending inserts queue
-/// Key: [embedding_code: 32] + [timestamp: u64] + [node_id: u32] = 44 bytes
+/// Key: [embedding: u64] + [timestamp: u64] + [vec_id: u32] = 20 bytes
 /// Value: empty (vector already stored in vector/vectors)
 ///
 /// Key structure ensures:
-/// - Namespace isolation via embedding_code prefix
+/// - Namespace isolation via embedding prefix
 /// - FIFO ordering via timestamp
 /// - Efficient batch collection via prefix scan
 pub struct PendingInserts;
@@ -3472,19 +3834,19 @@ impl ColumnFamilyRecord for PendingInserts {
 }
 
 impl PendingInserts {
-    pub fn make_key(code: &EmbeddingSpace, timestamp: u64, node_id: u32) -> Vec<u8> {
-        let mut key = Vec::with_capacity(44);
-        key.extend_from_slice(code.as_bytes());      // 32 bytes
-        key.extend_from_slice(&timestamp.to_be_bytes()); // 8 bytes (BE for ordering)
-        key.extend_from_slice(&node_id.to_be_bytes());   // 4 bytes
+    pub fn make_key(code: &Embedding, timestamp: u64, vec_id: u32) -> Vec<u8> {
+        let mut key = Vec::with_capacity(20);  // u64 + u64 + u32
+        key.extend_from_slice(&code.to_be_bytes());       // 8 bytes
+        key.extend_from_slice(&timestamp.to_be_bytes());  // 8 bytes (BE for ordering)
+        key.extend_from_slice(&vec_id.to_be_bytes());    // 4 bytes
         key
     }
 
-    pub fn parse_key(key: &[u8]) -> (EmbeddingSpace, u64, u32) {
-        let code = EmbeddingSpace::from_bytes(&key[0..32]);
-        let timestamp = u64::from_be_bytes(key[32..40].try_into().unwrap());
-        let node_id = u32::from_be_bytes(key[40..44].try_into().unwrap());
-        (code, timestamp, node_id)
+    pub fn parse_key(key: &[u8]) -> (Embedding, u64, u32) {
+        let code = Embedding::from_id(u64::from_be_bytes(key[0..8].try_into().unwrap()));
+        let timestamp = u64::from_be_bytes(key[8..16].try_into().unwrap());
+        let vec_id = u32::from_be_bytes(key[16..20].try_into().unwrap());
+        (code, timestamp, vec_id)
     }
 }
 ```
@@ -3604,9 +3966,9 @@ impl AsyncGraphUpdater {
             log::debug!("Worker {} processing batch of {} vectors", worker_id, batch.len());
 
             // Process each vector in the batch
-            for (code, node_id) in &batch {
-                if let Err(e) = Self::process_insert(&storage, &config, code, *node_id) {
-                    log::error!("Failed to process insert for node {}: {}", node_id, e);
+            for (code, vec_id) in &batch {
+                if let Err(e) = Self::process_insert(&storage, &config, code, *vec_id) {
+                    log::error!("Failed to process insert for node {}: {}", vec_id, e);
                     // Continue with next - don't fail entire batch
                 }
             }
@@ -3621,7 +3983,7 @@ impl AsyncGraphUpdater {
     fn collect_batch(
         storage: &VectorStorage,
         config: &AsyncUpdaterConfig,
-    ) -> Vec<(EmbeddingSpace, u32)> {
+    ) -> Vec<(Embedding, u32)> {
         let cf = storage.db.cf_handle(cf::PENDING).unwrap();
         let mut batch = Vec::with_capacity(config.batch_size);
         let deadline = Instant::now() + config.batch_timeout;
@@ -3638,8 +4000,8 @@ impl AsyncGraphUpdater {
             }
 
             if let Ok((key, _)) = item {
-                let (code, _timestamp, node_id) = PendingInserts::parse_key(&key);
-                batch.push((code, node_id));
+                let (code, _timestamp, vec_id) = PendingInserts::parse_key(&key);
+                batch.push((code, vec_id));
             }
         }
 
@@ -3649,15 +4011,15 @@ impl AsyncGraphUpdater {
     fn process_insert(
         storage: &VectorStorage,
         config: &AsyncUpdaterConfig,
-        code: &EmbeddingSpace,
-        node_id: u32,
+        code: &Embedding,
+        vec_id: u32,
     ) -> Result<()> {
         // 1. Load the vector
-        let vector = storage.get_vector(code, node_id)?
-            .ok_or_else(|| anyhow!("Vector not found for pending node {}", node_id))?;
+        let vector = storage.get_vector(code, vec_id)?
+            .ok_or_else(|| anyhow!("Vector not found for pending node {}", vec_id))?;
 
         // 2. Determine layer for this node
-        let level = storage.get_node_level(code, node_id)?;
+        let level = storage.get_node_level(code, vec_id)?;
 
         // 3. Get entry point
         let entry_point = storage.get_entry_point(code)?;
@@ -3680,7 +4042,7 @@ impl AsyncGraphUpdater {
                 .collect();
 
             // 6. Add bidirectional edges (using merge operator)
-            storage.add_edges_batch(code, node_id, &selected, layer)?;
+            storage.add_edges_batch(code, vec_id, &selected, layer)?;
 
             // 7. Prune neighbors if they exceed M_max
             for &neighbor in &selected {
@@ -3689,26 +4051,26 @@ impl AsyncGraphUpdater {
         }
 
         // 8. Update entry point if this node has higher level
-        storage.maybe_update_entry_point(code, node_id, level)?;
+        storage.maybe_update_entry_point(code, vec_id, level)?;
 
         Ok(())
     }
 
-    fn clear_processed(storage: &VectorStorage, batch: &[(EmbeddingSpace, u32)]) {
+    fn clear_processed(storage: &VectorStorage, batch: &[(Embedding, u32)]) {
         let cf = storage.db.cf_handle(cf::PENDING).unwrap();
 
         // Delete processed entries
         // Note: We need to reconstruct the full key with timestamp
         // In practice, store the full key in the batch
-        for (code, node_id) in batch {
+        for (code, vec_id) in batch {
             // Scan for this node's pending entry and delete
-            let prefix = code.as_bytes();
-            let iter = storage.db.prefix_iterator_cf(cf, prefix);
+            let prefix = code.to_be_bytes();
+            let iter = storage.db.prefix_iterator_cf(cf, &prefix);
 
             for item in iter {
                 if let Ok((key, _)) = item {
-                    let (_, _, key_node_id) = PendingInserts::parse_key(&key);
-                    if key_node_id == *node_id {
+                    let (_, _, key_vec_id) = PendingInserts::parse_key(&key);
+                    if key_vec_id == *vec_id {
                         let _ = storage.db.delete_cf(cf, &key);
                         break;
                     }
@@ -3728,9 +4090,9 @@ impl AsyncGraphUpdater {
                 break;
             }
 
-            for (code, node_id) in &batch {
-                if let Err(e) = Self::process_insert(storage, config, code, *node_id) {
-                    log::error!("Failed to drain pending node {}: {}", node_id, e);
+            for (code, vec_id) in &batch {
+                if let Err(e) = Self::process_insert(storage, config, code, *vec_id) {
+                    log::error!("Failed to drain pending node {}: {}", vec_id, e);
                 }
                 count += 1;
             }
@@ -3750,7 +4112,7 @@ Deletes also use the two-phase pattern:
 ```rust
 impl VectorStorage {
     /// Delete with async cleanup
-    pub fn delete_async(&self, code: &EmbeddingSpace, ulid: Id) -> Result<()> {
+    pub fn delete_async(&self, code: &Embedding, ulid: Id) -> Result<()> {
         let internal_id = self.get_internal_id(code, ulid)?
             .ok_or_else(|| anyhow!("Vector not found"))?;
 
@@ -3773,8 +4135,8 @@ impl VectorStorage {
     }
 
     /// Check if a node is deleted (for search filtering)
-    fn is_deleted(&self, code: &EmbeddingSpace, node_id: u32) -> Result<bool> {
-        let meta = self.get_node_meta(code, node_id)?;
+    fn is_deleted(&self, code: &Embedding, vec_id: u32) -> Result<bool> {
+        let meta = self.get_vec_meta(code, vec_id)?;
         Ok(meta.map_or(true, |m| m.flags & FLAG_DELETED != 0))
     }
 }
@@ -3830,7 +4192,7 @@ mod async_updater_tests {
     #[test]
     fn test_insert_async_immediate_searchability() {
         let storage = setup_vector_storage_with_async_updater();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let ulid = Id::new();
         let vector = vec![1.0; 128];
@@ -3847,7 +4209,7 @@ mod async_updater_tests {
     #[test]
     fn test_insert_async_low_latency() {
         let storage = setup_vector_storage_with_async_updater();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let mut latencies = Vec::new();
         for _ in 0..100 {
@@ -3868,7 +4230,7 @@ mod async_updater_tests {
     #[test]
     fn test_insert_sync_includes_graph_edges() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert some vectors synchronously
         for i in 0..10 {
@@ -3894,7 +4256,7 @@ mod async_updater_tests {
     #[test]
     fn test_pending_queue_ordering() {
         let storage = setup_vector_storage_with_async_updater();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert in order
         let ulids: Vec<Id> = (0..100).map(|_| Id::new()).collect();
@@ -3910,10 +4272,10 @@ mod async_updater_tests {
     }
 
     #[test]
-    fn test_pending_queue_per_embedding_space() {
+    fn test_pending_queue_per_embedding() {
         let storage = setup_vector_storage_with_async_updater();
-        let qwen = EmbeddingSpace::new("qwen3");
-        let gemma = EmbeddingSpace::new("gemma");
+        let qwen = Embedding::new("qwen3");
+        let gemma = Embedding::new("gemma");
 
         // Insert into different spaces
         for i in 0..50 {
@@ -3943,7 +4305,7 @@ mod async_updater_tests {
             num_workers: 1,
         };
         let storage = setup_vector_storage_with_config(config);
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert 50 vectors async
         for i in 0..50 {
@@ -3977,7 +4339,7 @@ mod async_updater_tests {
         let storage = setup_vector_storage_with_hooks(config, move |batch| {
             batch_count_clone.fetch_add(1, Ordering::SeqCst);
         });
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert 45 vectors (should be 5 batches: 4 full + 1 partial)
         for i in 0..45 {
@@ -3998,7 +4360,7 @@ mod async_updater_tests {
             num_workers: 1,
         };
         let storage = setup_vector_storage_with_config(config);
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert just 5 vectors (less than batch_size)
         for i in 0..5 {
@@ -4020,7 +4382,7 @@ mod async_updater_tests {
     #[test]
     fn test_delete_removes_from_search() {
         let storage = setup_vector_storage_with_async_updater();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let ulid = Id::new();
         storage.insert_sync(&code, ulid, &[1.0; 128]).unwrap();
@@ -4040,7 +4402,7 @@ mod async_updater_tests {
     #[test]
     fn test_delete_pending_vector() {
         let storage = setup_vector_storage_with_async_updater();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert async (still pending)
         let ulid = Id::new();
@@ -4068,7 +4430,7 @@ mod async_updater_tests {
         // First session: insert async, don't wait for drain
         {
             let storage = setup_vector_storage_at(tmp.path());
-            let code = EmbeddingSpace::new("test");
+            let code = Embedding::new("test");
 
             for i in 0..50 {
                 storage.insert_async(&code, Id::new(), &[i as f32; 128]).unwrap();
@@ -4081,7 +4443,7 @@ mod async_updater_tests {
         // Second session: recovery
         {
             let storage = setup_vector_storage_at(tmp.path());
-            let code = EmbeddingSpace::new("test");
+            let code = Embedding::new("test");
 
             // Should recover pending queue
             let pending = storage.get_pending_count(&code).unwrap();
@@ -4104,7 +4466,7 @@ mod async_updater_tests {
         // First session
         {
             let storage = setup_vector_storage_at(tmp.path());
-            let code = EmbeddingSpace::new("test");
+            let code = Embedding::new("test");
 
             ulids = (0..100).map(|i| {
                 let ulid = Id::new();
@@ -4119,7 +4481,7 @@ mod async_updater_tests {
         // Second session: all should be searchable
         {
             let storage = setup_vector_storage_at(tmp.path());
-            let code = EmbeddingSpace::new("test");
+            let code = Embedding::new("test");
 
             // Wait for full drain
             std::thread::sleep(Duration::from_secs(2));
@@ -4139,7 +4501,7 @@ mod async_updater_tests {
     #[test]
     fn test_concurrent_insert_async() {
         let storage = Arc::new(setup_vector_storage_with_async_updater());
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let mut handles = Vec::new();
         for t in 0..10 {
@@ -4186,7 +4548,7 @@ mod async_updater_tests {
 #[bench]
 fn bench_insert_async_latency(b: &mut Bencher) {
     let storage = setup_vector_storage_with_async_updater();
-    let code = EmbeddingSpace::new("bench");
+    let code = Embedding::new("bench");
 
     b.iter(|| {
         let ulid = Id::new();
@@ -4198,7 +4560,7 @@ fn bench_insert_async_latency(b: &mut Bencher) {
 #[bench]
 fn bench_insert_sync_latency(b: &mut Bencher) {
     let storage = setup_vector_storage_temp();
-    let code = EmbeddingSpace::new("bench");
+    let code = Embedding::new("bench");
 
     b.iter(|| {
         let ulid = Id::new();
@@ -4211,7 +4573,7 @@ fn bench_insert_sync_latency(b: &mut Bencher) {
 fn bench_async_updater_throughput(b: &mut Bencher) {
     // Measure sustained insert throughput with async updater
     let storage = setup_vector_storage_with_async_updater();
-    let code = EmbeddingSpace::new("bench");
+    let code = Embedding::new("bench");
 
     b.iter(|| {
         for _ in 0..1000 {
@@ -4294,7 +4656,7 @@ mod production_tests {
     #[test]
     fn test_delete_basic() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let ulid = Id::new();
         storage.insert(&code, ulid, &[1.0; 128]).unwrap();
@@ -4309,7 +4671,7 @@ mod production_tests {
     #[test]
     fn test_delete_frees_internal_id() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert and delete
         let ulid1 = Id::new();
@@ -4329,7 +4691,7 @@ mod production_tests {
     #[test]
     fn test_delete_removes_from_neighbors() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert several vectors
         let ulids: Vec<Id> = (0..10).map(|i| {
@@ -4358,7 +4720,7 @@ mod production_tests {
     #[test]
     fn test_delete_not_in_search_results() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let ulids: Vec<Id> = (0..100).map(|i| {
             let ulid = Id::new();
@@ -4387,7 +4749,7 @@ mod production_tests {
     #[test]
     fn test_concurrent_reads() {
         let storage = Arc::new(setup_vector_storage_with_vectors(10_000));
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let mut handles = Vec::new();
         for _ in 0..10 {
@@ -4409,7 +4771,7 @@ mod production_tests {
     #[test]
     fn test_concurrent_read_write() {
         let storage = Arc::new(setup_vector_storage_temp());
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Seed with some vectors
         for i in 0..100 {
@@ -4452,7 +4814,7 @@ mod production_tests {
     #[test]
     fn test_snapshot_isolation() {
         let storage = Arc::new(setup_vector_storage_temp());
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         // Insert initial vectors
         for i in 0..100 {
@@ -4483,7 +4845,7 @@ mod production_tests {
     #[ignore]  // Run explicitly: cargo test --release scale -- --ignored
     fn test_scale_10k() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let start = Instant::now();
         for _ in 0..10_000 {
@@ -4515,7 +4877,7 @@ mod production_tests {
     #[ignore]
     fn test_scale_100k() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         let start = Instant::now();
         for _ in 0..100_000 {
@@ -4551,7 +4913,7 @@ mod production_tests {
     #[ignore]
     fn test_scale_1m() {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("test");
+        let code = Embedding::new("test");
 
         println!("Building 1M vector index...");
         let start = Instant::now();
@@ -4600,8 +4962,8 @@ mod production_tests {
         let storage = setup_vector_storage_temp();
 
         // Multiple embedding spaces
-        let qwen = EmbeddingSpace::new("qwen3");
-        let gemma = EmbeddingSpace::new("gemma");
+        let qwen = Embedding::new("qwen3");
+        let gemma = Embedding::new("gemma");
 
         // Insert into both spaces
         for i in 0..100 {
@@ -4639,7 +5001,7 @@ mod production_tests {
     }
 
     // Helper function
-    fn measure_recall(storage: &VectorStorage, code: &EmbeddingSpace, num_queries: usize) -> f64 {
+    fn measure_recall(storage: &VectorStorage, code: &Embedding, num_queries: usize) -> f64 {
         let mut total_recall = 0.0;
         // ... brute force comparison logic
         total_recall / num_queries as f64
@@ -4668,7 +5030,7 @@ mod production_tests {
 fn bench_full_workflow(b: &mut Bencher) {
     b.iter(|| {
         let storage = setup_vector_storage_temp();
-        let code = EmbeddingSpace::new("bench");
+        let code = Embedding::new("bench");
 
         // Insert
         for _ in 0..1000 {
@@ -4842,7 +5204,7 @@ Session 7: Phase 6 (Production)
 libs/db/src/vector/
 ├── mod.rs              # Public API (VectorStorage, search, insert, delete)
 ├── config.rs           # HnswConfig, VectorConfig, RaBitQConfig
-├── embedding_space.rs  # EmbeddingSpace newtype
+├── embedding.rs  # Embedding newtype
 ├── id.rs               # IdManager (ULID ↔ u32 mapping)
 ├── hnsw/
 │   ├── mod.rs          # HNSW graph implementation
@@ -4869,11 +5231,11 @@ Start with this minimal skeleton to validate the module structure:
 //! Vector search module with HNSW indexing
 
 mod config;
-mod embedding_space;
+mod embedding;
 mod id;
 
 pub use config::{HnswConfig, VectorConfig};
-pub use embedding_space::EmbeddingSpace;
+pub use embedding::Embedding;
 
 use crate::{Database, Id, Result};
 
@@ -4892,7 +5254,7 @@ impl<'db> VectorStorage<'db> {
 
     pub fn insert(
         &self,
-        space: &EmbeddingSpace,
+        space: &Embedding,
         id: Id,
         vector: &[f32]
     ) -> Result<()> {
@@ -4901,7 +5263,7 @@ impl<'db> VectorStorage<'db> {
 
     pub fn search(
         &self,
-        space: &EmbeddingSpace,
+        space: &Embedding,
         query: &[f32],
         k: usize,
         ef: usize,
@@ -4909,7 +5271,7 @@ impl<'db> VectorStorage<'db> {
         todo!("Phase 2: HNSW search")
     }
 
-    pub fn delete(&self, space: &EmbeddingSpace, id: Id) -> Result<()> {
+    pub fn delete(&self, space: &Embedding, id: Id) -> Result<()> {
         todo!("Phase 6: Delete with tombstone")
     }
 }
@@ -4971,7 +5333,15 @@ cargo run -p motlie_core --example simd_check
 | 2026-01-02 | Added Design Decisions section (PQ exclusion rationale) | Claude Opus 4.5 |
 | 2026-01-02 | Added Navigation Layer tasks (2.7-2.9) to Phase 2 | Claude Opus 4.5 |
 | 2026-01-02 | Added Validation & Tests sections to all phases (0-6) | Claude Opus 4.5 |
-| 2026-01-02 | Renamed EmbeddingCode to EmbeddingSpace throughout | Claude Opus 4.5 |
+| 2026-01-02 | Renamed EmbeddingCode to Embedding throughout | Claude Opus 4.5 |
 | 2026-01-02 | Added complete HnswConfig/VectorConfig struct definitions (Task 0.1b) | Claude Opus 4.5 |
 | 2026-01-02 | Added HNSW parameter guidelines table for different scales | Claude Opus 4.5 |
 | 2026-01-02 | Added Quick Start section for future implementation sessions | Claude Opus 4.5 |
+| 2026-01-03 | Changed Embedding from [u8; 32] to u64 (8 bytes) per ARCH-14 | Claude Opus 4.5 |
+| 2026-01-03 | Updated all CF key layouts: 12-24 bytes (was 36-48), saves ~192 GB at 1B scale | Claude Opus 4.5 |
+| 2026-01-03 | Added EmbeddingRegistry for name <-> ID mapping | Claude Opus 4.5 |
+| 2026-01-03 | Added vector/embedding_registry CF to layout | Claude Opus 4.5 |
+| 2026-01-03 | Added CF Key Summary table, Key Design Decisions, Edge Storage Design sections | Claude Opus 4.5 |
+| 2026-01-03 | Renamed node_id to vec_id, node_meta to vec_meta, NodeMeta to VecMeta throughout | Claude Opus 4.5 |
+| 2026-01-03 | Added Task 0.3: EmbeddingRegistry Pre-warming (NameCache pattern) | Claude Opus 4.5 |
+| 2026-01-03 | Added Task 0.4: ColumnFamilyProvider Trait for mix-in storage initialization | Claude Opus 4.5 |
