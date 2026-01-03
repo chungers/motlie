@@ -1,0 +1,728 @@
+//! Column family definitions for the vector module.
+//!
+//! All vector CFs use the `vector/` prefix to avoid collisions with graph CFs.
+//! Follows the same patterns as graph::schema for consistency.
+//!
+//! See ROADMAP.md for complete schema documentation.
+
+use crate::Id;
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+use super::distance::Distance;
+
+// ============================================================================
+// Column Family Names
+// ============================================================================
+
+/// All column family names for the vector module.
+pub const ALL_COLUMN_FAMILIES: &[&str] = &[
+    EmbeddingRegistry::CF_NAME,
+    Vectors::CF_NAME,
+    Edges::CF_NAME,
+    BinaryCodes::CF_NAME,
+    VecMeta::CF_NAME,
+    GraphMeta::CF_NAME,
+    IdForward::CF_NAME,
+    IdReverse::CF_NAME,
+    IdAlloc::CF_NAME,
+    Pending::CF_NAME,
+];
+
+// ============================================================================
+// Embedding Registry CF
+// ============================================================================
+
+/// Embedding registry column family.
+///
+/// Key: [embedding_code: u64] = 8 bytes
+/// Value: EmbeddingRegistryCfValue (model, dim, distance)
+pub struct EmbeddingRegistry;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EmbeddingRegistryCfKey(pub u64);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EmbeddingRegistryCfValue {
+    pub model: String,
+    pub dim: u32,
+    pub distance: Distance,
+}
+
+impl EmbeddingRegistry {
+    pub const CF_NAME: &'static str = "vector/embedding_registry";
+
+    pub fn key_to_bytes(key: &EmbeddingRegistryCfKey) -> Vec<u8> {
+        key.0.to_be_bytes().to_vec()
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<EmbeddingRegistryCfKey> {
+        if bytes.len() != 8 {
+            anyhow::bail!(
+                "Invalid EmbeddingRegistryCfKey length: expected 8, got {}",
+                bytes.len()
+            );
+        }
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(bytes);
+        Ok(EmbeddingRegistryCfKey(u64::from_be_bytes(arr)))
+    }
+
+    pub fn value_to_bytes(value: &EmbeddingRegistryCfValue) -> Result<Vec<u8>> {
+        let bytes = rmp_serde::to_vec(value)?;
+        Ok(bytes)
+    }
+
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<EmbeddingRegistryCfValue> {
+        let value = rmp_serde::from_slice(bytes)?;
+        Ok(value)
+    }
+
+    pub fn column_family_options() -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_bloom_filter(10.0, false);
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+// ============================================================================
+// Vectors CF
+// ============================================================================
+
+/// Vectors column family - raw f32 vector storage.
+///
+/// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
+/// Value: f32[dim] as raw bytes (e.g., 512 bytes for 128D)
+pub struct Vectors;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VectorsCfKey {
+    pub embedding_code: u64,
+    pub vec_id: u32,
+}
+
+impl Vectors {
+    pub const CF_NAME: &'static str = "vector/vectors";
+
+    pub fn key_to_bytes(key: &VectorsCfKey) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(12);
+        bytes.extend_from_slice(&key.embedding_code.to_be_bytes());
+        bytes.extend_from_slice(&key.vec_id.to_be_bytes());
+        bytes
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<VectorsCfKey> {
+        if bytes.len() != 12 {
+            anyhow::bail!(
+                "Invalid VectorsCfKey length: expected 12, got {}",
+                bytes.len()
+            );
+        }
+        let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
+        let vec_id = u32::from_be_bytes(bytes[8..12].try_into()?);
+        Ok(VectorsCfKey {
+            embedding_code,
+            vec_id,
+        })
+    }
+
+    /// Store vector as raw f32 bytes (no compression for fast access)
+    pub fn value_to_bytes(vector: &[f32]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(vector.len() * 4);
+        for &v in vector {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// Load vector from raw f32 bytes
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<Vec<f32>> {
+        if bytes.len() % 4 != 0 {
+            anyhow::bail!("Invalid vector bytes length: {} is not divisible by 4", bytes.len());
+        }
+        let mut vector = Vec::with_capacity(bytes.len() / 4);
+        for chunk in bytes.chunks_exact(4) {
+            vector.push(f32::from_le_bytes(chunk.try_into()?));
+        }
+        Ok(vector)
+    }
+
+    pub fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // 16KB blocks for vector data
+        block_opts.set_block_size(16 * 1024);
+        // LZ4 compression for vectors
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+
+        // Prefix extractor for embedding_code (8 bytes)
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+// ============================================================================
+// Edges CF
+// ============================================================================
+
+/// Edges column family - HNSW graph edges stored as RoaringBitmap.
+///
+/// Key: [embedding: u64] + [vec_id: u32] + [layer: u8] = 13 bytes
+/// Value: RoaringBitmap serialized (~50-200 bytes)
+pub struct Edges;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EdgesCfKey {
+    pub embedding_code: u64,
+    pub vec_id: u32,
+    pub layer: u8,
+}
+
+impl Edges {
+    pub const CF_NAME: &'static str = "vector/edges";
+
+    pub fn key_to_bytes(key: &EdgesCfKey) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(13);
+        bytes.extend_from_slice(&key.embedding_code.to_be_bytes());
+        bytes.extend_from_slice(&key.vec_id.to_be_bytes());
+        bytes.push(key.layer);
+        bytes
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<EdgesCfKey> {
+        if bytes.len() != 13 {
+            anyhow::bail!(
+                "Invalid EdgesCfKey length: expected 13, got {}",
+                bytes.len()
+            );
+        }
+        let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
+        let vec_id = u32::from_be_bytes(bytes[8..12].try_into()?);
+        let layer = bytes[12];
+        Ok(EdgesCfKey {
+            embedding_code,
+            vec_id,
+            layer,
+        })
+    }
+
+    pub fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        // No compression - RoaringBitmap is already compact
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
+        // Prefix: embedding_code (8) + vec_id (4) = 12 bytes
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
+        opts
+    }
+}
+
+// ============================================================================
+// BinaryCodes CF
+// ============================================================================
+
+/// Binary codes column family - RaBitQ quantized vectors.
+///
+/// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
+/// Value: u8[code_size] (e.g., 16 bytes for 128-dim 1-bit RaBitQ)
+pub struct BinaryCodes;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BinaryCodesCfKey {
+    pub embedding_code: u64,
+    pub vec_id: u32,
+}
+
+impl BinaryCodes {
+    pub const CF_NAME: &'static str = "vector/binary_codes";
+
+    pub fn key_to_bytes(key: &BinaryCodesCfKey) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(12);
+        bytes.extend_from_slice(&key.embedding_code.to_be_bytes());
+        bytes.extend_from_slice(&key.vec_id.to_be_bytes());
+        bytes
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<BinaryCodesCfKey> {
+        if bytes.len() != 12 {
+            anyhow::bail!(
+                "Invalid BinaryCodesCfKey length: expected 12, got {}",
+                bytes.len()
+            );
+        }
+        let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
+        let vec_id = u32::from_be_bytes(bytes[8..12].try_into()?);
+        Ok(BinaryCodesCfKey {
+            embedding_code,
+            vec_id,
+        })
+    }
+
+    pub fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // 4KB blocks for binary codes (small, dense data)
+        block_opts.set_block_size(4 * 1024);
+        // No compression - already compact binary data
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
+        // Prefix: embedding_code (8 bytes)
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+// ============================================================================
+// VecMeta CF
+// ============================================================================
+
+/// Vector metadata column family.
+///
+/// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
+/// Value: { max_layer: u8, flags: u8, created_at: u64 }
+pub struct VecMeta;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VecMetaCfKey {
+    pub embedding_code: u64,
+    pub vec_id: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VecMetaCfValue {
+    pub max_layer: u8,
+    pub flags: u8,
+    pub created_at: u64,
+}
+
+impl VecMeta {
+    pub const CF_NAME: &'static str = "vector/vec_meta";
+
+    pub fn key_to_bytes(key: &VecMetaCfKey) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(12);
+        bytes.extend_from_slice(&key.embedding_code.to_be_bytes());
+        bytes.extend_from_slice(&key.vec_id.to_be_bytes());
+        bytes
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<VecMetaCfKey> {
+        if bytes.len() != 12 {
+            anyhow::bail!(
+                "Invalid VecMetaCfKey length: expected 12, got {}",
+                bytes.len()
+            );
+        }
+        let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
+        let vec_id = u32::from_be_bytes(bytes[8..12].try_into()?);
+        Ok(VecMetaCfKey {
+            embedding_code,
+            vec_id,
+        })
+    }
+
+    pub fn value_to_bytes(value: &VecMetaCfValue) -> Result<Vec<u8>> {
+        Ok(rmp_serde::to_vec(value)?)
+    }
+
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<VecMetaCfValue> {
+        Ok(rmp_serde::from_slice(bytes)?)
+    }
+
+    pub fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        // No compression for small metadata
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts
+    }
+}
+
+// ============================================================================
+// GraphMeta CF
+// ============================================================================
+
+/// Graph-level metadata column family.
+///
+/// Key: [embedding: u64] + [field: u8] = 9 bytes
+/// Value: varies by field
+pub struct GraphMeta;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GraphMetaCfKey {
+    pub embedding_code: u64,
+    pub field: u8,
+}
+
+/// Graph metadata field constants
+pub mod graph_meta_field {
+    pub const ENTRY_POINT: u8 = 0;
+    pub const MAX_LEVEL: u8 = 1;
+    pub const COUNT: u8 = 2;
+    pub const CONFIG: u8 = 3;
+}
+
+impl GraphMeta {
+    pub const CF_NAME: &'static str = "vector/graph_meta";
+
+    pub fn key_to_bytes(key: &GraphMetaCfKey) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(9);
+        bytes.extend_from_slice(&key.embedding_code.to_be_bytes());
+        bytes.push(key.field);
+        bytes
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<GraphMetaCfKey> {
+        if bytes.len() != 9 {
+            anyhow::bail!(
+                "Invalid GraphMetaCfKey length: expected 9, got {}",
+                bytes.len()
+            );
+        }
+        let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
+        let field = bytes[8];
+        Ok(GraphMetaCfKey {
+            embedding_code,
+            field,
+        })
+    }
+
+    pub fn column_family_options() -> rocksdb::Options {
+        rocksdb::Options::default()
+    }
+}
+
+// ============================================================================
+// IdForward CF
+// ============================================================================
+
+/// Forward ID mapping: ULID -> vec_id.
+///
+/// Key: [embedding: u64] + [ulid: 16] = 24 bytes
+/// Value: [vec_id: u32] = 4 bytes
+pub struct IdForward;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IdForwardCfKey {
+    pub embedding_code: u64,
+    pub ulid: Id,
+}
+
+impl IdForward {
+    pub const CF_NAME: &'static str = "vector/id_forward";
+
+    pub fn key_to_bytes(key: &IdForwardCfKey) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(24);
+        bytes.extend_from_slice(&key.embedding_code.to_be_bytes());
+        bytes.extend_from_slice(key.ulid.as_bytes());
+        bytes
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<IdForwardCfKey> {
+        if bytes.len() != 24 {
+            anyhow::bail!(
+                "Invalid IdForwardCfKey length: expected 24, got {}",
+                bytes.len()
+            );
+        }
+        let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
+        let mut ulid_bytes = [0u8; 16];
+        ulid_bytes.copy_from_slice(&bytes[8..24]);
+        Ok(IdForwardCfKey {
+            embedding_code,
+            ulid: Id::from_bytes(ulid_bytes),
+        })
+    }
+
+    pub fn value_to_bytes(vec_id: u32) -> Vec<u8> {
+        vec_id.to_be_bytes().to_vec()
+    }
+
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<u32> {
+        if bytes.len() != 4 {
+            anyhow::bail!(
+                "Invalid IdForward value length: expected 4, got {}",
+                bytes.len()
+            );
+        }
+        Ok(u32::from_be_bytes(bytes.try_into()?))
+    }
+
+    pub fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_bloom_filter(10.0, false);
+        // Prefix: embedding_code (8 bytes)
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+// ============================================================================
+// IdReverse CF
+// ============================================================================
+
+/// Reverse ID mapping: vec_id -> ULID.
+///
+/// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
+/// Value: [ulid: 16] = 16 bytes
+pub struct IdReverse;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IdReverseCfKey {
+    pub embedding_code: u64,
+    pub vec_id: u32,
+}
+
+impl IdReverse {
+    pub const CF_NAME: &'static str = "vector/id_reverse";
+
+    pub fn key_to_bytes(key: &IdReverseCfKey) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(12);
+        bytes.extend_from_slice(&key.embedding_code.to_be_bytes());
+        bytes.extend_from_slice(&key.vec_id.to_be_bytes());
+        bytes
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<IdReverseCfKey> {
+        if bytes.len() != 12 {
+            anyhow::bail!(
+                "Invalid IdReverseCfKey length: expected 12, got {}",
+                bytes.len()
+            );
+        }
+        let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
+        let vec_id = u32::from_be_bytes(bytes[8..12].try_into()?);
+        Ok(IdReverseCfKey {
+            embedding_code,
+            vec_id,
+        })
+    }
+
+    pub fn value_to_bytes(ulid: &Id) -> Vec<u8> {
+        ulid.as_bytes().to_vec()
+    }
+
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<Id> {
+        if bytes.len() != 16 {
+            anyhow::bail!(
+                "Invalid IdReverse value length: expected 16, got {}",
+                bytes.len()
+            );
+        }
+        let mut ulid_bytes = [0u8; 16];
+        ulid_bytes.copy_from_slice(bytes);
+        Ok(Id::from_bytes(ulid_bytes))
+    }
+
+    pub fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts
+    }
+}
+
+// ============================================================================
+// IdAlloc CF
+// ============================================================================
+
+/// ID allocator state.
+///
+/// Key: [embedding: u64] + [field: u8] = 9 bytes
+/// Value: u32 (next_id) or RoaringBitmap (free list)
+pub struct IdAlloc;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IdAllocCfKey {
+    pub embedding_code: u64,
+    pub field: u8,
+}
+
+/// ID allocator field constants
+pub mod id_alloc_field {
+    pub const NEXT_ID: u8 = 0;
+    pub const FREE_BITMAP: u8 = 1;
+}
+
+impl IdAlloc {
+    pub const CF_NAME: &'static str = "vector/id_alloc";
+
+    pub fn key_to_bytes(key: &IdAllocCfKey) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(9);
+        bytes.extend_from_slice(&key.embedding_code.to_be_bytes());
+        bytes.push(key.field);
+        bytes
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<IdAllocCfKey> {
+        if bytes.len() != 9 {
+            anyhow::bail!(
+                "Invalid IdAllocCfKey length: expected 9, got {}",
+                bytes.len()
+            );
+        }
+        let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
+        let field = bytes[8];
+        Ok(IdAllocCfKey {
+            embedding_code,
+            field,
+        })
+    }
+
+    pub fn column_family_options() -> rocksdb::Options {
+        rocksdb::Options::default()
+    }
+}
+
+// ============================================================================
+// Pending CF
+// ============================================================================
+
+/// Async updater pending queue.
+///
+/// Key: [embedding: u64] + [timestamp: u64] + [vec_id: u32] = 20 bytes
+/// Value: empty (vector already stored in vectors CF)
+pub struct Pending;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PendingCfKey {
+    pub embedding_code: u64,
+    pub timestamp: u64,
+    pub vec_id: u32,
+}
+
+impl Pending {
+    pub const CF_NAME: &'static str = "vector/pending";
+
+    pub fn key_to_bytes(key: &PendingCfKey) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(20);
+        bytes.extend_from_slice(&key.embedding_code.to_be_bytes());
+        bytes.extend_from_slice(&key.timestamp.to_be_bytes());
+        bytes.extend_from_slice(&key.vec_id.to_be_bytes());
+        bytes
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<PendingCfKey> {
+        if bytes.len() != 20 {
+            anyhow::bail!(
+                "Invalid PendingCfKey length: expected 20, got {}",
+                bytes.len()
+            );
+        }
+        let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
+        let timestamp = u64::from_be_bytes(bytes[8..16].try_into()?);
+        let vec_id = u32::from_be_bytes(bytes[16..20].try_into()?);
+        Ok(PendingCfKey {
+            embedding_code,
+            timestamp,
+            vec_id,
+        })
+    }
+
+    pub fn column_family_options() -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        // Prefix: embedding_code (8 bytes) for scanning per-embedding pending items
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_cf_names_have_prefix() {
+        for cf_name in ALL_COLUMN_FAMILIES {
+            assert!(
+                cf_name.starts_with("vector/"),
+                "CF {} should have 'vector/' prefix",
+                cf_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_vectors_key_roundtrip() {
+        let key = VectorsCfKey {
+            embedding_code: 42,
+            vec_id: 123,
+        };
+        let bytes = Vectors::key_to_bytes(&key);
+        assert_eq!(bytes.len(), 12);
+        let parsed = Vectors::key_from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.embedding_code, 42);
+        assert_eq!(parsed.vec_id, 123);
+    }
+
+    #[test]
+    fn test_vectors_value_roundtrip() {
+        let vector = vec![1.0f32, 2.0, 3.0, 4.0];
+        let bytes = Vectors::value_to_bytes(&vector);
+        assert_eq!(bytes.len(), 16); // 4 floats * 4 bytes
+        let parsed = Vectors::value_from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, vector);
+    }
+
+    #[test]
+    fn test_edges_key_roundtrip() {
+        let key = EdgesCfKey {
+            embedding_code: 1,
+            vec_id: 42,
+            layer: 3,
+        };
+        let bytes = Edges::key_to_bytes(&key);
+        assert_eq!(bytes.len(), 13);
+        let parsed = Edges::key_from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.embedding_code, 1);
+        assert_eq!(parsed.vec_id, 42);
+        assert_eq!(parsed.layer, 3);
+    }
+
+    #[test]
+    fn test_id_forward_key_roundtrip() {
+        let ulid = Id::new();
+        let key = IdForwardCfKey {
+            embedding_code: 5,
+            ulid,
+        };
+        let bytes = IdForward::key_to_bytes(&key);
+        assert_eq!(bytes.len(), 24);
+        let parsed = IdForward::key_from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.embedding_code, 5);
+        assert_eq!(parsed.ulid, ulid);
+    }
+
+    #[test]
+    fn test_pending_key_roundtrip() {
+        let key = PendingCfKey {
+            embedding_code: 1,
+            timestamp: 1000,
+            vec_id: 42,
+        };
+        let bytes = Pending::key_to_bytes(&key);
+        assert_eq!(bytes.len(), 20);
+        let parsed = Pending::key_from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.embedding_code, 1);
+        assert_eq!(parsed.timestamp, 1000);
+        assert_eq!(parsed.vec_id, 42);
+    }
+}
