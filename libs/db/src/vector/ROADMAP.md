@@ -132,16 +132,16 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │                     Implementation Phases                                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  Phase 0: Foundation                                                         │
-│  ├── 0.1 Module structure (mod.rs, schema.rs)                               │
-│  ├── 0.2 VectorConfig and VectorStorage types                              │
+│  Phase 0: Foundation [PARTIAL - Types Complete]                              │
+│  ├── 0.1 Module structure (mod.rs, schema.rs) ✓                             │
+│  ├── 0.2 VectorConfig and VectorStorage types ✓                            │
 │  ├── 0.3 Integration with existing graph Storage                           │
-│  ├── 0.4 Distance enum with compute behavior [ARCH-17]                      │
-│  ├── 0.5 Embedder trait for document-to-vector compute [ARCH-18]           │
-│  ├── 0.6 Rich Embedding struct (code, model, dim, distance, embedder)      │
-│  ├── 0.7 EmbeddingBuilder for fluent registration                          │
-│  ├── 0.8 EmbeddingRegistry with query/discovery API                        │
-│  └── 0.9 EmbeddingFilter for multi-field queries                           │
+│  ├── 0.4 Distance enum with compute behavior [ARCH-17] ✓                    │
+│  ├── 0.5 Embedder trait for document-to-vector compute [ARCH-18] ✓         │
+│  ├── 0.6 Rich Embedding struct (code, model, dim, distance, embedder) ✓    │
+│  ├── 0.7 EmbeddingBuilder for fluent registration ✓                        │
+│  ├── 0.8 EmbeddingRegistry with query/discovery API ✓                      │
+│  └── 0.9 EmbeddingFilter for multi-field queries ✓                         │
 │                                                                              │
 │  Phase 1: ID Management [ARCH-4, ARCH-5, ARCH-6]                            │
 │  ├── 1.1 u32 ID allocator with RoaringBitmap free list                     │
@@ -889,9 +889,9 @@ libs/db/src/vector/
 | `config.rs` | Configuration types | 0.25 day |
 
 **Acceptance Criteria:**
-- [ ] Module compiles and is accessible via `motlie_db::vector`
-- [ ] `VectorConfig` struct with HNSW parameters
-- [ ] Empty stub implementations for all public types
+- [x] Module compiles and is accessible via `motlie_db::vector`
+- [x] `VectorConfig` struct with HNSW parameters
+- [x] Empty stub implementations for all public types
 
 ### Task 0.1b: Configuration Types
 
@@ -1184,10 +1184,10 @@ mod foundation_tests {
 ```
 
 **Test Coverage Checklist:**
-- [ ] Module compilation and exports
+- [x] Module compilation and exports
 - [ ] VectorStorage initialization with shared DB
-- [ ] CF naming conventions (`vector/` prefix)
-- [ ] Embedding creation and validation
+- [x] CF naming conventions (`vector/` prefix)
+- [x] Embedding creation and validation
 - [ ] Namespace isolation between embedding models
 
 ### Task 0.3: EmbeddingRegistry Pre-warming
@@ -1280,9 +1280,9 @@ impl EmbeddingRegistry {
 
 **Acceptance Criteria:**
 - [ ] EmbeddingRegistry loads all entries during `ready()`
-- [ ] Lookup is O(1) via DashMap (no DB hit after prewarm)
-- [ ] New embeddings are persisted immediately
-- [ ] Thread-safe concurrent access
+- [x] Lookup is O(1) via DashMap (no DB hit after prewarm)
+- [x] New embeddings are persisted immediately
+- [x] Thread-safe concurrent access (DashMap)
 
 ### Task 0.4: ColumnFamilyProvider Trait (Mix-in Pattern)
 
@@ -5632,3 +5632,5 @@ cargo run -p motlie_core --example simd_check
 | 2026-01-03 | Added Distance enum with compute behavior, Embedder trait (ARCH-18) | Claude Opus 4.5 |
 | 2026-01-03 | Added EmbeddingBuilder, EmbeddingFilter, queryable EmbeddingRegistry API | Claude Opus 4.5 |
 | 2026-01-03 | Expanded Phase 0 with tasks 0.4-0.9 for rich Embedding implementation | Claude Opus 4.5 |
+| 2026-01-03 | **IMPLEMENTED** Phase 0 foundation: mod.rs, config.rs, distance.rs, embedding.rs, registry.rs, schema.rs, error.rs | Claude Opus 4.5 |
+| 2026-01-03 | 31 unit tests passing for Phase 0 types and schema | Claude Opus 4.5 |
