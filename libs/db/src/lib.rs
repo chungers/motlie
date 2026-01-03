@@ -15,6 +15,10 @@ pub mod vector;
 // Users access via fully qualified paths: motlie_db::fulltext::*
 pub mod fulltext;
 
+// Column family provider trait for modular storage initialization
+// Users access via: motlie_db::provider::ColumnFamilyProvider
+pub mod provider;
+
 // Unified storage module - combines graph and fulltext
 // Users access via: motlie_db::Storage, motlie_db::StorageConfig, etc.
 mod storage;
