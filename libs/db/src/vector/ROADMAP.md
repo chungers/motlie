@@ -135,7 +135,13 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  Phase 0: Foundation                                                         │
 │  ├── 0.1 Module structure (mod.rs, schema.rs)                               │
 │  ├── 0.2 VectorConfig and VectorStorage types                              │
-│  └── 0.3 Integration with existing graph Storage                           │
+│  ├── 0.3 Integration with existing graph Storage                           │
+│  ├── 0.4 Distance enum with compute behavior [ARCH-17]                      │
+│  ├── 0.5 Embedder trait for document-to-vector compute [ARCH-18]           │
+│  ├── 0.6 Rich Embedding struct (code, model, dim, distance, embedder)      │
+│  ├── 0.7 EmbeddingBuilder for fluent registration                          │
+│  ├── 0.8 EmbeddingRegistry with query/discovery API                        │
+│  └── 0.9 EmbeddingFilter for multi-field queries                           │
 │                                                                              │
 │  Phase 1: ID Management [ARCH-4, ARCH-5, ARCH-6]                            │
 │  ├── 1.1 u32 ID allocator with RoaringBitmap free list                     │
@@ -197,58 +203,335 @@ independent of `motlie_db::graph` column families. All vector CFs use the `vecto
 3. **No Graph Module Changes**: Vector module is self-contained; does not modify graph CFs
 4. **Shared RocksDB Instance**: Uses same `TransactionDB` as graph module for efficiency
 
-### Embedding Namespace
+### Embedding Type (Rich Struct with Behavior)
 
-An **embedding namespace** identifies a specific embedding model/configuration:
+An **Embedding** is a rich struct that combines namespace identity, metadata, and optional compute behavior.
+
+#### Design Rationale (ARCH-14, ARCH-17)
+
+- **ARCH-14**: u64 `code` field provides register-aligned keys, saves ~192 GB at 1B scale
+- **ARCH-17**: Rich struct carries model, dimension, and distance metric directly (no registry lookup)
+- **ARCH-18**: Optional `Embedder` trait enables document-to-vector computation
+
+#### Distance Metric
 
 ```rust
-/// Embedding namespace identifier (e.g., "qwen3", "gemma", "openai-ada-002")
-/// Uses u64 for register-aligned keys; mapped from string names via registry.
+/// Distance metric for vector similarity
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Distance {
+    Cosine,
+    L2,
+    DotProduct,
+}
+
+impl Distance {
+    /// Compute distance between two vectors
+    pub fn compute(&self, a: &[f32], b: &[f32]) -> f32 {
+        match self {
+            Distance::Cosine => motlie_core::distance::cosine(a, b),
+            Distance::L2 => motlie_core::distance::l2(a, b),
+            Distance::DotProduct => motlie_core::distance::dot(a, b),
+        }
+    }
+
+    /// Whether lower values mean more similar
+    pub fn is_lower_better(&self) -> bool {
+        match self {
+            Distance::Cosine | Distance::L2 => true,
+            Distance::DotProduct => false,  // higher = more similar
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Distance::Cosine => "cosine",
+            Distance::L2 => "l2",
+            Distance::DotProduct => "dot",
+        }
+    }
+}
+```
+
+#### Embedder Trait (Compute Behavior)
+
+```rust
+/// Trait for computing embeddings from documents
+/// Implementations can wrap external services (Ollama, OpenAI) or local models
+pub trait Embedder: Send + Sync {
+    /// Embed a single document
+    fn embed(&self, document: &str) -> Result<Vec<f32>>;
+
+    /// Batch embed for efficiency (default: sequential)
+    fn embed_batch(&self, documents: &[&str]) -> Result<Vec<Vec<f32>>> {
+        documents.iter().map(|d| self.embed(d)).collect()
+    }
+
+    /// Output dimensionality
+    fn dim(&self) -> u32;
+
+    /// Model identifier
+    fn model(&self) -> &str;
+}
+```
+
+#### Embedding Struct
+
+```rust
+/// Complete embedding space specification with optional compute behavior
 ///
-/// Design rationale (ARCH-14):
-/// - u64 is register-aligned for fast key comparison
-/// - 8 bytes vs 32 bytes saves ~192 GB at 1B scale
-/// - <1000 embedding models expected; u64 is more than sufficient
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Embedding(u64);
+/// Design rationale:
+/// - `code`: u64 for fast key serialization (ARCH-14)
+/// - `model`, `dim`, `distance`: Direct access without registry lookup (ARCH-17)
+/// - `embedder`: Optional compute capability (ARCH-18)
+#[derive(Clone)]
+pub struct Embedding {
+    /// Unique namespace code for storage keys (allocated by registry)
+    code: u64,
+    /// Model identifier (e.g., "gemma", "qwen3", "openai-ada-002")
+    model: Arc<str>,
+    /// Vector dimensionality
+    dim: u32,
+    /// Distance metric for similarity computation
+    distance: Distance,
+    /// Optional embedder for computing vectors from documents
+    embedder: Option<Arc<dyn Embedder>>,
+}
 
 impl Embedding {
-    /// Create from numeric ID (used internally after registry lookup)
-    pub fn from_id(id: u64) -> Self {
-        Embedding(id)
+    // ─────────────────────────────────────────────────────────────
+    // Accessors
+    // ─────────────────────────────────────────────────────────────
+
+    /// Namespace code for storage keys
+    pub fn code(&self) -> u64 { self.code }
+
+    /// Code as big-endian bytes for key construction
+    pub fn code_bytes(&self) -> [u8; 8] { self.code.to_be_bytes() }
+
+    pub fn model(&self) -> &str { &self.model }
+
+    pub fn dim(&self) -> u32 { self.dim }
+
+    pub fn distance(&self) -> Distance { self.distance }
+
+    /// Check if this embedding has compute capability
+    pub fn has_embedder(&self) -> bool { self.embedder.is_some() }
+
+    // ─────────────────────────────────────────────────────────────
+    // Behavior (delegated to Embedder trait)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Compute embedding for a document (requires embedder)
+    pub fn embed(&self, document: &str) -> Result<Vec<f32>> {
+        self.embedder
+            .as_ref()
+            .ok_or(Error::NoEmbedder(self.model.to_string()))?
+            .embed(document)
     }
 
-    pub fn as_u64(&self) -> u64 {
-        self.0
+    /// Batch embed documents
+    pub fn embed_batch(&self, documents: &[&str]) -> Result<Vec<Vec<f32>>> {
+        self.embedder
+            .as_ref()
+            .ok_or(Error::NoEmbedder(self.model.to_string()))?
+            .embed_batch(documents)
     }
 
-    pub fn to_be_bytes(&self) -> [u8; 8] {
-        self.0.to_be_bytes()
+    /// Compute distance between two vectors using this space's metric
+    pub fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32 {
+        self.distance.compute(a, b)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Validation
+    // ─────────────────────────────────────────────────────────────
+
+    /// Validate vector dimension matches this embedding space
+    pub fn validate_vector(&self, vector: &[f32]) -> Result<()> {
+        if vector.len() != self.dim as usize {
+            return Err(Error::DimensionMismatch {
+                expected: self.dim,
+                got: vector.len() as u32,
+            });
+        }
+        Ok(())
     }
 }
 
-/// Registry for embedding name <-> ID mapping
+// Equality and Hash based on code only (for HashMap keys)
+impl PartialEq for Embedding {
+    fn eq(&self, other: &Self) -> bool { self.code == other.code }
+}
+impl Eq for Embedding {}
+impl Hash for Embedding {
+    fn hash<H: Hasher>(&self, state: &mut H) { self.code.hash(state); }
+}
+```
+
+#### Embedding Registry
+
+```rust
+/// Builder for registering embedding spaces
+pub struct EmbeddingBuilder {
+    model: String,
+    dim: u32,
+    distance: Distance,
+    embedder: Option<Arc<dyn Embedder>>,
+}
+
+impl EmbeddingBuilder {
+    pub fn new(model: impl Into<String>, dim: u32, distance: Distance) -> Self {
+        Self { model: model.into(), dim, distance, embedder: None }
+    }
+
+    /// Attach an embedder for compute capability
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
+    }
+
+    /// Register with the given registry
+    pub fn register(self, registry: &EmbeddingRegistry) -> Result<Embedding> {
+        registry.register(self)
+    }
+}
+
+/// Registry for embedding spaces - manages specs and generates handles
 /// Stored in vector/embedding_registry CF
 pub struct EmbeddingRegistry {
-    // name -> id mapping (in-memory cache)
-    name_to_id: HashMap<String, u64>,
-    // id -> name mapping
-    id_to_name: HashMap<u64, String>,
-    next_id: AtomicU64,
+    /// (model, dim, distance) -> Embedding mapping
+    specs: RwLock<HashMap<(String, u32, Distance), Embedding>>,
+    /// code -> Embedding mapping (for lookup by code)
+    by_code: RwLock<HashMap<u64, Embedding>>,
+    /// Next code to allocate
+    next_code: AtomicU64,
+    /// RocksDB handle for persistence
+    db: Arc<TransactionDB>,
 }
 
 impl EmbeddingRegistry {
-    /// Get or create embedding ID for a name
-    pub fn get_or_create(&self, name: &str) -> Embedding {
-        if let Some(&id) = self.name_to_id.get(name) {
-            return Embedding(id);
-        }
-        // Allocate new ID and persist to CF
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        // ... persist to RocksDB ...
-        Embedding(id)
-    }
+    // ─────────────────────────────────────────────────────────────
+    // Registration
+    // ─────────────────────────────────────────────────────────────
+
+    /// Register a new embedding space. Idempotent: returns existing if spec matches.
+    pub fn register(&self, builder: EmbeddingBuilder) -> Result<Embedding>;
+
+    // ─────────────────────────────────────────────────────────────
+    // Lookup
+    // ─────────────────────────────────────────────────────────────
+
+    /// Get embedding by exact spec (None if not registered)
+    pub fn get(&self, model: &str, dim: u32, distance: Distance) -> Option<Embedding>;
+
+    /// Get embedding by code (for deserialization from storage)
+    pub fn get_by_code(&self, code: u64) -> Option<Embedding>;
+
+    /// Attach/update embedder for existing space (runtime configuration)
+    pub fn set_embedder(&self, code: u64, embedder: Arc<dyn Embedder>) -> Result<()>;
+
+    // ─────────────────────────────────────────────────────────────
+    // Query / Discovery
+    // ─────────────────────────────────────────────────────────────
+
+    /// List all registered embedding spaces
+    pub fn list_all(&self) -> Vec<Embedding>;
+
+    /// Find all spaces using a specific model
+    pub fn find_by_model(&self, model: &str) -> Vec<Embedding>;
+
+    /// Find all spaces using a specific distance metric
+    pub fn find_by_distance(&self, distance: Distance) -> Vec<Embedding>;
+
+    /// Find all spaces with a specific dimension
+    pub fn find_by_dim(&self, dim: u32) -> Vec<Embedding>;
+
+    /// Find with multiple filters (AND logic)
+    pub fn find(&self, filter: &EmbeddingFilter) -> Vec<Embedding>;
 }
+
+/// Filter for querying embedding spaces
+#[derive(Default)]
+pub struct EmbeddingFilter {
+    pub model: Option<String>,
+    pub dim: Option<u32>,
+    pub distance: Option<Distance>,
+}
+
+impl EmbeddingFilter {
+    pub fn model(mut self, model: &str) -> Self { self.model = Some(model.into()); self }
+    pub fn dim(mut self, dim: u32) -> Self { self.dim = Some(dim); self }
+    pub fn distance(mut self, d: Distance) -> Self { self.distance = Some(d); self }
+}
+```
+
+#### Usage Examples
+
+```rust
+let registry = vector_storage.registry();
+
+// ═══════════════════════════════════════════════════════════════════
+// Registration (data-only, no compute)
+// ═══════════════════════════════════════════════════════════════════
+
+let gemma_cosine = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
+    .register(registry)?;
+
+let gemma_l2 = EmbeddingBuilder::new("gemma", 768, Distance::L2)
+    .register(registry)?;
+
+// Direct field access (no registry lookup needed)
+assert_eq!(gemma_cosine.model(), "gemma");
+assert_eq!(gemma_cosine.dim(), 768);
+assert_eq!(gemma_cosine.distance(), Distance::Cosine);
+
+// ═══════════════════════════════════════════════════════════════════
+// Registration with Embedder (compute capability)
+// ═══════════════════════════════════════════════════════════════════
+
+struct OllamaEmbedder { client: OllamaClient, model: String }
+
+impl Embedder for OllamaEmbedder {
+    fn embed(&self, document: &str) -> Result<Vec<f32>> {
+        self.client.embeddings(&self.model, document)
+    }
+    fn dim(&self) -> u32 { 768 }
+    fn model(&self) -> &str { &self.model }
+}
+
+let gemma_with_compute = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
+    .with_embedder(Arc::new(OllamaEmbedder::new("gemma")))
+    .register(registry)?;
+
+// Compute embeddings directly via the Embedding type
+let vec = gemma_with_compute.embed("Hello world")?;
+vector_storage.insert(&gemma_with_compute, doc_id, &vec)?;
+
+// Or use convenience method
+vector_storage.insert_document(&gemma_with_compute, doc_id, "Hello world")?;
+
+// ═══════════════════════════════════════════════════════════════════
+// Query / Discovery
+// ═══════════════════════════════════════════════════════════════════
+
+// What embedding spaces do we have?
+for emb in registry.list_all() {
+    println!("{}: dim={}, distance={:?}", emb.model(), emb.dim(), emb.distance());
+}
+
+// Find all Gemma spaces
+let gemma_spaces = registry.find_by_model("gemma");
+// → [gemma:768:cosine, gemma:768:l2]
+
+// Find all cosine-based spaces
+let cosine_spaces = registry.find_by_distance(Distance::Cosine);
+
+// Multi-filter query
+let matches = registry.find(
+    &EmbeddingFilter::default()
+        .model("gemma")
+        .distance(Distance::Cosine)
+);
 ```
 
 **Note**: Internal vec_ids use u32 (not u64) because RoaringBitmap edge storage requires u32 values (ARCH-15). This limits each embedding space to 4B vectors, acceptable for SCALE-1 target.
@@ -5345,3 +5628,7 @@ cargo run -p motlie_core --example simd_check
 | 2026-01-03 | Renamed node_id to vec_id, node_meta to vec_meta, NodeMeta to VecMeta throughout | Claude Opus 4.5 |
 | 2026-01-03 | Added Task 0.3: EmbeddingRegistry Pre-warming (NameCache pattern) | Claude Opus 4.5 |
 | 2026-01-03 | Added Task 0.4: ColumnFamilyProvider Trait for mix-in storage initialization | Claude Opus 4.5 |
+| 2026-01-03 | Redesigned Embedding as rich struct with model, dim, distance, embedder fields (ARCH-17) | Claude Opus 4.5 |
+| 2026-01-03 | Added Distance enum with compute behavior, Embedder trait (ARCH-18) | Claude Opus 4.5 |
+| 2026-01-03 | Added EmbeddingBuilder, EmbeddingFilter, queryable EmbeddingRegistry API | Claude Opus 4.5 |
+| 2026-01-03 | Expanded Phase 0 with tasks 0.4-0.9 for rich Embedding implementation | Claude Opus 4.5 |

@@ -374,6 +374,8 @@ Vector Search (ef=200) -> ID Mapping -> Temporal Filter (Graph) -> Re-rank -> To
 | <a id="arch-14"></a>**ARCH-14** | Embedding namespace uses **u64** (8 bytes) identifier | Register-aligned, <1000 embeddings expected |
 | <a id="arch-15"></a>**ARCH-15** | Internal vec_ids use **u32** per embedding space | RoaringBitmap edge storage requires u32 |
 | <a id="arch-16"></a>**ARCH-16** | ID mappings require embedding prefix: `[embedding: 8] + [ulid: 16]` | Same ULID maps to different vec_ids per space |
+| <a id="arch-17"></a>**ARCH-17** | `Embedding` is a **rich struct** with model, dim, distance, embedder | Direct field access without registry lookup; self-describing |
+| <a id="arch-18"></a>**ARCH-18** | `Embedder` trait enables **document-to-vector compute** | Optional behavior; supports Ollama, OpenAI, local models |
 
 **Storage Key Layout** (per FUNC-7):
 
@@ -415,3 +417,4 @@ Vector Search (ef=200) -> ID Mapping -> Temporal Filter (Graph) -> Re-rank -> To
 | 2026-01-02 | Copied to libs/db/src/vector/ with updated paths | Claude Opus 4.5 |
 | 2026-01-03 | Added FUNC-7 (multi-embedding support) and ARCH-13 to ARCH-16 (storage strategy) | Claude Opus 4.5 |
 | 2026-01-03 | Renamed node_id to vec_id throughout for consistency with graph module terminology | Claude Opus 4.5 |
+| 2026-01-03 | Added ARCH-17 (rich Embedding struct) and ARCH-18 (Embedder trait) | Claude Opus 4.5 |
