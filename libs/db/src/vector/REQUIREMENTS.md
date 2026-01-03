@@ -135,6 +135,13 @@ This document defines the ground truth requirements for motlie_db vector search.
 | <a id="func-4"></a>**FUNC-4** | Vector update | Not started | P2 |
 | <a id="func-5"></a>**FUNC-5** | Batch insert | Not started | P1 |
 | <a id="func-6"></a>**FUNC-6** | Filtered search | Not started | P2 |
+| <a id="func-7"></a>**FUNC-7** | Multi-embedding support | Not started | P0 |
+
+**FUNC-7 Details**: A single document (ULID) may be embedded in multiple embedding spaces simultaneously (e.g., "qwen3", "gemma", "openai-ada-002"). Each embedding space maintains its own HNSW graph, and the same document will have different internal vec_ids and graph positions in each space. This is required to support:
+- Embedding model migration (run old and new models in parallel)
+- Multi-modal embeddings (text + image for same document)
+- A/B testing of embedding strategies
+- Ensemble search across multiple embedding models
 
 ### 5.2 Consistency Requirements
 
@@ -359,6 +366,26 @@ Vector Search (ef=200) -> ID Mapping -> Temporal Filter (Graph) -> Re-rank -> To
 | <a id="arch-11"></a>**ARCH-11** | Vectors represent node/edge summaries and fragments | Graph entities are the primary data model |
 | <a id="arch-12"></a>**ARCH-12** | Graph RocksDB is source of truth for entity visibility | Temporal range, existence, relationships |
 
+### 10.6 Multi-Embedding Storage Strategy
+
+| ID | Assumption | Rationale |
+|----|------------|-----------|
+| <a id="arch-13"></a>**ARCH-13** | Documents may exist in **multiple embedding spaces** simultaneously | Model migration, multi-modal, A/B testing |
+| <a id="arch-14"></a>**ARCH-14** | Embedding namespace uses **u64** (8 bytes) identifier | Register-aligned, <1000 embeddings expected |
+| <a id="arch-15"></a>**ARCH-15** | Internal vec_ids use **u32** per embedding space | RoaringBitmap edge storage requires u32 |
+| <a id="arch-16"></a>**ARCH-16** | ID mappings require embedding prefix: `[embedding: 8] + [ulid: 16]` | Same ULID maps to different vec_ids per space |
+
+**Storage Key Layout** (per FUNC-7):
+
+| CF | Key Format | Size |
+|----|------------|------|
+| vectors | `[embedding: 8] + [vec_id: 4]` | 12 bytes |
+| edges | `[embedding: 8] + [vec_id: 4] + [layer: 1]` | 13 bytes |
+| id_forward | `[embedding: 8] + [ulid: 16]` | 24 bytes |
+| id_reverse | `[embedding: 8] + [vec_id: 4]` | 12 bytes |
+
+**Why u32 for vec_id**: RoaringBitmap (used for compressed edge storage) only supports u32 values. This limits each embedding space to 4B vectors, which is acceptable given SCALE-1 target of 1B vectors total.
+
 ---
 
 ## 11. Traceability Matrix
@@ -386,3 +413,5 @@ Vector Search (ef=200) -> ID Mapping -> Temporal Filter (Graph) -> Re-rank -> To
 | 2025-12-25 | Added Section 10: Architecture Assumptions (ARCH-1 to ARCH-12) | Claude Opus 4.5 |
 | 2025-12-25 | Added anchor IDs to all requirements for cross-document linking | Claude Opus 4.5 |
 | 2026-01-02 | Copied to libs/db/src/vector/ with updated paths | Claude Opus 4.5 |
+| 2026-01-03 | Added FUNC-7 (multi-embedding support) and ARCH-13 to ARCH-16 (storage strategy) | Claude Opus 4.5 |
+| 2026-01-03 | Renamed node_id to vec_id throughout for consistency with graph module terminology | Claude Opus 4.5 |
