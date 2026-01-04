@@ -323,6 +323,28 @@ impl EmbeddingRegistry {
     pub fn is_empty(&self) -> bool {
         self.by_code.is_empty()
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // Internal: Pre-warming from read-only storage
+    // ─────────────────────────────────────────────────────────────
+
+    /// Register an embedding from database values (used during pre-warming).
+    ///
+    /// This method is used by `vector::Storage` when pre-warming from
+    /// read-only DB (where `prewarm(&TransactionDB)` isn't available).
+    pub(crate) fn register_from_db(&self, code: u64, model: &str, dim: u32, distance: Distance) {
+        let embedding = Embedding::new(code, model, dim, distance, None);
+        let spec_key = (model.to_string(), dim, distance);
+
+        self.by_spec.insert(spec_key, embedding.clone());
+        self.by_code.insert(code, embedding);
+
+        // Update next_code if needed
+        let current_next = self.next_code.load(Ordering::SeqCst);
+        if code >= current_next {
+            self.next_code.store(code + 1, Ordering::SeqCst);
+        }
+    }
 }
 
 impl Default for EmbeddingRegistry {
