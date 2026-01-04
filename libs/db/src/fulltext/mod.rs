@@ -34,7 +34,7 @@ pub use reader::{
     spawn_query_consumer_pool_readonly, spawn_query_consumer_pool_shared, Consumer, Processor,
     QueryExecutor, Reader, ReaderConfig,
 };
-pub use schema::{compute_validity_facet, extract_tags, DocumentFields};
+pub use schema::{compute_validity_facet, extract_tags, DocumentFields, Schema};
 pub use search::{EdgeHit, FacetCounts, Hit, MatchSource, NodeHit};
 pub use writer::{
     create_mutation_consumer, create_mutation_consumer_with_next,
@@ -132,7 +132,7 @@ impl Storage {
             return Ok(());
         }
 
-        let (schema, fields) = schema::build_schema();
+        let (tantivy_schema, fields) = schema::build_schema();
 
         match self.mode {
             StorageMode::ReadOnly => {
@@ -164,7 +164,7 @@ impl Storage {
                 } else {
                     std::fs::create_dir_all(&self.index_path)
                         .context("Failed to create index directory")?;
-                    tantivy::Index::create_in_dir(&self.index_path, schema)
+                    tantivy::Index::create_in_dir(&self.index_path, tantivy_schema)
                         .context("Failed to create Tantivy index")?
                 };
 
