@@ -1,0 +1,319 @@
+//! Configuration types for vector storage and indexing.
+//!
+//! References:
+//! - HNSW paper: https://arxiv.org/abs/1603.09320
+//! - RaBitQ paper: https://arxiv.org/abs/2405.12497
+//! - motlie design: libs/db/src/vector/ROADMAP.md
+
+use serde::{Deserialize, Serialize};
+
+/// HNSW algorithm parameters.
+///
+/// HNSW (Hierarchical Navigable Small World) is a graph-based approximate
+/// nearest neighbor search algorithm. These parameters control the trade-off
+/// between index quality, memory usage, and search speed.
+///
+/// # Parameter Guidelines
+///
+/// | Scale | M | ef_construction | ef_search | Memory/Vector |
+/// |-------|---|-----------------|-----------|---------------|
+/// | 10K   | 16| 100             | 50        | ~0.5KB        |
+/// | 100K  | 16| 200             | 100       | ~0.5KB        |
+/// | 1M    | 16-32| 200-400      | 100-200   | ~0.5-1KB      |
+/// | 1B    | 16| 200             | 100       | ~0.5KB        |
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HnswConfig {
+    /// Vector dimensionality (must match embedding model).
+    /// Common values: 128 (SIFT), 768 (BERT), 1536 (OpenAI ada-002)
+    pub dim: usize,
+
+    /// Number of bidirectional links per node at layer 0.
+    /// Higher M = better recall, more memory, slower insert.
+    /// Recommended: 16-64, Default: 16
+    pub m: usize,
+
+    /// Maximum links per node at layers > 0 (typically 2*M).
+    /// Default: 2 * m
+    pub m_max: usize,
+
+    /// Maximum links per node at layer 0 (typically M or 2*M).
+    /// Layer 0 is denser, so higher limit improves recall.
+    /// Default: 2 * m
+    pub m_max_0: usize,
+
+    /// Search beam width during index construction.
+    /// Higher ef_construction = better graph quality, slower build.
+    /// Recommended: 100-500, Default: 200
+    pub ef_construction: usize,
+
+    /// Probability multiplier for layer assignment.
+    /// P(layer = L) = exp(-L * m_l)
+    /// Default: 1.0 / ln(m)
+    pub m_l: f32,
+
+    /// Maximum search layer (auto-determined based on N).
+    /// Default: None (auto-calculate as floor(ln(N) * m_l))
+    pub max_level: Option<u8>,
+}
+
+impl Default for HnswConfig {
+    fn default() -> Self {
+        let m = 16;
+        Self {
+            dim: 128,
+            m,
+            m_max: 2 * m,
+            m_max_0: 2 * m,
+            ef_construction: 200,
+            m_l: 1.0 / (m as f32).ln(),
+            max_level: None,
+        }
+    }
+}
+
+impl HnswConfig {
+    /// Create config for specific dimension with default parameters.
+    pub fn for_dim(dim: usize) -> Self {
+        Self {
+            dim,
+            ..Default::default()
+        }
+    }
+
+    /// High-recall configuration (slower, more memory).
+    /// Best for applications where recall is critical.
+    pub fn high_recall(dim: usize) -> Self {
+        Self {
+            dim,
+            m: 32,
+            m_max: 64,
+            m_max_0: 64,
+            ef_construction: 400,
+            m_l: 1.0 / 32f32.ln(),
+            max_level: None,
+        }
+    }
+
+    /// Memory-optimized configuration (faster, less recall).
+    /// Best for resource-constrained environments.
+    pub fn compact(dim: usize) -> Self {
+        Self {
+            dim,
+            m: 8,
+            m_max: 16,
+            m_max_0: 16,
+            ef_construction: 100,
+            m_l: 1.0 / 8f32.ln(),
+            max_level: None,
+        }
+    }
+}
+
+/// RaBitQ binary quantization parameters.
+///
+/// RaBitQ is a training-free binary quantization method that uses random
+/// rotation to preserve distance relationships. Unlike Product Quantization,
+/// it requires no training data (DATA-1 compliant).
+///
+/// # Bits per Dimension Trade-offs
+///
+/// | Bits | Bytes (128D) | Recall (no rerank) | Compression |
+/// |------|--------------|---------------------|-------------|
+/// | 1    | 16 bytes     | ~70%                | 32x         |
+/// | 2    | 32 bytes     | ~85%                | 16x         |
+/// | 4    | 64 bytes     | ~92%                | 8x          |
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RaBitQConfig {
+    /// Bits per dimension (1, 2, 4, or 8).
+    /// 1-bit: 32x compression, ~70% recall without rerank
+    /// 2-bit: 16x compression, ~85% recall without rerank
+    /// 4-bit: 8x compression, ~92% recall without rerank
+    pub bits_per_dim: u8,
+
+    /// Seed for rotation matrix generation (deterministic).
+    /// Same seed produces same rotation matrix.
+    pub rotation_seed: u64,
+
+    /// Enable RaBitQ (can be disabled for full-precision search).
+    pub enabled: bool,
+}
+
+impl Default for RaBitQConfig {
+    fn default() -> Self {
+        Self {
+            bits_per_dim: 1,
+            rotation_seed: 42,
+            enabled: true,
+        }
+    }
+}
+
+impl RaBitQConfig {
+    /// Calculate the code size in bytes for a given dimension.
+    pub fn code_size(&self, dim: usize) -> usize {
+        (dim * self.bits_per_dim as usize + 7) / 8
+    }
+}
+
+/// Async graph updater configuration.
+///
+/// Controls background graph refinement for online updates.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AsyncUpdaterConfig {
+    /// Enable async graph updates.
+    pub enabled: bool,
+
+    /// Maximum pending vectors before blocking inserts.
+    pub max_pending: usize,
+
+    /// Batch size for graph updates.
+    pub batch_size: usize,
+
+    /// Interval between update batches in milliseconds.
+    pub interval_ms: u64,
+}
+
+impl Default for AsyncUpdaterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_pending: 10_000,
+            batch_size: 100,
+            interval_ms: 100,
+        }
+    }
+}
+
+/// Navigation cache configuration.
+///
+/// Caches top HNSW layers in memory for faster search.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NavigationCacheConfig {
+    /// Enable navigation cache.
+    pub enabled: bool,
+
+    /// Maximum layers to cache (from top).
+    pub max_cached_layers: u8,
+
+    /// Maximum nodes per layer to cache.
+    pub max_nodes_per_layer: usize,
+}
+
+impl Default for NavigationCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_cached_layers: 3,
+            max_nodes_per_layer: 10_000,
+        }
+    }
+}
+
+/// Complete vector storage configuration.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct VectorConfig {
+    pub hnsw: HnswConfig,
+    pub rabitq: RaBitQConfig,
+    pub async_updater: AsyncUpdaterConfig,
+    pub navigation_cache: NavigationCacheConfig,
+}
+
+impl VectorConfig {
+    /// Configuration for 128-dimensional embeddings (e.g., SIFT).
+    pub fn dim_128() -> Self {
+        Self {
+            hnsw: HnswConfig::for_dim(128),
+            ..Default::default()
+        }
+    }
+
+    /// Configuration for 768-dimensional embeddings (e.g., BERT, Gemma).
+    pub fn dim_768() -> Self {
+        Self {
+            hnsw: HnswConfig::for_dim(768),
+            ..Default::default()
+        }
+    }
+
+    /// Configuration for 1024-dimensional embeddings (e.g., Qwen3).
+    pub fn dim_1024() -> Self {
+        Self {
+            hnsw: HnswConfig::for_dim(1024),
+            ..Default::default()
+        }
+    }
+
+    /// Configuration for 1536-dimensional embeddings (e.g., OpenAI ada-002).
+    pub fn dim_1536() -> Self {
+        Self {
+            hnsw: HnswConfig::for_dim(1536),
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hnsw_defaults() {
+        let config = HnswConfig::default();
+        assert_eq!(config.dim, 128);
+        assert_eq!(config.m, 16);
+        assert_eq!(config.m_max, 32);
+        assert_eq!(config.m_max_0, 32);
+        assert_eq!(config.ef_construction, 200);
+    }
+
+    #[test]
+    fn test_hnsw_for_dim() {
+        let config = HnswConfig::for_dim(768);
+        assert_eq!(config.dim, 768);
+        assert_eq!(config.m, 16); // Other params stay default
+    }
+
+    #[test]
+    fn test_hnsw_high_recall() {
+        let config = HnswConfig::high_recall(768);
+        assert_eq!(config.dim, 768);
+        assert_eq!(config.m, 32);
+        assert_eq!(config.ef_construction, 400);
+    }
+
+    #[test]
+    fn test_hnsw_compact() {
+        let config = HnswConfig::compact(768);
+        assert_eq!(config.dim, 768);
+        assert_eq!(config.m, 8);
+        assert_eq!(config.ef_construction, 100);
+    }
+
+    #[test]
+    fn test_rabitq_code_size() {
+        let config = RaBitQConfig::default();
+        // 128 dims * 1 bit = 128 bits = 16 bytes
+        assert_eq!(config.code_size(128), 16);
+        // 768 dims * 1 bit = 768 bits = 96 bytes
+        assert_eq!(config.code_size(768), 96);
+
+        let config_2bit = RaBitQConfig {
+            bits_per_dim: 2,
+            ..Default::default()
+        };
+        // 128 dims * 2 bits = 256 bits = 32 bytes
+        assert_eq!(config_2bit.code_size(128), 32);
+    }
+
+    #[test]
+    fn test_vector_config_presets() {
+        let c128 = VectorConfig::dim_128();
+        assert_eq!(c128.hnsw.dim, 128);
+
+        let c768 = VectorConfig::dim_768();
+        assert_eq!(c768.hnsw.dim, 768);
+
+        let c1536 = VectorConfig::dim_1536();
+        assert_eq!(c1536.hnsw.dim, 1536);
+    }
+}

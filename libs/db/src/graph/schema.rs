@@ -1,10 +1,13 @@
 use super::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
 use super::name_hash::NameHash;
+use super::subsystem::GraphBlockCacheConfig;
 use super::summary_hash::SummaryHash;
-use super::BlockCacheConfig;
 use super::ColumnFamilyRecord;
 use super::HotColumnFamilyRecord;
 use super::ValidRangePatchable;
+
+// Type alias for backwards compatibility within this module
+type BlockCacheConfig = GraphBlockCacheConfig;
 use crate::DataUrl;
 use crate::Id;
 use crate::TimestampMilli;
@@ -923,6 +926,7 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     ReverseEdges::CF_NAME,
 ];
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,4 +1212,5 @@ mod tests {
         let range3 = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2001)));
         assert_ne!(range1, range3);
     }
+
 }

@@ -7,11 +7,8 @@
 //! - Fuzzy search for typo-tolerant queries
 //! - Tag-based user-defined facets extracted from content
 
-use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-
-use tantivy::IndexWriter;
 
 // Submodules
 pub mod mutation;
@@ -19,6 +16,7 @@ pub mod query;
 pub mod reader;
 pub mod schema;
 pub mod search;
+pub mod storage;
 pub mod writer;
 
 #[cfg(test)]
@@ -34,8 +32,9 @@ pub use reader::{
     spawn_query_consumer_pool_readonly, spawn_query_consumer_pool_shared, Consumer, Processor,
     QueryExecutor, Reader, ReaderConfig,
 };
-pub use schema::{compute_validity_facet, extract_tags, DocumentFields};
+pub use schema::{compute_validity_facet, extract_tags, DocumentFields, Schema};
 pub use search::{EdgeHit, FacetCounts, Hit, MatchSource, NodeHit};
+pub use storage::Storage;
 pub use writer::{
     create_mutation_consumer, create_mutation_consumer_with_next,
     create_mutation_consumer_with_params, create_mutation_consumer_with_params_and_next,
@@ -43,181 +42,6 @@ pub use writer::{
     spawn_mutation_consumer_with_params, spawn_mutation_consumer_with_params_and_next,
     MutationExecutor,
 };
-
-// ============================================================================
-// Storage - Readonly/Readwrite Tantivy Index Access
-// ============================================================================
-
-/// Storage mode for Tantivy index
-#[derive(Clone, Copy, Debug)]
-enum StorageMode {
-    /// Read-only access - can have multiple instances
-    ReadOnly,
-    /// Read-write access - exclusive (only one IndexWriter per index)
-    ReadWrite,
-}
-
-/// Fulltext storage following the same pattern as graph::Storage.
-///
-/// Supports two modes:
-/// - **ReadOnly**: Multiple instances can open the same index for searching.
-///   Does not acquire the index lock. Use for query consumers.
-/// - **ReadWrite**: Exclusive access with an IndexWriter for mutations.
-///   Only one instance can hold the lock at a time. Use for mutation consumers.
-///
-/// # Example
-/// ```no_run
-/// use motlie_db::fulltext::Storage;
-/// use std::path::Path;
-/// use std::sync::Arc;
-///
-/// // For mutations (exclusive write access)
-/// let mut write_storage = Storage::readwrite(Path::new("/data/fulltext"));
-/// write_storage.ready().unwrap();
-/// let write_storage = Arc::new(write_storage);
-///
-/// // For queries (multiple readers allowed)
-/// let mut read_storage = Storage::readonly(Path::new("/data/fulltext"));
-/// read_storage.ready().unwrap();
-/// let read_storage = Arc::new(read_storage);
-/// ```
-pub struct Storage {
-    index_path: PathBuf,
-    mode: StorageMode,
-    /// The Tantivy index (set after ready())
-    index: Option<tantivy::Index>,
-    /// The index writer - only present in readwrite mode, behind Mutex for thread-safe access
-    writer: Option<tokio::sync::Mutex<IndexWriter>>,
-    /// Field handles for the schema
-    fields: Option<DocumentFields>,
-}
-
-impl Storage {
-    /// Create a new Storage instance in readonly mode.
-    ///
-    /// Multiple readonly instances can access the same index simultaneously.
-    /// Use this for query consumers.
-    pub fn readonly(index_path: &Path) -> Self {
-        Self {
-            index_path: PathBuf::from(index_path),
-            mode: StorageMode::ReadOnly,
-            index: None,
-            writer: None,
-            fields: None,
-        }
-    }
-
-    /// Create a new Storage instance in readwrite mode.
-    ///
-    /// Only one readwrite instance can access the index at a time due to
-    /// Tantivy's exclusive IndexWriter lock.
-    /// Use this for mutation consumers.
-    pub fn readwrite(index_path: &Path) -> Self {
-        Self {
-            index_path: PathBuf::from(index_path),
-            mode: StorageMode::ReadWrite,
-            index: None,
-            writer: None,
-            fields: None,
-        }
-    }
-
-    /// Ready the storage by opening the index.
-    ///
-    /// For ReadOnly mode: Opens the index without acquiring the writer lock.
-    /// For ReadWrite mode: Opens the index and creates an exclusive IndexWriter.
-    #[tracing::instrument(skip(self), fields(path = ?self.index_path, mode = ?self.mode))]
-    pub fn ready(&mut self) -> Result<()> {
-        if self.index.is_some() {
-            return Ok(());
-        }
-
-        let (schema, fields) = schema::build_schema();
-
-        match self.mode {
-            StorageMode::ReadOnly => {
-                // ReadOnly: Just open the index, no writer needed
-                if !self.index_path.exists() {
-                    return Err(anyhow::anyhow!(
-                        "Index path does not exist: {:?}. Create it first with a readwrite Storage.",
-                        self.index_path
-                    ));
-                }
-                let index = tantivy::Index::open_in_dir(&self.index_path)
-                    .context("Failed to open Tantivy index in readonly mode")?;
-
-                tracing::info!(
-                    path = ?self.index_path,
-                    "[FullText Storage] Opened index in READONLY mode"
-                );
-
-                self.index = Some(index);
-                self.fields = Some(fields);
-            }
-            StorageMode::ReadWrite => {
-                // ReadWrite: Create or open index with exclusive writer
-                // Check for meta.json to determine if a valid Tantivy index exists
-                let meta_path = self.index_path.join("meta.json");
-                let index = if meta_path.exists() {
-                    tantivy::Index::open_in_dir(&self.index_path)
-                        .context("Failed to open existing Tantivy index")?
-                } else {
-                    std::fs::create_dir_all(&self.index_path)
-                        .context("Failed to create index directory")?;
-                    tantivy::Index::create_in_dir(&self.index_path, schema)
-                        .context("Failed to create Tantivy index")?
-                };
-
-                // Create index writer with 50MB buffer (acquires exclusive lock)
-                let writer = index
-                    .writer(50_000_000)
-                    .context("Failed to create index writer")?;
-
-                tracing::info!(
-                    path = ?self.index_path,
-                    "[FullText Storage] Opened index in READWRITE mode"
-                );
-
-                self.index = Some(index);
-                self.writer = Some(tokio::sync::Mutex::new(writer));
-                self.fields = Some(fields);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Get a reference to the Tantivy index for searching.
-    pub fn index(&self) -> Result<&tantivy::Index> {
-        self.index
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("[FullText Storage] Not ready"))
-    }
-
-    /// Get the field handles.
-    pub fn fields(&self) -> Result<&DocumentFields> {
-        self.fields
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("[FullText Storage] Not ready"))
-    }
-
-    /// Get the index path.
-    pub fn index_path(&self) -> &Path {
-        &self.index_path
-    }
-
-    /// Check if this storage is in readwrite mode.
-    pub fn is_readwrite(&self) -> bool {
-        matches!(self.mode, StorageMode::ReadWrite)
-    }
-
-    /// Get a reference to the index writer (only available in readwrite mode).
-    ///
-    /// Returns None if in readonly mode.
-    pub(crate) fn writer(&self) -> Option<&tokio::sync::Mutex<IndexWriter>> {
-        self.writer.as_ref()
-    }
-}
 
 // ============================================================================
 // Index - Wraps Storage for query and mutation processing

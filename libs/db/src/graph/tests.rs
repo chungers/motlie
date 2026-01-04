@@ -1391,7 +1391,7 @@ use tokio::time::Duration;
 
         // Query the node back using transaction executor
         let query = NodeById::new(node_id, None);
-        let result = query.execute_in_transaction(&txn, txn_db, storage.name_cache());
+        let result = query.execute_in_transaction(&txn, txn_db, storage.cache());
 
         assert!(result.is_ok(), "Query should succeed for node with empty summary");
         let (name, summary) = result.unwrap();
@@ -1456,7 +1456,7 @@ use tokio::time::Duration;
 
         // Query the edge back using transaction executor
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, "CONNECTS".to_string(), None);
-        let result = query.execute_in_transaction(&txn, txn_db, storage.name_cache());
+        let result = query.execute_in_transaction(&txn, txn_db, storage.cache());
 
         assert!(result.is_ok(), "Query should succeed for edge with empty summary");
         let (summary, weight) = result.unwrap();
@@ -1499,7 +1499,7 @@ use tokio::time::Duration;
 
         // Query the node back using transaction executor
         let query = NodeById::new(node_id, None);
-        let result = query.execute_in_transaction(&txn, txn_db, storage.name_cache());
+        let result = query.execute_in_transaction(&txn, txn_db, storage.cache());
 
         assert!(result.is_ok(), "Query should succeed for node with summary");
         let (name, summary) = result.unwrap();
@@ -1566,7 +1566,7 @@ use tokio::time::Duration;
 
         // Query the edge back using transaction executor
         let query = EdgeSummaryBySrcDstName::new(src_id, dst_id, "STRONG_LINK".to_string(), None);
-        let result = query.execute_in_transaction(&txn, txn_db, storage.name_cache());
+        let result = query.execute_in_transaction(&txn, txn_db, storage.cache());
 
         assert!(result.is_ok(), "Query should succeed for edge with summary");
         let (summary, weight) = result.unwrap();
@@ -1623,8 +1623,8 @@ use tokio::time::Duration;
         let query1 = NodeById::new(node1_id, None);
         let query2 = NodeById::new(node2_id, None);
 
-        let (_, summary1) = query1.execute_in_transaction(&txn, txn_db, storage.name_cache()).unwrap();
-        let (_, summary2) = query2.execute_in_transaction(&txn, txn_db, storage.name_cache()).unwrap();
+        let (_, summary1) = query1.execute_in_transaction(&txn, txn_db, storage.cache()).unwrap();
+        let (_, summary2) = query2.execute_in_transaction(&txn, txn_db, storage.cache()).unwrap();
 
         let decoded1: String = summary1.decode_string().unwrap();
         let decoded2: String = summary2.decode_string().unwrap();
