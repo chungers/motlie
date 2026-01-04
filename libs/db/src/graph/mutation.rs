@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use super::name_hash::NameHash;
 use super::schema;
 use super::writer::{MutationExecutor, Writer};
-use super::HotColumnFamilyRecord;
+use super::{ColumnFamily, HotColumnFamilyRecord};
 use crate::writer::Runnable;
 use crate::{Id, TimestampMilli};
 

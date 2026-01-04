@@ -24,8 +24,7 @@ use rocksdb::{Direction, IteratorMode};
 
 use super::name_hash::NameHash;
 use super::summary_hash::SummaryHash;
-use super::ColumnFamilyRecord;
-use super::HotColumnFamilyRecord;
+use super::{ColumnFamily, ColumnFamilyRecord, HotColumnFamilyRecord};
 use super::schema::{
     self, is_valid_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
     FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,

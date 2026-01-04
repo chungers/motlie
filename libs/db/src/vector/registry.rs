@@ -12,6 +12,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use rocksdb::{IteratorMode, TransactionDB};
 
+use crate::rocksdb::ColumnFamily;
 use super::distance::Distance;
 use super::embedding::{Embedding, EmbeddingBuilder};
 use super::schema::{EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecCfValue, EmbeddingSpecs};

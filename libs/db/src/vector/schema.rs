@@ -44,11 +44,13 @@
 //!
 //! See ROADMAP.md for complete schema documentation.
 
+use crate::rocksdb::{ColumnFamily, ColumnFamilyConfig};
 use crate::{Id, TimestampMilli};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::distance::Distance;
+use super::subsystem::VectorBlockCacheConfig;
 
 // ============================================================================
 // Common Types
@@ -137,9 +139,23 @@ pub(crate) struct EmbeddingSpecCfKey(pub(crate) EmbeddingCode);
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct EmbeddingSpecCfValue(pub(crate) EmbeddingSpec);
 
-impl EmbeddingSpecs {
-    pub const CF_NAME: &'static str = "vector/embedding_specs";
+impl ColumnFamily for EmbeddingSpecs {
+    const CF_NAME: &'static str = "vector/embedding_specs";
+}
 
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for EmbeddingSpecs {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_bloom_filter(10.0, false);
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl EmbeddingSpecs {
     pub fn key_to_bytes(key: &EmbeddingSpecCfKey) -> Vec<u8> {
         key.0.to_be_bytes().to_vec()
     }
@@ -165,27 +181,6 @@ impl EmbeddingSpecs {
         let value = rmp_serde::from_slice(bytes)?;
         Ok(value)
     }
-
-    pub fn column_family_options() -> rocksdb::Options {
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-        block_opts.set_bloom_filter(10.0, false);
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
-
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &super::subsystem::VectorBlockCacheConfig,
-    ) -> rocksdb::Options {
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-        block_opts.set_bloom_filter(10.0, false);
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.default_block_size);
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
 }
 
 // ============================================================================
@@ -206,9 +201,27 @@ pub(crate) struct VectorCfKey(pub(crate) EmbeddingCode, pub(crate) VecId);
 #[derive(Debug, Clone)]
 pub(crate) struct VectorCfValue(pub(crate) Vec<f32>);
 
-impl Vectors {
-    pub const CF_NAME: &'static str = "vector/vectors";
+impl ColumnFamily for Vectors {
+    const CF_NAME: &'static str = "vector/vectors";
+}
 
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for Vectors {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.vector_block_size);
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl Vectors {
     pub fn key_to_bytes(key: &VectorCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(12);
         bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -251,40 +264,6 @@ impl Vectors {
         }
         Ok(VectorCfValue(vector))
     }
-
-    pub fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        // 16KB blocks for vector data
-        block_opts.set_block_size(16 * 1024);
-        // LZ4 compression for vectors
-        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-
-        // Prefix extractor for embedding_code (8 bytes)
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
-
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &super::subsystem::VectorBlockCacheConfig,
-    ) -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.vector_block_size);
-        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
 }
 
 // ============================================================================
@@ -305,9 +284,27 @@ pub(crate) struct EdgeCfKey(pub(crate) EmbeddingCode, pub(crate) VecId, pub(crat
 #[derive(Debug, Clone)]
 pub(crate) struct EdgeCfValue(pub(crate) RoaringBitmapBytes);
 
-impl Edges {
-    pub const CF_NAME: &'static str = "vector/edges";
+impl ColumnFamily for Edges {
+    const CF_NAME: &'static str = "vector/edges";
+}
 
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for Edges {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl Edges {
     pub fn key_to_bytes(key: &EdgeCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(13);
         bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -338,34 +335,6 @@ impl Edges {
     pub fn value_from_bytes(bytes: &[u8]) -> Result<EdgeCfValue> {
         Ok(EdgeCfValue(bytes.to_vec()))
     }
-
-    pub fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        // No compression - RoaringBitmap is already compact
-        opts.set_compression_type(rocksdb::DBCompressionType::None);
-        // Prefix: embedding_code (8) + vec_id (4) = 12 bytes
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
-        opts
-    }
-
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &super::subsystem::VectorBlockCacheConfig,
-    ) -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.default_block_size);
-        opts.set_compression_type(rocksdb::DBCompressionType::None);
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
 }
 
 // ============================================================================
@@ -386,9 +355,27 @@ pub(crate) struct BinaryCodeCfKey(pub(crate) EmbeddingCode, pub(crate) VecId);
 #[derive(Debug, Clone)]
 pub(crate) struct BinaryCodeCfValue(pub(crate) RabitqCode);
 
-impl BinaryCodes {
-    pub const CF_NAME: &'static str = "vector/binary_codes";
+impl ColumnFamily for BinaryCodes {
+    const CF_NAME: &'static str = "vector/binary_codes";
+}
 
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for BinaryCodes {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl BinaryCodes {
     pub fn key_to_bytes(key: &BinaryCodeCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(12);
         bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -416,39 +403,6 @@ impl BinaryCodes {
     /// Deserialize binary code value
     pub fn value_from_bytes(bytes: &[u8]) -> Result<BinaryCodeCfValue> {
         Ok(BinaryCodeCfValue(bytes.to_vec()))
-    }
-
-    pub fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        // 4KB blocks for binary codes (small, dense data)
-        block_opts.set_block_size(4 * 1024);
-        // No compression - already compact binary data
-        opts.set_compression_type(rocksdb::DBCompressionType::None);
-        // Prefix: embedding_code (8 bytes)
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
-
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &super::subsystem::VectorBlockCacheConfig,
-    ) -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.default_block_size);
-        opts.set_compression_type(rocksdb::DBCompressionType::None);
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts.set_block_based_table_factory(&block_opts);
-        opts
     }
 }
 
@@ -483,9 +437,27 @@ pub(crate) struct VecMetaCfKey(pub(crate) EmbeddingCode, pub(crate) VecId);
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct VecMetaCfValue(pub(crate) VecMetadata);
 
-impl VecMeta {
-    pub const CF_NAME: &'static str = "vector/vec_meta";
+impl ColumnFamily for VecMeta {
+    const CF_NAME: &'static str = "vector/vec_meta";
+}
 
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for VecMeta {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl VecMeta {
     pub fn key_to_bytes(key: &VecMetaCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(12);
         bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -511,33 +483,6 @@ impl VecMeta {
 
     pub fn value_from_bytes(bytes: &[u8]) -> Result<VecMetaCfValue> {
         Ok(rmp_serde::from_slice(bytes)?)
-    }
-
-    pub fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        // No compression for small metadata
-        opts.set_compression_type(rocksdb::DBCompressionType::None);
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts
-    }
-
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &super::subsystem::VectorBlockCacheConfig,
-    ) -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.default_block_size);
-        opts.set_compression_type(rocksdb::DBCompressionType::None);
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts.set_block_based_table_factory(&block_opts);
-        opts
     }
 }
 
@@ -612,9 +557,23 @@ pub(crate) type GraphMetaValue = GraphMetaField;
 #[derive(Debug, Clone)]
 pub(crate) struct GraphMetaCfValue(pub(crate) GraphMetaValue);
 
-impl GraphMeta {
-    pub const CF_NAME: &'static str = "vector/graph_meta";
+impl ColumnFamily for GraphMeta {
+    const CF_NAME: &'static str = "vector/graph_meta";
+}
 
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for GraphMeta {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl GraphMeta {
     pub fn key_to_bytes(key: &GraphMetaCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(9);
         bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -679,23 +638,6 @@ impl GraphMeta {
         };
         Ok(GraphMetaCfValue(field))
     }
-
-    pub fn column_family_options() -> rocksdb::Options {
-        rocksdb::Options::default()
-    }
-
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &super::subsystem::VectorBlockCacheConfig,
-    ) -> rocksdb::Options {
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.default_block_size);
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
 }
 
 // ============================================================================
@@ -716,9 +658,27 @@ pub(crate) struct IdForwardCfKey(pub(crate) EmbeddingCode, pub(crate) Id);
 #[derive(Debug, Clone)]
 pub(crate) struct IdForwardCfValue(pub(crate) VecId);
 
-impl IdForward {
-    pub const CF_NAME: &'static str = "vector/id_forward";
+impl ColumnFamily for IdForward {
+    const CF_NAME: &'static str = "vector/id_forward";
+}
 
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for IdForward {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_bloom_filter(10.0, false);
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl IdForward {
     pub fn key_to_bytes(key: &IdForwardCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(24);
         bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -752,35 +712,6 @@ impl IdForward {
         }
         Ok(IdForwardCfValue(u32::from_be_bytes(bytes.try_into()?)))
     }
-
-    pub fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-        block_opts.set_bloom_filter(10.0, false);
-        // Prefix: embedding_code (8 bytes)
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
-
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &super::subsystem::VectorBlockCacheConfig,
-    ) -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        block_opts.set_bloom_filter(10.0, false);
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.default_block_size);
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
 }
 
 // ============================================================================
@@ -801,9 +732,26 @@ pub(crate) struct IdReverseCfKey(pub(crate) EmbeddingCode, pub(crate) VecId);
 #[derive(Debug, Clone)]
 pub(crate) struct IdReverseCfValue(pub(crate) Id);
 
-impl IdReverse {
-    pub const CF_NAME: &'static str = "vector/id_reverse";
+impl ColumnFamily for IdReverse {
+    const CF_NAME: &'static str = "vector/id_reverse";
+}
 
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for IdReverse {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl IdReverse {
     pub fn key_to_bytes(key: &IdReverseCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(12);
         bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -837,30 +785,6 @@ impl IdReverse {
         let mut ulid_bytes = [0u8; 16];
         ulid_bytes.copy_from_slice(bytes);
         Ok(IdReverseCfValue(Id::from_bytes(ulid_bytes)))
-    }
-
-    pub fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts
-    }
-
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &super::subsystem::VectorBlockCacheConfig,
-    ) -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.default_block_size);
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts.set_block_based_table_factory(&block_opts);
-        opts
     }
 }
 
@@ -919,9 +843,23 @@ pub(crate) type IdAllocValue = IdAllocField;
 #[derive(Debug, Clone)]
 pub(crate) struct IdAllocCfValue(pub(crate) IdAllocValue);
 
-impl IdAlloc {
-    pub const CF_NAME: &'static str = "vector/id_alloc";
+impl ColumnFamily for IdAlloc {
+    const CF_NAME: &'static str = "vector/id_alloc";
+}
 
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for IdAlloc {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl IdAlloc {
     pub fn key_to_bytes(key: &IdAllocCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(9);
         bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -970,23 +908,6 @@ impl IdAlloc {
         };
         Ok(IdAllocCfValue(field))
     }
-
-    pub fn column_family_options() -> rocksdb::Options {
-        rocksdb::Options::default()
-    }
-
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &super::subsystem::VectorBlockCacheConfig,
-    ) -> rocksdb::Options {
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.default_block_size);
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
 }
 
 // ============================================================================
@@ -1007,9 +928,26 @@ pub(crate) struct PendingCfKey(pub(crate) EmbeddingCode, pub(crate) TimestampMil
 #[derive(Debug, Clone)]
 pub(crate) struct PendingCfValue(pub(crate) ());
 
-impl Pending {
-    pub const CF_NAME: &'static str = "vector/pending";
+impl ColumnFamily for Pending {
+    const CF_NAME: &'static str = "vector/pending";
+}
 
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for Pending {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl Pending {
     pub fn key_to_bytes(key: &PendingCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(20);
         bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -1037,31 +975,6 @@ impl Pending {
 
     pub fn value_from_bytes(_bytes: &[u8]) -> Result<PendingCfValue> {
         Ok(PendingCfValue(()))
-    }
-
-    pub fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        // Prefix: embedding_code (8 bytes) for scanning per-embedding pending items
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts
-    }
-
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &super::subsystem::VectorBlockCacheConfig,
-    ) -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.default_block_size);
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
-        opts.set_block_based_table_factory(&block_opts);
-        opts
     }
 }
 

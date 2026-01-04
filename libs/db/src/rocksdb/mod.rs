@@ -52,12 +52,14 @@
 //!
 //! See `README.md` in this directory for detailed architecture documentation.
 
+mod cf_traits;
 mod config;
 mod handle;
 mod storage;
 mod subsystem;
 
 // Re-exports
+pub use cf_traits::{ColumnFamily, ColumnFamilyConfig, ColumnFamilyRecord, HotColumnFamilyRecord};
 pub use config::BlockCacheConfig;
 pub use handle::{DatabaseHandle, StorageMode, StorageOptions};
 pub use storage::Storage;
