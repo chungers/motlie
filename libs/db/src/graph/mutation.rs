@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use super::name_hash::NameHash;
 use super::schema;
 use super::writer::{MutationExecutor, Writer};
-use super::HotColumnFamilyRecord;
+use super::{ColumnFamily, HotColumnFamilyRecord};
 use crate::writer::Runnable;
 use crate::{Id, TimestampMilli};
 
@@ -243,7 +243,7 @@ fn write_name_to_cf(
     txn_db: &rocksdb::TransactionDB,
     name: &str,
 ) -> Result<NameHash> {
-    use super::schema::{Names, NamesCfKey, NamesCfValue};
+    use super::schema::{Names, NameCfKey, NameCfValue};
 
     let name_hash = NameHash::from_name(name);
 
@@ -251,8 +251,8 @@ fn write_name_to_cf(
         .cf_handle(Names::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Names::CF_NAME))?;
 
-    let key_bytes = Names::key_to_bytes(&NamesCfKey(name_hash));
-    let value_bytes = Names::value_to_bytes(&NamesCfValue(name.to_string()))?;
+    let key_bytes = Names::key_to_bytes(&NameCfKey(name_hash));
+    let value_bytes = Names::value_to_bytes(&NameCfValue(name.to_string()))?;
 
     txn.put_cf(names_cf, key_bytes, value_bytes)?;
 
@@ -272,7 +272,7 @@ fn write_name_to_cf_cached(
     name: &str,
     cache: &super::name_hash::NameCache,
 ) -> Result<NameHash> {
-    use super::schema::{Names, NamesCfKey, NamesCfValue};
+    use super::schema::{Names, NameCfKey, NameCfValue};
 
     // Check cache first - if already interned, skip DB write
     let (name_hash, is_new) = cache.intern_if_new(name);
@@ -283,8 +283,8 @@ fn write_name_to_cf_cached(
             .cf_handle(Names::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Names::CF_NAME))?;
 
-        let key_bytes = Names::key_to_bytes(&NamesCfKey(name_hash));
-        let value_bytes = Names::value_to_bytes(&NamesCfValue(name.to_string()))?;
+        let key_bytes = Names::key_to_bytes(&NameCfKey(name_hash));
+        let value_bytes = Names::value_to_bytes(&NameCfValue(name.to_string()))?;
 
         txn.put_cf(names_cf, key_bytes, value_bytes)?;
         tracing::trace!(name = %name, "Wrote new name to Names CF");

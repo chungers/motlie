@@ -42,32 +42,32 @@ fn test_shared_storage_all_cfs_created() {
 
     let db = storage.db().expect("Should have DB");
 
-    // Check graph CFs exist
-    assert!(db.cf_handle("names").is_some(), "names CF should exist");
-    assert!(db.cf_handle("nodes").is_some(), "nodes CF should exist");
+    // Check graph CFs exist (all use "graph/" prefix)
+    assert!(db.cf_handle("graph/names").is_some(), "graph/names CF should exist");
+    assert!(db.cf_handle("graph/nodes").is_some(), "graph/nodes CF should exist");
     assert!(
-        db.cf_handle("forward_edges").is_some(),
-        "forward_edges CF should exist"
+        db.cf_handle("graph/forward_edges").is_some(),
+        "graph/forward_edges CF should exist"
     );
     assert!(
-        db.cf_handle("reverse_edges").is_some(),
-        "reverse_edges CF should exist"
+        db.cf_handle("graph/reverse_edges").is_some(),
+        "graph/reverse_edges CF should exist"
     );
     assert!(
-        db.cf_handle("node_fragments").is_some(),
-        "node_fragments CF should exist"
+        db.cf_handle("graph/node_fragments").is_some(),
+        "graph/node_fragments CF should exist"
     );
     assert!(
-        db.cf_handle("edge_fragments").is_some(),
-        "edge_fragments CF should exist"
+        db.cf_handle("graph/edge_fragments").is_some(),
+        "graph/edge_fragments CF should exist"
     );
     assert!(
-        db.cf_handle("node_summaries").is_some(),
-        "node_summaries CF should exist"
+        db.cf_handle("graph/node_summaries").is_some(),
+        "graph/node_summaries CF should exist"
     );
     assert!(
-        db.cf_handle("edge_summaries").is_some(),
-        "edge_summaries CF should exist"
+        db.cf_handle("graph/edge_summaries").is_some(),
+        "graph/edge_summaries CF should exist"
     );
 
     // Check vector CFs exist
@@ -120,15 +120,15 @@ fn test_shared_storage_cf_names_list() {
 
     let all_cfs = storage.all_cf_names();
 
-    // Graph CFs (8)
-    assert!(all_cfs.contains(&"names"));
-    assert!(all_cfs.contains(&"nodes"));
-    assert!(all_cfs.contains(&"forward_edges"));
-    assert!(all_cfs.contains(&"reverse_edges"));
-    assert!(all_cfs.contains(&"node_fragments"));
-    assert!(all_cfs.contains(&"edge_fragments"));
-    assert!(all_cfs.contains(&"node_summaries"));
-    assert!(all_cfs.contains(&"edge_summaries"));
+    // Graph CFs (8) - all use "graph/" prefix
+    assert!(all_cfs.contains(&"graph/names"));
+    assert!(all_cfs.contains(&"graph/nodes"));
+    assert!(all_cfs.contains(&"graph/forward_edges"));
+    assert!(all_cfs.contains(&"graph/reverse_edges"));
+    assert!(all_cfs.contains(&"graph/node_fragments"));
+    assert!(all_cfs.contains(&"graph/edge_fragments"));
+    assert!(all_cfs.contains(&"graph/node_summaries"));
+    assert!(all_cfs.contains(&"graph/edge_summaries"));
 
     // Vector CFs (10)
     assert!(all_cfs.contains(&"vector/embedding_specs"));
@@ -220,7 +220,7 @@ fn test_db_clone_works() {
     let db2 = storage.db_clone().expect("Should have DB");
 
     // Both clones should access the same CFs
-    assert!(db1.cf_handle("names").is_some());
+    assert!(db1.cf_handle("graph/names").is_some());
     assert!(db2.cf_handle("vector/vectors").is_some());
 }
 
@@ -252,7 +252,7 @@ fn test_single_provider_works() {
     assert!(storage.get_component("vector").is_none());
 
     let db = storage.db().expect("Should have DB");
-    assert!(db.cf_handle("names").is_some());
+    assert!(db.cf_handle("graph/names").is_some());
     assert!(db.cf_handle("vector/vectors").is_none());
 }
 
@@ -272,5 +272,5 @@ fn test_vector_only_works() {
 
     let db = storage.db().expect("Should have DB");
     assert!(db.cf_handle("vector/vectors").is_some());
-    assert!(db.cf_handle("names").is_none());
+    assert!(db.cf_handle("graph/names").is_none());
 }
