@@ -42,7 +42,7 @@ fn test_shared_storage_all_cfs_created() {
     let temp_dir = TempDir::new().unwrap();
     let storage = create_shared_storage(&temp_dir);
 
-    let db = storage.db();
+    let db = storage.db().expect("Should have DB");
 
     // Check graph CFs exist
     assert!(db.cf_handle("names").is_some(), "names CF should exist");
@@ -218,8 +218,8 @@ fn test_db_clone_works() {
     let storage = create_shared_storage(&temp_dir);
 
     // Clone should work
-    let db1 = storage.db_clone();
-    let db2 = storage.db_clone();
+    let db1 = storage.db_clone().expect("Should have DB");
+    let db2 = storage.db_clone().expect("Should have DB");
 
     // Both clones should access the same CFs
     assert!(db1.cf_handle("names").is_some());
@@ -253,7 +253,7 @@ fn test_single_provider_works() {
     assert!(storage.get_provider("graph").is_some());
     assert!(storage.get_provider("vector").is_none());
 
-    let db = storage.db();
+    let db = storage.db().expect("Should have DB");
     assert!(db.cf_handle("names").is_some());
     assert!(db.cf_handle("vector/vectors").is_none());
 }
@@ -272,7 +272,7 @@ fn test_vector_only_works() {
     assert!(storage.get_provider("vector").is_some());
     assert!(storage.get_provider("graph").is_none());
 
-    let db = storage.db();
+    let db = storage.db().expect("Should have DB");
     assert!(db.cf_handle("vector/vectors").is_some());
     assert!(db.cf_handle("names").is_none());
 }

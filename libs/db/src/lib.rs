@@ -15,11 +15,15 @@ pub mod vector;
 // Users access via fully qualified paths: motlie_db::fulltext::*
 pub mod fulltext;
 
-// Column family provider trait for modular storage initialization
+// Column family provider trait for modular RocksDB storage initialization
 // Users access via: motlie_db::provider::ColumnFamilyProvider
 pub mod provider;
 
-// Storage builder for composing modular ColumnFamilyProvider implementations
+// Index provider trait for modular Tantivy index initialization
+// Users access via: motlie_db::index_provider::IndexProvider
+pub mod index_provider;
+
+// Storage builder for composing modular providers (RocksDB + Tantivy)
 // Users access via: motlie_db::storage_builder::{StorageBuilder, SharedStorage}
 pub mod storage_builder;
 
