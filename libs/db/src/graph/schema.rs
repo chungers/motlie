@@ -1,3 +1,47 @@
+//! All graph CFs use the `graph/` prefix to avoid collisions with other subsystem CFs.
+//!
+//! ## Naming Convention
+//!
+//! For a domain entity named `Foo`:
+//!
+//! 1. **Column family marker**: `Foos` (plural) - a unit struct marking the CF
+//! 2. **Key type**: `FooCfKey` (singular + CfKey) - always a tuple struct for compound keys
+//! 3. **Value type**: `FooCfValue` (singular + CfValue) - wraps or aliases the value type
+//! 4. **Domain struct**: `Foo` - if the value has >2 fields, define a separate struct
+//!
+//! ### Example
+//!
+//! ```ignore
+//! // Domain struct for rich data (>2 fields)
+//! pub(crate) struct EmbeddingSpec {
+//!     pub(crate) model: String,
+//!     pub(crate) dim: u32,
+//!     pub(crate) distance: Distance,
+//! }
+//!
+//! // CF marker (plural)
+//! pub(crate) struct EmbeddingSpecs;
+//!
+//! // Key (singular + CfKey) - always tuple
+//! pub(crate) struct EmbeddingSpecCfKey(pub(crate) u64);
+//!
+//! // Value (singular + CfValue) - wraps domain struct
+//! pub(crate) struct EmbeddingSpecCfValue(pub(crate) EmbeddingSpec);
+//! ```
+//!
+//! ### Key Rules
+//!
+//! - Keys are **always tuples** (compound keys for RocksDB prefix extraction)
+//! - Keys use direct byte serialization (not MessagePack) for prefix extractors
+//!
+//! ### Value Rules
+//!
+//! - If value has ≤2 fields: tuple struct is acceptable
+//! - If value has >2 fields: define a named struct, wrap in `FooCfValue`
+//! - Values use MessagePack serialization (self-describing, compact) or rkyv zero-copy if the
+//! column family implements the HotColumnFamilyRecord trait.
+//!
+//!
 use super::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
 use super::name_hash::NameHash;
 use super::subsystem::GraphBlockCacheConfig;
@@ -32,44 +76,44 @@ pub use crate::{is_valid_at_time, StartTimestamp, TemporalRange, UntilTimestamp}
 pub(crate) struct Names;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct NamesCfKey(pub(crate) NameHash);
+pub(crate) struct NameCfKey(pub(crate) NameHash);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct NamesCfValue(pub(crate) String);
+pub(crate) struct NameCfValue(pub(crate) String);
 
 impl Names {
-    pub const CF_NAME: &'static str = "names";
+    pub const CF_NAME: &'static str = "graph/names";
 
     /// Serialize the key to bytes (8 bytes, fixed size).
-    pub fn key_to_bytes(key: &NamesCfKey) -> Vec<u8> {
+    pub fn key_to_bytes(key: &NameCfKey) -> Vec<u8> {
         key.0.as_bytes().to_vec()
     }
 
     /// Deserialize the key from bytes.
-    pub fn key_from_bytes(bytes: &[u8]) -> Result<NamesCfKey, anyhow::Error> {
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<NameCfKey, anyhow::Error> {
         if bytes.len() != NameHash::SIZE {
             anyhow::bail!(
-                "Invalid NamesCfKey length: expected {}, got {}",
+                "Invalid NameCfKey length: expected {}, got {}",
                 NameHash::SIZE,
                 bytes.len()
             );
         }
         let mut hash_bytes = [0u8; 8];
         hash_bytes.copy_from_slice(bytes);
-        Ok(NamesCfKey(NameHash::from_bytes(hash_bytes)))
+        Ok(NameCfKey(NameHash::from_bytes(hash_bytes)))
     }
 
     /// Serialize the value to bytes (LZ4 compressed MessagePack).
-    pub fn value_to_bytes(value: &NamesCfValue) -> Result<Vec<u8>, anyhow::Error> {
+    pub fn value_to_bytes(value: &NameCfValue) -> Result<Vec<u8>, anyhow::Error> {
         let msgpack_bytes = rmp_serde::to_vec(value)?;
         let compressed = lz4::block::compress(&msgpack_bytes, None, true)?;
         Ok(compressed)
     }
 
     /// Deserialize the value from bytes.
-    pub fn value_from_bytes(bytes: &[u8]) -> Result<NamesCfValue, anyhow::Error> {
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<NameCfValue, anyhow::Error> {
         let decompressed = lz4::block::decompress(bytes, None)?;
-        let value: NamesCfValue = rmp_serde::from_slice(&decompressed)?;
+        let value: NameCfValue = rmp_serde::from_slice(&decompressed)?;
         Ok(value)
     }
 
@@ -132,8 +176,7 @@ pub(crate) struct NodeCfKey(pub(crate) Id);
 
 /// Node value - optimized for graph traversal (hot path)
 /// Size: ~26 bytes (vs ~200-500 bytes with inline summary)
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct NodeCfValue(
     pub(crate) Option<TemporalRange>,
@@ -214,8 +257,7 @@ pub(crate) struct ForwardEdgeCfKey(
 
 /// Forward edge value - optimized for graph traversal (hot path)
 /// Size: ~35 bytes (vs ~200-500 bytes with inline summary)
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct ForwardEdgeCfValue(
     pub(crate) Option<TemporalRange>, // Field 0: Temporal validity
@@ -233,8 +275,7 @@ pub(crate) struct ReverseEdgeCfKey(
 );
 /// Reverse edge value - minimal for reverse lookups
 /// Size: ~17 bytes
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<TemporalRange>);
 
@@ -257,7 +298,7 @@ pub type EdgeSummary = DataUrl;
 pub type FragmentContent = DataUrl;
 
 impl Nodes {
-    pub const CF_NAME: &'static str = "nodes";
+    pub const CF_NAME: &'static str = "graph/nodes";
 
     /// Create key-value pair from AddNode mutation.
     pub fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
@@ -308,7 +349,7 @@ impl Nodes {
 }
 
 impl HotColumnFamilyRecord for Nodes {
-    const CF_NAME: &'static str = "nodes";
+    const CF_NAME: &'static str = "graph/nodes";
     type Key = NodeCfKey;
     type Value = NodeCfValue;
 
@@ -334,7 +375,7 @@ pub(crate) struct NodeFragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
 pub(crate) struct NodeFragmentCfValue(pub(crate) Option<TemporalRange>, pub(crate) FragmentContent);
 
 impl ColumnFamilyRecord for NodeFragments {
-    const CF_NAME: &'static str = "node_fragments";
+    const CF_NAME: &'static str = "graph/node_fragments";
     type Key = NodeFragmentCfKey;
     type Value = NodeFragmentCfValue;
     type CreateOp = AddNodeFragment;
@@ -427,19 +468,14 @@ impl NodeFragments {
 }
 
 impl ColumnFamilyRecord for EdgeFragments {
-    const CF_NAME: &'static str = "edge_fragments";
+    const CF_NAME: &'static str = "graph/edge_fragments";
     type Key = EdgeFragmentCfKey;
     type Value = EdgeFragmentCfValue;
     type CreateOp = AddEdgeFragment;
 
     fn record_from(args: &AddEdgeFragment) -> (EdgeFragmentCfKey, EdgeFragmentCfValue) {
         let name_hash = NameHash::from_name(&args.edge_name);
-        let key = EdgeFragmentCfKey(
-            args.src_id,
-            args.dst_id,
-            name_hash,
-            args.ts_millis,
-        );
+        let key = EdgeFragmentCfKey(args.src_id, args.dst_id, name_hash, args.ts_millis);
         let value = EdgeFragmentCfValue(args.valid_range.clone(), args.content.clone());
         (key, value)
     }
@@ -536,7 +572,7 @@ impl EdgeFragments {
 }
 
 impl ForwardEdges {
-    pub const CF_NAME: &'static str = "forward_edges";
+    pub const CF_NAME: &'static str = "graph/forward_edges";
 
     /// Create key-value pair from AddEdge mutation.
     pub fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
@@ -595,7 +631,7 @@ impl ForwardEdges {
 }
 
 impl HotColumnFamilyRecord for ForwardEdges {
-    const CF_NAME: &'static str = "forward_edges";
+    const CF_NAME: &'static str = "graph/forward_edges";
     type Key = ForwardEdgeCfKey;
     type Value = ForwardEdgeCfValue;
 
@@ -635,7 +671,7 @@ impl HotColumnFamilyRecord for ForwardEdges {
 }
 
 impl ReverseEdges {
-    pub const CF_NAME: &'static str = "reverse_edges";
+    pub const CF_NAME: &'static str = "graph/reverse_edges";
 
     /// Create key-value pair from AddEdge mutation.
     pub fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
@@ -686,7 +722,7 @@ impl ReverseEdges {
 }
 
 impl HotColumnFamilyRecord for ReverseEdges {
-    const CF_NAME: &'static str = "reverse_edges";
+    const CF_NAME: &'static str = "graph/reverse_edges";
     type Key = ReverseEdgeCfKey;
     type Value = ReverseEdgeCfValue;
 
@@ -745,7 +781,7 @@ pub(crate) struct NodeSummaryCfKey(pub(crate) SummaryHash);
 pub(crate) struct NodeSummaryCfValue(pub(crate) NodeSummary);
 
 impl NodeSummaries {
-    pub const CF_NAME: &'static str = "node_summaries";
+    pub const CF_NAME: &'static str = "graph/node_summaries";
 
     /// Serialize the key to bytes (8 bytes, fixed size).
     pub fn key_to_bytes(key: &NodeSummaryCfKey) -> Vec<u8> {
@@ -837,7 +873,7 @@ pub(crate) struct EdgeSummaryCfKey(pub(crate) SummaryHash);
 pub(crate) struct EdgeSummaryCfValue(pub(crate) EdgeSummary);
 
 impl EdgeSummaries {
-    pub const CF_NAME: &'static str = "edge_summaries";
+    pub const CF_NAME: &'static str = "graph/edge_summaries";
 
     /// Serialize the key to bytes (8 bytes, fixed size).
     pub fn key_to_bytes(key: &EdgeSummaryCfKey) -> Vec<u8> {
@@ -919,18 +955,17 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     Names::CF_NAME,
     Nodes::CF_NAME,
     NodeFragments::CF_NAME,
-    NodeSummaries::CF_NAME,  // Phase 2: Cold CF for node summaries
+    NodeSummaries::CF_NAME, // Phase 2: Cold CF for node summaries
     EdgeFragments::CF_NAME,
-    EdgeSummaries::CF_NAME,  // Phase 2: Cold CF for edge summaries
+    EdgeSummaries::CF_NAME, // Phase 2: Cold CF for edge summaries
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
 ];
 
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::mutation::AddEdge;
+    use super::*;
     use crate::Id;
 
     #[test]
@@ -1212,5 +1247,4 @@ mod tests {
         let range3 = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2001)));
         assert_ne!(range1, range3);
     }
-
 }
