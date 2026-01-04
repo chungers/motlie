@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use rocksdb::{Cache, ColumnFamilyDescriptor, IteratorMode};
 
-use crate::rocksdb::{BlockCacheConfig, DbAccess, StorageSubsystem};
+use crate::rocksdb::{BlockCacheConfig, ColumnFamily, ColumnFamilyConfig, DbAccess, StorageSubsystem};
 
 use super::registry::EmbeddingRegistry;
 use super::schema::{self, ALL_COLUMN_FAMILIES, EmbeddingSpecs};
@@ -48,44 +48,44 @@ impl StorageSubsystem for Subsystem {
 
         vec![
             ColumnFamilyDescriptor::new(
-                schema::EmbeddingSpecs::CF_NAME,
-                schema::EmbeddingSpecs::column_family_options_with_cache(block_cache, &vector_config),
+                <schema::EmbeddingSpecs as ColumnFamily>::CF_NAME,
+                <schema::EmbeddingSpecs as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::Vectors::CF_NAME,
-                schema::Vectors::column_family_options_with_cache(block_cache, &vector_config),
+                <schema::Vectors as ColumnFamily>::CF_NAME,
+                <schema::Vectors as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::Edges::CF_NAME,
-                schema::Edges::column_family_options_with_cache(block_cache, &vector_config),
+                <schema::Edges as ColumnFamily>::CF_NAME,
+                <schema::Edges as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::BinaryCodes::CF_NAME,
-                schema::BinaryCodes::column_family_options_with_cache(block_cache, &vector_config),
+                <schema::BinaryCodes as ColumnFamily>::CF_NAME,
+                <schema::BinaryCodes as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::VecMeta::CF_NAME,
-                schema::VecMeta::column_family_options_with_cache(block_cache, &vector_config),
+                <schema::VecMeta as ColumnFamily>::CF_NAME,
+                <schema::VecMeta as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::GraphMeta::CF_NAME,
-                schema::GraphMeta::column_family_options_with_cache(block_cache, &vector_config),
+                <schema::GraphMeta as ColumnFamily>::CF_NAME,
+                <schema::GraphMeta as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::IdForward::CF_NAME,
-                schema::IdForward::column_family_options_with_cache(block_cache, &vector_config),
+                <schema::IdForward as ColumnFamily>::CF_NAME,
+                <schema::IdForward as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::IdReverse::CF_NAME,
-                schema::IdReverse::column_family_options_with_cache(block_cache, &vector_config),
+                <schema::IdReverse as ColumnFamily>::CF_NAME,
+                <schema::IdReverse as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::IdAlloc::CF_NAME,
-                schema::IdAlloc::column_family_options_with_cache(block_cache, &vector_config),
+                <schema::IdAlloc as ColumnFamily>::CF_NAME,
+                <schema::IdAlloc as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::Pending::CF_NAME,
-                schema::Pending::column_family_options_with_cache(block_cache, &vector_config),
+                <schema::Pending as ColumnFamily>::CF_NAME,
+                <schema::Pending as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
         ]
     }
