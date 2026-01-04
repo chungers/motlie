@@ -1531,7 +1531,28 @@ The following additional work was completed during Phase 0 implementation.
 | `src/vector/registry.rs` | `EmbeddingRegistry`, `EmbeddingFilter` |
 | `src/vector/schema.rs` | All vector CF definitions with key/value serialization |
 | `src/vector/error.rs` | Internal error handling |
+| `src/vector/README.md` | Schema documentation and union pattern appendix |
 | `tests/test_storage_builder.rs` | Integration tests for shared storage |
+
+#### Schema Refactoring (2026-01-04, cac8da3)
+
+Added semantic type aliases and union pattern for polymorphic CFs:
+
+**Semantic Types:**
+- `EmbeddingCode` (u64) - FK to EmbeddingSpecs
+- `VecId` (u32) - internal vector index
+- `HnswLayer` (u8) - HNSW layer index
+- `RoaringBitmapBytes` (Vec<u8>) - serialized RoaringBitmap
+- `RabitqCode` (Vec<u8>) - RaBitQ quantized code
+
+**Union Pattern for Polymorphic CFs:**
+- `GraphMeta`: `GraphMetaField` enum with `EntryPoint`, `MaxLevel`, `Count`, `Config` variants
+- `IdAlloc`: `IdAllocField` enum with `NextId`, `FreeBitmap` variants
+- Single enum for both key discrimination and value storage
+- Key helpers: `GraphMetaCfKey::entry_point(code)`, etc.
+- `value_from_bytes(key, bytes)` uses key's variant for type info
+
+See `src/vector/README.md` Appendix A for detailed documentation.
 
 #### StorageSubsystem Trait (Generic Storage)
 
@@ -5868,3 +5889,4 @@ cargo run -p motlie_core --example simd_check
 | 2026-01-03 | Expanded Phase 0 with tasks 0.4-0.9 for rich Embedding implementation | Claude Opus 4.5 |
 | 2026-01-03 | **IMPLEMENTED** Phase 0 foundation: mod.rs, config.rs, distance.rs, embedding.rs, registry.rs, schema.rs, error.rs | Claude Opus 4.5 |
 | 2026-01-03 | 31 unit tests passing for Phase 0 types and schema | Claude Opus 4.5 |
+| 2026-01-04 | **cac8da3** Refactor vector schema: semantic types (EmbeddingCode, VecId, HnswLayer, RoaringBitmapBytes, RabitqCode), union pattern for polymorphic CFs (GraphMeta, IdAlloc), README documentation | Claude Opus 4.5 |
