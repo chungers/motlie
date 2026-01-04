@@ -24,6 +24,8 @@ use rkyv::{Archive, CheckBytes, Deserialize as RkyvDeserialize, Serialize as Rky
 use rocksdb::{Cache, Options};
 use serde::{Deserialize, Serialize};
 
+use super::DbAccess;
+
 // ============================================================================
 // Base Trait: ColumnFamily
 // ============================================================================
@@ -214,6 +216,51 @@ pub trait HotColumnFamilyRecord: ColumnFamily {
         rkyv::to_bytes::<_, 256>(value)
             .map_err(|e| anyhow::anyhow!("rkyv serialization failed: {}", e))
     }
+}
+
+// ============================================================================
+// Prewarm Helper
+// ============================================================================
+
+/// Generic prewarm helper for `ColumnFamilyRecord` CFs.
+///
+/// Iterates over a column family using trait methods for deserialization,
+/// calling the visitor function for each record up to the specified limit.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// prewarm_cf::<EmbeddingSpecs, _>(db, 1000, |key, value| {
+///     cache.register_from_db(key.0, &value.0.model, value.0.dim, value.0.distance);
+///     Ok(())
+/// })?;
+/// ```
+pub fn prewarm_cf<CF, F>(db: &dyn DbAccess, limit: usize, mut visitor: F) -> Result<usize>
+where
+    CF: ColumnFamilyRecord,
+    F: FnMut(&CF::Key, &CF::Value) -> Result<()>,
+{
+    if limit == 0 {
+        return Ok(0);
+    }
+
+    let iter = db.iterator_cf(CF::CF_NAME)?;
+    let mut loaded = 0;
+
+    for item in iter {
+        if loaded >= limit {
+            break;
+        }
+
+        let (key_bytes, value_bytes) = item?;
+
+        let key = CF::key_from_bytes(&key_bytes)?;
+        let value = CF::value_from_bytes(&value_bytes)?;
+        visitor(&key, &value)?;
+        loaded += 1;
+    }
+
+    Ok(loaded)
 }
 
 #[cfg(test)]

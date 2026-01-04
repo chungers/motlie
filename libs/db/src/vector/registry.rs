@@ -12,10 +12,11 @@ use anyhow::Result;
 use dashmap::DashMap;
 use rocksdb::{IteratorMode, TransactionDB};
 
-use crate::rocksdb::ColumnFamily;
+use crate::rocksdb::{ColumnFamily, ColumnFamilyRecord};
 use super::distance::Distance;
 use super::embedding::{Embedding, EmbeddingBuilder};
-use super::schema::{EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecCfValue, EmbeddingSpecs};
+use super::mutation::AddEmbeddingSpec;
+use super::schema::EmbeddingSpecs;
 
 // ============================================================================
 // EmbeddingFilter
@@ -200,23 +201,20 @@ impl EmbeddingRegistry {
         // Slow path: allocate new code and persist
         let code = self.next_code.fetch_add(1, Ordering::SeqCst);
 
-        // Persist to RocksDB
+        // Persist to RocksDB using ColumnFamilyRecord trait
         let cf = db
             .cf_handle(EmbeddingSpecs::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
 
-        let key = EmbeddingSpecCfKey(code);
-        let value = EmbeddingSpecCfValue(EmbeddingSpec {
+        let add_op = AddEmbeddingSpec {
+            code,
             model: builder.model.clone(),
             dim: builder.dim,
             distance: builder.distance,
-        });
+        };
+        let (key_bytes, value_bytes) = EmbeddingSpecs::create_bytes(&add_op)?;
 
-        db.put_cf(
-            &cf,
-            EmbeddingSpecs::key_to_bytes(&key),
-            EmbeddingSpecs::value_to_bytes(&value)?,
-        )?;
+        db.put_cf(&cf, key_bytes, value_bytes)?;
 
         // Create embedding
         let embedding = Embedding::new(

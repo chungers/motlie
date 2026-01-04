@@ -5,9 +5,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use rocksdb::{Cache, ColumnFamilyDescriptor, IteratorMode};
+use rocksdb::{Cache, ColumnFamilyDescriptor};
 
-use crate::rocksdb::{BlockCacheConfig, ColumnFamily, ColumnFamilyConfig, DbAccess, StorageSubsystem};
+use crate::rocksdb::{
+    prewarm_cf, BlockCacheConfig, ColumnFamily, ColumnFamilyConfig, DbAccess, StorageSubsystem,
+};
 
 use super::registry::EmbeddingRegistry;
 use super::schema::{self, ALL_COLUMN_FAMILIES, EmbeddingSpecs};
@@ -95,34 +97,11 @@ impl StorageSubsystem for Subsystem {
         cache: &Self::Cache,
         config: &Self::PrewarmConfig,
     ) -> Result<usize> {
-        if config.prewarm_limit == 0 {
-            return Ok(0);
-        }
-
-        let mut loaded = 0;
-        let limit = config.prewarm_limit;
-
-        let iter = db.iterator_cf(EmbeddingSpecs::CF_NAME)?;
-
-        for item in iter {
-            if loaded >= limit {
-                break;
-            }
-
-            let (key_bytes, value_bytes) = item?;
-
-            // Parse key and value
-            if let (Ok(key), Ok(value)) = (
-                EmbeddingSpecs::key_from_bytes(&key_bytes),
-                EmbeddingSpecs::value_from_bytes(&value_bytes),
-            ) {
-                let spec = &value.0;
-                cache.register_from_db(key.0, &spec.model, spec.dim, spec.distance);
-                loaded += 1;
-            }
-        }
-
-        Ok(loaded)
+        prewarm_cf::<EmbeddingSpecs, _>(db, config.prewarm_limit, |key, value| {
+            let spec = &value.0;
+            cache.register_from_db(key.0, &spec.model, spec.dim, spec.distance);
+            Ok(())
+        })
     }
 }
 

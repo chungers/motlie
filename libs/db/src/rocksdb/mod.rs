@@ -59,7 +59,9 @@ mod storage;
 mod subsystem;
 
 // Re-exports
-pub use cf_traits::{ColumnFamily, ColumnFamilyConfig, ColumnFamilyRecord, HotColumnFamilyRecord};
+pub use cf_traits::{
+    prewarm_cf, ColumnFamily, ColumnFamilyConfig, ColumnFamilyRecord, HotColumnFamilyRecord,
+};
 pub use config::BlockCacheConfig;
 pub use handle::{DatabaseHandle, StorageMode, StorageOptions};
 pub use storage::Storage;
