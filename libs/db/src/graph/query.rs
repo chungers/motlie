@@ -23,7 +23,7 @@ use super::summary_hash::SummaryHash;
 use crate::reader::Runnable;
 use super::schema::{
     self, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey, FragmentContent,
-    Names, NamesCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey, SrcId,
+    Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey, SrcId,
 };
 use super::ColumnFamilyRecord;
 use super::Storage;
@@ -49,7 +49,7 @@ fn resolve_name(storage: &Storage, name_hash: NameHash) -> Result<String> {
     }
 
     // Cache miss: fetch from Names CF
-    let key_bytes = Names::key_to_bytes(&NamesCfKey(name_hash));
+    let key_bytes = Names::key_to_bytes(&NameCfKey(name_hash));
 
     let value_bytes = if let Ok(db) = storage.db() {
         let names_cf = db
@@ -96,7 +96,7 @@ fn resolve_name_from_txn(
         .cf_handle(Names::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Names CF not found"))?;
 
-    let key_bytes = Names::key_to_bytes(&NamesCfKey(name_hash));
+    let key_bytes = Names::key_to_bytes(&NameCfKey(name_hash));
 
     let value_bytes = txn
         .get_cf(names_cf, &key_bytes)?

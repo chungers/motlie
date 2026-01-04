@@ -28,7 +28,7 @@ use super::ColumnFamilyRecord;
 use super::HotColumnFamilyRecord;
 use super::schema::{
     self, is_valid_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
-    FragmentContent, Names, NamesCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,
+    FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,
     SrcId, TemporalRange,
 };
 use super::Storage;
@@ -51,7 +51,7 @@ fn resolve_name(storage: &Storage, name_hash: NameHash) -> Result<String> {
     }
 
     // Cache miss: fetch from Names CF
-    let key_bytes = Names::key_to_bytes(&NamesCfKey(name_hash));
+    let key_bytes = Names::key_to_bytes(&NameCfKey(name_hash));
 
     let value_bytes = if let Ok(db) = storage.db() {
         let names_cf = db

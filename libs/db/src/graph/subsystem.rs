@@ -194,11 +194,11 @@ mod tests {
     fn test_subsystem_constants() {
         assert_eq!(Subsystem::NAME, "graph");
         assert!(!Subsystem::COLUMN_FAMILIES.is_empty());
-        // Verify known CFs are present
+        // Verify known CFs are present (all graph CFs use "graph/" prefix)
         let cfs: std::collections::HashSet<_> = Subsystem::COLUMN_FAMILIES.iter().copied().collect();
-        assert!(cfs.contains("names"), "Should have names CF");
-        assert!(cfs.contains("nodes"), "Should have nodes CF");
-        assert!(cfs.contains("forward_edges"), "Should have forward_edges CF");
-        assert!(cfs.contains("reverse_edges"), "Should have reverse_edges CF");
+        assert!(cfs.contains("graph/names"), "Should have graph/names CF");
+        assert!(cfs.contains("graph/nodes"), "Should have graph/nodes CF");
+        assert!(cfs.contains("graph/forward_edges"), "Should have graph/forward_edges CF");
+        assert!(cfs.contains("graph/reverse_edges"), "Should have graph/reverse_edges CF");
     }
 }
