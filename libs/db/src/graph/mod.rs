@@ -16,9 +16,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use rkyv::validation::validators::DefaultValidator;
-use rkyv::{Archive, CheckBytes, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::{Deserialize, Serialize};
+
+// Re-export CF traits from rocksdb module
+pub(crate) use crate::rocksdb::{
+    ColumnFamily, ColumnFamilyConfig, ColumnFamilyRecord, HotColumnFamilyRecord,
+};
 
 // Submodules
 pub mod mutation;
@@ -106,132 +108,7 @@ pub use writer::{
 use schema::ALL_COLUMN_FAMILIES;
 use writer::Processor;
 
-/// Trait for column family record types that can create and serialize key-value pairs.
-///
-/// This trait uses direct byte concatenation for keys (to enable RocksDB prefix extractors)
-/// and MessagePack for values (where self-describing format is beneficial).
-pub(crate) trait ColumnFamilyRecord {
-    const CF_NAME: &'static str;
 
-    /// The key type for this column family
-    type Key: Serialize + for<'de> Deserialize<'de>;
-
-    /// The value type for this column family
-    type Value: Serialize + for<'de> Deserialize<'de>;
-
-    /// The argument type for creating records
-    type CreateOp;
-
-    /// Create a key-value pair from arguments
-    fn record_from(args: &Self::CreateOp) -> (Self::Key, Self::Value);
-
-    /// Serialize the key to bytes using direct concatenation (no MessagePack).
-    /// This enables constant-length prefixes for RocksDB prefix extractors.
-    fn key_to_bytes(key: &Self::Key) -> Vec<u8>;
-
-    /// Deserialize the key from bytes (direct format, no MessagePack).
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error>;
-
-    /// Serialize the value to bytes using MessagePack, then compress with LZ4.
-    fn value_to_bytes(value: &Self::Value) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-        let msgpack_bytes = rmp_serde::to_vec(value)?;
-        let compressed = lz4::block::compress(&msgpack_bytes, None, true).map_err(|e| {
-            rmp_serde::encode::Error::Syntax(format!("LZ4 compression failed: {}", e))
-        })?;
-        Ok(compressed)
-    }
-
-    /// Decompress with LZ4, then deserialize the value from bytes using MessagePack.
-    fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value, rmp_serde::decode::Error> {
-        let decompressed = lz4::block::decompress(bytes, None).map_err(|e| {
-            rmp_serde::decode::Error::Syntax(format!("LZ4 decompression failed: {}", e))
-        })?;
-        rmp_serde::from_slice(&decompressed)
-    }
-
-    /// Create and serialize to bytes using direct encoding for keys, compressed MessagePack for values.
-    fn create_bytes(args: &Self::CreateOp) -> Result<(Vec<u8>, Vec<u8>), rmp_serde::encode::Error> {
-        let (key, value) = Self::record_from(args);
-        let key_bytes = Self::key_to_bytes(&key);
-        let value_bytes = Self::value_to_bytes(&value)?;
-        Ok((key_bytes, value_bytes))
-    }
-
-    /// Configure RocksDB options for this column family.
-    /// Each implementer specifies their own prefix extractor and bloom filter settings.
-    fn column_family_options() -> rocksdb::Options {
-        rocksdb::Options::default()
-    }
-}
-
-// ============================================================================
-// Hot Column Family Record Trait (rkyv zero-copy serialization)
-// ============================================================================
-
-/// Trait for hot column families using rkyv (zero-copy serialization).
-///
-/// Hot CFs store small, frequently-accessed data (topology, weights, temporal ranges).
-/// Values are serialized with rkyv for zero-copy access during graph traversal.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// // Zero-copy access (hot path)
-/// let archived = Nodes::value_archived(&value_bytes)?;
-/// if archived.temporal_range.as_ref().map_or(true, |tr| tr.is_valid_at(now)) {
-///     // Use archived data directly without allocation
-/// }
-///
-/// // Full deserialization when ownership is needed (cold path)
-/// let value: NodeCfValue = Nodes::value_from_bytes(&value_bytes)?;
-/// ```
-pub(crate) trait HotColumnFamilyRecord {
-    /// Column family name (constant for each implementor)
-    const CF_NAME: &'static str;
-
-    /// The key type for this column family
-    type Key;
-
-    /// The value type for this column family (must implement rkyv traits)
-    type Value: Archive + RkyvSerialize<rkyv::ser::serializers::AllocSerializer<256>>;
-
-    /// Serialize key to bytes.
-    fn key_to_bytes(key: &Self::Key) -> Vec<u8>;
-
-    /// Deserialize key from bytes.
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key>;
-
-    /// Zero-copy value access - returns archived reference without allocation.
-    ///
-    /// This is the hot path for graph traversal. The returned reference
-    /// is valid as long as the input bytes are valid.
-    fn value_archived(bytes: &[u8]) -> Result<&<Self::Value as Archive>::Archived>
-    where
-        <Self::Value as Archive>::Archived: for<'a> CheckBytes<DefaultValidator<'a>>,
-    {
-        rkyv::check_archived_root::<Self::Value>(bytes)
-            .map_err(|e| anyhow::anyhow!("rkyv validation failed: {}", e))
-    }
-
-    /// Full deserialization when mutation/ownership is needed.
-    ///
-    /// This allocates and copies data. Use sparingly - prefer value_archived()
-    /// for read-only access.
-    fn value_from_bytes(bytes: &[u8]) -> Result<Self::Value>
-    where
-        <Self::Value as Archive>::Archived: for<'a> CheckBytes<DefaultValidator<'a>>,
-        <Self::Value as Archive>::Archived: RkyvDeserialize<Self::Value, rkyv::Infallible>,
-    {
-        let archived = Self::value_archived(bytes)?;
-        Ok(archived.deserialize(&mut rkyv::Infallible).expect("Infallible"))
-    }
-
-    /// Serialize value to bytes using rkyv.
-    fn value_to_bytes(value: &Self::Value) -> Result<rkyv::AlignedVec> {
-        rkyv::to_bytes::<_, 256>(value)
-            .map_err(|e| anyhow::anyhow!("rkyv serialization failed: {}", e))
-    }
-}
 
 /// Trait implemented by column families that supports patching of TemporalRange.
 pub(crate) trait ValidRangePatchable {

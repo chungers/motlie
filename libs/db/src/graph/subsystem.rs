@@ -11,7 +11,7 @@ use crate::rocksdb::{BlockCacheConfig, DbAccess, StorageSubsystem};
 
 use super::name_hash::{NameCache, NameHash};
 use super::schema::{self, ALL_COLUMN_FAMILIES};
-use super::ColumnFamilyRecord;
+use super::{ColumnFamily, ColumnFamilyConfig};
 
 // ============================================================================
 // Graph Subsystem
@@ -51,36 +51,36 @@ impl StorageSubsystem for Subsystem {
 
         vec![
             ColumnFamilyDescriptor::new(
-                schema::Names::CF_NAME,
-                schema::Names::column_family_options_with_cache(block_cache, &graph_config),
+                <schema::Names as ColumnFamily>::CF_NAME,
+                <schema::Names as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::Nodes::CF_NAME,
-                schema::Nodes::column_family_options_with_cache(block_cache, &graph_config),
+                <schema::Nodes as ColumnFamily>::CF_NAME,
+                <schema::Nodes as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::NodeFragments::CF_NAME,
-                schema::NodeFragments::column_family_options_with_cache(block_cache, &graph_config),
+                <schema::NodeFragments as ColumnFamily>::CF_NAME,
+                <schema::NodeFragments as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::NodeSummaries::CF_NAME,
-                schema::NodeSummaries::column_family_options_with_cache(block_cache, &graph_config),
+                <schema::NodeSummaries as ColumnFamily>::CF_NAME,
+                <schema::NodeSummaries as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::EdgeFragments::CF_NAME,
-                schema::EdgeFragments::column_family_options_with_cache(block_cache, &graph_config),
+                <schema::EdgeFragments as ColumnFamily>::CF_NAME,
+                <schema::EdgeFragments as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::EdgeSummaries::CF_NAME,
-                schema::EdgeSummaries::column_family_options_with_cache(block_cache, &graph_config),
+                <schema::EdgeSummaries as ColumnFamily>::CF_NAME,
+                <schema::EdgeSummaries as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::ForwardEdges::CF_NAME,
-                schema::ForwardEdges::column_family_options_with_cache(block_cache, &graph_config),
+                <schema::ForwardEdges as ColumnFamily>::CF_NAME,
+                <schema::ForwardEdges as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
             ColumnFamilyDescriptor::new(
-                schema::ReverseEdges::CF_NAME,
-                schema::ReverseEdges::column_family_options_with_cache(block_cache, &graph_config),
+                <schema::ReverseEdges as ColumnFamily>::CF_NAME,
+                <schema::ReverseEdges as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
         ]
     }
@@ -194,11 +194,11 @@ mod tests {
     fn test_subsystem_constants() {
         assert_eq!(Subsystem::NAME, "graph");
         assert!(!Subsystem::COLUMN_FAMILIES.is_empty());
-        // Verify known CFs are present
+        // Verify known CFs are present (all graph CFs use "graph/" prefix)
         let cfs: std::collections::HashSet<_> = Subsystem::COLUMN_FAMILIES.iter().copied().collect();
-        assert!(cfs.contains("names"), "Should have names CF");
-        assert!(cfs.contains("nodes"), "Should have nodes CF");
-        assert!(cfs.contains("forward_edges"), "Should have forward_edges CF");
-        assert!(cfs.contains("reverse_edges"), "Should have reverse_edges CF");
+        assert!(cfs.contains("graph/names"), "Should have graph/names CF");
+        assert!(cfs.contains("graph/nodes"), "Should have graph/nodes CF");
+        assert!(cfs.contains("graph/forward_edges"), "Should have graph/forward_edges CF");
+        assert!(cfs.contains("graph/reverse_edges"), "Should have graph/reverse_edges CF");
     }
 }

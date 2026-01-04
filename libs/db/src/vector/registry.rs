@@ -12,9 +12,10 @@ use anyhow::Result;
 use dashmap::DashMap;
 use rocksdb::{IteratorMode, TransactionDB};
 
+use crate::rocksdb::ColumnFamily;
 use super::distance::Distance;
 use super::embedding::{Embedding, EmbeddingBuilder};
-use super::schema::{EmbeddingSpecs, EmbeddingSpecsCfKey, EmbeddingSpecsCfValue};
+use super::schema::{EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecCfValue, EmbeddingSpecs};
 
 // ============================================================================
 // EmbeddingFilter
@@ -148,15 +149,16 @@ impl EmbeddingRegistry {
             let value = EmbeddingSpecs::value_from_bytes(&value_bytes)?;
 
             let code = key.0;
+            let spec = &value.0;
             let embedding = Embedding::new(
                 code,
-                value.0.clone(), // model
-                value.1,         // dim
-                value.2,         // distance
+                spec.model.clone(),
+                spec.dim,
+                spec.distance,
                 None,
             );
 
-            let spec_key = (value.0, value.1, value.2);
+            let spec_key = (spec.model.clone(), spec.dim, spec.distance);
             self.by_spec.insert(spec_key, embedding.clone());
             self.by_code.insert(code, embedding);
 
@@ -203,12 +205,12 @@ impl EmbeddingRegistry {
             .cf_handle(EmbeddingSpecs::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
 
-        let key = EmbeddingSpecsCfKey(code);
-        let value = EmbeddingSpecsCfValue(
-            builder.model.clone(), // model
-            builder.dim,           // dim
-            builder.distance,      // distance
-        );
+        let key = EmbeddingSpecCfKey(code);
+        let value = EmbeddingSpecCfValue(EmbeddingSpec {
+            model: builder.model.clone(),
+            dim: builder.dim,
+            distance: builder.distance,
+        });
 
         db.put_cf(
             &cf,

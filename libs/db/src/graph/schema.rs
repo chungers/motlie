@@ -1,7 +1,53 @@
+//! All graph CFs use the `graph/` prefix to avoid collisions with other subsystem CFs.
+//!
+//! ## Naming Convention
+//!
+//! For a domain entity named `Foo`:
+//!
+//! 1. **Column family marker**: `Foos` (plural) - a unit struct marking the CF
+//! 2. **Key type**: `FooCfKey` (singular + CfKey) - always a tuple struct for compound keys
+//! 3. **Value type**: `FooCfValue` (singular + CfValue) - wraps or aliases the value type
+//! 4. **Domain struct**: `Foo` - if the value has >2 fields, define a separate struct
+//!
+//! ### Example
+//!
+//! ```ignore
+//! // Domain struct for rich data (>2 fields)
+//! pub(crate) struct EmbeddingSpec {
+//!     pub(crate) model: String,
+//!     pub(crate) dim: u32,
+//!     pub(crate) distance: Distance,
+//! }
+//!
+//! // CF marker (plural)
+//! pub(crate) struct EmbeddingSpecs;
+//!
+//! // Key (singular + CfKey) - always tuple
+//! pub(crate) struct EmbeddingSpecCfKey(pub(crate) u64);
+//!
+//! // Value (singular + CfValue) - wraps domain struct
+//! pub(crate) struct EmbeddingSpecCfValue(pub(crate) EmbeddingSpec);
+//! ```
+//!
+//! ### Key Rules
+//!
+//! - Keys are **always tuples** (compound keys for RocksDB prefix extraction)
+//! - Keys use direct byte serialization (not MessagePack) for prefix extractors
+//!
+//! ### Value Rules
+//!
+//! - If value has ≤2 fields: tuple struct is acceptable
+//! - If value has >2 fields: define a named struct, wrap in `FooCfValue`
+//! - Values use MessagePack serialization (self-describing, compact) or rkyv zero-copy if the
+//! column family implements the HotColumnFamilyRecord trait.
+//!
+//!
 use super::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
 use super::name_hash::NameHash;
 use super::subsystem::GraphBlockCacheConfig;
 use super::summary_hash::SummaryHash;
+use super::ColumnFamily;
+use super::ColumnFamilyConfig;
 use super::ColumnFamilyRecord;
 use super::HotColumnFamilyRecord;
 use super::ValidRangePatchable;
@@ -32,68 +78,20 @@ pub use crate::{is_valid_at_time, StartTimestamp, TemporalRange, UntilTimestamp}
 pub(crate) struct Names;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct NamesCfKey(pub(crate) NameHash);
+pub(crate) struct NameCfKey(pub(crate) NameHash);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct NamesCfValue(pub(crate) String);
+pub(crate) struct NameCfValue(pub(crate) String);
 
-impl Names {
-    pub const CF_NAME: &'static str = "names";
+impl ColumnFamily for Names {
+    const CF_NAME: &'static str = "graph/names";
+}
 
-    /// Serialize the key to bytes (8 bytes, fixed size).
-    pub fn key_to_bytes(key: &NamesCfKey) -> Vec<u8> {
-        key.0.as_bytes().to_vec()
-    }
-
-    /// Deserialize the key from bytes.
-    pub fn key_from_bytes(bytes: &[u8]) -> Result<NamesCfKey, anyhow::Error> {
-        if bytes.len() != NameHash::SIZE {
-            anyhow::bail!(
-                "Invalid NamesCfKey length: expected {}, got {}",
-                NameHash::SIZE,
-                bytes.len()
-            );
-        }
-        let mut hash_bytes = [0u8; 8];
-        hash_bytes.copy_from_slice(bytes);
-        Ok(NamesCfKey(NameHash::from_bytes(hash_bytes)))
-    }
-
-    /// Serialize the value to bytes (LZ4 compressed MessagePack).
-    pub fn value_to_bytes(value: &NamesCfValue) -> Result<Vec<u8>, anyhow::Error> {
-        let msgpack_bytes = rmp_serde::to_vec(value)?;
-        let compressed = lz4::block::compress(&msgpack_bytes, None, true)?;
-        Ok(compressed)
-    }
-
-    /// Deserialize the value from bytes.
-    pub fn value_from_bytes(bytes: &[u8]) -> Result<NamesCfValue, anyhow::Error> {
-        let decompressed = lz4::block::decompress(bytes, None)?;
-        let value: NamesCfValue = rmp_serde::from_slice(&decompressed)?;
-        Ok(value)
-    }
-
-    /// Configure RocksDB options for this column family.
-    ///
-    /// Names CF is small and hot - optimize for point lookups.
-    pub fn column_family_options() -> rocksdb::Options {
-        let mut opts = rocksdb::Options::default();
-
-        // Enable bloom filter for fast point lookups
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-        block_opts.set_bloom_filter(10.0, false); // 10 bits per key
-        opts.set_block_based_table_factory(&block_opts);
-
-        opts
-    }
-
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for Names {
     /// Configure RocksDB options with shared block cache.
     ///
     /// Names CF is small and hot - use high cache priority to keep it in memory.
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &BlockCacheConfig,
-    ) -> rocksdb::Options {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
         let mut block_opts = rocksdb::BlockBasedOptions::default();
 
@@ -102,8 +100,6 @@ impl Names {
         block_opts.set_block_size(config.graph_block_size);
 
         // Cache index and filter blocks for Names CF
-        // Note: The Rust bindings don't expose high_priority setting, but setting
-        // cache_index_and_filter_blocks=true keeps metadata in cache which helps.
         if config.cache_index_and_filter_blocks {
             block_opts.set_cache_index_and_filter_blocks(true);
         }
@@ -116,6 +112,41 @@ impl Names {
 
         opts.set_block_based_table_factory(&block_opts);
         opts
+    }
+}
+
+impl Names {
+    /// Serialize the key to bytes (8 bytes, fixed size).
+    pub fn key_to_bytes(key: &NameCfKey) -> Vec<u8> {
+        key.0.as_bytes().to_vec()
+    }
+
+    /// Deserialize the key from bytes.
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<NameCfKey, anyhow::Error> {
+        if bytes.len() != NameHash::SIZE {
+            anyhow::bail!(
+                "Invalid NameCfKey length: expected {}, got {}",
+                NameHash::SIZE,
+                bytes.len()
+            );
+        }
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(bytes);
+        Ok(NameCfKey(NameHash::from_bytes(hash_bytes)))
+    }
+
+    /// Serialize the value to bytes (LZ4 compressed MessagePack).
+    pub fn value_to_bytes(value: &NameCfValue) -> Result<Vec<u8>, anyhow::Error> {
+        let msgpack_bytes = rmp_serde::to_vec(value)?;
+        let compressed = lz4::block::compress(&msgpack_bytes, None, true)?;
+        Ok(compressed)
+    }
+
+    /// Deserialize the value from bytes.
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<NameCfValue, anyhow::Error> {
+        let decompressed = lz4::block::decompress(bytes, None)?;
+        let value: NameCfValue = rmp_serde::from_slice(&decompressed)?;
+        Ok(value)
     }
 }
 
@@ -132,8 +163,7 @@ pub(crate) struct NodeCfKey(pub(crate) Id);
 
 /// Node value - optimized for graph traversal (hot path)
 /// Size: ~26 bytes (vs ~200-500 bytes with inline summary)
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct NodeCfValue(
     pub(crate) Option<TemporalRange>,
@@ -214,8 +244,7 @@ pub(crate) struct ForwardEdgeCfKey(
 
 /// Forward edge value - optimized for graph traversal (hot path)
 /// Size: ~35 bytes (vs ~200-500 bytes with inline summary)
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct ForwardEdgeCfValue(
     pub(crate) Option<TemporalRange>, // Field 0: Temporal validity
@@ -233,8 +262,7 @@ pub(crate) struct ReverseEdgeCfKey(
 );
 /// Reverse edge value - minimal for reverse lookups
 /// Size: ~17 bytes
-#[derive(Archive, RkyvDeserialize, RkyvSerialize)]
-#[derive(Serialize, Deserialize)]
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<TemporalRange>);
 
@@ -256,9 +284,33 @@ pub type NodeSummary = DataUrl;
 pub type EdgeSummary = DataUrl;
 pub type FragmentContent = DataUrl;
 
-impl Nodes {
-    pub const CF_NAME: &'static str = "nodes";
+impl ColumnFamily for Nodes {
+    const CF_NAME: &'static str = "graph/nodes";
+}
 
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for Nodes {
+    /// Configure RocksDB options with shared block cache.
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with graph block size
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl Nodes {
     /// Create key-value pair from AddNode mutation.
     pub fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
@@ -282,33 +334,9 @@ impl Nodes {
         let value_bytes = <Self as HotColumnFamilyRecord>::value_to_bytes(&value)?.to_vec();
         Ok((key_bytes, value_bytes))
     }
-
-    /// Configure RocksDB options with shared block cache.
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &BlockCacheConfig,
-    ) -> rocksdb::Options {
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        // Shared block cache with graph block size
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.graph_block_size);
-
-        if config.cache_index_and_filter_blocks {
-            block_opts.set_cache_index_and_filter_blocks(true);
-        }
-        if config.pin_l0_filter_and_index {
-            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
-        }
-
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
 }
 
 impl HotColumnFamilyRecord for Nodes {
-    const CF_NAME: &'static str = "nodes";
     type Key = NodeCfKey;
     type Value = NodeCfValue;
 
@@ -333,72 +361,15 @@ pub(crate) struct NodeFragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeFragmentCfValue(pub(crate) Option<TemporalRange>, pub(crate) FragmentContent);
 
-impl ColumnFamilyRecord for NodeFragments {
-    const CF_NAME: &'static str = "node_fragments";
-    type Key = NodeFragmentCfKey;
-    type Value = NodeFragmentCfValue;
-    type CreateOp = AddNodeFragment;
-
-    fn record_from(args: &AddNodeFragment) -> (NodeFragmentCfKey, NodeFragmentCfValue) {
-        let key = NodeFragmentCfKey(args.id, args.ts_millis);
-        let value = NodeFragmentCfValue(args.valid_range.clone(), args.content.clone());
-        (key, value)
-    }
-
-    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // NodeFragmentCfKey(Id, TimestampMilli)
-        // Layout: [Id bytes (16)] + [timestamp big-endian (8)]
-        let mut bytes = Vec::with_capacity(24);
-        bytes.extend_from_slice(&key.0.into_bytes());
-        bytes.extend_from_slice(&key.1 .0.to_be_bytes());
-        bytes
-    }
-
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
-        if bytes.len() != 24 {
-            anyhow::bail!(
-                "Invalid NodeFragmentCfKey length: expected 24, got {}",
-                bytes.len()
-            );
-        }
-
-        let mut id_bytes = [0u8; 16];
-        id_bytes.copy_from_slice(&bytes[0..16]);
-
-        let mut ts_bytes = [0u8; 8];
-        ts_bytes.copy_from_slice(&bytes[16..24]);
-        let timestamp = u64::from_be_bytes(ts_bytes);
-
-        Ok(NodeFragmentCfKey(
-            Id::from_bytes(id_bytes),
-            TimestampMilli(timestamp),
-        ))
-    }
-
-    fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-
-        // Key layout: [Id (16 bytes)] + [TimestampMilli (8 bytes)]
-        // Use 16-byte prefix to scan all fragments for a given Id
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
-
-        // Enable prefix bloom filter for fast prefix existence checks
-        opts.set_memtable_prefix_bloom_ratio(0.2);
-
-        opts
-    }
+impl ColumnFamily for NodeFragments {
+    const CF_NAME: &'static str = "graph/node_fragments";
 }
 
-impl NodeFragments {
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for NodeFragments {
     /// Configure RocksDB options with shared block cache.
     ///
     /// Fragment CFs use larger block size for variable-length content.
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &BlockCacheConfig,
-    ) -> rocksdb::Options {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
         use rocksdb::SliceTransform;
 
         let mut opts = rocksdb::Options::default();
@@ -426,20 +397,92 @@ impl NodeFragments {
     }
 }
 
+impl ColumnFamilyRecord for NodeFragments {
+    type Key = NodeFragmentCfKey;
+    type Value = NodeFragmentCfValue;
+    type CreateOp = AddNodeFragment;
+
+    fn record_from(args: &AddNodeFragment) -> (NodeFragmentCfKey, NodeFragmentCfValue) {
+        let key = NodeFragmentCfKey(args.id, args.ts_millis);
+        let value = NodeFragmentCfValue(args.valid_range.clone(), args.content.clone());
+        (key, value)
+    }
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // NodeFragmentCfKey(Id, TimestampMilli)
+        // Layout: [Id bytes (16)] + [timestamp big-endian (8)]
+        let mut bytes = Vec::with_capacity(24);
+        bytes.extend_from_slice(&key.0.into_bytes());
+        bytes.extend_from_slice(&key.1 .0.to_be_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
+        if bytes.len() != 24 {
+            anyhow::bail!(
+                "Invalid NodeFragmentCfKey length: expected 24, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(&bytes[0..16]);
+
+        let mut ts_bytes = [0u8; 8];
+        ts_bytes.copy_from_slice(&bytes[16..24]);
+        let timestamp = u64::from_be_bytes(ts_bytes);
+
+        Ok(NodeFragmentCfKey(
+            Id::from_bytes(id_bytes),
+            TimestampMilli(timestamp),
+        ))
+    }
+}
+
+impl ColumnFamily for EdgeFragments {
+    const CF_NAME: &'static str = "graph/edge_fragments";
+}
+
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for EdgeFragments {
+    /// Configure RocksDB options with shared block cache.
+    ///
+    /// Fragment CFs use larger block size for variable-length content.
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with fragment block size (larger for variable content)
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.fragment_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [timestamp (8)] = 48 bytes
+        // Use 32-byte prefix (src_id + dst_id) to scan all fragments for a given edge topology
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
 impl ColumnFamilyRecord for EdgeFragments {
-    const CF_NAME: &'static str = "edge_fragments";
     type Key = EdgeFragmentCfKey;
     type Value = EdgeFragmentCfValue;
     type CreateOp = AddEdgeFragment;
 
     fn record_from(args: &AddEdgeFragment) -> (EdgeFragmentCfKey, EdgeFragmentCfValue) {
         let name_hash = NameHash::from_name(&args.edge_name);
-        let key = EdgeFragmentCfKey(
-            args.src_id,
-            args.dst_id,
-            name_hash,
-            args.ts_millis,
-        );
+        let key = EdgeFragmentCfKey(args.src_id, args.dst_id, name_hash, args.ts_millis);
         let value = EdgeFragmentCfValue(args.valid_range.clone(), args.content.clone());
         (key, value)
     }
@@ -455,7 +498,7 @@ impl ColumnFamilyRecord for EdgeFragments {
         bytes
     }
 
-    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key, anyhow::Error> {
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
         if bytes.len() != 48 {
             anyhow::bail!(
                 "Invalid EdgeFragmentCfKey length: expected 48, got {}",
@@ -483,90 +526,15 @@ impl ColumnFamilyRecord for EdgeFragments {
             TimestampMilli(timestamp),
         ))
     }
-
-    fn column_family_options() -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-
-        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [timestamp (8)] = 48 bytes
-        // Use 32-byte prefix (src_id + dst_id) to scan all fragments for a given edge topology
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
-
-        // Enable prefix bloom filter for fast prefix existence checks
-        opts.set_memtable_prefix_bloom_ratio(0.2);
-
-        opts
-    }
 }
 
-impl EdgeFragments {
-    /// Configure RocksDB options with shared block cache.
-    ///
-    /// Fragment CFs use larger block size for variable-length content.
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &BlockCacheConfig,
-    ) -> rocksdb::Options {
-        use rocksdb::SliceTransform;
-
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        // Shared block cache with fragment block size (larger for variable content)
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.fragment_block_size);
-
-        if config.cache_index_and_filter_blocks {
-            block_opts.set_cache_index_and_filter_blocks(true);
-        }
-        if config.pin_l0_filter_and_index {
-            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
-        }
-
-        opts.set_block_based_table_factory(&block_opts);
-
-        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [timestamp (8)] = 48 bytes
-        // Use 32-byte prefix (src_id + dst_id) to scan all fragments for a given edge topology
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(32));
-        opts.set_memtable_prefix_bloom_ratio(0.2);
-
-        opts
-    }
+impl ColumnFamily for ForwardEdges {
+    const CF_NAME: &'static str = "graph/forward_edges";
 }
 
-impl ForwardEdges {
-    pub const CF_NAME: &'static str = "forward_edges";
-
-    /// Create key-value pair from AddEdge mutation.
-    pub fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
-        let name_hash = NameHash::from_name(&args.name);
-        let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, name_hash);
-
-        // Compute summary hash if summary is non-empty
-        let summary_hash = if !args.summary.is_empty() {
-            SummaryHash::from_summary(&args.summary).ok()
-        } else {
-            None
-        };
-
-        let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, summary_hash);
-        (key, value)
-    }
-
-    /// Create and serialize to bytes (key bytes, value bytes).
-    pub fn create_bytes(args: &AddEdge) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-        let (key, value) = Self::record_from(args);
-        let key_bytes = <Self as HotColumnFamilyRecord>::key_to_bytes(&key);
-        let value_bytes = <Self as HotColumnFamilyRecord>::value_to_bytes(&value)?.to_vec();
-        Ok((key_bytes, value_bytes))
-    }
-
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for ForwardEdges {
     /// Configure RocksDB options with shared block cache.
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &BlockCacheConfig,
-    ) -> rocksdb::Options {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
         use rocksdb::SliceTransform;
 
         let mut opts = rocksdb::Options::default();
@@ -594,8 +562,33 @@ impl ForwardEdges {
     }
 }
 
+impl ForwardEdges {
+    /// Create key-value pair from AddEdge mutation.
+    pub fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
+        let name_hash = NameHash::from_name(&args.name);
+        let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, name_hash);
+
+        // Compute summary hash if summary is non-empty
+        let summary_hash = if !args.summary.is_empty() {
+            SummaryHash::from_summary(&args.summary).ok()
+        } else {
+            None
+        };
+
+        let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, summary_hash);
+        (key, value)
+    }
+
+    /// Create and serialize to bytes (key bytes, value bytes).
+    pub fn create_bytes(args: &AddEdge) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+        let (key, value) = Self::record_from(args);
+        let key_bytes = <Self as HotColumnFamilyRecord>::key_to_bytes(&key);
+        let value_bytes = <Self as HotColumnFamilyRecord>::value_to_bytes(&value)?.to_vec();
+        Ok((key_bytes, value_bytes))
+    }
+}
+
 impl HotColumnFamilyRecord for ForwardEdges {
-    const CF_NAME: &'static str = "forward_edges";
     type Key = ForwardEdgeCfKey;
     type Value = ForwardEdgeCfValue;
 
@@ -634,30 +627,13 @@ impl HotColumnFamilyRecord for ForwardEdges {
     }
 }
 
-impl ReverseEdges {
-    pub const CF_NAME: &'static str = "reverse_edges";
+impl ColumnFamily for ReverseEdges {
+    const CF_NAME: &'static str = "graph/reverse_edges";
+}
 
-    /// Create key-value pair from AddEdge mutation.
-    pub fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
-        let name_hash = NameHash::from_name(&args.name);
-        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, name_hash);
-        let value = ReverseEdgeCfValue(args.valid_range.clone());
-        (key, value)
-    }
-
-    /// Create and serialize to bytes (key bytes, value bytes).
-    pub fn create_bytes(args: &AddEdge) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-        let (key, value) = Self::record_from(args);
-        let key_bytes = <Self as HotColumnFamilyRecord>::key_to_bytes(&key);
-        let value_bytes = <Self as HotColumnFamilyRecord>::value_to_bytes(&value)?.to_vec();
-        Ok((key_bytes, value_bytes))
-    }
-
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for ReverseEdges {
     /// Configure RocksDB options with shared block cache.
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &BlockCacheConfig,
-    ) -> rocksdb::Options {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
         use rocksdb::SliceTransform;
 
         let mut opts = rocksdb::Options::default();
@@ -685,8 +661,25 @@ impl ReverseEdges {
     }
 }
 
+impl ReverseEdges {
+    /// Create key-value pair from AddEdge mutation.
+    pub fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
+        let name_hash = NameHash::from_name(&args.name);
+        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, name_hash);
+        let value = ReverseEdgeCfValue(args.valid_range.clone());
+        (key, value)
+    }
+
+    /// Create and serialize to bytes (key bytes, value bytes).
+    pub fn create_bytes(args: &AddEdge) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+        let (key, value) = Self::record_from(args);
+        let key_bytes = <Self as HotColumnFamilyRecord>::key_to_bytes(&key);
+        let value_bytes = <Self as HotColumnFamilyRecord>::value_to_bytes(&value)?.to_vec();
+        Ok((key_bytes, value_bytes))
+    }
+}
+
 impl HotColumnFamilyRecord for ReverseEdges {
-    const CF_NAME: &'static str = "reverse_edges";
     type Key = ReverseEdgeCfKey;
     type Value = ReverseEdgeCfValue;
 
@@ -744,9 +737,36 @@ pub(crate) struct NodeSummaryCfKey(pub(crate) SummaryHash);
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct NodeSummaryCfValue(pub(crate) NodeSummary);
 
-impl NodeSummaries {
-    pub const CF_NAME: &'static str = "node_summaries";
+impl ColumnFamily for NodeSummaries {
+    const CF_NAME: &'static str = "graph/node_summaries";
+}
 
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for NodeSummaries {
+    /// Configure RocksDB options with shared block cache.
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        // Shared block cache with larger block size for cold data
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.fragment_block_size); // Use fragment size for cold CFs
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        // Enable bloom filter for point lookups
+        block_opts.set_bloom_filter(10.0, false);
+
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl NodeSummaries {
     /// Serialize the key to bytes (8 bytes, fixed size).
     pub fn key_to_bytes(key: &NodeSummaryCfKey) -> Vec<u8> {
         key.0.as_bytes().to_vec()
@@ -779,26 +799,30 @@ impl NodeSummaries {
         let value: NodeSummaryCfValue = rmp_serde::from_slice(&decompressed)?;
         Ok(value)
     }
+}
 
-    /// Configure RocksDB options for this column family.
-    ///
-    /// NodeSummaries is a COLD CF - optimize for space, not speed.
-    pub fn column_family_options() -> rocksdb::Options {
-        let mut opts = rocksdb::Options::default();
+/// EdgeSummaries column family (COLD - infrequently accessed).
+///
+/// Stores edge summary content keyed by content hash (SummaryHash).
+/// Content-addressable: identical summaries stored once, referenced by hash.
+///
+/// Key: SummaryHash (8 bytes, content-addressable)
+/// Value: EdgeSummary (DataUrl, rmp_serde + LZ4 compressed)
+pub(crate) struct EdgeSummaries;
 
-        // Enable bloom filter for point lookups by hash
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-        block_opts.set_bloom_filter(10.0, false);
-        opts.set_block_based_table_factory(&block_opts);
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct EdgeSummaryCfKey(pub(crate) SummaryHash);
 
-        opts
-    }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct EdgeSummaryCfValue(pub(crate) EdgeSummary);
 
+impl ColumnFamily for EdgeSummaries {
+    const CF_NAME: &'static str = "graph/edge_summaries";
+}
+
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for EdgeSummaries {
     /// Configure RocksDB options with shared block cache.
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &BlockCacheConfig,
-    ) -> rocksdb::Options {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
         let mut opts = rocksdb::Options::default();
         let mut block_opts = rocksdb::BlockBasedOptions::default();
 
@@ -821,24 +845,7 @@ impl NodeSummaries {
     }
 }
 
-/// EdgeSummaries column family (COLD - infrequently accessed).
-///
-/// Stores edge summary content keyed by content hash (SummaryHash).
-/// Content-addressable: identical summaries stored once, referenced by hash.
-///
-/// Key: SummaryHash (8 bytes, content-addressable)
-/// Value: EdgeSummary (DataUrl, rmp_serde + LZ4 compressed)
-pub(crate) struct EdgeSummaries;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EdgeSummaryCfKey(pub(crate) SummaryHash);
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EdgeSummaryCfValue(pub(crate) EdgeSummary);
-
 impl EdgeSummaries {
-    pub const CF_NAME: &'static str = "edge_summaries";
-
     /// Serialize the key to bytes (8 bytes, fixed size).
     pub fn key_to_bytes(key: &EdgeSummaryCfKey) -> Vec<u8> {
         key.0.as_bytes().to_vec()
@@ -871,46 +878,6 @@ impl EdgeSummaries {
         let value: EdgeSummaryCfValue = rmp_serde::from_slice(&decompressed)?;
         Ok(value)
     }
-
-    /// Configure RocksDB options for this column family.
-    ///
-    /// EdgeSummaries is a COLD CF - optimize for space, not speed.
-    pub fn column_family_options() -> rocksdb::Options {
-        let mut opts = rocksdb::Options::default();
-
-        // Enable bloom filter for point lookups by hash
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-        block_opts.set_bloom_filter(10.0, false);
-        opts.set_block_based_table_factory(&block_opts);
-
-        opts
-    }
-
-    /// Configure RocksDB options with shared block cache.
-    pub fn column_family_options_with_cache(
-        cache: &rocksdb::Cache,
-        config: &BlockCacheConfig,
-    ) -> rocksdb::Options {
-        let mut opts = rocksdb::Options::default();
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-
-        // Shared block cache with larger block size for cold data
-        block_opts.set_block_cache(cache);
-        block_opts.set_block_size(config.fragment_block_size); // Use fragment size for cold CFs
-
-        if config.cache_index_and_filter_blocks {
-            block_opts.set_cache_index_and_filter_blocks(true);
-        }
-        if config.pin_l0_filter_and_index {
-            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
-        }
-
-        // Enable bloom filter for point lookups
-        block_opts.set_bloom_filter(10.0, false);
-
-        opts.set_block_based_table_factory(&block_opts);
-        opts
-    }
 }
 
 /// All column families used in the database.
@@ -919,18 +886,17 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     Names::CF_NAME,
     Nodes::CF_NAME,
     NodeFragments::CF_NAME,
-    NodeSummaries::CF_NAME,  // Phase 2: Cold CF for node summaries
+    NodeSummaries::CF_NAME, // Phase 2: Cold CF for node summaries
     EdgeFragments::CF_NAME,
-    EdgeSummaries::CF_NAME,  // Phase 2: Cold CF for edge summaries
+    EdgeSummaries::CF_NAME, // Phase 2: Cold CF for edge summaries
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
 ];
 
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::mutation::AddEdge;
+    use super::*;
     use crate::Id;
 
     #[test]
@@ -1212,5 +1178,4 @@ mod tests {
         let range3 = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2001)));
         assert_ne!(range1, range3);
     }
-
 }
