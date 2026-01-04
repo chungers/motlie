@@ -3,14 +3,33 @@ use ferroid::id::ULID;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
+// Common RocksDB storage infrastructure
+// Provides generic Storage<S> and StorageSubsystem trait
+pub mod rocksdb;
+
 // Graph module - RocksDB-based graph storage
 // Users access via fully qualified paths: motlie_db::graph::*
 pub mod graph;
 
+// Vector module - HNSW-based vector storage and search
+// Users access via fully qualified paths: motlie_db::vector::*
+pub mod vector;
 
 // Fulltext module - Tantivy-based fulltext search
 // Users access via fully qualified paths: motlie_db::fulltext::*
 pub mod fulltext;
+
+// Column family provider trait for modular RocksDB storage initialization
+// Users access via: motlie_db::provider::ColumnFamilyProvider
+pub mod provider;
+
+// Index provider trait for modular Tantivy index initialization
+// Users access via: motlie_db::index_provider::IndexProvider
+pub mod index_provider;
+
+// Storage builder for composing modular providers (RocksDB + Tantivy)
+// Users access via: motlie_db::storage_builder::{StorageBuilder, SharedStorage}
+pub mod storage_builder;
 
 // Unified storage module - combines graph and fulltext
 // Users access via: motlie_db::Storage, motlie_db::StorageConfig, etc.

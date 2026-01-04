@@ -2,7 +2,10 @@
 //!
 //! This module defines the Tantivy schema and field handles used for fulltext indexing.
 
-use tantivy::schema::*;
+use tantivy::schema::{
+    self, Facet, Field, IndexRecordOption, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED,
+    STRING, TEXT,
+};
 
 /// Field handles for efficient access to the Tantivy schema fields.
 ///
@@ -41,7 +44,7 @@ pub struct DocumentFields {
 
 /// Build the Tantivy schema for fulltext indexing.
 ///
-/// Returns a tuple of (Schema, DocumentFields) where:
+/// Returns a tuple of (tantivy::schema::Schema, DocumentFields) where:
 /// - Schema is the Tantivy schema definition
 /// - DocumentFields contains handles to all fields for efficient access
 ///
@@ -52,8 +55,8 @@ pub struct DocumentFields {
 /// - **INDEXED only**: Fields used for searching/filtering but retrievable from RocksDB
 ///
 /// This reduces Tantivy's disk usage and memory footprint.
-pub fn build_schema() -> (Schema, DocumentFields) {
-    let mut schema_builder = Schema::builder();
+pub fn build_schema() -> (schema::Schema, DocumentFields) {
+    let mut schema_builder = schema::Schema::builder();
 
     // ID fields - STORED for RocksDB lookups, INDEXED for delete_term operations
     // IMPORTANT: INDEXED is required for delete_term to work (e.g., UpdateNodeValidSinceUntil)
@@ -194,6 +197,94 @@ pub fn compute_validity_facet(temporal_range: &Option<crate::TemporalRange>) -> 
             (None, Some(_)) => Facet::from("/validity/until_only"),
             (Some(_), Some(_)) => Facet::from("/validity/bounded"),
         },
+    }
+}
+
+// ============================================================================
+// Schema - IndexProvider Implementation
+// ============================================================================
+
+use crate::index_provider::IndexProvider;
+
+/// Fulltext module schema implementing the IndexProvider trait.
+///
+/// This enables the fulltext module to register its Tantivy schema with
+/// StorageBuilder for unified initialization.
+///
+/// # Example
+///
+/// ```ignore
+/// use motlie_db::fulltext::Schema;
+/// use motlie_db::storage_builder::StorageBuilder;
+///
+/// let fulltext_schema = Schema::new();
+///
+/// // Get Tantivy schema and fields
+/// let tantivy_schema = fulltext_schema.tantivy_schema();
+/// let fields = fulltext_schema.fields();
+/// ```
+pub struct Schema {
+    /// Cached Tantivy schema
+    tantivy_schema: schema::Schema,
+    /// Field handles for document construction
+    fields: DocumentFields,
+    /// Writer heap size (default 50MB)
+    writer_heap_size: usize,
+}
+
+impl Schema {
+    /// Default writer heap size (50MB)
+    pub const DEFAULT_WRITER_HEAP_SIZE: usize = 50_000_000;
+
+    /// Create a new Schema with default settings.
+    pub fn new() -> Self {
+        let (tantivy_schema, fields) = build_schema();
+        Self {
+            tantivy_schema,
+            fields,
+            writer_heap_size: Self::DEFAULT_WRITER_HEAP_SIZE,
+        }
+    }
+
+    /// Set custom writer heap size.
+    pub fn with_writer_heap_size(mut self, size: usize) -> Self {
+        self.writer_heap_size = size;
+        self
+    }
+
+    /// Get the Tantivy schema.
+    pub fn tantivy_schema(&self) -> &schema::Schema {
+        &self.tantivy_schema
+    }
+
+    /// Get the field handles.
+    pub fn fields(&self) -> &DocumentFields {
+        &self.fields
+    }
+}
+
+impl Default for Schema {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IndexProvider for Schema {
+    fn name(&self) -> &'static str {
+        "fulltext"
+    }
+
+    fn schema(&self) -> schema::Schema {
+        self.tantivy_schema.clone()
+    }
+
+    fn writer_heap_size(&self) -> usize {
+        self.writer_heap_size
+    }
+
+    fn on_ready(&self, _index: &tantivy::Index) -> anyhow::Result<()> {
+        tracing::info!("[fulltext::Schema] Index ready");
+        Ok(())
     }
 }
 
