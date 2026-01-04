@@ -132,16 +132,18 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │                     Implementation Phases                                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  Phase 0: Foundation [PARTIAL - Types Complete]                              │
+│  Phase 0: Foundation [COMPLETE]                                              │
 │  ├── 0.1 Module structure (mod.rs, schema.rs) ✓                             │
 │  ├── 0.2 VectorConfig and VectorStorage types ✓                            │
-│  ├── 0.3 Integration with existing graph Storage                           │
-│  ├── 0.4 Distance enum with compute behavior [ARCH-17] ✓                    │
-│  ├── 0.5 Embedder trait for document-to-vector compute [ARCH-18] ✓         │
-│  ├── 0.6 Rich Embedding struct (code, model, dim, distance, embedder) ✓    │
-│  ├── 0.7 EmbeddingBuilder for fluent registration ✓                        │
-│  ├── 0.8 EmbeddingRegistry with query/discovery API ✓                      │
-│  └── 0.9 EmbeddingFilter for multi-field queries ✓                         │
+│  ├── 0.3 Integration with existing graph Storage ✓                         │
+│  ├── 0.4 ColumnFamilyProvider trait + StorageBuilder ✓                     │
+│  ├── 0.5 Distance enum with compute behavior [ARCH-17] ✓                   │
+│  ├── 0.6 Embedder trait for document-to-vector compute [ARCH-18] ✓         │
+│  ├── 0.7 Rich Embedding struct (code, model, dim, distance, embedder) ✓    │
+│  ├── 0.8 EmbeddingBuilder for fluent registration ✓                        │
+│  ├── 0.9 EmbeddingRegistry with query/discovery API ✓                      │
+│  ├── 0.10 EmbeddingFilter for multi-field queries ✓                        │
+│  └── 0.11 IndexProvider trait + fulltext::Schema ✓                         │
 │                                                                              │
 │  Phase 1: ID Management [ARCH-4, ARCH-5, ARCH-6]                            │
 │  ├── 1.1 u32 ID allocator with RoaringBitmap free list                     │
@@ -1441,12 +1443,115 @@ let storage = StorageBuilder::new("/data/motlie")
 | Optional vector support | `with_vector()` is opt-in; graph-only builds work |
 
 **Acceptance Criteria:**
-- [ ] `ColumnFamilyProvider` trait in `motlie_db::schema` (shared module)
-- [ ] `StorageBuilder` in `motlie_db::storage` (root, composes all modules)
-- [ ] Graph module implements trait (refactor existing CF init)
-- [ ] Vector module implements trait (new)
-- [ ] Vector module is optional (graph-only builds compile)
-- [ ] Integration test: graph + vector CFs in same DB
+- [x] `ColumnFamilyProvider` trait in `motlie_db::provider` module
+- [x] `StorageBuilder` in `motlie_db::storage_builder` (root, composes all modules)
+- [x] Graph module implements trait (`graph::Schema`)
+- [x] Vector module implements trait (`vector::Schema`)
+- [x] Vector module is optional (graph-only builds compile)
+- [x] Integration test: graph + vector CFs in same DB
+
+### Phase 0 Implementation Notes (January 2026)
+
+The following additional work was completed during Phase 0 implementation:
+
+#### Files Created
+
+| File | Description |
+|------|-------------|
+| `src/provider.rs` | `ColumnFamilyProvider` trait for RocksDB CF registration |
+| `src/index_provider.rs` | `IndexProvider` trait for Tantivy index registration |
+| `src/storage_builder.rs` | `StorageBuilder` and `SharedStorage` for unified initialization |
+| `src/vector/config.rs` | `HnswConfig`, `RaBitQConfig`, `VectorConfig` |
+| `src/vector/distance.rs` | `Distance` enum with computation behavior |
+| `src/vector/embedding.rs` | `Embedding`, `EmbeddingBuilder`, `Embedder` trait |
+| `src/vector/registry.rs` | `EmbeddingRegistry`, `EmbeddingFilter` |
+| `src/vector/schema.rs` | All vector CF definitions, `Schema` implementing `ColumnFamilyProvider` |
+| `src/vector/error.rs` | Internal error handling |
+| `tests/test_storage_builder.rs` | Integration tests for shared storage |
+
+#### Provider Pattern Implementation
+
+**RocksDB Providers (`ColumnFamilyProvider` trait):**
+```rust
+pub trait ColumnFamilyProvider: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn column_family_descriptors(&self, cache: Option<&Cache>, block_size: usize) -> Vec<ColumnFamilyDescriptor>;
+    fn on_ready(&self, db: &TransactionDB) -> Result<()>;
+    fn cf_names(&self) -> Vec<&'static str>;
+}
+```
+
+- `graph::Schema` - Pre-warms `NameCache` in `on_ready()`
+- `vector::Schema` - Pre-warms `EmbeddingRegistry` in `on_ready()`
+
+**Tantivy Providers (`IndexProvider` trait):**
+```rust
+pub trait IndexProvider: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn schema(&self) -> tantivy::schema::Schema;
+    fn on_ready(&self, index: &Index) -> Result<()>;
+    fn writer_heap_size(&self) -> usize;
+}
+```
+
+- `fulltext::Schema` - Provides Tantivy schema and initialization
+
+#### StorageBuilder Design
+
+```rust
+// Unified initialization of RocksDB + Tantivy
+let storage = StorageBuilder::new(&base_path)
+    .with_provider(Box::new(graph::Schema::new()))
+    .with_provider(Box::new(vector::Schema::new()))
+    .with_index_provider(Box::new(fulltext::Schema::new()))
+    .with_cache_size(512 * 1024 * 1024)
+    .build()?;
+
+// Access backends
+let db = storage.db();       // RocksDB TransactionDB
+let index = storage.index(); // Tantivy Index
+```
+
+**Directory Structure:**
+```
+<base_path>/
+├── rocksdb/     # RocksDB TransactionDB (graph + vector CFs)
+└── tantivy/     # Tantivy fulltext index
+```
+
+#### Schema Pattern Consistency
+
+Both `graph::Schema` and `vector::Schema` follow the same patterns:
+
+1. **Tuple structs** for CF key/value types (e.g., `CfKey(u64, u32)`)
+2. **`pub(crate)` visibility** for internal types
+3. **Static `CF_NAME` constant** per CF marker type
+4. **`key_to_bytes` / `key_from_bytes`** for serialization
+5. **`value_to_bytes` / `value_from_bytes`** for serialization
+
+#### Vector Module Column Families
+
+| CF Name | Key | Value | Purpose |
+|---------|-----|-------|---------|
+| `vector/embedding_specs` | code (u64) | (model, dim, distance) | Embedding space registry |
+| `vector/vectors` | (code, vec_id) | f32 bytes | Raw vector storage |
+| `vector/edges` | (code, vec_id) | RoaringBitmap | HNSW neighbor lists |
+| `vector/binary_codes` | (code, vec_id) | binary | RaBitQ quantized vectors |
+| `vector/vec_meta` | (code, vec_id) | (layer, flags) | Per-vector metadata |
+| `vector/graph_meta` | code (u64) | (entry, stats) | Per-graph metadata |
+| `vector/id_forward` | (code, emb_id) | vec_id | ULID → u32 mapping |
+| `vector/id_reverse` | (code, vec_id) | emb_id | u32 → ULID mapping |
+| `vector/id_alloc` | code (u64) | (next_id, free_bitmap) | ID allocation state |
+| `vector/pending` | (code, emb_id, ts) | operation | Async update queue |
+
+#### Test Coverage
+
+- 364 tests passing (285 unit + 79 integration)
+- Includes `test_storage_builder.rs` with 10 integration tests for graph+vector+fulltext composition
+
+#### Deferred Work
+
+- **Secondary mode support for StorageBuilder**: The existing `graph::Storage::secondary()` API works for RocksDB secondary instances. Adding this to `StorageBuilder` is deferred as it requires different RocksDB APIs (`DB::open_as_secondary()` vs `TransactionDB`).
 
 ---
 
