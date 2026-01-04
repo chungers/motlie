@@ -116,7 +116,8 @@ impl StorageSubsystem for Subsystem {
                 EmbeddingSpecs::key_from_bytes(&key_bytes),
                 EmbeddingSpecs::value_from_bytes(&value_bytes),
             ) {
-                cache.register_from_db(key.0, &value.0, value.1, value.2);
+                let spec = &value.0;
+                cache.register_from_db(key.0, &spec.model, spec.dim, spec.distance);
                 loaded += 1;
             }
         }
