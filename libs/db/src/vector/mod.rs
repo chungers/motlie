@@ -28,16 +28,101 @@ pub mod embedding;
 mod error;
 pub mod registry;
 pub mod schema;
+pub mod subsystem;
 
 // Re-exports for public API
 pub use config::{HnswConfig, RaBitQConfig, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
-pub use schema::{Schema, ALL_COLUMN_FAMILIES};
+pub use schema::ALL_COLUMN_FAMILIES;
+
+// Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
+pub use subsystem::{EmbeddingRegistryConfig, Subsystem, VectorBlockCacheConfig};
+
+/// Storage type alias using generic rocksdb::Storage
+pub type Storage = crate::rocksdb::Storage<Subsystem>;
+
+/// BlockCacheConfig re-export (alias to VectorBlockCacheConfig for backwards compat)
+pub type BlockCacheConfig = VectorBlockCacheConfig;
+
+/// Component type for use with StorageBuilder
+pub type Component = crate::rocksdb::ComponentWrapper<Subsystem>;
+
+/// Convenience constructor for vector component
+pub fn component() -> Component {
+    Component::new()
+}
 
 // Internal re-exports
 pub(crate) use error::Result;
+
+// ============================================================================
+// SystemInfo - Telemetry
+// ============================================================================
+
+/// Static configuration info for the vector database subsystem.
+///
+/// Used by the `motlie info` command to display vector DB settings.
+/// Implements [`motlie_core::telemetry::SubsystemInfo`] for consistent formatting.
+///
+/// # Example
+///
+/// ```ignore
+/// use motlie_db::vector::SystemInfo;
+/// use motlie_core::telemetry::{format_subsystem_info, SubsystemInfo};
+///
+/// let info = SystemInfo::default();
+/// println!("{}", format_subsystem_info(&info));
+/// ```
+#[derive(Debug, Clone)]
+pub struct SystemInfo {
+    /// Block cache configuration
+    pub block_cache_config: BlockCacheConfig,
+    /// EmbeddingRegistry pre-warming configuration
+    pub registry_config: EmbeddingRegistryConfig,
+    /// List of column families
+    pub column_families: Vec<&'static str>,
+}
+
+impl Default for SystemInfo {
+    fn default() -> Self {
+        Self {
+            block_cache_config: BlockCacheConfig::default(),
+            registry_config: EmbeddingRegistryConfig::default(),
+            column_families: ALL_COLUMN_FAMILIES.to_vec(),
+        }
+    }
+}
+
+impl motlie_core::telemetry::SubsystemInfo for SystemInfo {
+    fn name(&self) -> &'static str {
+        "Vector Database (RocksDB)"
+    }
+
+    fn info_lines(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("Block Cache Size", format_bytes(self.block_cache_config.cache_size_bytes)),
+            ("Default Block Size", format_bytes(self.block_cache_config.default_block_size)),
+            ("Vector Block Size", format_bytes(self.block_cache_config.vector_block_size)),
+            ("Registry Prewarm", self.registry_config.prewarm_limit.to_string()),
+            ("Column Families", self.column_families.join(", ")),
+        ]
+    }
+}
+
+/// Format a byte count as a human-readable string.
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{} GB", bytes / (1024 * 1024 * 1024))
+    } else if bytes >= 1024 * 1024 {
+        format!("{} MB", bytes / (1024 * 1024))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{} B", bytes)
+    }
+}
 
 #[cfg(test)]
 mod tests {

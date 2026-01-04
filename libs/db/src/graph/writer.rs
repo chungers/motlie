@@ -284,7 +284,7 @@ impl Writer {
 
         let txn_db = storage.transaction_db()?;
         let txn = txn_db.transaction();
-        let name_cache = storage.name_cache().clone();
+        let name_cache = storage.cache().clone();
 
         Ok(Transaction::new(txn, txn_db, self.transaction_forward_to.clone(), name_cache))
     }

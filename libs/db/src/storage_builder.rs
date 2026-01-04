@@ -1,17 +1,17 @@
-//! Storage builder for composing modular storage providers.
+//! Storage builder for composing modular storage components.
 //!
 //! This module provides [`StorageBuilder`] which enables multiple storage modules
 //! to share storage instances without coupling between modules:
 //!
-//! - **RocksDB providers** (`ColumnFamilyProvider`): graph, vector modules share TransactionDB
-//! - **Tantivy providers** (`IndexProvider`): fulltext module for full-text search
+//! - **RocksDB components** (`ColumnFamilyProvider`): graph, vector modules share TransactionDB
+//! - **Tantivy components** (`IndexProvider`): fulltext module for full-text search
 //!
 //! # Design Rationale (Task 0.4)
 //!
 //! - Graph module shouldn't know about vector-specific CFs
 //! - Vector module needs to share the same TransactionDB
 //! - Fulltext module uses Tantivy independently but initialized through same builder
-//! - Each module registers its own initialization logic via provider traits
+//! - Each module registers its own initialization logic via component traits
 //! - Pre-warm isolation: each module's `on_ready()` handles its own caches
 //!
 //! # Example
@@ -24,8 +24,8 @@
 //!
 //! // Build shared storage with RocksDB and Tantivy
 //! let storage = StorageBuilder::new(&base_path)
-//!     .with_provider(Box::new(graph::Schema::new()))
-//!     .with_provider(Box::new(vector::Schema::new()))
+//!     .with_component(Box::new(graph::component()))
+//!     .with_component(Box::new(vector::component()))
 //!     .with_index_provider(Box::new(fulltext::Schema::new()))
 //!     .with_cache_size(512 * 1024 * 1024)  // 512MB
 //!     .build()?;
@@ -76,7 +76,7 @@ impl Default for CacheConfig {
 // StorageBuilder
 // ============================================================================
 
-/// Builder for composing modular storage providers into shared storage instances.
+/// Builder for composing modular storage components into shared storage instances.
 ///
 /// This builder collects:
 /// - `ColumnFamilyProvider` implementations for RocksDB (graph, vector modules)
@@ -97,15 +97,15 @@ impl Default for CacheConfig {
 /// use motlie_db::fulltext;
 ///
 /// let storage = StorageBuilder::new(&base_path)
-///     .with_provider(Box::new(graph::Schema::new()))
-///     .with_provider(Box::new(vector::Schema::new()))
+///     .with_component(Box::new(graph::component()))
+///     .with_component(Box::new(vector::component()))
 ///     .with_index_provider(Box::new(fulltext::Schema::new()))
 ///     .build()?;
 /// ```
 pub struct StorageBuilder {
     path: PathBuf,
-    /// RocksDB column family providers
-    providers: Vec<Box<dyn ColumnFamilyProvider>>,
+    /// RocksDB column family components
+    components: Vec<Box<dyn ColumnFamilyProvider>>,
     /// Tantivy index providers
     index_providers: Vec<Box<dyn IndexProvider>>,
     cache_config: CacheConfig,
@@ -120,7 +120,7 @@ impl StorageBuilder {
     /// * `path` - Base path for storage directories
     ///
     /// # Directory Structure
-    /// - `<path>/rocksdb` - RocksDB TransactionDB (if providers added)
+    /// - `<path>/rocksdb` - RocksDB TransactionDB (if components added)
     /// - `<path>/tantivy` - Tantivy fulltext index (if index providers added)
     pub fn new(path: &Path) -> Self {
         let mut db_options = Options::default();
@@ -129,7 +129,7 @@ impl StorageBuilder {
 
         Self {
             path: path.to_path_buf(),
-            providers: Vec::new(),
+            components: Vec::new(),
             index_providers: Vec::new(),
             cache_config: CacheConfig::default(),
             db_options,
@@ -137,12 +137,12 @@ impl StorageBuilder {
         }
     }
 
-    /// Add a RocksDB column family provider.
+    /// Add a RocksDB column family component.
     ///
-    /// Providers are registered in order and their column families are collected
+    /// Components are registered in order and their column families are collected
     /// during `build()`.
-    pub fn with_provider(mut self, provider: Box<dyn ColumnFamilyProvider>) -> Self {
-        self.providers.push(provider);
+    pub fn with_component(mut self, component: Box<dyn ColumnFamilyProvider>) -> Self {
+        self.components.push(component);
         self
     }
 
@@ -189,9 +189,9 @@ impl StorageBuilder {
     ///
     /// This method:
     /// 1. Creates a shared block cache for RocksDB
-    /// 2. Collects CF descriptors from all RocksDB providers
+    /// 2. Collects CF descriptors from all RocksDB components
     /// 3. Opens the TransactionDB with all CFs
-    /// 4. Calls `on_ready()` on each RocksDB provider
+    /// 4. Calls `on_ready()` on each RocksDB component
     /// 5. Creates/opens Tantivy index if index providers are registered
     /// 6. Calls `on_ready()` on each index provider
     ///
@@ -199,8 +199,8 @@ impl StorageBuilder {
     /// Returns an error if:
     /// - The database cannot be opened
     /// - The Tantivy index cannot be created/opened
-    /// - Any provider's `on_ready()` fails
-    #[tracing::instrument(skip(self), fields(path = ?self.path, providers = self.providers.len(), index_providers = self.index_providers.len()))]
+    /// - Any component's `on_ready()` fails
+    #[tracing::instrument(skip(self), fields(path = ?self.path, components = self.components.len(), index_providers = self.index_providers.len()))]
     pub fn build(self) -> Result<SharedStorage> {
         let rocksdb_path = self.path.join("rocksdb");
         let tantivy_path = self.path.join("tantivy");
@@ -209,7 +209,7 @@ impl StorageBuilder {
         // RocksDB Initialization
         // ─────────────────────────────────────────────────────────────
 
-        let (db_arc, cache, provider_map) = if !self.providers.is_empty() {
+        let (db_arc, cache, component_map) = if !self.components.is_empty() {
             // Create shared block cache
             let cache = Cache::new_lru_cache(self.cache_config.size_bytes);
 
@@ -219,28 +219,28 @@ impl StorageBuilder {
                 "[StorageBuilder] Created shared block cache"
             );
 
-            // Collect CF descriptors from all providers
+            // Collect CF descriptors from all components
             let mut all_descriptors: Vec<ColumnFamilyDescriptor> = Vec::new();
-            let mut provider_names: Vec<&'static str> = Vec::new();
+            let mut component_names: Vec<&'static str> = Vec::new();
 
-            for provider in &self.providers {
-                let name = provider.name();
+            for component in &self.components {
+                let name = component.name();
                 let descriptors =
-                    provider.column_family_descriptors(Some(&cache), self.cache_config.block_size);
+                    component.column_family_descriptors(Some(&cache), self.cache_config.block_size);
 
                 tracing::debug!(
-                    provider = name,
+                    component = name,
                     cf_count = descriptors.len(),
                     "[StorageBuilder] Collected CF descriptors"
                 );
 
                 all_descriptors.extend(descriptors);
-                provider_names.push(name);
+                component_names.push(name);
             }
 
             tracing::info!(
                 total_cfs = all_descriptors.len(),
-                providers = ?provider_names,
+                components = ?component_names,
                 path = ?rocksdb_path,
                 "[StorageBuilder] Opening TransactionDB with all CFs"
             );
@@ -255,25 +255,25 @@ impl StorageBuilder {
 
             let db_arc = Arc::new(db);
 
-            // Call on_ready for each provider
-            for provider in &self.providers {
-                let name = provider.name();
-                tracing::debug!(provider = name, "[StorageBuilder] Calling RocksDB on_ready");
-                provider.on_ready(&db_arc)?;
+            // Call on_ready for each component
+            for component in &self.components {
+                let name = component.name();
+                tracing::debug!(component = name, "[StorageBuilder] Calling RocksDB on_ready");
+                component.on_ready(&db_arc)?;
             }
 
             tracing::info!(
-                providers = ?provider_names,
-                "[StorageBuilder] All RocksDB providers initialized"
+                components = ?component_names,
+                "[StorageBuilder] All RocksDB components initialized"
             );
 
-            // Build provider name -> index map for lookup
-            let mut provider_map: HashMap<&'static str, usize> = HashMap::new();
-            for (i, provider) in self.providers.iter().enumerate() {
-                provider_map.insert(provider.name(), i);
+            // Build component name -> index map for lookup
+            let mut component_map: HashMap<&'static str, usize> = HashMap::new();
+            for (i, component) in self.components.iter().enumerate() {
+                component_map.insert(component.name(), i);
             }
 
-            (Some(db_arc), Some(cache), provider_map)
+            (Some(db_arc), Some(cache), component_map)
         } else {
             (None, None, HashMap::new())
         };
@@ -336,8 +336,8 @@ impl StorageBuilder {
             path: self.path,
             db: db_arc,
             cache,
-            providers: self.providers,
-            provider_map,
+            components: self.components,
+            component_map,
             index: index_arc,
             index_providers: self.index_providers,
             index_provider_map,
@@ -352,9 +352,9 @@ impl StorageBuilder {
 /// Shared storage handle providing access to RocksDB and Tantivy storage.
 ///
 /// This is the result of [`StorageBuilder::build()`]. It provides:
-/// - Access to the shared RocksDB `TransactionDB` (if RocksDB providers registered)
+/// - Access to the shared RocksDB `TransactionDB` (if RocksDB components registered)
 /// - Access to the shared Tantivy `Index` (if index providers registered)
-/// - Access to individual providers by name
+/// - Access to individual components by name
 /// - The shared block cache
 pub struct SharedStorage {
     path: PathBuf,
@@ -362,8 +362,8 @@ pub struct SharedStorage {
     db: Option<Arc<TransactionDB>>,
     #[allow(dead_code)]
     cache: Option<Cache>,
-    providers: Vec<Box<dyn ColumnFamilyProvider>>,
-    provider_map: HashMap<&'static str, usize>,
+    components: Vec<Box<dyn ColumnFamilyProvider>>,
+    component_map: HashMap<&'static str, usize>,
     // Tantivy storage
     index: Option<Arc<tantivy::Index>>,
     index_providers: Vec<Box<dyn IndexProvider>>,
@@ -392,37 +392,37 @@ impl SharedStorage {
 
     /// Get a reference to the shared TransactionDB.
     ///
-    /// Returns `None` if no RocksDB providers were registered.
+    /// Returns `None` if no RocksDB components were registered.
     pub fn db(&self) -> Option<&Arc<TransactionDB>> {
         self.db.as_ref()
     }
 
     /// Get a clone of the TransactionDB Arc.
     ///
-    /// Returns `None` if no RocksDB providers were registered.
+    /// Returns `None` if no RocksDB components were registered.
     pub fn db_clone(&self) -> Option<Arc<TransactionDB>> {
         self.db.clone()
     }
 
-    /// Get a RocksDB provider by name.
+    /// Get a RocksDB component by name.
     ///
-    /// Returns `None` if no provider with the given name is registered.
-    pub fn get_provider(&self, name: &str) -> Option<&dyn ColumnFamilyProvider> {
-        self.provider_map
+    /// Returns `None` if no component with the given name is registered.
+    pub fn get_component(&self, name: &str) -> Option<&dyn ColumnFamilyProvider> {
+        self.component_map
             .get(name)
-            .map(|&i| self.providers[i].as_ref())
+            .map(|&i| self.components[i].as_ref())
     }
 
-    /// List all registered RocksDB provider names.
-    pub fn provider_names(&self) -> Vec<&'static str> {
-        self.providers.iter().map(|p| p.name()).collect()
+    /// List all registered RocksDB component names.
+    pub fn component_names(&self) -> Vec<&'static str> {
+        self.components.iter().map(|p| p.name()).collect()
     }
 
-    /// List all column family names across all RocksDB providers.
+    /// List all column family names across all RocksDB components.
     pub fn all_cf_names(&self) -> Vec<&'static str> {
         let mut names: Vec<&'static str> = Vec::new();
-        for provider in &self.providers {
-            names.extend(provider.cf_names());
+        for component in &self.components {
+            names.extend(component.cf_names());
         }
         names
     }
@@ -539,15 +539,15 @@ mod tests {
         let path = Path::new("/tmp/test_db");
         let builder = StorageBuilder::new(path);
         assert_eq!(builder.path, path);
-        assert!(builder.providers.is_empty());
+        assert!(builder.components.is_empty());
     }
 
     #[test]
-    fn test_storage_builder_with_provider() {
+    fn test_storage_builder_with_component() {
         let path = Path::new("/tmp/test_db");
         let builder = StorageBuilder::new(path)
-            .with_provider(Box::new(MockProvider::new("test", "test_cf")));
-        assert_eq!(builder.providers.len(), 1);
+            .with_component(Box::new(MockProvider::new("test", "test_cf")));
+        assert_eq!(builder.components.len(), 1);
     }
 
     #[test]
@@ -562,36 +562,36 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_builder_build_single_provider() {
+    fn test_storage_builder_build_single_component() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_provider(Box::new(MockProvider::new("mock", "mock_cf")))
+            .with_component(Box::new(MockProvider::new("mock", "mock_cf")))
             .build()
             .expect("Failed to build storage");
 
         assert_eq!(storage.path(), db_path);
-        assert!(storage.get_provider("mock").is_some());
-        assert!(storage.get_provider("nonexistent").is_none());
-        assert_eq!(storage.provider_names(), vec!["mock"]);
+        assert!(storage.get_component("mock").is_some());
+        assert!(storage.get_component("nonexistent").is_none());
+        assert_eq!(storage.component_names(), vec!["mock"]);
         assert_eq!(storage.all_cf_names(), vec!["mock_cf"]);
     }
 
     #[test]
-    fn test_storage_builder_build_multiple_providers() {
+    fn test_storage_builder_build_multiple_components() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_provider(Box::new(MockProvider::new("provider1", "cf1")))
-            .with_provider(Box::new(MockProvider::new("provider2", "cf2")))
+            .with_component(Box::new(MockProvider::new("component1", "cf1")))
+            .with_component(Box::new(MockProvider::new("component2", "cf2")))
             .build()
             .expect("Failed to build storage");
 
-        assert!(storage.get_provider("provider1").is_some());
-        assert!(storage.get_provider("provider2").is_some());
-        assert_eq!(storage.provider_names().len(), 2);
+        assert!(storage.get_component("component1").is_some());
+        assert!(storage.get_component("component2").is_some());
+        assert_eq!(storage.component_names().len(), 2);
         assert_eq!(storage.all_cf_names().len(), 2);
     }
 
@@ -635,7 +635,7 @@ mod tests {
         };
 
         let _storage = StorageBuilder::new(&db_path)
-            .with_provider(Box::new(tracked))
+            .with_component(Box::new(tracked))
             .build()
             .expect("Failed to build storage");
 
@@ -648,7 +648,7 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_provider(Box::new(MockProvider::new("test", "test_cf")))
+            .with_component(Box::new(MockProvider::new("test", "test_cf")))
             .build()
             .expect("Failed to build storage");
 
@@ -694,7 +694,7 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_provider(Box::new(MockProvider::new("test", "test_cf")))
+            .with_component(Box::new(MockProvider::new("test", "test_cf")))
             .with_index_provider(Box::new(MockIndexProvider::new()))
             .build()
             .expect("Failed to build storage");
@@ -704,7 +704,7 @@ mod tests {
         assert!(storage.has_tantivy());
         assert!(storage.db().is_some());
         assert!(storage.index().is_some());
-        assert_eq!(storage.provider_names(), vec!["test"]);
+        assert_eq!(storage.component_names(), vec!["test"]);
         assert_eq!(storage.index_provider_names(), vec!["mock_index"]);
     }
 
@@ -714,7 +714,7 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_provider(Box::new(MockProvider::new("test", "test_cf")))
+            .with_component(Box::new(MockProvider::new("test", "test_cf")))
             .build()
             .expect("Failed to build storage");
 

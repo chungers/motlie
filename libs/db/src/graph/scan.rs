@@ -45,7 +45,7 @@ use crate::{Id, TimestampMilli};
 /// added to the cache for future lookups.
 fn resolve_name(storage: &Storage, name_hash: NameHash) -> Result<String> {
     // Check cache first (O(1) DashMap lookup)
-    let cache = storage.name_cache();
+    let cache = storage.cache();
     if let Some(name) = cache.get(&name_hash) {
         return Ok((*name).clone());
     }

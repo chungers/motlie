@@ -470,7 +470,7 @@ impl EmbeddingFilter {
 #### Usage Examples
 
 ```rust
-let registry = vector_storage.registry();
+let registry = vector_storage.cache();  // Returns &Arc<EmbeddingRegistry>
 
 // ═══════════════════════════════════════════════════════════════════
 // Registration (data-only, no compute)
@@ -732,6 +732,19 @@ pub mod cf {
 
 ## Storage Integration Design
 
+> **⚠️ OUTDATED (2026-01-03):** This section describes the **original design proposal**. The actual implementation uses a generic, trait-based architecture:
+>
+> - `StorageSubsystem` trait for type-safe subsystem definitions
+> - `ComponentWrapper<S>` adapter for `StorageBuilder` integration
+> - `rocksdb::Storage<S>` generic storage parameterized by subsystem
+> - Type aliases: `graph::Storage` and `vector::Storage`
+>
+> **See `src/rocksdb/README.md` for the current architecture documentation.**
+>
+> The high-level concepts (shared TransactionDB, independent CFs, caller-side filtering) remain valid, but the implementation details below are superseded.
+
+**Original Design Proposal:**
+
 The vector module shares the same RocksDB instance as `motlie_db::graph` but maintains
 complete independence in its column families and operations.
 
@@ -864,6 +877,8 @@ This keeps the vector module simple and fast.
 
 ### Task 0.1: Module Structure
 
+**Status:** ✅ COMPLETED (2026-01-03)
+
 Create the basic module layout:
 
 ```
@@ -896,6 +911,8 @@ libs/db/src/vector/
 - [x] Empty stub implementations for all public types
 
 ### Task 0.1b: Configuration Types
+
+**Status:** ✅ COMPLETED (2026-01-03)
 
 ```rust
 // libs/db/src/vector/config.rs
@@ -1067,7 +1084,14 @@ impl VectorConfig {
 
 ### Task 0.2: VectorStorage Integration
 
-Integrate with existing graph Storage (share TransactionDB only):
+**Status:** ✅ COMPLETED (2026-01-03)
+
+> **Note:** The code below shows the **original design proposal**. The actual implementation uses:
+> - `vector::Storage` = type alias to `rocksdb::Storage<vector::Subsystem>` (not a separate struct)
+> - `StorageBuilder` + `vector::component()` for shared DB initialization
+> - See **"Phase 0 Implementation Notes"** section for the actual API.
+
+**Original Design Proposal:**
 
 ```rust
 // libs/db/src/vector/mod.rs
@@ -1096,13 +1120,28 @@ impl VectorStorage {
 ```
 
 **Acceptance Criteria:**
-- [ ] `VectorStorage::open()` creates/opens vector CFs in shared DB
-- [ ] No dependency on graph module internals (only shares DB)
+- [x] `vector::Storage::readonly()/readwrite()/ready()` for standalone access (type alias to generic `rocksdb::Storage<Subsystem>`)
+- [x] `StorageBuilder` + `vector::component()` for shared DB with graph module
+- [x] No dependency on graph module internals (only shares DB via `StorageBuilder`)
 
 ### Phase 0 Validation & Tests
 
+**Status:** ✅ COMPLETED (2026-01-03)
+
+> **Note:** The code below shows the **original test proposal**. The actual tests are distributed across:
+> - `src/vector/mod.rs` - Module exports, config presets, distance metrics
+> - `src/vector/config.rs` - HNSW/RaBitQ/VectorConfig tests
+> - `src/vector/embedding.rs` - Embedding accessors, validation, builder
+> - `src/vector/registry.rs` - EmbeddingFilter, EmbeddingRegistry tests
+> - `src/vector/schema.rs` - CF prefix, key/value roundtrip tests
+> - `src/vector/distance.rs` - Distance enum tests
+> - `src/vector/subsystem.rs` - Subsystem constants tests
+> - `tests/test_storage_builder.rs` - StorageBuilder integration tests
+
+**Original Test Proposal:**
+
 ```rust
-// libs/db/src/vector/tests/foundation_tests.rs
+// libs/db/src/vector/tests/foundation_tests.rs (original proposal)
 
 #[cfg(test)]
 mod foundation_tests {
@@ -1186,13 +1225,15 @@ mod foundation_tests {
 ```
 
 **Test Coverage Checklist:**
-- [x] Module compilation and exports
-- [ ] VectorStorage initialization with shared DB
-- [x] CF naming conventions (`vector/` prefix)
-- [x] Embedding creation and validation
-- [ ] Namespace isolation between embedding models
+- [x] Module compilation and exports → `src/vector/mod.rs::test_module_exports`
+- [x] Storage initialization with shared DB → `tests/test_storage_builder.rs`
+- [x] CF naming conventions (`vector/` prefix) → `src/vector/schema.rs::test_all_cf_names_have_prefix`
+- [x] Embedding creation and validation → `src/vector/embedding.rs::test_*`, `registry.rs::test_*`
+- [ ] Namespace isolation between embedding models → **Deferred to Phase 1** (requires HNSW insert/search)
 
 ### Task 0.3: EmbeddingRegistry Pre-warming
+
+**Status:** ✅ COMPLETED (2026-01-03)
 
 Pre-warm EmbeddingRegistry during `ready()`, following the NameCache pattern in `graph/name_hash.rs`:
 
@@ -1281,14 +1322,25 @@ impl EmbeddingRegistry {
 ```
 
 **Acceptance Criteria:**
-- [ ] EmbeddingRegistry loads all entries during `ready()`
+- [x] EmbeddingRegistry loads entries during `ready()` → `vector::Subsystem::prewarm()` in `subsystem.rs`
 - [x] Lookup is O(1) via DashMap (no DB hit after prewarm)
 - [x] New embeddings are persisted immediately
 - [x] Thread-safe concurrent access (DashMap)
 
 ### Task 0.4: ColumnFamilyProvider Trait (Mix-in Pattern)
 
-Enable vector module to register its CFs with shared RocksDB **without** modifying graph module code:
+**Status:** ✅ COMPLETED (2026-01-03)
+
+Enable vector module to register its CFs with shared RocksDB **without** modifying graph module code.
+
+> **Note:** The code below shows the **original design proposal**. The actual implementation evolved to use a two-layer approach:
+> 1. `StorageSubsystem` trait (type-safe, generic) - see `src/rocksdb/subsystem.rs`
+> 2. `ColumnFamilyProvider` trait (object-safe, dynamic) - for `StorageBuilder`
+> 3. `ComponentWrapper<S>` adapts `StorageSubsystem` to `ColumnFamilyProvider`
+>
+> See **"Phase 0 Implementation Notes"** above for the actual implementation details.
+
+**Original Design Proposal:**
 
 ```rust
 // libs/db/src/schema.rs (new shared module)
@@ -1445,44 +1497,74 @@ let storage = StorageBuilder::new("/data/motlie")
 **Acceptance Criteria:**
 - [x] `ColumnFamilyProvider` trait in `motlie_db::provider` module
 - [x] `StorageBuilder` in `motlie_db::storage_builder` (root, composes all modules)
-- [x] Graph module implements trait (`graph::Schema`)
-- [x] Vector module implements trait (`vector::Schema`)
+- [x] Graph module implements `StorageSubsystem` trait (`graph::Subsystem`)
+- [x] Vector module implements `StorageSubsystem` trait (`vector::Subsystem`)
 - [x] Vector module is optional (graph-only builds compile)
 - [x] Integration test: graph + vector CFs in same DB
 
-### Phase 0 Implementation Notes (January 2026)
+### Phase 0 Implementation Notes
 
-The following additional work was completed during Phase 0 implementation:
+**Status:** ✅ COMPLETED (2026-01-03)
 
-#### Files Created
+The following additional work was completed during Phase 0 implementation.
 
-| File | Description |
-|------|-------------|
-| `src/provider.rs` | `ColumnFamilyProvider` trait for RocksDB CF registration |
+> **Architecture Documentation:** See `src/rocksdb/README.md` for detailed architecture documentation of the unified storage infrastructure.
+
+#### Module Structure
+
+| Module | Description |
+|--------|-------------|
+| `src/rocksdb/` | **Generic RocksDB storage infrastructure** (see README.md) |
+| `src/rocksdb/mod.rs` | Module exports and documentation |
+| `src/rocksdb/config.rs` | `BlockCacheConfig` (shared configuration) |
+| `src/rocksdb/handle.rs` | `DatabaseHandle`, `StorageMode`, `StorageOptions` |
+| `src/rocksdb/storage.rs` | Generic `Storage<S: StorageSubsystem>` |
+| `src/rocksdb/subsystem.rs` | `StorageSubsystem` trait, `ComponentWrapper`, `DbAccess` |
+| `src/provider.rs` | `ColumnFamilyProvider` trait (object-safe, for `StorageBuilder`) |
 | `src/index_provider.rs` | `IndexProvider` trait for Tantivy index registration |
 | `src/storage_builder.rs` | `StorageBuilder` and `SharedStorage` for unified initialization |
+| `src/graph/subsystem.rs` | `graph::Subsystem` implementing `StorageSubsystem` |
+| `src/vector/subsystem.rs` | `vector::Subsystem` implementing `StorageSubsystem` |
 | `src/vector/config.rs` | `HnswConfig`, `RaBitQConfig`, `VectorConfig` |
 | `src/vector/distance.rs` | `Distance` enum with computation behavior |
 | `src/vector/embedding.rs` | `Embedding`, `EmbeddingBuilder`, `Embedder` trait |
 | `src/vector/registry.rs` | `EmbeddingRegistry`, `EmbeddingFilter` |
-| `src/vector/schema.rs` | All vector CF definitions, `Schema` implementing `ColumnFamilyProvider` |
+| `src/vector/schema.rs` | All vector CF definitions with key/value serialization |
 | `src/vector/error.rs` | Internal error handling |
 | `tests/test_storage_builder.rs` | Integration tests for shared storage |
 
-#### Provider Pattern Implementation
+#### StorageSubsystem Trait (Generic Storage)
 
-**RocksDB Providers (`ColumnFamilyProvider` trait):**
+The `StorageSubsystem` trait enables type-safe, zero-cost generic storage:
+
 ```rust
-pub trait ColumnFamilyProvider: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn column_family_descriptors(&self, cache: Option<&Cache>, block_size: usize) -> Vec<ColumnFamilyDescriptor>;
-    fn on_ready(&self, db: &TransactionDB) -> Result<()>;
-    fn cf_names(&self) -> Vec<&'static str>;
+pub trait StorageSubsystem: Send + Sync + 'static {
+    const NAME: &'static str;
+    const COLUMN_FAMILIES: &'static [&'static str];
+
+    type PrewarmConfig: Default + Clone + Send + Sync;
+    type Cache: Send + Sync;
+
+    fn create_cache() -> Arc<Self::Cache>;
+    fn cf_descriptors(block_cache: &Cache, config: &BlockCacheConfig) -> Vec<ColumnFamilyDescriptor>;
+    fn prewarm(db: &dyn DbAccess, cache: &Self::Cache, config: &Self::PrewarmConfig) -> Result<usize>;
 }
 ```
 
-- `graph::Schema` - Pre-warms `NameCache` in `on_ready()`
-- `vector::Schema` - Pre-warms `EmbeddingRegistry` in `on_ready()`
+- `graph::Subsystem` - Cache type is `NameCache`, pre-warms from Names CF
+- `vector::Subsystem` - Cache type is `EmbeddingRegistry`, pre-warms from EmbeddingSpecs CF
+
+#### ComponentWrapper (StorageBuilder Adapter)
+
+`ComponentWrapper<S>` adapts any `StorageSubsystem` to implement `ColumnFamilyProvider` for use with `StorageBuilder`:
+
+```rust
+// Type aliases in each module
+pub type Component = rocksdb::ComponentWrapper<Subsystem>;
+
+// Convenience constructors
+pub fn component() -> Component { Component::new() }
+```
 
 **Tantivy Providers (`IndexProvider` trait):**
 ```rust
@@ -1499,10 +1581,17 @@ pub trait IndexProvider: Send + Sync {
 #### StorageBuilder Design
 
 ```rust
+// Create components and get cache references before boxing
+let graph_component = graph::component();
+let name_cache = graph_component.cache().clone();
+
+let vector_component = vector::component();
+let registry = vector_component.cache().clone();
+
 // Unified initialization of RocksDB + Tantivy
 let storage = StorageBuilder::new(&base_path)
-    .with_provider(Box::new(graph::Schema::new()))
-    .with_provider(Box::new(vector::Schema::new()))
+    .with_component(Box::new(graph_component))
+    .with_component(Box::new(vector_component))
     .with_index_provider(Box::new(fulltext::Schema::new()))
     .with_cache_size(512 * 1024 * 1024)
     .build()?;
@@ -1510,6 +1599,9 @@ let storage = StorageBuilder::new(&base_path)
 // Access backends
 let db = storage.db();       // RocksDB TransactionDB
 let index = storage.index(); // Tantivy Index
+
+// Caches remain accessible via cloned Arcs
+assert_eq!(name_cache.len(), 0);
 ```
 
 **Directory Structure:**
@@ -1519,15 +1611,52 @@ let index = storage.index(); // Tantivy Index
 └── tantivy/     # Tantivy fulltext index
 ```
 
+#### Standalone Storage (Type Aliases)
+
+Both `graph::Storage` and `vector::Storage` are type aliases to the generic `rocksdb::Storage<S>`:
+
+```rust
+// In graph/mod.rs
+pub type Storage = crate::rocksdb::Storage<Subsystem>;
+
+// In vector/mod.rs
+pub type Storage = crate::rocksdb::Storage<Subsystem>;
+```
+
+Usage:
+
+```rust
+// Read-only access (e.g., CLI scanning tools)
+let mut storage = vector::Storage::readonly(db_path);
+storage.ready()?;
+
+// Read-write access
+let mut storage = vector::Storage::readwrite(db_path);
+storage.ready()?;
+
+// Secondary mode (read replicas)
+let mut storage = vector::Storage::secondary(primary_path, secondary_path);
+storage.ready()?;
+storage.try_catch_up_with_primary()?;
+
+// Access pre-warmed cache (generic .cache() method)
+let registry: &Arc<EmbeddingRegistry> = storage.cache();
+```
+
+**Configuration:**
+- `EmbeddingRegistryConfig` - Controls pre-warming limit (default: 1000)
+- `BlockCacheConfig` / `VectorBlockCacheConfig` - Shared block cache settings
+
 #### Schema Pattern Consistency
 
-Both `graph::Schema` and `vector::Schema` follow the same patterns:
+Both `graph::schema` and `vector::schema` modules follow the same patterns:
 
 1. **Tuple structs** for CF key/value types (e.g., `CfKey(u64, u32)`)
 2. **`pub(crate)` visibility** for internal types
 3. **Static `CF_NAME` constant** per CF marker type
 4. **`key_to_bytes` / `key_from_bytes`** for serialization
 5. **`value_to_bytes` / `value_from_bytes`** for serialization
+6. **`column_family_options_with_cache()`** for block cache configuration
 
 #### Vector Module Column Families
 

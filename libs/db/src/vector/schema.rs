@@ -92,6 +92,19 @@ impl EmbeddingSpecs {
         opts.set_block_based_table_factory(&block_opts);
         opts
     }
+
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::VectorBlockCacheConfig,
+    ) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_bloom_filter(10.0, false);
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
 }
 
 // ============================================================================
@@ -173,6 +186,23 @@ impl Vectors {
         opts.set_block_based_table_factory(&block_opts);
         opts
     }
+
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::VectorBlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.vector_block_size);
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
 }
 
 // ============================================================================
@@ -227,6 +257,23 @@ impl Edges {
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
         opts
     }
+
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::VectorBlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
 }
 
 // ============================================================================
@@ -279,6 +326,23 @@ impl BinaryCodes {
         // No compression - already compact binary data
         opts.set_compression_type(rocksdb::DBCompressionType::None);
         // Prefix: embedding_code (8 bytes)
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::VectorBlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
         opts.set_block_based_table_factory(&block_opts);
         opts
@@ -349,6 +413,23 @@ impl VecMeta {
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
         opts
     }
+
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::VectorBlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
 }
 
 // ============================================================================
@@ -400,6 +481,19 @@ impl GraphMeta {
 
     pub fn column_family_options() -> rocksdb::Options {
         rocksdb::Options::default()
+    }
+
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::VectorBlockCacheConfig,
+    ) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_block_based_table_factory(&block_opts);
+        opts
     }
 }
 
@@ -468,6 +562,23 @@ impl IdForward {
         opts.set_block_based_table_factory(&block_opts);
         opts
     }
+
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::VectorBlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_bloom_filter(10.0, false);
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
 }
 
 // ============================================================================
@@ -532,6 +643,22 @@ impl IdReverse {
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
         opts
     }
+
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::VectorBlockCacheConfig,
+    ) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
 }
 
 // ============================================================================
@@ -581,6 +708,19 @@ impl IdAlloc {
 
     pub fn column_family_options() -> rocksdb::Options {
         rocksdb::Options::default()
+    }
+
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::VectorBlockCacheConfig,
+    ) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_block_based_table_factory(&block_opts);
+        opts
     }
 }
 
@@ -634,136 +774,24 @@ impl Pending {
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
         opts
     }
-}
 
-// ============================================================================
-// Schema - ColumnFamilyProvider Implementation
-// ============================================================================
-
-use crate::provider::ColumnFamilyProvider;
-use crate::vector::registry::EmbeddingRegistry as Registry;
-use rocksdb::{Cache, ColumnFamilyDescriptor, TransactionDB};
-use std::sync::Arc;
-
-/// Vector module schema implementing the ColumnFamilyProvider trait.
-///
-/// This enables the vector module to register its column families with
-/// the shared RocksDB instance without coupling to the graph module.
-pub struct Schema {
-    /// Embedding registry for pre-warming
-    registry: Arc<Registry>,
-}
-
-impl Schema {
-    /// Create a new Schema.
-    pub fn new() -> Self {
-        Self {
-            registry: Arc::new(Registry::new()),
-        }
-    }
-
-    /// Create with a custom registry (for sharing).
-    pub fn with_registry(registry: Arc<Registry>) -> Self {
-        Self { registry }
-    }
-
-    /// Get the embedding registry.
-    pub fn registry(&self) -> &Arc<Registry> {
-        &self.registry
-    }
-
-    /// Configure CF options with optional shared cache.
-    fn cf_options_with_cache(
-        base_opts: rocksdb::Options,
-        cache: Option<&Cache>,
-        block_size: usize,
+    pub fn column_family_options_with_cache(
+        cache: &rocksdb::Cache,
+        config: &super::subsystem::VectorBlockCacheConfig,
     ) -> rocksdb::Options {
-        let mut opts = base_opts;
-        if let Some(cache) = cache {
-            let mut block_opts = rocksdb::BlockBasedOptions::default();
-            block_opts.set_block_size(block_size);
-            block_opts.set_block_cache(cache);
-            opts.set_block_based_table_factory(&block_opts);
-        }
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_block_based_table_factory(&block_opts);
         opts
     }
 }
 
-impl Default for Schema {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ColumnFamilyProvider for Schema {
-    fn name(&self) -> &'static str {
-        "vector"
-    }
-
-    fn column_family_descriptors(
-        &self,
-        cache: Option<&Cache>,
-        block_size: usize,
-    ) -> Vec<ColumnFamilyDescriptor> {
-        vec![
-            ColumnFamilyDescriptor::new(
-                EmbeddingSpecs::CF_NAME,
-                Self::cf_options_with_cache(
-                    EmbeddingSpecs::column_family_options(),
-                    cache,
-                    block_size,
-                ),
-            ),
-            ColumnFamilyDescriptor::new(
-                Vectors::CF_NAME,
-                Self::cf_options_with_cache(Vectors::column_family_options(), cache, 16 * 1024),
-            ),
-            ColumnFamilyDescriptor::new(
-                Edges::CF_NAME,
-                Self::cf_options_with_cache(Edges::column_family_options(), cache, block_size),
-            ),
-            ColumnFamilyDescriptor::new(
-                BinaryCodes::CF_NAME,
-                Self::cf_options_with_cache(BinaryCodes::column_family_options(), cache, 4 * 1024),
-            ),
-            ColumnFamilyDescriptor::new(
-                VecMeta::CF_NAME,
-                Self::cf_options_with_cache(VecMeta::column_family_options(), cache, block_size),
-            ),
-            ColumnFamilyDescriptor::new(
-                GraphMeta::CF_NAME,
-                Self::cf_options_with_cache(GraphMeta::column_family_options(), cache, block_size),
-            ),
-            ColumnFamilyDescriptor::new(
-                IdForward::CF_NAME,
-                Self::cf_options_with_cache(IdForward::column_family_options(), cache, block_size),
-            ),
-            ColumnFamilyDescriptor::new(
-                IdReverse::CF_NAME,
-                Self::cf_options_with_cache(IdReverse::column_family_options(), cache, block_size),
-            ),
-            ColumnFamilyDescriptor::new(
-                IdAlloc::CF_NAME,
-                Self::cf_options_with_cache(IdAlloc::column_family_options(), cache, block_size),
-            ),
-            ColumnFamilyDescriptor::new(
-                Pending::CF_NAME,
-                Self::cf_options_with_cache(Pending::column_family_options(), cache, block_size),
-            ),
-        ]
-    }
-
-    fn on_ready(&self, db: &TransactionDB) -> Result<()> {
-        // Pre-warm the embedding registry
-        let count = self.registry.prewarm(db)?;
-        tracing::info!(count, "[vector::Schema] Pre-warmed EmbeddingRegistry");
-        Ok(())
-    }
-
-    fn cf_names(&self) -> Vec<&'static str> {
-        ALL_COLUMN_FAMILIES.to_vec()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -832,33 +860,4 @@ mod tests {
         assert_eq!(parsed.2, 42);
     }
 
-    #[test]
-    fn test_schema_new() {
-        let schema = Schema::new();
-        assert_eq!(schema.name(), "vector");
-    }
-
-    #[test]
-    fn test_schema_cf_names() {
-        let schema = Schema::new();
-        let names = schema.cf_names();
-        assert_eq!(names.len(), ALL_COLUMN_FAMILIES.len());
-        for name in &names {
-            assert!(name.starts_with("vector/"));
-        }
-    }
-
-    #[test]
-    fn test_schema_column_family_descriptors() {
-        let schema = Schema::new();
-        let descriptors = schema.column_family_descriptors(None, 4096);
-        assert_eq!(descriptors.len(), ALL_COLUMN_FAMILIES.len());
-    }
-
-    #[test]
-    fn test_schema_registry_access() {
-        let schema = Schema::new();
-        let registry = schema.registry();
-        assert!(registry.is_empty());
-    }
 }

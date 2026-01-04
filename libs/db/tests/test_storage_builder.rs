@@ -1,22 +1,20 @@
-//! Integration tests for StorageBuilder with graph and vector providers.
+//! Integration tests for StorageBuilder with graph and vector components.
 //!
-//! These tests verify that graph::Schema and vector::Schema can share
+//! These tests verify that graph::component() and vector::component() can share
 //! a single RocksDB TransactionDB instance via StorageBuilder.
-
-use std::sync::Arc;
 
 use motlie_db::graph;
 use motlie_db::storage_builder::{CacheConfig, SharedStorage, StorageBuilder};
 use motlie_db::vector;
 use tempfile::TempDir;
 
-/// Helper to create a shared storage with both graph and vector providers
+/// Helper to create a shared storage with both graph and vector components
 fn create_shared_storage(temp_dir: &TempDir) -> SharedStorage {
     let db_path = temp_dir.path().join("shared_db");
 
     StorageBuilder::new(&db_path)
-        .with_provider(Box::new(graph::Schema::new()))
-        .with_provider(Box::new(vector::Schema::new()))
+        .with_component(Box::new(graph::component()))
+        .with_component(Box::new(vector::component()))
         .with_cache_size(64 * 1024 * 1024) // 64MB for tests
         .build()
         .expect("Failed to build shared storage")
@@ -27,11 +25,11 @@ fn test_shared_storage_creation() {
     let temp_dir = TempDir::new().unwrap();
     let storage = create_shared_storage(&temp_dir);
 
-    // Verify both providers are registered
-    assert!(storage.get_provider("graph").is_some());
-    assert!(storage.get_provider("vector").is_some());
+    // Verify both components are registered
+    assert!(storage.get_component("graph").is_some());
+    assert!(storage.get_component("vector").is_some());
 
-    let names = storage.provider_names();
+    let names = storage.component_names();
     assert_eq!(names.len(), 2);
     assert!(names.contains(&"graph"));
     assert!(names.contains(&"vector"));
@@ -149,47 +147,47 @@ fn test_shared_storage_cf_names_list() {
 }
 
 #[test]
-fn test_graph_schema_name_cache_accessible() {
+fn test_graph_component_name_cache_accessible() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("shared_db");
 
-    // Create with shared name cache
-    let name_cache = Arc::new(graph::NameCache::new());
-    let graph_schema = graph::Schema::with_name_cache(name_cache.clone());
+    // Create component and get reference to its cache before boxing
+    let graph_component = graph::component();
+    let name_cache = graph_component.cache().clone();
 
     let storage = StorageBuilder::new(&db_path)
-        .with_provider(Box::new(graph_schema))
-        .with_provider(Box::new(vector::Schema::new()))
+        .with_component(Box::new(graph_component))
+        .with_component(Box::new(vector::component()))
         .build()
         .expect("Failed to build shared storage");
 
-    // Name cache should be accessible and empty (no data pre-warmed)
+    // Name cache should be accessible and empty (no data pre-warmed in empty DB)
     assert_eq!(name_cache.len(), 0);
 
     // Verify storage is functional
-    assert!(storage.get_provider("graph").is_some());
+    assert!(storage.get_component("graph").is_some());
 }
 
 #[test]
-fn test_vector_schema_registry_accessible() {
+fn test_vector_component_registry_accessible() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("shared_db");
 
-    // Create with shared registry
-    let registry = Arc::new(vector::EmbeddingRegistry::new());
-    let vector_schema = vector::Schema::with_registry(registry.clone());
+    // Create component and get reference to its registry before boxing
+    let vector_component = vector::component();
+    let registry = vector_component.cache().clone();
 
     let storage = StorageBuilder::new(&db_path)
-        .with_provider(Box::new(graph::Schema::new()))
-        .with_provider(Box::new(vector_schema))
+        .with_component(Box::new(graph::component()))
+        .with_component(Box::new(vector_component))
         .build()
         .expect("Failed to build shared storage");
 
-    // Registry should be accessible and empty (no embeddings pre-warmed)
+    // Registry should be accessible and empty (no embeddings pre-warmed in empty DB)
     assert!(registry.is_empty());
 
     // Verify storage is functional
-    assert!(storage.get_provider("vector").is_some());
+    assert!(storage.get_component("vector").is_some());
 }
 
 #[test]
@@ -203,13 +201,13 @@ fn test_cache_config_applied() {
     };
 
     let storage = StorageBuilder::new(&db_path)
-        .with_provider(Box::new(graph::Schema::new()))
+        .with_component(Box::new(graph::component()))
         .with_cache_config(config)
         .build()
         .expect("Failed to build storage");
 
     // Storage should be created successfully
-    assert!(storage.get_provider("graph").is_some());
+    assert!(storage.get_component("graph").is_some());
 }
 
 #[test]
@@ -232,7 +230,7 @@ fn test_storage_path() {
     let db_path = temp_dir.path().join("my_shared_db");
 
     let storage = StorageBuilder::new(&db_path)
-        .with_provider(Box::new(graph::Schema::new()))
+        .with_component(Box::new(graph::component()))
         .build()
         .expect("Failed to build storage");
 
@@ -246,12 +244,12 @@ fn test_single_provider_works() {
 
     // Graph only
     let storage = StorageBuilder::new(&db_path)
-        .with_provider(Box::new(graph::Schema::new()))
+        .with_component(Box::new(graph::component()))
         .build()
         .expect("Failed to build storage");
 
-    assert!(storage.get_provider("graph").is_some());
-    assert!(storage.get_provider("vector").is_none());
+    assert!(storage.get_component("graph").is_some());
+    assert!(storage.get_component("vector").is_none());
 
     let db = storage.db().expect("Should have DB");
     assert!(db.cf_handle("names").is_some());
@@ -265,12 +263,12 @@ fn test_vector_only_works() {
 
     // Vector only
     let storage = StorageBuilder::new(&db_path)
-        .with_provider(Box::new(vector::Schema::new()))
+        .with_component(Box::new(vector::component()))
         .build()
         .expect("Failed to build storage");
 
-    assert!(storage.get_provider("vector").is_some());
-    assert!(storage.get_provider("graph").is_none());
+    assert!(storage.get_component("vector").is_some());
+    assert!(storage.get_component("graph").is_none());
 
     let db = storage.db().expect("Should have DB");
     assert!(db.cf_handle("vector/vectors").is_some());

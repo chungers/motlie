@@ -3,6 +3,10 @@ use ferroid::id::ULID;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
+// Common RocksDB storage infrastructure
+// Provides generic Storage<S> and StorageSubsystem trait
+pub mod rocksdb;
+
 // Graph module - RocksDB-based graph storage
 // Users access via fully qualified paths: motlie_db::graph::*
 pub mod graph;

@@ -201,5 +201,5 @@ fn test_try_catch_up_on_non_secondary_fails() {
     assert!(result
         .unwrap_err()
         .to_string()
-        .contains("Not a secondary instance"));
+        .contains("only works for secondary instances"));
 }
