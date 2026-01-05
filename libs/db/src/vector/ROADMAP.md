@@ -1740,6 +1740,8 @@ Both `graph::schema` and `vector::schema` modules follow the same patterns:
 
 ### Task 1.1: ID Allocator
 
+**Status:** ✅ COMPLETE (2026-01-04) - Implemented in `id.rs` with 7 unit tests
+
 ```rust
 // libs/db/src/vector/id.rs
 
@@ -1795,16 +1797,13 @@ impl IdAllocator {
 
 ### Task 1.2: Forward Mapping (ULID -> u32)
 
-**Status:** ✅ SCHEMA COMPLETE (see `schema.rs::IdForward`)
+**Status:** ✅ COMPLETE (2026-01-04) - Schema in `schema.rs::IdForward`, integrated in `writer.rs`
 
-The `IdForward` CF is already implemented with:
+The `IdForward` CF is implemented with:
 - Key: `IdForwardCfKey(EmbeddingCode, Id)` = 24 bytes
 - Value: `IdForwardCfValue(VecId)` = 4 bytes
 - All serialization methods (`key_to_bytes`, `key_from_bytes`, `value_to_bytes`, `value_from_bytes`)
-
-**Remaining Work:** Integrate with `IdAllocator` during vector insert.
-
-**Effort:** 0.25 day (integration only)
+- Integration with `InsertVector` and `DeleteVector` mutations in `writer.rs`
 
 **Acceptance Criteria:**
 - [ ] Insert stores ULID -> u32 mapping
@@ -1812,20 +1811,20 @@ The `IdForward` CF is already implemented with:
 
 ### Task 1.3: Reverse Mapping (u32 -> ULID)
 
-**Status:** ✅ SCHEMA COMPLETE (see `schema.rs::IdReverse`)
+**Status:** ✅ COMPLETE (2026-01-04) - Schema in `schema.rs::IdReverse`, queries in `query.rs`
 
-This is the hot path during search. The `IdReverse` CF is already implemented with:
+This is the hot path during search. The `IdReverse` CF is implemented with:
 - Key: `IdReverseCfKey(EmbeddingCode, VecId)` = 12 bytes
 - Value: `IdReverseCfValue(Id)` = 16 bytes (raw ULID bytes, not rkyv)
 - All serialization methods
+- `GetExternalId` query for single lookups
+- `ResolveIds` query for batch lookups
 
 | Approach | Memory at 1B | Lookup | Implementation |
 |----------|--------------|--------|----------------|
 | RocksDB CF | On-demand | ~100µs | ✅ Implemented |
 | Dense array | 16 GB | O(1) ~10ns | Deferred |
 | Mmap file | On-demand | O(1) ~100ns | Deferred |
-
-**Remaining Work:** Add `multi_get` batch lookup API for search result resolution.
 
 ```rust
 // Add to id.rs or a new api.rs
@@ -1862,15 +1861,15 @@ impl IdReverse {
 
 ### Task 1.4: ID Allocation Persistence
 
-**Status:** ✅ SCHEMA COMPLETE (see `schema.rs::IdAlloc`)
+**Status:** ✅ COMPLETE (2026-01-04) - Schema in `schema.rs::IdAlloc`, persist/recover in `id.rs`
 
-The `IdAlloc` CF is already implemented with:
+The `IdAlloc` CF is implemented with:
 - Key: `IdAllocCfKey(EmbeddingCode, IdAllocField)` = 9 bytes
 - Value: `IdAllocCfValue(IdAllocField)` with variants:
   - `NextId(VecId)` = 4 bytes
   - `FreeBitmap(RoaringBitmapBytes)` = variable
-
-**Remaining Work:** Integrate with `IdAllocator::persist()` and `recover()`.
+- `IdAllocator::persist()` - saves state to RocksDB
+- `IdAllocator::recover()` - restores state from RocksDB
 
 ```rust
 // Add to id.rs - persistence integration
@@ -1938,6 +1937,8 @@ impl IdAllocator {
 - [ ] Free bitmap persists (for ID reuse after restart)
 
 ### Phase 1 Validation & Tests
+
+**Status:** ✅ COMPLETE (2026-01-04) - Unit tests in `id.rs`, `api.rs`, `query.rs`, `mutation.rs`, `writer.rs`, `reader.rs`
 
 ```rust
 // libs/db/src/vector/tests/id_tests.rs
@@ -2139,7 +2140,9 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 
 ---
 
-## Storage API Integration Design
+## Task 1.5: Storage API Integration Design
+
+**Status:** ✅ COMPLETE (2026-01-04) - Implemented in `writer.rs`, `reader.rs`, `processor.rs`, `query.rs`, `mutation.rs`
 
 > **Design Pattern:** Following the established patterns in `graph::` and `fulltext::` modules for consistency across subsystems. This includes MPSC mutation channels, MPMC query channels, and the `Runnable` trait for composable operations.
 
@@ -2896,6 +2899,8 @@ libs/db/src/vector/
 ```
 
 ### Convenience API (`vector/api.rs`)
+
+**Status:** 🔄 PARTIAL (2026-01-04) - Phase 1 functions implemented (`insert`, `get_vector`, `delete`), Phase 2 `search` pending HNSW
 
 ```rust
 //! Generic API functions for common vector operations.

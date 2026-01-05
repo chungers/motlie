@@ -22,6 +22,7 @@
 //! - `REQUIREMENTS.md` - Functional and architectural requirements
 
 // Submodules
+pub mod api;
 pub mod config;
 pub mod distance;
 pub mod embedding;
