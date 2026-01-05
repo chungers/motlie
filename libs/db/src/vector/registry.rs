@@ -12,7 +12,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use rocksdb::{IteratorMode, TransactionDB};
 
-use crate::rocksdb::{ColumnFamily, ColumnFamilyRecord};
+use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, MutationCodec};
 use super::distance::Distance;
 use super::embedding::{Embedding, EmbeddingBuilder};
 use super::mutation::AddEmbeddingSpec;
@@ -212,7 +212,7 @@ impl EmbeddingRegistry {
             dim: builder.dim,
             distance: builder.distance,
         };
-        let (key_bytes, value_bytes) = EmbeddingSpecs::create_bytes(&add_op)?;
+        let (key_bytes, value_bytes) = add_op.to_cf_bytes()?;
 
         db.put_cf(&cf, key_bytes, value_bytes)?;
 

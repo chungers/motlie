@@ -60,7 +60,8 @@ mod subsystem;
 
 // Re-exports
 pub use cf_traits::{
-    prewarm_cf, ColumnFamily, ColumnFamilyConfig, ColumnFamilyRecord, HotColumnFamilyRecord,
+    prewarm_cf, ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde, HotColumnFamilyRecord,
+    MutationCodec,
 };
 pub use config::BlockCacheConfig;
 pub use handle::{DatabaseHandle, StorageMode, StorageOptions};

@@ -3,9 +3,16 @@
 //! This module contains mutation type definitions for vector storage operations.
 //! Following the pattern from `graph::mutation`, mutations are grouped in an enum
 //! for type-safe dispatch.
+//!
+//! Mutations implement `MutationCodec` to marshal themselves to CF key-value pairs.
+//! This keeps marshaling logic with the mutation definitions rather than in schema.
+
+use crate::rocksdb::MutationCodec;
 
 use super::distance::Distance;
-use super::schema::EmbeddingCode;
+use super::schema::{
+    EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecCfValue, EmbeddingSpecs,
+};
 
 // ============================================================================
 // Mutation Enum
@@ -60,5 +67,23 @@ pub struct AddEmbeddingSpec {
 impl From<AddEmbeddingSpec> for Mutation {
     fn from(op: AddEmbeddingSpec) -> Self {
         Mutation::AddEmbeddingSpec(op)
+    }
+}
+
+// ============================================================================
+// MutationCodec Implementations
+// ============================================================================
+
+impl MutationCodec for AddEmbeddingSpec {
+    type Cf = EmbeddingSpecs;
+
+    fn to_record(&self) -> (EmbeddingSpecCfKey, EmbeddingSpecCfValue) {
+        let key = EmbeddingSpecCfKey(self.code);
+        let value = EmbeddingSpecCfValue(EmbeddingSpec {
+            model: self.model.clone(),
+            dim: self.dim,
+            distance: self.distance,
+        });
+        (key, value)
     }
 }

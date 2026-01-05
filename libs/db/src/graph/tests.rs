@@ -1,4 +1,4 @@
-use crate::graph::{ColumnFamily, ColumnFamilyRecord, Graph, HotColumnFamilyRecord, Storage};
+use crate::graph::{ColumnFamily, ColumnFamilySerde, Graph, HotColumnFamilyRecord, Storage};
 use crate::graph::mutation::{
     AddEdge, AddNode, AddNodeFragment, UpdateEdgeValidSinceUntil,
     UpdateNodeValidSinceUntil,
@@ -1654,7 +1654,7 @@ use tokio::time::Duration;
             NodeCfKey, NodeCfValue, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue, Nodes,
         };
         use crate::graph::writer::MutationExecutor;
-        use crate::graph::ColumnFamilyRecord;
+        use crate::graph::ColumnFamilySerde;
         use crate::graph::Storage;
         use crate::graph::SummaryHash;
         use crate::{DataUrl, Id, TimestampMilli};

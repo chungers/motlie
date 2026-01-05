@@ -44,14 +44,13 @@
 //!
 //! See ROADMAP.md for complete schema documentation.
 
-use crate::rocksdb::{ColumnFamily, ColumnFamilyConfig, ColumnFamilyRecord, HotColumnFamilyRecord};
+use crate::rocksdb::{ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde, HotColumnFamilyRecord};
 use crate::{Id, TimestampMilli};
 use anyhow::Result;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::distance::Distance;
-use super::mutation::AddEmbeddingSpec;
 use super::subsystem::VectorBlockCacheConfig;
 
 // ============================================================================
@@ -118,28 +117,28 @@ pub const ALL_COLUMN_FAMILIES: &[&str] = &[
 ///
 /// Key: [embedding_code: u64] = 8 bytes
 /// Value: EmbeddingSpec (model, dim, distance)
-pub(crate) struct EmbeddingSpecs;
+pub struct EmbeddingSpecs;
 
 /// Domain struct for embedding specification.
 ///
 /// Rich struct with >2 fields, so defined separately per naming convention.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EmbeddingSpec {
+pub struct EmbeddingSpec {
     /// Model name (e.g., "gemma", "qwen3", "ada-002")
-    pub(crate) model: String,
+    pub model: String,
     /// Vector dimensionality (e.g., 128, 768, 1536)
-    pub(crate) dim: u32,
+    pub dim: u32,
     /// Distance metric for similarity computation
-    pub(crate) distance: Distance,
+    pub distance: Distance,
 }
 
 /// EmbeddingSpecs key: the embedding space identifier (primary key)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EmbeddingSpecCfKey(pub(crate) EmbeddingCode);
+pub struct EmbeddingSpecCfKey(pub EmbeddingCode);
 
 /// EmbeddingSpecs value: wraps EmbeddingSpec
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EmbeddingSpecCfValue(pub(crate) EmbeddingSpec);
+pub struct EmbeddingSpecCfValue(pub EmbeddingSpec);
 
 impl ColumnFamily for EmbeddingSpecs {
     const CF_NAME: &'static str = "vector/embedding_specs";
@@ -157,20 +156,9 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for EmbeddingSpecs {
     }
 }
 
-impl ColumnFamilyRecord for EmbeddingSpecs {
+impl ColumnFamilySerde for EmbeddingSpecs {
     type Key = EmbeddingSpecCfKey;
     type Value = EmbeddingSpecCfValue;
-    type CreateOp = AddEmbeddingSpec;
-
-    fn record_from(args: &Self::CreateOp) -> (Self::Key, Self::Value) {
-        let key = EmbeddingSpecCfKey(args.code);
-        let value = EmbeddingSpecCfValue(EmbeddingSpec {
-            model: args.model.clone(),
-            dim: args.dim,
-            distance: args.distance,
-        });
-        (key, value)
-    }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         key.0.to_be_bytes().to_vec()
