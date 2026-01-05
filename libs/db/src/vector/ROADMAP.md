@@ -1707,9 +1707,29 @@ Both `graph::schema` and `vector::schema` modules follow the same patterns:
 
 ## Phase 1: ID Management
 
+> **⚠️ TRAIT HIERARCHY NOTE (2026-01-04):** The code examples in this phase and later phases use the deprecated `ColumnFamilyRecord` trait. The actual implementation should use the current trait hierarchy from `rocksdb::cf_traits`:
+>
+> | Trait | Purpose | Use For |
+> |-------|---------|---------|
+> | `ColumnFamily` | Base marker with CF_NAME | All CFs |
+> | `ColumnFamilyConfig<C>` | RocksDB options | All CFs |
+> | `ColumnFamilySerde` | Cold CF (MessagePack + LZ4) | ForwardIdMapping, IdAllocatorMeta, EmbeddingSpecs |
+> | `HotColumnFamilyRecord` | Hot CF (rkyv zero-copy) | ReverseIdMapping, VecMetaCF, GraphMetaCF |
+> | `MutationCodec` | Mutation marshaling | InsertVector, DeleteVector mutations |
+>
+> For raw byte CFs (Vectors, BinaryCodes, Edges), implement only `ColumnFamily` with custom key/value methods.
+>
+> **See `src/rocksdb/README.md` for the current architecture documentation.**
+
 **Goal:** Implement u32 internal ID system per [ARCH-4, ARCH-5, ARCH-6].
 
 **Design Reference:** `examples/vector/HNSW2.md` - Item ID Design
+
+**Status:** 🔄 IN PROGRESS
+- ✅ Schema definitions complete (`IdForward`, `IdReverse`, `IdAlloc` CFs in `schema.rs`)
+- ✅ Key/value types and serialization methods complete
+- ⏳ `IdAllocator` implementation pending (`id.rs`)
+- ⏳ Storage API integration pending
 
 ### Task 1.1: ID Allocator
 
@@ -1768,21 +1788,16 @@ impl IdAllocator {
 
 ### Task 1.2: Forward Mapping (ULID -> u32)
 
-```rust
-// libs/db/src/vector/schema.rs
+**Status:** ✅ SCHEMA COMPLETE (see `schema.rs::IdForward`)
 
-/// Forward mapping: ULID -> internal u32
-/// Used during insert path (less frequent)
-pub struct ForwardIdMapping;
+The `IdForward` CF is already implemented with:
+- Key: `IdForwardCfKey(EmbeddingCode, Id)` = 24 bytes
+- Value: `IdForwardCfValue(VecId)` = 4 bytes
+- All serialization methods (`key_to_bytes`, `key_from_bytes`, `value_to_bytes`, `value_from_bytes`)
 
-impl ColumnFamilyRecord for ForwardIdMapping {
-    const CF_NAME: &'static str = cf::ID_FORWARD;  // "vector/id_forward"
-    type Key = Id;              // 16-byte ULID
-    type Value = u32;           // 4-byte internal ID
-}
-```
+**Remaining Work:** Integrate with `IdAllocator` during vector insert.
 
-**Effort:** 0.5 day
+**Effort:** 0.25 day (integration only)
 
 **Acceptance Criteria:**
 - [ ] Insert stores ULID -> u32 mapping
@@ -1790,38 +1805,49 @@ impl ColumnFamilyRecord for ForwardIdMapping {
 
 ### Task 1.3: Reverse Mapping (u32 -> ULID)
 
-This is the hot path during search. Options:
+**Status:** ✅ SCHEMA COMPLETE (see `schema.rs::IdReverse`)
+
+This is the hot path during search. The `IdReverse` CF is already implemented with:
+- Key: `IdReverseCfKey(EmbeddingCode, VecId)` = 12 bytes
+- Value: `IdReverseCfValue(Id)` = 16 bytes (raw ULID bytes, not rkyv)
+- All serialization methods
 
 | Approach | Memory at 1B | Lookup | Implementation |
 |----------|--------------|--------|----------------|
-| RocksDB CF | On-demand | ~100µs | Simple |
-| Dense array | 16 GB | O(1) ~10ns | Complex |
-| Mmap file | On-demand | O(1) ~100ns | Medium |
+| RocksDB CF | On-demand | ~100µs | ✅ Implemented |
+| Dense array | 16 GB | O(1) ~10ns | Deferred |
+| Mmap file | On-demand | O(1) ~100ns | Deferred |
 
-**Recommended:** Start with RocksDB CF, optimize to mmap if needed.
+**Remaining Work:** Add `multi_get` batch lookup API for search result resolution.
 
 ```rust
-/// Reverse mapping: internal u32 -> ULID
-/// Hot path during search - consider mmap optimization
-pub struct ReverseIdMapping;
-
-impl ColumnFamilyRecord for ReverseIdMapping {
-    const CF_NAME: &'static str = cf::ID_REVERSE;  // "vector/id_reverse"
-    type Key = u32;             // 4-byte internal ID
-    type Value = Id;            // 16-byte ULID
-}
-
-impl ReverseIdMapping {
+// Add to id.rs or a new api.rs
+impl IdReverse {
     /// Batch lookup for search results
-    pub fn multi_get(db: &DB, ids: &[u32]) -> Result<Vec<Option<Id>>> {
+    pub fn multi_get(db: &TransactionDB, embedding: EmbeddingCode, ids: &[VecId])
+        -> Result<Vec<Option<Id>>>
+    {
+        // Build keys
+        let keys: Vec<Vec<u8>> = ids.iter()
+            .map(|&id| Self::key_to_bytes(&IdReverseCfKey(embedding, id)))
+            .collect();
+
         // Use RocksDB MultiGet for efficiency
-        let keys: Vec<_> = ids.iter().map(|id| id.to_le_bytes()).collect();
-        db.multi_get_cf(cf, keys)
+        let cf = db.cf_handle(Self::CF_NAME)?;
+        let results = db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())));
+
+        // Parse results
+        results.into_iter()
+            .map(|r| match r? {
+                Some(bytes) => Ok(Some(Self::value_from_bytes(&bytes)?.0)),
+                None => Ok(None),
+            })
+            .collect()
     }
 }
 ```
 
-**Effort:** 0.5 day (RocksDB), +1 day (mmap optimization)
+**Effort:** 0.25 day (integration only)
 
 **Acceptance Criteria:**
 - [ ] Search results correctly map back to ULIDs
@@ -1829,20 +1855,76 @@ impl ReverseIdMapping {
 
 ### Task 1.4: ID Allocation Persistence
 
-Persist allocator state for crash recovery:
+**Status:** ✅ SCHEMA COMPLETE (see `schema.rs::IdAlloc`)
+
+The `IdAlloc` CF is already implemented with:
+- Key: `IdAllocCfKey(EmbeddingCode, IdAllocField)` = 9 bytes
+- Value: `IdAllocCfValue(IdAllocField)` with variants:
+  - `NextId(VecId)` = 4 bytes
+  - `FreeBitmap(RoaringBitmapBytes)` = variable
+
+**Remaining Work:** Integrate with `IdAllocator::persist()` and `recover()`.
 
 ```rust
-/// ID allocator metadata
-pub struct IdAllocatorMeta;
+// Add to id.rs - persistence integration
+impl IdAllocator {
+    /// Persist allocator state to RocksDB
+    pub fn persist(&self, db: &TransactionDB, embedding: EmbeddingCode) -> Result<()> {
+        let cf = db.cf_handle(IdAlloc::CF_NAME)?;
 
-impl ColumnFamilyRecord for IdAllocatorMeta {
-    const CF_NAME: &'static str = cf::ID_ALLOC;  // "vector/id_alloc"
-    type Key = &'static str;    // "next_id" | "free_bitmap"
-    type Value = Vec<u8>;       // Serialized value
+        // Persist next_id
+        let next_key = IdAllocCfKey::next_id(embedding);
+        let next_val = IdAllocCfValue(IdAllocField::NextId(
+            self.next_id.load(Ordering::SeqCst)
+        ));
+        db.put_cf(&cf, IdAlloc::key_to_bytes(&next_key), IdAlloc::value_to_bytes(&next_val))?;
+
+        // Persist free bitmap
+        let bitmap_key = IdAllocCfKey::free_bitmap(embedding);
+        let mut bitmap_bytes = Vec::new();
+        self.free_ids.lock().unwrap().serialize_into(&mut bitmap_bytes)?;
+        let bitmap_val = IdAllocCfValue(IdAllocField::FreeBitmap(bitmap_bytes));
+        db.put_cf(&cf, IdAlloc::key_to_bytes(&bitmap_key), IdAlloc::value_to_bytes(&bitmap_val))?;
+
+        Ok(())
+    }
+
+    /// Recover state from RocksDB
+    pub fn recover(db: &TransactionDB, embedding: EmbeddingCode) -> Result<Self> {
+        let cf = db.cf_handle(IdAlloc::CF_NAME)?;
+
+        // Load next_id
+        let next_key = IdAllocCfKey::next_id(embedding);
+        let next_id = match db.get_cf(&cf, IdAlloc::key_to_bytes(&next_key))? {
+            Some(bytes) => {
+                let val = IdAlloc::value_from_bytes(&next_key, &bytes)?;
+                match val.0 { IdAllocField::NextId(v) => v, _ => 0 }
+            }
+            None => 0,
+        };
+
+        // Load free bitmap
+        let bitmap_key = IdAllocCfKey::free_bitmap(embedding);
+        let free_ids = match db.get_cf(&cf, IdAlloc::key_to_bytes(&bitmap_key))? {
+            Some(bytes) => {
+                let val = IdAlloc::value_from_bytes(&bitmap_key, &bytes)?;
+                match val.0 {
+                    IdAllocField::FreeBitmap(b) => RoaringBitmap::deserialize_from(&b[..])?,
+                    _ => RoaringBitmap::new(),
+                }
+            }
+            None => RoaringBitmap::new(),
+        };
+
+        Ok(Self {
+            next_id: AtomicU32::new(next_id),
+            free_ids: Mutex::new(free_ids),
+        })
+    }
 }
 ```
 
-**Effort:** 0.5 day
+**Effort:** 0.25 day (integration only)
 
 **Acceptance Criteria:**
 - [ ] `next_id` persists across restarts
@@ -2050,6 +2132,882 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 
 ---
 
+## Storage API Integration Design
+
+> **Design Pattern:** Following the established patterns in `graph::` and `fulltext::` modules for consistency across subsystems. This includes MPSC mutation channels, MPMC query channels, and the `Runnable` trait for composable operations.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                           Vector Module API Architecture                          │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                   │
+│  ┌─────────────────────────────────┐    ┌─────────────────────────────────┐     │
+│  │        vector::Writer           │    │        vector::Reader           │     │
+│  │                                 │    │                                 │     │
+│  │  send(Vec<Mutation>)           │    │  send_query(Query)              │     │
+│  │  flush() -> oneshot            │    │  is_closed()                    │     │
+│  │  send_sync(Vec<Mutation>)      │    │                                 │     │
+│  └──────────────┬──────────────────┘    └──────────────┬──────────────────┘     │
+│                 │                                       │                        │
+│                 ▼ MPSC (tokio)                         ▼ MPMC (flume)           │
+│                 │                                       │                        │
+│  ┌──────────────┴──────────────────┐    ┌──────────────┴──────────────────┐     │
+│  │     vector::writer::Consumer    │    │     vector::reader::Consumer    │     │
+│  │                                 │    │                                 │     │
+│  │  process_batch(Vec<Mutation>)   │    │  process_query(Query)           │     │
+│  │  → RocksDB Transaction          │    │  → Execute + oneshot response   │     │
+│  └─────────────────────────────────┘    └─────────────────────────────────┘     │
+│                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐ │
+│  │                              vector::Processor                               │ │
+│  │                                                                              │ │
+│  │  storage: Arc<Storage<Subsystem>>     Provides:                             │ │
+│  │  id_allocators: DashMap<u64, IdAllocator>   • DB access                     │ │
+│  │  registry: Arc<EmbeddingRegistry>           • ID allocation per embedding   │ │
+│  │                                              • Embedding registry           │ │
+│  └─────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Mutation Design
+
+#### Mutation Enum (`vector/mutation.rs`)
+
+```rust
+/// Mutation enum for vector storage operations.
+///
+/// All vector mutations are variants of this enum, enabling type-safe
+/// dispatch in mutation consumers.
+#[derive(Debug, Clone)]
+pub enum Mutation {
+    // ─────────────────────────────────────────────────────────────
+    // Embedding Space Management
+    // ─────────────────────────────────────────────────────────────
+    /// Register a new embedding space
+    AddEmbeddingSpec(AddEmbeddingSpec),  // Already implemented
+
+    // ─────────────────────────────────────────────────────────────
+    // Vector Operations
+    // ─────────────────────────────────────────────────────────────
+    /// Insert a new vector into an embedding space
+    InsertVector(InsertVector),
+    /// Delete a vector from an embedding space
+    DeleteVector(DeleteVector),
+    /// Batch insert multiple vectors (optimization)
+    InsertVectorBatch(InsertVectorBatch),
+
+    // ─────────────────────────────────────────────────────────────
+    // HNSW Graph Operations (internal, used by InsertVector)
+    // ─────────────────────────────────────────────────────────────
+    /// Add/update edges for a node in the HNSW graph
+    UpdateEdges(UpdateEdges),
+    /// Update graph metadata (entry_point, max_level, count)
+    UpdateGraphMeta(UpdateGraphMeta),
+
+    // ─────────────────────────────────────────────────────────────
+    // Synchronization
+    // ─────────────────────────────────────────────────────────────
+    /// Synchronization marker with oneshot channel for flush semantics
+    Flush(FlushMarker),
+}
+
+/// Insert a vector into an embedding space.
+///
+/// This mutation:
+/// 1. Allocates a u32 vec_id via IdAllocator
+/// 2. Stores ULID ↔ vec_id mappings (IdForward, IdReverse)
+/// 3. Stores the raw vector (Vectors CF)
+/// 4. Stores vector metadata (VecMeta CF)
+/// 5. Optionally: queues for async HNSW graph update (Pending CF)
+#[derive(Debug, Clone)]
+pub struct InsertVector {
+    /// Embedding space to insert into
+    pub embedding: EmbeddingCode,
+    /// External document ID
+    pub id: Id,
+    /// Vector data (must match embedding dimension)
+    pub vector: Vec<f32>,
+    /// Whether to index immediately or queue for async processing
+    pub immediate_index: bool,
+}
+
+/// Delete a vector from an embedding space.
+#[derive(Debug, Clone)]
+pub struct DeleteVector {
+    /// Embedding space
+    pub embedding: EmbeddingCode,
+    /// External document ID
+    pub id: Id,
+}
+
+/// Batch insert multiple vectors for efficiency.
+#[derive(Debug, Clone)]
+pub struct InsertVectorBatch {
+    /// Embedding space
+    pub embedding: EmbeddingCode,
+    /// Batch of (id, vector) pairs
+    pub vectors: Vec<(Id, Vec<f32>)>,
+    /// Whether to index immediately
+    pub immediate_index: bool,
+}
+
+/// Update HNSW graph edges for a node.
+#[derive(Debug, Clone)]
+pub struct UpdateEdges {
+    /// Embedding space
+    pub embedding: EmbeddingCode,
+    /// Vector ID
+    pub vec_id: VecId,
+    /// Layer to update
+    pub layer: HnswLayer,
+    /// Operation: add or replace neighbors
+    pub neighbors: EdgeUpdate,
+}
+
+#[derive(Debug, Clone)]
+pub enum EdgeUpdate {
+    /// Add neighbors (merge with existing)
+    Add(Vec<VecId>),
+    /// Replace all neighbors at this layer
+    Replace(Vec<VecId>),
+}
+
+/// Update graph-level metadata.
+#[derive(Debug, Clone)]
+pub struct UpdateGraphMeta {
+    pub embedding: EmbeddingCode,
+    pub field: GraphMetaUpdate,
+}
+
+#[derive(Debug, Clone)]
+pub enum GraphMetaUpdate {
+    EntryPoint(VecId),
+    MaxLevel(HnswLayer),
+    IncrementCount,
+    DecrementCount,
+}
+```
+
+#### MutationExecutor Trait
+
+```rust
+/// Trait for executing mutations against vector storage.
+pub trait MutationExecutor: Send + Sync {
+    /// Execute this mutation within a RocksDB transaction.
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<()>;
+}
+
+// Implemented for each mutation type
+impl MutationExecutor for InsertVector {
+    fn execute(&self, txn: &Transaction, txn_db: &TransactionDB, processor: &Processor) -> Result<()> {
+        // 1. Validate embedding exists and dimension matches
+        let emb = processor.registry.get_by_code(self.embedding)
+            .ok_or_else(|| Error::UnknownEmbedding(self.embedding))?;
+        emb.validate_vector(&self.vector)?;
+
+        // 2. Allocate vec_id
+        let allocator = processor.get_or_create_allocator(self.embedding);
+        let vec_id = allocator.allocate();
+
+        // 3. Store ID mappings
+        let fwd_key = IdForwardCfKey(self.embedding, self.id);
+        let fwd_val = IdForwardCfValue(vec_id);
+        txn.put_cf(cf!(IdForward), IdForward::key_to_bytes(&fwd_key), IdForward::value_to_bytes(&fwd_val))?;
+
+        let rev_key = IdReverseCfKey(self.embedding, vec_id);
+        let rev_val = IdReverseCfValue(self.id);
+        txn.put_cf(cf!(IdReverse), IdReverse::key_to_bytes(&rev_key), IdReverse::value_to_bytes(&rev_val))?;
+
+        // 4. Store vector
+        let vec_key = VectorCfKey(self.embedding, vec_id);
+        let vec_val = VectorCfValue(self.vector.clone());
+        txn.put_cf(cf!(Vectors), Vectors::key_to_bytes(&vec_key), Vectors::value_to_bytes(&vec_val))?;
+
+        // 5. Store metadata
+        let meta = VecMetadata { max_layer: 0, flags: 0, created_at: now_millis() };
+        // ... store to VecMeta CF
+
+        // 6. Queue for HNSW indexing or index immediately
+        if self.immediate_index {
+            // Index synchronously (blocking)
+            processor.index_vector(txn, self.embedding, vec_id, &self.vector)?;
+        } else {
+            // Queue for async updater
+            let pending_key = PendingCfKey(self.embedding, TimestampMilli::now(), vec_id);
+            txn.put_cf(cf!(Pending), Pending::key_to_bytes(&pending_key), &[])?;
+        }
+
+        Ok(())
+    }
+}
+```
+
+### Query Design
+
+#### Query Enum (`vector/query.rs`)
+
+```rust
+/// Query enum for vector search operations.
+///
+/// Each variant wraps a dispatch struct containing:
+/// - Query parameters (user-provided)
+/// - Timeout duration
+/// - Oneshot channel for result delivery
+pub enum Query {
+    // ─────────────────────────────────────────────────────────────
+    // Search Operations
+    // ─────────────────────────────────────────────────────────────
+    /// K-nearest neighbor search
+    SearchKNN(SearchKNNDispatch),
+    /// Search with pre-filter (e.g., only vectors matching certain IDs)
+    SearchKNNFiltered(SearchKNNFilteredDispatch),
+
+    // ─────────────────────────────────────────────────────────────
+    // Point Lookups
+    // ─────────────────────────────────────────────────────────────
+    /// Get vector by external ID
+    GetVector(GetVectorDispatch),
+    /// Get internal vec_id for external ID
+    GetInternalId(GetInternalIdDispatch),
+    /// Get external ID for internal vec_id
+    GetExternalId(GetExternalIdDispatch),
+    /// Batch resolve vec_ids to external IDs
+    ResolveIds(ResolveIdsDispatch),
+
+    // ─────────────────────────────────────────────────────────────
+    // Graph Introspection
+    // ─────────────────────────────────────────────────────────────
+    /// Get graph metadata for an embedding space
+    GetGraphMeta(GetGraphMetaDispatch),
+    /// Get neighbors of a node at a specific layer
+    GetNeighbors(GetNeighborsDispatch),
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Search Operations
+// ═══════════════════════════════════════════════════════════════════
+
+/// K-nearest neighbor search query.
+#[derive(Debug, Clone)]
+pub struct SearchKNN {
+    /// Embedding space to search
+    pub embedding: EmbeddingCode,
+    /// Query vector
+    pub query: Vec<f32>,
+    /// Number of results to return
+    pub k: usize,
+    /// Search beam width (higher = better recall, slower)
+    pub ef: usize,
+}
+
+/// Search result: (distance, external ID)
+pub type SearchResult = (f32, Id);
+
+// Dispatch wrapper with oneshot channel
+pub(crate) struct SearchKNNDispatch {
+    pub(crate) params: SearchKNN,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<SearchResult>>>,
+}
+
+/// Filtered KNN search with ID pre-filter.
+#[derive(Debug, Clone)]
+pub struct SearchKNNFiltered {
+    pub embedding: EmbeddingCode,
+    pub query: Vec<f32>,
+    pub k: usize,
+    pub ef: usize,
+    /// Only consider vectors with these external IDs
+    pub filter_ids: Vec<Id>,
+}
+
+pub(crate) struct SearchKNNFilteredDispatch {
+    pub(crate) params: SearchKNNFiltered,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<SearchResult>>>,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Point Lookups
+// ═══════════════════════════════════════════════════════════════════
+
+/// Get vector by external ID.
+#[derive(Debug, Clone)]
+pub struct GetVector {
+    pub embedding: EmbeddingCode,
+    pub id: Id,
+}
+
+pub(crate) struct GetVectorDispatch {
+    pub(crate) params: GetVector,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Option<Vec<f32>>>>,
+}
+
+/// Get internal vec_id for external ID.
+#[derive(Debug, Clone)]
+pub struct GetInternalId {
+    pub embedding: EmbeddingCode,
+    pub id: Id,
+}
+
+pub(crate) struct GetInternalIdDispatch {
+    pub(crate) params: GetInternalId,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Option<VecId>>>,
+}
+
+/// Batch resolve vec_ids to external IDs.
+#[derive(Debug, Clone)]
+pub struct ResolveIds {
+    pub embedding: EmbeddingCode,
+    pub vec_ids: Vec<VecId>,
+}
+
+pub(crate) struct ResolveIdsDispatch {
+    pub(crate) params: ResolveIds,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<Option<Id>>>>,
+}
+```
+
+#### QueryExecutor Trait
+
+```rust
+/// Trait for executing queries against vector storage.
+pub trait QueryExecutor: Send + Sync {
+    type Output: Send;
+
+    /// Execute this query against the processor.
+    async fn execute(&self, processor: &Processor) -> Result<Self::Output>;
+
+    /// Query timeout.
+    fn timeout(&self) -> Duration;
+}
+
+impl QueryExecutor for SearchKNN {
+    type Output = Vec<SearchResult>;
+
+    async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
+        // 1. Validate embedding and query dimension
+        let emb = processor.registry.get_by_code(self.embedding)
+            .ok_or_else(|| Error::UnknownEmbedding(self.embedding))?;
+        emb.validate_vector(&self.query)?;
+
+        // 2. Perform HNSW search (returns vec_ids with distances)
+        let internal_results = processor.hnsw_search(
+            self.embedding,
+            &self.query,
+            self.k,
+            self.ef,
+        )?;
+
+        // 3. Resolve vec_ids to external IDs
+        let vec_ids: Vec<VecId> = internal_results.iter().map(|(_, id)| *id).collect();
+        let external_ids = processor.resolve_ids(self.embedding, &vec_ids)?;
+
+        // 4. Combine distances with external IDs
+        let results: Vec<SearchResult> = internal_results.into_iter()
+            .zip(external_ids)
+            .filter_map(|((dist, _), opt_id)| opt_id.map(|id| (dist, id)))
+            .collect();
+
+        Ok(results)
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(30)  // Configurable
+    }
+}
+```
+
+### Writer Infrastructure (`vector/writer.rs`)
+
+```rust
+use tokio::sync::{mpsc, oneshot};
+
+/// Synchronization marker for flush semantics.
+#[derive(Debug)]
+pub struct FlushMarker(pub(crate) oneshot::Sender<()>);
+
+/// Vector mutation writer.
+///
+/// Sends mutations through an MPSC channel to the consumer.
+/// Supports batching, flush, and send_sync patterns.
+#[derive(Clone)]
+pub struct Writer {
+    sender: mpsc::Sender<Vec<Mutation>>,
+}
+
+impl Writer {
+    /// Send mutations asynchronously (fire-and-forget).
+    pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()> {
+        self.sender.send(mutations).await
+            .map_err(|_| Error::ChannelClosed)?;
+        Ok(())
+    }
+
+    /// Wait for all pending mutations to be committed.
+    pub async fn flush(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.sender.send(vec![Mutation::Flush(FlushMarker(tx))]).await
+            .map_err(|_| Error::ChannelClosed)?;
+        rx.await.map_err(|_| Error::FlushFailed)?;
+        Ok(())
+    }
+
+    /// Send mutations and wait for commit (send + flush).
+    pub async fn send_sync(&self, mutations: Vec<Mutation>) -> Result<()> {
+        self.send(mutations).await?;
+        self.flush().await
+    }
+}
+
+/// Configuration for the vector writer.
+#[derive(Debug, Clone)]
+pub struct WriterConfig {
+    /// Channel buffer size
+    pub channel_size: usize,
+}
+
+impl Default for WriterConfig {
+    fn default() -> Self {
+        Self { channel_size: 1024 }
+    }
+}
+
+/// Writer builder.
+pub struct WriterBuilder {
+    config: WriterConfig,
+}
+
+impl WriterBuilder {
+    pub fn new() -> Self {
+        Self { config: WriterConfig::default() }
+    }
+
+    pub fn channel_size(mut self, size: usize) -> Self {
+        self.config.channel_size = size;
+        self
+    }
+
+    pub fn build(self, processor: Arc<Processor>) -> (Writer, Consumer) {
+        let (tx, rx) = mpsc::channel(self.config.channel_size);
+        let writer = Writer { sender: tx };
+        let consumer = Consumer::new(rx, processor);
+        (writer, consumer)
+    }
+}
+
+/// Mutation consumer - processes batches from the MPSC channel.
+pub struct Consumer {
+    receiver: mpsc::Receiver<Vec<Mutation>>,
+    processor: Arc<Processor>,
+}
+
+impl Consumer {
+    /// Run the consumer loop.
+    pub async fn run(mut self) {
+        while let Some(batch) = self.receiver.recv().await {
+            if let Err(e) = self.process_batch(batch).await {
+                tracing::error!(?e, "Failed to process mutation batch");
+            }
+        }
+    }
+
+    async fn process_batch(&self, mutations: Vec<Mutation>) -> Result<()> {
+        let db = self.processor.storage.transaction_db()?;
+        let txn = db.transaction();
+
+        let mut flush_markers = Vec::new();
+
+        for mutation in mutations {
+            match mutation {
+                Mutation::Flush(marker) => {
+                    flush_markers.push(marker);
+                }
+                _ => {
+                    mutation.execute(&txn, &db, &self.processor)?;
+                }
+            }
+        }
+
+        // Commit transaction
+        txn.commit()?;
+
+        // Signal all flush waiters
+        for FlushMarker(tx) in flush_markers {
+            let _ = tx.send(());
+        }
+
+        Ok(())
+    }
+}
+```
+
+### Reader Infrastructure (`vector/reader.rs`)
+
+```rust
+use flume;
+use tokio::sync::oneshot;
+
+/// Vector query reader.
+///
+/// Sends queries through an MPMC (flume) channel for load balancing.
+#[derive(Clone)]
+pub struct Reader {
+    sender: flume::Sender<Query>,
+}
+
+impl Reader {
+    /// Send a query and get the result.
+    pub async fn send_query<Q: Into<Query>>(&self, query: Q) -> Result<()> {
+        self.sender.send_async(query.into()).await
+            .map_err(|_| Error::ChannelClosed)?;
+        Ok(())
+    }
+
+    /// Check if the reader is closed.
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_disconnected()
+    }
+}
+
+/// Configuration for the vector reader.
+#[derive(Debug, Clone)]
+pub struct ReaderConfig {
+    /// Channel buffer size
+    pub channel_size: usize,
+    /// Number of consumer workers
+    pub num_workers: usize,
+}
+
+impl Default for ReaderConfig {
+    fn default() -> Self {
+        Self {
+            channel_size: 1024,
+            num_workers: 4,
+        }
+    }
+}
+
+/// Reader builder.
+pub struct ReaderBuilder {
+    config: ReaderConfig,
+}
+
+impl ReaderBuilder {
+    pub fn new() -> Self {
+        Self { config: ReaderConfig::default() }
+    }
+
+    pub fn channel_size(mut self, size: usize) -> Self {
+        self.config.channel_size = size;
+        self
+    }
+
+    pub fn num_workers(mut self, n: usize) -> Self {
+        self.config.num_workers = n;
+        self
+    }
+
+    pub fn build(self, processor: Arc<Processor>) -> (Reader, Vec<Consumer>) {
+        let (tx, rx) = flume::bounded(self.config.channel_size);
+        let reader = Reader { sender: tx };
+
+        let consumers: Vec<_> = (0..self.config.num_workers)
+            .map(|_| Consumer::new(rx.clone(), processor.clone()))
+            .collect();
+
+        (reader, consumers)
+    }
+}
+
+/// Query consumer - processes queries from the MPMC channel.
+pub struct Consumer {
+    receiver: flume::Receiver<Query>,
+    processor: Arc<Processor>,
+}
+
+impl Consumer {
+    /// Run the consumer loop.
+    pub async fn run(self) {
+        while let Ok(query) = self.receiver.recv_async().await {
+            self.process_query(query).await;
+        }
+    }
+
+    async fn process_query(&self, query: Query) {
+        match query {
+            Query::SearchKNN(dispatch) => {
+                let result = dispatch.params.execute(&self.processor).await;
+                let _ = dispatch.result_tx.send(result);
+            }
+            Query::GetVector(dispatch) => {
+                let result = dispatch.params.execute(&self.processor).await;
+                let _ = dispatch.result_tx.send(result);
+            }
+            // ... other variants
+        }
+    }
+}
+```
+
+### Processor (`vector/processor.rs`)
+
+```rust
+use dashmap::DashMap;
+
+/// Vector processor - provides storage access and state management.
+///
+/// This is the central component that mutation executors and query executors
+/// use to access the database and manage per-embedding state.
+pub struct Processor {
+    /// Vector storage (RocksDB via generic Storage<Subsystem>)
+    pub storage: Arc<Storage>,
+    /// Embedding registry (pre-warmed on startup)
+    pub registry: Arc<EmbeddingRegistry>,
+    /// Per-embedding ID allocators (lazily created)
+    id_allocators: DashMap<EmbeddingCode, IdAllocator>,
+}
+
+impl Processor {
+    pub fn new(storage: Arc<Storage>, registry: Arc<EmbeddingRegistry>) -> Self {
+        Self {
+            storage,
+            registry,
+            id_allocators: DashMap::new(),
+        }
+    }
+
+    /// Get or create an ID allocator for the given embedding space.
+    pub fn get_or_create_allocator(&self, embedding: EmbeddingCode) -> dashmap::RefMut<EmbeddingCode, IdAllocator> {
+        self.id_allocators.entry(embedding).or_insert_with(|| {
+            // Try to recover from storage, or create new
+            let db = self.storage.transaction_db().expect("DB access");
+            IdAllocator::recover(&db, embedding).unwrap_or_else(|_| IdAllocator::new())
+        })
+    }
+
+    /// Resolve vec_ids to external IDs using MultiGet.
+    pub fn resolve_ids(&self, embedding: EmbeddingCode, vec_ids: &[VecId]) -> Result<Vec<Option<Id>>> {
+        let db = self.storage.transaction_db()?;
+        IdReverse::multi_get(&db, embedding, vec_ids)
+    }
+
+    /// HNSW search (placeholder - implemented in Phase 2)
+    pub fn hnsw_search(
+        &self,
+        embedding: EmbeddingCode,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+    ) -> Result<Vec<(f32, VecId)>> {
+        todo!("Implement in Phase 2")
+    }
+
+    /// Index a vector into the HNSW graph (placeholder - implemented in Phase 2)
+    pub fn index_vector(
+        &self,
+        txn: &rocksdb::Transaction,
+        embedding: EmbeddingCode,
+        vec_id: VecId,
+        vector: &[f32],
+    ) -> Result<()> {
+        todo!("Implement in Phase 2")
+    }
+}
+```
+
+### Runnable Trait Integration
+
+```rust
+// In vector/mutation.rs
+
+/// Runnable trait for mutations - mirrors graph/fulltext pattern.
+#[async_trait::async_trait]
+impl crate::writer::Runnable for InsertVector {
+    async fn run(self, writer: &crate::vector::writer::Writer) -> Result<()> {
+        writer.send(vec![Mutation::InsertVector(self)]).await
+    }
+}
+
+// In vector/query.rs
+
+/// Runnable trait for queries - mirrors graph/fulltext pattern.
+#[async_trait::async_trait]
+impl crate::reader::Runnable<crate::vector::reader::Reader> for SearchKNN {
+    type Output = Vec<SearchResult>;
+
+    async fn run(self, reader: &crate::vector::reader::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (tx, rx) = oneshot::channel();
+        let dispatch = SearchKNNDispatch {
+            params: self,
+            timeout,
+            result_tx: tx,
+        };
+        reader.send_query(Query::SearchKNN(dispatch)).await?;
+
+        tokio::time::timeout(timeout, rx)
+            .await
+            .map_err(|_| Error::QueryTimeout)?
+            .map_err(|_| Error::ChannelClosed)?
+    }
+}
+```
+
+### Module Structure
+
+```
+libs/db/src/vector/
+├── mod.rs              # Module exports
+├── api.rs              # Generic API functions (convenience layer)
+├── config.rs           # Configuration types
+├── distance.rs         # Distance metrics
+├── embedding.rs        # Embedding type
+├── error.rs            # Error types
+├── id.rs               # IdAllocator (Phase 1)
+├── mutation.rs         # Mutation enum + MutationExecutor impls
+├── processor.rs        # Processor (central state management)
+├── query.rs            # Query enum + QueryExecutor impls
+├── reader.rs           # Reader, Consumer, MPMC infrastructure
+├── registry.rs         # EmbeddingRegistry
+├── schema.rs           # Column family definitions
+├── subsystem.rs        # StorageSubsystem impl
+├── writer.rs           # Writer, Consumer, MPSC infrastructure
+├── hnsw.rs             # HNSW algorithm (Phase 2)
+├── rabitq.rs           # RaBitQ quantization (Phase 4)
+└── async_updater.rs    # Background graph maintenance (Phase 5)
+```
+
+### Convenience API (`vector/api.rs`)
+
+```rust
+//! Generic API functions for common vector operations.
+//!
+//! These provide a simpler interface for basic operations without
+//! requiring direct use of Reader/Writer infrastructure.
+
+use super::*;
+
+/// Insert a vector into an embedding space.
+///
+/// This is a convenience wrapper that creates the mutation and sends it
+/// through the writer.
+pub async fn insert(
+    writer: &Writer,
+    embedding: EmbeddingCode,
+    id: Id,
+    vector: Vec<f32>,
+) -> Result<()> {
+    let mutation = InsertVector {
+        embedding,
+        id,
+        vector,
+        immediate_index: false,  // Default to async indexing
+    };
+    writer.send_sync(vec![Mutation::InsertVector(mutation)]).await
+}
+
+/// Search for k nearest neighbors.
+///
+/// Convenience wrapper for SearchKNN query.
+pub async fn search(
+    reader: &Reader,
+    embedding: EmbeddingCode,
+    query: Vec<f32>,
+    k: usize,
+) -> Result<Vec<SearchResult>> {
+    SearchKNN {
+        embedding,
+        query,
+        k,
+        ef: k * 10,  // Default ef = 10x k
+    }.run(reader, Duration::from_secs(30)).await
+}
+
+/// Get a vector by its external ID.
+pub async fn get_vector(
+    reader: &Reader,
+    embedding: EmbeddingCode,
+    id: Id,
+) -> Result<Option<Vec<f32>>> {
+    GetVector { embedding, id }
+        .run(reader, Duration::from_secs(5))
+        .await
+}
+
+/// Delete a vector by its external ID.
+pub async fn delete(
+    writer: &Writer,
+    embedding: EmbeddingCode,
+    id: Id,
+) -> Result<()> {
+    let mutation = DeleteVector { embedding, id };
+    writer.send_sync(vec![Mutation::DeleteVector(mutation)]).await
+}
+```
+
+### Implementation Priority
+
+| Task | Phase | Priority | Dependencies |
+|------|-------|----------|--------------|
+| `id.rs` - IdAllocator | 1 | High | Schema (done) |
+| `mutation.rs` - InsertVector/DeleteVector | 1 | High | IdAllocator |
+| `query.rs` - GetVector/GetInternalId | 1 | High | Schema (done) |
+| `processor.rs` - Processor struct | 1 | High | IdAllocator |
+| `writer.rs` - Writer/Consumer | 1 | Medium | Processor |
+| `reader.rs` - Reader/Consumer | 1 | Medium | Processor |
+| `api.rs` - Convenience functions | 1 | Low | Writer/Reader |
+| `query.rs` - SearchKNN | 2 | High | HNSW impl |
+| `hnsw.rs` - HNSW algorithm | 2 | High | Processor |
+
+### Test Strategy
+
+```rust
+// tests/test_vector_api.rs
+
+#[tokio::test]
+async fn test_insert_and_get_vector() {
+    let tmp = TempDir::new().unwrap();
+    let (processor, writer, reader) = setup_vector_infra(tmp.path()).await;
+
+    // Register embedding space
+    let embedding = processor.registry.register(
+        EmbeddingBuilder::new("test", 128, Distance::Cosine)
+    )?;
+
+    // Insert vector
+    let id = Id::new();
+    let vector = vec![1.0f32; 128];
+    api::insert(&writer, embedding.code(), id, vector.clone()).await?;
+
+    // Retrieve vector
+    let retrieved = api::get_vector(&reader, embedding.code(), id).await?;
+    assert_eq!(retrieved, Some(vector));
+}
+
+#[tokio::test]
+async fn test_writer_flush_semantics() {
+    // Test that flush waits for commit
+}
+
+#[tokio::test]
+async fn test_reader_mpmc_load_balancing() {
+    // Test that multiple consumers handle queries
+}
+```
+
+---
+
 ## Phase 2: HNSW2 Core + Navigation Layer
 
 **Goal:** Implement optimized HNSW with roaring bitmap edges per `examples/vector/HNSW2.md`,
@@ -2069,18 +3027,32 @@ Replace explicit edge lists with compressed bitmaps:
 /// HNSW graph edges using RoaringBitmap
 /// Key: [embedding: u64] + [vec_id: u32] + [layer: u8] = 13 bytes
 /// Value: RoaringBitmap serialized (~50-200 bytes)
+/// Uses ColumnFamily base trait only (raw bytes, no serde)
 pub struct GraphEdges;
 
-impl ColumnFamilyRecord for GraphEdges {
+impl ColumnFamily for GraphEdges {
     const CF_NAME: &'static str = cf::EDGES;  // "vector/edges"
+}
 
-    fn key_to_bytes(embedding: &Embedding, vec_id: u32, layer: u8) -> [u8; 13] {
+impl GraphEdges {
+    /// Build key from components
+    pub fn key_to_bytes(embedding: u64, vec_id: u32, layer: u8) -> [u8; 13] {
         let mut key = [0u8; 13];
         key[0..8].copy_from_slice(&embedding.to_be_bytes());
         key[8..12].copy_from_slice(&vec_id.to_be_bytes());
         key[12] = layer;
         key
     }
+
+    /// Parse key into components
+    pub fn key_from_bytes(bytes: &[u8]) -> (u64, u32, u8) {
+        let embedding = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
+        let vec_id = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+        let layer = bytes[12];
+        (embedding, vec_id, layer)
+    }
+
+    /// Value is RoaringBitmap::serialize_into / deserialize_from (direct bytes)
 }
 
 // Storage comparison:
@@ -2155,15 +3127,22 @@ Store raw vectors for exact distance computation:
 /// Full vector storage (raw f32 bytes)
 /// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
 /// Value: [f32; D] as raw bytes (e.g., 512 bytes for 128D)
+/// Uses ColumnFamily base trait only (raw bytes via bytemuck, no serde)
 pub struct Vectors;
 
-impl ColumnFamilyRecord for Vectors {
+impl ColumnFamily for Vectors {
     const CF_NAME: &'static str = cf::VECTORS;  // "vector/vectors"
+}
 
-    fn column_family_options() -> Options {
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for Vectors {
+    fn cf_options(cache: &Cache, config: &VectorBlockCacheConfig) -> Options {
         let mut opts = Options::default();
         opts.set_compression_type(DBCompressionType::Lz4);
-        opts.set_block_size(16 * 1024);  // 16KB for vectors
+        opts.set_block_size(config.vector_block_size);  // 16KB for vectors
+        // Configure block cache
+        let mut block_opts = BlockBasedOptions::default();
+        block_opts.set_block_cache(cache);
+        opts.set_block_based_table_factory(&block_opts);
         opts
     }
 }
@@ -3806,16 +4785,23 @@ impl RaBitQ {
 /// Binary codes storage
 /// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
 /// Value: [u8; code_size] (e.g., 16 bytes for 128-dim 1-bit)
+/// Uses ColumnFamily base trait only (raw bytes, no serde)
 pub struct BinaryCodes;
 
-impl ColumnFamilyRecord for BinaryCodes {
+impl ColumnFamily for BinaryCodes {
     const CF_NAME: &'static str = cf::BINARY_CODES;  // "vector/binary_codes"
+}
 
-    fn column_family_options() -> Options {
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for BinaryCodes {
+    fn cf_options(cache: &Cache, config: &VectorBlockCacheConfig) -> Options {
         let mut opts = Options::default();
         // No compression - already minimal
         opts.set_compression_type(DBCompressionType::None);
         opts.set_block_size(4 * 1024);  // 4KB blocks
+        // Configure block cache
+        let mut block_opts = BlockBasedOptions::default();
+        block_opts.set_block_cache(cache);
+        opts.set_block_based_table_factory(&block_opts);
         opts
     }
 }
@@ -4365,9 +5351,10 @@ The pending queue tracks vectors awaiting graph integration:
 /// - Namespace isolation via embedding prefix
 /// - FIFO ordering via timestamp
 /// - Efficient batch collection via prefix scan
+/// Uses ColumnFamily base trait only (key-only CF, no value serde needed)
 pub struct PendingInserts;
 
-impl ColumnFamilyRecord for PendingInserts {
+impl ColumnFamily for PendingInserts {
     const CF_NAME: &'static str = cf::PENDING;  // "vector/pending"
 }
 
