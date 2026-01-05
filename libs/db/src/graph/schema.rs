@@ -42,13 +42,13 @@
 //! column family implements the HotColumnFamilyRecord trait.
 //!
 //!
-use super::mutation::{AddEdge, AddEdgeFragment, AddNode, AddNodeFragment};
+use super::mutation::{AddEdge, AddNode};
 use super::name_hash::NameHash;
 use super::subsystem::GraphBlockCacheConfig;
 use super::summary_hash::SummaryHash;
 use super::ColumnFamily;
 use super::ColumnFamilyConfig;
-use super::ColumnFamilyRecord;
+use super::ColumnFamilySerde;
 use super::HotColumnFamilyRecord;
 use super::ValidRangePatchable;
 
@@ -115,14 +115,15 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for Names {
     }
 }
 
-impl Names {
-    /// Serialize the key to bytes (8 bytes, fixed size).
-    pub fn key_to_bytes(key: &NameCfKey) -> Vec<u8> {
+impl ColumnFamilySerde for Names {
+    type Key = NameCfKey;
+    type Value = NameCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         key.0.as_bytes().to_vec()
     }
 
-    /// Deserialize the key from bytes.
-    pub fn key_from_bytes(bytes: &[u8]) -> Result<NameCfKey, anyhow::Error> {
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
         if bytes.len() != NameHash::SIZE {
             anyhow::bail!(
                 "Invalid NameCfKey length: expected {}, got {}",
@@ -134,20 +135,7 @@ impl Names {
         hash_bytes.copy_from_slice(bytes);
         Ok(NameCfKey(NameHash::from_bytes(hash_bytes)))
     }
-
-    /// Serialize the value to bytes (LZ4 compressed MessagePack).
-    pub fn value_to_bytes(value: &NameCfValue) -> Result<Vec<u8>, anyhow::Error> {
-        let msgpack_bytes = rmp_serde::to_vec(value)?;
-        let compressed = lz4::block::compress(&msgpack_bytes, None, true)?;
-        Ok(compressed)
-    }
-
-    /// Deserialize the value from bytes.
-    pub fn value_from_bytes(bytes: &[u8]) -> Result<NameCfValue, anyhow::Error> {
-        let decompressed = lz4::block::decompress(bytes, None)?;
-        let value: NameCfValue = rmp_serde::from_slice(&decompressed)?;
-        Ok(value)
-    }
+    // value_to_bytes and value_from_bytes use default impl (MessagePack + LZ4)
 }
 
 /// Nodes column family (HOT - optimized for graph traversal).
@@ -267,16 +255,16 @@ pub(crate) struct ReverseEdgeCfKey(
 pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<TemporalRange>);
 
 /// Edge fragments column family.
-pub(crate) struct EdgeFragments;
+pub struct EdgeFragments;
 #[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeFragmentCfKey(
-    pub(crate) SrcId,
-    pub(crate) DstId,
-    pub(crate) NameHash, // Edge name stored as hash; full name in Names CF
-    pub(crate) TimestampMilli,
+pub struct EdgeFragmentCfKey(
+    pub SrcId,
+    pub DstId,
+    pub NameHash, // Edge name stored as hash; full name in Names CF
+    pub TimestampMilli,
 );
 #[derive(Serialize, Deserialize)]
-pub(crate) struct EdgeFragmentCfValue(pub(crate) Option<TemporalRange>, pub(crate) FragmentContent);
+pub struct EdgeFragmentCfValue(pub Option<TemporalRange>, pub FragmentContent);
 
 pub type NodeName = String;
 pub type EdgeName = String;
@@ -355,11 +343,11 @@ impl HotColumnFamilyRecord for Nodes {
 }
 
 /// Node fragments column family (renamed from Fragments for clarity).
-pub(crate) struct NodeFragments;
+pub struct NodeFragments;
 #[derive(Serialize, Deserialize)]
-pub(crate) struct NodeFragmentCfKey(pub(crate) Id, pub(crate) TimestampMilli);
+pub struct NodeFragmentCfKey(pub Id, pub TimestampMilli);
 #[derive(Serialize, Deserialize)]
-pub(crate) struct NodeFragmentCfValue(pub(crate) Option<TemporalRange>, pub(crate) FragmentContent);
+pub struct NodeFragmentCfValue(pub Option<TemporalRange>, pub FragmentContent);
 
 impl ColumnFamily for NodeFragments {
     const CF_NAME: &'static str = "graph/node_fragments";
@@ -397,16 +385,9 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for NodeFragments {
     }
 }
 
-impl ColumnFamilyRecord for NodeFragments {
+impl ColumnFamilySerde for NodeFragments {
     type Key = NodeFragmentCfKey;
     type Value = NodeFragmentCfValue;
-    type CreateOp = AddNodeFragment;
-
-    fn record_from(args: &AddNodeFragment) -> (NodeFragmentCfKey, NodeFragmentCfValue) {
-        let key = NodeFragmentCfKey(args.id, args.ts_millis);
-        let value = NodeFragmentCfValue(args.valid_range.clone(), args.content.clone());
-        (key, value)
-    }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         // NodeFragmentCfKey(Id, TimestampMilli)
@@ -475,17 +456,9 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for EdgeFragments {
     }
 }
 
-impl ColumnFamilyRecord for EdgeFragments {
+impl ColumnFamilySerde for EdgeFragments {
     type Key = EdgeFragmentCfKey;
     type Value = EdgeFragmentCfValue;
-    type CreateOp = AddEdgeFragment;
-
-    fn record_from(args: &AddEdgeFragment) -> (EdgeFragmentCfKey, EdgeFragmentCfValue) {
-        let name_hash = NameHash::from_name(&args.edge_name);
-        let key = EdgeFragmentCfKey(args.src_id, args.dst_id, name_hash, args.ts_millis);
-        let value = EdgeFragmentCfValue(args.valid_range.clone(), args.content.clone());
-        (key, value)
-    }
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         // EdgeFragmentCfKey(SrcId, DstId, NameHash, TimestampMilli)
@@ -766,14 +739,15 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for NodeSummaries {
     }
 }
 
-impl NodeSummaries {
-    /// Serialize the key to bytes (8 bytes, fixed size).
-    pub fn key_to_bytes(key: &NodeSummaryCfKey) -> Vec<u8> {
+impl ColumnFamilySerde for NodeSummaries {
+    type Key = NodeSummaryCfKey;
+    type Value = NodeSummaryCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         key.0.as_bytes().to_vec()
     }
 
-    /// Deserialize the key from bytes.
-    pub fn key_from_bytes(bytes: &[u8]) -> Result<NodeSummaryCfKey, anyhow::Error> {
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
         if bytes.len() != SummaryHash::SIZE {
             anyhow::bail!(
                 "Invalid NodeSummaryCfKey length: expected {}, got {}",
@@ -785,20 +759,7 @@ impl NodeSummaries {
         hash_bytes.copy_from_slice(bytes);
         Ok(NodeSummaryCfKey(SummaryHash::from_bytes(hash_bytes)))
     }
-
-    /// Serialize the value to bytes (LZ4 compressed MessagePack).
-    pub fn value_to_bytes(value: &NodeSummaryCfValue) -> Result<Vec<u8>, anyhow::Error> {
-        let msgpack_bytes = rmp_serde::to_vec(value)?;
-        let compressed = lz4::block::compress(&msgpack_bytes, None, true)?;
-        Ok(compressed)
-    }
-
-    /// Deserialize the value from bytes.
-    pub fn value_from_bytes(bytes: &[u8]) -> Result<NodeSummaryCfValue, anyhow::Error> {
-        let decompressed = lz4::block::decompress(bytes, None)?;
-        let value: NodeSummaryCfValue = rmp_serde::from_slice(&decompressed)?;
-        Ok(value)
-    }
+    // value_to_bytes and value_from_bytes use default impl (MessagePack + LZ4)
 }
 
 /// EdgeSummaries column family (COLD - infrequently accessed).
@@ -845,14 +806,15 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for EdgeSummaries {
     }
 }
 
-impl EdgeSummaries {
-    /// Serialize the key to bytes (8 bytes, fixed size).
-    pub fn key_to_bytes(key: &EdgeSummaryCfKey) -> Vec<u8> {
+impl ColumnFamilySerde for EdgeSummaries {
+    type Key = EdgeSummaryCfKey;
+    type Value = EdgeSummaryCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         key.0.as_bytes().to_vec()
     }
 
-    /// Deserialize the key from bytes.
-    pub fn key_from_bytes(bytes: &[u8]) -> Result<EdgeSummaryCfKey, anyhow::Error> {
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
         if bytes.len() != SummaryHash::SIZE {
             anyhow::bail!(
                 "Invalid EdgeSummaryCfKey length: expected {}, got {}",
@@ -864,20 +826,7 @@ impl EdgeSummaries {
         hash_bytes.copy_from_slice(bytes);
         Ok(EdgeSummaryCfKey(SummaryHash::from_bytes(hash_bytes)))
     }
-
-    /// Serialize the value to bytes (LZ4 compressed MessagePack).
-    pub fn value_to_bytes(value: &EdgeSummaryCfValue) -> Result<Vec<u8>, anyhow::Error> {
-        let msgpack_bytes = rmp_serde::to_vec(value)?;
-        let compressed = lz4::block::compress(&msgpack_bytes, None, true)?;
-        Ok(compressed)
-    }
-
-    /// Deserialize the value from bytes.
-    pub fn value_from_bytes(bytes: &[u8]) -> Result<EdgeSummaryCfValue, anyhow::Error> {
-        let decompressed = lz4::block::decompress(bytes, None)?;
-        let value: EdgeSummaryCfValue = rmp_serde::from_slice(&decompressed)?;
-        Ok(value)
-    }
+    // value_to_bytes and value_from_bytes use default impl (MessagePack + LZ4)
 }
 
 /// All column families used in the database.

@@ -24,7 +24,7 @@ use rocksdb::{Direction, IteratorMode};
 
 use super::name_hash::NameHash;
 use super::summary_hash::SummaryHash;
-use super::{ColumnFamily, ColumnFamilyRecord, HotColumnFamilyRecord};
+use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use super::schema::{
     self, is_valid_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
     FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,
@@ -340,7 +340,7 @@ fn iterate_and_visit<CF, R, V, F, G>(
     visitor: &mut V,
 ) -> Result<usize>
 where
-    CF: ColumnFamilyRecord,
+    CF: ColumnFamily,
     V: Visitor<R>,
     F: Fn(&[u8], &[u8]) -> Result<R>,
     G: Fn(&R) -> &Option<TemporalRange>,

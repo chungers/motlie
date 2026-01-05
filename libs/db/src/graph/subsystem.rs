@@ -11,7 +11,7 @@ use crate::rocksdb::{BlockCacheConfig, DbAccess, StorageSubsystem};
 
 use super::name_hash::{NameCache, NameHash};
 use super::schema::{self, ALL_COLUMN_FAMILIES};
-use super::{ColumnFamily, ColumnFamilyConfig};
+use super::{ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde};
 
 // ============================================================================
 // Graph Subsystem
