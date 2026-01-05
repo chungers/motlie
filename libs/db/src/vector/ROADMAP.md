@@ -145,11 +145,12 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  ├── 0.10 EmbeddingFilter for multi-field queries ✓                        │
 │  └── 0.11 IndexProvider trait + fulltext::Schema ✓                         │
 │                                                                              │
-│  Phase 1: ID Management [ARCH-4, ARCH-5, ARCH-6]                            │
-│  ├── 1.1 u32 ID allocator with RoaringBitmap free list                     │
-│  ├── 1.2 Forward mapping CF (ULID -> u32)                                  │
-│  ├── 1.3 Reverse mapping (u32 -> ULID) - dense array or mmap              │
-│  └── 1.4 ID allocation persistence and recovery                            │
+│  Phase 1: ID Management [ARCH-4, ARCH-5, ARCH-6] ✓ COMPLETE                │
+│  ├── 1.1 u32 ID allocator with RoaringBitmap free list ✓                   │
+│  ├── 1.2 Forward mapping CF (ULID -> u32) ✓                                │
+│  ├── 1.3 Reverse mapping (u32 -> ULID) ✓                                   │
+│  ├── 1.4 ID allocation persistence and recovery ✓                          │
+│  └── 1.5 Storage API: mutation/query/writer/reader infrastructure ✓        │
 │                                                                              │
 │  Phase 2: HNSW2 Core + Navigation Layer [THR-1]                             │
 │  ├── 2.1 RoaringBitmap edge storage                                        │
@@ -1725,11 +1726,17 @@ Both `graph::schema` and `vector::schema` modules follow the same patterns:
 
 **Design Reference:** `examples/vector/HNSW2.md` - Item ID Design
 
-**Status:** 🔄 IN PROGRESS
+**Status:** ✅ COMPLETE (2026-01-04)
 - ✅ Schema definitions complete (`IdForward`, `IdReverse`, `IdAlloc` CFs in `schema.rs`)
 - ✅ Key/value types and serialization methods complete
-- ⏳ `IdAllocator` implementation pending (`id.rs`)
-- ⏳ Storage API integration pending
+- ✅ `IdAllocator` implementation complete (`id.rs`) - 7 tests
+- ✅ Storage API integration complete:
+  - `mutation.rs` - InsertVector, DeleteVector, InsertVectorBatch, UpdateEdges, UpdateGraphMeta, FlushMarker
+  - `query.rs` - GetVector, GetInternalId, GetExternalId, ResolveIds with QueryExecutor
+  - `processor.rs` - Central state management with per-embedding IdAllocators
+  - `writer.rs` - MPSC mutation infrastructure with Consumer
+  - `reader.rs` - MPMC query infrastructure with flume
+- ✅ All 62 vector module tests pass
 
 ### Task 1.1: ID Allocator
 
@@ -6629,9 +6636,9 @@ The memory caching (2.9) can be deferred if timeline is tight, but 2.7-2.8 are r
 
 | Phase | Tasks | Effort | Cumulative |
 |-------|-------|--------|------------|
-| Phase 0: Foundation | 0.1-0.3 | 1.25 days | 1.25 days |
-| Phase 1: ID Management | 1.1-1.4 | 3-4 days | 4-5 days |
-| Phase 2: HNSW2 Core + Navigation | 2.1-2.9 | 11-17 days | 15-22 days |
+| Phase 0: Foundation | 0.1-0.3 | ✅ COMPLETE | ✅ |
+| Phase 1: ID Management | 1.1-1.5 | ✅ COMPLETE | ✅ |
+| Phase 2: HNSW2 Core + Navigation | 2.1-2.9 | 11-17 days | ~11-17 days |
 | Phase 3: Batch APIs | 3.1-3.4 | 2.5-3 days | 17-25 days |
 | Phase 4: RaBitQ | 4.1-4.5 | 5-7 days | 22-32 days |
 | Phase 5: Async Updater | 5.1-5.5 | 3-4 days | 25-36 days |
