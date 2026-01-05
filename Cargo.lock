@@ -2084,8 +2084,10 @@ dependencies = [
  "flume",
  "lz4",
  "motlie-core",
+ "rand 0.8.5",
  "rkyv",
  "rmp-serde",
+ "roaring",
  "rocksdb",
  "serde",
  "tantivy",
@@ -3109,6 +3111,16 @@ dependencies = [
  "byteorder",
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "roaring"
+version = "0.10.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b"
+dependencies = [
+ "bytemuck",
+ "byteorder",
 ]
 
 [[package]]

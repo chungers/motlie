@@ -26,15 +26,22 @@ pub mod config;
 pub mod distance;
 pub mod embedding;
 mod error;
+pub mod id;
 pub mod mutation;
+pub mod processor;
+pub mod query;
+pub mod reader;
 pub mod registry;
 pub mod schema;
 pub mod subsystem;
+pub mod writer;
 
 // Re-exports for public API
 pub use config::{HnswConfig, RaBitQConfig, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
+pub use id::IdAllocator;
+pub use processor::Processor;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::ALL_COLUMN_FAMILIES;
 
