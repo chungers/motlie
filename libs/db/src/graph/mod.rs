@@ -19,7 +19,7 @@ use anyhow::Result;
 
 // Re-export CF traits from rocksdb module
 pub(crate) use crate::rocksdb::{
-    ColumnFamily, ColumnFamilyConfig, ColumnFamilyRecord, HotColumnFamilyRecord,
+    ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde, HotColumnFamilyRecord,
 };
 
 // Submodules

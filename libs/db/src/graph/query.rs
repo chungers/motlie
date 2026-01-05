@@ -25,7 +25,7 @@ use super::schema::{
     self, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey, FragmentContent,
     Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey, SrcId,
 };
-use super::{ColumnFamily, ColumnFamilyRecord};
+use super::{ColumnFamily, ColumnFamilySerde};
 use super::Storage;
 use crate::{Id, TimestampMilli};
 

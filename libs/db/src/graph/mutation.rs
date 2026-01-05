@@ -9,10 +9,15 @@ use std::sync::Mutex;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
+use crate::rocksdb::MutationCodec;
+
 use super::name_hash::NameHash;
-use super::schema;
+use super::schema::{
+    self, EdgeFragmentCfKey, EdgeFragmentCfValue, EdgeFragments, NodeFragmentCfKey,
+    NodeFragmentCfValue, NodeFragments,
+};
 use super::writer::{MutationExecutor, Writer};
-use super::{ColumnFamily, HotColumnFamilyRecord};
+use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use crate::writer::Runnable;
 use crate::{Id, TimestampMilli};
 
@@ -228,6 +233,31 @@ pub struct UpdateEdgeWeight {
 
     /// The new weight value
     pub weight: f64,
+}
+
+// ============================================================================
+// MutationCodec Implementations
+// ============================================================================
+
+impl MutationCodec for AddNodeFragment {
+    type Cf = NodeFragments;
+
+    fn to_record(&self) -> (NodeFragmentCfKey, NodeFragmentCfValue) {
+        let key = NodeFragmentCfKey(self.id, self.ts_millis);
+        let value = NodeFragmentCfValue(self.valid_range.clone(), self.content.clone());
+        (key, value)
+    }
+}
+
+impl MutationCodec for AddEdgeFragment {
+    type Cf = EdgeFragments;
+
+    fn to_record(&self) -> (EdgeFragmentCfKey, EdgeFragmentCfValue) {
+        let name_hash = NameHash::from_name(&self.edge_name);
+        let key = EdgeFragmentCfKey(self.src_id, self.dst_id, name_hash, self.ts_millis);
+        let value = EdgeFragmentCfValue(self.valid_range.clone(), self.content.clone());
+        (key, value)
+    }
 }
 
 // ============================================================================
@@ -625,13 +655,10 @@ impl MutationExecutor for AddNodeFragment {
             "Executing AddNodeFragment mutation"
         );
 
-        use super::ColumnFamilyRecord;
-        use super::schema::NodeFragments;
-
         let cf = txn_db.cf_handle(NodeFragments::CF_NAME).ok_or_else(|| {
             anyhow::anyhow!("Column family '{}' not found", NodeFragments::CF_NAME)
         })?;
-        let (key, value) = NodeFragments::create_bytes(self)?;
+        let (key, value) = self.to_cf_bytes()?;
         txn.put_cf(cf, key, value)?;
 
         Ok(())
@@ -653,16 +680,13 @@ impl MutationExecutor for AddEdgeFragment {
             "Executing AddEdgeFragment mutation"
         );
 
-        use super::ColumnFamilyRecord;
-        use super::schema::EdgeFragments;
-
         // Write name to Names CF (idempotent)
         write_name_to_cf(txn, txn_db, &self.edge_name)?;
 
         let cf = txn_db.cf_handle(EdgeFragments::CF_NAME).ok_or_else(|| {
             anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME)
         })?;
-        let (key, value) = EdgeFragments::create_bytes(self)?;
+        let (key, value) = self.to_cf_bytes()?;
         txn.put_cf(cf, key, value)?;
 
         Ok(())
@@ -683,16 +707,13 @@ impl MutationExecutor for AddEdgeFragment {
             "Executing AddEdgeFragment mutation (cached)"
         );
 
-        use super::ColumnFamilyRecord;
-        use super::schema::EdgeFragments;
-
         // Write name to Names CF with cache optimization
         write_name_to_cf_cached(txn, txn_db, &self.edge_name, cache)?;
 
         let cf = txn_db.cf_handle(EdgeFragments::CF_NAME).ok_or_else(|| {
             anyhow::anyhow!("Column family '{}' not found", EdgeFragments::CF_NAME)
         })?;
-        let (key, value) = EdgeFragments::create_bytes(self)?;
+        let (key, value) = self.to_cf_bytes()?;
         txn.put_cf(cf, key, value)?;
 
         Ok(())

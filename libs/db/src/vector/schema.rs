@@ -44,9 +44,10 @@
 //!
 //! See ROADMAP.md for complete schema documentation.
 
-use crate::rocksdb::{ColumnFamily, ColumnFamilyConfig};
+use crate::rocksdb::{ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde, HotColumnFamilyRecord};
 use crate::{Id, TimestampMilli};
 use anyhow::Result;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::distance::Distance;
@@ -116,28 +117,28 @@ pub const ALL_COLUMN_FAMILIES: &[&str] = &[
 ///
 /// Key: [embedding_code: u64] = 8 bytes
 /// Value: EmbeddingSpec (model, dim, distance)
-pub(crate) struct EmbeddingSpecs;
+pub struct EmbeddingSpecs;
 
 /// Domain struct for embedding specification.
 ///
 /// Rich struct with >2 fields, so defined separately per naming convention.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EmbeddingSpec {
+pub struct EmbeddingSpec {
     /// Model name (e.g., "gemma", "qwen3", "ada-002")
-    pub(crate) model: String,
+    pub model: String,
     /// Vector dimensionality (e.g., 128, 768, 1536)
-    pub(crate) dim: u32,
+    pub dim: u32,
     /// Distance metric for similarity computation
-    pub(crate) distance: Distance,
+    pub distance: Distance,
 }
 
 /// EmbeddingSpecs key: the embedding space identifier (primary key)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EmbeddingSpecCfKey(pub(crate) EmbeddingCode);
+pub struct EmbeddingSpecCfKey(pub EmbeddingCode);
 
 /// EmbeddingSpecs value: wraps EmbeddingSpec
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EmbeddingSpecCfValue(pub(crate) EmbeddingSpec);
+pub struct EmbeddingSpecCfValue(pub EmbeddingSpec);
 
 impl ColumnFamily for EmbeddingSpecs {
     const CF_NAME: &'static str = "vector/embedding_specs";
@@ -155,12 +156,15 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for EmbeddingSpecs {
     }
 }
 
-impl EmbeddingSpecs {
-    pub fn key_to_bytes(key: &EmbeddingSpecCfKey) -> Vec<u8> {
+impl ColumnFamilySerde for EmbeddingSpecs {
+    type Key = EmbeddingSpecCfKey;
+    type Value = EmbeddingSpecCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         key.0.to_be_bytes().to_vec()
     }
 
-    pub fn key_from_bytes(bytes: &[u8]) -> Result<EmbeddingSpecCfKey> {
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key> {
         if bytes.len() != 8 {
             anyhow::bail!(
                 "Invalid EmbeddingSpecCfKey length: expected 8, got {}",
@@ -172,15 +176,7 @@ impl EmbeddingSpecs {
         Ok(EmbeddingSpecCfKey(u64::from_be_bytes(arr)))
     }
 
-    pub fn value_to_bytes(value: &EmbeddingSpecCfValue) -> Result<Vec<u8>> {
-        let bytes = rmp_serde::to_vec(value)?;
-        Ok(bytes)
-    }
-
-    pub fn value_from_bytes(bytes: &[u8]) -> Result<EmbeddingSpecCfValue> {
-        let value = rmp_serde::from_slice(bytes)?;
-        Ok(value)
-    }
+    // value_to_bytes, value_from_bytes use default impl (MessagePack + LZ4)
 }
 
 // ============================================================================
@@ -419,7 +415,9 @@ pub(crate) struct VecMeta;
 /// Domain struct for vector metadata.
 ///
 /// Rich struct with >2 fields, so defined separately per naming convention.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+/// Uses rkyv for zero-copy access during HNSW search (hot path reads max_layer).
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Debug, Clone)]
+#[archive(check_bytes)]
 pub(crate) struct VecMetadata {
     /// Maximum HNSW layer this vector appears in
     pub(crate) max_layer: u8,
@@ -430,11 +428,12 @@ pub(crate) struct VecMetadata {
 }
 
 /// VecMeta key: (embedding_code, vec_id)
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct VecMetaCfKey(pub(crate) EmbeddingCode, pub(crate) VecId);
 
-/// VecMeta value: wraps VecMetadata
-#[derive(Serialize, Deserialize, Debug, Clone)]
+/// VecMeta value: wraps VecMetadata (rkyv-serialized)
+#[derive(Archive, RkyvDeserialize, RkyvSerialize, Debug, Clone)]
+#[archive(check_bytes)]
 pub(crate) struct VecMetaCfValue(pub(crate) VecMetadata);
 
 impl ColumnFamily for VecMeta {
@@ -457,15 +456,18 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for VecMeta {
     }
 }
 
-impl VecMeta {
-    pub fn key_to_bytes(key: &VecMetaCfKey) -> Vec<u8> {
+impl HotColumnFamilyRecord for VecMeta {
+    type Key = VecMetaCfKey;
+    type Value = VecMetaCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(12);
         bytes.extend_from_slice(&key.0.to_be_bytes());
         bytes.extend_from_slice(&key.1.to_be_bytes());
         bytes
     }
 
-    pub fn key_from_bytes(bytes: &[u8]) -> Result<VecMetaCfKey> {
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key> {
         if bytes.len() != 12 {
             anyhow::bail!(
                 "Invalid VecMetaCfKey length: expected 12, got {}",
@@ -477,13 +479,7 @@ impl VecMeta {
         Ok(VecMetaCfKey(embedding_code, vec_id))
     }
 
-    pub fn value_to_bytes(value: &VecMetaCfValue) -> Result<Vec<u8>> {
-        Ok(rmp_serde::to_vec(value)?)
-    }
-
-    pub fn value_from_bytes(bytes: &[u8]) -> Result<VecMetaCfValue> {
-        Ok(rmp_serde::from_slice(bytes)?)
-    }
+    // value_to_bytes, value_from_bytes, value_archived provided by trait default impl
 }
 
 // ============================================================================
