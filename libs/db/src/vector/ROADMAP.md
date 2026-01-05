@@ -218,255 +218,30 @@ An **Embedding** is a rich struct that combines namespace identity, metadata, an
 
 #### Distance Metric
 
-```rust
-/// Distance metric for vector similarity
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Distance {
-    Cosine,
-    L2,
-    DotProduct,
-}
-
-impl Distance {
-    /// Compute distance between two vectors
-    pub fn compute(&self, a: &[f32], b: &[f32]) -> f32 {
-        match self {
-            Distance::Cosine => motlie_core::distance::cosine(a, b),
-            Distance::L2 => motlie_core::distance::l2(a, b),
-            Distance::DotProduct => motlie_core::distance::dot(a, b),
-        }
-    }
-
-    /// Whether lower values mean more similar
-    pub fn is_lower_better(&self) -> bool {
-        match self {
-            Distance::Cosine | Distance::L2 => true,
-            Distance::DotProduct => false,  // higher = more similar
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Distance::Cosine => "cosine",
-            Distance::L2 => "l2",
-            Distance::DotProduct => "dot",
-        }
-    }
-}
-```
+**Implementation:** [`distance.rs`](distance.rs) - Distance enum with `compute()`, `is_lower_better()`, and `as_str()` methods.
 
 #### Embedder Trait (Compute Behavior)
 
-```rust
-/// Trait for computing embeddings from documents
-/// Implementations can wrap external services (Ollama, OpenAI) or local models
-pub trait Embedder: Send + Sync {
-    /// Embed a single document
-    fn embed(&self, document: &str) -> Result<Vec<f32>>;
-
-    /// Batch embed for efficiency (default: sequential)
-    fn embed_batch(&self, documents: &[&str]) -> Result<Vec<Vec<f32>>> {
-        documents.iter().map(|d| self.embed(d)).collect()
-    }
-
-    /// Output dimensionality
-    fn dim(&self) -> u32;
-
-    /// Model identifier
-    fn model(&self) -> &str;
-}
-```
+**Implementation:** [`embedding.rs`](embedding.rs) - `Embedder` trait with `embed()`, `embed_batch()`, `dim()`, and `model()` methods.
 
 #### Embedding Struct
 
-```rust
-/// Complete embedding space specification with optional compute behavior
-///
-/// Design rationale:
-/// - `code`: u64 for fast key serialization (ARCH-14)
-/// - `model`, `dim`, `distance`: Direct access without registry lookup (ARCH-17)
-/// - `embedder`: Optional compute capability (ARCH-18)
-#[derive(Clone)]
-pub struct Embedding {
-    /// Unique namespace code for storage keys (allocated by registry)
-    code: u64,
-    /// Model identifier (e.g., "gemma", "qwen3", "openai-ada-002")
-    model: Arc<str>,
-    /// Vector dimensionality
-    dim: u32,
-    /// Distance metric for similarity computation
-    distance: Distance,
-    /// Optional embedder for computing vectors from documents
-    embedder: Option<Arc<dyn Embedder>>,
-}
-
-impl Embedding {
-    // ─────────────────────────────────────────────────────────────
-    // Accessors
-    // ─────────────────────────────────────────────────────────────
-
-    /// Namespace code for storage keys
-    pub fn code(&self) -> u64 { self.code }
-
-    /// Code as big-endian bytes for key construction
-    pub fn code_bytes(&self) -> [u8; 8] { self.code.to_be_bytes() }
-
-    pub fn model(&self) -> &str { &self.model }
-
-    pub fn dim(&self) -> u32 { self.dim }
-
-    pub fn distance(&self) -> Distance { self.distance }
-
-    /// Check if this embedding has compute capability
-    pub fn has_embedder(&self) -> bool { self.embedder.is_some() }
-
-    // ─────────────────────────────────────────────────────────────
-    // Behavior (delegated to Embedder trait)
-    // ─────────────────────────────────────────────────────────────
-
-    /// Compute embedding for a document (requires embedder)
-    pub fn embed(&self, document: &str) -> Result<Vec<f32>> {
-        self.embedder
-            .as_ref()
-            .ok_or(Error::NoEmbedder(self.model.to_string()))?
-            .embed(document)
-    }
-
-    /// Batch embed documents
-    pub fn embed_batch(&self, documents: &[&str]) -> Result<Vec<Vec<f32>>> {
-        self.embedder
-            .as_ref()
-            .ok_or(Error::NoEmbedder(self.model.to_string()))?
-            .embed_batch(documents)
-    }
-
-    /// Compute distance between two vectors using this space's metric
-    pub fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32 {
-        self.distance.compute(a, b)
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // Validation
-    // ─────────────────────────────────────────────────────────────
-
-    /// Validate vector dimension matches this embedding space
-    pub fn validate_vector(&self, vector: &[f32]) -> Result<()> {
-        if vector.len() != self.dim as usize {
-            return Err(Error::DimensionMismatch {
-                expected: self.dim,
-                got: vector.len() as u32,
-            });
-        }
-        Ok(())
-    }
-}
-
-// Equality and Hash based on code only (for HashMap keys)
-impl PartialEq for Embedding {
-    fn eq(&self, other: &Self) -> bool { self.code == other.code }
-}
-impl Eq for Embedding {}
-impl Hash for Embedding {
-    fn hash<H: Hasher>(&self, state: &mut H) { self.code.hash(state); }
-}
-```
+**Implementation:** [`embedding.rs`](embedding.rs) - Complete `Embedding` struct with:
+- Fields: `code` (u64), `model`, `dim`, `distance`, optional `embedder`
+- Accessors: `code()`, `code_bytes()`, `model()`, `dim()`, `distance()`, `has_embedder()`
+- Behavior: `embed()`, `embed_batch()`, `compute_distance()`
+- Validation: `validate_vector()`
+- Traits: `PartialEq`, `Eq`, `Hash` based on code
 
 #### Embedding Registry
 
-```rust
-/// Builder for registering embedding spaces
-pub struct EmbeddingBuilder {
-    model: String,
-    dim: u32,
-    distance: Distance,
-    embedder: Option<Arc<dyn Embedder>>,
-}
-
-impl EmbeddingBuilder {
-    pub fn new(model: impl Into<String>, dim: u32, distance: Distance) -> Self {
-        Self { model: model.into(), dim, distance, embedder: None }
-    }
-
-    /// Attach an embedder for compute capability
-    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
-        self.embedder = Some(embedder);
-        self
-    }
-
-    /// Register with the given registry
-    pub fn register(self, registry: &EmbeddingRegistry) -> Result<Embedding> {
-        registry.register(self)
-    }
-}
-
-/// Registry for embedding spaces - manages specs and generates handles
-/// Stored in vector/embedding_registry CF
-pub struct EmbeddingRegistry {
-    /// (model, dim, distance) -> Embedding mapping
-    specs: RwLock<HashMap<(String, u32, Distance), Embedding>>,
-    /// code -> Embedding mapping (for lookup by code)
-    by_code: RwLock<HashMap<u64, Embedding>>,
-    /// Next code to allocate
-    next_code: AtomicU64,
-    /// RocksDB handle for persistence
-    db: Arc<TransactionDB>,
-}
-
-impl EmbeddingRegistry {
-    // ─────────────────────────────────────────────────────────────
-    // Registration
-    // ─────────────────────────────────────────────────────────────
-
-    /// Register a new embedding space. Idempotent: returns existing if spec matches.
-    pub fn register(&self, builder: EmbeddingBuilder) -> Result<Embedding>;
-
-    // ─────────────────────────────────────────────────────────────
-    // Lookup
-    // ─────────────────────────────────────────────────────────────
-
-    /// Get embedding by exact spec (None if not registered)
-    pub fn get(&self, model: &str, dim: u32, distance: Distance) -> Option<Embedding>;
-
-    /// Get embedding by code (for deserialization from storage)
-    pub fn get_by_code(&self, code: u64) -> Option<Embedding>;
-
-    /// Attach/update embedder for existing space (runtime configuration)
-    pub fn set_embedder(&self, code: u64, embedder: Arc<dyn Embedder>) -> Result<()>;
-
-    // ─────────────────────────────────────────────────────────────
-    // Query / Discovery
-    // ─────────────────────────────────────────────────────────────
-
-    /// List all registered embedding spaces
-    pub fn list_all(&self) -> Vec<Embedding>;
-
-    /// Find all spaces using a specific model
-    pub fn find_by_model(&self, model: &str) -> Vec<Embedding>;
-
-    /// Find all spaces using a specific distance metric
-    pub fn find_by_distance(&self, distance: Distance) -> Vec<Embedding>;
-
-    /// Find all spaces with a specific dimension
-    pub fn find_by_dim(&self, dim: u32) -> Vec<Embedding>;
-
-    /// Find with multiple filters (AND logic)
-    pub fn find(&self, filter: &EmbeddingFilter) -> Vec<Embedding>;
-}
-
-/// Filter for querying embedding spaces
-#[derive(Default)]
-pub struct EmbeddingFilter {
-    pub model: Option<String>,
-    pub dim: Option<u32>,
-    pub distance: Option<Distance>,
-}
-
-impl EmbeddingFilter {
-    pub fn model(mut self, model: &str) -> Self { self.model = Some(model.into()); self }
-    pub fn dim(mut self, dim: u32) -> Self { self.dim = Some(dim); self }
-    pub fn distance(mut self, d: Distance) -> Self { self.distance = Some(d); self }
-}
-```
+**Implementation:**
+- [`embedding.rs`](embedding.rs) - `EmbeddingBuilder` with fluent API (`new()`, `with_embedder()`, `register()`)
+- [`registry.rs`](registry.rs) - `EmbeddingRegistry` with:
+  - Registration: `register()` (idempotent)
+  - Lookup: `get()`, `get_by_code()`, `set_embedder()`
+  - Query/Discovery: `list_all()`, `find_by_model()`, `find_by_distance()`, `find_by_dim()`, `find()`
+- [`registry.rs`](registry.rs) - `EmbeddingFilter` for multi-field queries
 
 #### Usage Examples
 
@@ -708,26 +483,7 @@ let results = vector_storage.search(&qwen3, &query_embedding, k, ef)?;
 
 ### CF Constants
 
-```rust
-// libs/db/src/vector/schema.rs
-
-pub mod cf {
-    pub const VECTORS: &str = "vector/vectors";
-    pub const EDGES: &str = "vector/edges";
-    pub const BINARY_CODES: &str = "vector/binary_codes";
-    pub const NODE_META: &str = "vector/vec_meta";
-    pub const GRAPH_META: &str = "vector/graph_meta";
-    pub const ID_FORWARD: &str = "vector/id_forward";
-    pub const ID_REVERSE: &str = "vector/id_reverse";
-    pub const ID_ALLOC: &str = "vector/id_alloc";
-    pub const PENDING: &str = "vector/pending";
-
-    pub const ALL: &[&str] = &[
-        VECTORS, EDGES, BINARY_CODES, NODE_META, GRAPH_META,
-        ID_FORWARD, ID_REVERSE, ID_ALLOC, PENDING,
-    ];
-}
-```
+**Implementation:** [`schema.rs`](schema.rs) - All column family constants with `vector/` prefix and `ALL_COLUMN_FAMILIES` array.
 
 ---
 
@@ -915,158 +671,10 @@ libs/db/src/vector/
 
 **Status:** ✅ COMPLETED (2026-01-03)
 
-```rust
-// libs/db/src/vector/config.rs
-
-/// HNSW algorithm parameters
-///
-/// References:
-/// - Original paper: https://arxiv.org/abs/1603.09320
-/// - motlie design: examples/vector/HNSW2.md
-#[derive(Clone, Debug)]
-pub struct HnswConfig {
-    /// Vector dimensionality (must match embedding model)
-    /// Common values: 128 (SIFT), 768 (BERT), 1536 (OpenAI ada-002)
-    pub dim: usize,
-
-    /// Number of bidirectional links per node at layer 0
-    /// Higher M = better recall, more memory, slower insert
-    /// Recommended: 16-64, Default: 16
-    pub m: usize,
-
-    /// Maximum links per node at layers > 0 (typically 2*M)
-    /// Default: 2 * m
-    pub m_max: usize,
-
-    /// Maximum links per node at layer 0 (typically M or 2*M)
-    /// Layer 0 is denser, so higher limit improves recall
-    /// Default: 2 * m
-    pub m_max_0: usize,
-
-    /// Search beam width during index construction
-    /// Higher ef_construction = better graph quality, slower build
-    /// Recommended: 100-500, Default: 200
-    pub ef_construction: usize,
-
-    /// Probability multiplier for layer assignment
-    /// P(layer = L) = exp(-L * m_l)
-    /// Default: 1.0 / ln(m)
-    pub m_l: f32,
-
-    /// Maximum search layer (auto-determined based on N)
-    /// Default: None (auto-calculate as floor(ln(N) * m_l))
-    pub max_level: Option<u8>,
-}
-
-impl Default for HnswConfig {
-    fn default() -> Self {
-        let m = 16;
-        Self {
-            dim: 128,
-            m,
-            m_max: 2 * m,
-            m_max_0: 2 * m,
-            ef_construction: 200,
-            m_l: 1.0 / (m as f32).ln(),
-            max_level: None,
-        }
-    }
-}
-
-impl HnswConfig {
-    /// Create config for specific dimension
-    pub fn for_dim(dim: usize) -> Self {
-        Self { dim, ..Default::default() }
-    }
-
-    /// High-recall configuration (slower, more memory)
-    pub fn high_recall(dim: usize) -> Self {
-        Self {
-            dim,
-            m: 32,
-            m_max: 64,
-            m_max_0: 64,
-            ef_construction: 400,
-            m_l: 1.0 / 32f32.ln(),
-            max_level: None,
-        }
-    }
-
-    /// Memory-optimized configuration (faster, less recall)
-    pub fn compact(dim: usize) -> Self {
-        Self {
-            dim,
-            m: 8,
-            m_max: 16,
-            m_max_0: 16,
-            ef_construction: 100,
-            m_l: 1.0 / 8f32.ln(),
-            max_level: None,
-        }
-    }
-}
-
-/// RaBitQ binary quantization parameters
-#[derive(Clone, Debug)]
-pub struct RaBitQConfig {
-    /// Bits per dimension (1, 2, 4, or 8)
-    /// 1-bit: 32x compression, ~70% recall without rerank
-    /// 2-bit: 16x compression, ~85% recall without rerank
-    /// 4-bit: 8x compression, ~92% recall without rerank
-    pub bits_per_dim: u8,
-
-    /// Seed for rotation matrix generation (deterministic)
-    pub rotation_seed: u64,
-
-    /// Enable RaBitQ (can be disabled for full-precision search)
-    pub enabled: bool,
-}
-
-impl Default for RaBitQConfig {
-    fn default() -> Self {
-        Self {
-            bits_per_dim: 1,
-            rotation_seed: 42,
-            enabled: true,
-        }
-    }
-}
-
-/// Complete vector storage configuration
-#[derive(Clone, Debug, Default)]
-pub struct VectorConfig {
-    pub hnsw: HnswConfig,
-    pub rabitq: RaBitQConfig,
-    pub async_updater: AsyncUpdaterConfig,
-    pub navigation_cache: NavigationCacheConfig,
-}
-
-impl VectorConfig {
-    /// Configuration for 128-dimensional embeddings (e.g., SIFT)
-    pub fn dim_128() -> Self {
-        Self {
-            hnsw: HnswConfig::for_dim(128),
-            ..Default::default()
-        }
-    }
-
-    /// Configuration for 768-dimensional embeddings (e.g., BERT)
-    pub fn dim_768() -> Self {
-        Self {
-            hnsw: HnswConfig::for_dim(768),
-            ..Default::default()
-        }
-    }
-
-    /// Configuration for 1536-dimensional embeddings (e.g., OpenAI ada-002)
-    pub fn dim_1536() -> Self {
-        Self {
-            hnsw: HnswConfig::for_dim(1536),
-            ..Default::default()
-        }
-    }
-}
-```
+**Implementation:** [`config.rs`](config.rs) - Complete configuration types:
+- `HnswConfig` - HNSW parameters (dim, m, m_max, ef_construction, etc.) with presets (`default()`, `high_recall()`, `compact()`)
+- `RaBitQConfig` - Binary quantization parameters (bits_per_dim, rotation_seed, enabled)
+- `VectorConfig` - Complete storage config with dimension presets (`dim_128()`, `dim_768()`, `dim_1024()`, `dim_1536()`)
 
 **HNSW Parameter Guidelines:**
 
@@ -1236,91 +844,11 @@ mod foundation_tests {
 
 **Status:** ✅ COMPLETED (2026-01-03)
 
-Pre-warm EmbeddingRegistry during `ready()`, following the NameCache pattern in `graph/name_hash.rs`:
-
-```rust
-// libs/db/src/vector/embedding.rs
-
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
-/// Thread-safe bidirectional embedding name <-> ID cache
-/// Pattern: Similar to graph::NameCache (libs/db/src/graph/name_hash.rs:123-249)
-pub struct EmbeddingRegistry {
-    /// ID -> name mapping
-    id_to_name: DashMap<u64, Arc<String>>,
-    /// Name -> ID mapping
-    name_to_id: DashMap<Arc<String>, u64>,
-    /// Next available ID (monotonic)
-    next_id: AtomicU64,
-}
-
-impl EmbeddingRegistry {
-    pub fn new() -> Self {
-        Self {
-            id_to_name: DashMap::new(),
-            name_to_id: DashMap::new(),
-            next_id: AtomicU64::new(0),
-        }
-    }
-
-    /// Pre-warm by loading ALL entries from embedding_registry CF
-    /// Unlike NameCache (which limits to N entries), we load everything
-    /// since we expect <1000 embeddings total
-    pub fn prewarm(&self, db: &TransactionDB) -> Result<usize> {
-        let cf = db.cf_handle(cf::EMBEDDING_REGISTRY)?;
-        let iter = db.iterator_cf(cf, IteratorMode::Start);
-
-        let mut count = 0u64;
-        let mut max_id = 0u64;
-
-        for item in iter {
-            let (key, value) = item?;
-            let id = u64::from_be_bytes(key[..8].try_into()?);
-            let name: String = String::from_utf8(value.to_vec())?;
-
-            self.id_to_name.insert(id, Arc::new(name.clone()));
-            self.name_to_id.insert(Arc::new(name), id);
-
-            max_id = max_id.max(id);
-            count += 1;
-        }
-
-        // Set next_id to max + 1
-        self.next_id.store(max_id + 1, Ordering::SeqCst);
-
-        Ok(count as usize)
-    }
-
-    /// Get existing or create new embedding ID
-    pub fn get_or_create(&self, name: &str, db: &TransactionDB) -> Result<Embedding> {
-        // Fast path: already cached
-        if let Some(id) = self.name_to_id.get(name) {
-            return Ok(Embedding::from_id(*id));
-        }
-
-        // Slow path: allocate new ID and persist
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let name_arc = Arc::new(name.to_string());
-
-        // Persist to RocksDB
-        let cf = db.cf_handle(cf::EMBEDDING_REGISTRY)?;
-        db.put_cf(cf, &id.to_be_bytes(), name.as_bytes())?;
-
-        // Update cache
-        self.id_to_name.insert(id, name_arc.clone());
-        self.name_to_id.insert(name_arc, id);
-
-        Ok(Embedding::from_id(id))
-    }
-
-    /// Lookup name by ID (for debugging/logging)
-    pub fn get_name(&self, id: u64) -> Option<Arc<String>> {
-        self.id_to_name.get(&id).map(|r| r.clone())
-    }
-}
-```
+**Implementation:** [`registry.rs`](registry.rs) - Thread-safe `EmbeddingRegistry` with DashMap:
+- Pre-warming via `prewarm()` during `Subsystem::prewarm()` in [`subsystem.rs`](subsystem.rs)
+- Loads all entries from `vector/embedding_specs` CF (expects <1000 embeddings)
+- O(1) lookup after prewarm via DashMap
+- Thread-safe concurrent access
 
 **Acceptance Criteria:**
 - [x] EmbeddingRegistry loads entries during `ready()` → `vector::Subsystem::prewarm()` in `subsystem.rs`
@@ -1557,74 +1085,35 @@ See `src/vector/README.md` Appendix A for detailed documentation.
 
 #### StorageSubsystem Trait (Generic Storage)
 
-The `StorageSubsystem` trait enables type-safe, zero-cost generic storage:
+**Implementation:** [`../rocksdb/subsystem.rs`](../rocksdb/subsystem.rs) - `StorageSubsystem` trait enabling type-safe, zero-cost generic storage with:
+- Associated constants: `NAME`, `COLUMN_FAMILIES`
+- Associated types: `PrewarmConfig`, `Cache`
+- Required methods: `create_cache()`, `cf_descriptors()`, `prewarm()`
 
-```rust
-pub trait StorageSubsystem: Send + Sync + 'static {
-    const NAME: &'static str;
-    const COLUMN_FAMILIES: &'static [&'static str];
-
-    type PrewarmConfig: Default + Clone + Send + Sync;
-    type Cache: Send + Sync;
-
-    fn create_cache() -> Arc<Self::Cache>;
-    fn cf_descriptors(block_cache: &Cache, config: &BlockCacheConfig) -> Vec<ColumnFamilyDescriptor>;
-    fn prewarm(db: &dyn DbAccess, cache: &Self::Cache, config: &Self::PrewarmConfig) -> Result<usize>;
-}
-```
-
+Implementations:
 - `graph::Subsystem` - Cache type is `NameCache`, pre-warms from Names CF
 - `vector::Subsystem` - Cache type is `EmbeddingRegistry`, pre-warms from EmbeddingSpecs CF
 
 #### ComponentWrapper (StorageBuilder Adapter)
 
-`ComponentWrapper<S>` adapts any `StorageSubsystem` to implement `ColumnFamilyProvider` for use with `StorageBuilder`:
+**Implementation:** [`../rocksdb/subsystem.rs`](../rocksdb/subsystem.rs) - `ComponentWrapper<S>` adapts any `StorageSubsystem` to implement `ColumnFamilyProvider` for use with `StorageBuilder`.
 
-```rust
-// Type aliases in each module
-pub type Component = rocksdb::ComponentWrapper<Subsystem>;
+Type aliases and convenience constructors in each module:
+- `graph::Component` / `graph::component()`
+- `vector::Component` / `vector::component()`
 
-// Convenience constructors
-pub fn component() -> Component { Component::new() }
-```
+**Tantivy Providers:**
 
-**Tantivy Providers (`IndexProvider` trait):**
-```rust
-pub trait IndexProvider: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn schema(&self) -> tantivy::schema::Schema;
-    fn on_ready(&self, index: &Index) -> Result<()>;
-    fn writer_heap_size(&self) -> usize;
-}
-```
+**Implementation:** [`../index_provider.rs`](../index_provider.rs) - `IndexProvider` trait with `name()`, `schema()`, `on_ready()`, `writer_heap_size()`.
 
 - `fulltext::Schema` - Provides Tantivy schema and initialization
 
 #### StorageBuilder Design
 
-```rust
-// Create components and get cache references before boxing
-let graph_component = graph::component();
-let name_cache = graph_component.cache().clone();
-
-let vector_component = vector::component();
-let registry = vector_component.cache().clone();
-
-// Unified initialization of RocksDB + Tantivy
-let storage = StorageBuilder::new(&base_path)
-    .with_component(Box::new(graph_component))
-    .with_component(Box::new(vector_component))
-    .with_index_provider(Box::new(fulltext::Schema::new()))
-    .with_cache_size(512 * 1024 * 1024)
-    .build()?;
-
-// Access backends
-let db = storage.db();       // RocksDB TransactionDB
-let index = storage.index(); // Tantivy Index
-
-// Caches remain accessible via cloned Arcs
-assert_eq!(name_cache.len(), 0);
-```
+**Implementation:** [`../storage_builder.rs`](../storage_builder.rs) - Unified initialization of RocksDB + Tantivy:
+- `StorageBuilder::new()` → `.with_component()` → `.with_index_provider()` → `.build()`
+- Returns `SharedStorage` with access to `db()` (RocksDB) and `index()` (Tantivy)
+- Caches accessible via cloned `Arc`s before building
 
 **Directory Structure:**
 ```
@@ -1742,51 +1231,11 @@ Both `graph::schema` and `vector::schema` modules follow the same patterns:
 
 **Status:** ✅ COMPLETE (2026-01-04) - Implemented in `id.rs` with 7 unit tests
 
-```rust
-// libs/db/src/vector/id.rs
-
-use roaring::RoaringBitmap;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-/// Lock-free ID allocator with free list
-pub struct IdAllocator {
-    /// Next ID to allocate (monotonically increasing)
-    next_id: AtomicU32,
-
-    /// Free IDs from deletions (protected by mutex for bitmap ops)
-    free_ids: Mutex<RoaringBitmap>,
-
-    /// RocksDB CF for persistence
-    cf_name: &'static str,
-}
-
-impl IdAllocator {
-    /// Allocate a new u32 ID
-    pub fn allocate(&self) -> u32 {
-        // First try to reuse a freed ID
-        let mut free = self.free_ids.lock().unwrap();
-        if let Some(id) = free.iter().next() {
-            free.remove(id);
-            return id;
-        }
-        drop(free);
-
-        // Otherwise allocate fresh
-        self.next_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Return an ID to the free list
-    pub fn free(&self, id: u32) {
-        self.free_ids.lock().unwrap().insert(id);
-    }
-
-    /// Persist allocator state to RocksDB
-    pub fn persist(&self, db: &TransactionDB) -> Result<()>;
-
-    /// Recover state from RocksDB
-    pub fn recover(db: &TransactionDB) -> Result<Self>;
-}
-```
+**Implementation:** [`id.rs`](id.rs) - Lock-free `IdAllocator` with:
+- `AtomicU32` for next_id (monotonically increasing)
+- `Mutex<RoaringBitmap>` for free list (deleted IDs for reuse)
+- Methods: `new()`, `allocate()`, `free()`, `persist()`, `recover()`
+- Free IDs reused before allocating fresh ones
 
 **Effort:** 1-2 days
 
@@ -1826,32 +1275,7 @@ This is the hot path during search. The `IdReverse` CF is implemented with:
 | Dense array | 16 GB | O(1) ~10ns | Deferred |
 | Mmap file | On-demand | O(1) ~100ns | Deferred |
 
-```rust
-// Add to id.rs or a new api.rs
-impl IdReverse {
-    /// Batch lookup for search results
-    pub fn multi_get(db: &TransactionDB, embedding: EmbeddingCode, ids: &[VecId])
-        -> Result<Vec<Option<Id>>>
-    {
-        // Build keys
-        let keys: Vec<Vec<u8>> = ids.iter()
-            .map(|&id| Self::key_to_bytes(&IdReverseCfKey(embedding, id)))
-            .collect();
-
-        // Use RocksDB MultiGet for efficiency
-        let cf = db.cf_handle(Self::CF_NAME)?;
-        let results = db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())));
-
-        // Parse results
-        results.into_iter()
-            .map(|r| match r? {
-                Some(bytes) => Ok(Some(Self::value_from_bytes(&bytes)?.0)),
-                None => Ok(None),
-            })
-            .collect()
-    }
-}
-```
+**Implementation:** [`query.rs`](query.rs) - `ResolveIds` query for batch ULID resolution using RocksDB MultiGet.
 
 **Effort:** 0.25 day (integration only)
 
@@ -1863,72 +1287,13 @@ impl IdReverse {
 
 **Status:** ✅ COMPLETE (2026-01-04) - Schema in `schema.rs::IdAlloc`, persist/recover in `id.rs`
 
-The `IdAlloc` CF is implemented with:
-- Key: `IdAllocCfKey(EmbeddingCode, IdAllocField)` = 9 bytes
-- Value: `IdAllocCfValue(IdAllocField)` with variants:
-  - `NextId(VecId)` = 4 bytes
-  - `FreeBitmap(RoaringBitmapBytes)` = variable
-- `IdAllocator::persist()` - saves state to RocksDB
-- `IdAllocator::recover()` - restores state from RocksDB
-
-```rust
-// Add to id.rs - persistence integration
-impl IdAllocator {
-    /// Persist allocator state to RocksDB
-    pub fn persist(&self, db: &TransactionDB, embedding: EmbeddingCode) -> Result<()> {
-        let cf = db.cf_handle(IdAlloc::CF_NAME)?;
-
-        // Persist next_id
-        let next_key = IdAllocCfKey::next_id(embedding);
-        let next_val = IdAllocCfValue(IdAllocField::NextId(
-            self.next_id.load(Ordering::SeqCst)
-        ));
-        db.put_cf(&cf, IdAlloc::key_to_bytes(&next_key), IdAlloc::value_to_bytes(&next_val))?;
-
-        // Persist free bitmap
-        let bitmap_key = IdAllocCfKey::free_bitmap(embedding);
-        let mut bitmap_bytes = Vec::new();
-        self.free_ids.lock().unwrap().serialize_into(&mut bitmap_bytes)?;
-        let bitmap_val = IdAllocCfValue(IdAllocField::FreeBitmap(bitmap_bytes));
-        db.put_cf(&cf, IdAlloc::key_to_bytes(&bitmap_key), IdAlloc::value_to_bytes(&bitmap_val))?;
-
-        Ok(())
-    }
-
-    /// Recover state from RocksDB
-    pub fn recover(db: &TransactionDB, embedding: EmbeddingCode) -> Result<Self> {
-        let cf = db.cf_handle(IdAlloc::CF_NAME)?;
-
-        // Load next_id
-        let next_key = IdAllocCfKey::next_id(embedding);
-        let next_id = match db.get_cf(&cf, IdAlloc::key_to_bytes(&next_key))? {
-            Some(bytes) => {
-                let val = IdAlloc::value_from_bytes(&next_key, &bytes)?;
-                match val.0 { IdAllocField::NextId(v) => v, _ => 0 }
-            }
-            None => 0,
-        };
-
-        // Load free bitmap
-        let bitmap_key = IdAllocCfKey::free_bitmap(embedding);
-        let free_ids = match db.get_cf(&cf, IdAlloc::key_to_bytes(&bitmap_key))? {
-            Some(bytes) => {
-                let val = IdAlloc::value_from_bytes(&bitmap_key, &bytes)?;
-                match val.0 {
-                    IdAllocField::FreeBitmap(b) => RoaringBitmap::deserialize_from(&b[..])?,
-                    _ => RoaringBitmap::new(),
-                }
-            }
-            None => RoaringBitmap::new(),
-        };
-
-        Ok(Self {
-            next_id: AtomicU32::new(next_id),
-            free_ids: Mutex::new(free_ids),
-        })
-    }
-}
-```
+**Implementation:**
+- [`schema.rs`](schema.rs) - `IdAlloc` CF with union pattern:
+  - Key: `IdAllocCfKey(EmbeddingCode, IdAllocField)` = 9 bytes
+  - Value: `IdAllocCfValue(IdAllocField)` with `NextId(VecId)` or `FreeBitmap(RoaringBitmapBytes)` variants
+- [`id.rs`](id.rs) - Persistence methods:
+  - `IdAllocator::persist()` - saves next_id and free bitmap to RocksDB
+  - `IdAllocator::recover()` - restores state from RocksDB on startup
 
 **Effort:** 0.25 day (integration only)
 
@@ -2140,13 +1505,13 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 
 ---
 
-## Task 1.5: Storage API Integration Design
+### Task 1.5: Storage API Integration Design
 
 **Status:** ✅ COMPLETE (2026-01-04) - Implemented in `writer.rs`, `reader.rs`, `processor.rs`, `query.rs`, `mutation.rs`
 
 > **Design Pattern:** Following the established patterns in `graph::` and `fulltext::` modules for consistency across subsystems. This includes MPSC mutation channels, MPMC query channels, and the `Runnable` trait for composable operations.
 
-### Architecture Overview
+#### Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -2182,699 +1547,121 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Mutation Design
+#### Mutation Design
+
+**Implementation:** [`mutation.rs`](mutation.rs) - Complete mutation infrastructure:
 
-#### Mutation Enum (`vector/mutation.rs`)
+**Mutation Enum:**
+- `AddEmbeddingSpec` - Register embedding space
+- `InsertVector` - Insert vector with ID allocation and mapping storage
+- `DeleteVector` - Delete vector and return ID to free list
+- `InsertVectorBatch` - Batch insert optimization
+- `UpdateEdges` - HNSW graph edge updates (Phase 2)
+- `UpdateGraphMeta` - Graph metadata updates (Phase 2)
+- `Flush(FlushMarker)` - Synchronization with oneshot channel
 
-```rust
-/// Mutation enum for vector storage operations.
-///
-/// All vector mutations are variants of this enum, enabling type-safe
-/// dispatch in mutation consumers.
-#[derive(Debug, Clone)]
-pub enum Mutation {
-    // ─────────────────────────────────────────────────────────────
-    // Embedding Space Management
-    // ─────────────────────────────────────────────────────────────
-    /// Register a new embedding space
-    AddEmbeddingSpec(AddEmbeddingSpec),  // Already implemented
+**Mutation Structs:**
+- `InsertVector` - embedding, id, vector, immediate_index flag
+- `DeleteVector` - embedding, id
+- `InsertVectorBatch` - embedding, vectors Vec, immediate_index
+- `UpdateEdges` - embedding, vec_id, layer, EdgeUpdate enum
+- `UpdateGraphMeta` - embedding, GraphMetaUpdate enum
+- `FlushMarker` - oneshot::Sender for flush semantics
 
-    // ─────────────────────────────────────────────────────────────
-    // Vector Operations
-    // ─────────────────────────────────────────────────────────────
-    /// Insert a new vector into an embedding space
-    InsertVector(InsertVector),
-    /// Delete a vector from an embedding space
-    DeleteVector(DeleteVector),
-    /// Batch insert multiple vectors (optimization)
-    InsertVectorBatch(InsertVectorBatch),
+**Mutation Execution:** [`writer.rs`](writer.rs) `Consumer::execute_single()` - Executes mutations within RocksDB transactions:
+1. Allocates vec_id via IdAllocator
+2. Stores ULID ↔ vec_id mappings (IdForward, IdReverse CFs)
+3. Stores raw vector (Vectors CF)
+4. Handles flush markers after commit
 
-    // ─────────────────────────────────────────────────────────────
-    // HNSW Graph Operations (internal, used by InsertVector)
-    // ─────────────────────────────────────────────────────────────
-    /// Add/update edges for a node in the HNSW graph
-    UpdateEdges(UpdateEdges),
-    /// Update graph metadata (entry_point, max_level, count)
-    UpdateGraphMeta(UpdateGraphMeta),
+#### Query Design
 
-    // ─────────────────────────────────────────────────────────────
-    // Synchronization
-    // ─────────────────────────────────────────────────────────────
-    /// Synchronization marker with oneshot channel for flush semantics
-    Flush(FlushMarker),
-}
+**Implementation:** [`query.rs`](query.rs) - Complete query infrastructure:
 
-/// Insert a vector into an embedding space.
-///
-/// This mutation:
-/// 1. Allocates a u32 vec_id via IdAllocator
-/// 2. Stores ULID ↔ vec_id mappings (IdForward, IdReverse)
-/// 3. Stores the raw vector (Vectors CF)
-/// 4. Stores vector metadata (VecMeta CF)
-/// 5. Optionally: queues for async HNSW graph update (Pending CF)
-#[derive(Debug, Clone)]
-pub struct InsertVector {
-    /// Embedding space to insert into
-    pub embedding: EmbeddingCode,
-    /// External document ID
-    pub id: Id,
-    /// Vector data (must match embedding dimension)
-    pub vector: Vec<f32>,
-    /// Whether to index immediately or queue for async processing
-    pub immediate_index: bool,
-}
+**Query Enum:**
+- Search Operations (Phase 2): `SearchKNN`, `SearchKNNFiltered`
+- Point Lookups (Phase 1): `GetVector`, `GetInternalId`, `GetExternalId`, `ResolveIds`
+- Graph Introspection (Phase 2): `GetGraphMeta`, `GetNeighbors`
 
-/// Delete a vector from an embedding space.
-#[derive(Debug, Clone)]
-pub struct DeleteVector {
-    /// Embedding space
-    pub embedding: EmbeddingCode,
-    /// External document ID
-    pub id: Id,
-}
+**Query Structs (Phase 1 - Implemented):**
+- `GetVector` - Get vector by external ID
+- `GetInternalId` - ULID → VecId lookup
+- `GetExternalId` - VecId → ULID lookup
+- `ResolveIds` - Batch VecId → ULID resolution
 
-/// Batch insert multiple vectors for efficiency.
-#[derive(Debug, Clone)]
-pub struct InsertVectorBatch {
-    /// Embedding space
-    pub embedding: EmbeddingCode,
-    /// Batch of (id, vector) pairs
-    pub vectors: Vec<(Id, Vec<f32>)>,
-    /// Whether to index immediately
-    pub immediate_index: bool,
-}
+**QueryExecutor Trait:**
+- `execute(&self, storage: &Storage) -> Result<Self::Output>` - Execute query against storage
+- Implemented for `GetVector`, `GetInternalId`, `GetExternalId`, `ResolveIds`
+- Search queries (Phase 2) will add HNSW search implementation
 
-/// Update HNSW graph edges for a node.
-#[derive(Debug, Clone)]
-pub struct UpdateEdges {
-    /// Embedding space
-    pub embedding: EmbeddingCode,
-    /// Vector ID
-    pub vec_id: VecId,
-    /// Layer to update
-    pub layer: HnswLayer,
-    /// Operation: add or replace neighbors
-    pub neighbors: EdgeUpdate,
-}
+#### Writer Infrastructure (`vector/writer.rs`)
 
-#[derive(Debug, Clone)]
-pub enum EdgeUpdate {
-    /// Add neighbors (merge with existing)
-    Add(Vec<VecId>),
-    /// Replace all neighbors at this layer
-    Replace(Vec<VecId>),
-}
+**Implementation:** [`writer.rs`](writer.rs) - MPSC mutation infrastructure:
 
-/// Update graph-level metadata.
-#[derive(Debug, Clone)]
-pub struct UpdateGraphMeta {
-    pub embedding: EmbeddingCode,
-    pub field: GraphMetaUpdate,
-}
+**Writer:**
+- `send(Vec<Mutation>)` - Fire-and-forget async send
+- `flush()` - Wait for pending mutations to commit (uses `FlushMarker` oneshot)
+- `send_sync(Vec<Mutation>)` - Send + flush in one call
+- `is_closed()` - Check if consumer dropped
 
-#[derive(Debug, Clone)]
-pub enum GraphMetaUpdate {
-    EntryPoint(VecId),
-    MaxLevel(HnswLayer),
-    IncrementCount,
-    DecrementCount,
-}
-```
+**WriterConfig:**
+- `channel_buffer_size` - MPSC channel buffer (default: 1000)
 
-#### MutationExecutor Trait
+**Consumer:**
+- `run()` - Process mutations continuously from channel
+- `process_batch()` - Execute mutations in RocksDB transaction
+- `execute_single()` - Handle each mutation type (InsertVector, DeleteVector, etc.)
+- Commits transaction, then signals flush waiters
 
-```rust
-/// Trait for executing mutations against vector storage.
-pub trait MutationExecutor: Send + Sync {
-    /// Execute this mutation within a RocksDB transaction.
-    fn execute(
-        &self,
-        txn: &rocksdb::Transaction,
-        txn_db: &rocksdb::TransactionDB,
-        processor: &Processor,
-    ) -> Result<()>;
-}
+**Factory Functions:**
+- `create_writer(config)` - Returns `(Writer, Receiver)`
+- `spawn_consumer(consumer)` - Spawn as tokio task
 
-// Implemented for each mutation type
-impl MutationExecutor for InsertVector {
-    fn execute(&self, txn: &Transaction, txn_db: &TransactionDB, processor: &Processor) -> Result<()> {
-        // 1. Validate embedding exists and dimension matches
-        let emb = processor.registry.get_by_code(self.embedding)
-            .ok_or_else(|| Error::UnknownEmbedding(self.embedding))?;
-        emb.validate_vector(&self.vector)?;
+#### Reader Infrastructure (`vector/reader.rs`)
 
-        // 2. Allocate vec_id
-        let allocator = processor.get_or_create_allocator(self.embedding);
-        let vec_id = allocator.allocate();
+**Implementation:** [`reader.rs`](reader.rs) - MPMC query infrastructure using flume:
 
-        // 3. Store ID mappings
-        let fwd_key = IdForwardCfKey(self.embedding, self.id);
-        let fwd_val = IdForwardCfValue(vec_id);
-        txn.put_cf(cf!(IdForward), IdForward::key_to_bytes(&fwd_key), IdForward::value_to_bytes(&fwd_val))?;
+**Reader:**
+- `send_query(Query)` - Send query to consumer pool
+- `is_closed()` - Check if consumers dropped
 
-        let rev_key = IdReverseCfKey(self.embedding, vec_id);
-        let rev_val = IdReverseCfValue(self.id);
-        txn.put_cf(cf!(IdReverse), IdReverse::key_to_bytes(&rev_key), IdReverse::value_to_bytes(&rev_val))?;
+**ReaderConfig:**
+- `channel_buffer_size` - flume channel buffer (default: 1000)
 
-        // 4. Store vector
-        let vec_key = VectorCfKey(self.embedding, vec_id);
-        let vec_val = VectorCfValue(self.vector.clone());
-        txn.put_cf(cf!(Vectors), Vectors::key_to_bytes(&vec_key), Vectors::value_to_bytes(&vec_val))?;
+**Consumer:**
+- `run()` - Process queries continuously from MPMC channel
+- `process_query()` - Execute query via `Query::process()` and send result
 
-        // 5. Store metadata
-        let meta = VecMetadata { max_layer: 0, flags: 0, created_at: now_millis() };
-        // ... store to VecMeta CF
+**Factory Functions:**
+- `create_reader(config)` - Returns `(Reader, Receiver)`
+- `spawn_consumer(consumer)` - Spawn single consumer as tokio task
+- `spawn_consumers(receiver, config, storage, count)` - Spawn N consumers for parallel processing
 
-        // 6. Queue for HNSW indexing or index immediately
-        if self.immediate_index {
-            // Index synchronously (blocking)
-            processor.index_vector(txn, self.embedding, vec_id, &self.vector)?;
-        } else {
-            // Queue for async updater
-            let pending_key = PendingCfKey(self.embedding, TimestampMilli::now(), vec_id);
-            txn.put_cf(cf!(Pending), Pending::key_to_bytes(&pending_key), &[])?;
-        }
+#### Processor (`vector/processor.rs`)
 
-        Ok(())
-    }
-}
-```
+**Implementation:** [`processor.rs`](processor.rs) - Central state management:
 
-### Query Design
+**Processor struct:**
+- `storage: Arc<Storage>` - RocksDB via generic `Storage<Subsystem>`
+- `id_allocators: DashMap<EmbeddingCode, Arc<IdAllocator>>` - Per-embedding ID allocators (lazily created)
 
-#### Query Enum (`vector/query.rs`)
+**Methods:**
+- `new(storage)` - Create processor with storage reference
+- `storage()` - Access underlying storage
+- `get_or_create_allocator(embedding)` - Get/create IdAllocator for embedding space (recovers from DB or creates new)
 
-```rust
-/// Query enum for vector search operations.
-///
-/// Each variant wraps a dispatch struct containing:
-/// - Query parameters (user-provided)
-/// - Timeout duration
-/// - Oneshot channel for result delivery
-pub enum Query {
-    // ─────────────────────────────────────────────────────────────
-    // Search Operations
-    // ─────────────────────────────────────────────────────────────
-    /// K-nearest neighbor search
-    SearchKNN(SearchKNNDispatch),
-    /// Search with pre-filter (e.g., only vectors matching certain IDs)
-    SearchKNNFiltered(SearchKNNFilteredDispatch),
+**Phase 2 placeholders:**
+- `hnsw_search()` - HNSW nearest neighbor search
+- `index_vector()` - Add vector to HNSW graph
 
-    // ─────────────────────────────────────────────────────────────
-    // Point Lookups
-    // ─────────────────────────────────────────────────────────────
-    /// Get vector by external ID
-    GetVector(GetVectorDispatch),
-    /// Get internal vec_id for external ID
-    GetInternalId(GetInternalIdDispatch),
-    /// Get external ID for internal vec_id
-    GetExternalId(GetExternalIdDispatch),
-    /// Batch resolve vec_ids to external IDs
-    ResolveIds(ResolveIdsDispatch),
+#### Runnable Trait Integration
 
-    // ─────────────────────────────────────────────────────────────
-    // Graph Introspection
-    // ─────────────────────────────────────────────────────────────
-    /// Get graph metadata for an embedding space
-    GetGraphMeta(GetGraphMetaDispatch),
-    /// Get neighbors of a node at a specific layer
-    GetNeighbors(GetNeighborsDispatch),
-}
+> **Note:** The vector module uses a simpler pattern than the `Runnable` trait shown in the original design:
+> - Queries implement `QueryExecutor` trait directly (see [`query.rs`](query.rs))
+> - Mutations are sent via `Writer::send()` / `Writer::send_sync()` (see [`writer.rs`](writer.rs))
+> - Convenience API functions in [`api.rs`](api.rs) wrap common operations
 
-// ═══════════════════════════════════════════════════════════════════
-// Search Operations
-// ═══════════════════════════════════════════════════════════════════
-
-/// K-nearest neighbor search query.
-#[derive(Debug, Clone)]
-pub struct SearchKNN {
-    /// Embedding space to search
-    pub embedding: EmbeddingCode,
-    /// Query vector
-    pub query: Vec<f32>,
-    /// Number of results to return
-    pub k: usize,
-    /// Search beam width (higher = better recall, slower)
-    pub ef: usize,
-}
-
-/// Search result: (distance, external ID)
-pub type SearchResult = (f32, Id);
-
-// Dispatch wrapper with oneshot channel
-pub(crate) struct SearchKNNDispatch {
-    pub(crate) params: SearchKNN,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<SearchResult>>>,
-}
-
-/// Filtered KNN search with ID pre-filter.
-#[derive(Debug, Clone)]
-pub struct SearchKNNFiltered {
-    pub embedding: EmbeddingCode,
-    pub query: Vec<f32>,
-    pub k: usize,
-    pub ef: usize,
-    /// Only consider vectors with these external IDs
-    pub filter_ids: Vec<Id>,
-}
-
-pub(crate) struct SearchKNNFilteredDispatch {
-    pub(crate) params: SearchKNNFiltered,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<SearchResult>>>,
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Point Lookups
-// ═══════════════════════════════════════════════════════════════════
-
-/// Get vector by external ID.
-#[derive(Debug, Clone)]
-pub struct GetVector {
-    pub embedding: EmbeddingCode,
-    pub id: Id,
-}
-
-pub(crate) struct GetVectorDispatch {
-    pub(crate) params: GetVector,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Option<Vec<f32>>>>,
-}
-
-/// Get internal vec_id for external ID.
-#[derive(Debug, Clone)]
-pub struct GetInternalId {
-    pub embedding: EmbeddingCode,
-    pub id: Id,
-}
-
-pub(crate) struct GetInternalIdDispatch {
-    pub(crate) params: GetInternalId,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Option<VecId>>>,
-}
-
-/// Batch resolve vec_ids to external IDs.
-#[derive(Debug, Clone)]
-pub struct ResolveIds {
-    pub embedding: EmbeddingCode,
-    pub vec_ids: Vec<VecId>,
-}
-
-pub(crate) struct ResolveIdsDispatch {
-    pub(crate) params: ResolveIds,
-    pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<Option<Id>>>>,
-}
-```
-
-#### QueryExecutor Trait
-
-```rust
-/// Trait for executing queries against vector storage.
-pub trait QueryExecutor: Send + Sync {
-    type Output: Send;
-
-    /// Execute this query against the processor.
-    async fn execute(&self, processor: &Processor) -> Result<Self::Output>;
-
-    /// Query timeout.
-    fn timeout(&self) -> Duration;
-}
-
-impl QueryExecutor for SearchKNN {
-    type Output = Vec<SearchResult>;
-
-    async fn execute(&self, processor: &Processor) -> Result<Self::Output> {
-        // 1. Validate embedding and query dimension
-        let emb = processor.registry.get_by_code(self.embedding)
-            .ok_or_else(|| Error::UnknownEmbedding(self.embedding))?;
-        emb.validate_vector(&self.query)?;
-
-        // 2. Perform HNSW search (returns vec_ids with distances)
-        let internal_results = processor.hnsw_search(
-            self.embedding,
-            &self.query,
-            self.k,
-            self.ef,
-        )?;
-
-        // 3. Resolve vec_ids to external IDs
-        let vec_ids: Vec<VecId> = internal_results.iter().map(|(_, id)| *id).collect();
-        let external_ids = processor.resolve_ids(self.embedding, &vec_ids)?;
-
-        // 4. Combine distances with external IDs
-        let results: Vec<SearchResult> = internal_results.into_iter()
-            .zip(external_ids)
-            .filter_map(|((dist, _), opt_id)| opt_id.map(|id| (dist, id)))
-            .collect();
-
-        Ok(results)
-    }
-
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(30)  // Configurable
-    }
-}
-```
-
-### Writer Infrastructure (`vector/writer.rs`)
-
-```rust
-use tokio::sync::{mpsc, oneshot};
-
-/// Synchronization marker for flush semantics.
-#[derive(Debug)]
-pub struct FlushMarker(pub(crate) oneshot::Sender<()>);
-
-/// Vector mutation writer.
-///
-/// Sends mutations through an MPSC channel to the consumer.
-/// Supports batching, flush, and send_sync patterns.
-#[derive(Clone)]
-pub struct Writer {
-    sender: mpsc::Sender<Vec<Mutation>>,
-}
-
-impl Writer {
-    /// Send mutations asynchronously (fire-and-forget).
-    pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()> {
-        self.sender.send(mutations).await
-            .map_err(|_| Error::ChannelClosed)?;
-        Ok(())
-    }
-
-    /// Wait for all pending mutations to be committed.
-    pub async fn flush(&self) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        self.sender.send(vec![Mutation::Flush(FlushMarker(tx))]).await
-            .map_err(|_| Error::ChannelClosed)?;
-        rx.await.map_err(|_| Error::FlushFailed)?;
-        Ok(())
-    }
-
-    /// Send mutations and wait for commit (send + flush).
-    pub async fn send_sync(&self, mutations: Vec<Mutation>) -> Result<()> {
-        self.send(mutations).await?;
-        self.flush().await
-    }
-}
-
-/// Configuration for the vector writer.
-#[derive(Debug, Clone)]
-pub struct WriterConfig {
-    /// Channel buffer size
-    pub channel_size: usize,
-}
-
-impl Default for WriterConfig {
-    fn default() -> Self {
-        Self { channel_size: 1024 }
-    }
-}
-
-/// Writer builder.
-pub struct WriterBuilder {
-    config: WriterConfig,
-}
-
-impl WriterBuilder {
-    pub fn new() -> Self {
-        Self { config: WriterConfig::default() }
-    }
-
-    pub fn channel_size(mut self, size: usize) -> Self {
-        self.config.channel_size = size;
-        self
-    }
-
-    pub fn build(self, processor: Arc<Processor>) -> (Writer, Consumer) {
-        let (tx, rx) = mpsc::channel(self.config.channel_size);
-        let writer = Writer { sender: tx };
-        let consumer = Consumer::new(rx, processor);
-        (writer, consumer)
-    }
-}
-
-/// Mutation consumer - processes batches from the MPSC channel.
-pub struct Consumer {
-    receiver: mpsc::Receiver<Vec<Mutation>>,
-    processor: Arc<Processor>,
-}
-
-impl Consumer {
-    /// Run the consumer loop.
-    pub async fn run(mut self) {
-        while let Some(batch) = self.receiver.recv().await {
-            if let Err(e) = self.process_batch(batch).await {
-                tracing::error!(?e, "Failed to process mutation batch");
-            }
-        }
-    }
-
-    async fn process_batch(&self, mutations: Vec<Mutation>) -> Result<()> {
-        let db = self.processor.storage.transaction_db()?;
-        let txn = db.transaction();
-
-        let mut flush_markers = Vec::new();
-
-        for mutation in mutations {
-            match mutation {
-                Mutation::Flush(marker) => {
-                    flush_markers.push(marker);
-                }
-                _ => {
-                    mutation.execute(&txn, &db, &self.processor)?;
-                }
-            }
-        }
-
-        // Commit transaction
-        txn.commit()?;
-
-        // Signal all flush waiters
-        for FlushMarker(tx) in flush_markers {
-            let _ = tx.send(());
-        }
-
-        Ok(())
-    }
-}
-```
-
-### Reader Infrastructure (`vector/reader.rs`)
-
-```rust
-use flume;
-use tokio::sync::oneshot;
-
-/// Vector query reader.
-///
-/// Sends queries through an MPMC (flume) channel for load balancing.
-#[derive(Clone)]
-pub struct Reader {
-    sender: flume::Sender<Query>,
-}
-
-impl Reader {
-    /// Send a query and get the result.
-    pub async fn send_query<Q: Into<Query>>(&self, query: Q) -> Result<()> {
-        self.sender.send_async(query.into()).await
-            .map_err(|_| Error::ChannelClosed)?;
-        Ok(())
-    }
-
-    /// Check if the reader is closed.
-    pub fn is_closed(&self) -> bool {
-        self.sender.is_disconnected()
-    }
-}
-
-/// Configuration for the vector reader.
-#[derive(Debug, Clone)]
-pub struct ReaderConfig {
-    /// Channel buffer size
-    pub channel_size: usize,
-    /// Number of consumer workers
-    pub num_workers: usize,
-}
-
-impl Default for ReaderConfig {
-    fn default() -> Self {
-        Self {
-            channel_size: 1024,
-            num_workers: 4,
-        }
-    }
-}
-
-/// Reader builder.
-pub struct ReaderBuilder {
-    config: ReaderConfig,
-}
-
-impl ReaderBuilder {
-    pub fn new() -> Self {
-        Self { config: ReaderConfig::default() }
-    }
-
-    pub fn channel_size(mut self, size: usize) -> Self {
-        self.config.channel_size = size;
-        self
-    }
-
-    pub fn num_workers(mut self, n: usize) -> Self {
-        self.config.num_workers = n;
-        self
-    }
-
-    pub fn build(self, processor: Arc<Processor>) -> (Reader, Vec<Consumer>) {
-        let (tx, rx) = flume::bounded(self.config.channel_size);
-        let reader = Reader { sender: tx };
-
-        let consumers: Vec<_> = (0..self.config.num_workers)
-            .map(|_| Consumer::new(rx.clone(), processor.clone()))
-            .collect();
-
-        (reader, consumers)
-    }
-}
-
-/// Query consumer - processes queries from the MPMC channel.
-pub struct Consumer {
-    receiver: flume::Receiver<Query>,
-    processor: Arc<Processor>,
-}
-
-impl Consumer {
-    /// Run the consumer loop.
-    pub async fn run(self) {
-        while let Ok(query) = self.receiver.recv_async().await {
-            self.process_query(query).await;
-        }
-    }
-
-    async fn process_query(&self, query: Query) {
-        match query {
-            Query::SearchKNN(dispatch) => {
-                let result = dispatch.params.execute(&self.processor).await;
-                let _ = dispatch.result_tx.send(result);
-            }
-            Query::GetVector(dispatch) => {
-                let result = dispatch.params.execute(&self.processor).await;
-                let _ = dispatch.result_tx.send(result);
-            }
-            // ... other variants
-        }
-    }
-}
-```
-
-### Processor (`vector/processor.rs`)
-
-```rust
-use dashmap::DashMap;
-
-/// Vector processor - provides storage access and state management.
-///
-/// This is the central component that mutation executors and query executors
-/// use to access the database and manage per-embedding state.
-pub struct Processor {
-    /// Vector storage (RocksDB via generic Storage<Subsystem>)
-    pub storage: Arc<Storage>,
-    /// Embedding registry (pre-warmed on startup)
-    pub registry: Arc<EmbeddingRegistry>,
-    /// Per-embedding ID allocators (lazily created)
-    id_allocators: DashMap<EmbeddingCode, IdAllocator>,
-}
-
-impl Processor {
-    pub fn new(storage: Arc<Storage>, registry: Arc<EmbeddingRegistry>) -> Self {
-        Self {
-            storage,
-            registry,
-            id_allocators: DashMap::new(),
-        }
-    }
-
-    /// Get or create an ID allocator for the given embedding space.
-    pub fn get_or_create_allocator(&self, embedding: EmbeddingCode) -> dashmap::RefMut<EmbeddingCode, IdAllocator> {
-        self.id_allocators.entry(embedding).or_insert_with(|| {
-            // Try to recover from storage, or create new
-            let db = self.storage.transaction_db().expect("DB access");
-            IdAllocator::recover(&db, embedding).unwrap_or_else(|_| IdAllocator::new())
-        })
-    }
-
-    /// Resolve vec_ids to external IDs using MultiGet.
-    pub fn resolve_ids(&self, embedding: EmbeddingCode, vec_ids: &[VecId]) -> Result<Vec<Option<Id>>> {
-        let db = self.storage.transaction_db()?;
-        IdReverse::multi_get(&db, embedding, vec_ids)
-    }
-
-    /// HNSW search (placeholder - implemented in Phase 2)
-    pub fn hnsw_search(
-        &self,
-        embedding: EmbeddingCode,
-        query: &[f32],
-        k: usize,
-        ef: usize,
-    ) -> Result<Vec<(f32, VecId)>> {
-        todo!("Implement in Phase 2")
-    }
-
-    /// Index a vector into the HNSW graph (placeholder - implemented in Phase 2)
-    pub fn index_vector(
-        &self,
-        txn: &rocksdb::Transaction,
-        embedding: EmbeddingCode,
-        vec_id: VecId,
-        vector: &[f32],
-    ) -> Result<()> {
-        todo!("Implement in Phase 2")
-    }
-}
-```
-
-### Runnable Trait Integration
-
-```rust
-// In vector/mutation.rs
-
-/// Runnable trait for mutations - mirrors graph/fulltext pattern.
-#[async_trait::async_trait]
-impl crate::writer::Runnable for InsertVector {
-    async fn run(self, writer: &crate::vector::writer::Writer) -> Result<()> {
-        writer.send(vec![Mutation::InsertVector(self)]).await
-    }
-}
-
-// In vector/query.rs
-
-/// Runnable trait for queries - mirrors graph/fulltext pattern.
-#[async_trait::async_trait]
-impl crate::reader::Runnable<crate::vector::reader::Reader> for SearchKNN {
-    type Output = Vec<SearchResult>;
-
-    async fn run(self, reader: &crate::vector::reader::Reader, timeout: Duration) -> Result<Self::Output> {
-        let (tx, rx) = oneshot::channel();
-        let dispatch = SearchKNNDispatch {
-            params: self,
-            timeout,
-            result_tx: tx,
-        };
-        reader.send_query(Query::SearchKNN(dispatch)).await?;
-
-        tokio::time::timeout(timeout, rx)
-            .await
-            .map_err(|_| Error::QueryTimeout)?
-            .map_err(|_| Error::ChannelClosed)?
-    }
-}
-```
-
-### Module Structure
+#### Module Structure
 
 ```
 libs/db/src/vector/
@@ -2898,77 +1685,24 @@ libs/db/src/vector/
 └── async_updater.rs    # Background graph maintenance (Phase 5)
 ```
 
-### Convenience API (`vector/api.rs`)
+#### Convenience API (`vector/api.rs`)
 
-**Status:** 🔄 PARTIAL (2026-01-04) - Phase 1 functions implemented (`insert`, `get_vector`, `delete`), Phase 2 `search` pending HNSW
+**Status:** 🔄 PARTIAL (2026-01-04) - Phase 1 functions implemented, Phase 2 `search` pending HNSW
 
-```rust
-//! Generic API functions for common vector operations.
-//!
-//! These provide a simpler interface for basic operations without
-//! requiring direct use of Reader/Writer infrastructure.
+**Implementation:** [`api.rs`](api.rs) - Simplified interface for common operations:
 
-use super::*;
+**Phase 1 (Implemented):**
+- `insert(writer, embedding, id, vector)` - Insert vector with default async indexing
+- `insert_immediate(writer, embedding, id, vector)` - Insert with immediate indexing
+- `get_vector(storage, embedding, id)` - Get vector by external ID
+- `get_internal_id(storage, embedding, id)` - Get VecId for external ID
+- `get_external_id(storage, embedding, vec_id)` - Get external ID for VecId
+- `delete(writer, embedding, id)` - Delete vector by external ID
 
-/// Insert a vector into an embedding space.
-///
-/// This is a convenience wrapper that creates the mutation and sends it
-/// through the writer.
-pub async fn insert(
-    writer: &Writer,
-    embedding: EmbeddingCode,
-    id: Id,
-    vector: Vec<f32>,
-) -> Result<()> {
-    let mutation = InsertVector {
-        embedding,
-        id,
-        vector,
-        immediate_index: false,  // Default to async indexing
-    };
-    writer.send_sync(vec![Mutation::InsertVector(mutation)]).await
-}
+**Phase 2 (Pending HNSW):**
+- `search(reader, embedding, query, k)` - K-nearest neighbor search
 
-/// Search for k nearest neighbors.
-///
-/// Convenience wrapper for SearchKNN query.
-pub async fn search(
-    reader: &Reader,
-    embedding: EmbeddingCode,
-    query: Vec<f32>,
-    k: usize,
-) -> Result<Vec<SearchResult>> {
-    SearchKNN {
-        embedding,
-        query,
-        k,
-        ef: k * 10,  // Default ef = 10x k
-    }.run(reader, Duration::from_secs(30)).await
-}
-
-/// Get a vector by its external ID.
-pub async fn get_vector(
-    reader: &Reader,
-    embedding: EmbeddingCode,
-    id: Id,
-) -> Result<Option<Vec<f32>>> {
-    GetVector { embedding, id }
-        .run(reader, Duration::from_secs(5))
-        .await
-}
-
-/// Delete a vector by its external ID.
-pub async fn delete(
-    writer: &Writer,
-    embedding: EmbeddingCode,
-    id: Id,
-) -> Result<()> {
-    let mutation = DeleteVector { embedding, id };
-    writer.send_sync(vec![Mutation::DeleteVector(mutation)]).await
-}
-```
-
-### Implementation Priority
+#### Implementation Priority
 
 | Task | Phase | Priority | Dependencies |
 |------|-------|----------|--------------|
@@ -2982,7 +1716,7 @@ pub async fn delete(
 | `query.rs` - SearchKNN | 2 | High | HNSW impl |
 | `hnsw.rs` - HNSW algorithm | 2 | High | Processor |
 
-### Test Strategy
+#### Test Strategy
 
 ```rust
 // tests/test_vector_api.rs
@@ -6889,3 +5623,4 @@ cargo run -p motlie_core --example simd_check
 | 2026-01-03 | **IMPLEMENTED** Phase 0 foundation: mod.rs, config.rs, distance.rs, embedding.rs, registry.rs, schema.rs, error.rs | Claude Opus 4.5 |
 | 2026-01-03 | 31 unit tests passing for Phase 0 types and schema | Claude Opus 4.5 |
 | 2026-01-04 | **cac8da3** Refactor vector schema: semantic types (EmbeddingCode, VecId, HnswLayer, RoaringBitmapBytes, RabitqCode), union pattern for polymorphic CFs (GraphMeta, IdAlloc), README documentation | Claude Opus 4.5 |
+| 2026-01-04 | Replaced Phase 0 and Phase 1 code blocks with source file links (20 blocks total) | Claude Opus 4.5 |
