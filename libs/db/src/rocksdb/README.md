@@ -43,10 +43,126 @@ behavior through the `StorageSubsystem` trait.
 rocksdb/
 ├── mod.rs          # Module exports and documentation
 ├── README.md       # This file
+├── cf_traits.rs    # Column family trait hierarchy
 ├── config.rs       # BlockCacheConfig (shared configuration)
 ├── handle.rs       # DatabaseHandle, StorageMode, StorageOptions
 ├── storage.rs      # Generic Storage<S: StorageSubsystem>
 └── subsystem.rs    # StorageSubsystem trait, ComponentWrapper, DbAccess
+```
+
+## Column Family Trait Hierarchy
+
+The module defines a trait hierarchy for column family serialization:
+
+```
+                       ColumnFamily
+                       (CF_NAME only)
+                            │
+         ┌──────────────────┼──────────────────┐
+         │                  │                  │
+         ▼                  ▼                  ▼
+  ColumnFamilyConfig  ColumnFamilySerde  HotColumnFamilyRecord
+       <C>            (MessagePack+LZ4)        (rkyv)
+                            │
+                            │ (used by)
+                            ▼
+                      MutationCodec
+                   (mutation marshaling)
+```
+
+### Trait Descriptions
+
+| Trait | Purpose | Used For |
+|-------|---------|----------|
+| `ColumnFamily` | Base marker with CF_NAME (single source of truth) | All CFs |
+| `ColumnFamilyConfig<C>` | RocksDB options with domain-specific config | All CFs |
+| `ColumnFamilySerde` | Cold CF serialization (MessagePack + LZ4) | Cold CFs: Names, Summaries, Fragments |
+| `HotColumnFamilyRecord` | Hot CF zero-copy access using rkyv | Hot CFs: Nodes, Edges |
+| `MutationCodec` | Marshals mutation structs to CF records | Cold CF mutations |
+
+### Separation of Concerns
+
+The hierarchy separates:
+- **Storage infrastructure** (`ColumnFamily`, `ColumnFamilyConfig`, serde traits)
+- **Mutation marshaling** (`MutationCodec` - converts business mutations to CF records)
+
+This allows CFs like `Names` to implement `ColumnFamilySerde` for prewarm/iteration
+without needing a mutation type, while mutation types own their marshaling logic.
+
+### Hot vs Cold Column Families
+
+**Hot CFs** (Nodes, ForwardEdges, ReverseEdges):
+- Use `HotColumnFamilyRecord` with rkyv for zero-copy access
+- Small, frequently-accessed during graph traversal
+- Inherent `record_from`/`create_bytes` methods for mutation execution
+
+**Cold CFs** (Names, Summaries, Fragments):
+- Use `ColumnFamilySerde` with MessagePack + LZ4
+- Larger, infrequently-accessed data
+- `MutationCodec` for mutation marshaling (where applicable)
+
+### Example: Using the Traits
+
+**ColumnFamilySerde for cold CF serialization:**
+```rust
+impl ColumnFamilySerde for Names {
+    type Key = NameCfKey;
+    type Value = NameCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        key.0.as_bytes().to_vec()
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key> {
+        // Direct byte deserialization for fixed-size key
+    }
+    // value_to_bytes, value_from_bytes use default impl (MessagePack + LZ4)
+}
+```
+
+**MutationCodec for mutation marshaling (cold CFs):**
+```rust
+// In mutation.rs
+impl MutationCodec for AddNodeFragment {
+    type Cf = NodeFragments;
+
+    fn to_record(&self) -> (NodeFragmentCfKey, NodeFragmentCfValue) {
+        let key = NodeFragmentCfKey(self.id, self.ts_millis);
+        let value = NodeFragmentCfValue(self.valid_range.clone(), self.content.clone());
+        (key, value)
+    }
+}
+
+// Usage:
+let (key_bytes, value_bytes) = add_fragment.to_cf_bytes()?;
+db.put_cf(&cf, key_bytes, value_bytes)?;
+```
+
+**HotColumnFamilyRecord for hot CF zero-copy access:**
+```rust
+impl HotColumnFamilyRecord for Nodes {
+    type Key = NodeCfKey;
+    type Value = NodeCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        key.0.into_bytes().to_vec()
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key> { ... }
+    // value_to_bytes, value_from_bytes use rkyv
+}
+
+// Zero-copy hot path:
+let archived = Nodes::value_archived(&value_bytes)?;
+if archived.0.as_ref().map_or(true, |tr| tr.is_valid_at(now)) { ... }
+```
+
+**Generic prewarm helper:**
+```rust
+prewarm_cf::<Names, _>(db, 1000, |key, value| {
+    cache.intern(key.0, &value.0);
+    Ok(())
+})?;
 ```
 
 ## Core Types

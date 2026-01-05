@@ -3,26 +3,45 @@
 //! This module defines the trait hierarchy for column family types:
 //!
 //! ```text
-//!                     ColumnFamily
-//!                     (CF_NAME only)
-//!                          │
-//!          ┌───────────────┼───────────────┐
-//!          │               │               │
-//!          ▼               ▼               ▼
-//!   ColumnFamilyConfig  ColumnFamilyRecord  HotColumnFamilyRecord
-//!       <C>            (MessagePack+LZ4)       (rkyv)
+//!                        ColumnFamily
+//!                        (CF_NAME only)
+//!                             │
+//!          ┌──────────────────┼──────────────────┐
+//!          │                  │                  │
+//!          ▼                  ▼                  ▼
+//!   ColumnFamilyConfig  ColumnFamilySerde  HotColumnFamilyRecord
+//!        <C>            (MessagePack+LZ4)        (rkyv)
+//!                             │
+//!                             │ (used by)
+//!                             ▼
+//!                       MutationCodec
+//!                    (mutation marshaling)
 //! ```
+//!
+//! ## Trait Descriptions
 //!
 //! - `ColumnFamily`: Base marker trait with CF_NAME (single source of truth)
 //! - `ColumnFamilyConfig<C>`: RocksDB options with domain-specific config type
-//! - `ColumnFamilyRecord`: Cold CF serialization using MessagePack + LZ4
+//! - `ColumnFamilySerde`: Cold CF serialization using MessagePack + LZ4
 //! - `HotColumnFamilyRecord`: Hot CF zero-copy access using rkyv
+//! - `MutationCodec`: Marshals mutation structs to CF key-value pairs
+//!
+//! ## Separation of Concerns
+//!
+//! The trait hierarchy separates:
+//! - **Storage infrastructure** (`ColumnFamily`, `ColumnFamilyConfig`, serde traits)
+//! - **Mutation marshaling** (`MutationCodec` - converts business mutations to CF records)
+//!
+//! This allows CFs like `Names` to implement `ColumnFamilySerde` for prewarm/iteration
+//! without needing a mutation type, while mutation types own their marshaling logic.
 
 use anyhow::Result;
 use rkyv::validation::validators::DefaultValidator;
 use rkyv::{Archive, CheckBytes, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use rocksdb::{Cache, Options};
 use serde::{Deserialize, Serialize};
+
+use super::DbAccess;
 
 // ============================================================================
 // Base Trait: ColumnFamily
@@ -72,10 +91,14 @@ pub trait ColumnFamilyConfig<C>: ColumnFamily {
 }
 
 // ============================================================================
-// Cold CF Serialization: ColumnFamilyRecord
+// Cold CF Serialization: ColumnFamilySerde
 // ============================================================================
 
-/// Trait for cold column family record types using MessagePack + LZ4.
+/// Trait for column family serialization using MessagePack + LZ4.
+///
+/// This trait handles pure serialization concerns - converting between
+/// typed Key/Value and bytes. It does NOT include mutation marshaling
+/// (see `MutationCodec` for that).
 ///
 /// Cold CFs store larger, less frequently accessed data (fragments, summaries).
 /// Values are serialized with MessagePack for self-describing format, then
@@ -87,36 +110,26 @@ pub trait ColumnFamilyConfig<C>: ColumnFamily {
 /// # Example
 ///
 /// ```rust,ignore
-/// impl ColumnFamilyRecord for NodeFragments {
-///     type Key = NodeFragmentCfKey;
-///     type Value = NodeFragmentCfValue;
-///     type CreateOp = AddNodeFragment;
-///
-///     fn record_from(args: &Self::CreateOp) -> (Self::Key, Self::Value) {
-///         // Create key-value pair from mutation args
-///     }
+/// impl ColumnFamilySerde for EmbeddingSpecs {
+///     type Key = EmbeddingSpecCfKey;
+///     type Value = EmbeddingSpecCfValue;
 ///
 ///     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-///         // Direct byte serialization for prefix extraction
+///         key.0.to_be_bytes().to_vec()
 ///     }
 ///
 ///     fn key_from_bytes(bytes: &[u8]) -> Result<Self::Key> {
 ///         // Direct byte deserialization
 ///     }
+///     // value_to_bytes, value_from_bytes use default impl
 /// }
 /// ```
-pub trait ColumnFamilyRecord: ColumnFamily {
+pub trait ColumnFamilySerde: ColumnFamily {
     /// The key type for this column family
     type Key: Serialize + for<'de> Deserialize<'de>;
 
     /// The value type for this column family
     type Value: Serialize + for<'de> Deserialize<'de>;
-
-    /// The argument type for creating records (e.g., mutation type)
-    type CreateOp;
-
-    /// Create a key-value pair from arguments
-    fn record_from(args: &Self::CreateOp) -> (Self::Key, Self::Value);
 
     /// Serialize the key to bytes using direct concatenation (no MessagePack).
     /// This enables constant-length prefixes for RocksDB prefix extractors.
@@ -140,12 +153,58 @@ pub trait ColumnFamilyRecord: ColumnFamily {
         let value = rmp_serde::from_slice(&decompressed)?;
         Ok(value)
     }
+}
 
-    /// Create and serialize to bytes using direct encoding for keys, compressed MessagePack for values.
-    fn create_bytes(args: &Self::CreateOp) -> Result<(Vec<u8>, Vec<u8>)> {
-        let (key, value) = Self::record_from(args);
-        let key_bytes = Self::key_to_bytes(&key);
-        let value_bytes = Self::value_to_bytes(&value)?;
+// ============================================================================
+// Mutation Marshaling: MutationCodec
+// ============================================================================
+
+/// Trait for marshaling mutation types to column family records.
+///
+/// This trait inverts the traditional relationship: instead of CFs knowing
+/// about mutation types (`CF::CreateOp`), mutations know which CF they target.
+/// This keeps mutation marshaling logic in mutation modules where it belongs.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // In vector/mutation.rs
+/// impl MutationCodec for AddEmbeddingSpec {
+///     type Cf = EmbeddingSpecs;
+///
+///     fn to_record(&self) -> (EmbeddingSpecCfKey, EmbeddingSpecCfValue) {
+///         let key = EmbeddingSpecCfKey(self.code);
+///         let value = EmbeddingSpecCfValue(EmbeddingSpec {
+///             model: self.model.clone(),
+///             dim: self.dim,
+///             distance: self.distance,
+///         });
+///         (key, value)
+///     }
+/// }
+///
+/// // Usage:
+/// let add_op = AddEmbeddingSpec { code, model, dim, distance };
+/// let (key_bytes, value_bytes) = add_op.to_cf_bytes()?;
+/// db.put_cf(&cf, key_bytes, value_bytes)?;
+/// ```
+pub trait MutationCodec {
+    /// The target column family type
+    type Cf: ColumnFamilySerde;
+
+    /// Convert mutation to CF key-value pair
+    fn to_record(
+        &self,
+    ) -> (
+        <Self::Cf as ColumnFamilySerde>::Key,
+        <Self::Cf as ColumnFamilySerde>::Value,
+    );
+
+    /// Serialize to bytes using the target CF's serde methods.
+    fn to_cf_bytes(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        let (key, value) = self.to_record();
+        let key_bytes = Self::Cf::key_to_bytes(&key);
+        let value_bytes = Self::Cf::value_to_bytes(&value)?;
         Ok((key_bytes, value_bytes))
     }
 }
@@ -214,6 +273,51 @@ pub trait HotColumnFamilyRecord: ColumnFamily {
         rkyv::to_bytes::<_, 256>(value)
             .map_err(|e| anyhow::anyhow!("rkyv serialization failed: {}", e))
     }
+}
+
+// ============================================================================
+// Prewarm Helper
+// ============================================================================
+
+/// Generic prewarm helper for `ColumnFamilySerde` CFs.
+///
+/// Iterates over a column family using trait methods for deserialization,
+/// calling the visitor function for each record up to the specified limit.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// prewarm_cf::<EmbeddingSpecs, _>(db, 1000, |key, value| {
+///     cache.register_from_db(key.0, &value.0.model, value.0.dim, value.0.distance);
+///     Ok(())
+/// })?;
+/// ```
+pub fn prewarm_cf<CF, F>(db: &dyn DbAccess, limit: usize, mut visitor: F) -> Result<usize>
+where
+    CF: ColumnFamilySerde,
+    F: FnMut(&CF::Key, &CF::Value) -> Result<()>,
+{
+    if limit == 0 {
+        return Ok(0);
+    }
+
+    let iter = db.iterator_cf(CF::CF_NAME)?;
+    let mut loaded = 0;
+
+    for item in iter {
+        if loaded >= limit {
+            break;
+        }
+
+        let (key_bytes, value_bytes) = item?;
+
+        let key = CF::key_from_bytes(&key_bytes)?;
+        let value = CF::value_from_bytes(&value_bytes)?;
+        visitor(&key, &value)?;
+        loaded += 1;
+    }
+
+    Ok(loaded)
 }
 
 #[cfg(test)]

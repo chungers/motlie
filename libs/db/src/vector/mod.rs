@@ -26,6 +26,7 @@ pub mod config;
 pub mod distance;
 pub mod embedding;
 mod error;
+pub mod mutation;
 pub mod registry;
 pub mod schema;
 pub mod subsystem;
