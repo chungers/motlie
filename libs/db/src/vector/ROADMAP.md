@@ -163,11 +163,14 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  ├── 2.8 Layer descent search algorithm ✓                                 │
 │  └── 2.9 Memory-cached top layers (NavigationCache) ✓                     │
 │                                                                              │
-│  Phase 3: Batch Operations [THR-1, THR-3]                                   │
+│  Phase 3: Batch Operations + Deferred Items [THR-1, THR-3]                  │
 │  ├── 3.1 O(1) degree queries via RoaringBitmap.len()                       │
 │  ├── 3.2 Batch neighbor fetch for beam search (MultiGet)                   │
 │  ├── 3.3 Batch vector retrieval for re-ranking (MultiGet)                  │
-│  └── 3.4 Batch ULID resolution                                             │
+│  ├── 3.4 Batch ULID resolution                                             │
+│  ├── 3.5 Upper layer edge caching (deferred from 2.9)                      │
+│  ├── 3.6 Layer 0 hot node LRU cache (deferred from 2.9)                    │
+│  └── 3.7 Recall tuning at scale (deferred from 2.6)                        │
 │                                                                              │
 │  Phase 4: RaBitQ Compression [STOR-4, THR-3]                                │
 │  ├── 4.1 Random rotation matrix generation                                 │
@@ -1756,6 +1759,10 @@ async fn test_reader_mpmc_load_balancing() {
 
 ## Phase 2: HNSW2 Core + Navigation Layer ✓ CORE COMPLETE
 
+**Status:** Core implementation complete. Some acceptance criteria deferred to Phase 3:
+- Task 2.6: 100K throughput/recall targets → Phase 3.7
+- Task 2.9: Upper layer caching, LRU cache, cache invalidation → Phase 3.5, 3.6
+
 **Goal:** Implement optimized HNSW with roaring bitmap edges per `examples/vector/HNSW2.md`,
 including the hierarchical navigation layer for O(log N) search complexity.
 
@@ -2965,9 +2972,12 @@ SIFT_PATH=/data/sift cargo test --release test_recall_sift_data
 
 ---
 
-## Phase 3: Batch Operations
+## Phase 3: Batch Operations + Deferred Items
 
-**Goal:** Implement batch operations within the vector module to reduce I/O overhead.
+**Goal:** Implement batch operations to reduce I/O overhead, plus complete deferred items from Phase 2.
+
+**Tasks 3.1-3.4:** Batch operations (MultiGet) for search and build speedup.
+**Tasks 3.5-3.7:** Deferred from Phase 2 - caching and recall tuning.
 
 **Note:** All operations are self-contained in `motlie_db::vector`. No changes to `motlie_db::graph`.
 
@@ -3173,6 +3183,56 @@ impl VectorStorage {
 **Effort:** 0.5 day
 
 **Impact:** Fast ID resolution for search result mapping
+
+### Task 3.5: Upper Layer Edge Caching (Deferred from 2.9)
+
+Cache edges for HNSW layers 2+ in memory to reduce I/O during upper layer traversal.
+
+**Rationale:** Upper layers have exponentially fewer nodes (~4M at layer 2 for 1B vectors).
+Caching these edges eliminates RocksDB reads during the initial descent phase of search.
+
+**Acceptance Criteria:**
+- [ ] Layers 2+ edges cached in memory (~50-200MB at 1B scale)
+- [ ] Cache populated during `ready()` or lazily on first access
+- [ ] Cache invalidation on edge updates (insert/delete)
+
+**Effort:** 1 day
+
+**Impact:** 20-50% latency reduction for upper layer traversal
+
+### Task 3.6: Layer 0 Hot Node LRU Cache (Deferred from 2.9)
+
+LRU cache for frequently accessed layer-0 nodes during beam search.
+
+**Rationale:** Beam search with ef=100 visits ~1000 nodes at layer 0. Popular entry regions
+get repeated access across queries. An LRU cache avoids redundant RocksDB reads.
+
+**Acceptance Criteria:**
+- [ ] LRU cache for layer 0-1 edges (configurable size, default 100K entries)
+- [ ] Cache hit rate monitoring
+- [ ] Thread-safe concurrent access
+
+**Effort:** 1 day
+
+**Impact:** 2-3x QPS improvement for repeated query patterns
+
+### Task 3.7: Recall Tuning at Scale (Deferred from 2.6)
+
+Improve Recall@10 at 100K+ scale from 88.4% to >95%.
+
+**Rationale:** Current 88.4% recall at 100K is below target. Options:
+1. Increase ef_search parameter (trades latency for recall)
+2. Improve pruning algorithm (select_neighbors_heuristic)
+3. Increase M parameter (trades memory for recall)
+
+**Acceptance Criteria:**
+- [ ] Recall@10 > 95% at 100K scale on SIFT
+- [ ] Document optimal ef/M parameters for different recall targets
+- [ ] Benchmark latency vs recall tradeoff
+
+**Effort:** 0.5 day (tuning) + 0.5 day (documentation)
+
+**Impact:** Production-ready recall at scale
 
 ### Phase 3 Validation & Tests
 
@@ -5450,7 +5510,7 @@ The memory caching (2.9) can be deferred if timeline is tight, but 2.7-2.8 are r
 | Phase 0: Foundation | 0.1-0.3 | ✅ COMPLETE | ✅ |
 | Phase 1: ID Management | 1.1-1.5 | ✅ COMPLETE | ✅ |
 | Phase 2: HNSW2 Core + Navigation | 2.1-2.9 | 11-17 days | ~11-17 days |
-| Phase 3: Batch APIs | 3.1-3.4 | 2.5-3 days | 17-25 days |
+| Phase 3: Batch + Deferred | 3.1-3.7 | 4.5-6 days | 17-28 days |
 | Phase 4: RaBitQ | 4.1-4.5 | 5-7 days | 22-32 days |
 | Phase 5: Async Updater | 5.1-5.5 | 3-4 days | 25-36 days |
 | Phase 6: Production | 6.1-6.3 | 4-7 days | 29-43 days |
