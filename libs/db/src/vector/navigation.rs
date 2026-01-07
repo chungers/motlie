@@ -136,11 +136,13 @@ impl NavigationLayerInfo {
 }
 
 // ============================================================================
-// NavigationCache (Task 2.9)
+// NavigationCache (Task 2.9 + Task 3.5 Edge Caching)
 // ============================================================================
 
 use std::collections::HashMap;
 use std::sync::RwLock;
+
+use roaring::RoaringBitmap;
 
 /// Configuration for the navigation cache.
 #[derive(Debug, Clone)]
@@ -153,6 +155,11 @@ pub struct NavigationCacheConfig {
     /// Maximum edges to cache per embedding space.
     /// Default: 1M edges across all cached layers.
     pub max_cached_edges: usize,
+
+    /// Maximum entries in the layer 0-1 LRU cache.
+    /// These layers are too large to cache fully, so we use LRU.
+    /// Default: 10,000 entries
+    pub hot_cache_size: usize,
 }
 
 impl Default for NavigationCacheConfig {
@@ -160,17 +167,47 @@ impl Default for NavigationCacheConfig {
         Self {
             min_cached_layer: 2,
             max_cached_edges: 1_000_000,
+            hot_cache_size: 10_000,
         }
     }
 }
+
+/// Key for edge cache: (embedding_code, vec_id, layer)
+type EdgeCacheKey = (EmbeddingCode, VecId, HnswLayer);
+
+use std::collections::VecDeque;
 
 /// In-memory cache for navigation layer data.
 ///
 /// Caches upper layers (sparse) fully in memory to avoid disk I/O
 /// during the O(log N) descent phase of search.
+///
+/// # Phase 3.5: Edge Caching
+///
+/// For layers >= min_cached_layer, edges are cached in memory.
+/// This reduces RocksDB reads during upper layer traversal.
+///
+/// # Phase 3.6: Hot Node Cache
+///
+/// For layers 0-1 (too large to cache fully), a bounded FIFO cache
+/// keeps frequently accessed nodes in memory.
 pub struct NavigationCache {
     /// Per-embedding-space navigation info
     nav_info: RwLock<HashMap<EmbeddingCode, NavigationLayerInfo>>,
+
+    /// Edge cache for upper layers (layer >= min_cached_layer)
+    /// Key: (embedding_code, vec_id, layer) -> neighbor bitmap
+    edge_cache: RwLock<HashMap<EdgeCacheKey, RoaringBitmap>>,
+
+    /// Current edge cache size (sum of bitmap lengths)
+    edge_cache_size: RwLock<usize>,
+
+    /// Hot node cache for layers 0-1 (Phase 3.6)
+    /// Uses FIFO eviction when cache is full
+    hot_cache: RwLock<HashMap<EdgeCacheKey, RoaringBitmap>>,
+
+    /// FIFO order for hot cache eviction
+    hot_cache_order: RwLock<VecDeque<EdgeCacheKey>>,
 
     /// Configuration
     config: NavigationCacheConfig,
@@ -186,6 +223,10 @@ impl NavigationCache {
     pub fn with_config(config: NavigationCacheConfig) -> Self {
         Self {
             nav_info: RwLock::new(HashMap::new()),
+            edge_cache: RwLock::new(HashMap::new()),
+            edge_cache_size: RwLock::new(0),
+            hot_cache: RwLock::new(HashMap::new()),
+            hot_cache_order: RwLock::new(VecDeque::new()),
             config,
         }
     }
@@ -232,6 +273,142 @@ impl NavigationCache {
     /// Check if a layer should be cached in memory.
     pub fn should_cache_layer(&self, layer: HnswLayer) -> bool {
         layer >= self.config.min_cached_layer
+    }
+
+    // =========================================================================
+    // Edge Caching (Phase 3.5)
+    // =========================================================================
+
+    /// Get cached neighbors for upper layers, or load via fetch_fn.
+    ///
+    /// For layers >= min_cached_layer (upper layers):
+    /// - Returns cached bitmap if available
+    /// - Otherwise calls fetch_fn and caches the result
+    ///
+    /// For layers < min_cached_layer (layers 0-1):
+    /// - Uses bounded hot cache with FIFO eviction
+    /// - Helps for repeated access to frequently queried nodes
+    ///
+    /// # Arguments
+    /// * `embedding` - Embedding space code
+    /// * `vec_id` - Vector ID
+    /// * `layer` - HNSW layer
+    /// * `fetch_fn` - Function to fetch edges from storage
+    pub fn get_neighbors_cached<F, E>(
+        &self,
+        embedding: EmbeddingCode,
+        vec_id: VecId,
+        layer: HnswLayer,
+        fetch_fn: F,
+    ) -> Result<RoaringBitmap, E>
+    where
+        F: FnOnce() -> Result<RoaringBitmap, E>,
+    {
+        let key = (embedding, vec_id, layer);
+
+        // Upper layers (>= min_cached_layer): full caching
+        if layer >= self.config.min_cached_layer {
+            // Check cache first (read lock)
+            if let Ok(cache) = self.edge_cache.read() {
+                if let Some(bitmap) = cache.get(&key) {
+                    return Ok(bitmap.clone());
+                }
+            }
+
+            // Cache miss - fetch from storage
+            let bitmap = fetch_fn()?;
+
+            // Try to insert into cache (write lock)
+            if let Ok(mut cache) = self.edge_cache.write() {
+                if let Ok(mut size) = self.edge_cache_size.write() {
+                    let bitmap_len = bitmap.len() as usize;
+
+                    // Only cache if we haven't exceeded max size
+                    if *size + bitmap_len <= self.config.max_cached_edges {
+                        cache.insert(key, bitmap.clone());
+                        *size += bitmap_len;
+                    }
+                }
+            }
+
+            return Ok(bitmap);
+        }
+
+        // Lower layers (0-1): use hot cache with FIFO eviction
+        // Check hot cache first (read lock)
+        if let Ok(cache) = self.hot_cache.read() {
+            if let Some(bitmap) = cache.get(&key) {
+                return Ok(bitmap.clone());
+            }
+        }
+
+        // Cache miss - fetch from storage
+        let bitmap = fetch_fn()?;
+
+        // Try to insert into hot cache (write lock)
+        if let Ok(mut cache) = self.hot_cache.write() {
+            if let Ok(mut order) = self.hot_cache_order.write() {
+                // Evict oldest entry if cache is full
+                while cache.len() >= self.config.hot_cache_size {
+                    if let Some(old_key) = order.pop_front() {
+                        cache.remove(&old_key);
+                    } else {
+                        break;
+                    }
+                }
+
+                // Insert new entry
+                cache.insert(key, bitmap.clone());
+                order.push_back(key);
+            }
+        }
+
+        Ok(bitmap)
+    }
+
+    /// Invalidate cached edges for a node (call after edge updates).
+    ///
+    /// Should be called when edges are modified during insert or delete.
+    pub fn invalidate_edges(&self, embedding: EmbeddingCode, vec_id: VecId, layer: HnswLayer) {
+        let key = (embedding, vec_id, layer);
+
+        if layer >= self.config.min_cached_layer {
+            // Upper layer cache
+            if let Ok(mut cache) = self.edge_cache.write() {
+                if let Some(removed) = cache.remove(&key) {
+                    if let Ok(mut size) = self.edge_cache_size.write() {
+                        *size = size.saturating_sub(removed.len() as usize);
+                    }
+                }
+            }
+        } else {
+            // Hot cache (layers 0-1)
+            if let Ok(mut cache) = self.hot_cache.write() {
+                cache.remove(&key);
+                // Note: We don't remove from hot_cache_order to avoid O(n) scan
+                // The entry will be skipped during eviction if already removed
+            }
+        }
+    }
+
+    /// Get edge cache statistics.
+    pub fn edge_cache_stats(&self) -> (usize, usize) {
+        let entries = self
+            .edge_cache
+            .read()
+            .map(|c| c.len())
+            .unwrap_or(0);
+        let size = self
+            .edge_cache_size
+            .read()
+            .map(|s| *s)
+            .unwrap_or(0);
+        (entries, size)
+    }
+
+    /// Get hot cache statistics.
+    pub fn hot_cache_stats(&self) -> usize {
+        self.hot_cache.read().map(|c| c.len()).unwrap_or(0)
     }
 }
 
@@ -368,5 +545,132 @@ mod tests {
         assert!(!cache.should_cache_layer(1));
         assert!(cache.should_cache_layer(2));
         assert!(cache.should_cache_layer(3));
+    }
+
+    #[test]
+    fn test_edge_caching() {
+        let cache = NavigationCache::new();
+        let mut call_count = 0;
+
+        // Layer 0 - should use hot cache (Phase 3.6)
+        let result: Result<RoaringBitmap, ()> = cache.get_neighbors_cached(1, 100, 0, || {
+            call_count += 1;
+            let mut bm = RoaringBitmap::new();
+            bm.insert(1);
+            bm.insert(2);
+            Ok(bm)
+        });
+        assert!(result.is_ok());
+        assert_eq!(call_count, 1);
+        assert_eq!(cache.hot_cache_stats(), 1);
+
+        // Layer 0 again - should return cached value from hot cache
+        let result: Result<RoaringBitmap, ()> = cache.get_neighbors_cached(1, 100, 0, || {
+            call_count += 1;
+            let mut bm = RoaringBitmap::new();
+            bm.insert(1);
+            bm.insert(2);
+            Ok(bm)
+        });
+        assert!(result.is_ok());
+        assert_eq!(call_count, 1); // No new call - hot cache hit!
+        let bm = result.unwrap();
+        assert!(bm.contains(1));
+        assert!(bm.contains(2));
+
+        // Layer 2 - should cache in upper layer cache (>= min_cached_layer)
+        let result: Result<RoaringBitmap, ()> = cache.get_neighbors_cached(1, 100, 2, || {
+            call_count += 1;
+            let mut bm = RoaringBitmap::new();
+            bm.insert(10);
+            bm.insert(20);
+            Ok(bm)
+        });
+        assert!(result.is_ok());
+        assert_eq!(call_count, 2);
+        let (entries, size) = cache.edge_cache_stats();
+        assert_eq!(entries, 1);
+        assert_eq!(size, 2);
+
+        // Layer 2 again - should return cached value (no new fetch_fn call)
+        let result: Result<RoaringBitmap, ()> = cache.get_neighbors_cached(1, 100, 2, || {
+            call_count += 1;
+            Ok(RoaringBitmap::new())
+        });
+        assert!(result.is_ok());
+        assert_eq!(call_count, 2); // No new call
+        let bm = result.unwrap();
+        assert!(bm.contains(10));
+        assert!(bm.contains(20));
+    }
+
+    #[test]
+    fn test_edge_cache_invalidation() {
+        let cache = NavigationCache::new();
+
+        // Cache an edge
+        let _: Result<RoaringBitmap, ()> = cache.get_neighbors_cached(1, 100, 2, || {
+            let mut bm = RoaringBitmap::new();
+            bm.insert(10);
+            Ok(bm)
+        });
+
+        let (entries, _) = cache.edge_cache_stats();
+        assert_eq!(entries, 1);
+
+        // Invalidate
+        cache.invalidate_edges(1, 100, 2);
+
+        let (entries, _) = cache.edge_cache_stats();
+        assert_eq!(entries, 0);
+    }
+
+    #[test]
+    fn test_hot_cache_eviction() {
+        // Create cache with small hot_cache_size for testing
+        let config = NavigationCacheConfig {
+            hot_cache_size: 3,
+            ..Default::default()
+        };
+        let cache = NavigationCache::with_config(config);
+
+        // Fill the hot cache
+        for vec_id in 0..3 {
+            let _: Result<RoaringBitmap, ()> = cache.get_neighbors_cached(1, vec_id, 0, || {
+                let mut bm = RoaringBitmap::new();
+                bm.insert(vec_id);
+                Ok(bm)
+            });
+        }
+        assert_eq!(cache.hot_cache_stats(), 3);
+
+        // Add one more - should evict the oldest (vec_id=0)
+        let _: Result<RoaringBitmap, ()> = cache.get_neighbors_cached(1, 100, 0, || {
+            let mut bm = RoaringBitmap::new();
+            bm.insert(100);
+            Ok(bm)
+        });
+        assert_eq!(cache.hot_cache_stats(), 3);
+
+        // vec_id=0 should be evicted - fetch_fn will be called again
+        let mut fetch_called = false;
+        let result: Result<RoaringBitmap, ()> = cache.get_neighbors_cached(1, 0, 0, || {
+            fetch_called = true;
+            let mut bm = RoaringBitmap::new();
+            bm.insert(0);
+            Ok(bm)
+        });
+        assert!(result.is_ok());
+        assert!(fetch_called); // Was evicted, so fetch_fn was called
+
+        // vec_id=2 should still be cached (not evicted yet)
+        // Note: After re-adding vec_id=0, the cache contains [1, 2, 100] -> [2, 100, 0]
+        let mut fetch_called = false;
+        let result: Result<RoaringBitmap, ()> = cache.get_neighbors_cached(1, 2, 0, || {
+            fetch_called = true;
+            Ok(RoaringBitmap::new())
+        });
+        assert!(result.is_ok());
+        assert!(!fetch_called); // Still in cache
     }
 }
