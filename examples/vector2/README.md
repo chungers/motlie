@@ -33,6 +33,13 @@ All benchmarks run with:
 | SIFT10K | 1,000 | 0.86s | 1,161 vec/s | 100.0% | 1,483 | 0.67ms | 0.87ms | 2 MB |
 | SIFT10K | 10,000 | 20.54s | 487 vec/s | 100.0% | 522 | 1.97ms | 2.82ms | 22 MB |
 | SIFT1M | 100,000 | 453.40s | 221 vec/s | 88.4% | 282 | 3.44ms | 5.75ms | 241 MB |
+| SIFT1M | 1,000,000 | 16,133s | 62 vec/s | **99.7%** | 47 | 21.05ms | 37.30ms | 2.85 GB |
+
+### Comparison with Baseline (Old HNSW)
+
+| Scale | Old Build Rate | New Build Rate | Old Recall | New Recall | Improvement |
+|-------|----------------|----------------|------------|------------|-------------|
+| 1M | 39.9 vec/s | 62.0 vec/s | 95.3% | **99.7%** | **1.55x faster, +4.4% recall** |
 
 ### Analysis
 
@@ -51,11 +58,13 @@ All benchmarks run with:
 
 ## Detailed Results
 
-Raw benchmark outputs are stored in the `results/` directory:
+Raw benchmark outputs are stored in the `results/` directory with phase prefixes
+for tracking performance evolution across ROADMAP phases:
 
-- `results/sift10k_1k_vectors.txt` - SIFT10K with 1,000 vectors
-- `results/sift10k_10k_vectors.txt` - SIFT10K with 10,000 vectors
-- `results/sift1m_100k_vectors.txt` - SIFT1M with 100,000 vectors
+- `results/phase2_sift10k_1k_vectors.txt` - Phase 2: SIFT10K with 1,000 vectors
+- `results/phase2_sift10k_10k_vectors.txt` - Phase 2: SIFT10K with 10,000 vectors
+- `results/phase2_sift1m_100k_vectors.txt` - Phase 2: SIFT1M with 100,000 vectors
+- `results/phase2_sift1m_1m_vectors.txt` - Phase 2: SIFT1M with 1,000,000 vectors
 
 ## Command Line Options
 
