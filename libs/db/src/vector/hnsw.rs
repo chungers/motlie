@@ -337,7 +337,7 @@ impl HnswIndex {
     /// Greedy search at a single layer (for descent phase).
     ///
     /// Finds the single closest node by following edges greedily.
-    /// Uses batch_distances for efficient I/O.
+    /// Uses batch_distances when neighbor count exceeds threshold.
     fn greedy_search_layer(
         &self,
         storage: &Storage,
@@ -346,6 +346,8 @@ impl HnswIndex {
         entry_dist: f32,
         layer: HnswLayer,
     ) -> Result<(VecId, f32)> {
+        const BATCH_THRESHOLD: usize = 4;
+
         let mut current = entry;
         let mut current_dist = entry_dist;
 
@@ -355,17 +357,27 @@ impl HnswIndex {
                 break;
             }
 
-            // Batch compute distances for all neighbors
-            let neighbor_ids: Vec<VecId> = neighbors.iter().collect();
-            let distances = self.batch_distances(storage, query, &neighbor_ids)?;
-
-            // Find the closest neighbor
             let mut improved = false;
-            for (neighbor, dist) in distances {
-                if dist < current_dist {
-                    current = neighbor;
-                    current_dist = dist;
-                    improved = true;
+
+            // Use batch for larger neighbor sets, individual for small
+            if neighbors.len() as u64 >= BATCH_THRESHOLD as u64 {
+                let neighbor_ids: Vec<VecId> = neighbors.iter().collect();
+                let distances = self.batch_distances(storage, query, &neighbor_ids)?;
+                for (neighbor, dist) in distances {
+                    if dist < current_dist {
+                        current = neighbor;
+                        current_dist = dist;
+                        improved = true;
+                    }
+                }
+            } else {
+                for neighbor in neighbors.iter() {
+                    let dist = self.distance(storage, query, neighbor)?;
+                    if dist < current_dist {
+                        current = neighbor;
+                        current_dist = dist;
+                        improved = true;
+                    }
                 }
             }
 
@@ -416,15 +428,10 @@ impl HnswIndex {
             })
     }
 
-    /// Batch size for beam search candidate processing.
-    /// Larger batches = fewer I/O round trips, but may do more work.
-    const BEAM_BATCH_SIZE: usize = 8;
-
-    /// Generic beam search at any layer (batched version).
+    /// Generic beam search at any layer.
     ///
-    /// Uses batch operations to reduce I/O round trips:
-    /// - get_neighbors_batch: 1 I/O for all candidates in batch
-    /// - batch_distances: 1 I/O for all neighbor vectors
+    /// Uses batch_distances for efficient neighbor distance computation
+    /// while maintaining correct sequential candidate processing.
     fn beam_search(
         &self,
         storage: &Storage,
@@ -444,60 +451,48 @@ impl HnswIndex {
         results.push((OrderedFloat(entry_dist), entry));
         visited.insert(entry);
 
-        while !candidates.is_empty() {
-            // Get current worst distance threshold
-            let worst_dist = if results.len() >= ef {
-                results.peek().map(|(OrderedFloat(d), _)| *d)
-            } else {
-                None
-            };
-
-            // Pop a batch of candidates, stopping if we hit the pruning threshold
-            let mut batch: Vec<VecId> = Vec::with_capacity(Self::BEAM_BATCH_SIZE);
-            while batch.len() < Self::BEAM_BATCH_SIZE {
-                match candidates.pop() {
-                    Some(Reverse((OrderedFloat(dist), node))) => {
-                        // Check pruning condition
-                        if let Some(worst) = worst_dist {
-                            if dist > worst {
-                                // This candidate and all remaining are too far, done
-                                // Put it back and break out of the main loop
-                                candidates.push(Reverse((OrderedFloat(dist), node)));
-                                batch.clear(); // Clear batch to signal termination
-                                break;
-                            }
-                        }
-                        batch.push(node);
+        while let Some(Reverse((OrderedFloat(dist), node))) = candidates.pop() {
+            // If this candidate is farther than the worst result, stop
+            if results.len() >= ef {
+                if let Some(&(OrderedFloat(worst), _)) = results.peek() {
+                    if dist > worst {
+                        break;
                     }
-                    None => break,
                 }
             }
 
-            if batch.is_empty() {
-                break;
-            }
+            // Get neighbors for this candidate
+            let neighbors = self.get_neighbors(storage, node, layer)?;
 
-            // Batch fetch all neighbors for this batch
-            let neighbor_maps = self.get_neighbors_batch(storage, &batch, layer)?;
-
-            // Collect all unvisited neighbors
-            let unvisited_neighbors: Vec<VecId> = neighbor_maps
+            // Collect unvisited neighbors
+            let unvisited: Vec<VecId> = neighbors
                 .iter()
-                .flat_map(|(_, bitmap)| bitmap.iter())
                 .filter(|&n| !visited.contains(n))
                 .collect();
 
-            // Mark as visited before fetching (to avoid duplicates in next batch)
-            for &n in &unvisited_neighbors {
+            // Mark as visited
+            for &n in &unvisited {
                 visited.insert(n);
             }
 
-            if unvisited_neighbors.is_empty() {
+            if unvisited.is_empty() {
                 continue;
             }
 
-            // Batch compute distances for all unvisited neighbors
-            let distances = self.batch_distances(storage, query, &unvisited_neighbors)?;
+            // Compute distances - use batch for larger sets
+            const BATCH_THRESHOLD: usize = 8;
+            let distances: Vec<(VecId, f32)> = if unvisited.len() >= BATCH_THRESHOLD {
+                self.batch_distances(storage, query, &unvisited)?
+            } else {
+                unvisited
+                    .iter()
+                    .filter_map(|&n| {
+                        self.distance(storage, query, n)
+                            .ok()
+                            .map(|d| (n, d))
+                    })
+                    .collect()
+            };
 
             // Update candidates and results
             for (neighbor, neighbor_dist) in distances {
@@ -593,21 +588,18 @@ impl HnswIndex {
 
     /// Get neighbors of a node at a specific layer.
     ///
-    /// For upper layers (>= min_cached_layer), uses the NavigationCache
-    /// to avoid RocksDB reads during descent.
+    /// NOTE: Edge caching is disabled during development.
+    /// The cache was causing stale reads during insert.
+    /// TODO: Add cache invalidation in connect_neighbors to re-enable.
     fn get_neighbors(
         &self,
         storage: &Storage,
         vec_id: VecId,
         layer: HnswLayer,
     ) -> Result<RoaringBitmap> {
-        // Use cached lookup for upper layers (Phase 3.5)
-        self.nav_cache.get_neighbors_cached(
-            self.embedding,
-            vec_id,
-            layer,
-            || self.get_neighbors_uncached(storage, vec_id, layer),
-        )
+        // Disabled caching - was causing stale reads during insert
+        // TODO: Re-enable with proper cache invalidation
+        self.get_neighbors_uncached(storage, vec_id, layer)
     }
 
     /// Get neighbors directly from RocksDB (no cache).
