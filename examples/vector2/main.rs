@@ -37,7 +37,7 @@ use rand_chacha::ChaCha8Rng;
 use tempfile::TempDir;
 
 use benchmark::{BenchmarkDataset, BenchmarkMetrics, DatasetConfig, DatasetName};
-use motlie_db::rocksdb::ColumnFamily;
+use motlie_db::rocksdb::{BlockCacheConfig, ColumnFamily};
 use motlie_db::vector::{
     EmbeddingCode, HnswConfig, HnswIndex, NavigationCache, Storage, VecId, VectorCfKey,
     VectorCfValue, Vectors,
@@ -87,6 +87,10 @@ struct Args {
     #[arg(long)]
     compare: bool,
 
+    /// Block cache size in MB (default: 256MB)
+    #[arg(long, default_value = "256")]
+    cache_size_mb: usize,
+
     /// Verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -120,6 +124,7 @@ async fn main() -> Result<()> {
     println!("  ef (search):     {}", args.ef);
     println!("  M:               {}", args.m);
     println!("  ef_construction: {}", args.ef_construction);
+    println!("  Cache Size:      {} MB", args.cache_size_mb);
     println!();
 
     // Load benchmark dataset
@@ -183,8 +188,9 @@ async fn run_phase2_benchmark(
 
     println!("Database path: {}", db_path.display());
 
-    // Initialize vector storage
-    let mut storage = Storage::readwrite(&db_path);
+    // Initialize vector storage with configurable cache size
+    let cache_config = BlockCacheConfig::with_cache_size(args.cache_size_mb * 1024 * 1024);
+    let mut storage = Storage::readwrite(&db_path).with_block_cache_config(cache_config);
     storage.ready()?;
 
     // Create HNSW configuration
@@ -249,6 +255,7 @@ async fn run_phase2_benchmark(
 
     let index_time = start.elapsed();
     metrics.num_vectors = args.num_vectors;
+    metrics.cache_size_mb = args.cache_size_mb;
     metrics.build_time_secs = index_time.as_secs_f64();
     metrics.build_throughput = args.num_vectors as f64 / index_time.as_secs_f64();
 
