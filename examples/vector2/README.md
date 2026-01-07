@@ -81,9 +81,59 @@ OPTIONS:
     --ef <N>                   Search beam width [default: 100]
     --m <N>                    HNSW M parameter [default: 16]
     --ef-construction <N>      ef_construction parameter [default: 200]
+    --cache-size-mb <N>        Block cache size in MB [default: 256]
     --compare                  Compare with old implementation
     -v, --verbose              Verbose output
 ```
+
+## Future Improvements
+
+The following optimizations are planned to improve search QPS. Items are prioritized based on
+impact and alignment with the ROADMAP phases.
+
+### High Priority (Phase 3: Batch Operations)
+
+These are the next planned improvements from `libs/db/src/vector/ROADMAP.md`:
+
+| Task | Description | Expected Impact | Effort |
+|------|-------------|-----------------|--------|
+| **3.1 O(1) Degree Queries** | Use `RoaringBitmap.len()` for degree checks | 95% prune overhead reduction | 0.5 day |
+| **3.2 Batch Neighbor Fetch** | MultiGet for beam search candidates | 3-5x search speedup | 1 day |
+| **3.3 Batch Vector Retrieval** | MultiGet for re-ranking vectors | 2x re-ranking speedup | 0.5 day |
+| **3.4 Batch ULID Resolution** | MultiGet for search result IDs | Faster result mapping | 0.5 day |
+
+### Medium Priority (Phase 2 Deferred + Cache Tuning)
+
+| Improvement | Description | Expected Impact |
+|-------------|-------------|-----------------|
+| **Upper Layer Edge Caching** | Cache edges for layers 2+ in memory | Reduce I/O for upper traversal |
+| **LRU Vector Cache** | In-memory cache for hot layer-0 vectors | 2-3x QPS for repeated queries |
+| **Larger Block Cache** | Increase from 256MB to 2-4GB | 2-5x QPS at 1M+ scale (see below) |
+| **Pin Hot Column Families** | Pin L0 blocks and bloom filters | 20-50% latency reduction |
+
+### Cache Size Analysis
+
+Search QPS is I/O bound. At scales where data exceeds cache, larger caches help significantly:
+
+| Scale | Disk Size | 256MB Cache | 2GB+ Cache | Speedup |
+|-------|-----------|-------------|------------|---------|
+| 100K | 241 MB | 267 QPS | 279 QPS | ~5% (data fits in either) |
+| 1M | 2.85 GB | 47 QPS | TBD | Expected 2-5x |
+
+Use `--cache-size-mb` to configure:
+```bash
+# Large cache for production workloads
+cargo run --release --example vector2 -- --dataset sift1m --num-vectors 1000000 --cache-size-mb 4096
+```
+
+### Lower Priority (Future Phases)
+
+| Phase | Improvement | Description |
+|-------|-------------|-------------|
+| Phase 4 | **Product Quantization (RaBitQ)** | 128D → 32 bytes, 16x smaller vectors |
+| Phase 4 | **Two-Stage Search** | Fast PQ scan + exact re-ranking |
+| Future | **SIMD Distance (AVX-512)** | 4-8x faster distance computation |
+| Future | **Memory-Mapped Vectors** | OS page cache for large datasets |
 
 ## Architecture
 

@@ -675,6 +675,8 @@ pub struct BenchmarkMetrics {
     pub num_queries: usize,
     /// K value for recall
     pub k: usize,
+    /// Block cache size in MB
+    pub cache_size_mb: usize,
     /// Index build time in seconds
     pub build_time_secs: f64,
     /// Index throughput (vectors/sec)
@@ -725,6 +727,7 @@ impl BenchmarkMetrics {
         println!("| Vectors | {} |", self.num_vectors);
         println!("| Queries | {} |", self.num_queries);
         println!("| K | {} |", self.k);
+        println!("| Cache Size | {} MB |", self.cache_size_mb);
         println!("| Build Time | {:.2}s |", self.build_time_secs);
         println!("| Build Throughput | {:.1} vec/s |", self.build_throughput);
         println!("| Avg Latency | {:.2}ms |", self.avg_search_latency_ms);
