@@ -249,6 +249,13 @@ impl HnswIndex {
             txn_db.merge_cf(&cf, reverse_key, reverse_op.to_bytes())?;
         }
 
+        // Invalidate edge cache for modified nodes (Phase 3.5/3.6)
+        // This ensures get_neighbors returns fresh data after edge updates
+        self.nav_cache.invalidate_edges(self.embedding, vec_id, layer);
+        for &neighbor_id in &neighbor_ids {
+            self.nav_cache.invalidate_edges(self.embedding, neighbor_id, layer);
+        }
+
         // TODO: Prune if degree exceeds M_max
         // This will be added when we implement degree-based pruning
 
@@ -588,18 +595,23 @@ impl HnswIndex {
 
     /// Get neighbors of a node at a specific layer.
     ///
-    /// NOTE: Edge caching is disabled during development.
-    /// The cache was causing stale reads during insert.
-    /// TODO: Add cache invalidation in connect_neighbors to re-enable.
+    /// Uses NavigationCache for edge caching:
+    /// - Upper layers (>= 2): Full caching in HashMap
+    /// - Lower layers (0-1): FIFO hot cache with bounded size
+    ///
+    /// Cache is invalidated in connect_neighbors() after edge modifications.
     fn get_neighbors(
         &self,
         storage: &Storage,
         vec_id: VecId,
         layer: HnswLayer,
     ) -> Result<RoaringBitmap> {
-        // Disabled caching - was causing stale reads during insert
-        // TODO: Re-enable with proper cache invalidation
-        self.get_neighbors_uncached(storage, vec_id, layer)
+        self.nav_cache.get_neighbors_cached(
+            self.embedding,
+            vec_id,
+            layer,
+            || self.get_neighbors_uncached(storage, vec_id, layer),
+        )
     }
 
     /// Get neighbors directly from RocksDB (no cache).
