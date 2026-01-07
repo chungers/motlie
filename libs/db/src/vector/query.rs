@@ -451,6 +451,10 @@ impl QueryExecutor for ResolveIds {
     type Output = Vec<Option<Id>>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        if self.vec_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let txn_db = storage.transaction_db()?;
         let reverse_cf = txn_db
             .cf_handle(IdReverse::CF_NAME)
@@ -466,18 +470,22 @@ impl QueryExecutor for ResolveIds {
             })
             .collect();
 
-        // Perform batch lookup
-        let results: Vec<Option<Id>> = keys
-            .iter()
-            .map(|key_bytes| {
-                match txn_db.get_cf(&reverse_cf, key_bytes) {
-                    Ok(Some(bytes)) => IdReverse::value_from_bytes(&bytes).ok().map(|v| v.0),
-                    _ => None,
-                }
+        // Perform batch lookup using multi_get_cf (Phase 3 optimization)
+        let results: Vec<std::result::Result<Option<Vec<u8>>, rocksdb::Error>> =
+            txn_db.multi_get_cf(keys.iter().map(|k| (&reverse_cf, k.as_slice())));
+
+        // Parse results, converting RocksDB errors to None
+        let resolved: Vec<Option<Id>> = results
+            .into_iter()
+            .map(|result| {
+                result
+                    .ok()
+                    .flatten()
+                    .and_then(|bytes| IdReverse::value_from_bytes(&bytes).ok().map(|v| v.0))
             })
             .collect();
 
-        Ok(results)
+        Ok(resolved)
     }
 
     fn timeout(&self) -> Duration {

@@ -337,6 +337,7 @@ impl HnswIndex {
     /// Greedy search at a single layer (for descent phase).
     ///
     /// Finds the single closest node by following edges greedily.
+    /// Uses batch_distances for efficient I/O.
     fn greedy_search_layer(
         &self,
         storage: &Storage,
@@ -350,10 +351,17 @@ impl HnswIndex {
 
         loop {
             let neighbors = self.get_neighbors(storage, current, layer)?;
-            let mut improved = false;
+            if neighbors.is_empty() {
+                break;
+            }
 
-            for neighbor in neighbors.iter() {
-                let dist = self.distance(storage, query, neighbor)?;
+            // Batch compute distances for all neighbors
+            let neighbor_ids: Vec<VecId> = neighbors.iter().collect();
+            let distances = self.batch_distances(storage, query, &neighbor_ids)?;
+
+            // Find the closest neighbor
+            let mut improved = false;
+            for (neighbor, dist) in distances {
                 if dist < current_dist {
                     current = neighbor;
                     current_dist = dist;
@@ -408,7 +416,15 @@ impl HnswIndex {
             })
     }
 
-    /// Generic beam search at any layer.
+    /// Batch size for beam search candidate processing.
+    /// Larger batches = fewer I/O round trips, but may do more work.
+    const BEAM_BATCH_SIZE: usize = 8;
+
+    /// Generic beam search at any layer (batched version).
+    ///
+    /// Uses batch operations to reduce I/O round trips:
+    /// - get_neighbors_batch: 1 I/O for all candidates in batch
+    /// - batch_distances: 1 I/O for all neighbor vectors
     fn beam_search(
         &self,
         storage: &Storage,
@@ -428,26 +444,63 @@ impl HnswIndex {
         results.push((OrderedFloat(entry_dist), entry));
         visited.insert(entry);
 
-        while let Some(Reverse((OrderedFloat(dist), node))) = candidates.pop() {
-            // If this candidate is farther than the worst result, stop
-            if results.len() >= ef {
-                if let Some(&(OrderedFloat(worst), _)) = results.peek() {
-                    if dist > worst {
-                        break;
+        while !candidates.is_empty() {
+            // Get current worst distance threshold
+            let worst_dist = if results.len() >= ef {
+                results.peek().map(|(OrderedFloat(d), _)| *d)
+            } else {
+                None
+            };
+
+            // Pop a batch of candidates, stopping if we hit the pruning threshold
+            let mut batch: Vec<VecId> = Vec::with_capacity(Self::BEAM_BATCH_SIZE);
+            while batch.len() < Self::BEAM_BATCH_SIZE {
+                match candidates.pop() {
+                    Some(Reverse((OrderedFloat(dist), node))) => {
+                        // Check pruning condition
+                        if let Some(worst) = worst_dist {
+                            if dist > worst {
+                                // This candidate and all remaining are too far, done
+                                // Put it back and break out of the main loop
+                                candidates.push(Reverse((OrderedFloat(dist), node)));
+                                batch.clear(); // Clear batch to signal termination
+                                break;
+                            }
+                        }
+                        batch.push(node);
                     }
+                    None => break,
                 }
             }
 
-            // Expand neighbors
-            let neighbors = self.get_neighbors(storage, node, layer)?;
-            for neighbor in neighbors.iter() {
-                if visited.contains(neighbor) {
-                    continue;
-                }
-                visited.insert(neighbor);
+            if batch.is_empty() {
+                break;
+            }
 
-                let neighbor_dist = self.distance(storage, query, neighbor)?;
+            // Batch fetch all neighbors for this batch
+            let neighbor_maps = self.get_neighbors_batch(storage, &batch, layer)?;
 
+            // Collect all unvisited neighbors
+            let unvisited_neighbors: Vec<VecId> = neighbor_maps
+                .iter()
+                .flat_map(|(_, bitmap)| bitmap.iter())
+                .filter(|&n| !visited.contains(n))
+                .collect();
+
+            // Mark as visited before fetching (to avoid duplicates in next batch)
+            for &n in &unvisited_neighbors {
+                visited.insert(n);
+            }
+
+            if unvisited_neighbors.is_empty() {
+                continue;
+            }
+
+            // Batch compute distances for all unvisited neighbors
+            let distances = self.batch_distances(storage, query, &unvisited_neighbors)?;
+
+            // Update candidates and results
+            for (neighbor, neighbor_dist) in distances {
                 // Add to candidates if promising
                 let should_add = results.len() < ef || {
                     let &(OrderedFloat(worst), _) = results.peek().unwrap();
@@ -539,7 +592,26 @@ impl HnswIndex {
     }
 
     /// Get neighbors of a node at a specific layer.
+    ///
+    /// For upper layers (>= min_cached_layer), uses the NavigationCache
+    /// to avoid RocksDB reads during descent.
     fn get_neighbors(
+        &self,
+        storage: &Storage,
+        vec_id: VecId,
+        layer: HnswLayer,
+    ) -> Result<RoaringBitmap> {
+        // Use cached lookup for upper layers (Phase 3.5)
+        self.nav_cache.get_neighbors_cached(
+            self.embedding,
+            vec_id,
+            layer,
+            || self.get_neighbors_uncached(storage, vec_id, layer),
+        )
+    }
+
+    /// Get neighbors directly from RocksDB (no cache).
+    fn get_neighbors_uncached(
         &self,
         storage: &Storage,
         vec_id: VecId,
@@ -562,6 +634,20 @@ impl HnswIndex {
         }
     }
 
+    /// Get the number of neighbors (degree) for a node at a specific layer.
+    ///
+    /// This uses `RoaringBitmap::len()` which is O(1) since the cardinality
+    /// is stored in the bitmap structure. Used for degree-based pruning checks.
+    pub fn get_neighbor_count(
+        &self,
+        storage: &Storage,
+        vec_id: VecId,
+        layer: HnswLayer,
+    ) -> Result<u64> {
+        let neighbors = self.get_neighbors(storage, vec_id, layer)?;
+        Ok(neighbors.len())
+    }
+
     /// Compute distance between query vector and stored vector.
     fn distance(&self, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
         let vector = self.get_vector(storage, vec_id)?;
@@ -582,6 +668,117 @@ impl HnswIndex {
             .ok_or_else(|| anyhow::anyhow!("Vector {} not found", vec_id))?;
 
         Vectors::value_from_bytes(&bytes).map(|v| v.0)
+    }
+
+    // =========================================================================
+    // Batch Operations (Phase 3)
+    // =========================================================================
+
+    /// Batch fetch vectors using RocksDB's multi_get_cf.
+    ///
+    /// Returns vectors in the same order as input vec_ids. Missing vectors
+    /// are represented as None.
+    pub fn get_vectors_batch(
+        &self,
+        storage: &Storage,
+        vec_ids: &[VecId],
+    ) -> Result<Vec<Option<Vec<f32>>>> {
+        if vec_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let txn_db = storage.transaction_db()?;
+        let cf = txn_db
+            .cf_handle(Vectors::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+
+        // Build keys
+        let keys: Vec<Vec<u8>> = vec_ids
+            .iter()
+            .map(|&id| Vectors::key_to_bytes(&VectorCfKey(self.embedding, id)))
+            .collect();
+
+        // Batch fetch using multi_get_cf
+        let results: Vec<std::result::Result<Option<Vec<u8>>, rocksdb::Error>> =
+            txn_db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())));
+
+        // Deserialize vectors
+        results
+            .into_iter()
+            .map(|result| {
+                result
+                    .map_err(|e| anyhow::anyhow!("RocksDB error: {}", e))?
+                    .map(|bytes| Vectors::value_from_bytes(&bytes).map(|v| v.0))
+                    .transpose()
+            })
+            .collect()
+    }
+
+    /// Batch compute distances from query to multiple vectors.
+    ///
+    /// Fetches all vectors in a single multi_get_cf call, then computes distances.
+    /// Returns (vec_id, distance) pairs for vectors that exist.
+    pub fn batch_distances(
+        &self,
+        storage: &Storage,
+        query: &[f32],
+        vec_ids: &[VecId],
+    ) -> Result<Vec<(VecId, f32)>> {
+        let vectors = self.get_vectors_batch(storage, vec_ids)?;
+
+        Ok(vec_ids
+            .iter()
+            .copied()
+            .zip(vectors.into_iter())
+            .filter_map(|(id, vec_opt)| vec_opt.map(|v| (id, l2_distance(query, &v))))
+            .collect())
+    }
+
+    /// Batch fetch neighbors for multiple nodes at a layer.
+    ///
+    /// Uses multi_get_cf for efficient batch lookup. Returns (vec_id, bitmap) pairs.
+    pub fn get_neighbors_batch(
+        &self,
+        storage: &Storage,
+        vec_ids: &[VecId],
+        layer: HnswLayer,
+    ) -> Result<Vec<(VecId, RoaringBitmap)>> {
+        if vec_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let txn_db = storage.transaction_db()?;
+        let cf = txn_db
+            .cf_handle(Edges::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Edges CF not found"))?;
+
+        // Build keys
+        let keys: Vec<Vec<u8>> = vec_ids
+            .iter()
+            .map(|&id| Edges::key_to_bytes(&EdgeCfKey(self.embedding, id, layer)))
+            .collect();
+
+        // Batch fetch
+        let results: Vec<std::result::Result<Option<Vec<u8>>, rocksdb::Error>> =
+            txn_db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())));
+
+        // Deserialize bitmaps
+        vec_ids
+            .iter()
+            .copied()
+            .zip(results.into_iter())
+            .map(|(id, result)| {
+                let bitmap = result
+                    .map_err(|e| anyhow::anyhow!("RocksDB error: {}", e))?
+                    .map(|bytes| {
+                        RoaringBitmap::deserialize_from(&bytes[..])
+                            .context("Failed to deserialize edge bitmap")
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                Ok((id, bitmap))
+            })
+            .collect()
     }
 }
 
