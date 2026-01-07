@@ -30,6 +30,9 @@ rkyv = { version = "0.7", features = ["validation", "strict"] }
 bytecheck = { version = "0.6" }
 # RoaringBitmap for HNSW edges and ID allocator free lists
 roaring = "0.10"
+# HNSW algorithm dependencies
+ordered-float = "4"
+rand = "0.8"
 
 [dev-dependencies]
 tempfile = "3.14"

@@ -152,16 +152,16 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  ├── 1.4 ID allocation persistence and recovery ✓                          │
 │  └── 1.5 Storage API: mutation/query/writer/reader infrastructure ✓        │
 │                                                                              │
-│  Phase 2: HNSW2 Core + Navigation Layer [THR-1]                             │
-│  ├── 2.1 RoaringBitmap edge storage                                        │
-│  ├── 2.2 RocksDB merge operators for edge updates                          │
-│  ├── 2.3 Vector storage CF (raw f32 bytes)                                 │
-│  ├── 2.4 Node metadata CF (layer, flags)                                   │
-│  ├── 2.5 Graph metadata CF (entry point, stats)                            │
-│  ├── 2.6 HNSW insert algorithm with bitmap edges                           │
-│  ├── 2.7 Navigation layer structure (entry points per layer)               │
-│  ├── 2.8 Layer descent search algorithm                                    │
-│  └── 2.9 Memory-cached top layers (NavigationCache)                        │
+│  Phase 2: HNSW2 Core + Navigation Layer [THR-1] ✓ COMPLETE                │
+│  ├── 2.1 RoaringBitmap edge storage ✓                                     │
+│  ├── 2.2 RocksDB merge operators for edge updates ✓                       │
+│  ├── 2.3 Vector storage CF (raw f32 bytes) ✓                              │
+│  ├── 2.4 Node metadata CF (layer, flags) ✓                                │
+│  ├── 2.5 Graph metadata CF (entry point, stats) ✓                         │
+│  ├── 2.6 HNSW insert algorithm with bitmap edges ✓                        │
+│  ├── 2.7 Navigation layer structure (entry points per layer) ✓            │
+│  ├── 2.8 Layer descent search algorithm ✓                                 │
+│  └── 2.9 Memory-cached top layers (NavigationCache) ✓                     │
 │                                                                              │
 │  Phase 3: Batch Operations [THR-1, THR-3]                                   │
 │  ├── 3.1 O(1) degree queries via RoaringBitmap.len()                       │
@@ -1754,7 +1754,7 @@ async fn test_reader_mpmc_load_balancing() {
 
 ---
 
-## Phase 2: HNSW2 Core + Navigation Layer
+## Phase 2: HNSW2 Core + Navigation Layer ✓ COMPLETE
 
 **Goal:** Implement optimized HNSW with roaring bitmap edges per `examples/vector/HNSW2.md`,
 including the hierarchical navigation layer for O(log N) search complexity.
@@ -1762,6 +1762,11 @@ including the hierarchical navigation layer for O(log N) search complexity.
 **Target:** Achieve [THR-1] 5,000+ inserts/sec (125x improvement from 40/s).
 
 **Design Reference:** `examples/vector/HYBRID.md` - Navigation Layer (Phase 4)
+
+**Implementation Files:**
+- [`merge.rs`](merge.rs) - RocksDB merge operators for concurrent edge updates
+- [`navigation.rs`](navigation.rs) - Navigation layer structure and cache
+- [`hnsw.rs`](hnsw.rs) - HNSW insert and search algorithms
 
 ### Task 2.1: RoaringBitmap Edge Storage
 
@@ -5624,3 +5629,5 @@ cargo run -p motlie_core --example simd_check
 | 2026-01-03 | 31 unit tests passing for Phase 0 types and schema | Claude Opus 4.5 |
 | 2026-01-04 | **cac8da3** Refactor vector schema: semantic types (EmbeddingCode, VecId, HnswLayer, RoaringBitmapBytes, RabitqCode), union pattern for polymorphic CFs (GraphMeta, IdAlloc), README documentation | Claude Opus 4.5 |
 | 2026-01-04 | Replaced Phase 0 and Phase 1 code blocks with source file links (20 blocks total) | Claude Opus 4.5 |
+| 2026-01-06 | **IMPLEMENTED** Phase 2: merge.rs (EdgeOp merge operators), navigation.rs (NavigationLayerInfo, NavigationCache), hnsw.rs (HnswIndex with insert/search) | Claude Opus 4.5 |
+| 2026-01-06 | 80 unit tests passing for vector module (Phases 0-2) | Claude Opus 4.5 |

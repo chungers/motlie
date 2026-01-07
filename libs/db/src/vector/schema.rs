@@ -62,13 +62,13 @@ use super::subsystem::VectorBlockCacheConfig;
 /// This is the primary key of the `EmbeddingSpecs` CF and serves as a
 /// foreign key in all other vector CFs. Using a type alias makes the
 /// relationship explicit without relying on comments.
-pub(crate) type EmbeddingCode = u64;
+pub type EmbeddingCode = u64;
 
 /// Internal vector identifier within an embedding space.
 ///
 /// Compact u32 index used for HNSW graph edges and storage.
 /// Mapped bidirectionally to external ULIDs via IdForward/IdReverse CFs.
-pub(crate) type VecId = u32;
+pub type VecId = u32;
 
 /// HNSW graph layer index.
 ///
@@ -187,15 +187,15 @@ impl ColumnFamilySerde for EmbeddingSpecs {
 ///
 /// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
 /// Value: f32[dim] as raw bytes (e.g., 512 bytes for 128D)
-pub(crate) struct Vectors;
+pub struct Vectors;
 
 /// Vectors key: (embedding_code, vec_id)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct VectorCfKey(pub(crate) EmbeddingCode, pub(crate) VecId);
+pub struct VectorCfKey(pub EmbeddingCode, pub VecId);
 
 /// Vectors value: raw f32 vector data
 #[derive(Debug, Clone)]
-pub(crate) struct VectorCfValue(pub(crate) Vec<f32>);
+pub struct VectorCfValue(pub Vec<f32>);
 
 impl ColumnFamily for Vectors {
     const CF_NAME: &'static str = "vector/vectors";
@@ -296,6 +296,13 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for Edges {
         opts.set_compression_type(rocksdb::DBCompressionType::None);
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
         opts.set_block_based_table_factory(&block_opts);
+
+        // Configure merge operator for concurrent edge updates
+        opts.set_merge_operator_associative(
+            super::merge::EDGE_MERGE_OPERATOR_NAME,
+            super::merge::edge_full_merge,
+        );
+
         opts
     }
 }

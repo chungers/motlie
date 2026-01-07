@@ -27,8 +27,11 @@ pub mod config;
 pub mod distance;
 pub mod embedding;
 mod error;
+pub mod hnsw;
 pub mod id;
+pub mod merge;
 pub mod mutation;
+pub mod navigation;
 pub mod processor;
 pub mod query;
 pub mod reader;
@@ -41,10 +44,14 @@ pub mod writer;
 pub use config::{HnswConfig, RaBitQConfig, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
+pub use hnsw::HnswIndex;
 pub use id::IdAllocator;
+pub use navigation::{NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
 pub use processor::Processor;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
-pub use schema::ALL_COLUMN_FAMILIES;
+pub use schema::{
+    ALL_COLUMN_FAMILIES, EmbeddingCode, VecId, VectorCfKey, VectorCfValue, Vectors,
+};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{EmbeddingRegistryConfig, Subsystem, VectorBlockCacheConfig};
