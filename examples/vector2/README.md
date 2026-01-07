@@ -113,12 +113,21 @@ These are the next planned improvements from `libs/db/src/vector/ROADMAP.md`:
 
 ### Cache Size Analysis
 
-Search QPS is I/O bound. At scales where data exceeds cache, larger caches help significantly:
+**Key insight:** Cache size impacts **search QPS**, not build speed. Build is write-bound (~62 vec/s
+at 1M scale = ~4.5 hours). Search is read-bound and benefits from larger cache when data exceeds
+cache size.
 
 | Scale | Disk Size | 256MB Cache | 2GB+ Cache | Speedup |
 |-------|-----------|-------------|------------|---------|
 | 100K | 241 MB | 267 QPS | 279 QPS | ~5% (data fits in either) |
 | 1M | 2.85 GB | 47 QPS | TBD | Expected 2-5x |
+
+**Why 1M cache comparison is deferred:** Building a 1M index takes ~4.5 hours. We will re-run
+this comparison after Phase 3 batch operations are implemented, which will:
+1. Speed up build time via MultiGet during greedy search (target: 2-3x faster)
+2. Speed up search via batch neighbor/vector fetches (target: 3-5x faster)
+
+This allows us to measure cache impact on search with reasonable build times.
 
 Use `--cache-size-mb` to configure:
 ```bash
