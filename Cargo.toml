@@ -161,6 +161,10 @@ path = "examples/vector/vamana.rs"
 name = "simd_bench"
 path = "examples/vector/simd_bench.rs"
 
+[[example]]
+name = "vector2"
+path = "examples/vector2/main.rs"
+
 [[bin]]
 name = "motlie"
 path = "bins/motlie/src/main.rs"
