@@ -37,6 +37,41 @@ throughput improvement and 10x search QPS improvement.
 
 ---
 
+## Table of Contents
+
+### Implementation Phases
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| [Phase 0](#phase-0-foundation) | Foundation (Schema, CFs, Distance) | ✅ Complete |
+| [Phase 1](#phase-1-id-management) | ID Management (ULID ↔ u32 mapping) | ✅ Complete |
+| [Phase 2](#phase-2-hnsw2-core--navigation-layer--core-complete) | HNSW2 Core + Navigation Layer | ✅ Complete |
+| [Phase 3](#phase-3-batch-operations--deferred-items) | Batch Operations + Deferred Items | ✅ Complete |
+| [Phase 4](#phase-4-rabitq-compression) | RaBitQ Compression | 🔄 In Progress |
+| [Phase 5](#phase-5-async-graph-updater-online-updates) | Async Graph Updater (Online Updates) | 🔲 Not Started |
+| [Phase 6](#phase-6-production-hardening) | Production Hardening | 🔲 Not Started |
+
+### Phase 4 Tasks (Current)
+
+| Task | Description | Status |
+|------|-------------|--------|
+| [Task 4.1-4.7](#phase-4-rabitq-compression) | Core RaBitQ implementation | ✅ Complete |
+| [Task 4.8](#task-48-implementation--results) | Hybrid L2 + Hamming (disproven) | ✅ Complete |
+| [Task 4.9](#task-49-rabitq-tuning-configuration-analysis) | RaBitQ Tuning Analysis | ✅ Complete |
+| [Task 4.10](#task-410-in-memory-binary-code-cache) | In-Memory Binary Code Cache | ✅ Complete |
+| [Task 4.11](#task-411-api-cleanup-phase-1---deprecate-invalidated-functions) | API Cleanup: Deprecate Functions | ✅ Complete |
+| [Task 4.12](#task-412-api-cleanup-phase-2---remove-deprecated-code) | API Cleanup: Remove Dead Code | 🔲 Not Started |
+| [Task 4.13](#task-413-api-cleanup-phase-3---unified-searchstrategy-api) | API Cleanup: SearchStrategy API | 🔲 Not Started |
+| [Task 4.14](#task-414-api-cleanup-phase-4---configuration-validation) | API Cleanup: Config Validation | 🔲 Not Started |
+| [Task 4.15](#task-415-phase-5-integration-planning) | Phase 5 Integration Planning | 🔲 Not Started |
+
+### Other Sections
+
+- [Design Decisions](#design-decisions) - Why RaBitQ, Architecture choices
+- [Implementation Timeline](#implementation-timeline) - Estimated effort per phase
+
+---
+
 ## Design Decisions
 
 ### Why RaBitQ Instead of Product Quantization (PQ)
