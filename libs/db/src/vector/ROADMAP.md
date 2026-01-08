@@ -4206,6 +4206,217 @@ Comprehensive recall tests added to validate HNSW parameter tuning.
 
 ---
 
+#### Task 4.11: API Cleanup Phase 1 - Deprecate Invalidated Functions
+
+**Status:** ✅ Complete
+
+**Goal:** Mark functions invalidated by Phase 4 experiments as deprecated.
+
+**Changes (commit ce2a060):**
+
+| Method | Annotation | Reason |
+|--------|------------|--------|
+| `search_with_rabitq()` | `#[deprecated]` | Double I/O, slower than L2 at scale (Task 4.9) |
+| `search_hybrid()` | `#[deprecated]` | Worse than baseline (Task 4.8) |
+| `search_hamming_filter()` | `#[deprecated]` + `#[allow(dead_code)]` | Never used, experimental |
+| `beam_search_layer0_hamming()` | `#[allow(dead_code)]` | Only used by deprecated functions |
+
+**Acceptance Criteria:**
+- [x] Add `#[deprecated]` annotations with clear migration guidance
+- [x] Document why each function is deprecated
+- [x] Point to recommended alternatives
+
+---
+
+#### Task 4.12: API Cleanup Phase 2 - Remove Deprecated Code
+
+**Status:** 🔲 Not Started
+
+**Goal:** Remove deprecated functions and dead code from the crate.
+
+**Functions to Remove:**
+
+```rust
+// Remove entirely:
+pub fn search_hybrid(...)           // ~60 lines
+pub fn search_hamming_filter(...)   // ~60 lines
+pub fn search_with_rabitq(...)      // ~65 lines (RocksDB version)
+fn beam_search_layer0_hamming(...)  // ~55 lines (uncached version)
+
+// Total: ~240 lines of dead code
+```
+
+**Migration:**
+- `search_hybrid` → `search()` (standard L2)
+- `search_with_rabitq` → `search_with_rabitq_cached()` (requires BinaryCodeCache)
+- `search_hamming_filter` → `search_with_rabitq_cached()`
+
+**Acceptance Criteria:**
+- [ ] Remove all deprecated functions
+- [ ] Update any internal callers
+- [ ] Verify cargo test passes
+- [ ] Update examples if needed
+
+---
+
+#### Task 4.13: API Cleanup Phase 3 - Unified SearchStrategy API
+
+**Status:** 🔲 Not Started
+
+**Goal:** Create a type-safe search API that prevents misuse.
+
+**Proposed Design:**
+
+```rust
+/// Search strategy - guides users to correct usage
+pub enum SearchStrategy {
+    /// Standard L2 search - best recall, recommended default
+    Standard,
+
+    /// Quantized search with cached binary codes
+    /// - 2-9x faster than Standard
+    /// - Requires pre-populated BinaryCodeCache
+    /// - Lower recall (use rerank_factor >= 8 for >90%)
+    Quantized {
+        encoder: Arc<RaBitQ>,
+        code_cache: Arc<BinaryCodeCache>,
+        rerank_factor: usize,
+    },
+}
+
+impl HnswIndex {
+    /// Unified search API
+    pub fn search(
+        &self,
+        storage: &Storage,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        strategy: &SearchStrategy,
+    ) -> Result<Vec<(f32, VecId)>>;
+}
+```
+
+**Benefits:**
+- Single entry point prevents calling wrong function
+- Type system enforces required parameters
+- Documentation in enum variants guides users
+
+**Acceptance Criteria:**
+- [ ] Implement `SearchStrategy` enum
+- [ ] Unified `search()` method accepting strategy
+- [ ] Deprecate old individual search methods
+- [ ] Update benchmark to use new API
+- [ ] Documentation with usage examples
+
+---
+
+#### Task 4.14: API Cleanup Phase 4 - Configuration Validation
+
+**Status:** 🔲 Not Started
+
+**Goal:** Prevent misconfiguration through validation and presets.
+
+**Proposed Design:**
+
+```rust
+impl HnswConfig {
+    /// Validate configuration, return warnings for suboptimal settings
+    pub fn validate(&self) -> Result<(), Vec<ConfigWarning>> {
+        let mut warnings = Vec::new();
+
+        if self.m < 8 {
+            warnings.push(ConfigWarning::LowM(
+                "M < 8 may cause poor recall at scale"
+            ));
+        }
+        if self.ef_construction < self.m * 2 {
+            warnings.push(ConfigWarning::LowEfConstruction(
+                "ef_construction should be >= 2*M"
+            ));
+        }
+        // ...
+    }
+}
+
+impl RaBitQ {
+    /// Create with validation
+    pub fn new(dim: usize, bits_per_dim: u8, seed: u64) -> Result<Self, ConfigError> {
+        if ![1, 2, 4].contains(&bits_per_dim) {
+            return Err(ConfigError::InvalidBitsPerDim);
+        }
+        // ...
+    }
+}
+```
+
+**Presets with Documented Tradeoffs:**
+
+| Preset | M | ef_construction | Use Case |
+|--------|---|-----------------|----------|
+| `default()` | 16 | 200 | Balanced recall/memory |
+| `high_recall()` | 32 | 400 | >99% recall requirements |
+| `compact()` | 8 | 100 | Memory-constrained (~5% recall loss) |
+
+**Acceptance Criteria:**
+- [ ] Add `validate()` method to HnswConfig
+- [ ] Add `validate()` method to RaBitQConfig
+- [ ] Return warnings, not errors (allow advanced users to override)
+- [ ] Document tradeoffs in preset methods
+- [ ] Add builder pattern with validation
+
+---
+
+#### Task 4.15: Phase 5 Integration Planning
+
+**Status:** 🔲 Not Started
+
+**Goal:** Ensure API cleanup is compatible with Phase 5 (Async Graph Updater).
+
+**Analysis Summary:**
+
+SearchStrategy design is **orthogonal and compatible** with Phase 5:
+
+| Phase 5 Feature | SearchStrategy Impact |
+|-----------------|----------------------|
+| `insert_async()` | ✅ Search works regardless of insert mode |
+| Binary codes (Phase 1 sync) | ✅ BinaryCodeCache populated immediately |
+| Pending vectors | ✅ Found via graph expansion |
+| Background updater | ✅ Improves recall over time |
+
+**Integration Points:**
+
+```rust
+// Phase 5 insert populates cache for SearchStrategy::Quantized
+pub fn insert_async(&self, embedding: &Embedding, vector: &[f32]) -> Result<Id> {
+    // Phase 1: Sync writes
+    let id = self.allocate_id()?;
+    self.store_vector(embedding, id, vector)?;
+
+    // Store binary code AND populate cache
+    if let Some(rabitq) = self.rabitq.as_ref() {
+        let code = rabitq.encode(vector);
+        self.store_binary_code(embedding, id, &code)?;
+
+        // Populate cache for immediate quantized searchability
+        if let Some(cache) = self.code_cache.as_ref() {
+            cache.put(embedding.code(), id, code);
+        }
+    }
+
+    self.add_to_pending(embedding, id)?;
+    Ok(id)
+}
+```
+
+**Acceptance Criteria:**
+- [ ] Document Phase 5 compatibility in SearchStrategy
+- [ ] Ensure BinaryCodeCache integrates with async insert
+- [ ] Test quantized search on pending vectors
+- [ ] Benchmark async insert + quantized search latency
+
+---
+
 **Task 4.7 Acceptance Criteria:**
 - [x] SIMD Hamming distance in motlie_core with tests
 - [x] RaBitQ using SIMD Hamming
