@@ -39,8 +39,8 @@ use tempfile::TempDir;
 use benchmark::{BenchmarkDataset, BenchmarkMetrics, DatasetConfig, DatasetName};
 use motlie_db::rocksdb::{BlockCacheConfig, ColumnFamily};
 use motlie_db::vector::{
-    BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, HnswConfig, HnswIndex,
-    NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue, Vectors,
+    BinaryCodeCache, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, HnswConfig,
+    HnswIndex, NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue, Vectors,
 };
 
 // ============================================================================
@@ -95,6 +95,11 @@ struct Args {
     #[arg(long)]
     rabitq: bool,
 
+    /// Enable RaBitQ with in-memory cached binary codes (Task 4.10)
+    /// This eliminates RocksDB reads during beam search for maximum performance
+    #[arg(long)]
+    rabitq_cached: bool,
+
     /// Enable hybrid search (L2 navigation + Hamming validation)
     #[arg(long)]
     hybrid: bool,
@@ -143,14 +148,16 @@ async fn main() -> Result<()> {
     println!("  Cache Size:      {} MB", args.cache_size_mb);
     let search_mode_str = if args.hybrid {
         "hybrid (L2 nav + Hamming filter)"
+    } else if args.rabitq_cached {
+        "rabitq-cached (in-memory Hamming nav + L2 rerank)"
     } else if args.rabitq {
         "rabitq (Hamming nav + L2 rerank)"
     } else {
         "standard (L2 only)"
     };
     println!("  Search Mode:     {}", search_mode_str);
-    if args.rabitq || args.hybrid {
-        if args.rabitq {
+    if args.rabitq || args.rabitq_cached || args.hybrid {
+        if args.rabitq || args.rabitq_cached {
             println!("  Rerank Factor:   {}", args.rerank_factor);
         }
         println!("  Bits/Dim:        {}", args.bits_per_dim);
@@ -203,6 +210,8 @@ async fn run_phase2_benchmark(
     let mut metrics = BenchmarkMetrics::new(&dataset_str, "HNSW2-RocksDB");
     metrics.search_mode = if args.hybrid {
         format!("hybrid(bits={})", args.bits_per_dim)
+    } else if args.rabitq_cached {
+        format!("RaBitQ-cached(rerank={}x,bits={})", args.rerank_factor, args.bits_per_dim)
     } else if args.rabitq {
         format!("RaBitQ(rerank={}x,bits={})", args.rerank_factor, args.bits_per_dim)
     } else {
@@ -249,10 +258,17 @@ async fn run_phase2_benchmark(
     // Prepare random number generator
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
-    // Create RaBitQ encoder for binary code generation (if rabitq or hybrid enabled)
-    let build_encoder = if args.rabitq || args.hybrid {
+    // Create RaBitQ encoder for binary code generation (if rabitq, rabitq_cached, or hybrid enabled)
+    let build_encoder = if args.rabitq || args.rabitq_cached || args.hybrid {
         let dim = benchmark_data.map(|d| d.dimensions).unwrap_or(128);
         Some(RaBitQ::new(dim, args.bits_per_dim, 42))
+    } else {
+        None
+    };
+
+    // Create in-memory binary code cache (if rabitq_cached enabled)
+    let code_cache = if args.rabitq_cached {
+        Some(BinaryCodeCache::new())
     } else {
         None
     };
@@ -267,8 +283,8 @@ async fn run_phase2_benchmark(
         .cf_handle(Vectors::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
 
-    // Get BinaryCodes CF handle if RaBitQ or hybrid enabled
-    let binary_codes_cf = if args.rabitq || args.hybrid {
+    // Get BinaryCodes CF handle if RaBitQ, RaBitQ-cached, or hybrid enabled
+    let binary_codes_cf = if args.rabitq || args.rabitq_cached || args.hybrid {
         Some(
             txn_db
                 .cf_handle(BinaryCodes::CF_NAME)
@@ -300,13 +316,20 @@ async fn run_phase2_benchmark(
         // Store binary code if RaBitQ enabled
         if let (Some(ref encoder), Some(ref cf)) = (&build_encoder, &binary_codes_cf) {
             let code = encoder.encode(&vector);
+
+            // Store in RocksDB
             let bc_key = BinaryCodeCfKey(embedding_code, vec_id);
-            let bc_value = BinaryCodeCfValue(code);
+            let bc_value = BinaryCodeCfValue(code.clone());
             txn_db.put_cf(
                 cf,
                 BinaryCodes::key_to_bytes(&bc_key),
                 BinaryCodes::value_to_bytes(&bc_value),
             )?;
+
+            // Also populate in-memory cache if rabitq_cached mode
+            if let Some(ref cache) = code_cache {
+                cache.put(embedding_code, vec_id, code);
+            }
         }
 
         vec_id_to_index.insert(vec_id, i);
@@ -345,11 +368,19 @@ async fn run_phase2_benchmark(
 
     let search_mode = if args.hybrid {
         format!("hybrid (L2 nav + Hamming filter, bits={})", args.bits_per_dim)
+    } else if args.rabitq_cached {
+        format!("RaBitQ-cached (in-memory, rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
     } else if args.rabitq {
         format!("RaBitQ (rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
     } else {
         "standard".to_string()
     };
+
+    // Print cache stats if rabitq_cached enabled
+    if let Some(ref cache) = code_cache {
+        let (count, bytes) = cache.stats();
+        println!("Binary Code Cache: {} entries, {} KB", count, bytes / 1024);
+    }
     println!("\nRunning {} queries (k={}, ef={}, mode={})...", actual_queries, args.k, args.ef, search_mode);
 
     let mut total_recall = 0.0;
@@ -362,11 +393,15 @@ async fn run_phase2_benchmark(
             generate_random_vector(128, &mut rng)
         };
 
-        // HNSW search (standard, hybrid, or rabitq)
+        // HNSW search (standard, hybrid, rabitq, or rabitq_cached)
         let search_start = Instant::now();
         let results = if args.hybrid {
             let encoder = rabitq_encoder.as_ref().expect("Encoder required for hybrid mode");
             index.search_hybrid(&storage, &query, encoder, args.k, args.ef)?
+        } else if args.rabitq_cached {
+            let encoder = rabitq_encoder.as_ref().expect("Encoder required for rabitq_cached mode");
+            let cache = code_cache.as_ref().expect("Code cache required for rabitq_cached mode");
+            index.search_with_rabitq_cached(&storage, &query, encoder, cache, args.k, args.ef, args.rerank_factor)?
         } else if args.rabitq {
             let encoder = rabitq_encoder.as_ref().expect("Encoder required for rabitq mode");
             index.search_with_rabitq(&storage, &query, encoder, args.k, args.ef, args.rerank_factor)?

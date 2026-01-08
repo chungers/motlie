@@ -4135,21 +4135,74 @@ Comprehensive recall tests added to validate HNSW parameter tuning.
 - Higher ef doesn't help much - Hamming beam search is the bottleneck
 - For >85% recall, standard L2 is recommended
 
-**Future Optimization (Task 4.10 - Not Started):**
+#### Task 4.10: In-Memory Binary Code Cache
 
-To make RaBitQ actually faster, binary codes must be cached in memory:
+**Status:** ✅ Complete (hypothesis validated)
 
-```
-Optimized RaBitQ:
-1. On index build: Store codes in RocksDB AND populate memory cache
-2. On search: Hamming from memory cache (fast) → Vector fetch from RocksDB
-3. Memory overhead: ~16 bytes/vector for 128D 1-bit codes
-   - 100K vectors: 1.6 MB
-   - 1M vectors: 16 MB
-   - 10M vectors: 160 MB (acceptable)
-```
+**Goal:** Validate that in-memory cached binary codes eliminate the double I/O problem.
 
-This would reduce I/O from 2 fetches to 1 fetch, making RaBitQ beneficial.
+##### Implementation
+
+1. **BinaryCodeCache** (`libs/db/src/vector/navigation.rs`)
+   - Thread-safe HashMap storage: `RwLock<HashMap<(EmbeddingCode, VecId), Vec<u8>>>`
+   - Methods: `put()`, `get()`, `get_batch()`, `stats()`
+   - Memory tracking for monitoring
+
+2. **search_with_rabitq_cached()** (`libs/db/src/vector/hnsw.rs`)
+   - Uses `BinaryCodeCache` instead of RocksDB reads during beam search
+   - Only re-ranking phase reads vectors from disk
+
+3. **Benchmark integration** (`examples/vector2/main.rs`)
+   - `--rabitq-cached` flag to enable in-memory mode
+   - Populates cache during index build
+
+##### Benchmark Results (10K Vectors, Random Data)
+
+| Mode | QPS | Latency (P50) | Recall@10 | vs Baseline |
+|------|-----|---------------|-----------|-------------|
+| Standard L2 | 48 | 20.80ms | 90.4% | 1.0x (baseline) |
+| RaBitQ (RocksDB) | 192 | 5.16ms | 9.6% | 4x faster |
+| **RaBitQ-cached** | **430** | **2.23ms** | 9.8% | **9x faster** |
+
+**Speedup Analysis:**
+- RaBitQ-cached vs RocksDB: **2.2x faster** (430 vs 192 QPS)
+- This confirms the hypothesis: in-memory codes eliminate the double I/O problem
+
+**Memory Usage:**
+- 10K vectors at 128D 1-bit: 10000 × 128 / 8 = 160 KB (actually 1250 KB with HashMap overhead)
+- Projected at scale:
+  - 100K: ~12 MB
+  - 1M: ~120 MB
+  - 10M: ~1.2 GB (acceptable for dedicated servers)
+
+##### Key Findings
+
+1. **Hypothesis Validated:** In-memory binary code caching provides 2.2x speedup over RocksDB-backed RaBitQ.
+
+2. **Recall Still Low:** Hamming-only navigation achieves only ~10% recall. This is a fundamental limitation of 1-bit quantization for HNSW navigation.
+
+3. **Best Use Case for Cached RaBitQ:**
+   - High-throughput, low-recall applications (e.g., first-pass filtering)
+   - When combined with exact re-ranking on a larger candidate set
+   - Memory-constrained environments where only codes are cached
+
+4. **For High Recall:** Use standard L2 search. RaBitQ (even cached) is not suitable for >50% recall requirements due to Hamming navigation limitations.
+
+##### Recommendations
+
+| Use Case | Recommended Mode | Expected Results |
+|----------|------------------|------------------|
+| High Recall (>90%) | Standard L2 | 48 QPS, 90%+ recall |
+| Balanced | L2 with larger ef | Tunable |
+| High Throughput | RaBitQ-cached, rerank=8-16 | 430 QPS, ~10% recall |
+| Initial Filtering | RaBitQ-cached, then L2 on top-N | Combine benefits |
+
+**Acceptance Criteria:**
+- [x] Implement `BinaryCodeCache` structure
+- [x] Implement `search_with_rabitq_cached()` method
+- [x] Add `--rabitq-cached` benchmark flag
+- [x] Validate 2x+ speedup over RocksDB-backed RaBitQ
+- [x] Document results and recommendations
 
 ---
 

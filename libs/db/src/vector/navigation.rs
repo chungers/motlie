@@ -428,6 +428,123 @@ impl Default for NavigationCache {
 }
 
 // ============================================================================
+// BinaryCodeCache (Phase 4.10)
+// ============================================================================
+
+/// In-memory cache for RaBitQ binary codes.
+///
+/// Caches binary codes to avoid RocksDB reads during Hamming-based beam search.
+/// This addresses the "double I/O" problem where RaBitQ is slower than standard
+/// L2 search due to fetching both binary codes and vectors from disk.
+///
+/// # Background
+///
+/// Task 4.9 benchmarking revealed that RaBitQ with RocksDB-backed binary codes
+/// is SLOWER at 100K scale because:
+/// 1. Binary code fetch: RocksDB read for each candidate's code
+/// 2. Vector fetch: RocksDB read for top candidates during re-ranking
+///
+/// With in-memory caching, Hamming distance computation becomes nearly free
+/// (SIMD popcount on cached bytes), making RaBitQ viable for speedup.
+///
+/// # Memory Usage
+///
+/// For 1-bit RaBitQ at 128D:
+/// - Binary code: 16 bytes per vector
+/// - 100K vectors: ~1.6 MB
+/// - 1M vectors: ~16 MB
+///
+/// This is small compared to the 512 bytes/vector for full vectors.
+pub struct BinaryCodeCache {
+    /// Cached binary codes: (embedding_code, vec_id) -> binary_code
+    codes: RwLock<HashMap<(EmbeddingCode, VecId), Vec<u8>>>,
+
+    /// Total bytes cached (for monitoring)
+    cache_bytes: RwLock<usize>,
+}
+
+impl BinaryCodeCache {
+    /// Create a new empty cache.
+    pub fn new() -> Self {
+        Self {
+            codes: RwLock::new(HashMap::new()),
+            cache_bytes: RwLock::new(0),
+        }
+    }
+
+    /// Insert a binary code into the cache.
+    pub fn put(&self, embedding: EmbeddingCode, vec_id: VecId, code: Vec<u8>) {
+        if let Ok(mut cache) = self.codes.write() {
+            let code_len = code.len();
+            cache.insert((embedding, vec_id), code);
+            if let Ok(mut bytes) = self.cache_bytes.write() {
+                *bytes += code_len;
+            }
+        }
+    }
+
+    /// Get a binary code from the cache.
+    pub fn get(&self, embedding: EmbeddingCode, vec_id: VecId) -> Option<Vec<u8>> {
+        self.codes.read().ok()?.get(&(embedding, vec_id)).cloned()
+    }
+
+    /// Get binary codes for multiple vectors.
+    ///
+    /// Returns a vector of Option<Vec<u8>> in the same order as vec_ids.
+    /// Missing codes are None.
+    pub fn get_batch(&self, embedding: EmbeddingCode, vec_ids: &[VecId]) -> Vec<Option<Vec<u8>>> {
+        if let Ok(cache) = self.codes.read() {
+            vec_ids
+                .iter()
+                .map(|&id| cache.get(&(embedding, id)).cloned())
+                .collect()
+        } else {
+            vec![None; vec_ids.len()]
+        }
+    }
+
+    /// Check if a code is cached.
+    pub fn contains(&self, embedding: EmbeddingCode, vec_id: VecId) -> bool {
+        self.codes
+            .read()
+            .ok()
+            .map(|c| c.contains_key(&(embedding, vec_id)))
+            .unwrap_or(false)
+    }
+
+    /// Get cache statistics: (entry_count, total_bytes)
+    pub fn stats(&self) -> (usize, usize) {
+        let count = self.codes.read().map(|c| c.len()).unwrap_or(0);
+        let bytes = self.cache_bytes.read().map(|b| *b).unwrap_or(0);
+        (count, bytes)
+    }
+
+    /// Clear all cached codes.
+    pub fn clear(&self) {
+        if let Ok(mut cache) = self.codes.write() {
+            cache.clear();
+        }
+        if let Ok(mut bytes) = self.cache_bytes.write() {
+            *bytes = 0;
+        }
+    }
+
+    /// Get number of cached entries for a specific embedding space.
+    pub fn count_for_embedding(&self, embedding: EmbeddingCode) -> usize {
+        self.codes
+            .read()
+            .map(|c| c.keys().filter(|(e, _)| *e == embedding).count())
+            .unwrap_or(0)
+    }
+}
+
+impl Default for BinaryCodeCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
