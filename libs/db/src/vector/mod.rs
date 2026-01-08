@@ -34,6 +34,7 @@ pub mod mutation;
 pub mod navigation;
 pub mod processor;
 pub mod query;
+pub mod rabitq;
 pub mod reader;
 pub mod registry;
 pub mod schema;
@@ -48,6 +49,7 @@ pub use hnsw::HnswIndex;
 pub use id::IdAllocator;
 pub use navigation::{NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
 pub use processor::Processor;
+pub use rabitq::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
     ALL_COLUMN_FAMILIES, EmbeddingCode, VecId, VectorCfKey, VectorCfValue, Vectors,

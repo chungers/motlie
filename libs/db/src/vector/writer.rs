@@ -293,8 +293,9 @@ impl Consumer {
         mutation: &Mutation,
     ) -> Result<()> {
         use super::schema::{
-            EmbeddingSpecs, IdForward, IdForwardCfKey, IdForwardCfValue, IdReverse,
-            IdReverseCfKey, IdReverseCfValue, VectorCfKey, VectorCfValue, Vectors,
+            BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingSpecs, IdForward,
+            IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue,
+            VectorCfKey, VectorCfValue, Vectors,
         };
         use crate::rocksdb::{ColumnFamily, MutationCodec};
 
@@ -351,6 +352,21 @@ impl Consumer {
                     Vectors::value_to_bytes(&vec_value),
                 )?;
 
+                // 5. Store binary code (if RaBitQ enabled)
+                if let Some(encoder) = self.processor.get_or_create_encoder(op.embedding) {
+                    let binary_code = encoder.encode(&op.vector);
+                    let code_key = BinaryCodeCfKey(op.embedding, vec_id);
+                    let code_value = BinaryCodeCfValue(binary_code);
+                    let codes_cf = txn_db
+                        .cf_handle(BinaryCodes::CF_NAME)
+                        .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+                    txn.put_cf(
+                        &codes_cf,
+                        BinaryCodes::key_to_bytes(&code_key),
+                        BinaryCodes::value_to_bytes(&code_value),
+                    )?;
+                }
+
                 // Note: HNSW indexing will be added in Phase 2
             }
 
@@ -383,7 +399,16 @@ impl Consumer {
                     .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
                 txn.delete_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?;
 
-                // 5. Return vec_id to free list
+                // 5. Delete binary code (if RaBitQ enabled)
+                if self.processor.rabitq_enabled() {
+                    let code_key = BinaryCodeCfKey(op.embedding, vec_id);
+                    let codes_cf = txn_db
+                        .cf_handle(BinaryCodes::CF_NAME)
+                        .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+                    txn.delete_cf(&codes_cf, BinaryCodes::key_to_bytes(&code_key))?;
+                }
+
+                // 6. Return vec_id to free list
                 {
                     let allocator = self.processor.get_or_create_allocator(op.embedding);
                     allocator.free(vec_id);

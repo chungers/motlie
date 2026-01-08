@@ -22,7 +22,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use dashmap::DashMap;
 
+use super::config::RaBitQConfig;
 use super::id::IdAllocator;
+use super::rabitq::RaBitQ;
 use super::registry::EmbeddingRegistry;
 use super::schema::EmbeddingCode;
 use super::Storage;
@@ -57,15 +59,30 @@ pub struct Processor {
     registry: Arc<EmbeddingRegistry>,
     /// Per-embedding ID allocators (lazily created)
     id_allocators: DashMap<EmbeddingCode, IdAllocator>,
+    /// Per-embedding RaBitQ encoders (lazily created)
+    rabitq_encoders: DashMap<EmbeddingCode, Arc<RaBitQ>>,
+    /// RaBitQ configuration (shared across all embeddings)
+    rabitq_config: RaBitQConfig,
 }
 
 impl Processor {
     /// Create a new Processor with the given storage and registry.
     pub fn new(storage: Arc<Storage>, registry: Arc<EmbeddingRegistry>) -> Self {
+        Self::with_rabitq_config(storage, registry, RaBitQConfig::default())
+    }
+
+    /// Create a Processor with custom RaBitQ configuration.
+    pub fn with_rabitq_config(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        rabitq_config: RaBitQConfig,
+    ) -> Self {
         Self {
             storage,
             registry,
             id_allocators: DashMap::new(),
+            rabitq_encoders: DashMap::new(),
+            rabitq_config,
         }
     }
 
@@ -133,6 +150,52 @@ impl Processor {
     /// Get the number of registered embedding spaces with allocators.
     pub fn allocator_count(&self) -> usize {
         self.id_allocators.len()
+    }
+
+    // ========================================================================
+    // RaBitQ Encoder Management
+    // ========================================================================
+
+    /// Get or create a RaBitQ encoder for the given embedding space.
+    ///
+    /// Returns None if:
+    /// - RaBitQ is disabled in config
+    /// - Embedding is not found in registry (can't determine dimension)
+    ///
+    /// Encoders are cached per embedding space for efficiency.
+    pub fn get_or_create_encoder(&self, embedding: EmbeddingCode) -> Option<Arc<RaBitQ>> {
+        if !self.rabitq_config.enabled {
+            return None;
+        }
+
+        // Check cache first
+        if let Some(encoder) = self.rabitq_encoders.get(&embedding) {
+            return Some(encoder.clone());
+        }
+
+        // Look up embedding to get dimension
+        let emb = self.registry.get_by_code(embedding)?;
+        let dim = emb.dim() as usize;
+
+        // Create and cache encoder
+        let encoder = Arc::new(RaBitQ::from_config(dim, &self.rabitq_config));
+        self.rabitq_encoders.insert(embedding, encoder.clone());
+        Some(encoder)
+    }
+
+    /// Check if RaBitQ is enabled.
+    pub fn rabitq_enabled(&self) -> bool {
+        self.rabitq_config.enabled
+    }
+
+    /// Get the RaBitQ configuration.
+    pub fn rabitq_config(&self) -> &RaBitQConfig {
+        &self.rabitq_config
+    }
+
+    /// Get the number of cached RaBitQ encoders.
+    pub fn encoder_count(&self) -> usize {
+        self.rabitq_encoders.len()
     }
 }
 

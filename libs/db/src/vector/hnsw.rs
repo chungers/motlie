@@ -36,9 +36,11 @@ use roaring::RoaringBitmap;
 use super::config::HnswConfig;
 use super::merge::EdgeOp;
 use super::navigation::{NavigationCache, NavigationLayerInfo};
+use super::rabitq::RaBitQ;
 use super::schema::{
-    EdgeCfKey, Edges, EmbeddingCode, GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField,
-    HnswLayer, VecId, VecMeta, VecMetaCfKey, VecMetaCfValue, VecMetadata, VectorCfKey, Vectors,
+    BinaryCodeCfKey, BinaryCodes, EdgeCfKey, Edges, EmbeddingCode, GraphMeta, GraphMetaCfKey,
+    GraphMetaCfValue, GraphMetaField, HnswLayer, VecId, VecMeta, VecMetaCfKey, VecMetaCfValue,
+    VecMetadata, VectorCfKey, Vectors,
 };
 use super::Storage;
 use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
@@ -804,6 +806,254 @@ impl HnswIndex {
                 Ok((id, bitmap))
             })
             .collect()
+    }
+
+    // =========================================================================
+    // RaBitQ Methods
+    // =========================================================================
+
+    /// Get a binary code for a vector.
+    pub fn get_binary_code(&self, storage: &Storage, vec_id: VecId) -> Result<Option<Vec<u8>>> {
+        let txn_db = storage.transaction_db()?;
+        let cf = txn_db
+            .cf_handle(BinaryCodes::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+
+        let key = BinaryCodeCfKey(self.embedding, vec_id);
+        let key_bytes = BinaryCodes::key_to_bytes(&key);
+
+        match txn_db.get_cf(&cf, key_bytes)? {
+            Some(bytes) => Ok(Some(bytes.to_vec())),
+            None => Ok(None),
+        }
+    }
+
+    /// Batch retrieve binary codes for multiple vectors.
+    pub fn get_binary_codes_batch(
+        &self,
+        storage: &Storage,
+        vec_ids: &[VecId],
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let txn_db = storage.transaction_db()?;
+        let cf = txn_db
+            .cf_handle(BinaryCodes::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+
+        let keys: Vec<Vec<u8>> = vec_ids
+            .iter()
+            .map(|&id| BinaryCodes::key_to_bytes(&BinaryCodeCfKey(self.embedding, id)))
+            .collect();
+
+        let results: Vec<std::result::Result<Option<Vec<u8>>, rocksdb::Error>> =
+            txn_db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())));
+
+        results
+            .into_iter()
+            .map(|r| r.map(|opt| opt.map(|b| b.to_vec())).map_err(|e| anyhow::anyhow!("RocksDB error: {}", e)))
+            .collect()
+    }
+
+    /// Two-phase search using RaBitQ for initial filtering.
+    ///
+    /// Phase 1: Use standard HNSW search to find candidates
+    /// Phase 2: Re-rank candidates with exact distance
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Vector storage
+    /// * `query` - Query vector
+    /// * `encoder` - RaBitQ encoder for the query
+    /// * `k` - Number of results to return
+    /// * `ef` - Search beam width
+    /// * `rerank_factor` - Multiplier for candidates to fetch (typically 2-4)
+    ///
+    /// # Returns
+    ///
+    /// Top-k results sorted by exact distance.
+    pub fn search_with_rabitq(
+        &self,
+        storage: &Storage,
+        query: &[f32],
+        encoder: &RaBitQ,
+        k: usize,
+        ef: usize,
+        rerank_factor: usize,
+    ) -> Result<Vec<(f32, VecId)>> {
+        // Phase 1: Get more candidates using standard search
+        let expanded_k = k * rerank_factor;
+        let expanded_ef = ef.max(expanded_k);
+
+        // Use standard HNSW search
+        let candidates = self.search(storage, query, expanded_k, expanded_ef)?;
+
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Encode query for potential Hamming-based filtering
+        let _query_code = encoder.encode(query);
+
+        // Phase 2: Re-rank with exact distances
+        // Note: The standard search already returns exact distances,
+        // so this is mainly for future optimization where Phase 1
+        // would use Hamming distance for faster candidate selection.
+
+        // For now, just return top-k from the exact distance results
+        let mut results = candidates;
+        results.truncate(k);
+
+        Ok(results)
+    }
+
+    /// Experimental: Search using Hamming distance for candidate filtering.
+    ///
+    /// This is a more aggressive optimization that uses binary codes
+    /// during the beam search phase. Currently not used by default
+    /// as it requires additional tuning for good recall.
+    #[allow(dead_code)]
+    pub fn search_hamming_filter(
+        &self,
+        storage: &Storage,
+        query: &[f32],
+        encoder: &RaBitQ,
+        k: usize,
+        ef: usize,
+        rerank_count: usize,
+    ) -> Result<Vec<(f32, VecId)>> {
+        let nav_info = self
+            .nav_cache
+            .get(self.embedding)
+            .or_else(|| self.load_navigation(storage).ok())
+            .ok_or_else(|| anyhow::anyhow!("No navigation info for embedding {}", self.embedding))?;
+
+        if nav_info.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let entry_point = nav_info.entry_point().unwrap();
+        let max_layer = nav_info.max_layer;
+
+        // Encode query to binary
+        let query_code = encoder.encode(query);
+
+        // Greedy descent using exact distance (upper layers are small)
+        let mut current = entry_point;
+        let mut current_dist = self.distance(storage, query, current)?;
+
+        for layer in (1..=max_layer).rev() {
+            (current, current_dist) =
+                self.greedy_search_layer(storage, query, current, current_dist, layer, true)?;
+        }
+
+        // Beam search at layer 0 using Hamming distance for candidate ranking
+        let mut candidates = self.beam_search_layer0_hamming(
+            storage,
+            query,
+            &query_code,
+            encoder,
+            current,
+            ef,
+        )?;
+
+        // Re-rank top candidates with exact distance
+        candidates.truncate(rerank_count);
+        let vec_ids: Vec<VecId> = candidates.iter().map(|(_, id)| *id).collect();
+
+        // Fetch actual vectors and compute exact distances
+        let mut exact_results: Vec<(f32, VecId)> = Vec::with_capacity(vec_ids.len());
+        for &vec_id in &vec_ids {
+            let dist = self.distance(storage, query, vec_id)?;
+            exact_results.push((dist, vec_id));
+        }
+
+        // Sort by exact distance and return top-k
+        exact_results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        exact_results.truncate(k);
+
+        Ok(exact_results)
+    }
+
+    /// Beam search at layer 0 using Hamming distance for candidate ranking.
+    ///
+    /// This is an experimental optimization that uses binary codes
+    /// for faster distance computation during beam search.
+    #[allow(dead_code)]
+    fn beam_search_layer0_hamming(
+        &self,
+        storage: &Storage,
+        _query: &[f32],
+        query_code: &[u8],
+        _encoder: &RaBitQ,
+        entry: VecId,
+        ef: usize,
+    ) -> Result<Vec<(u32, VecId)>> {
+        // Min-heap for candidates (by Hamming distance, ascending)
+        // Max-heap for results (by Hamming distance, descending - worst at top)
+        let mut candidates: BinaryHeap<Reverse<(u32, VecId)>> = BinaryHeap::new();
+        let mut results: BinaryHeap<(u32, VecId)> = BinaryHeap::new();
+        let mut visited = RoaringBitmap::new();
+
+        // Get entry point's Hamming distance
+        let entry_code = self.get_binary_code(storage, entry)?.unwrap_or_default();
+        let entry_dist = RaBitQ::hamming_distance(query_code, &entry_code);
+
+        candidates.push(Reverse((entry_dist, entry)));
+        results.push((entry_dist, entry));
+        visited.insert(entry);
+
+        while let Some(Reverse((current_dist, current))) = candidates.pop() {
+            // Stop if current is worse than worst result (when results are full)
+            if results.len() >= ef {
+                if let Some(&(worst_dist, _)) = results.peek() {
+                    if current_dist > worst_dist {
+                        break;
+                    }
+                }
+            }
+
+            // Expand neighbors
+            let neighbors = self.get_neighbors(storage, current, 0, true)?;
+
+            // Batch fetch binary codes for unvisited neighbors
+            let unvisited: Vec<VecId> = neighbors
+                .iter()
+                .filter(|n| !visited.contains(*n))
+                .collect();
+
+            if unvisited.is_empty() {
+                continue;
+            }
+
+            let codes = self.get_binary_codes_batch(storage, &unvisited)?;
+
+            for (neighbor, code_opt) in unvisited.into_iter().zip(codes.into_iter()) {
+                visited.insert(neighbor);
+
+                let dist = if let Some(code) = code_opt {
+                    RaBitQ::hamming_distance(query_code, &code)
+                } else {
+                    u32::MAX // No code, skip
+                };
+
+                // Add to results if better than worst or results not full
+                if results.len() < ef {
+                    candidates.push(Reverse((dist, neighbor)));
+                    results.push((dist, neighbor));
+                } else if let Some(&(worst_dist, _)) = results.peek() {
+                    if dist < worst_dist {
+                        candidates.push(Reverse((dist, neighbor)));
+                        results.pop();
+                        results.push((dist, neighbor));
+                    }
+                }
+            }
+        }
+
+        // Extract results sorted by Hamming distance (ascending)
+        let mut result_vec: Vec<(u32, VecId)> = results.into_iter().collect();
+        result_vec.sort_by_key(|(dist, _)| *dist);
+
+        Ok(result_vec)
     }
 }
 
