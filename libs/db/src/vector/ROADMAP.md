@@ -3565,16 +3565,20 @@ fn bench_batch_vector_retrieval_100(b: &mut Bencher) {
 
 ## Phase 4: RaBitQ Compression
 
-**Status:** Pending
+**Status:** In Progress (Tasks 4.1-4.5 ✅, Task 4.6 pending)
 
 **Goal:** Implement training-free binary quantization per [DATA-1] constraint.
 
-**Tasks 4.1-4.5:** RaBitQ implementation (rotation matrix, encoder, SIMD Hamming, storage, two-phase search).
-**Task 4.6:** Recall tuning at scale (deferred from Phase 3).
+**Tasks 4.1-4.5:** RaBitQ implementation (rotation matrix, encoder, SIMD Hamming, storage, two-phase search) - ✅ COMPLETED
+**Task 4.6:** Recall tuning at scale (deferred from Phase 3) - pending
 
 **Design Reference:** `examples/vector/HNSW2.md` - RaBitQ section, `examples/vector/ALTERNATIVES.md`
 
-### Task 4.1: Random Rotation Matrix
+### Task 4.1: Random Rotation Matrix ✅
+
+**Status:** ✅ COMPLETED (2026-01-07)
+
+**Implementation:** `rabitq.rs` - Gram-Schmidt orthogonalization with ChaCha20Rng for deterministic rotation matrix generation.
 
 ```rust
 // libs/db/src/vector/rabitq.rs
@@ -3643,7 +3647,11 @@ impl RaBitQ {
 - [ ] Rotation matrix is orthogonal (R * R^T = I)
 - [ ] Deterministic given same seed
 
-### Task 4.2: Binary Code Encoder
+### Task 4.2: Binary Code Encoder ✅
+
+**Status:** ✅ COMPLETED (2026-01-07)
+
+**Implementation:** `rabitq.rs` - 1/2/4-bit quantization with sign, threshold, and uniform encoding.
 
 ```rust
 impl RaBitQ {
@@ -3691,7 +3699,11 @@ impl RaBitQ {
 
 **Effort:** 1 day
 
-### Task 4.3: SIMD Hamming Distance
+### Task 4.3: SIMD Hamming Distance ✅
+
+**Status:** ✅ COMPLETED (2026-01-07)
+
+**Implementation:** `rabitq.rs` - `hamming_distance()` and `hamming_distance_fast()` using u64 chunks with `count_ones()`.
 
 ```rust
 // libs/db/src/vector/rabitq.rs
@@ -3738,7 +3750,15 @@ impl RaBitQ {
 
 **Effort:** 0.5 day
 
-### Task 4.4: Binary Codes CF
+### Task 4.4: Binary Codes CF ✅
+
+**Status:** ✅ COMPLETED (2026-01-07)
+
+**Implementation:**
+- Schema: `BinaryCodes` CF in `schema.rs` (already existed)
+- Storage: `writer.rs` stores binary codes on insert, deletes on delete
+- Retrieval: `hnsw.rs` adds `get_binary_code()` and `get_binary_codes_batch()`
+- Encoder: `processor.rs` caches `RaBitQ` encoders per embedding
 
 ```rust
 /// Binary codes storage
@@ -3768,7 +3788,14 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for BinaryCodes {
 
 **Effort:** 0.25 day
 
-### Task 4.5: Search with Approximate + Re-rank
+### Task 4.5: Search with Approximate + Re-rank ✅
+
+**Status:** ✅ COMPLETED (2026-01-07)
+
+**Implementation:** `hnsw.rs` adds:
+- `search_with_rabitq()` - Two-phase search with expanded candidates and re-ranking
+- `search_hamming_filter()` - Experimental Hamming-based beam search (for future optimization)
+- `beam_search_layer0_hamming()` - Beam search using Hamming distance
 
 ```rust
 impl VectorStorage {
