@@ -1081,6 +1081,11 @@ fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vector::{VectorCfKey, VectorCfValue};
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha20Rng;
+    use std::collections::HashSet;
+    use tempfile::TempDir;
 
     #[test]
     fn test_l2_distance() {
@@ -1103,6 +1108,435 @@ mod tests {
         assert_eq!(index.config().m, config.m);
     }
 
-    // Integration tests require RocksDB storage
-    // See integration test files for full end-to-end testing
+    // =========================================================================
+    // Recall Tests
+    // =========================================================================
+    //
+    // These tests verify HNSW recall characteristics at different scales
+    // and with different parameter configurations.
+    //
+    // Recall@k = |HNSW_results ∩ Ground_truth| / k
+    //
+    // Expected recall targets:
+    // - Small scale (100-1K vectors): 99%+ with default params
+    // - Medium scale (1K-10K): 95%+ with default params
+    // - Large scale (10K-100K): 90%+ with default, 95%+ with tuned params
+
+    /// Helper: Create test storage
+    fn create_test_storage() -> (TempDir, Storage) {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        (temp_dir, storage)
+    }
+
+    /// Helper: Generate random vectors
+    fn generate_random_vectors(count: usize, dim: usize, seed: u64) -> Vec<Vec<f32>> {
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        (0..count)
+            .map(|_| (0..dim).map(|_| rng.gen::<f32>()).collect())
+            .collect()
+    }
+
+    /// Helper: Compute ground truth (brute force k-NN)
+    fn brute_force_knn(query: &[f32], vectors: &[Vec<f32>], k: usize) -> Vec<usize> {
+        let mut distances: Vec<(f32, usize)> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (l2_distance(query, v), i))
+            .collect();
+        distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        distances.into_iter().take(k).map(|(_, i)| i).collect()
+    }
+
+    /// Helper: Compute recall@k
+    fn compute_recall(hnsw_results: &[(f32, VecId)], ground_truth: &[usize]) -> f64 {
+        let hnsw_set: HashSet<u32> = hnsw_results.iter().map(|(_, id)| *id).collect();
+        let gt_set: HashSet<u32> = ground_truth.iter().map(|&i| i as u32).collect();
+        let intersection = hnsw_set.intersection(&gt_set).count();
+        intersection as f64 / ground_truth.len() as f64
+    }
+
+    /// Helper: Store vectors in RocksDB Vectors CF
+    fn store_vectors(storage: &Storage, embedding: EmbeddingCode, vectors: &[Vec<f32>]) {
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let cf = txn_db
+            .cf_handle(Vectors::CF_NAME)
+            .expect("Vectors CF not found");
+
+        for (i, vector) in vectors.iter().enumerate() {
+            let key = Vectors::key_to_bytes(&VectorCfKey(embedding, i as VecId));
+            let value = Vectors::value_to_bytes(&VectorCfValue(vector.clone()));
+            txn_db.put_cf(&cf, key, value).expect("Failed to store vector");
+        }
+    }
+
+    /// Helper: Build HNSW index with vectors
+    fn build_index(
+        storage: &Storage,
+        embedding: EmbeddingCode,
+        vectors: &[Vec<f32>],
+        config: &HnswConfig,
+    ) -> HnswIndex {
+        // First, store vectors in RocksDB so HNSW can access them
+        store_vectors(storage, embedding, vectors);
+
+        // Now build the HNSW index
+        let nav_cache = Arc::new(NavigationCache::new());
+        let index = HnswIndex::new(embedding, config.clone(), nav_cache);
+
+        for (i, vector) in vectors.iter().enumerate() {
+            index.insert(storage, i as VecId, vector).expect("Insert failed");
+        }
+
+        index
+    }
+
+    #[test]
+    fn test_recall_small_scale_100_vectors() {
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 32;
+        let n_vectors = 100;
+        let n_queries = 20;
+        let k = 10;
+
+        let vectors = generate_random_vectors(n_vectors, dim, 42);
+        let queries = generate_random_vectors(n_queries, dim, 123);
+
+        let config = HnswConfig {
+            dim,
+            m: 16,
+            m_max: 32,
+            m_max_0: 32,
+            ef_construction: 100,
+            ..Default::default()
+        };
+
+        let index = build_index(&storage, 1, &vectors, &config);
+
+        // Test recall over multiple queries
+        let mut total_recall = 0.0;
+        for query in &queries {
+            let results = index.search(&storage, query, k, 50).expect("Search failed");
+            let ground_truth = brute_force_knn(query, &vectors, k);
+            total_recall += compute_recall(&results, &ground_truth);
+        }
+
+        let avg_recall = total_recall / n_queries as f64;
+        assert!(
+            avg_recall >= 0.95,
+            "Recall@{} should be >= 95% at {} vectors, got {:.1}%",
+            k, n_vectors, avg_recall * 100.0
+        );
+    }
+
+    #[test]
+    fn test_recall_medium_scale_1k_vectors() {
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 64;
+        let n_vectors = 1000;
+        let n_queries = 20;
+        let k = 10;
+
+        let vectors = generate_random_vectors(n_vectors, dim, 42);
+        let queries = generate_random_vectors(n_queries, dim, 123);
+
+        let config = HnswConfig {
+            dim,
+            m: 16,
+            m_max: 32,
+            m_max_0: 32,
+            ef_construction: 200,
+            ..Default::default()
+        };
+
+        let index = build_index(&storage, 1, &vectors, &config);
+
+        let mut total_recall = 0.0;
+        for query in &queries {
+            let results = index.search(&storage, query, k, 100).expect("Search failed");
+            let ground_truth = brute_force_knn(query, &vectors, k);
+            total_recall += compute_recall(&results, &ground_truth);
+        }
+
+        let avg_recall = total_recall / n_queries as f64;
+        assert!(
+            avg_recall >= 0.90,
+            "Recall@{} should be >= 90% at {} vectors, got {:.1}%",
+            k, n_vectors, avg_recall * 100.0
+        );
+    }
+
+    #[test]
+    fn test_recall_vs_ef_tradeoff() {
+        // Test how recall improves with higher ef values
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 32;
+        let n_vectors = 500;
+        let n_queries = 10;
+        let k = 10;
+
+        let vectors = generate_random_vectors(n_vectors, dim, 42);
+        let queries = generate_random_vectors(n_queries, dim, 123);
+
+        let config = HnswConfig {
+            dim,
+            m: 16,
+            m_max: 32,
+            m_max_0: 32,
+            ef_construction: 100,
+            ..Default::default()
+        };
+
+        let index = build_index(&storage, 1, &vectors, &config);
+
+        // Test different ef values
+        let ef_values = [10, 20, 50, 100];
+        let mut prev_recall = 0.0;
+
+        for &ef in &ef_values {
+            let mut total_recall = 0.0;
+            for query in &queries {
+                let results = index.search(&storage, query, k, ef).expect("Search failed");
+                let ground_truth = brute_force_knn(query, &vectors, k);
+                total_recall += compute_recall(&results, &ground_truth);
+            }
+            let avg_recall = total_recall / n_queries as f64;
+
+            // Recall should generally increase with ef (allowing small variance)
+            assert!(
+                avg_recall >= prev_recall - 0.05,
+                "Recall should not decrease significantly with higher ef. ef={}, recall={:.1}%, prev={:.1}%",
+                ef, avg_recall * 100.0, prev_recall * 100.0
+            );
+            prev_recall = avg_recall;
+        }
+
+        // Final recall with ef=100 should be good
+        assert!(
+            prev_recall >= 0.85,
+            "Recall with ef=100 should be >= 85%, got {:.1}%",
+            prev_recall * 100.0
+        );
+    }
+
+    #[test]
+    fn test_recall_high_recall_config() {
+        // Test the high_recall configuration preset
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 64;
+        let n_vectors = 500;
+        let n_queries = 10;
+        let k = 10;
+
+        let vectors = generate_random_vectors(n_vectors, dim, 42);
+        let queries = generate_random_vectors(n_queries, dim, 123);
+
+        let config = HnswConfig::high_recall(dim);
+        let index = build_index(&storage, 1, &vectors, &config);
+
+        let mut total_recall = 0.0;
+        for query in &queries {
+            let results = index.search(&storage, query, k, 150).expect("Search failed");
+            let ground_truth = brute_force_knn(query, &vectors, k);
+            total_recall += compute_recall(&results, &ground_truth);
+        }
+
+        let avg_recall = total_recall / n_queries as f64;
+        assert!(
+            avg_recall >= 0.95,
+            "High-recall config should achieve >= 95% recall, got {:.1}%",
+            avg_recall * 100.0
+        );
+    }
+
+    #[test]
+    fn test_recall_compact_config() {
+        // Test the compact (memory-optimized) configuration
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 32;
+        let n_vectors = 500;
+        let n_queries = 10;
+        let k = 10;
+
+        let vectors = generate_random_vectors(n_vectors, dim, 42);
+        let queries = generate_random_vectors(n_queries, dim, 123);
+
+        let config = HnswConfig::compact(dim);
+        let index = build_index(&storage, 1, &vectors, &config);
+
+        let mut total_recall = 0.0;
+        for query in &queries {
+            // Compact config needs higher ef to compensate for smaller M
+            let results = index.search(&storage, query, k, 100).expect("Search failed");
+            let ground_truth = brute_force_knn(query, &vectors, k);
+            total_recall += compute_recall(&results, &ground_truth);
+        }
+
+        let avg_recall = total_recall / n_queries as f64;
+        // Compact config trades recall for memory, so lower threshold
+        assert!(
+            avg_recall >= 0.70,
+            "Compact config should achieve >= 70% recall, got {:.1}%",
+            avg_recall * 100.0
+        );
+    }
+
+    #[test]
+    fn test_recall_different_k_values() {
+        // Test recall at different k values (1, 5, 10, 20)
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 32;
+        let n_vectors = 500;
+        let n_queries = 10;
+
+        let vectors = generate_random_vectors(n_vectors, dim, 42);
+        let queries = generate_random_vectors(n_queries, dim, 123);
+
+        let config = HnswConfig {
+            dim,
+            m: 16,
+            m_max: 32,
+            m_max_0: 32,
+            ef_construction: 100,
+            ..Default::default()
+        };
+
+        let index = build_index(&storage, 1, &vectors, &config);
+
+        let k_values = [1, 5, 10, 20];
+        for &k in &k_values {
+            let ef = k.max(50); // ef should be at least k
+            let mut total_recall = 0.0;
+
+            for query in &queries {
+                let results = index.search(&storage, query, k, ef).expect("Search failed");
+                let ground_truth = brute_force_knn(query, &vectors, k);
+                total_recall += compute_recall(&results, &ground_truth);
+            }
+
+            let avg_recall = total_recall / n_queries as f64;
+            // k=1 is harder, so lower threshold
+            let min_recall = if k == 1 { 0.80 } else { 0.85 };
+            assert!(
+                avg_recall >= min_recall,
+                "Recall@{} should be >= {:.0}%, got {:.1}%",
+                k, min_recall * 100.0, avg_recall * 100.0
+            );
+        }
+    }
+
+    #[test]
+    fn test_recall_clustered_data() {
+        // Test recall on clustered data (harder case)
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 32;
+        let n_clusters = 10;
+        let points_per_cluster = 50;
+        let n_vectors = n_clusters * points_per_cluster;
+        let n_queries = 10;
+        let k = 10;
+
+        // Generate clustered data
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
+        let mut vectors = Vec::with_capacity(n_vectors);
+
+        for _ in 0..n_clusters {
+            // Random cluster center
+            let center: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>() * 10.0).collect();
+
+            // Points around the center
+            for _ in 0..points_per_cluster {
+                let point: Vec<f32> = center
+                    .iter()
+                    .map(|&c| c + (rng.gen::<f32>() - 0.5) * 0.5)
+                    .collect();
+                vectors.push(point);
+            }
+        }
+
+        let queries = generate_random_vectors(n_queries, dim, 123);
+
+        let config = HnswConfig {
+            dim,
+            m: 16,
+            m_max: 32,
+            m_max_0: 32,
+            ef_construction: 200,
+            ..Default::default()
+        };
+
+        let index = build_index(&storage, 1, &vectors, &config);
+
+        let mut total_recall = 0.0;
+        for query in &queries {
+            let results = index.search(&storage, query, k, 100).expect("Search failed");
+            let ground_truth = brute_force_knn(query, &vectors, k);
+            total_recall += compute_recall(&results, &ground_truth);
+        }
+
+        let avg_recall = total_recall / n_queries as f64;
+        assert!(
+            avg_recall >= 0.85,
+            "Recall on clustered data should be >= 85%, got {:.1}%",
+            avg_recall * 100.0
+        );
+    }
+
+    // =========================================================================
+    // Parameter Documentation Tests
+    // =========================================================================
+    //
+    // These tests document the expected recall for different configurations.
+    // Run with `cargo test -- --nocapture` to see the parameter recommendations.
+
+    #[test]
+    fn test_document_optimal_parameters() {
+        // This test documents optimal parameters for different recall targets
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 64;
+        let n_vectors = 1000;
+        let n_queries = 20;
+        let k = 10;
+
+        let vectors = generate_random_vectors(n_vectors, dim, 42);
+        let queries = generate_random_vectors(n_queries, dim, 123);
+
+        // Test different M values
+        let m_values = [8, 16, 32];
+        let ef_values = [50, 100, 200];
+
+        println!("\n=== HNSW Parameter Recommendations ({}D, {} vectors) ===", dim, n_vectors);
+        println!("| M | ef_search | Recall@{} |", k);
+        println!("|---|-----------|----------|");
+
+        for &m in &m_values {
+            let config = HnswConfig {
+                dim,
+                m,
+                m_max: 2 * m,
+                m_max_0: 2 * m,
+                ef_construction: 200,
+                ..Default::default()
+            };
+
+            let index = build_index(&storage, 1, &vectors, &config);
+
+            for &ef in &ef_values {
+                let mut total_recall = 0.0;
+                for query in &queries {
+                    let results = index.search(&storage, query, k, ef).expect("Search failed");
+                    let ground_truth = brute_force_knn(query, &vectors, k);
+                    total_recall += compute_recall(&results, &ground_truth);
+                }
+                let avg_recall = total_recall / n_queries as f64;
+                println!("| {} | {} | {:.1}% |", m, ef, avg_recall * 100.0);
+            }
+        }
+
+        println!("\nRecommendations:");
+        println!("- For >95% recall: M=16-32, ef_search >= 100");
+        println!("- For >90% recall: M=16, ef_search >= 50");
+        println!("- Memory-constrained: M=8, ef_search >= 100");
+    }
 }
