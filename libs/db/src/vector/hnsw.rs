@@ -943,6 +943,105 @@ impl HnswIndex {
         Ok(exact_results)
     }
 
+    /// Hybrid search: L2 navigation + Hamming filtering.
+    ///
+    /// This approach preserves recall by using exact L2 distance for HNSW navigation,
+    /// then uses fast SIMD Hamming distance as a secondary filter/validator.
+    ///
+    /// # Architecture
+    ///
+    /// ```text
+    /// Phase 1: L2 Navigation (Upper Layers)
+    ///   - Greedy descent using exact L2 distance
+    ///   - Same as standard HNSW search
+    ///
+    /// Phase 2: L2 Beam Search (Layer 0)
+    ///   - Standard beam search with ef candidates
+    ///   - Returns candidates with exact L2 distances
+    ///
+    /// Phase 3: Hamming Validation
+    ///   - Compute Hamming distance for all candidates
+    ///   - Combine L2 rank and Hamming rank for final scoring
+    ///   - Candidates that rank poorly in both are likely false positives
+    ///
+    /// Phase 4: Return top-k by combined score
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Vector storage
+    /// * `query` - Query vector
+    /// * `encoder` - RaBitQ encoder
+    /// * `k` - Number of results
+    /// * `ef` - Beam width
+    ///
+    /// # Returns
+    ///
+    /// Top-k results sorted by exact L2 distance.
+    pub fn search_hybrid(
+        &self,
+        storage: &Storage,
+        query: &[f32],
+        encoder: &RaBitQ,
+        k: usize,
+        ef: usize,
+    ) -> Result<Vec<(f32, VecId)>> {
+        // Phase 1-2: Standard L2 search (navigation + beam search)
+        // This preserves recall by using exact distances for graph traversal
+        let l2_candidates = self.search(storage, query, ef, ef)?;
+
+        if l2_candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // If we got exactly k or fewer candidates, no filtering needed
+        if l2_candidates.len() <= k {
+            return Ok(l2_candidates);
+        }
+
+        // Phase 3: Hamming validation
+        // Compute Hamming distances for all candidates
+        let query_code = encoder.encode(query);
+        let vec_ids: Vec<VecId> = l2_candidates.iter().map(|(_, id)| *id).collect();
+        let binary_codes = self.get_binary_codes_batch(storage, &vec_ids)?;
+
+        // Combine L2 and Hamming rankings
+        // Score = L2_rank + Hamming_rank (lower is better)
+        let mut candidates_with_scores: Vec<(f32, VecId, u32, usize, usize)> = l2_candidates
+            .iter()
+            .enumerate()
+            .zip(binary_codes.iter())
+            .map(|((l2_rank, (l2_dist, vec_id)), code_opt)| {
+                let hamming_dist = code_opt
+                    .as_ref()
+                    .map(|code| RaBitQ::hamming_distance(&query_code, code))
+                    .unwrap_or(u32::MAX);
+                (*l2_dist, *vec_id, hamming_dist, l2_rank, 0) // hamming_rank filled later
+            })
+            .collect();
+
+        // Sort by Hamming distance to get Hamming ranks
+        candidates_with_scores.sort_by_key(|(_, _, hamming, _, _)| *hamming);
+        for (hamming_rank, (_, _, _, _, ref mut h_rank)) in candidates_with_scores.iter_mut().enumerate() {
+            *h_rank = hamming_rank;
+        }
+
+        // Sort by combined score (L2_rank + Hamming_rank)
+        candidates_with_scores.sort_by_key(|(_, _, _, l2_rank, h_rank)| l2_rank + h_rank);
+
+        // Phase 4: Return top-k, sorted by L2 distance
+        let mut results: Vec<(f32, VecId)> = candidates_with_scores
+            .iter()
+            .take(k)
+            .map(|(l2_dist, vec_id, _, _, _)| (*l2_dist, *vec_id))
+            .collect();
+
+        // Final sort by L2 distance for consistent output
+        results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(results)
+    }
+
     /// Experimental: Search using Hamming distance for candidate filtering.
     ///
     /// This is a more aggressive optimization that uses binary codes

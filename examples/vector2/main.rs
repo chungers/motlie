@@ -95,6 +95,10 @@ struct Args {
     #[arg(long)]
     rabitq: bool,
 
+    /// Enable hybrid search (L2 navigation + Hamming validation)
+    #[arg(long)]
+    hybrid: bool,
+
     /// RaBitQ re-rank factor (how many candidates to fetch before re-ranking)
     #[arg(long, default_value = "4")]
     rerank_factor: usize,
@@ -137,9 +141,18 @@ async fn main() -> Result<()> {
     println!("  M:               {}", args.m);
     println!("  ef_construction: {}", args.ef_construction);
     println!("  Cache Size:      {} MB", args.cache_size_mb);
-    println!("  RaBitQ:          {}", if args.rabitq { "enabled" } else { "disabled" });
-    if args.rabitq {
-        println!("  Rerank Factor:   {}", args.rerank_factor);
+    let search_mode_str = if args.hybrid {
+        "hybrid (L2 nav + Hamming filter)"
+    } else if args.rabitq {
+        "rabitq (Hamming nav + L2 rerank)"
+    } else {
+        "standard (L2 only)"
+    };
+    println!("  Search Mode:     {}", search_mode_str);
+    if args.rabitq || args.hybrid {
+        if args.rabitq {
+            println!("  Rerank Factor:   {}", args.rerank_factor);
+        }
         println!("  Bits/Dim:        {}", args.bits_per_dim);
     }
     println!();
@@ -188,7 +201,9 @@ async fn run_phase2_benchmark(
         .unwrap_or_else(|| "random".to_string());
 
     let mut metrics = BenchmarkMetrics::new(&dataset_str, "HNSW2-RocksDB");
-    metrics.search_mode = if args.rabitq {
+    metrics.search_mode = if args.hybrid {
+        format!("hybrid(bits={})", args.bits_per_dim)
+    } else if args.rabitq {
         format!("RaBitQ(rerank={}x,bits={})", args.rerank_factor, args.bits_per_dim)
     } else {
         "standard".to_string()
@@ -234,8 +249,8 @@ async fn run_phase2_benchmark(
     // Prepare random number generator
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
-    // Create RaBitQ encoder for binary code generation (if enabled)
-    let build_encoder = if args.rabitq {
+    // Create RaBitQ encoder for binary code generation (if rabitq or hybrid enabled)
+    let build_encoder = if args.rabitq || args.hybrid {
         let dim = benchmark_data.map(|d| d.dimensions).unwrap_or(128);
         Some(RaBitQ::new(dim, args.bits_per_dim, 42))
     } else {
@@ -252,8 +267,8 @@ async fn run_phase2_benchmark(
         .cf_handle(Vectors::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
 
-    // Get BinaryCodes CF handle if RaBitQ enabled
-    let binary_codes_cf = if args.rabitq {
+    // Get BinaryCodes CF handle if RaBitQ or hybrid enabled
+    let binary_codes_cf = if args.rabitq || args.hybrid {
         Some(
             txn_db
                 .cf_handle(BinaryCodes::CF_NAME)
@@ -328,7 +343,9 @@ async fn run_phase2_benchmark(
     // Use the same encoder for search (if RaBitQ enabled)
     let rabitq_encoder = build_encoder;
 
-    let search_mode = if args.rabitq {
+    let search_mode = if args.hybrid {
+        format!("hybrid (L2 nav + Hamming filter, bits={})", args.bits_per_dim)
+    } else if args.rabitq {
         format!("RaBitQ (rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
     } else {
         "standard".to_string()
@@ -345,9 +362,13 @@ async fn run_phase2_benchmark(
             generate_random_vector(128, &mut rng)
         };
 
-        // HNSW search (with or without RaBitQ)
+        // HNSW search (standard, hybrid, or rabitq)
         let search_start = Instant::now();
-        let results = if let Some(ref encoder) = rabitq_encoder {
+        let results = if args.hybrid {
+            let encoder = rabitq_encoder.as_ref().expect("Encoder required for hybrid mode");
+            index.search_hybrid(&storage, &query, encoder, args.k, args.ef)?
+        } else if args.rabitq {
+            let encoder = rabitq_encoder.as_ref().expect("Encoder required for rabitq mode");
             index.search_with_rabitq(&storage, &query, encoder, args.k, args.ef, args.rerank_factor)?
         } else {
             index.search(&storage, &query, args.k, args.ef)?

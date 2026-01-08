@@ -4011,10 +4011,54 @@ Comprehensive recall tests added to validate HNSW parameter tuning.
 | Pure Hamming | 686 | 34% | Task 4.7 result |
 | **Hybrid** | **500-600** | **>95%** | **Target** |
 
+---
+
+#### Task 4.8 Implementation & Results
+
+**Status:** ✅ Complete (hypothesis disproven)
+
+**Implemented:** `search_hybrid()` method in `libs/db/src/vector/hnsw.rs`
+
+**Actual Benchmark Results:**
+
+| Scale | Mode | QPS | Recall@10 | Notes |
+|-------|------|-----|-----------|-------|
+| 1K | Standard | 442 | 100% | Baseline |
+| 1K | Hybrid | 324 | 51% | **Worse than baseline** |
+| 1K | RaBitQ | 658 | 33% | Fast but low recall |
+| 10K | Standard | 49 | 90% | Baseline |
+| 10K | Hybrid | 49 | 39% | **Worse than baseline** |
+| 10K | RaBitQ | 190 | 10% | Fast but very low recall |
+
+**Findings - Why Hybrid Failed:**
+
+1. **Combined Ranking Problem**: The hybrid approach combines L2_rank + Hamming_rank for scoring. A candidate that ranks #1 in L2 but #50 in Hamming gets score 51, while a candidate ranking #25 in both gets score 50. This favors "mediocre" candidates over "excellent in L2".
+
+2. **L2 Is Ground Truth**: Since we're optimizing for L2 nearest neighbors, any weighting of Hamming distance into the ranking can only hurt recall (unless Hamming perfectly correlates with L2, which it doesn't).
+
+3. **No QPS Benefit**: The hybrid approach adds Hamming computation AFTER L2 search, so it can only add overhead, not remove it.
+
+**Key Insight:**
+
+> Hamming distance is useful for **replacing** L2 computations (pure RaBitQ approach), not **supplementing** them. The hybrid approach that does both L2 AND Hamming is strictly worse than just doing L2.
+
+**Correct Use Cases for Hamming:**
+
+1. **Replace L2 during beam search** (RaBitQ): Trades recall for QPS
+2. **Initial candidate filtering** (not navigation): Use Hamming to quickly filter from millions to thousands, then L2 for final ranking
+3. **Large-scale systems**: Where L2 computation dominates and Hamming filtering can reduce candidate count
+
+**Recommendations:**
+
+1. **For high recall**: Use standard L2 search (no Hamming)
+2. **For high QPS**: Use pure RaBitQ with tuned ef and rerank_factor
+3. **Hybrid not recommended**: Adds overhead without benefit
+
 **Acceptance Criteria:**
-- [ ] Implement `search_hybrid()` method
-- [ ] Benchmark showing QPS improvement over standard with >95% recall
-- [ ] Document results in ROADMAP
+- [x] Implement `search_hybrid()` method
+- [x] Benchmark showing results
+- [x] Document results in ROADMAP
+- [ ] ~~Benchmark showing QPS improvement over standard with >95% recall~~ (disproven)
 
 ---
 
