@@ -89,11 +89,29 @@ impl StorageOptions {
     /// - `error_if_exists`: false (allow opening existing DBs)
     /// - `create_if_missing`: true (create new DBs)
     /// - `create_missing_column_families`: true (auto-create CFs)
+    /// - Parallelism: uses all available CPUs
+    /// - Write buffer: 128MB with up to 4 buffers before stalling
     pub fn default_for_readwrite() -> Options {
         let mut options = Options::default();
         options.set_error_if_exists(false);
         options.create_if_missing(true);
         options.create_missing_column_families(true);
+
+        // Parallelism: use available CPU cores for background jobs
+        let num_cpus = std::thread::available_parallelism()
+            .map(|p| p.get() as i32)
+            .unwrap_or(4);
+        options.increase_parallelism(num_cpus);
+        options.set_max_background_jobs(num_cpus.min(8));
+
+        // Write buffer tuning for bulk insert performance
+        // Larger buffers = fewer flushes during index build
+        options.set_write_buffer_size(128 * 1024 * 1024); // 128MB per buffer
+        options.set_max_write_buffer_number(4); // Up to 4 buffers before stalling
+
+        // Optimize for point lookups (most HNSW operations)
+        options.set_advise_random_on_open(true);
+
         options
     }
 

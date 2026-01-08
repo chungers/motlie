@@ -54,6 +54,25 @@ pub struct HnswConfig {
     /// Maximum search layer (auto-determined based on N).
     /// Default: None (auto-calculate as floor(ln(N) * m_l))
     pub max_level: Option<u8>,
+
+    /// Minimum neighbor set size to trigger batch distance computation.
+    ///
+    /// When fetching neighbors during search, if the neighbor count exceeds
+    /// this threshold, vectors are fetched via MultiGet instead of individual
+    /// lookups. Batch operations have overhead (Vec allocation, MultiGet
+    /// coordination) that only pays off for large batches.
+    ///
+    /// **Tuning guidance:**
+    /// - `64` (default): Effectively disables batching. Best for local NVMe/SSD
+    ///   storage with small M values (M ≤ 32). Individual lookups are faster.
+    /// - `4-8`: Enables batching. May help with high-latency storage (network,
+    ///   remote DB) or very large M values (M ≥ 64).
+    ///
+    /// **Background:** Phase 3 benchmarks showed batching hurts performance
+    /// at 100K scale with M=16 on local storage due to overhead exceeding
+    /// the I/O savings. The code is retained for future use with different
+    /// storage backends or configurations.
+    pub batch_threshold: usize,
 }
 
 impl Default for HnswConfig {
@@ -67,6 +86,7 @@ impl Default for HnswConfig {
             ef_construction: 200,
             m_l: 1.0 / (m as f32).ln(),
             max_level: None,
+            batch_threshold: 64, // Effectively disables batching for local storage
         }
     }
 }
@@ -91,6 +111,7 @@ impl HnswConfig {
             ef_construction: 400,
             m_l: 1.0 / 32f32.ln(),
             max_level: None,
+            batch_threshold: 64, // May benefit from lower threshold with M=32
         }
     }
 
@@ -105,6 +126,7 @@ impl HnswConfig {
             ef_construction: 100,
             m_l: 1.0 / 8f32.ln(),
             max_level: None,
+            batch_threshold: 64,
         }
     }
 }
