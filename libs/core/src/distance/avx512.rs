@@ -105,6 +105,48 @@ pub unsafe fn dot(a: &[f32], b: &[f32]) -> f32 {
     result
 }
 
+/// Compute Hamming distance using AVX-512 for loading + scalar popcnt.
+///
+/// Processes 64 bytes at a time using 512-bit XOR, then uses
+/// _popcnt64 on 8 x u64 chunks.
+#[target_feature(enable = "avx512f,popcnt")]
+#[inline]
+pub unsafe fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+    let len = a.len();
+    let chunks = len / 64;
+    let mut result = 0u32;
+
+    for i in 0..chunks {
+        let offset = i * 64;
+        // Load 64 bytes from each array
+        let va = _mm512_loadu_si512(a.as_ptr().add(offset) as *const i32);
+        let vb = _mm512_loadu_si512(b.as_ptr().add(offset) as *const i32);
+
+        // XOR to find differing bits
+        let xor_result = _mm512_xor_si512(va, vb);
+
+        // Extract as 8 x u64 and count bits
+        let mut xor_bytes = [0u64; 8];
+        _mm512_storeu_si512(xor_bytes.as_mut_ptr() as *mut i32, xor_result);
+
+        result += _popcnt64(xor_bytes[0] as i64) as u32;
+        result += _popcnt64(xor_bytes[1] as i64) as u32;
+        result += _popcnt64(xor_bytes[2] as i64) as u32;
+        result += _popcnt64(xor_bytes[3] as i64) as u32;
+        result += _popcnt64(xor_bytes[4] as i64) as u32;
+        result += _popcnt64(xor_bytes[5] as i64) as u32;
+        result += _popcnt64(xor_bytes[6] as i64) as u32;
+        result += _popcnt64(xor_bytes[7] as i64) as u32;
+    }
+
+    // Handle remaining bytes
+    for i in (chunks * 64)..len {
+        result += (*a.get_unchecked(i) ^ *b.get_unchecked(i)).count_ones();
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +213,44 @@ mod tests {
             avx512_result,
             scalar_result
         );
+    }
+
+    #[test]
+    fn test_hamming_distance_identical() {
+        if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("popcnt") {
+            println!("Skipping AVX-512 hamming test - CPU doesn't support it");
+            return;
+        }
+
+        let a = vec![0xFF; 64];
+        let b = vec![0xFF; 64];
+        assert_eq!(unsafe { hamming_distance(&a, &b) }, 0);
+    }
+
+    #[test]
+    fn test_hamming_distance_opposite() {
+        if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("popcnt") {
+            println!("Skipping AVX-512 hamming test - CPU doesn't support it");
+            return;
+        }
+
+        let a = vec![0x00; 64];
+        let b = vec![0xFF; 64];
+        // 64 bytes * 8 bits = 512 differing bits
+        assert_eq!(unsafe { hamming_distance(&a, &b) }, 512);
+    }
+
+    #[test]
+    fn test_hamming_distance_with_tail() {
+        if !is_x86_feature_detected!("avx512f") || !is_x86_feature_detected!("popcnt") {
+            println!("Skipping AVX-512 hamming test - CPU doesn't support it");
+            return;
+        }
+
+        // 80 bytes = 64 (one AVX-512 chunk) + 16 (tail)
+        let a = vec![0x00; 80];
+        let b = vec![0xFF; 80];
+        // 80 bytes * 8 bits = 640 differing bits
+        assert_eq!(unsafe { hamming_distance(&a, &b) }, 640);
     }
 }

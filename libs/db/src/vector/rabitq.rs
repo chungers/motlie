@@ -267,41 +267,19 @@ impl RaBitQ {
 
     /// Compute Hamming distance between two binary codes.
     ///
-    /// Uses `count_ones()` which compiles to efficient popcount instruction.
+    /// Uses SIMD-optimized implementation from `motlie_core::distance`.
+    /// Automatically selects best implementation (AVX-512, AVX2, NEON, scalar).
     #[inline]
     pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
-        debug_assert_eq!(a.len(), b.len(), "Code length mismatch");
-
-        a.iter()
-            .zip(b.iter())
-            .map(|(&x, &y)| (x ^ y).count_ones())
-            .sum()
+        motlie_core::distance::hamming_distance(a, b)
     }
 
-    /// Compute Hamming distance using u64 chunks for better performance.
+    /// Compute Hamming distance using SIMD-optimized implementation.
     ///
-    /// Processes 8 bytes at a time when possible.
+    /// Alias for `hamming_distance` - both now use SIMD.
+    #[inline]
     pub fn hamming_distance_fast(a: &[u8], b: &[u8]) -> u32 {
-        debug_assert_eq!(a.len(), b.len(), "Code length mismatch");
-
-        let mut distance = 0u32;
-        let chunks = a.len() / 8;
-
-        // Process 8 bytes at a time
-        for i in 0..chunks {
-            let offset = i * 8;
-            let a_chunk = u64::from_le_bytes(a[offset..offset + 8].try_into().unwrap());
-            let b_chunk = u64::from_le_bytes(b[offset..offset + 8].try_into().unwrap());
-            distance += (a_chunk ^ b_chunk).count_ones();
-        }
-
-        // Handle remaining bytes
-        let remainder_start = chunks * 8;
-        for i in remainder_start..a.len() {
-            distance += (a[i] ^ b[i]).count_ones();
-        }
-
-        distance
+        motlie_core::distance::hamming_distance(a, b)
     }
 
     /// Batch compute Hamming distances from a query code to multiple candidates.
