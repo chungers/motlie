@@ -39,7 +39,7 @@ use tempfile::TempDir;
 use benchmark::{BenchmarkDataset, BenchmarkMetrics, DatasetConfig, DatasetName};
 use motlie_db::rocksdb::{BlockCacheConfig, ColumnFamily};
 use motlie_db::vector::{
-    EmbeddingCode, HnswConfig, HnswIndex, NavigationCache, Storage, VecId, VectorCfKey,
+    EmbeddingCode, HnswConfig, HnswIndex, NavigationCache, RaBitQ, Storage, VecId, VectorCfKey,
     VectorCfValue, Vectors,
 };
 
@@ -91,6 +91,18 @@ struct Args {
     #[arg(long, default_value = "256")]
     cache_size_mb: usize,
 
+    /// Enable RaBitQ two-phase search (Hamming filter + exact re-rank)
+    #[arg(long)]
+    rabitq: bool,
+
+    /// RaBitQ re-rank factor (how many candidates to fetch before re-ranking)
+    #[arg(long, default_value = "4")]
+    rerank_factor: usize,
+
+    /// RaBitQ bits per dimension (1, 2, or 4)
+    #[arg(long, default_value = "1")]
+    bits_per_dim: u8,
+
     /// Verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -125,6 +137,11 @@ async fn main() -> Result<()> {
     println!("  M:               {}", args.m);
     println!("  ef_construction: {}", args.ef_construction);
     println!("  Cache Size:      {} MB", args.cache_size_mb);
+    println!("  RaBitQ:          {}", if args.rabitq { "enabled" } else { "disabled" });
+    if args.rabitq {
+        println!("  Rerank Factor:   {}", args.rerank_factor);
+        println!("  Bits/Dim:        {}", args.bits_per_dim);
+    }
     println!();
 
     // Load benchmark dataset
@@ -171,6 +188,11 @@ async fn run_phase2_benchmark(
         .unwrap_or_else(|| "random".to_string());
 
     let mut metrics = BenchmarkMetrics::new(&dataset_str, "HNSW2-RocksDB");
+    metrics.search_mode = if args.rabitq {
+        format!("RaBitQ(rerank={}x,bits={})", args.rerank_factor, args.bits_per_dim)
+    } else {
+        "standard".to_string()
+    };
 
     // Create temp directory or use specified path
     let _temp_dir: Option<TempDir>;
@@ -272,7 +294,20 @@ async fn run_phase2_benchmark(
         args.num_queries
     };
 
-    println!("\nRunning {} queries (k={}, ef={})...", actual_queries, args.k, args.ef);
+    // Create RaBitQ encoder if enabled
+    let rabitq_encoder = if args.rabitq {
+        let dim = benchmark_data.map(|d| d.dimensions).unwrap_or(128);
+        Some(RaBitQ::new(dim, args.bits_per_dim, 42))
+    } else {
+        None
+    };
+
+    let search_mode = if args.rabitq {
+        format!("RaBitQ (rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
+    } else {
+        "standard".to_string()
+    };
+    println!("\nRunning {} queries (k={}, ef={}, mode={})...", actual_queries, args.k, args.ef, search_mode);
 
     let mut total_recall = 0.0;
     let mut search_latencies: Vec<f64> = Vec::with_capacity(actual_queries);
@@ -284,9 +319,13 @@ async fn run_phase2_benchmark(
             generate_random_vector(128, &mut rng)
         };
 
-        // HNSW search
+        // HNSW search (with or without RaBitQ)
         let search_start = Instant::now();
-        let results = index.search(&storage, &query, args.k, args.ef)?;
+        let results = if let Some(ref encoder) = rabitq_encoder {
+            index.search_with_rabitq(&storage, &query, encoder, args.k, args.ef, args.rerank_factor)?
+        } else {
+            index.search(&storage, &query, args.k, args.ef)?
+        };
         let search_time = search_start.elapsed();
         search_latencies.push(search_time.as_secs_f64() * 1000.0);
 

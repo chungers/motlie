@@ -669,6 +669,8 @@ pub struct BenchmarkMetrics {
     pub dataset: String,
     /// Algorithm name
     pub algorithm: String,
+    /// Search mode (standard, RaBitQ, etc.)
+    pub search_mode: String,
     /// Number of indexed vectors
     pub num_vectors: usize,
     /// Number of queries executed
@@ -728,6 +730,9 @@ impl BenchmarkMetrics {
         println!("| Queries | {} |", self.num_queries);
         println!("| K | {} |", self.k);
         println!("| Cache Size | {} MB |", self.cache_size_mb);
+        if !self.search_mode.is_empty() {
+            println!("| Search Mode | {} |", self.search_mode);
+        }
         println!("| Build Time | {:.2}s |", self.build_time_secs);
         println!("| Build Throughput | {:.1} vec/s |", self.build_throughput);
         println!("| Avg Latency | {:.2}ms |", self.avg_search_latency_ms);
