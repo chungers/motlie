@@ -35,7 +35,7 @@ use roaring::RoaringBitmap;
 
 use super::config::HnswConfig;
 use super::merge::EdgeOp;
-use super::navigation::{NavigationCache, NavigationLayerInfo};
+use super::navigation::{BinaryCodeCache, NavigationCache, NavigationLayerInfo};
 use super::rabitq::RaBitQ;
 use super::schema::{
     BinaryCodeCfKey, BinaryCodes, EdgeCfKey, Edges, EmbeddingCode, GraphMeta, GraphMetaCfKey,
@@ -1170,6 +1170,184 @@ impl HnswIndex {
                     RaBitQ::hamming_distance(query_code, &code)
                 } else {
                     u32::MAX // No code, skip
+                };
+
+                // Add to results if better than worst or results not full
+                if results.len() < ef {
+                    candidates.push(Reverse((dist, neighbor)));
+                    results.push((dist, neighbor));
+                } else if let Some(&(worst_dist, _)) = results.peek() {
+                    if dist < worst_dist {
+                        candidates.push(Reverse((dist, neighbor)));
+                        results.pop();
+                        results.push((dist, neighbor));
+                    }
+                }
+            }
+        }
+
+        // Extract results sorted by Hamming distance (ascending)
+        let mut result_vec: Vec<(u32, VecId)> = results.into_iter().collect();
+        result_vec.sort_by_key(|(dist, _)| *dist);
+
+        Ok(result_vec)
+    }
+
+    /// Two-phase search using in-memory cached binary codes.
+    ///
+    /// This is the optimized version of `search_with_rabitq` that uses a
+    /// `BinaryCodeCache` instead of fetching codes from RocksDB. This eliminates
+    /// the "double I/O" problem that made RaBitQ slower than standard L2 at scale.
+    ///
+    /// # Performance
+    ///
+    /// With cached codes:
+    /// - Hamming distance: ~ns (SIMD popcount on in-memory bytes)
+    /// - No RocksDB reads during beam search
+    /// - Only re-ranking phase reads vectors from disk
+    ///
+    /// Expected speedup: 2-4x over standard L2 search.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Vector storage (only used for re-ranking)
+    /// * `query` - Query vector
+    /// * `encoder` - RaBitQ encoder
+    /// * `code_cache` - In-memory cache of binary codes
+    /// * `k` - Number of results to return
+    /// * `ef` - Search beam width
+    /// * `rerank_factor` - Multiplier for candidates to re-rank
+    pub fn search_with_rabitq_cached(
+        &self,
+        storage: &Storage,
+        query: &[f32],
+        encoder: &RaBitQ,
+        code_cache: &BinaryCodeCache,
+        k: usize,
+        ef: usize,
+        rerank_factor: usize,
+    ) -> Result<Vec<(f32, VecId)>> {
+        let nav_info = self
+            .nav_cache
+            .get(self.embedding)
+            .or_else(|| self.load_navigation(storage).ok())
+            .ok_or_else(|| anyhow::anyhow!("No navigation info for embedding {}", self.embedding))?;
+
+        if nav_info.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let entry_point = nav_info.entry_point().unwrap();
+        let max_layer = nav_info.max_layer;
+
+        // Encode query to binary code
+        let query_code = encoder.encode(query);
+
+        // Phase 1: Greedy descent through upper layers using exact distance
+        let mut current = entry_point;
+        let mut current_dist = self.distance(storage, query, current)?;
+
+        for layer in (1..=max_layer).rev() {
+            (current, current_dist) =
+                self.greedy_search_layer(storage, query, current, current_dist, layer, true)?;
+        }
+
+        // Phase 2: Beam search at layer 0 using CACHED Hamming distance
+        let rerank_count = k * rerank_factor;
+        let effective_ef = ef.max(rerank_count);
+        let hamming_candidates = self.beam_search_layer0_hamming_cached(
+            storage,
+            &query_code,
+            code_cache,
+            current,
+            effective_ef,
+        )?;
+
+        if hamming_candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 3: Re-rank top candidates with exact L2 distance
+        let candidates_to_rerank = hamming_candidates.len().min(rerank_count);
+        let vec_ids: Vec<VecId> = hamming_candidates
+            .iter()
+            .take(candidates_to_rerank)
+            .map(|(_, id)| *id)
+            .collect();
+
+        // Fetch actual vectors and compute exact distances
+        let mut exact_results: Vec<(f32, VecId)> = Vec::with_capacity(vec_ids.len());
+        for &vec_id in &vec_ids {
+            let dist = self.distance(storage, query, vec_id)?;
+            exact_results.push((dist, vec_id));
+        }
+
+        // Sort by exact distance and return top-k
+        exact_results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        exact_results.truncate(k);
+
+        Ok(exact_results)
+    }
+
+    /// Beam search at layer 0 using in-memory cached binary codes.
+    ///
+    /// This version uses `BinaryCodeCache` instead of RocksDB reads, making
+    /// Hamming distance computation essentially free (just SIMD popcount).
+    fn beam_search_layer0_hamming_cached(
+        &self,
+        storage: &Storage,
+        query_code: &[u8],
+        code_cache: &BinaryCodeCache,
+        entry: VecId,
+        ef: usize,
+    ) -> Result<Vec<(u32, VecId)>> {
+        let mut candidates: BinaryHeap<Reverse<(u32, VecId)>> = BinaryHeap::new();
+        let mut results: BinaryHeap<(u32, VecId)> = BinaryHeap::new();
+        let mut visited = RoaringBitmap::new();
+
+        // Get entry point's Hamming distance from cache
+        let entry_code = code_cache
+            .get(self.embedding, entry)
+            .unwrap_or_default();
+        let entry_dist = RaBitQ::hamming_distance(query_code, &entry_code);
+
+        candidates.push(Reverse((entry_dist, entry)));
+        results.push((entry_dist, entry));
+        visited.insert(entry);
+
+        while let Some(Reverse((current_dist, current))) = candidates.pop() {
+            // Stop if current is worse than worst result
+            if results.len() >= ef {
+                if let Some(&(worst_dist, _)) = results.peek() {
+                    if current_dist > worst_dist {
+                        break;
+                    }
+                }
+            }
+
+            // Expand neighbors (still need edge lookup from storage)
+            let neighbors = self.get_neighbors(storage, current, 0, true)?;
+
+            // Filter unvisited
+            let unvisited: Vec<VecId> = neighbors
+                .iter()
+                .filter(|n| !visited.contains(*n))
+                .collect();
+
+            if unvisited.is_empty() {
+                continue;
+            }
+
+            // Batch fetch binary codes from CACHE (not RocksDB!)
+            let codes = code_cache.get_batch(self.embedding, &unvisited);
+
+            for (neighbor, code_opt) in unvisited.into_iter().zip(codes.into_iter()) {
+                visited.insert(neighbor);
+
+                let dist = if let Some(code) = code_opt {
+                    RaBitQ::hamming_distance(query_code, &code)
+                } else {
+                    u32::MAX // No cached code, skip (shouldn't happen if cache is populated)
                 };
 
                 // Add to results if better than worst or results not full

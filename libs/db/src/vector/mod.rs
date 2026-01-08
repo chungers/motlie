@@ -47,7 +47,7 @@ pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
 pub use hnsw::HnswIndex;
 pub use id::IdAllocator;
-pub use navigation::{NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
+pub use navigation::{BinaryCodeCache, NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
 pub use processor::Processor;
 pub use rabitq::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
