@@ -855,14 +855,20 @@ impl HnswIndex {
 
     /// Two-phase search using RaBitQ for early filtering.
     ///
+    /// # Deprecated
+    ///
+    /// This method fetches binary codes from RocksDB during beam search, which
+    /// causes "double I/O" (codes + vectors) and is **slower than standard L2**
+    /// at scale (Task 4.9 benchmarks).
+    ///
+    /// Use [`search_with_rabitq_cached`] instead, which uses in-memory cached
+    /// codes and provides 2.2x speedup over this method.
+    ///
+    /// # Original Design
+    ///
     /// Phase 1: HNSW layer descent using exact distance (upper layers are small)
     /// Phase 2: Layer 0 beam search using Hamming distance for candidate filtering
     /// Phase 3: Re-rank top candidates with exact L2 distance
-    ///
-    /// This approach provides speedup because:
-    /// - Hamming distance is 4-10x faster than L2 (SIMD popcount)
-    /// - Layer 0 has most of the graph nodes
-    /// - Re-ranking is only done on top candidates
     ///
     /// # Arguments
     ///
@@ -876,6 +882,10 @@ impl HnswIndex {
     /// # Returns
     ///
     /// Top-k results sorted by exact distance.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Slower than standard search due to RocksDB I/O. Use search_with_rabitq_cached() instead."
+    )]
     pub fn search_with_rabitq(
         &self,
         storage: &Storage,
@@ -945,24 +955,31 @@ impl HnswIndex {
 
     /// Hybrid search: L2 navigation + Hamming filtering.
     ///
-    /// This approach preserves recall by using exact L2 distance for HNSW navigation,
-    /// then uses fast SIMD Hamming distance as a secondary filter/validator.
+    /// # Deprecated
     ///
-    /// # Architecture
+    /// Task 4.8 benchmarks showed this approach is **worse than standard L2**:
+    /// - Lower recall (51% vs 100% at 1K, 39% vs 90% at 10K)
+    /// - Similar or worse QPS (adds Hamming computation overhead)
+    ///
+    /// The combined L2+Hamming ranking hurts recall because candidates that
+    /// rank well in L2 but poorly in Hamming get penalized, even though L2
+    /// is the ground truth metric.
+    ///
+    /// Use [`search`] for high recall, or [`search_with_rabitq_cached`] for
+    /// high throughput with acceptable recall tradeoff.
+    ///
+    /// # Original Architecture
     ///
     /// ```text
     /// Phase 1: L2 Navigation (Upper Layers)
     ///   - Greedy descent using exact L2 distance
-    ///   - Same as standard HNSW search
     ///
     /// Phase 2: L2 Beam Search (Layer 0)
     ///   - Standard beam search with ef candidates
-    ///   - Returns candidates with exact L2 distances
     ///
     /// Phase 3: Hamming Validation
     ///   - Compute Hamming distance for all candidates
     ///   - Combine L2 rank and Hamming rank for final scoring
-    ///   - Candidates that rank poorly in both are likely false positives
     ///
     /// Phase 4: Return top-k by combined score
     /// ```
@@ -978,6 +995,10 @@ impl HnswIndex {
     /// # Returns
     ///
     /// Top-k results sorted by exact L2 distance.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Worse than standard search (lower recall, similar QPS). Use search() or search_with_rabitq_cached() instead."
+    )]
     pub fn search_hybrid(
         &self,
         storage: &Storage,
@@ -1044,10 +1065,18 @@ impl HnswIndex {
 
     /// Experimental: Search using Hamming distance for candidate filtering.
     ///
-    /// This is a more aggressive optimization that uses binary codes
-    /// during the beam search phase. Currently not used by default
-    /// as it requires additional tuning for good recall.
+    /// # Deprecated
+    ///
+    /// This experimental function was never integrated into the public API.
+    /// It requires manual tuning for good recall and has been superseded by
+    /// [`search_with_rabitq_cached`] which provides a better documented approach.
+    ///
+    /// Will be removed in a future version.
     #[allow(dead_code)]
+    #[deprecated(
+        since = "0.2.0",
+        note = "Experimental, never used. Will be removed. Use search_with_rabitq_cached() instead."
+    )]
     pub fn search_hamming_filter(
         &self,
         storage: &Storage,
@@ -1115,6 +1144,10 @@ impl HnswIndex {
     /// Uses SIMD-optimized Hamming distance (via motlie_core::distance) for
     /// faster distance computation during beam search. The results are then
     /// re-ranked with exact L2 distance in the caller.
+    ///
+    /// Note: Only used by deprecated functions (`search_with_rabitq`, `search_hamming_filter`).
+    /// Use `beam_search_layer0_hamming_cached` instead via `search_with_rabitq_cached`.
+    #[allow(dead_code)]
     fn beam_search_layer0_hamming(
         &self,
         storage: &Storage,
