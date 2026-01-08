@@ -293,6 +293,11 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for Edges {
 
         block_opts.set_block_cache(cache);
         block_opts.set_block_size(config.default_block_size);
+
+        // Enable bloom filter for fast point lookups (10 bits per key)
+        // This is critical for HNSW get_neighbors performance
+        block_opts.set_bloom_filter(10.0, false);
+
         opts.set_compression_type(rocksdb::DBCompressionType::None);
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
         opts.set_block_based_table_factory(&block_opts);

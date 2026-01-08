@@ -147,17 +147,17 @@ use roaring::RoaringBitmap;
 /// Configuration for the navigation cache.
 #[derive(Debug, Clone)]
 pub struct NavigationCacheConfig {
-    /// Minimum layer to cache fully in memory.
+    /// Minimum layer to cache fully in memory (Search mode only).
     /// Layers below this use RocksDB with block cache.
     /// Default: 2 (cache layers 2+ in memory)
     pub min_cached_layer: HnswLayer,
 
-    /// Maximum edges to cache per embedding space.
+    /// Maximum edges to cache per embedding space (Search mode only).
     /// Default: 1M edges across all cached layers.
     pub max_cached_edges: usize,
 
-    /// Maximum entries in the layer 0-1 LRU cache.
-    /// These layers are too large to cache fully, so we use LRU.
+    /// Maximum entries in the layer 0-1 hot cache (Search mode only).
+    /// These layers are too large to cache fully, so we use bounded FIFO.
     /// Default: 10,000 entries
     pub hot_cache_size: usize,
 }
@@ -181,6 +181,11 @@ use std::collections::VecDeque;
 ///
 /// Caches upper layers (sparse) fully in memory to avoid disk I/O
 /// during the O(log N) descent phase of search.
+///
+/// # Usage
+///
+/// Edge caching is used only during search operations. During index build,
+/// callers should use uncached methods directly to avoid cache overhead.
 ///
 /// # Phase 3.5: Edge Caching
 ///
@@ -279,7 +284,10 @@ impl NavigationCache {
     // Edge Caching (Phase 3.5)
     // =========================================================================
 
-    /// Get cached neighbors for upper layers, or load via fetch_fn.
+    /// Get cached neighbors, or load via fetch_fn.
+    ///
+    /// This method is intended for search operations only. During index build,
+    /// callers should use the uncached fetch directly to avoid cache overhead.
     ///
     /// For layers >= min_cached_layer (upper layers):
     /// - Returns cached bitmap if available
@@ -368,7 +376,8 @@ impl NavigationCache {
 
     /// Invalidate cached edges for a node (call after edge updates).
     ///
-    /// Should be called when edges are modified during insert or delete.
+    /// Should be called when edges are modified during search-time updates.
+    /// Not needed during index build since build uses uncached paths.
     pub fn invalidate_edges(&self, embedding: EmbeddingCode, vec_id: VecId, layer: HnswLayer) {
         let key = (embedding, vec_id, layer);
 

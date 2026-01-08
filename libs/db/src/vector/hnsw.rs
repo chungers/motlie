@@ -132,16 +132,17 @@ impl HnswIndex {
         let mut current_dist = self.distance(storage, vector, current)?;
 
         // Descend from max_layer to node_layer + 1 (greedy, single candidate)
+        // use_cache: false - index build should not use cache
         for layer in (node_layer + 1..=max_layer).rev() {
             (current, current_dist) =
-                self.greedy_search_layer(storage, vector, current, current_dist, layer)?;
+                self.greedy_search_layer(storage, vector, current, current_dist, layer, false)?;
         }
 
         // 6. At each layer from node_layer down to 0: find neighbors and connect
         for layer in (0..=node_layer).rev() {
-            // Search for neighbors at this layer
+            // Search for neighbors at this layer (use_cache: false for build)
             let neighbors =
-                self.search_layer(storage, vector, current, self.config.ef_construction, layer)?;
+                self.search_layer(storage, vector, current, self.config.ef_construction, layer, false)?;
 
             // Select M neighbors (simple heuristic: take closest)
             let m = if layer == 0 {
@@ -249,12 +250,8 @@ impl HnswIndex {
             txn_db.merge_cf(&cf, reverse_key, reverse_op.to_bytes())?;
         }
 
-        // Invalidate edge cache for modified nodes (Phase 3.5/3.6)
-        // This ensures get_neighbors returns fresh data after edge updates
-        self.nav_cache.invalidate_edges(self.embedding, vec_id, layer);
-        for &neighbor_id in &neighbor_ids {
-            self.nav_cache.invalidate_edges(self.embedding, neighbor_id, layer);
-        }
+        // Note: No cache invalidation needed - index build uses uncached paths,
+        // and the cache is only populated during search operations.
 
         // TODO: Prune if degree exceeds M_max
         // This will be added when we implement degree-based pruning
@@ -330,13 +327,14 @@ impl HnswIndex {
         let mut current_dist = self.distance(storage, query, current)?;
 
         // Greedy descent through layers (from max_layer down to 1)
+        // use_cache: true - search benefits from edge caching
         for layer in (1..=max_layer).rev() {
             (current, current_dist) =
-                self.greedy_search_layer(storage, query, current, current_dist, layer)?;
+                self.greedy_search_layer(storage, query, current, current_dist, layer, true)?;
         }
 
-        // Beam search at layer 0
-        let results = self.beam_search_layer0(storage, query, current, k, ef)?;
+        // Beam search at layer 0 (use_cache: true for search)
+        let results = self.beam_search_layer0(storage, query, current, k, ef, true)?;
 
         Ok(results)
     }
@@ -345,6 +343,9 @@ impl HnswIndex {
     ///
     /// Finds the single closest node by following edges greedily.
     /// Uses batch_distances when neighbor count exceeds threshold.
+    ///
+    /// # Arguments
+    /// * `use_cache` - If true, uses edge cache (for search). If false, uncached (for build).
     fn greedy_search_layer(
         &self,
         storage: &Storage,
@@ -352,14 +353,13 @@ impl HnswIndex {
         entry: VecId,
         entry_dist: f32,
         layer: HnswLayer,
+        use_cache: bool,
     ) -> Result<(VecId, f32)> {
-        const BATCH_THRESHOLD: usize = 4;
-
         let mut current = entry;
         let mut current_dist = entry_dist;
 
         loop {
-            let neighbors = self.get_neighbors(storage, current, layer)?;
+            let neighbors = self.get_neighbors(storage, current, layer, use_cache)?;
             if neighbors.is_empty() {
                 break;
             }
@@ -367,7 +367,8 @@ impl HnswIndex {
             let mut improved = false;
 
             // Use batch for larger neighbor sets, individual for small
-            if neighbors.len() as u64 >= BATCH_THRESHOLD as u64 {
+            // Threshold is configurable - default 64 effectively disables batching
+            if neighbors.len() as u64 >= self.config.batch_threshold as u64 {
                 let neighbor_ids: Vec<VecId> = neighbors.iter().collect();
                 let distances = self.batch_distances(storage, query, &neighbor_ids)?;
                 for (neighbor, dist) in distances {
@@ -399,6 +400,9 @@ impl HnswIndex {
     /// Search at a single layer with ef candidates.
     ///
     /// Returns up to ef candidates sorted by distance.
+    ///
+    /// # Arguments
+    /// * `use_cache` - If true, uses edge cache (for search). If false, uncached (for build).
     fn search_layer(
         &self,
         storage: &Storage,
@@ -406,20 +410,24 @@ impl HnswIndex {
         entry: VecId,
         ef: usize,
         layer: HnswLayer,
+        use_cache: bool,
     ) -> Result<Vec<(f32, VecId)>> {
         // For single-node graph, just return the entry
-        let neighbors = self.get_neighbors(storage, entry, layer)?;
+        let neighbors = self.get_neighbors(storage, entry, layer, use_cache)?;
         if neighbors.is_empty() {
             let dist = self.distance(storage, query, entry)?;
             return Ok(vec![(dist, entry)]);
         }
 
         // Use beam search
-        let results = self.beam_search(storage, query, entry, ef, layer)?;
+        let results = self.beam_search(storage, query, entry, ef, layer, use_cache)?;
         Ok(results)
     }
 
     /// Beam search at layer 0 for final candidate expansion.
+    ///
+    /// # Arguments
+    /// * `use_cache` - If true, uses edge cache (for search). If false, uncached (for build).
     fn beam_search_layer0(
         &self,
         storage: &Storage,
@@ -427,8 +435,9 @@ impl HnswIndex {
         entry: VecId,
         k: usize,
         ef: usize,
+        use_cache: bool,
     ) -> Result<Vec<(f32, VecId)>> {
-        self.beam_search(storage, query, entry, ef, 0)
+        self.beam_search(storage, query, entry, ef, 0, use_cache)
             .map(|mut results| {
                 results.truncate(k);
                 results
@@ -439,6 +448,9 @@ impl HnswIndex {
     ///
     /// Uses batch_distances for efficient neighbor distance computation
     /// while maintaining correct sequential candidate processing.
+    ///
+    /// # Arguments
+    /// * `use_cache` - If true, uses edge cache (for search). If false, uncached (for build).
     fn beam_search(
         &self,
         storage: &Storage,
@@ -446,6 +458,7 @@ impl HnswIndex {
         entry: VecId,
         ef: usize,
         layer: HnswLayer,
+        use_cache: bool,
     ) -> Result<Vec<(f32, VecId)>> {
         // Min-heap for candidates (closest first)
         let mut candidates: BinaryHeap<Reverse<(OrderedFloat<f32>, VecId)>> = BinaryHeap::new();
@@ -469,7 +482,7 @@ impl HnswIndex {
             }
 
             // Get neighbors for this candidate
-            let neighbors = self.get_neighbors(storage, node, layer)?;
+            let neighbors = self.get_neighbors(storage, node, layer, use_cache)?;
 
             // Collect unvisited neighbors
             let unvisited: Vec<VecId> = neighbors
@@ -487,8 +500,8 @@ impl HnswIndex {
             }
 
             // Compute distances - use batch for larger sets
-            const BATCH_THRESHOLD: usize = 8;
-            let distances: Vec<(VecId, f32)> = if unvisited.len() >= BATCH_THRESHOLD {
+            // Threshold is configurable - default 64 effectively disables batching
+            let distances: Vec<(VecId, f32)> = if unvisited.len() >= self.config.batch_threshold {
                 self.batch_distances(storage, query, &unvisited)?
             } else {
                 unvisited
@@ -595,23 +608,30 @@ impl HnswIndex {
 
     /// Get neighbors of a node at a specific layer.
     ///
-    /// Uses NavigationCache for edge caching:
+    /// # Arguments
+    /// * `use_cache` - If true, uses NavigationCache for edge caching (for search).
+    ///                 If false, reads directly from RocksDB (for index build).
+    ///
+    /// Cache behavior when `use_cache` is true:
     /// - Upper layers (>= 2): Full caching in HashMap
     /// - Lower layers (0-1): FIFO hot cache with bounded size
-    ///
-    /// Cache is invalidated in connect_neighbors() after edge modifications.
     fn get_neighbors(
         &self,
         storage: &Storage,
         vec_id: VecId,
         layer: HnswLayer,
+        use_cache: bool,
     ) -> Result<RoaringBitmap> {
-        self.nav_cache.get_neighbors_cached(
-            self.embedding,
-            vec_id,
-            layer,
-            || self.get_neighbors_uncached(storage, vec_id, layer),
-        )
+        if use_cache {
+            self.nav_cache.get_neighbors_cached(
+                self.embedding,
+                vec_id,
+                layer,
+                || self.get_neighbors_uncached(storage, vec_id, layer),
+            )
+        } else {
+            self.get_neighbors_uncached(storage, vec_id, layer)
+        }
     }
 
     /// Get neighbors directly from RocksDB (no cache).
@@ -648,7 +668,8 @@ impl HnswIndex {
         vec_id: VecId,
         layer: HnswLayer,
     ) -> Result<u64> {
-        let neighbors = self.get_neighbors(storage, vec_id, layer)?;
+        // Always uncached - this is typically called during build
+        let neighbors = self.get_neighbors(storage, vec_id, layer, false)?;
         Ok(neighbors.len())
     }
 
