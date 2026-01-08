@@ -86,7 +86,8 @@ pub(crate) type RoaringBitmapBytes = Vec<u8>;
 ///
 /// Fixed-size binary representation of a vector for fast approximate distance.
 /// Size depends on vector dimensionality (e.g., 16 bytes for 128-dim 1-bit RaBitQ).
-pub(crate) type RabitqCode = Vec<u8>;
+/// Type alias for RaBitQ binary code
+pub type RabitqCode = Vec<u8>;
 
 // ============================================================================
 // Column Family Names
@@ -353,15 +354,15 @@ impl Edges {
 ///
 /// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
 /// Value: u8[code_size] (e.g., 16 bytes for 128-dim 1-bit RaBitQ)
-pub(crate) struct BinaryCodes;
+pub struct BinaryCodes;
 
 /// BinaryCodes key: (embedding_code, vec_id)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct BinaryCodeCfKey(pub(crate) EmbeddingCode, pub(crate) VecId);
+pub struct BinaryCodeCfKey(pub EmbeddingCode, pub VecId);
 
 /// BinaryCodes value: RaBitQ quantized code
 #[derive(Debug, Clone)]
-pub(crate) struct BinaryCodeCfValue(pub(crate) RabitqCode);
+pub struct BinaryCodeCfValue(pub RabitqCode);
 
 impl ColumnFamily for BinaryCodes {
     const CF_NAME: &'static str = "vector/binary_codes";

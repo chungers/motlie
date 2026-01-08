@@ -39,8 +39,8 @@ use tempfile::TempDir;
 use benchmark::{BenchmarkDataset, BenchmarkMetrics, DatasetConfig, DatasetName};
 use motlie_db::rocksdb::{BlockCacheConfig, ColumnFamily};
 use motlie_db::vector::{
-    EmbeddingCode, HnswConfig, HnswIndex, NavigationCache, RaBitQ, Storage, VecId, VectorCfKey,
-    VectorCfValue, Vectors,
+    BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, HnswConfig, HnswIndex,
+    NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue, Vectors,
 };
 
 // ============================================================================
@@ -234,6 +234,14 @@ async fn run_phase2_benchmark(
     // Prepare random number generator
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
+    // Create RaBitQ encoder for binary code generation (if enabled)
+    let build_encoder = if args.rabitq {
+        let dim = benchmark_data.map(|d| d.dimensions).unwrap_or(128);
+        Some(RaBitQ::new(dim, args.bits_per_dim, 42))
+    } else {
+        None
+    };
+
     // Index vectors
     println!("\nIndexing {} vectors...", args.num_vectors);
     let start = Instant::now();
@@ -243,6 +251,17 @@ async fn run_phase2_benchmark(
     let vectors_cf = txn_db
         .cf_handle(Vectors::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+
+    // Get BinaryCodes CF handle if RaBitQ enabled
+    let binary_codes_cf = if args.rabitq {
+        Some(
+            txn_db
+                .cf_handle(BinaryCodes::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?,
+        )
+    } else {
+        None
+    };
 
     let mut vec_id_to_index: HashMap<VecId, usize> = HashMap::new();
 
@@ -262,6 +281,18 @@ async fn run_phase2_benchmark(
             Vectors::key_to_bytes(&key),
             Vectors::value_to_bytes(&value),
         )?;
+
+        // Store binary code if RaBitQ enabled
+        if let (Some(ref encoder), Some(ref cf)) = (&build_encoder, &binary_codes_cf) {
+            let code = encoder.encode(&vector);
+            let bc_key = BinaryCodeCfKey(embedding_code, vec_id);
+            let bc_value = BinaryCodeCfValue(code);
+            txn_db.put_cf(
+                cf,
+                BinaryCodes::key_to_bytes(&bc_key),
+                BinaryCodes::value_to_bytes(&bc_value),
+            )?;
+        }
 
         vec_id_to_index.insert(vec_id, i);
 
@@ -294,13 +325,8 @@ async fn run_phase2_benchmark(
         args.num_queries
     };
 
-    // Create RaBitQ encoder if enabled
-    let rabitq_encoder = if args.rabitq {
-        let dim = benchmark_data.map(|d| d.dimensions).unwrap_or(128);
-        Some(RaBitQ::new(dim, args.bits_per_dim, 42))
-    } else {
-        None
-    };
+    // Use the same encoder for search (if RaBitQ enabled)
+    let rabitq_encoder = build_encoder;
 
     let search_mode = if args.rabitq {
         format!("RaBitQ (rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)

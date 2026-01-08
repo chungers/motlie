@@ -52,7 +52,8 @@ pub use processor::Processor;
 pub use rabitq::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
-    ALL_COLUMN_FAMILIES, EmbeddingCode, VecId, VectorCfKey, VectorCfValue, Vectors,
+    ALL_COLUMN_FAMILIES, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, VecId,
+    VectorCfKey, VectorCfValue, Vectors,
 };
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder

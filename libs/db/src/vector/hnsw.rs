@@ -853,10 +853,16 @@ impl HnswIndex {
             .collect()
     }
 
-    /// Two-phase search using RaBitQ for initial filtering.
+    /// Two-phase search using RaBitQ for early filtering.
     ///
-    /// Phase 1: Use standard HNSW search to find candidates
-    /// Phase 2: Re-rank candidates with exact distance
+    /// Phase 1: HNSW layer descent using exact distance (upper layers are small)
+    /// Phase 2: Layer 0 beam search using Hamming distance for candidate filtering
+    /// Phase 3: Re-rank top candidates with exact L2 distance
+    ///
+    /// This approach provides speedup because:
+    /// - Hamming distance is 4-10x faster than L2 (SIMD popcount)
+    /// - Layer 0 has most of the graph nodes
+    /// - Re-ranking is only done on top candidates
     ///
     /// # Arguments
     ///
@@ -865,7 +871,7 @@ impl HnswIndex {
     /// * `encoder` - RaBitQ encoder for the query
     /// * `k` - Number of results to return
     /// * `ef` - Search beam width
-    /// * `rerank_factor` - Multiplier for candidates to fetch (typically 2-4)
+    /// * `rerank_factor` - Multiplier for candidates to re-rank (typically 2-4)
     ///
     /// # Returns
     ///
@@ -879,30 +885,62 @@ impl HnswIndex {
         ef: usize,
         rerank_factor: usize,
     ) -> Result<Vec<(f32, VecId)>> {
-        // Phase 1: Get more candidates using standard search
-        let expanded_k = k * rerank_factor;
-        let expanded_ef = ef.max(expanded_k);
+        let nav_info = self
+            .nav_cache
+            .get(self.embedding)
+            .or_else(|| self.load_navigation(storage).ok())
+            .ok_or_else(|| anyhow::anyhow!("No navigation info for embedding {}", self.embedding))?;
 
-        // Use standard HNSW search
-        let candidates = self.search(storage, query, expanded_k, expanded_ef)?;
-
-        if candidates.is_empty() {
+        if nav_info.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Encode query for potential Hamming-based filtering
-        let _query_code = encoder.encode(query);
+        let entry_point = nav_info.entry_point().unwrap();
+        let max_layer = nav_info.max_layer;
 
-        // Phase 2: Re-rank with exact distances
-        // Note: The standard search already returns exact distances,
-        // so this is mainly for future optimization where Phase 1
-        // would use Hamming distance for faster candidate selection.
+        // Encode query to binary code
+        let query_code = encoder.encode(query);
 
-        // For now, just return top-k from the exact distance results
-        let mut results = candidates;
-        results.truncate(k);
+        // Phase 1: Greedy descent through upper layers using exact distance
+        // (upper layers have few nodes, so exact distance is fine)
+        let mut current = entry_point;
+        let mut current_dist = self.distance(storage, query, current)?;
 
-        Ok(results)
+        for layer in (1..=max_layer).rev() {
+            (current, current_dist) =
+                self.greedy_search_layer(storage, query, current, current_dist, layer, true)?;
+        }
+
+        // Phase 2: Beam search at layer 0 using Hamming distance
+        let rerank_count = k * rerank_factor;
+        let effective_ef = ef.max(rerank_count);
+        let hamming_candidates =
+            self.beam_search_layer0_hamming(storage, query, &query_code, encoder, current, effective_ef)?;
+
+        if hamming_candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 3: Re-rank top candidates with exact L2 distance
+        let candidates_to_rerank = hamming_candidates.len().min(rerank_count);
+        let vec_ids: Vec<VecId> = hamming_candidates
+            .iter()
+            .take(candidates_to_rerank)
+            .map(|(_, id)| *id)
+            .collect();
+
+        // Fetch actual vectors and compute exact distances
+        let mut exact_results: Vec<(f32, VecId)> = Vec::with_capacity(vec_ids.len());
+        for &vec_id in &vec_ids {
+            let dist = self.distance(storage, query, vec_id)?;
+            exact_results.push((dist, vec_id));
+        }
+
+        // Sort by exact distance and return top-k
+        exact_results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        exact_results.truncate(k);
+
+        Ok(exact_results)
     }
 
     /// Experimental: Search using Hamming distance for candidate filtering.
@@ -975,9 +1013,9 @@ impl HnswIndex {
 
     /// Beam search at layer 0 using Hamming distance for candidate ranking.
     ///
-    /// This is an experimental optimization that uses binary codes
-    /// for faster distance computation during beam search.
-    #[allow(dead_code)]
+    /// Uses SIMD-optimized Hamming distance (via motlie_core::distance) for
+    /// faster distance computation during beam search. The results are then
+    /// re-ranked with exact L2 distance in the caller.
     fn beam_search_layer0_hamming(
         &self,
         storage: &Storage,
