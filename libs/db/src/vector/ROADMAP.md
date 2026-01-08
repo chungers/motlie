@@ -4062,6 +4062,97 @@ Comprehensive recall tests added to validate HNSW parameter tuning.
 
 ---
 
+#### Task 4.9: RaBitQ Tuning Configuration Analysis
+
+**Status:** ✅ Complete
+
+**Goal:** Find optimal ef and rerank_factor parameters for different recall/QPS tradeoffs.
+
+##### Comprehensive Benchmark Results
+
+**1K Scale (Random Data):**
+
+| ef | rerank | QPS | Recall@10 | vs Baseline |
+|----|--------|-----|-----------|-------------|
+| 50 | 32 | 510 | 74.0% | 1.2x faster |
+| 100 | 32 | 471 | 74.0% | 1.1x faster |
+| - | - (L2) | 430 | 100% | baseline |
+
+**10K Scale (Random Data):**
+
+| ef | rerank | QPS | Recall@10 | vs Baseline |
+|----|--------|-----|-----------|-------------|
+| 50 | 32 | 129 | 26.6% | 2.7x faster |
+| 200 | 64 | 106 | 36.6% | 2.2x faster |
+| 200 | 100 | 93 | 46.2% | 2.0x faster |
+| 200 | 200 | 71 | 61.8% | 1.5x faster |
+| 500 | 500 | 47 | 90.6% | **1.0x (same)** |
+| 1000 | 1000 | 29 | 100% | 0.6x slower |
+| - | - (L2) | 48 | 90.4% | baseline |
+
+**100K Scale (SIFT Dataset):**
+
+| ef | rerank | QPS | Recall@10 | vs Baseline |
+|----|--------|-----|-----------|-------------|
+| 100 | 100 | 55 | 76.8% | **0.24x slower** |
+| 200 | 500 | 17 | 85.6% | **0.13x slower** |
+| - | - (L2 ef=100) | 225 | 86.8% | baseline |
+| - | - (L2 ef=200) | 133 | 86.8% | baseline |
+
+##### Critical Finding: RaBitQ Performance Issue
+
+**Observation:** RaBitQ is **slower** than standard L2 at larger scales (100K).
+
+**Root Cause Analysis:**
+
+1. **Double I/O Problem:**
+   ```
+   Standard L2:     Fetch ef vectors from RocksDB → Compute L2 distances
+   RaBitQ (ours):   Fetch ef codes from RocksDB → Compute Hamming
+                    → Fetch rerank vectors from RocksDB → Compute L2
+   ```
+   RaBitQ does MORE I/O, not less, because binary codes are in RocksDB.
+
+2. **Original RaBitQ Intent vs Our Implementation:**
+   - **Original**: Binary codes in memory, Hamming is CPU-bound, reduces vector fetches
+   - **Ours**: Binary codes in RocksDB, adds I/O latency, negates Hamming speed benefit
+
+3. **Break-Even Point:**
+   At 10K scale with rerank=500, RaBitQ matches L2 (47 QPS each). Above this scale, RaBitQ becomes slower because I/O dominates.
+
+##### Recommendations
+
+**For Current Implementation (RocksDB-stored codes):**
+
+| Use Case | Recommendation | Parameters |
+|----------|----------------|------------|
+| High Recall (>90%) | **Use Standard L2** | ef=100-200 |
+| Moderate Recall (70-80%) | RaBitQ possible | ef=200, rerank=200 |
+| Low Recall OK (<50%) | RaBitQ for QPS | ef=50, rerank=32 |
+
+**Tuning Guidelines:**
+- `rerank_factor = 10 × (target_recall / current_recall)` as starting point
+- Higher ef doesn't help much - Hamming beam search is the bottleneck
+- For >85% recall, standard L2 is recommended
+
+**Future Optimization (Task 4.10 - Not Started):**
+
+To make RaBitQ actually faster, binary codes must be cached in memory:
+
+```
+Optimized RaBitQ:
+1. On index build: Store codes in RocksDB AND populate memory cache
+2. On search: Hamming from memory cache (fast) → Vector fetch from RocksDB
+3. Memory overhead: ~16 bytes/vector for 128D 1-bit codes
+   - 100K vectors: 1.6 MB
+   - 1M vectors: 16 MB
+   - 10M vectors: 160 MB (acceptable)
+```
+
+This would reduce I/O from 2 fetches to 1 fetch, making RaBitQ beneficial.
+
+---
+
 **Task 4.7 Acceptance Criteria:**
 - [x] SIMD Hamming distance in motlie_core with tests
 - [x] RaBitQ using SIMD Hamming
