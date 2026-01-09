@@ -1513,4 +1513,357 @@ mod tests {
         println!("- For >90% recall: M=16, ef_search >= 50");
         println!("- Memory-constrained: M=8, ef_search >= 100");
     }
+
+    // =========================================================================
+    // SearchConfig Integration Tests
+    // =========================================================================
+    //
+    // These tests verify SearchConfig works correctly with HnswIndex,
+    // including strategy selection, distance metric consistency, and
+    // embedding code validation.
+
+    use crate::vector::{Distance, Embedding, SearchConfig, SearchStrategy};
+
+    /// Helper: Create an Embedding for testing
+    fn make_test_embedding(code: u64, dim: u32, distance: Distance) -> Embedding {
+        Embedding::new(code, "test-model", dim, distance, None)
+    }
+
+    #[test]
+    fn test_search_config_strategy_selection() {
+        // Cosine should auto-select RaBitQ
+        let cosine_emb = make_test_embedding(1, 128, Distance::Cosine);
+        let cosine_config = SearchConfig::new(cosine_emb, 10);
+        assert!(
+            cosine_config.strategy().is_rabitq(),
+            "Cosine should auto-select RaBitQ"
+        );
+
+        // L2 should auto-select Exact
+        let l2_emb = make_test_embedding(2, 128, Distance::L2);
+        let l2_config = SearchConfig::new(l2_emb, 10);
+        assert!(
+            l2_config.strategy().is_exact(),
+            "L2 should auto-select Exact"
+        );
+
+        // DotProduct should auto-select Exact
+        let dot_emb = make_test_embedding(3, 128, Distance::DotProduct);
+        let dot_config = SearchConfig::new(dot_emb, 10);
+        assert!(
+            dot_config.strategy().is_exact(),
+            "DotProduct should auto-select Exact"
+        );
+    }
+
+    #[test]
+    fn test_search_config_embedding_validation() {
+        let emb = make_test_embedding(42, 128, Distance::L2);
+        let config = SearchConfig::new(emb, 10);
+
+        // Should pass for matching code
+        assert!(config.validate_embedding_code(42).is_ok());
+
+        // Should fail for mismatched code
+        let err = config.validate_embedding_code(99).unwrap_err();
+        assert!(err.to_string().contains("mismatch"));
+        assert!(err.to_string().contains("42"));
+        assert!(err.to_string().contains("99"));
+    }
+
+    #[test]
+    fn test_search_config_compute_distance_l2() {
+        let emb = make_test_embedding(1, 4, Distance::L2);
+        let config = SearchConfig::new(emb, 10);
+
+        let a = vec![0.0, 0.0, 0.0, 0.0];
+        let b = vec![3.0, 4.0, 0.0, 0.0];
+
+        // L2 distance = sqrt(9 + 16) = 5
+        let dist = config.compute_distance(&a, &b);
+        assert!((dist - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_search_config_compute_distance_cosine() {
+        let emb = make_test_embedding(1, 4, Distance::Cosine);
+        let config = SearchConfig::new(emb, 10);
+
+        // Same vector should have distance 0
+        let a = vec![1.0, 2.0, 3.0, 4.0];
+        let dist = config.compute_distance(&a, &a);
+        assert!(dist.abs() < 0.001, "Same vector cosine distance should be ~0");
+
+        // Orthogonal vectors
+        let b = vec![1.0, 0.0, 0.0, 0.0];
+        let c = vec![0.0, 1.0, 0.0, 0.0];
+        let dist = config.compute_distance(&b, &c);
+        assert!((dist - 1.0).abs() < 0.001, "Orthogonal vectors cosine distance should be ~1");
+    }
+
+    #[test]
+    fn test_search_config_compute_distance_dot_product() {
+        let emb = make_test_embedding(1, 4, Distance::DotProduct);
+        let config = SearchConfig::new(emb, 10);
+
+        let a = vec![1.0, 2.0, 3.0, 4.0];
+        let b = vec![1.0, 1.0, 1.0, 1.0];
+
+        // DotProduct returns -dot(a, b) for "lower is better"
+        // dot = 1 + 2 + 3 + 4 = 10, so distance = -10
+        let dist = config.compute_distance(&a, &b);
+        assert!((dist - (-10.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_search_config_rabitq_only_for_cosine() {
+        // RaBitQ should work for Cosine
+        let cosine_emb = make_test_embedding(1, 128, Distance::Cosine);
+        let result = SearchConfig::new(cosine_emb, 10).exact().rabitq();
+        assert!(result.is_ok());
+
+        // RaBitQ should fail for L2
+        let l2_emb = make_test_embedding(2, 128, Distance::L2);
+        let result = SearchConfig::new(l2_emb, 10).rabitq();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cosine"));
+
+        // RaBitQ should fail for DotProduct
+        let dot_emb = make_test_embedding(3, 128, Distance::DotProduct);
+        let result = SearchConfig::new(dot_emb, 10).rabitq();
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // SIFT 1K Integration Tests
+    // =========================================================================
+    //
+    // These tests use a SIFT-like dataset (1K random vectors) to verify
+    // SearchConfig works correctly with actual HNSW index operations.
+
+    /// Helper: Generate SIFT-like normalized vectors (128D, unit length)
+    fn generate_sift_like_vectors(count: usize, seed: u64) -> Vec<Vec<f32>> {
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        (0..count)
+            .map(|_| {
+                let mut vec: Vec<f32> = (0..128).map(|_| rng.gen::<f32>() - 0.5).collect();
+                // Normalize to unit length for cosine distance
+                let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm > 0.0 {
+                    for x in &mut vec {
+                        *x /= norm;
+                    }
+                }
+                vec
+            })
+            .collect()
+    }
+
+    /// Helper: Compute ground truth with configurable distance metric
+    fn brute_force_knn_with_distance(
+        query: &[f32],
+        vectors: &[Vec<f32>],
+        k: usize,
+        distance: Distance,
+    ) -> Vec<usize> {
+        let mut distances: Vec<(f32, usize)> = vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (distance.compute(query, v), i))
+            .collect();
+        distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        distances.into_iter().take(k).map(|(_, i)| i).collect()
+    }
+
+    #[test]
+    fn test_sift_1k_l2_with_search_config() {
+        // Test SearchConfig with L2 distance on SIFT-like data
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 128;
+        let n_vectors = 1000;
+        let n_queries = 20;
+        let k = 10;
+
+        let vectors = generate_sift_like_vectors(n_vectors, 42);
+        let queries = generate_sift_like_vectors(n_queries, 123);
+
+        // Create embedding with L2 distance
+        let embedding = make_test_embedding(1, dim as u32, Distance::L2);
+
+        let config = HnswConfig {
+            dim,
+            m: 16,
+            m_max: 32,
+            m_max_0: 32,
+            ef_construction: 200,
+            ..Default::default()
+        };
+
+        let index = build_index(&storage, embedding.code(), &vectors, &config);
+
+        // Create SearchConfig - should auto-select Exact for L2
+        let search_config = SearchConfig::new(embedding.clone(), k).with_ef(100);
+        assert!(search_config.strategy().is_exact());
+
+        // Validate embedding matches
+        assert!(search_config.validate_embedding_code(index.embedding()).is_ok());
+
+        // Test recall using SearchConfig's compute_distance
+        let mut total_recall = 0.0;
+        for query in &queries {
+            // Use the existing search method (SearchConfig will be integrated later)
+            let results = index.search(&storage, query, k, search_config.ef()).expect("Search failed");
+            let ground_truth = brute_force_knn_with_distance(query, &vectors, k, Distance::L2);
+            total_recall += compute_recall(&results, &ground_truth);
+        }
+
+        let avg_recall = total_recall / n_queries as f64;
+        assert!(
+            avg_recall >= 0.90,
+            "L2 recall@{} should be >= 90% at {} vectors, got {:.1}%",
+            k, n_vectors, avg_recall * 100.0
+        );
+    }
+
+    #[test]
+    fn test_sift_1k_cosine_with_search_config() {
+        // Test SearchConfig with Cosine distance on SIFT-like data
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 128;
+        let n_vectors = 1000;
+        let n_queries = 20;
+        let k = 10;
+
+        let vectors = generate_sift_like_vectors(n_vectors, 42);
+        let queries = generate_sift_like_vectors(n_queries, 123);
+
+        // Create embedding with Cosine distance
+        let embedding = make_test_embedding(1, dim as u32, Distance::Cosine);
+
+        let config = HnswConfig {
+            dim,
+            m: 16,
+            m_max: 32,
+            m_max_0: 32,
+            ef_construction: 200,
+            ..Default::default()
+        };
+
+        let index = build_index(&storage, embedding.code(), &vectors, &config);
+
+        // Create SearchConfig - should auto-select RaBitQ for Cosine
+        let search_config = SearchConfig::new(embedding.clone(), k).with_ef(100);
+        assert!(search_config.strategy().is_rabitq());
+
+        // Test can force Exact strategy
+        let exact_config = SearchConfig::new(embedding.clone(), k).with_ef(100).exact();
+        assert!(exact_config.strategy().is_exact());
+
+        // Validate embedding matches
+        assert!(search_config.validate_embedding_code(index.embedding()).is_ok());
+
+        // Test recall using search_config's distance (currently uses L2 internally,
+        // but we verify the config would use Cosine)
+        let mut total_recall = 0.0;
+        for query in &queries {
+            let results = index.search(&storage, query, k, search_config.ef()).expect("Search failed");
+            // Ground truth computed with Cosine distance
+            let ground_truth = brute_force_knn_with_distance(query, &vectors, k, Distance::Cosine);
+            total_recall += compute_recall(&results, &ground_truth);
+        }
+
+        let avg_recall = total_recall / n_queries as f64;
+        // Note: Current search() uses L2 internally, so recall with Cosine ground truth may differ
+        // This test primarily verifies SearchConfig setup is correct
+        assert!(
+            avg_recall >= 0.60,
+            "Cosine recall@{} should be >= 60% (L2 approximation), got {:.1}%",
+            k, avg_recall * 100.0
+        );
+    }
+
+    #[test]
+    fn test_search_config_embedding_mismatch_detection() {
+        // Test that SearchConfig detects embedding code mismatches
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 64;
+        let n_vectors = 100;
+
+        let vectors = generate_random_vectors(n_vectors, dim, 42);
+
+        // Create index with embedding code 1
+        let config = HnswConfig::for_dim(dim);
+        let index = build_index(&storage, 1, &vectors, &config);
+
+        // Create SearchConfig with different embedding code (2)
+        let wrong_embedding = make_test_embedding(2, dim as u32, Distance::L2);
+        let search_config = SearchConfig::new(wrong_embedding, 10);
+
+        // Validation should fail
+        let result = search_config.validate_embedding_code(index.embedding());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mismatch"));
+    }
+
+    #[test]
+    fn test_search_config_parameters_propagation() {
+        // Test that SearchConfig parameters are accessible
+        let embedding = make_test_embedding(1, 128, Distance::L2);
+        let config = SearchConfig::new(embedding, 10)
+            .with_ef(150)
+            .with_rerank_factor(8)
+            .with_k(20);
+
+        assert_eq!(config.k(), 20);
+        assert_eq!(config.ef(), 150);
+        assert_eq!(config.rerank_factor(), 8);
+        assert_eq!(config.distance(), Distance::L2);
+        assert_eq!(config.embedding().code(), 1);
+    }
+
+    #[test]
+    fn test_sift_1k_different_k_values() {
+        // Test SearchConfig with different k values
+        let (_temp_dir, storage) = create_test_storage();
+        let dim = 128;
+        let n_vectors = 1000;
+        let n_queries = 10;
+
+        let vectors = generate_sift_like_vectors(n_vectors, 42);
+        let queries = generate_sift_like_vectors(n_queries, 123);
+
+        let embedding = make_test_embedding(1, dim as u32, Distance::L2);
+        let hnsw_config = HnswConfig {
+            dim,
+            m: 16,
+            ef_construction: 200,
+            ..Default::default()
+        };
+
+        let index = build_index(&storage, embedding.code(), &vectors, &hnsw_config);
+
+        // Test different k values
+        for k in [1, 5, 10, 20] {
+            let search_config = SearchConfig::new(embedding.clone(), k).with_ef(k.max(50));
+
+            let mut total_recall = 0.0;
+            for query in &queries {
+                let results = index
+                    .search(&storage, query, search_config.k(), search_config.ef())
+                    .expect("Search failed");
+                let ground_truth = brute_force_knn_with_distance(query, &vectors, k, Distance::L2);
+                total_recall += compute_recall(&results, &ground_truth);
+            }
+
+            let avg_recall = total_recall / n_queries as f64;
+            let min_recall = if k == 1 { 0.80 } else { 0.85 };
+            assert!(
+                avg_recall >= min_recall,
+                "Recall@{} should be >= {:.0}%, got {:.1}%",
+                k,
+                min_recall * 100.0,
+                avg_recall * 100.0
+            );
+        }
+    }
 }

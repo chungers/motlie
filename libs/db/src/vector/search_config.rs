@@ -452,4 +452,142 @@ mod tests {
             "RaBitQ(uncached)"
         );
     }
+
+    // =========================================================================
+    // Edge Case Tests
+    // =========================================================================
+
+    #[test]
+    fn test_rabitq_uncached_cosine_ok() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10).rabitq_uncached();
+
+        assert!(config.is_ok());
+        let config = config.unwrap();
+        assert!(matches!(
+            config.strategy(),
+            SearchStrategy::RaBitQ { use_cache: false }
+        ));
+    }
+
+    #[test]
+    fn test_rabitq_uncached_l2_fails() {
+        let emb = make_embedding(Distance::L2);
+        let config = SearchConfig::new(emb, 10).rabitq_uncached();
+
+        assert!(config.is_err());
+    }
+
+    #[test]
+    fn test_builder_chain_all() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 5)
+            .with_ef(200)
+            .with_rerank_factor(8)
+            .with_k(20)
+            .exact();
+
+        assert_eq!(config.k(), 20);
+        assert_eq!(config.ef(), 200);
+        assert_eq!(config.rerank_factor(), 8);
+        assert!(config.strategy().is_exact());
+    }
+
+    #[test]
+    fn test_distance_accessor() {
+        let emb = make_embedding(Distance::DotProduct);
+        let config = SearchConfig::new(emb, 10);
+
+        assert_eq!(config.distance(), Distance::DotProduct);
+    }
+
+    #[test]
+    fn test_embedding_accessor() {
+        let emb = make_embedding(Distance::L2);
+        let config = SearchConfig::new(emb.clone(), 10);
+
+        assert_eq!(config.embedding().code(), 1);
+        assert_eq!(config.embedding().distance(), Distance::L2);
+    }
+
+    #[test]
+    fn test_compute_distance_dot_product() {
+        let emb = make_embedding(Distance::DotProduct);
+        let config = SearchConfig::new(emb, 10);
+
+        let a = vec![1.0, 2.0, 3.0, 4.0];
+        let b = vec![1.0, 1.0, 1.0, 1.0];
+
+        // DotProduct returns -dot(a, b) = -(1+2+3+4) = -10
+        let dist = config.compute_distance(&a, &b);
+        assert!((dist - (-10.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_k_zero() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 0);
+
+        assert_eq!(config.k(), 0);
+    }
+
+    #[test]
+    fn test_ef_zero() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10).with_ef(0);
+
+        assert_eq!(config.ef(), 0);
+    }
+
+    #[test]
+    fn test_large_values() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 1_000_000)
+            .with_ef(10_000)
+            .with_rerank_factor(100);
+
+        assert_eq!(config.k(), 1_000_000);
+        assert_eq!(config.ef(), 10_000);
+        assert_eq!(config.rerank_factor(), 100);
+    }
+
+    #[test]
+    fn test_multiple_embeddings_different_codes() {
+        // Test that different embedding codes are properly distinguished
+        let emb1 = Embedding::new(1, "model1", 128, Distance::Cosine, None);
+        let emb2 = Embedding::new(2, "model2", 768, Distance::L2, None);
+
+        let config1 = SearchConfig::new(emb1, 10);
+        let config2 = SearchConfig::new(emb2, 10);
+
+        assert!(config1.validate_embedding_code(1).is_ok());
+        assert!(config1.validate_embedding_code(2).is_err());
+
+        assert!(config2.validate_embedding_code(2).is_ok());
+        assert!(config2.validate_embedding_code(1).is_err());
+    }
+
+    #[test]
+    fn test_strategy_is_rabitq() {
+        assert!(!SearchStrategy::Exact.is_rabitq());
+        assert!(SearchStrategy::RaBitQ { use_cache: true }.is_rabitq());
+        assert!(SearchStrategy::RaBitQ { use_cache: false }.is_rabitq());
+    }
+
+    #[test]
+    fn test_strategy_is_exact() {
+        assert!(SearchStrategy::Exact.is_exact());
+        assert!(!SearchStrategy::RaBitQ { use_cache: true }.is_exact());
+        assert!(!SearchStrategy::RaBitQ { use_cache: false }.is_exact());
+    }
+
+    #[test]
+    fn test_display_exact_strategy() {
+        let emb = make_embedding(Distance::L2);
+        let config = SearchConfig::new(emb, 10);
+
+        let display = format!("{}", config);
+        assert!(display.contains("Exact"));
+        assert!(display.contains("k: 10"));
+    }
 }
