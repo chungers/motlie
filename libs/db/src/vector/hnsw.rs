@@ -34,6 +34,7 @@ use ordered_float::OrderedFloat;
 use roaring::RoaringBitmap;
 
 use super::config::HnswConfig;
+use super::distance::Distance;
 use super::merge::EdgeOp;
 use super::navigation::{BinaryCodeCache, NavigationCache, NavigationLayerInfo};
 use super::rabitq::RaBitQ;
@@ -55,6 +56,8 @@ use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 pub struct HnswIndex {
     /// The embedding space code this index manages
     embedding: EmbeddingCode,
+    /// Distance metric for this index (Cosine, L2, DotProduct)
+    distance: Distance,
     /// HNSW configuration (M, ef_construction, etc.)
     config: HnswConfig,
     /// Navigation cache for fast layer traversal
@@ -63,13 +66,21 @@ pub struct HnswIndex {
 
 impl HnswIndex {
     /// Create a new HNSW index for an embedding space.
+    ///
+    /// # Arguments
+    /// * `embedding` - The embedding space code
+    /// * `distance` - Distance metric to use (Cosine, L2, DotProduct)
+    /// * `config` - HNSW configuration
+    /// * `nav_cache` - Navigation cache for fast layer traversal
     pub fn new(
         embedding: EmbeddingCode,
+        distance: Distance,
         config: HnswConfig,
         nav_cache: Arc<NavigationCache>,
     ) -> Self {
         Self {
             embedding,
+            distance,
             config,
             nav_cache,
         }
@@ -678,8 +689,17 @@ impl HnswIndex {
     /// Compute distance between query vector and stored vector.
     fn distance(&self, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
         let vector = self.get_vector(storage, vec_id)?;
-        // Use L2 distance for now (TODO: use embedding's configured distance)
-        Ok(l2_distance(query, &vector))
+        Ok(self.compute_distance(query, &vector))
+    }
+
+    /// Compute distance between two vectors using the configured metric.
+    #[inline]
+    fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32 {
+        match self.distance {
+            Distance::L2 => l2_distance(a, b),
+            Distance::Cosine => cosine_distance(a, b),
+            Distance::DotProduct => dot_product_distance(a, b),
+        }
     }
 
     /// Load a vector from storage.
@@ -1048,6 +1068,32 @@ fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
         .sum()
 }
 
+/// Compute Cosine distance between two vectors.
+/// Returns 1 - cosine_similarity, so 0 = identical, 2 = opposite.
+#[inline]
+fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 1.0; // undefined, return neutral distance
+    }
+
+    1.0 - (dot / (norm_a * norm_b))
+}
+
+/// Compute negative dot product distance (for similarity ranking).
+/// More negative = more similar (for MaxSim use cases).
+/// We return negative so that lower values = more similar (consistent with L2/Cosine).
+#[inline]
+fn dot_product_distance(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    -dot // Negate so lower = more similar
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1076,7 +1122,7 @@ mod tests {
     fn test_hnsw_index_creation() {
         let config = HnswConfig::default();
         let nav_cache = Arc::new(NavigationCache::new());
-        let index = HnswIndex::new(1, config.clone(), nav_cache);
+        let index = HnswIndex::new(1, Distance::L2, config.clone(), nav_cache);
 
         assert_eq!(index.embedding(), 1);
         assert_eq!(index.config().m, config.m);
@@ -1149,6 +1195,7 @@ mod tests {
     fn build_index(
         storage: &Storage,
         embedding: EmbeddingCode,
+        distance: Distance,
         vectors: &[Vec<f32>],
         config: &HnswConfig,
     ) -> HnswIndex {
@@ -1157,7 +1204,7 @@ mod tests {
 
         // Now build the HNSW index
         let nav_cache = Arc::new(NavigationCache::new());
-        let index = HnswIndex::new(embedding, config.clone(), nav_cache);
+        let index = HnswIndex::new(embedding, distance, config.clone(), nav_cache);
 
         for (i, vector) in vectors.iter().enumerate() {
             index.insert(storage, i as VecId, vector).expect("Insert failed");
@@ -1186,7 +1233,7 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, 1, &vectors, &config);
+        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         // Test recall over multiple queries
         let mut total_recall = 0.0;
@@ -1224,7 +1271,7 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, 1, &vectors, &config);
+        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         let mut total_recall = 0.0;
         for query in &queries {
@@ -1262,7 +1309,7 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, 1, &vectors, &config);
+        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         // Test different ef values
         let ef_values = [10, 20, 50, 100];
@@ -1307,7 +1354,7 @@ mod tests {
         let queries = generate_random_vectors(n_queries, dim, 123);
 
         let config = HnswConfig::high_recall(dim);
-        let index = build_index(&storage, 1, &vectors, &config);
+        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         let mut total_recall = 0.0;
         for query in &queries {
@@ -1337,7 +1384,7 @@ mod tests {
         let queries = generate_random_vectors(n_queries, dim, 123);
 
         let config = HnswConfig::compact(dim);
-        let index = build_index(&storage, 1, &vectors, &config);
+        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         let mut total_recall = 0.0;
         for query in &queries {
@@ -1376,7 +1423,7 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, 1, &vectors, &config);
+        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         let k_values = [1, 5, 10, 20];
         for &k in &k_values {
@@ -1440,7 +1487,7 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, 1, &vectors, &config);
+        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         let mut total_recall = 0.0;
         for query in &queries {
@@ -1494,7 +1541,7 @@ mod tests {
                 ..Default::default()
             };
 
-            let index = build_index(&storage, 1, &vectors, &config);
+            let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
             for &ef in &ef_values {
                 let mut total_recall = 0.0;
@@ -1699,7 +1746,7 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, embedding.code(), &vectors, &config);
+        let index = build_index(&storage, embedding.code(), embedding.distance(), &vectors, &config);
 
         // Create SearchConfig - should auto-select Exact for L2
         let search_config = SearchConfig::new(embedding.clone(), k).with_ef(100);
@@ -1749,7 +1796,7 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, embedding.code(), &vectors, &config);
+        let index = build_index(&storage, embedding.code(), embedding.distance(), &vectors, &config);
 
         // Create SearchConfig - should auto-select RaBitQ for Cosine
         let search_config = SearchConfig::new(embedding.clone(), k).with_ef(100);
@@ -1793,7 +1840,7 @@ mod tests {
 
         // Create index with embedding code 1
         let config = HnswConfig::for_dim(dim);
-        let index = build_index(&storage, 1, &vectors, &config);
+        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         // Create SearchConfig with different embedding code (2)
         let wrong_embedding = make_test_embedding(2, dim as u32, Distance::L2);
@@ -1840,7 +1887,7 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, embedding.code(), &vectors, &hnsw_config);
+        let index = build_index(&storage, embedding.code(), embedding.distance(), &vectors, &hnsw_config);
 
         // Test different k values
         for k in [1, 5, 10, 20] {

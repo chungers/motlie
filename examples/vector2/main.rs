@@ -36,11 +36,15 @@ use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use tempfile::TempDir;
 
-use benchmark::{BenchmarkDataset, BenchmarkMetrics, DatasetConfig, DatasetName};
+use benchmark::{
+    BenchmarkDataset, BenchmarkMetrics, DatasetConfig, DatasetName,
+    compute_ground_truth_cosine, cosine_distance_f32, normalize_vector, normalize_vectors,
+};
 use motlie_db::rocksdb::{BlockCacheConfig, ColumnFamily};
 use motlie_db::vector::{
-    BinaryCodeCache, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, HnswConfig,
-    HnswIndex, NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue, Vectors,
+    BinaryCodeCache, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, Distance, EmbeddingCode,
+    HnswConfig, HnswIndex, NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue,
+    Vectors,
 };
 
 // ============================================================================
@@ -91,18 +95,10 @@ struct Args {
     #[arg(long, default_value = "256")]
     cache_size_mb: usize,
 
-    /// Enable RaBitQ two-phase search (Hamming filter + exact re-rank)
-    #[arg(long)]
-    rabitq: bool,
-
-    /// Enable RaBitQ with in-memory cached binary codes (Task 4.10)
-    /// This eliminates RocksDB reads during beam search for maximum performance
+    /// Enable RaBitQ with in-memory cached binary codes
+    /// Uses Hamming filtering at layer 0 + exact L2 re-ranking
     #[arg(long)]
     rabitq_cached: bool,
-
-    /// Enable hybrid search (L2 navigation + Hamming validation)
-    #[arg(long)]
-    hybrid: bool,
 
     /// RaBitQ re-rank factor (how many candidates to fetch before re-ranking)
     #[arg(long, default_value = "4")]
@@ -111,6 +107,12 @@ struct Args {
     /// RaBitQ bits per dimension (1, 2, or 4)
     #[arg(long, default_value = "1")]
     bits_per_dim: u8,
+
+    /// Use Cosine distance instead of L2
+    /// Normalizes vectors and computes cosine ground truth
+    /// Enables optimal RaBitQ performance (Hamming ≈ angular)
+    #[arg(long)]
+    cosine: bool,
 
     /// Verbose output
     #[arg(long, short)]
@@ -137,6 +139,7 @@ async fn main() -> Result<()> {
         .map(|d| d.to_string())
         .unwrap_or_else(|| "random".to_string());
 
+    let distance_str = if args.cosine { "Cosine" } else { "L2" };
     println!("Configuration:");
     println!("  Dataset:         {}", dataset_str);
     println!("  Vectors:         {}", args.num_vectors);
@@ -146,20 +149,21 @@ async fn main() -> Result<()> {
     println!("  M:               {}", args.m);
     println!("  ef_construction: {}", args.ef_construction);
     println!("  Cache Size:      {} MB", args.cache_size_mb);
-    let search_mode_str = if args.hybrid {
-        "hybrid (L2 nav + Hamming filter)"
-    } else if args.rabitq_cached {
-        "rabitq-cached (in-memory Hamming nav + L2 rerank)"
-    } else if args.rabitq {
-        "rabitq (Hamming nav + L2 rerank)"
+    println!("  Distance:        {}", distance_str);
+    let search_mode_str = if args.rabitq_cached {
+        if args.cosine {
+            "rabitq-cached (in-memory Hamming nav + Cosine rerank)"
+        } else {
+            "rabitq-cached (in-memory Hamming nav + L2 rerank)"
+        }
+    } else if args.cosine {
+        "standard (Cosine)"
     } else {
-        "standard (L2 only)"
+        "standard (L2)"
     };
     println!("  Search Mode:     {}", search_mode_str);
-    if args.rabitq || args.rabitq_cached || args.hybrid {
-        if args.rabitq || args.rabitq_cached {
-            println!("  Rerank Factor:   {}", args.rerank_factor);
-        }
+    if args.rabitq_cached {
+        println!("  Rerank Factor:   {}", args.rerank_factor);
         println!("  Bits/Dim:        {}", args.bits_per_dim);
     }
     println!();
@@ -207,15 +211,27 @@ async fn run_phase2_benchmark(
         .map(|d| d.name.to_string())
         .unwrap_or_else(|| "random".to_string());
 
+    let distance_mode = if args.cosine { "Cosine" } else { "L2" };
     let mut metrics = BenchmarkMetrics::new(&dataset_str, "HNSW2-RocksDB");
-    metrics.search_mode = if args.hybrid {
-        format!("hybrid(bits={})", args.bits_per_dim)
-    } else if args.rabitq_cached {
-        format!("RaBitQ-cached(rerank={}x,bits={})", args.rerank_factor, args.bits_per_dim)
-    } else if args.rabitq {
-        format!("RaBitQ(rerank={}x,bits={})", args.rerank_factor, args.bits_per_dim)
+    metrics.search_mode = if args.rabitq_cached {
+        format!("RaBitQ-cached({}+rerank={}x,bits={})", distance_mode, args.rerank_factor, args.bits_per_dim)
     } else {
-        "standard".to_string()
+        format!("standard({})", distance_mode)
+    };
+
+    // Prepare normalized vectors for cosine mode
+    let (base_vectors, query_vectors, cosine_ground_truth) = if args.cosine {
+        if let Some(data) = benchmark_data {
+            println!("Normalizing vectors for Cosine distance...");
+            let norm_base = normalize_vectors(&data.base_vectors);
+            let norm_query = normalize_vectors(&data.query_vectors);
+            let gt = compute_ground_truth_cosine(&norm_base, &norm_query, 100);
+            (Some(norm_base), Some(norm_query), Some(gt))
+        } else {
+            (None, None, None)
+        }
+    } else {
+        (None, None, None)
     };
 
     // Create temp directory or use specified path
@@ -253,13 +269,14 @@ async fn run_phase2_benchmark(
     // Create navigation cache and index
     let nav_cache = Arc::new(NavigationCache::new());
     let embedding_code: EmbeddingCode = 1; // Single embedding space for benchmark
-    let index = HnswIndex::new(embedding_code, hnsw_config.clone(), nav_cache.clone());
+    let distance = if args.cosine { Distance::Cosine } else { Distance::L2 };
+    let index = HnswIndex::new(embedding_code, distance, hnsw_config.clone(), nav_cache.clone());
 
     // Prepare random number generator
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
-    // Create RaBitQ encoder for binary code generation (if rabitq, rabitq_cached, or hybrid enabled)
-    let build_encoder = if args.rabitq || args.rabitq_cached || args.hybrid {
+    // Create RaBitQ encoder for binary code generation (if rabitq_cached enabled)
+    let build_encoder = if args.rabitq_cached {
         let dim = benchmark_data.map(|d| d.dimensions).unwrap_or(128);
         Some(RaBitQ::new(dim, args.bits_per_dim, 42))
     } else {
@@ -283,8 +300,8 @@ async fn run_phase2_benchmark(
         .cf_handle(Vectors::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
 
-    // Get BinaryCodes CF handle if RaBitQ, RaBitQ-cached, or hybrid enabled
-    let binary_codes_cf = if args.rabitq || args.rabitq_cached || args.hybrid {
+    // Get BinaryCodes CF handle if RaBitQ-cached enabled
+    let binary_codes_cf = if args.rabitq_cached {
         Some(
             txn_db
                 .cf_handle(BinaryCodes::CF_NAME)
@@ -298,7 +315,15 @@ async fn run_phase2_benchmark(
 
     for i in 0..args.num_vectors {
         let vec_id = i as VecId;
-        let vector = if let Some(data) = benchmark_data {
+        let vector = if args.cosine {
+            // Use normalized vectors for cosine mode
+            if let Some(ref norm_base) = base_vectors {
+                norm_base[i].clone()
+            } else {
+                let v = generate_random_vector(128, &mut rng);
+                normalize_vector(&v)
+            }
+        } else if let Some(data) = benchmark_data {
             data.base_vectors[i].clone()
         } else {
             generate_random_vector(128, &mut rng)
@@ -366,12 +391,8 @@ async fn run_phase2_benchmark(
     // Use the same encoder for search (if RaBitQ enabled)
     let rabitq_encoder = build_encoder;
 
-    let search_mode = if args.hybrid {
-        format!("hybrid (L2 nav + Hamming filter, bits={})", args.bits_per_dim)
-    } else if args.rabitq_cached {
+    let search_mode = if args.rabitq_cached {
         format!("RaBitQ-cached (in-memory, rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
-    } else if args.rabitq {
-        format!("RaBitQ (rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
     } else {
         "standard".to_string()
     };
@@ -387,24 +408,26 @@ async fn run_phase2_benchmark(
     let mut search_latencies: Vec<f64> = Vec::with_capacity(actual_queries);
 
     for i in 0..actual_queries {
-        let query = if let Some(data) = benchmark_data {
+        let query = if args.cosine {
+            // Use normalized queries for cosine mode
+            if let Some(ref norm_query) = query_vectors {
+                norm_query[i].clone()
+            } else {
+                let v = generate_random_vector(128, &mut rng);
+                normalize_vector(&v)
+            }
+        } else if let Some(data) = benchmark_data {
             data.query_vectors[i].clone()
         } else {
             generate_random_vector(128, &mut rng)
         };
 
-        // HNSW search (standard, hybrid, rabitq, or rabitq_cached)
+        // HNSW search (standard or rabitq_cached)
         let search_start = Instant::now();
-        let results = if args.hybrid {
-            let encoder = rabitq_encoder.as_ref().expect("Encoder required for hybrid mode");
-            index.search_hybrid(&storage, &query, encoder, args.k, args.ef)?
-        } else if args.rabitq_cached {
+        let results = if args.rabitq_cached {
             let encoder = rabitq_encoder.as_ref().expect("Encoder required for rabitq_cached mode");
             let cache = code_cache.as_ref().expect("Code cache required for rabitq_cached mode");
             index.search_with_rabitq_cached(&storage, &query, encoder, cache, args.k, args.ef, args.rerank_factor)?
-        } else if args.rabitq {
-            let encoder = rabitq_encoder.as_ref().expect("Encoder required for rabitq mode");
-            index.search_with_rabitq(&storage, &query, encoder, args.k, args.ef, args.rerank_factor)?
         } else {
             index.search(&storage, &query, args.k, args.ef)?
         };
@@ -412,8 +435,18 @@ async fn run_phase2_benchmark(
         search_latencies.push(search_time.as_secs_f64() * 1000.0);
 
         // Compute recall
-        let recall = if let Some(data) = benchmark_data {
-            // Convert results to (distance, index) for benchmark validation
+        let recall = if args.cosine && cosine_ground_truth.is_some() {
+            // Use cosine ground truth for cosine mode
+            let gt = cosine_ground_truth.as_ref().unwrap();
+            let gt_k: std::collections::HashSet<_> = gt[i].iter().take(args.k).cloned().collect();
+            let result_set: std::collections::HashSet<_> = results
+                .iter()
+                .filter_map(|(_, vec_id)| vec_id_to_index.get(vec_id).cloned())
+                .collect();
+            let intersection = gt_k.intersection(&result_set).count();
+            intersection as f32 / args.k as f32
+        } else if let Some(data) = benchmark_data {
+            // Convert results to (distance, index) for benchmark validation (L2)
             let result_indices: Vec<(f32, usize)> = results
                 .iter()
                 .filter_map(|(dist, vec_id)| {
@@ -437,7 +470,11 @@ async fn run_phase2_benchmark(
                 })
                 .collect();
 
-            let gt = brute_force_knn(&query, &vectors, args.k);
+            let gt = if args.cosine {
+                brute_force_knn_cosine(&query, &vectors, args.k)
+            } else {
+                brute_force_knn(&query, &vectors, args.k)
+            };
             let gt_set: std::collections::HashSet<_> = gt.iter().map(|(_, idx)| *idx).collect();
             let result_set: std::collections::HashSet<_> = results
                 .iter()
@@ -529,4 +566,17 @@ fn l2_distance_squared(a: &[f32], b: &[f32]) -> f32 {
             diff * diff
         })
         .sum()
+}
+
+/// Brute-force k-NN search using cosine distance
+fn brute_force_knn_cosine(query: &[f32], vectors: &[Vec<f32>], k: usize) -> Vec<(f32, usize)> {
+    let mut distances: Vec<(f32, usize)> = vectors
+        .iter()
+        .enumerate()
+        .map(|(idx, v)| (cosine_distance_f32(query, v), idx))
+        .collect();
+
+    distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    distances.truncate(k);
+    distances
 }
