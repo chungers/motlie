@@ -797,7 +797,7 @@ impl HnswIndex {
     /// Batch compute distances from query to multiple vectors.
     ///
     /// Fetches all vectors in a single multi_get_cf call, then computes distances
-    /// using the configured distance metric (L2, Cosine, or DotProduct).
+    /// in parallel using rayon. Uses the configured distance metric (L2, Cosine, DotProduct).
     /// Returns (vec_id, distance) pairs for vectors that exist.
     pub fn batch_distances(
         &self,
@@ -805,13 +805,22 @@ impl HnswIndex {
         query: &[f32],
         vec_ids: &[VecId],
     ) -> Result<Vec<(VecId, f32)>> {
+        use rayon::prelude::*;
+
         let vectors = self.get_vectors_batch(storage, vec_ids)?;
 
-        Ok(vec_ids
+        // Collect (id, vector) pairs for parallel processing
+        let id_vec_pairs: Vec<(VecId, Vec<f32>)> = vec_ids
             .iter()
             .copied()
             .zip(vectors.into_iter())
-            .filter_map(|(id, vec_opt)| vec_opt.map(|v| (id, self.compute_distance(query, &v))))
+            .filter_map(|(id, vec_opt)| vec_opt.map(|v| (id, v)))
+            .collect();
+
+        // Parallel distance computation (CPU-bound, benefits from rayon)
+        Ok(id_vec_pairs
+            .par_iter()
+            .map(|(id, v)| (*id, self.compute_distance(query, v)))
             .collect())
     }
 
@@ -980,7 +989,7 @@ impl HnswIndex {
             return Ok(Vec::new());
         }
 
-        // Phase 3: Re-rank top candidates with exact L2 distance
+        // Phase 3: Re-rank top candidates with exact distance (PARALLEL)
         let candidates_to_rerank = hamming_candidates.len().min(rerank_count);
         let vec_ids: Vec<VecId> = hamming_candidates
             .iter()
@@ -988,16 +997,10 @@ impl HnswIndex {
             .map(|(_, id)| *id)
             .collect();
 
-        // Fetch actual vectors and compute exact distances
-        let mut exact_results: Vec<(f32, VecId)> = Vec::with_capacity(vec_ids.len());
-        for &vec_id in &vec_ids {
-            let dist = self.distance(storage, query, vec_id)?;
-            exact_results.push((dist, vec_id));
-        }
-
-        // Sort by exact distance and return top-k
-        exact_results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        exact_results.truncate(k);
+        // Parallel reranking - each worker has thread-safe RocksDB access
+        let exact_results = super::parallel::rerank_parallel(&vec_ids, |vec_id| {
+            self.distance(storage, query, vec_id).ok()
+        }, k);
 
         Ok(exact_results)
     }
