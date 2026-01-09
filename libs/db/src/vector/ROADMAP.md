@@ -66,6 +66,7 @@ throughput improvement and 10x search QPS improvement.
 | [Task 4.13](#task-413-api-cleanup-phase-3---embedding-driven-searchconfig-api) | API Cleanup: SearchConfig API | ✅ Complete | `5f2dac0` |
 | [Task 4.14](#task-414-api-cleanup-phase-4---configuration-validation) | API Cleanup: Config Validation | ✅ Complete | `5f2dac0` |
 | [Task 4.15](#task-415-phase-5-integration-planning) | Phase 5 Integration Planning | 🔲 Not Started | - |
+| [Task 4.16](#task-416-hnsw-distance-metric-bug-fix) | HNSW Distance Metric Bug Fix | ✅ Complete | `0535e6a` |
 
 ### Other Sections
 
@@ -4934,6 +4935,66 @@ pub fn insert_async(&self, embedding: &Embedding, vector: &[f32]) -> Result<Id> 
 - [ ] Ensure BinaryCodeCache integrates with async insert
 - [ ] Test quantized search on pending vectors
 - [ ] Benchmark async insert + quantized search latency
+
+---
+
+#### Task 4.16: HNSW Distance Metric Bug Fix
+
+**Status:** ✅ Complete
+**Commit:** `0535e6a`
+**Date:** 2026-01-09
+
+**Bug Description:**
+
+HNSW navigation was **hardcoded to use L2 distance** regardless of the configured
+distance metric. This caused incorrect results when using Cosine or DotProduct distance.
+
+**Location:** `libs/db/src/vector/hnsw.rs:681`
+
+```rust
+// BEFORE (Bug):
+let dist = l2_distance(&current_vector, &target_vector);
+
+// AFTER (Fix):
+let dist = self.compute_distance(&current_vector, &target_vector);
+```
+
+**Changes:**
+
+1. Added `distance: Distance` field to `HnswIndex` struct
+2. Updated `HnswIndex::new()` to take `Distance` parameter
+3. Added `compute_distance()` method that dispatches to correct metric
+4. Added `cosine_distance()` and `dot_product_distance()` functions
+5. Updated all callers to pass Distance parameter
+
+**Corrected Benchmark Results (100K vectors):**
+
+| Distance | Strategy | QPS | Recall@10 |
+|----------|----------|-----|-----------|
+| L2 | Standard | 255 | 88.4% |
+| Cosine | RaBitQ-cached | 445 | 58.3% |
+
+**Analysis:**
+
+The lower Cosine + RaBitQ recall (58.3%) is expected for SIFT data because:
+- SIFT vectors are integer histograms, not unit vectors
+- Cosine distance is designed for normalized embedding vectors
+- RaBitQ's Hamming approximation works best with unit vectors
+
+For real embedding models (OpenAI, Cohere) that produce unit vectors,
+Cosine + RaBitQ should achieve much higher recall.
+
+**Files Changed:**
+- `libs/db/src/vector/hnsw.rs` - Core fix
+- `libs/db/src/vector/search_config.rs` - Updated default rerank_factor to 10
+- `examples/vector2/main.rs` - Pass Distance to HnswIndex
+- `examples/vector2/benchmark.rs` - Added cosine distance functions
+
+**Acceptance Criteria:**
+- [x] HnswIndex uses configured distance metric for navigation
+- [x] All 33 HNSW tests pass
+- [x] Benchmark results re-collected with corrected code
+- [x] Results documented in `examples/vector2/results/phase4_final_results.md`
 
 ---
 
