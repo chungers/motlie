@@ -91,6 +91,60 @@ impl Default for HnswConfig {
     }
 }
 
+/// Configuration warnings for suboptimal settings.
+///
+/// These are warnings, not errors. Advanced users may intentionally
+/// use non-standard settings for specific use cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigWarning {
+    /// M < 8 may cause poor recall at scale
+    LowM(usize),
+    /// M > 64 has diminishing returns and high memory cost
+    HighM(usize),
+    /// ef_construction should be >= 2*M for good graph quality
+    LowEfConstruction { ef_construction: usize, recommended: usize },
+    /// ef_construction > 500 has diminishing returns
+    HighEfConstruction(usize),
+    /// Dimension is unusually low (< 32)
+    LowDimension(usize),
+    /// Dimension is unusually high (> 4096)
+    HighDimension(usize),
+    /// bits_per_dim must be 1, 2, 4, or 8
+    InvalidBitsPerDim(u8),
+}
+
+impl std::fmt::Display for ConfigWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigWarning::LowM(m) => {
+                write!(f, "M={} is low, may cause poor recall at scale (recommend >= 8)", m)
+            }
+            ConfigWarning::HighM(m) => {
+                write!(f, "M={} is high, diminishing returns and high memory (recommend <= 64)", m)
+            }
+            ConfigWarning::LowEfConstruction { ef_construction, recommended } => {
+                write!(
+                    f,
+                    "ef_construction={} is low for M, recommend >= {} (2*M)",
+                    ef_construction, recommended
+                )
+            }
+            ConfigWarning::HighEfConstruction(ef) => {
+                write!(f, "ef_construction={} is high, diminishing returns (recommend <= 500)", ef)
+            }
+            ConfigWarning::LowDimension(dim) => {
+                write!(f, "dim={} is unusually low (common: 128-1536)", dim)
+            }
+            ConfigWarning::HighDimension(dim) => {
+                write!(f, "dim={} is unusually high (common: 128-1536)", dim)
+            }
+            ConfigWarning::InvalidBitsPerDim(bits) => {
+                write!(f, "bits_per_dim={} is invalid (must be 1, 2, 4, or 8)", bits)
+            }
+        }
+    }
+}
+
 impl HnswConfig {
     /// Create config for specific dimension with default parameters.
     pub fn for_dim(dim: usize) -> Self {
@@ -98,6 +152,62 @@ impl HnswConfig {
             dim,
             ..Default::default()
         }
+    }
+
+    /// Validate configuration and return warnings for suboptimal settings.
+    ///
+    /// Returns an empty vector if all settings are within recommended ranges.
+    /// Warnings are informational - the config will still work.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use motlie_db::vector::HnswConfig;
+    ///
+    /// let config = HnswConfig { m: 4, ..Default::default() };
+    /// let warnings = config.validate();
+    /// assert!(!warnings.is_empty()); // Warning: M is low
+    /// ```
+    pub fn validate(&self) -> Vec<ConfigWarning> {
+        let mut warnings = Vec::new();
+
+        // Check M bounds
+        if self.m < 8 {
+            warnings.push(ConfigWarning::LowM(self.m));
+        }
+        if self.m > 64 {
+            warnings.push(ConfigWarning::HighM(self.m));
+        }
+
+        // Check ef_construction relative to M
+        let recommended_ef = self.m * 2;
+        if self.ef_construction < recommended_ef {
+            warnings.push(ConfigWarning::LowEfConstruction {
+                ef_construction: self.ef_construction,
+                recommended: recommended_ef,
+            });
+        }
+        if self.ef_construction > 500 {
+            warnings.push(ConfigWarning::HighEfConstruction(self.ef_construction));
+        }
+
+        // Check dimension bounds (informational)
+        if self.dim < 32 {
+            warnings.push(ConfigWarning::LowDimension(self.dim));
+        }
+        if self.dim > 4096 {
+            warnings.push(ConfigWarning::HighDimension(self.dim));
+        }
+
+        warnings
+    }
+
+    /// Check if this configuration is valid (no critical issues).
+    ///
+    /// Returns true even with warnings - only returns false for
+    /// invalid configurations that would cause errors.
+    pub fn is_valid(&self) -> bool {
+        self.dim > 0 && self.m > 0 && self.ef_construction > 0
     }
 
     /// High-recall configuration (slower, more memory).
@@ -174,6 +284,33 @@ impl RaBitQConfig {
     /// Calculate the code size in bytes for a given dimension.
     pub fn code_size(&self, dim: usize) -> usize {
         (dim * self.bits_per_dim as usize + 7) / 8
+    }
+
+    /// Validate configuration and return warnings for invalid settings.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use motlie_db::vector::RaBitQConfig;
+    ///
+    /// let config = RaBitQConfig { bits_per_dim: 3, ..Default::default() };
+    /// let warnings = config.validate();
+    /// assert!(!warnings.is_empty()); // Warning: invalid bits_per_dim
+    /// ```
+    pub fn validate(&self) -> Vec<ConfigWarning> {
+        let mut warnings = Vec::new();
+
+        // bits_per_dim must be 1, 2, 4, or 8
+        if ![1, 2, 4, 8].contains(&self.bits_per_dim) {
+            warnings.push(ConfigWarning::InvalidBitsPerDim(self.bits_per_dim));
+        }
+
+        warnings
+    }
+
+    /// Check if this configuration is valid (no critical issues).
+    pub fn is_valid(&self) -> bool {
+        [1, 2, 4, 8].contains(&self.bits_per_dim)
     }
 }
 
@@ -337,5 +474,125 @@ mod tests {
 
         let c1536 = VectorConfig::dim_1536();
         assert_eq!(c1536.hnsw.dim, 1536);
+    }
+
+    // =========================================================================
+    // Validation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_hnsw_validate_default_no_warnings() {
+        let config = HnswConfig::default();
+        let warnings = config.validate();
+        assert!(warnings.is_empty(), "Default config should have no warnings");
+        assert!(config.is_valid());
+    }
+
+    #[test]
+    fn test_hnsw_validate_low_m() {
+        let config = HnswConfig {
+            m: 4,
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::LowM(4))));
+    }
+
+    #[test]
+    fn test_hnsw_validate_high_m() {
+        let config = HnswConfig {
+            m: 128,
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::HighM(128))));
+    }
+
+    #[test]
+    fn test_hnsw_validate_low_ef_construction() {
+        let config = HnswConfig {
+            m: 16,
+            ef_construction: 16, // Should be >= 32 (2*M)
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(warnings.iter().any(|w| matches!(
+            w,
+            ConfigWarning::LowEfConstruction { ef_construction: 16, recommended: 32 }
+        )));
+    }
+
+    #[test]
+    fn test_hnsw_validate_high_ef_construction() {
+        let config = HnswConfig {
+            ef_construction: 1000,
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::HighEfConstruction(1000))));
+    }
+
+    #[test]
+    fn test_hnsw_validate_low_dimension() {
+        let config = HnswConfig {
+            dim: 16,
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::LowDimension(16))));
+    }
+
+    #[test]
+    fn test_hnsw_validate_high_dimension() {
+        let config = HnswConfig {
+            dim: 8192,
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::HighDimension(8192))));
+    }
+
+    #[test]
+    fn test_rabitq_validate_default_no_warnings() {
+        let config = RaBitQConfig::default();
+        let warnings = config.validate();
+        assert!(warnings.is_empty(), "Default config should have no warnings");
+        assert!(config.is_valid());
+    }
+
+    #[test]
+    fn test_rabitq_validate_invalid_bits() {
+        let config = RaBitQConfig {
+            bits_per_dim: 3, // Invalid: not 1, 2, 4, or 8
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(warnings.iter().any(|w| matches!(w, ConfigWarning::InvalidBitsPerDim(3))));
+        assert!(!config.is_valid());
+    }
+
+    #[test]
+    fn test_rabitq_validate_valid_bits() {
+        for bits in [1, 2, 4, 8] {
+            let config = RaBitQConfig {
+                bits_per_dim: bits,
+                ..Default::default()
+            };
+            assert!(config.is_valid(), "bits_per_dim={} should be valid", bits);
+            assert!(config.validate().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_config_warning_display() {
+        let warning = ConfigWarning::LowM(4);
+        let display = format!("{}", warning);
+        assert!(display.contains("M=4"));
+        assert!(display.contains("low"));
+
+        let warning = ConfigWarning::InvalidBitsPerDim(3);
+        let display = format!("{}", warning);
+        assert!(display.contains("bits_per_dim=3"));
+        assert!(display.contains("invalid"));
     }
 }

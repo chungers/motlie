@@ -38,11 +38,12 @@ pub mod rabitq;
 pub mod reader;
 pub mod registry;
 pub mod schema;
+pub mod search_config;
 pub mod subsystem;
 pub mod writer;
 
 // Re-exports for public API
-pub use config::{HnswConfig, RaBitQConfig, VectorConfig};
+pub use config::{ConfigWarning, HnswConfig, RaBitQConfig, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
 pub use hnsw::HnswIndex;
@@ -55,6 +56,7 @@ pub use schema::{
     ALL_COLUMN_FAMILIES, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, VecId,
     VectorCfKey, VectorCfValue, Vectors,
 };
+pub use search_config::{SearchConfig, SearchStrategy};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{EmbeddingRegistryConfig, Subsystem, VectorBlockCacheConfig};
