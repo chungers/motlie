@@ -763,7 +763,8 @@ impl HnswIndex {
 
     /// Batch compute distances from query to multiple vectors.
     ///
-    /// Fetches all vectors in a single multi_get_cf call, then computes distances.
+    /// Fetches all vectors in a single multi_get_cf call, then computes distances
+    /// using the configured distance metric (L2, Cosine, or DotProduct).
     /// Returns (vec_id, distance) pairs for vectors that exist.
     pub fn batch_distances(
         &self,
@@ -777,7 +778,7 @@ impl HnswIndex {
             .iter()
             .copied()
             .zip(vectors.into_iter())
-            .filter_map(|(id, vec_opt)| vec_opt.map(|v| (id, l2_distance(query, &v))))
+            .filter_map(|(id, vec_opt)| vec_opt.map(|v| (id, self.compute_distance(query, &v))))
             .collect())
     }
 
