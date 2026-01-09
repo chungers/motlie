@@ -53,8 +53,8 @@ pub use processor::Processor;
 pub use rabitq::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
-    ALL_COLUMN_FAMILIES, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, VecId,
-    VectorCfKey, VectorCfValue, Vectors,
+    ALL_COLUMN_FAMILIES, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode,
+    EmbeddingSpec, VecId, VectorCfKey, VectorCfValue, VectorStorageType, Vectors,
 };
 pub use search_config::{SearchConfig, SearchStrategy};
 

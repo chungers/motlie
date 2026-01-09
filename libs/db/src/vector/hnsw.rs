@@ -41,7 +41,7 @@ use super::rabitq::RaBitQ;
 use super::schema::{
     BinaryCodeCfKey, BinaryCodes, EdgeCfKey, Edges, EmbeddingCode, GraphMeta, GraphMetaCfKey,
     GraphMetaCfValue, GraphMetaField, HnswLayer, VecId, VecMeta, VecMetaCfKey, VecMetaCfValue,
-    VecMetadata, VectorCfKey, Vectors,
+    VecMetadata, VectorCfKey, VectorStorageType, Vectors,
 };
 use super::Storage;
 use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
@@ -58,6 +58,8 @@ pub struct HnswIndex {
     embedding: EmbeddingCode,
     /// Distance metric for this index (Cosine, L2, DotProduct)
     distance: Distance,
+    /// Storage type for vectors (F32 or F16)
+    storage_type: VectorStorageType,
     /// HNSW configuration (M, ef_construction, etc.)
     config: HnswConfig,
     /// Navigation cache for fast layer traversal
@@ -81,6 +83,31 @@ impl HnswIndex {
         Self {
             embedding,
             distance,
+            storage_type: VectorStorageType::default(), // F32 by default
+            config,
+            nav_cache,
+        }
+    }
+
+    /// Create a new HNSW index with specified storage type.
+    ///
+    /// # Arguments
+    /// * `embedding` - The embedding space code
+    /// * `distance` - Distance metric to use (Cosine, L2, DotProduct)
+    /// * `storage_type` - Storage type for vectors (F32 or F16)
+    /// * `config` - HNSW configuration
+    /// * `nav_cache` - Navigation cache for fast layer traversal
+    pub fn with_storage_type(
+        embedding: EmbeddingCode,
+        distance: Distance,
+        storage_type: VectorStorageType,
+        config: HnswConfig,
+        nav_cache: Arc<NavigationCache>,
+    ) -> Self {
+        Self {
+            embedding,
+            distance,
+            storage_type,
             config,
             nav_cache,
         }
@@ -89,6 +116,11 @@ impl HnswIndex {
     /// Get the embedding code.
     pub fn embedding(&self) -> EmbeddingCode {
         self.embedding
+    }
+
+    /// Get the storage type.
+    pub fn storage_type(&self) -> VectorStorageType {
+        self.storage_type
     }
 
     /// Get the configuration.
@@ -714,7 +746,7 @@ impl HnswIndex {
             .get_cf(&cf, &key)?
             .ok_or_else(|| anyhow::anyhow!("Vector {} not found", vec_id))?;
 
-        Vectors::value_from_bytes(&bytes).map(|v| v.0)
+        Vectors::value_from_bytes_typed(&bytes, self.storage_type)
     }
 
     // =========================================================================
@@ -749,13 +781,14 @@ impl HnswIndex {
         let results: Vec<std::result::Result<Option<Vec<u8>>, rocksdb::Error>> =
             txn_db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())));
 
-        // Deserialize vectors
+        // Deserialize vectors using configured storage type
+        let storage_type = self.storage_type;
         results
             .into_iter()
             .map(|result| {
                 result
                     .map_err(|e| anyhow::anyhow!("RocksDB error: {}", e))?
-                    .map(|bytes| Vectors::value_from_bytes(&bytes).map(|v| v.0))
+                    .map(|bytes| Vectors::value_from_bytes_typed(&bytes, storage_type))
                     .transpose()
             })
             .collect()
