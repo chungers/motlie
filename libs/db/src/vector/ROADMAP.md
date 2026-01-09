@@ -4261,6 +4261,106 @@ Comprehensive recall tests added to validate HNSW parameter tuning.
 - [x] Document why each function is deprecated
 - [x] Point to recommended alternatives
 
+##### RaBitQ-Cached Search Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    INDEX BUILD (One-time)                           │
+├─────────────────────────────────────────────────────────────────────┤
+│  For each vector:                                                   │
+│  1. Store vector in RocksDB (Vectors CF)                           │
+│  2. Build HNSW graph edges using configured distance metric        │
+│  3. Encode vector → binary code (RaBitQ: rotate + sign)            │
+│  4. Store binary code in RocksDB AND populate BinaryCodeCache      │
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    SEARCH (Per Query)                               │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Phase 1: Upper Layer Navigation (exact distance)                  │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │ • Greedy descent from entry point                              │ │
+│  │ • Uses exact distance (L2/Cosine/Dot - same as index build)    │ │
+│  │ • Few nodes in upper layers → fast                             │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                              │                                      │
+│                              ▼                                      │
+│  Phase 2: Layer 0 Beam Search (Hamming from cache)                 │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │ • Encode query → binary code (one-time per query)              │ │
+│  │ • Beam search using Hamming distance on binary codes           │ │
+│  │ • Codes fetched from IN-MEMORY cache (not RocksDB)             │ │
+│  │ • SIMD popcount: ~ns per distance computation                  │ │
+│  │ • Returns ef candidates ranked by Hamming                      │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                              │                                      │
+│                              ▼                                      │
+│  Phase 3: Re-rank Top Candidates (exact distance)                  │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │ • Take top (k × rerank_factor) candidates                      │ │
+│  │ • Fetch full vectors from RocksDB                              │ │
+│  │ • Compute exact distance (same metric as index build)          │ │
+│  │ • Return top-k sorted by exact distance                        │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+##### Distance Metric Compatibility
+
+**Current Implementation Status:**
+
+```rust
+// hnsw.rs:681 - Currently HARDCODED to L2
+fn distance(&self, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
+    // Use L2 distance for now (TODO: use embedding's configured distance)
+    Ok(l2_distance(query, &vector))
+}
+```
+
+**TODO:** The `distance()` method should use the embedding's configured metric:
+```rust
+fn distance(&self, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
+    let vector = self.get_vector(storage, vec_id)?;
+    Ok(self.config.distance.compute(query, &vector))  // Use configured metric
+}
+```
+
+**RaBitQ Hamming Distance Compatibility:**
+
+| Distance Metric | RaBitQ Compatibility | Explanation |
+|-----------------|---------------------|-------------|
+| **Cosine** | ✅ Excellent | Hamming distance approximates angular distance. RaBitQ's sign quantization captures angle. |
+| **L2 (normalized)** | ✅ Good | For unit vectors: L2² = 2(1 - cos), so Hamming works well. |
+| **L2 (unnormalized)** | ⚠️ Moderate | Loses magnitude information. Sign only captures direction, not length. |
+| **DotProduct** | ⚠️ Moderate | Loses magnitude. Works for direction but misses scale factor. |
+
+**Why RaBitQ Works Best with Cosine:**
+
+```
+RaBitQ Process:
+  1. Rotate vector: v' = R × v  (R is orthonormal, preserves angles)
+  2. Quantize: code = sign(v')  (captures which half-space per dimension)
+
+Two vectors with similar ANGLES → similar signs → low Hamming distance
+Two vectors with similar MAGNITUDES but different angles → different signs → high Hamming
+
+∴ Hamming distance ≈ Angular distance ≈ Cosine distance
+```
+
+**Recommendation:**
+
+| Scenario | Recommendation |
+|----------|----------------|
+| Semantic search (text embeddings) | Use Cosine distance + RaBitQ (ideal match) |
+| Image features (normalized) | Use Cosine or L2 + RaBitQ (good) |
+| Spatial data (unnormalized L2) | Use L2 + Standard search (avoid RaBitQ) |
+| Max inner product (DotProduct) | Use DotProduct + Standard search (avoid RaBitQ) |
+
+**Key Invariant:** Re-ranking MUST use the same distance metric as index construction. The graph structure is optimized for that metric (ARCH-17).
+
 ---
 
 #### Task 4.12: API Cleanup Phase 2 - Remove Deprecated Code
