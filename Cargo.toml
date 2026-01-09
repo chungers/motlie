@@ -85,6 +85,12 @@ lazy_static = "1.4"
 pulp = { version = "0.18", optional = true }
 simsimd = { version = "6", optional = true }
 
+# LAION benchmark dependencies
+ndarray = "0.16"
+ndarray-npy = "0.9"
+plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series"] }
+byteorder = "1.5"
+
 [[example]]
 name = "store"
 path = "examples/store/main.rs"
@@ -164,6 +170,10 @@ path = "examples/vector/simd_bench.rs"
 [[example]]
 name = "vector2"
 path = "examples/vector2/main.rs"
+
+[[example]]
+name = "laion_benchmark"
+path = "examples/laion_benchmark/main.rs"
 
 [[bin]]
 name = "motlie"
