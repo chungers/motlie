@@ -1,0 +1,455 @@
+//! Search configuration with Embedding-driven validation.
+//!
+//! This module provides type-safe search configuration that uses `Embedding` as
+//! the single source of truth for distance metrics and search strategies.
+//!
+//! # Design Philosophy
+//!
+//! The `Embedding` struct contains the distance metric used to build the index.
+//! `SearchConfig` captures this and:
+//! 1. Validates the embedding matches the index being searched
+//! 2. Auto-selects optimal strategy based on distance metric
+//! 3. Prevents incompatible configurations at construction time
+//!
+//! # Example
+//!
+//! ```ignore
+//! // Cosine index - RaBitQ auto-selected
+//! let config = SearchConfig::new(cosine_embedding.clone(), 10);
+//! let results = index.search(&storage, &config, &query)?;
+//!
+//! // Force exact search if needed
+//! let config = SearchConfig::new(cosine_embedding.clone(), 10).exact();
+//! ```
+
+use super::distance::Distance;
+use super::embedding::Embedding;
+
+// ============================================================================
+// SearchStrategy
+// ============================================================================
+
+/// Search strategy - determines how distance computation is performed.
+///
+/// Auto-selected based on `embedding.distance()`:
+/// - Cosine → RaBitQ (Hamming approximates angular distance)
+/// - L2/DotProduct → Exact (Hamming not compatible)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchStrategy {
+    /// Exact distance computation at all layers.
+    /// Works with all distance metrics.
+    Exact,
+
+    /// RaBitQ: Hamming filtering at layer 0 + exact re-rank.
+    /// Only valid when embedding.distance == Cosine.
+    /// Requires BinaryCodeCache for good performance.
+    RaBitQ {
+        /// Use in-memory binary code cache (required for good performance)
+        use_cache: bool,
+    },
+}
+
+impl SearchStrategy {
+    /// Check if this strategy uses RaBitQ.
+    pub fn is_rabitq(&self) -> bool {
+        matches!(self, SearchStrategy::RaBitQ { .. })
+    }
+
+    /// Check if this strategy uses exact distance computation.
+    pub fn is_exact(&self) -> bool {
+        matches!(self, SearchStrategy::Exact)
+    }
+}
+
+impl std::fmt::Display for SearchStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SearchStrategy::Exact => write!(f, "Exact"),
+            SearchStrategy::RaBitQ { use_cache: true } => write!(f, "RaBitQ(cached)"),
+            SearchStrategy::RaBitQ { use_cache: false } => write!(f, "RaBitQ(uncached)"),
+        }
+    }
+}
+
+// ============================================================================
+// SearchConfig
+// ============================================================================
+
+/// Search configuration derived from Embedding.
+///
+/// Enforces correct distance metric and search strategy by using `Embedding`
+/// as the single source of truth.
+///
+/// # Validation
+///
+/// - Embedding code is validated against the index at search time
+/// - RaBitQ strategy is only allowed for Cosine distance
+/// - Distance computations use the embedding's configured metric
+///
+/// # Example
+///
+/// ```ignore
+/// // Create config - strategy auto-selected based on distance metric
+/// let config = SearchConfig::new(embedding.clone(), 10)
+///     .with_ef(150)
+///     .with_rerank_factor(4);
+///
+/// // Search using the config
+/// let results = index.search(&storage, &config, &query)?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct SearchConfig {
+    /// Embedding space specification (source of truth)
+    embedding: Embedding,
+    /// Search strategy (derived from embedding.distance + user choice)
+    strategy: SearchStrategy,
+    /// Number of results to return
+    k: usize,
+    /// Search beam width (ef parameter)
+    ef: usize,
+    /// Re-rank factor for RaBitQ (ignored for Exact)
+    rerank_factor: usize,
+}
+
+impl SearchConfig {
+    /// Create search config with automatic strategy selection.
+    ///
+    /// Strategy is chosen based on embedding's distance metric:
+    /// - Cosine → RaBitQ (Hamming approximates angular distance)
+    /// - L2/DotProduct → Exact (Hamming not compatible)
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - The embedding space (source of truth for distance metric)
+    /// * `k` - Number of results to return
+    pub fn new(embedding: Embedding, k: usize) -> Self {
+        let strategy = match embedding.distance() {
+            Distance::Cosine => SearchStrategy::RaBitQ { use_cache: true },
+            Distance::L2 | Distance::DotProduct => SearchStrategy::Exact,
+        };
+        Self {
+            embedding,
+            strategy,
+            k,
+            ef: 100,          // sensible default
+            rerank_factor: 4, // 4x re-ranking for >90% recall
+        }
+    }
+
+    /// Create config with exact search strategy (bypass auto-selection).
+    ///
+    /// Safe for all distance metrics.
+    pub fn new_exact(embedding: Embedding, k: usize) -> Self {
+        Self {
+            embedding,
+            strategy: SearchStrategy::Exact,
+            k,
+            ef: 100,
+            rerank_factor: 4,
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Builder Methods
+    // ─────────────────────────────────────────────────────────────
+
+    /// Builder: Override to use exact search (disable RaBitQ).
+    ///
+    /// Safe for all distance metrics.
+    pub fn exact(mut self) -> Self {
+        self.strategy = SearchStrategy::Exact;
+        self
+    }
+
+    /// Builder: Force RaBitQ strategy.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if `embedding.distance() != Cosine` because
+    /// Hamming distance only approximates angular (cosine) distance.
+    pub fn rabitq(mut self) -> anyhow::Result<Self> {
+        if self.embedding.distance() != Distance::Cosine {
+            return Err(anyhow::anyhow!(
+                "RaBitQ requires Cosine distance (Hamming ≈ angular), got {:?}",
+                self.embedding.distance()
+            ));
+        }
+        self.strategy = SearchStrategy::RaBitQ { use_cache: true };
+        Ok(self)
+    }
+
+    /// Builder: Force RaBitQ without cache (not recommended).
+    ///
+    /// # Errors
+    ///
+    /// Returns error if `embedding.distance() != Cosine`.
+    pub fn rabitq_uncached(mut self) -> anyhow::Result<Self> {
+        if self.embedding.distance() != Distance::Cosine {
+            return Err(anyhow::anyhow!(
+                "RaBitQ requires Cosine distance (Hamming ≈ angular), got {:?}",
+                self.embedding.distance()
+            ));
+        }
+        self.strategy = SearchStrategy::RaBitQ { use_cache: false };
+        Ok(self)
+    }
+
+    /// Builder: Set ef (beam width).
+    ///
+    /// Higher ef = better recall but slower search.
+    /// Typical values: 50-200.
+    pub fn with_ef(mut self, ef: usize) -> Self {
+        self.ef = ef;
+        self
+    }
+
+    /// Builder: Set re-rank factor (for RaBitQ).
+    ///
+    /// Number of candidates to re-rank = k * rerank_factor.
+    /// Higher factor = better recall but more I/O.
+    /// Typical values: 2-8.
+    pub fn with_rerank_factor(mut self, factor: usize) -> Self {
+        self.rerank_factor = factor;
+        self
+    }
+
+    /// Builder: Set k (number of results).
+    pub fn with_k(mut self, k: usize) -> Self {
+        self.k = k;
+        self
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Accessors
+    // ─────────────────────────────────────────────────────────────
+
+    /// Get the embedding (source of truth).
+    #[inline]
+    pub fn embedding(&self) -> &Embedding {
+        &self.embedding
+    }
+
+    /// Get the search strategy.
+    #[inline]
+    pub fn strategy(&self) -> SearchStrategy {
+        self.strategy
+    }
+
+    /// Get k (number of results).
+    #[inline]
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
+    /// Get ef (beam width).
+    #[inline]
+    pub fn ef(&self) -> usize {
+        self.ef
+    }
+
+    /// Get re-rank factor.
+    #[inline]
+    pub fn rerank_factor(&self) -> usize {
+        self.rerank_factor
+    }
+
+    /// Get the distance metric from the embedding.
+    #[inline]
+    pub fn distance(&self) -> Distance {
+        self.embedding.distance()
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Distance Computation (delegated to Embedding)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Compute distance using embedding's configured metric.
+    ///
+    /// This is the ONLY way distances should be computed during search,
+    /// ensuring the metric matches what was used to build the index.
+    #[inline]
+    pub fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32 {
+        self.embedding.compute_distance(a, b)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Validation
+    // ─────────────────────────────────────────────────────────────
+
+    /// Validate that this config's embedding matches the given embedding code.
+    ///
+    /// Should be called at the start of search to ensure the config was
+    /// created with the correct embedding for this index.
+    #[inline]
+    pub fn validate_embedding_code(&self, expected_code: u64) -> anyhow::Result<()> {
+        if self.embedding.code() != expected_code {
+            return Err(anyhow::anyhow!(
+                "Embedding mismatch: index has code {}, config has {}",
+                expected_code,
+                self.embedding.code()
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for SearchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SearchConfig {{ embedding: {}, strategy: {}, k: {}, ef: {}, rerank: {} }}",
+            self.embedding, self.strategy, self.k, self.ef, self.rerank_factor
+        )
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_embedding(distance: Distance) -> Embedding {
+        Embedding::new(1, "test", 128, distance, None)
+    }
+
+    #[test]
+    fn test_auto_strategy_cosine() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10);
+
+        assert!(config.strategy().is_rabitq());
+        assert_eq!(config.k(), 10);
+        assert_eq!(config.ef(), 100);
+        assert_eq!(config.rerank_factor(), 4);
+    }
+
+    #[test]
+    fn test_auto_strategy_l2() {
+        let emb = make_embedding(Distance::L2);
+        let config = SearchConfig::new(emb, 10);
+
+        assert!(config.strategy().is_exact());
+    }
+
+    #[test]
+    fn test_auto_strategy_dot_product() {
+        let emb = make_embedding(Distance::DotProduct);
+        let config = SearchConfig::new(emb, 10);
+
+        assert!(config.strategy().is_exact());
+    }
+
+    #[test]
+    fn test_builder_exact() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10).exact();
+
+        assert!(config.strategy().is_exact());
+    }
+
+    #[test]
+    fn test_builder_rabitq_cosine_ok() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10).exact().rabitq();
+
+        assert!(config.is_ok());
+        assert!(config.unwrap().strategy().is_rabitq());
+    }
+
+    #[test]
+    fn test_builder_rabitq_l2_fails() {
+        let emb = make_embedding(Distance::L2);
+        let config = SearchConfig::new(emb, 10).rabitq();
+
+        assert!(config.is_err());
+        assert!(config.unwrap_err().to_string().contains("Cosine"));
+    }
+
+    #[test]
+    fn test_builder_ef_and_rerank() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10).with_ef(200).with_rerank_factor(8);
+
+        assert_eq!(config.ef(), 200);
+        assert_eq!(config.rerank_factor(), 8);
+    }
+
+    #[test]
+    fn test_validate_embedding_code_ok() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10);
+
+        assert!(config.validate_embedding_code(1).is_ok());
+    }
+
+    #[test]
+    fn test_validate_embedding_code_mismatch() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10);
+
+        let result = config.validate_embedding_code(999);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("mismatch"));
+    }
+
+    #[test]
+    fn test_compute_distance_cosine() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10);
+
+        let a = vec![1.0, 0.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0, 0.0];
+
+        // Orthogonal vectors have cosine similarity 0, distance 1
+        let dist = config.compute_distance(&a, &b);
+        assert!((dist - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_compute_distance_l2() {
+        let emb = make_embedding(Distance::L2);
+        let config = SearchConfig::new(emb, 10);
+
+        let a = vec![0.0, 0.0, 0.0, 0.0];
+        let b = vec![3.0, 4.0, 0.0, 0.0];
+
+        // L2 distance = sqrt(9 + 16) = 5
+        let dist = config.compute_distance(&a, &b);
+        assert!((dist - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_new_exact() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new_exact(emb, 10);
+
+        // Even for Cosine, new_exact forces Exact strategy
+        assert!(config.strategy().is_exact());
+    }
+
+    #[test]
+    fn test_display() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10);
+
+        let display = format!("{}", config);
+        assert!(display.contains("RaBitQ"));
+        assert!(display.contains("k: 10"));
+    }
+
+    #[test]
+    fn test_strategy_display() {
+        assert_eq!(format!("{}", SearchStrategy::Exact), "Exact");
+        assert_eq!(
+            format!("{}", SearchStrategy::RaBitQ { use_cache: true }),
+            "RaBitQ(cached)"
+        );
+        assert_eq!(
+            format!("{}", SearchStrategy::RaBitQ { use_cache: false }),
+            "RaBitQ(uncached)"
+        );
+    }
+}
