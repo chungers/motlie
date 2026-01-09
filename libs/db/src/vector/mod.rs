@@ -32,6 +32,7 @@ pub mod id;
 pub mod merge;
 pub mod mutation;
 pub mod navigation;
+pub mod parallel;
 pub mod processor;
 pub mod query;
 pub mod rabitq;

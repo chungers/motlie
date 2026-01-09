@@ -36,6 +36,8 @@ rand = "0.8"
 rand_chacha = "0.3"
 # Half-precision float support for VectorStorageType::F16
 half = "2.4"
+# Parallel reranking for search (Task 4.19)
+rayon = "1.10"
 
 [dev-dependencies]
 tempfile = "3.14"

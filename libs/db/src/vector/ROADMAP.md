@@ -69,6 +69,7 @@ throughput improvement and 10x search QPS improvement.
 | [Task 4.16](#task-416-hnsw-distance-metric-bug-fix) | HNSW Distance Metric Bug Fix | ✅ Complete | `0535e6a` |
 | [Task 4.17](#task-417-batch_distances-metric-bug-fix) | batch_distances Metric Bug Fix | ✅ Complete | `d5899f3` |
 | [Task 4.18](#task-418-vectorstoragetype-multi-float-support) | VectorStorageType (f16/f32) | ✅ Complete | `c90f15c` |
+| [Task 4.19](#task-419-parallel-reranking-with-rayon) | Parallel Reranking (rayon) | 🔄 In Progress | - |
 
 ### Other Sections
 
@@ -5128,6 +5129,117 @@ impl Vectors {
 - ~5% recall drop from 50K to 200K (expected for high-dimensional CLIP embeddings)
 - QPS scales O(log N) as expected for HNSW
 - F16 storage works correctly with negligible precision loss
+
+---
+
+#### Task 4.19: Parallel Reranking with Rayon
+
+**Status:** 🔄 In Progress
+**Goal:** Add CPU parallelism to reranking phase for 2-4x QPS improvement
+
+**Motivation:**
+
+The current search pipeline is single-threaded per query. Profiling shows that the reranking phase (fetching vectors from RocksDB and computing exact distances) is a significant bottleneck, especially for RaBitQ search where we rerank 40-100+ candidates.
+
+**Current Architecture (Sequential):**
+```
+Query ─────────────────────────────────────────────> Result
+       │ Greedy │ Beam Search │    Rerank (N×)    │
+       └────────┴─────────────┴───────────────────┘
+                                    ↑ BOTTLENECK
+```
+
+**Proposed Architecture (Parallel Reranking):**
+```
+Query ──┬── Greedy ──┬── Beam Search ──┬── Parallel Rerank ──┬── Merge ──> Result
+        │            │                 │  ┌─ Worker 1 ─┐     │
+        │            │                 │  ├─ Worker 2 ─┤     │
+        │            │                 │  ├─ Worker 3 ─┤     │
+        │            │                 │  └─ Worker N ─┘     │
+        └────────────┴─────────────────┴─────────────────────┘
+```
+
+**Implementation:**
+
+1. **Add rayon dependency** to `libs/db/Cargo.toml`
+2. **New module:** `libs/db/src/vector/parallel.rs`
+   - `rerank_parallel()` - parallel distance computation
+   - `batch_distances_parallel()` - parallel batch distances
+3. **Update `HnswIndex`:**
+   - `search_with_rabitq_cached()` uses parallel reranking
+   - Optional `SearchConfig::parallel(bool)` flag
+
+**Code Changes:**
+
+```rust
+// libs/db/src/vector/parallel.rs
+use rayon::prelude::*;
+
+/// Parallel reranking - compute exact distances for candidates.
+pub fn rerank_parallel<F>(
+    candidates: &[VecId],
+    distance_fn: F,
+    k: usize,
+) -> Vec<(f32, VecId)>
+where
+    F: Fn(VecId) -> Option<f32> + Sync,
+{
+    let mut results: Vec<(f32, VecId)> = candidates
+        .par_iter()
+        .filter_map(|&id| distance_fn(id).map(|d| (d, id)))
+        .collect();
+
+    results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    results.truncate(k);
+    results
+}
+
+// Update hnsw.rs search_with_rabitq_cached():
+// BEFORE (sequential):
+for &vec_id in &vec_ids {
+    let dist = self.distance(storage, query, vec_id)?;
+    exact_results.push((dist, vec_id));
+}
+
+// AFTER (parallel):
+let exact_results = parallel::rerank_parallel(
+    &vec_ids,
+    |vec_id| self.distance(storage, query, vec_id).ok(),
+    k,
+);
+```
+
+**Expected Impact:**
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Rerank throughput | 1x | 4-8x | CPU parallelism |
+| Search QPS (RaBitQ) | 230 | 400-500 | 2x (rerank-bound) |
+| Search QPS (Exact) | 290 | 350-400 | 1.3x (less rerank) |
+
+**Why RocksDB is Thread-Safe:**
+
+RocksDB `TransactionDB` supports concurrent reads from multiple threads:
+- `multi_get_cf()` is already thread-safe
+- Each worker gets its own snapshot view
+- No locking needed for read-only operations
+
+**Implementation Steps:**
+- [ ] Add `rayon = "1.10"` to Cargo.toml
+- [ ] Create `libs/db/src/vector/parallel.rs`
+- [ ] Implement `rerank_parallel()` function
+- [ ] Implement `batch_distances_parallel()` function
+- [ ] Update `search_with_rabitq_cached()` to use parallel reranking
+- [ ] Add `parallel` flag to `SearchConfig` (default: true)
+- [ ] Run LAION benchmarks to measure improvement
+- [ ] Update LAION benchmark results in README
+
+**Acceptance Criteria:**
+- [ ] Parallel reranking using rayon
+- [ ] Thread-safe RocksDB access verified
+- [ ] 1.5x+ QPS improvement on LAION benchmark
+- [ ] No regression in recall
+- [ ] Unit tests for parallel functions
 
 ---
 
