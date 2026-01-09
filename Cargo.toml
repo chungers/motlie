@@ -90,6 +90,7 @@ ndarray = "0.16"
 ndarray-npy = "0.9"
 plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series"] }
 byteorder = "1.5"
+half = "2.4"
 
 [[example]]
 name = "store"

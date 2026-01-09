@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
+use half::f16;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -61,12 +62,12 @@ fn download_file(url: &str, path: &Path) -> Result<()> {
 
 /// Load embeddings from NPY file
 ///
-/// NPY format for float32 arrays:
+/// NPY format for float arrays:
 /// - Magic: \x93NUMPY
 /// - Version: 1 byte major, 1 byte minor
 /// - Header length: 2 bytes (v1) or 4 bytes (v2+)
 /// - Header: Python dict string describing shape/dtype
-/// - Data: raw binary float32 values
+/// - Data: raw binary float values (float16 or float32)
 pub fn load_npy_embeddings(path: &Path, max_count: usize) -> Result<Vec<Vec<f32>>> {
     println!("Loading embeddings from {:?}...", path);
 
@@ -74,7 +75,7 @@ pub fn load_npy_embeddings(path: &Path, max_count: usize) -> Result<Vec<Vec<f32>
     let mut reader = BufReader::new(file);
 
     // Read and parse NPY header
-    let (shape, _dtype) = parse_npy_header(&mut reader)?;
+    let (shape, dtype) = parse_npy_header(&mut reader)?;
 
     let num_vectors = shape[0].min(max_count);
     let dim = shape[1];
@@ -83,14 +84,31 @@ pub fn load_npy_embeddings(path: &Path, max_count: usize) -> Result<Vec<Vec<f32>
         anyhow::bail!("Expected {}D embeddings, got {}D", EMBEDDING_DIM, dim);
     }
 
-    println!("  Shape: {:?}, loading first {} vectors", shape, num_vectors);
+    // Detect dtype for proper reading
+    let is_float16 = dtype.contains("f2") || dtype.contains("float16");
+    let is_float32 = dtype.contains("f4") || dtype.contains("float32");
 
-    // Read embeddings
+    if !is_float16 && !is_float32 {
+        anyhow::bail!("Unsupported dtype: {}. Expected float16 (<f2) or float32 (<f4)", dtype);
+    }
+
+    println!("  Shape: {:?}, dtype: {}, loading first {} vectors", shape, dtype, num_vectors);
+
+    // Read embeddings based on dtype
     let mut embeddings = Vec::with_capacity(num_vectors);
     for i in 0..num_vectors {
         let mut vec = vec![0.0f32; dim];
-        for j in 0..dim {
-            vec[j] = reader.read_f32::<LittleEndian>()?;
+        if is_float16 {
+            // Read float16 and convert to float32
+            for j in 0..dim {
+                let bits = reader.read_u16::<LittleEndian>()?;
+                vec[j] = f16::from_bits(bits).to_f32();
+            }
+        } else {
+            // Read float32 directly
+            for j in 0..dim {
+                vec[j] = reader.read_f32::<LittleEndian>()?;
+            }
         }
         embeddings.push(vec);
 
