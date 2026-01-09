@@ -53,17 +53,19 @@ throughput improvement and 10x search QPS improvement.
 
 ### Phase 4 Tasks (Current)
 
-| Task | Description | Status |
-|------|-------------|--------|
-| [Task 4.1-4.7](#phase-4-rabitq-compression) | Core RaBitQ implementation | ✅ Complete |
-| [Task 4.8](#task-48-implementation--results) | Hybrid L2 + Hamming (disproven) | ✅ Complete |
-| [Task 4.9](#task-49-rabitq-tuning-configuration-analysis) | RaBitQ Tuning Analysis | ✅ Complete |
-| [Task 4.10](#task-410-in-memory-binary-code-cache) | In-Memory Binary Code Cache | ✅ Complete |
-| [Task 4.11](#task-411-api-cleanup-phase-1---deprecate-invalidated-functions) | API Cleanup: Deprecate Functions | ✅ Complete |
-| [Task 4.12](#task-412-api-cleanup-phase-2---remove-deprecated-code) | API Cleanup: Remove Dead Code | ✅ Complete |
-| [Task 4.13](#task-413-api-cleanup-phase-3---embedding-driven-searchconfig-api) | API Cleanup: SearchConfig API | ✅ Complete |
-| [Task 4.14](#task-414-api-cleanup-phase-4---configuration-validation) | API Cleanup: Config Validation | ✅ Complete |
-| [Task 4.15](#task-415-phase-5-integration-planning) | Phase 5 Integration Planning | 🔲 Not Started |
+| Task | Description | Status | Commit |
+|------|-------------|--------|--------|
+| [Task 4.1-4.5](#phase-4-rabitq-compression) | Core RaBitQ implementation | ✅ Complete | `9399cf9` |
+| [Task 4.6](#task-46-recall-tuning) | Recall tuning | ✅ Complete | `e5b81b6` |
+| [Task 4.7](#task-47-simd-hamming--early-filtering) | SIMD Hamming + early filtering | ✅ Complete | `4a4e954` |
+| [Task 4.8](#task-48-implementation--results) | Hybrid L2 + Hamming (disproven) | ✅ Complete | `bd29801` |
+| [Task 4.9](#task-49-rabitq-tuning-configuration-analysis) | RaBitQ Tuning Analysis | ✅ Complete | `9522658` |
+| [Task 4.10](#task-410-in-memory-binary-code-cache) | In-Memory Binary Code Cache | ✅ Complete | `9880a62` |
+| [Task 4.11](#task-411-api-cleanup-phase-1---deprecate-invalidated-functions) | API Cleanup: Deprecate Functions | ✅ Complete | `ce2a060` |
+| [Task 4.12](#task-412-api-cleanup-phase-2---remove-deprecated-code) | API Cleanup: Remove Dead Code | ✅ Complete | `5f2dac0` |
+| [Task 4.13](#task-413-api-cleanup-phase-3---embedding-driven-searchconfig-api) | API Cleanup: SearchConfig API | ✅ Complete | `5f2dac0` |
+| [Task 4.14](#task-414-api-cleanup-phase-4---configuration-validation) | API Cleanup: Config Validation | ✅ Complete | `5f2dac0` |
+| [Task 4.15](#task-415-phase-5-integration-planning) | Phase 5 Integration Planning | 🔲 Not Started | - |
 
 ### Other Sections
 
@@ -4173,6 +4175,7 @@ Comprehensive recall tests added to validate HNSW parameter tuning.
 #### Task 4.10: In-Memory Binary Code Cache
 
 **Status:** ✅ Complete (hypothesis validated)
+**Commit:** `9880a62`
 
 **Goal:** Validate that in-memory cached binary codes eliminate the double I/O problem.
 
@@ -4244,6 +4247,7 @@ Comprehensive recall tests added to validate HNSW parameter tuning.
 #### Task 4.11: API Cleanup Phase 1 - Deprecate Invalidated Functions
 
 **Status:** ✅ Complete
+**Commit:** `ce2a060`
 
 **Goal:** Mark functions invalidated by Phase 4 experiments as deprecated.
 
@@ -4366,6 +4370,7 @@ Two vectors with similar MAGNITUDES but different angles → different signs →
 #### Task 4.12: API Cleanup Phase 2 - Remove Deprecated Code
 
 **Status:** ✅ Complete
+**Commit:** `5f2dac0`
 
 **Goal:** Remove deprecated functions and dead code from the crate.
 
@@ -4395,11 +4400,12 @@ fn beam_search_layer0_hamming(...)  // ~86 lines (uncached version)
 #### Task 4.13: API Cleanup Phase 3 - Embedding-Driven SearchConfig API
 
 **Status:** ✅ Complete
+**Commit:** `5f2dac0` (impl), `0ace681` (tests)
 
 **Goal:** Use `Embedding` as the single source of truth for search configuration, ensuring
 consistency between index build and search operations.
 
-**Implementation:** `libs/db/src/vector/search_config.rs`
+**Implementation:** `libs/db/src/vector/search_config.rs` (30 unit tests, 11 integration tests)
 
 ##### Problem Statement
 
@@ -4823,8 +4829,9 @@ let results = l2_index.search(&storage, &config, &query);
 #### Task 4.14: API Cleanup Phase 4 - Configuration Validation
 
 **Status:** ✅ Complete
+**Commit:** `5f2dac0`
 
-**Implementation:** `libs/db/src/vector/config.rs` - `ConfigWarning`, `validate()` methods
+**Implementation:** `libs/db/src/vector/config.rs` - `ConfigWarning`, `validate()` methods (12 tests)
 
 **Goal:** Prevent misconfiguration through validation and presets.
 
