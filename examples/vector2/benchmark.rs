@@ -500,13 +500,42 @@ fn euclidean_distance_f32(a: &[f32], b: &[f32]) -> f32 {
         .sqrt()
 }
 
-/// Compute ground truth via brute force for a subset of vectors
+/// Compute cosine distance between two vectors (1 - cosine_similarity)
+/// Returns value in [0, 2] where 0 = identical, 2 = opposite
+pub fn cosine_distance_f32(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 1.0; // undefined, return neutral distance
+    }
+
+    let similarity = dot / (norm_a * norm_b);
+    1.0 - similarity // cosine distance
+}
+
+/// Normalize a vector to unit length
+pub fn normalize_vector(v: &[f32]) -> Vec<f32> {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm == 0.0 {
+        return v.to_vec();
+    }
+    v.iter().map(|x| x / norm).collect()
+}
+
+/// Normalize all vectors in a dataset
+pub fn normalize_vectors(vectors: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    vectors.iter().map(|v| normalize_vector(v)).collect()
+}
+
+/// Compute ground truth via brute force for a subset of vectors (L2 distance)
 fn compute_ground_truth_brute_force(
     base_vectors: &[Vec<f32>],
     query_vectors: &[Vec<f32>],
     k: usize,
 ) -> Vec<Vec<usize>> {
-    println!("Computing ground truth via brute force ({} queries)...", query_vectors.len());
+    println!("Computing L2 ground truth via brute force ({} queries)...", query_vectors.len());
 
     query_vectors.iter()
         .enumerate()
@@ -514,6 +543,35 @@ fn compute_ground_truth_brute_force(
             let mut distances: Vec<(f32, usize)> = base_vectors.iter()
                 .enumerate()
                 .map(|(idx, base)| (euclidean_distance_f32(query, base), idx))
+                .collect();
+            distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+            if (q_idx + 1) % 100 == 0 {
+                println!("  Computed ground truth for {}/{} queries", q_idx + 1, query_vectors.len());
+            }
+
+            distances.into_iter()
+                .take(k)
+                .map(|(_, idx)| idx)
+                .collect()
+        })
+        .collect()
+}
+
+/// Compute ground truth via brute force using cosine distance
+pub fn compute_ground_truth_cosine(
+    base_vectors: &[Vec<f32>],
+    query_vectors: &[Vec<f32>],
+    k: usize,
+) -> Vec<Vec<usize>> {
+    println!("Computing Cosine ground truth via brute force ({} queries)...", query_vectors.len());
+
+    query_vectors.iter()
+        .enumerate()
+        .map(|(q_idx, query)| {
+            let mut distances: Vec<(f32, usize)> = base_vectors.iter()
+                .enumerate()
+                .map(|(idx, base)| (cosine_distance_f32(query, base), idx))
                 .collect();
             distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 

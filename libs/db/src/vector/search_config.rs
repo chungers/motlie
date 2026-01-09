@@ -132,7 +132,7 @@ impl SearchConfig {
             strategy,
             k,
             ef: 100,          // sensible default
-            rerank_factor: 4, // 4x re-ranking for >90% recall
+            rerank_factor: 10, // 10x re-ranking for ~90% recall at 10K scale
         }
     }
 
@@ -145,7 +145,7 @@ impl SearchConfig {
             strategy: SearchStrategy::Exact,
             k,
             ef: 100,
-            rerank_factor: 4,
+            rerank_factor: 10,
         }
     }
 
@@ -323,7 +323,7 @@ mod tests {
         assert!(config.strategy().is_rabitq());
         assert_eq!(config.k(), 10);
         assert_eq!(config.ef(), 100);
-        assert_eq!(config.rerank_factor(), 4);
+        assert_eq!(config.rerank_factor(), 10); // Tuned for ~90% recall at 10K scale
     }
 
     #[test]
