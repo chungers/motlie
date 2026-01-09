@@ -67,6 +67,8 @@ throughput improvement and 10x search QPS improvement.
 | [Task 4.14](#task-414-api-cleanup-phase-4---configuration-validation) | API Cleanup: Config Validation | ✅ Complete | `5f2dac0` |
 | [Task 4.15](#task-415-phase-5-integration-planning) | Phase 5 Integration Planning | 🔲 Not Started | - |
 | [Task 4.16](#task-416-hnsw-distance-metric-bug-fix) | HNSW Distance Metric Bug Fix | ✅ Complete | `0535e6a` |
+| [Task 4.17](#task-417-batch_distances-metric-bug-fix) | batch_distances Metric Bug Fix | ✅ Complete | `d5899f3` |
+| [Task 4.18](#task-418-vectorstoragetype-multi-float-support) | VectorStorageType (f16/f32) | 🔄 In Progress | - |
 
 ### Other Sections
 
@@ -4995,6 +4997,121 @@ Cosine + RaBitQ should achieve much higher recall.
 - [x] All 33 HNSW tests pass
 - [x] Benchmark results re-collected with corrected code
 - [x] Results documented in `examples/vector2/results/phase4_final_results.md`
+
+---
+
+---
+
+#### Task 4.17: batch_distances Metric Bug Fix
+
+**Status:** ✅ Complete
+**Commit:** `d5899f3`
+**Date:** 2026-01-09
+
+**Bug Description:**
+
+The `batch_distances()` function in HNSW was **hardcoded to use L2 distance**
+regardless of the configured distance metric. This caused ~39% recall when using
+Cosine distance on LAION-CLIP embeddings (expected 90%+).
+
+**Location:** `libs/db/src/vector/hnsw.rs:780`
+
+```rust
+// BEFORE (Bug):
+.filter_map(|(id, vec_opt)| vec_opt.map(|v| (id, l2_distance(query, &v))))
+
+// AFTER (Fix):
+.filter_map(|(id, vec_opt)| vec_opt.map(|v| (id, self.compute_distance(query, &v))))
+```
+
+**Impact:**
+
+This bug was particularly severe because `batch_distances()` is called during
+beam search when neighbor count exceeds the batch threshold. The individual
+`distance()` calls were correct, but batch operations used wrong metric.
+
+**Before/After (LAION-CLIP 50K, Cosine distance):**
+
+| Metric | Before Fix | After Fix |
+|--------|-----------|-----------|
+| Recall@1 | 39.2% | **91.8%** |
+| Recall@5 | 40.3% | **91.5%** |
+| Recall@10 | 39.2% | **89.3%** |
+
+**Acceptance Criteria:**
+- [x] batch_distances uses configured distance metric
+- [x] Recall@1 > 90% on LAION-CLIP benchmark
+- [x] All HNSW tests pass
+
+---
+
+#### Task 4.18: VectorStorageType (Multi-Float Support)
+
+**Status:** 🔄 In Progress
+**Goal:** Support f16 (half-precision) storage for 50% space savings
+
+**Motivation:**
+
+LAION-CLIP embeddings are natively stored as f16 (IEEE 754 half-precision).
+Currently we:
+1. Load f16 from NPY files
+2. Convert to f32 in memory
+3. Store as f32 in RocksDB (4 bytes/element)
+
+With VectorStorageType, we can:
+1. Store as f16 in RocksDB (2 bytes/element)
+2. Convert to f32 only for distance computation
+3. Save 50% storage with negligible precision loss for normalized vectors
+
+**Schema Changes:**
+
+```rust
+// New enum in schema.rs
+#[derive(Serialize, Deserialize, Clone, Copy, Default)]
+pub enum VectorStorageType {
+    #[default]
+    F32,  // 4 bytes/element, full precision
+    F16,  // 2 bytes/element, 50% smaller
+}
+
+// Updated EmbeddingSpec
+pub struct EmbeddingSpec {
+    pub model: String,
+    pub dim: u32,
+    pub distance: Distance,
+    #[serde(default)]
+    pub storage_type: VectorStorageType,  // NEW - defaults to F32
+}
+
+// Updated Vectors CF serialization
+impl Vectors {
+    pub fn value_to_bytes(value: &[f32], storage_type: VectorStorageType) -> Vec<u8>;
+    pub fn value_from_bytes(bytes: &[u8], storage_type: VectorStorageType) -> Result<Vec<f32>>;
+}
+```
+
+**Storage Savings:**
+
+| Format | 512D Vector | 200K Vectors | Savings |
+|--------|-------------|--------------|---------|
+| F32 | 2,048 bytes | 400 MB | - |
+| F16 | 1,024 bytes | 200 MB | **50%** |
+
+**Implementation Steps:**
+- [ ] Add `VectorStorageType` enum to `schema.rs`
+- [ ] Add `storage_type` field to `EmbeddingSpec` (default F32)
+- [ ] Update `Vectors::value_to_bytes()` with f16 support
+- [ ] Update `Vectors::value_from_bytes()` with f16 support
+- [ ] Update `HnswIndex` to read storage_type from embedding config
+- [ ] Update LAION benchmark to use F16 storage
+- [ ] Run full benchmark suite comparing F16 vs F32
+
+**Acceptance Criteria:**
+- [ ] VectorStorageType enum with F32/F16 variants
+- [ ] Backward compatible (F32 default)
+- [ ] LAION benchmark uses F16 storage
+- [ ] Recall within 1% of F32 baseline
+- [ ] 50% storage reduction verified
 
 ---
 

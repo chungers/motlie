@@ -2143,6 +2143,7 @@ dependencies = [
  "data-url",
  "ferroid",
  "flume",
+ "half",
  "lz4",
  "motlie-core",
  "ordered-float",

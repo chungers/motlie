@@ -89,6 +89,8 @@ pub struct AddEmbeddingSpec {
     pub dim: u32,
     /// Distance metric for similarity computation
     pub distance: Distance,
+    /// Storage type for vectors (default: F32)
+    pub storage_type: super::schema::VectorStorageType,
 }
 
 impl From<AddEmbeddingSpec> for Mutation {
@@ -110,6 +112,7 @@ impl MutationCodec for AddEmbeddingSpec {
             model: self.model.clone(),
             dim: self.dim,
             distance: self.distance,
+            storage_type: self.storage_type,
         });
         (key, value)
     }

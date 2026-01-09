@@ -89,6 +89,26 @@ pub(crate) type RoaringBitmapBytes = Vec<u8>;
 /// Type alias for RaBitQ binary code
 pub type RabitqCode = Vec<u8>;
 
+/// Vector element storage type.
+///
+/// Controls how vector elements are serialized in the Vectors CF.
+/// All computation is done in f32 regardless of storage type.
+///
+/// # Storage Savings
+///
+/// | Type | Bytes/Element | 512D Vector | Savings |
+/// |------|---------------|-------------|---------|
+/// | F32  | 4 bytes       | 2,048 bytes | -       |
+/// | F16  | 2 bytes       | 1,024 bytes | **50%** |
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorStorageType {
+    /// 32-bit IEEE 754 floating point (default, full precision)
+    #[default]
+    F32,
+    /// 16-bit IEEE 754 half-precision (50% smaller, ~0.1% precision loss for normalized vectors)
+    F16,
+}
+
 // ============================================================================
 // Column Family Names
 // ============================================================================
@@ -131,6 +151,9 @@ pub struct EmbeddingSpec {
     pub dim: u32,
     /// Distance metric for similarity computation
     pub distance: Distance,
+    /// Storage type for vector elements (default: F32 for backward compatibility)
+    #[serde(default)]
+    pub storage_type: VectorStorageType,
 }
 
 /// EmbeddingSpecs key: the embedding space identifier (primary key)
@@ -238,28 +261,92 @@ impl Vectors {
         Ok(VectorCfKey(embedding_code, vec_id))
     }
 
-    /// Store vector as raw f32 bytes (no compression for fast access)
+    /// Store vector as raw f32 bytes (backward compatible, uses F32 storage)
     pub fn value_to_bytes(value: &VectorCfValue) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(value.0.len() * 4);
-        for &v in &value.0 {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        bytes
+        Self::value_to_bytes_typed(&value.0, VectorStorageType::F32)
     }
 
-    /// Load vector from raw f32 bytes
+    /// Load vector from raw f32 bytes (backward compatible, assumes F32 storage)
     pub fn value_from_bytes(bytes: &[u8]) -> Result<VectorCfValue> {
-        if bytes.len() % 4 != 0 {
-            anyhow::bail!(
-                "Invalid vector bytes length: {} is not divisible by 4",
-                bytes.len()
-            );
+        Self::value_from_bytes_typed(bytes, VectorStorageType::F32).map(VectorCfValue)
+    }
+
+    /// Store vector with specified storage type.
+    ///
+    /// # Arguments
+    /// * `value` - Vector as f32 slice (source is always f32)
+    /// * `storage_type` - Target storage format (F32 or F16)
+    ///
+    /// # Returns
+    /// Serialized bytes in the specified format
+    pub fn value_to_bytes_typed(value: &[f32], storage_type: VectorStorageType) -> Vec<u8> {
+        match storage_type {
+            VectorStorageType::F32 => {
+                let mut bytes = Vec::with_capacity(value.len() * 4);
+                for &v in value {
+                    bytes.extend_from_slice(&v.to_le_bytes());
+                }
+                bytes
+            }
+            VectorStorageType::F16 => {
+                use half::f16;
+                let mut bytes = Vec::with_capacity(value.len() * 2);
+                for &v in value {
+                    let h = f16::from_f32(v);
+                    bytes.extend_from_slice(&h.to_le_bytes());
+                }
+                bytes
+            }
         }
-        let mut vector = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
-            vector.push(f32::from_le_bytes(chunk.try_into()?));
+    }
+
+    /// Load vector from bytes with specified storage type.
+    ///
+    /// # Arguments
+    /// * `bytes` - Serialized vector bytes
+    /// * `storage_type` - Storage format used when serializing
+    ///
+    /// # Returns
+    /// Vector as Vec<f32> (always returns f32 for computation)
+    pub fn value_from_bytes_typed(bytes: &[u8], storage_type: VectorStorageType) -> Result<Vec<f32>> {
+        match storage_type {
+            VectorStorageType::F32 => {
+                if bytes.len() % 4 != 0 {
+                    anyhow::bail!(
+                        "Invalid F32 vector bytes length: {} is not divisible by 4",
+                        bytes.len()
+                    );
+                }
+                let mut vector = Vec::with_capacity(bytes.len() / 4);
+                for chunk in bytes.chunks_exact(4) {
+                    vector.push(f32::from_le_bytes(chunk.try_into()?));
+                }
+                Ok(vector)
+            }
+            VectorStorageType::F16 => {
+                use half::f16;
+                if bytes.len() % 2 != 0 {
+                    anyhow::bail!(
+                        "Invalid F16 vector bytes length: {} is not divisible by 2",
+                        bytes.len()
+                    );
+                }
+                let mut vector = Vec::with_capacity(bytes.len() / 2);
+                for chunk in bytes.chunks_exact(2) {
+                    let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                    vector.push(f16::from_bits(bits).to_f32());
+                }
+                Ok(vector)
+            }
         }
-        Ok(VectorCfValue(vector))
+    }
+
+    /// Calculate storage size in bytes for a vector of given dimension.
+    pub fn storage_size(dim: usize, storage_type: VectorStorageType) -> usize {
+        match storage_type {
+            VectorStorageType::F32 => dim * 4,
+            VectorStorageType::F16 => dim * 2,
+        }
     }
 }
 

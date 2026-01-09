@@ -11,7 +11,7 @@ use anyhow::Result;
 use motlie_db::rocksdb::ColumnFamily;
 use motlie_db::vector::{
     Distance, EmbeddingCode, HnswConfig, HnswIndex, NavigationCache,
-    Storage, VecId, VectorCfKey, VectorCfValue, Vectors,
+    Storage, VecId, VectorCfKey, VectorStorageType, Vectors,
 };
 use std::collections::HashMap;
 use std::fs::File;
@@ -153,14 +153,18 @@ fn build_hnsw_index(
     let nav_cache = Arc::new(NavigationCache::new());
     let embedding_code: EmbeddingCode = 1;
 
-    let index = HnswIndex::new(
+    // Use F16 storage for 50% space savings (LAION data is already f16)
+    let storage_type = VectorStorageType::F16;
+
+    let index = HnswIndex::with_storage_type(
         embedding_code,
         Distance::Cosine,
+        storage_type,
         hnsw_config,
         nav_cache,
     );
 
-    // Store vectors in RocksDB
+    // Store vectors in RocksDB using F16 storage
     let txn_db = storage.transaction_db()?;
     let vectors_cf = txn_db
         .cf_handle(Vectors::CF_NAME)
@@ -171,13 +175,13 @@ fn build_hnsw_index(
     for (i, vector) in vectors.iter().enumerate() {
         let vec_id = i as VecId;
 
-        // Store vector in Vectors CF
+        // Store vector in Vectors CF with F16 storage type
         let key = VectorCfKey(embedding_code, vec_id);
-        let value = VectorCfValue(vector.clone());
+        let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
         txn_db.put_cf(
             &vectors_cf,
             Vectors::key_to_bytes(&key),
-            Vectors::value_to_bytes(&value),
+            value_bytes,
         )?;
 
         // Insert into HNSW index
