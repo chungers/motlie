@@ -4394,54 +4394,428 @@ fn beam_search_layer0_hamming(...)  // ~55 lines (uncached version)
 
 ---
 
-#### Task 4.13: API Cleanup Phase 3 - Unified SearchStrategy API
+#### Task 4.13: API Cleanup Phase 3 - Embedding-Driven SearchConfig API
 
 **Status:** 🔲 Not Started
 
-**Goal:** Create a type-safe search API that prevents misuse.
+**Goal:** Use `Embedding` as the single source of truth for search configuration, ensuring
+consistency between index build and search operations.
 
-**Proposed Design:**
+##### Problem Statement
+
+1. **Distance Metric Mismatch**: Index built with Cosine but searched with hardcoded L2 (hnsw.rs:681)
+2. **RaBitQ Compatibility**: Hamming distance approximates angular distance, works best with Cosine
+3. **No Validation**: No runtime check that search uses correct distance metric
+4. **Configuration Scattered**: Distance metric in Embedding, search params elsewhere
+
+##### Key Insight
+
+The `Embedding` struct already contains everything needed:
+- `distance: Distance` - the metric used to build the index
+- `compute_distance(a, b)` - method to compute distances correctly
+
+The problem is `HnswIndex` only stores `EmbeddingCode` (u64) for key efficiency, losing
+access to the full `Embedding` including its distance metric.
+
+##### Proposed Design: SearchConfig
 
 ```rust
-/// Search strategy - guides users to correct usage
-pub enum SearchStrategy {
-    /// Standard L2 search - best recall, recommended default
-    Standard,
+/// Search configuration derived from Embedding.
+/// Enforces correct distance metric and search strategy.
+///
+/// # Design Philosophy
+///
+/// The Embedding is the source of truth. SearchConfig:
+/// 1. Captures the Embedding for distance computation
+/// 2. Validates embedding matches the index being searched
+/// 3. Auto-selects optimal strategy based on distance metric
+/// 4. Prevents incompatible configurations at construction time
+///
+/// # Example
+///
+/// ```rust
+/// // Index built with Cosine - RaBitQ auto-selected
+/// let cosine_emb = registry.register(
+///     EmbeddingBuilder::new("gemma", 768, Distance::Cosine), &db
+/// )?;
+/// let config = SearchConfig::new(cosine_emb.clone(), 10);
+/// assert!(matches!(config.strategy(), SearchStrategy::RaBitQ { .. }));
+///
+/// // Index built with L2 - Exact auto-selected
+/// let l2_emb = registry.register(
+///     EmbeddingBuilder::new("openai", 1536, Distance::L2), &db
+/// )?;
+/// let config = SearchConfig::new(l2_emb.clone(), 10);
+/// assert!(matches!(config.strategy(), SearchStrategy::Exact));
+/// ```
+pub struct SearchConfig {
+    /// Embedding space specification (source of truth)
+    embedding: Embedding,
+    /// Search strategy (derived from embedding.distance + user choice)
+    strategy: SearchStrategy,
+    /// Number of results to return
+    k: usize,
+    /// Search beam width (ef parameter)
+    ef: usize,
+    /// Re-rank factor for RaBitQ (ignored for Exact)
+    rerank_factor: usize,
+}
 
-    /// Quantized search with cached binary codes
-    /// - 2-9x faster than Standard
-    /// - Requires pre-populated BinaryCodeCache
-    /// - Lower recall (use rerank_factor >= 8 for >90%)
-    Quantized {
-        encoder: Arc<RaBitQ>,
-        code_cache: Arc<BinaryCodeCache>,
-        rerank_factor: usize,
+/// Search strategy - auto-selected based on embedding.distance
+#[derive(Debug, Clone)]
+pub enum SearchStrategy {
+    /// Exact distance computation at all layers.
+    /// Works with all distance metrics.
+    Exact,
+
+    /// RaBitQ: Hamming filtering at layer 0 + exact re-rank.
+    /// Only valid when embedding.distance == Cosine.
+    /// Requires BinaryCodeCache for good performance.
+    RaBitQ {
+        /// Use in-memory binary code cache (required for good performance)
+        use_cache: bool,
     },
 }
 
-impl HnswIndex {
-    /// Unified search API
-    pub fn search(
-        &self,
-        storage: &Storage,
-        query: &[f32],
-        k: usize,
-        ef: usize,
-        strategy: &SearchStrategy,
-    ) -> Result<Vec<(f32, VecId)>>;
+impl SearchConfig {
+    /// Create search config with automatic strategy selection.
+    ///
+    /// Strategy is chosen based on embedding's distance metric:
+    /// - Cosine → RaBitQ (Hamming approximates angular distance)
+    /// - L2/DotProduct → Exact (Hamming not compatible)
+    pub fn new(embedding: Embedding, k: usize) -> Self {
+        let strategy = match embedding.distance() {
+            Distance::Cosine => SearchStrategy::RaBitQ { use_cache: true },
+            Distance::L2 | Distance::DotProduct => SearchStrategy::Exact,
+        };
+        Self {
+            embedding,
+            strategy,
+            k,
+            ef: 100,           // sensible default
+            rerank_factor: 4,  // 4x re-ranking for >90% recall
+        }
+    }
+
+    /// Builder: Override to use exact search (disable RaBitQ).
+    /// Safe for all distance metrics.
+    pub fn exact(mut self) -> Self {
+        self.strategy = SearchStrategy::Exact;
+        self
+    }
+
+    /// Builder: Force RaBitQ strategy.
+    /// Returns error if embedding.distance != Cosine.
+    pub fn rabitq(mut self) -> Result<Self> {
+        if self.embedding.distance() != Distance::Cosine {
+            return Err(anyhow!(
+                "RaBitQ requires Cosine distance (Hamming ≈ angular), got {:?}",
+                self.embedding.distance()
+            ));
+        }
+        self.strategy = SearchStrategy::RaBitQ { use_cache: true };
+        Ok(self)
+    }
+
+    /// Builder: Set ef (beam width).
+    pub fn ef(mut self, ef: usize) -> Self {
+        self.ef = ef;
+        self
+    }
+
+    /// Builder: Set re-rank factor (for RaBitQ).
+    pub fn rerank_factor(mut self, factor: usize) -> Self {
+        self.rerank_factor = factor;
+        self
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Accessors
+    // ─────────────────────────────────────────────────────────────
+
+    /// Get the embedding (source of truth).
+    pub fn embedding(&self) -> &Embedding { &self.embedding }
+
+    /// Get the search strategy.
+    pub fn strategy(&self) -> &SearchStrategy { &self.strategy }
+
+    /// Get k (number of results).
+    pub fn k(&self) -> usize { self.k }
+
+    /// Get ef (beam width).
+    pub fn ef(&self) -> usize { self.ef }
+
+    /// Get re-rank factor.
+    pub fn rerank_factor(&self) -> usize { self.rerank_factor }
+
+    // ─────────────────────────────────────────────────────────────
+    // Distance Computation (delegated to Embedding)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Compute distance using embedding's configured metric.
+    /// This is the ONLY way distances should be computed during search.
+    #[inline]
+    pub fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32 {
+        self.embedding.compute_distance(a, b)
+    }
 }
 ```
 
-**Benefits:**
-- Single entry point prevents calling wrong function
-- Type system enforces required parameters
-- Documentation in enum variants guides users
+##### Updated HnswIndex API
+
+```rust
+impl HnswIndex {
+    /// Primary search method - uses SearchConfig for all parameters.
+    ///
+    /// # Validation
+    ///
+    /// This method validates that `config.embedding.code()` matches `self.embedding`.
+    /// This ensures the search uses the same distance metric as index construction.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let config = SearchConfig::new(embedding.clone(), 10).ef(150);
+    /// let results = index.search(&storage, &config, &query)?;
+    /// ```
+    pub fn search(
+        &self,
+        storage: &Storage,
+        config: &SearchConfig,
+        query: &[f32],
+    ) -> Result<Vec<(f32, VecId)>> {
+        // Validate embedding matches this index
+        if config.embedding().code() != self.embedding {
+            return Err(anyhow!(
+                "Embedding mismatch: index has code {}, config has {}",
+                self.embedding,
+                config.embedding().code()
+            ));
+        }
+
+        // Dispatch to appropriate strategy
+        match config.strategy() {
+            SearchStrategy::Exact => self.search_exact(storage, config, query),
+            SearchStrategy::RaBitQ { use_cache } => {
+                if *use_cache {
+                    self.search_rabitq_cached(storage, config, query)
+                } else {
+                    // Fall back to exact if cache not available
+                    self.search_exact(storage, config, query)
+                }
+            }
+        }
+    }
+
+    /// Internal: Exact search using embedding's distance metric.
+    fn search_exact(
+        &self,
+        storage: &Storage,
+        config: &SearchConfig,
+        query: &[f32],
+    ) -> Result<Vec<(f32, VecId)>> {
+        // Phase 1: Upper layer navigation (greedy descent)
+        let entry = self.get_entry_point(storage)?;
+        let mut current = entry;
+
+        for layer in (1..=self.get_max_layer(storage)?).rev() {
+            current = self.greedy_search_layer(storage, config, query, current, layer)?;
+        }
+
+        // Phase 2: Layer 0 beam search with EXACT distance
+        let candidates = self.beam_search_layer0_exact(storage, config, query, current)?;
+
+        // Return top-k
+        Ok(candidates.into_iter().take(config.k()).collect())
+    }
+
+    /// Internal: RaBitQ search with cached binary codes.
+    fn search_rabitq_cached(
+        &self,
+        storage: &Storage,
+        config: &SearchConfig,
+        query: &[f32],
+    ) -> Result<Vec<(f32, VecId)>> {
+        // Phase 1: Upper layer navigation (exact distance)
+        let entry = self.get_entry_point(storage)?;
+        let mut current = entry;
+
+        for layer in (1..=self.get_max_layer(storage)?).rev() {
+            current = self.greedy_search_layer(storage, config, query, current, layer)?;
+        }
+
+        // Phase 2: Layer 0 beam search with HAMMING filtering
+        let candidates = self.beam_search_layer0_hamming_cached(storage, config, query, current)?;
+
+        // Phase 3: Re-rank with EXACT distance (using config.compute_distance)
+        let rerank_count = config.k() * config.rerank_factor();
+        let to_rerank: Vec<VecId> = candidates.iter()
+            .take(rerank_count)
+            .map(|(_, id)| *id)
+            .collect();
+
+        let vectors = self.get_vectors_batch(storage, &to_rerank)?;
+        let mut reranked: Vec<(f32, VecId)> = to_rerank.iter()
+            .zip(vectors.iter())
+            .filter_map(|(&id, vec_opt)| {
+                vec_opt.as_ref().map(|v| {
+                    (config.compute_distance(query, v), id)  // Uses embedding's metric!
+                })
+            })
+            .collect();
+
+        reranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        reranked.truncate(config.k());
+        Ok(reranked)
+    }
+
+    /// Internal: Greedy search at a single layer.
+    /// Uses config.compute_distance() for distance computation.
+    fn greedy_search_layer(
+        &self,
+        storage: &Storage,
+        config: &SearchConfig,
+        query: &[f32],
+        entry: VecId,
+        layer: HnswLayer,
+    ) -> Result<VecId> {
+        let mut current = entry;
+        let mut current_dist = self.distance_with_config(storage, config, query, current)?;
+
+        loop {
+            let neighbors = self.get_neighbors(storage, current, layer, true)?;
+            let mut improved = false;
+
+            for neighbor in neighbors.iter() {
+                let neighbor_id = neighbor as VecId;
+                let neighbor_dist = self.distance_with_config(storage, config, query, neighbor_id)?;
+                if neighbor_dist < current_dist {
+                    current = neighbor_id;
+                    current_dist = neighbor_dist;
+                    improved = true;
+                }
+            }
+
+            if !improved {
+                break;
+            }
+        }
+
+        Ok(current)
+    }
+
+    /// Compute distance using SearchConfig (delegated to Embedding).
+    /// This replaces the old hardcoded L2 distance method.
+    #[inline]
+    fn distance_with_config(
+        &self,
+        storage: &Storage,
+        config: &SearchConfig,
+        query: &[f32],
+        vec_id: VecId,
+    ) -> Result<f32> {
+        let vector = self.get_vector(storage, vec_id)?;
+        Ok(config.compute_distance(query, &vector))
+    }
+}
+```
+
+##### Distance Metric Compatibility Matrix
+
+| Embedding Distance | Exact Strategy | RaBitQ Strategy | Notes |
+|-------------------|----------------|-----------------|-------|
+| **Cosine** | ✅ Works | ✅ Recommended | Hamming ≈ angular distance |
+| **L2** | ✅ Works | ⚠️ Error | Hamming not compatible |
+| **DotProduct** | ✅ Works | ⚠️ Error | Hamming not compatible |
+
+##### Migration Path
+
+1. **Step 1**: Add `SearchConfig` to `search_config.rs` (new file)
+2. **Step 2**: Add `distance_with_config()` to HnswIndex
+3. **Step 3**: Add new `search(config, query)` method
+4. **Step 4**: Deprecate old search methods with migration guide
+5. **Step 5**: Update examples and benchmarks
+6. **Step 6**: Remove deprecated methods (next major version)
+
+##### Hardcoded L2 Fix
+
+The current code at `hnsw.rs:678-683`:
+```rust
+fn distance(&self, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
+    let vector = self.get_vector(storage, vec_id)?;
+    // Use L2 distance for now (TODO: use embedding's configured distance)
+    Ok(l2_distance(query, &vector))
+}
+```
+
+Will be replaced by `distance_with_config()` which delegates to `config.compute_distance()`,
+which delegates to `embedding.distance.compute()`. This ensures the correct metric is used.
+
+##### API Usage Examples
+
+```rust
+// ─────────────────────────────────────────────────────────────
+// Example 1: Cosine index (auto-selects RaBitQ)
+// ─────────────────────────────────────────────────────────────
+let cosine_emb = registry.register(
+    EmbeddingBuilder::new("gemma", 768, Distance::Cosine),
+    &db
+)?;
+
+// SearchConfig auto-selects RaBitQ for Cosine
+let config = SearchConfig::new(cosine_emb.clone(), 10);
+let results = index.search(&storage, &config, &query)?;
+
+// ─────────────────────────────────────────────────────────────
+// Example 2: Force exact search (disable RaBitQ)
+// ─────────────────────────────────────────────────────────────
+let config = SearchConfig::new(cosine_emb.clone(), 10).exact();
+let results = index.search(&storage, &config, &query)?;
+
+// ─────────────────────────────────────────────────────────────
+// Example 3: L2 index (auto-selects Exact)
+// ─────────────────────────────────────────────────────────────
+let l2_emb = registry.register(
+    EmbeddingBuilder::new("openai", 1536, Distance::L2),
+    &db
+)?;
+
+// SearchConfig auto-selects Exact for L2
+let config = SearchConfig::new(l2_emb.clone(), 10);
+let results = l2_index.search(&storage, &config, &query)?;
+
+// ─────────────────────────────────────────────────────────────
+// Example 4: Trying RaBitQ on L2 index (FAILS at construction)
+// ─────────────────────────────────────────────────────────────
+let config = SearchConfig::new(l2_emb.clone(), 10)
+    .rabitq()?;  // Returns Err: "RaBitQ requires Cosine distance"
+
+// ─────────────────────────────────────────────────────────────
+// Example 5: Mismatched embedding (FAILS at search time)
+// ─────────────────────────────────────────────────────────────
+let config = SearchConfig::new(cosine_emb.clone(), 10);
+let results = l2_index.search(&storage, &config, &query);
+// Returns Err: "Embedding mismatch: index has code 2, config has 1"
+```
+
+##### Benefits
+
+1. **Single Source of Truth**: `Embedding` contains all configuration
+2. **Compile-time Safety**: RaBitQ + non-Cosine fails at `rabitq()` call
+3. **Runtime Validation**: Embedding code mismatch caught at search time
+4. **Auto-selection**: Optimal strategy chosen based on distance metric
+5. **Explicit Override**: Users can force exact search with `.exact()`
+6. **Clear Error Messages**: Explain why combinations are invalid
 
 **Acceptance Criteria:**
-- [ ] Implement `SearchStrategy` enum
-- [ ] Unified `search()` method accepting strategy
-- [ ] Deprecate old individual search methods
+- [ ] Create `search_config.rs` with `SearchConfig` and `SearchStrategy`
+- [ ] Add `distance_with_config()` method to HnswIndex
+- [ ] Add new `search(&SearchConfig, &query)` method
+- [ ] Validate embedding code match at search time
+- [ ] Auto-select strategy based on distance metric
+- [ ] Return error for RaBitQ + non-Cosine combinations
 - [ ] Update benchmark to use new API
+- [ ] Add integration tests for all combinations
 - [ ] Documentation with usage examples
 
 ---
