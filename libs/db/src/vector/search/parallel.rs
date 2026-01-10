@@ -122,7 +122,7 @@ where
 /// - `candidates.len() >= threshold` → parallel (rayon)
 /// - `candidates.len() < threshold` → sequential
 ///
-/// Default threshold: 800 (see [`DEFAULT_PARALLEL_RERANK_THRESHOLD`]).
+/// Default threshold: 3200 (see [`DEFAULT_PARALLEL_RERANK_THRESHOLD`]).
 ///
 /// # Arguments
 ///
@@ -388,8 +388,8 @@ mod tests {
 
     #[test]
     fn test_rerank_adaptive_at_threshold() {
-        let candidates: Vec<VecId> = (0..800).collect();
-        let threshold = 800; // Exactly at threshold
+        let candidates: Vec<VecId> = (0..3200).collect();
+        let threshold = 3200; // Exactly at threshold
 
         // Should use parallel (>= threshold)
         let results = rerank_adaptive(&candidates, |id| Some(id as f32), 10, threshold);
@@ -400,7 +400,7 @@ mod tests {
     fn test_rerank_auto_uses_default_threshold() {
         let candidates: Vec<VecId> = (0..100).collect();
 
-        // With default threshold of 800, 100 candidates should use sequential
+        // With default threshold of 3200, 100 candidates should use sequential
         let results = rerank_auto(&candidates, |id| Some(id as f32), 10);
         assert_eq!(results.len(), 10);
         assert_eq!(results[0].1, 0);
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_default_parallel_rerank_threshold() {
-        // Verify the default is 800 as documented
-        assert_eq!(DEFAULT_PARALLEL_RERANK_THRESHOLD, 800);
+        // Verify the default is 3200 as documented
+        assert_eq!(DEFAULT_PARALLEL_RERANK_THRESHOLD, 3200);
     }
 }
