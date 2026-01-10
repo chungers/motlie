@@ -10,6 +10,100 @@ RocksDB-backed persistent storage.
 - **Storage**: RocksDB with LZ4 compression
 - **Date**: 2026-01-10
 
+## Configuration Reference
+
+All configurable parameters used in benchmarks. See `config.rs`, `subsystem.rs`,
+and `search/config.rs` for implementation details.
+
+### HNSW Index Configuration (`HnswConfig`)
+
+| Parameter | Default | Benchmark Value | Description |
+|-----------|---------|-----------------|-------------|
+| `dim` | 128 | 512 | Vector dimensionality |
+| `m` | 16 | 16 | Bidirectional links per node at layer 0 |
+| `m_max` | 2×m (32) | 32 | Max links at layers > 0 |
+| `m_max_0` | 2×m (32) | 32 | Max links at layer 0 |
+| `ef_construction` | 200 | 100 | Build-time beam width |
+| `batch_threshold` | 64 | 64 | MultiGet threshold (effectively disabled) |
+
+**Presets**: `HnswConfig::high_recall(dim)` (M=32, ef=400), `HnswConfig::compact(dim)` (M=8, ef=100)
+
+### RaBitQ Quantization (`RaBitQConfig`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `bits_per_dim` | 1 | Bits per dimension (1, 2, 4, or 8) |
+| `rotation_seed` | 42 | Deterministic rotation matrix seed |
+| `enabled` | true | Enable/disable RaBitQ |
+
+**Code sizes** (512D with 1-bit): 64 bytes per vector (8x compression from F32)
+
+### Search Configuration (`SearchConfig`)
+
+| Parameter | Default | Benchmark Value | Description |
+|-----------|---------|-----------------|-------------|
+| `ef_search` | 100 | 10-160 | Search beam width |
+| `k` | 10 | 1-20 | Number of results |
+| `parallel_rerank_threshold` | 800 | 800 | Candidates before parallel reranking |
+
+**Search strategies**:
+- `SearchStrategy::Standard` - Full-precision distance during traversal
+- `SearchStrategy::RaBitQ` - Hamming filtering + exact rerank (requires `RaBitQ`)
+- `SearchStrategy::RaBitQCached` - Same with `BinaryCodeCache` (recommended)
+
+### Parallel Reranking (`DEFAULT_PARALLEL_RERANK_THRESHOLD`)
+
+| Threshold | Value | Rationale |
+|-----------|-------|-----------|
+| Default | 800 | Crossover point where rayon overhead is amortized |
+| Sequential | <400 candidates | Faster due to no thread coordination |
+| Parallel | >800 candidates | Faster with multi-core utilization |
+
+**Rayon configuration**: Uses system default thread pool. Override with `RAYON_NUM_THREADS` env var.
+
+### Storage Types (`VectorStorageType`)
+
+| Type | Bytes/Element | Memory (100K @ 512D) | Precision |
+|------|---------------|----------------------|-----------|
+| `F32` | 4 | 200 MB | Full (default) |
+| `F16` | 2 | 100 MB | Half (benchmark) |
+
+LAION benchmarks use F16 storage with F32 computation (auto-conversion on read).
+
+### RocksDB Block Cache (`VectorBlockCacheConfig`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `cache_size_bytes` | 256 MB | Total block cache size |
+| `default_block_size` | 4 KB | Block size for metadata CFs |
+| `vector_block_size` | 16 KB | Block size for vector data |
+
+### Binary Code Cache (`BinaryCodeCache`)
+
+| Aspect | Value | Notes |
+|--------|-------|-------|
+| Implementation | `HashMap` | Unbounded, no LRU eviction |
+| Memory (100K @ 512D, 1-bit) | ~6.4 MB | 64 bytes/vector |
+| Memory (1M @ 512D, 1-bit) | ~64 MB | Fits in RAM |
+| Thread safety | `RwLock` | Concurrent read, exclusive write |
+
+**Note**: Cache is populated during index build. For existing indices, codes must
+be loaded from `BinaryCodes` CF on startup.
+
+### Navigation Cache (`NavigationCacheConfig`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enabled` | true | Enable navigation caching |
+| `max_cached_layers` | 3 | Layers cached from top |
+| `max_nodes_per_layer` | 10,000 | Max nodes per cached layer |
+
+### Embedding Registry (`EmbeddingRegistryConfig`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `prewarm_limit` | 1,000 | Embedding specs to preload on startup |
+
 ## LAION-CLIP Benchmark
 
 ### Dataset
@@ -21,14 +115,19 @@ RocksDB-backed persistent storage.
 
 ### Configuration
 
-| Parameter | Value |
-|-----------|-------|
-| M | 16 |
-| M_max | 32 |
-| ef_construction | 100 |
-| ef_search | 10-160 |
-| Storage Type | F16 (half-precision) |
-| Block Cache | 256 MB |
+See [Configuration Reference](#configuration-reference) for full parameter details.
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| M | 16 | Standard connectivity |
+| M_max | 32 | 2×M |
+| ef_construction | 100 | Matches article baseline |
+| ef_search | 10-160 | Sweep across values |
+| Storage Type | F16 | Half-precision storage |
+| Block Cache | 256 MB | Default |
+| Search Strategy | Standard | Full-precision HNSW |
+| Parallel Rerank | N/A | Not used (standard search) |
+| Rayon Threads | System default | Env: `RAYON_NUM_THREADS` |
 
 ### Results Summary (January 2026)
 
