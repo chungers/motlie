@@ -47,7 +47,7 @@ throughput improvement and 10x search QPS improvement.
 | [Phase 1](#phase-1-id-management) | ID Management (ULID ↔ u32 mapping) | ✅ Complete |
 | [Phase 2](#phase-2-hnsw2-core--navigation-layer--core-complete) | HNSW2 Core + Navigation Layer | ✅ Complete |
 | [Phase 3](#phase-3-batch-operations--deferred-items) | Batch Operations + Deferred Items | ✅ Complete |
-| [Phase 4](#phase-4-rabitq-compression) | RaBitQ Compression | 🔄 In Progress |
+| [Phase 4](#phase-4-rabitq-compression) | RaBitQ Compression + Optimization | ✅ Complete |
 | [Phase 5](#phase-5-async-graph-updater-online-updates) | Async Graph Updater (Online Updates) | 🔲 Not Started |
 | [Phase 6](#phase-6-production-hardening) | Production Hardening | 🔲 Not Started |
 
@@ -175,63 +175,38 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  Phase 0: Foundation [COMPLETE]                                              │
-│  ├── 0.1 Module structure (mod.rs, schema.rs) ✓                             │
-│  ├── 0.2 VectorConfig and VectorStorage types ✓                            │
-│  ├── 0.3 Integration with existing graph Storage ✓                         │
-│  ├── 0.4 ColumnFamilyProvider trait + StorageBuilder ✓                     │
-│  ├── 0.5 Distance enum with compute behavior [ARCH-17] ✓                   │
-│  ├── 0.6 Embedder trait for document-to-vector compute [ARCH-18] ✓         │
-│  ├── 0.7 Rich Embedding struct (code, model, dim, distance, embedder) ✓    │
-│  ├── 0.8 EmbeddingBuilder for fluent registration ✓                        │
-│  ├── 0.9 EmbeddingRegistry with query/discovery API ✓                      │
-│  ├── 0.10 EmbeddingFilter for multi-field queries ✓                        │
-│  └── 0.11 IndexProvider trait + fulltext::Schema ✓                         │
+│  ├── 0.1-0.11 Module structure, types, traits ✓                            │
+│  └── Files: mod.rs, config.rs, distance.rs, embedding.rs, registry.rs      │
 │                                                                              │
-│  Phase 1: ID Management [ARCH-4, ARCH-5, ARCH-6] ✓ COMPLETE                │
-│  ├── 1.1 u32 ID allocator with RoaringBitmap free list ✓                   │
-│  ├── 1.2 Forward mapping CF (ULID -> u32) ✓                                │
-│  ├── 1.3 Reverse mapping (u32 -> ULID) ✓                                   │
-│  ├── 1.4 ID allocation persistence and recovery ✓                          │
-│  └── 1.5 Storage API: mutation/query/writer/reader infrastructure ✓        │
+│  Phase 1: ID Management [COMPLETE]                                          │
+│  ├── 1.1-1.5 u32 allocator, ULID mapping, persistence ✓                    │
+│  └── Files: id.rs, schema.rs (IdForward, IdReverse, IdAlloc CFs)           │
 │                                                                              │
-│  Phase 2: HNSW2 Core + Navigation Layer [THR-1] ✓ COMPLETE                │
-│  ├── 2.1 RoaringBitmap edge storage ✓                                     │
-│  ├── 2.2 RocksDB merge operators for edge updates ✓                       │
-│  ├── 2.3 Vector storage CF (raw f32 bytes) ✓                              │
-│  ├── 2.4 Node metadata CF (layer, flags) ✓                                │
-│  ├── 2.5 Graph metadata CF (entry point, stats) ✓                         │
-│  ├── 2.6 HNSW insert algorithm with bitmap edges ✓                        │
-│  ├── 2.7 Navigation layer structure (entry points per layer) ✓            │
-│  ├── 2.8 Layer descent search algorithm ✓                                 │
-│  └── 2.9 Memory-cached top layers (NavigationCache) ✓                     │
+│  Phase 2: HNSW2 Core + Navigation [COMPLETE]                                │
+│  ├── 2.1-2.9 RoaringBitmap edges, merge ops, NavigationCache ✓             │
+│  └── Files: hnsw.rs, merge.rs, navigation.rs, schema.rs                    │
 │                                                                              │
-│  Phase 3: Batch Operations + Deferred Items [THR-1, THR-3]                  │
-│  ├── 3.1 O(1) degree queries via RoaringBitmap.len()                       │
-│  ├── 3.2 Batch neighbor fetch for beam search (MultiGet)                   │
-│  ├── 3.3 Batch vector retrieval for re-ranking (MultiGet)                  │
-│  ├── 3.4 Batch ULID resolution                                             │
-│  ├── 3.5 Upper layer edge caching (deferred from 2.9)                      │
-│  ├── 3.6 Layer 0 hot node LRU cache (deferred from 2.9)                    │
-│  └── 3.7 Recall tuning at scale (deferred from 2.6)                        │
+│  Phase 3: Batch Operations [COMPLETE]                                        │
+│  ├── 3.1-3.7 MultiGet batching, edge caching, recall tuning ✓              │
+│  └── Files: hnsw.rs (batch_distances, batch_vectors)                       │
 │                                                                              │
-│  Phase 4: RaBitQ Compression [STOR-4, THR-3]                                │
-│  ├── 4.1 Random rotation matrix generation                                 │
-│  ├── 4.2 Binary code encoder                                               │
-│  ├── 4.3 SIMD Hamming distance                                             │
-│  ├── 4.4 Binary codes CF                                                   │
-│  └── 4.5 Search with approximate + re-rank                                 │
+│  Phase 4: RaBitQ + Optimization [COMPLETE]                                   │
+│  ├── 4.1-4.5 Core RaBitQ (rotation, encoding, Hamming) ✓                   │
+│  ├── 4.6-4.9 Recall tuning, hybrid experiments ✓                           │
+│  ├── 4.10 In-memory BinaryCodeCache ✓                                      │
+│  ├── 4.11-4.14 API cleanup, SearchConfig redesign ✓                        │
+│  ├── 4.16-4.17 Distance metric bug fixes ✓                                 │
+│  ├── 4.18 VectorStorageType (f16/f32 support) ✓                            │
+│  ├── 4.19-4.20 Parallel reranking (rayon) + threshold tuning ✓             │
+│  └── Files: rabitq.rs, search_config.rs, parallel.rs, navigation.rs        │
 │                                                                              │
-│  Phase 5: Async Graph Updater (Online Updates) [LAT-4, LAT-5]               │
-│  ├── 5.1 Pending queue CF (vector/pending)                                 │
-│  ├── 5.2 Async updater configuration                                       │
-│  ├── 5.3 Worker thread implementation (batch processing)                   │
-│  ├── 5.4 Delete handling (mark + lazy cleanup)                             │
-│  └── 5.5 Crash recovery (drain pending on startup)                         │
+│  Phase 5: Async Graph Updater [NOT STARTED]                                  │
+│  ├── 5.1-5.5 Pending queue, async workers, crash recovery                  │
+│  └── Goal: Online updates without blocking search                          │
 │                                                                              │
-│  Phase 6: Production Hardening                                               │
-│  ├── 6.1 Delete support [FUNC-3]                                           │
-│  ├── 6.2 Concurrent access [CON-3]                                         │
-│  └── 6.3 1B scale validation                                               │
+│  Phase 6: Production Hardening [NOT STARTED]                                 │
+│  ├── 6.1-6.3 Delete support, concurrency, 1B validation                    │
+│  └── Goal: Production-ready at scale                                        │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -578,98 +553,6 @@ complete independence in its column families and operations.
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### VectorStorage Constructor
-
-```rust
-// libs/db/src/vector/mod.rs
-
-/// Vector search storage - shares RocksDB with graph storage
-pub struct VectorStorage {
-    /// Shared TransactionDB (same instance as graph)
-    db: Arc<TransactionDB>,
-
-    /// Per-embedding-namespace state
-    indices: RwLock<HashMap<Embedding, IndexState>>,
-}
-
-struct IndexState {
-    id_allocator: IdAllocator,
-    graph_meta: GraphMeta,
-    rabitq: Option<RaBitQ>,
-}
-
-impl VectorStorage {
-    /// Create VectorStorage from existing graph storage
-    ///
-    /// This shares the same RocksDB instance, adding vector-specific CFs.
-    /// The vector module is completely independent - it only shares the DB.
-    pub fn open(graph: &GraphStorage) -> Result<Self> {
-        // Get the underlying TransactionDB from graph storage
-        let db = graph.transaction_db();
-
-        // Ensure vector CFs exist (idempotent)
-        Self::ensure_column_families(&db)?;
-
-        Ok(Self {
-            db,
-            indices: RwLock::new(HashMap::new()),
-        })
-    }
-
-    /// Create or get an embedding namespace
-    pub fn get_or_create_index(&self, code: &Embedding, config: HnswConfig) -> Result<()> {
-        let mut indices = self.indices.write().unwrap();
-        if !indices.contains_key(code) {
-            let state = IndexState::load_or_create(&self.db, code, config)?;
-            indices.insert(code.clone(), state);
-        }
-        Ok(())
-    }
-
-    fn ensure_column_families(db: &TransactionDB) -> Result<()> {
-        for cf_name in cf::ALL {
-            if db.cf_handle(cf_name).is_none() {
-                db.create_cf(cf_name, &Self::cf_options(cf_name))?;
-            }
-        }
-        Ok(())
-    }
-}
-```
-
-### Why No Graph Module Changes?
-
-| Concern | Resolution |
-|---------|------------|
-| **Edge storage** | Vector uses its own `vector/edges` CF with RoaringBitmaps; graph edges untouched |
-| **Degree queries** | Vector uses `bitmap.len()` on its own edges; no need for graph degree API |
-| **Batch edge fetch** | Vector iterates its own `vector/edges` CF; graph CF not involved |
-| **ID management** | Vector has separate u32 ID space per embedding namespace |
-
-The vector module is **completely self-contained**:
-- Only shares the `TransactionDB` instance for efficiency
-- Returns `Vec<(f32, Id)>` (distance + ULID) - caller handles any filtering
-- No temporal filtering logic - that's the caller's responsibility via `motlie_db::graph`
-
-### Caller-Side Filtering Pattern
-
-If the caller needs temporal or other filtering, they handle it after search:
-
-```rust
-// Application code (not in vector module)
-let results = vector_storage.search(&embedding, &query, k * 3, ef)?;
-
-// Caller applies temporal filter using graph storage
-let visible_results: Vec<_> = results.into_iter()
-    .filter(|(_, ulid)| graph_storage.is_visible(*ulid, as_of))
-    .take(k)
-    .collect();
-```
-
-This keeps the vector module simple and fast.
-
----
 
 ## Phase 0: Foundation
 
@@ -7394,3 +7277,243 @@ cargo run -p motlie_core --example simd_check
 | 2026-01-04 | Replaced Phase 0 and Phase 1 code blocks with source file links (20 blocks total) | Claude Opus 4.5 |
 | 2026-01-06 | **IMPLEMENTED** Phase 2: merge.rs (EdgeOp merge operators), navigation.rs (NavigationLayerInfo, NavigationCache), hnsw.rs (HnswIndex with insert/search) | Claude Opus 4.5 |
 | 2026-01-06 | 80 unit tests passing for vector module (Phases 0-2) | Claude Opus 4.5 |
+| 2026-01-07 | **9399cf9** Core RaBitQ implementation (Tasks 4.1-4.5): rabitq.rs with rotation matrix, binary encoding, Hamming distance | Claude Opus 4.5 |
+| 2026-01-07 | **e5b81b6** Recall tuning (Task 4.6): increased ef_search defaults, documented recall vs latency tradeoffs | Claude Opus 4.5 |
+| 2026-01-07 | **4a4e954** SIMD Hamming + early filtering (Task 4.7): motlie_core::distance::hamming_distance | Claude Opus 4.5 |
+| 2026-01-07 | **bd29801** Hybrid L2+Hamming experiment (Task 4.8): disproven - pure Hamming is faster | Claude Opus 4.5 |
+| 2026-01-08 | **9522658** RaBitQ tuning analysis (Task 4.9): optimal rerank_factor=10 for cosine, documented in benchmark results | Claude Opus 4.5 |
+| 2026-01-08 | **9880a62** In-memory BinaryCodeCache (Task 4.10): navigation.rs BinaryCodeCache for fast Hamming filtering | Claude Opus 4.5 |
+| 2026-01-08 | **ce2a060** API cleanup Phase 1 (Task 4.11): deprecated invalidated functions | Claude Opus 4.5 |
+| 2026-01-08 | **5f2dac0** API cleanup Phases 2-4 (Tasks 4.12-4.14): removed dead code, Embedding-driven SearchConfig, config validation | Claude Opus 4.5 |
+| 2026-01-09 | **0535e6a** HNSW distance metric bug fix (Task 4.16): layer navigation now uses configured distance metric | Claude Opus 4.5 |
+| 2026-01-09 | **d5899f3** batch_distances metric bug fix (Task 4.17): batch operations use correct distance metric | Claude Opus 4.5 |
+| 2026-01-09 | **c90f15c** VectorStorageType (Task 4.18): f16/f32 support for storage flexibility | Claude Opus 4.5 |
+| 2026-01-09 | **27d6b74** Parallel reranking with rayon (Task 4.19): parallel.rs rerank_parallel function | Claude Opus 4.5 |
+| 2026-01-09 | **a146d02** Parallel threshold tuning (Task 4.20): DEFAULT_PARALLEL_RERANK_THRESHOLD=800, rerank_adaptive, documentation | Claude Opus 4.5 |
+| 2026-01-09 | **Phase 4 COMPLETE**: All 20 tasks finished, 433 unit tests passing | Claude Opus 4.5 |
+| 2026-01-09 | Updated ROADMAP: Phase Overview tree view, API Surface Summary, moved VectorStorage to Appendix | Claude Opus 4.5 |
+
+---
+
+## API Surface Summary
+
+This section summarizes the public API for building indexes, configuring search, and parallel reranking.
+Use this for evaluating ergonomics and design consistency.
+
+### Core Types (mod.rs re-exports)
+
+```rust
+// ─────────────────────────────────────────────────────────────────────────────
+// Configuration Types
+// ─────────────────────────────────────────────────────────────────────────────
+pub use config::{ConfigWarning, HnswConfig, RaBitQConfig, VectorConfig};
+pub use distance::Distance;                    // Cosine, L2, DotProduct
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Embedding Types (identity + behavior)
+// ─────────────────────────────────────────────────────────────────────────────
+pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
+pub use registry::{EmbeddingFilter, EmbeddingRegistry};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Index and Quantization
+// ─────────────────────────────────────────────────────────────────────────────
+pub use hnsw::HnswIndex;
+pub use rabitq::RaBitQ;
+pub use navigation::{BinaryCodeCache, NavigationCache, NavigationCacheConfig};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Search Configuration
+// ─────────────────────────────────────────────────────────────────────────────
+pub use search_config::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Schema Types
+// ─────────────────────────────────────────────────────────────────────────────
+pub use schema::{EmbeddingCode, VecId, VectorStorageType, ALL_COLUMN_FAMILIES};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Storage Subsystem
+// ─────────────────────────────────────────────────────────────────────────────
+pub type Storage = crate::rocksdb::Storage<Subsystem>;
+pub type Component = crate::rocksdb::ComponentWrapper<Subsystem>;
+pub fn component() -> Component;
+```
+
+### Building an Embedding Space
+
+```rust
+use motlie_db::vector::{Distance, EmbeddingBuilder, EmbeddingRegistry};
+
+// Create registry (typically from Storage)
+let registry = EmbeddingRegistry::new();
+
+// Register embedding space (idempotent)
+let embedding = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
+    .register(&registry)?;
+
+// Access properties
+assert_eq!(embedding.model(), "gemma");
+assert_eq!(embedding.dim(), 768);
+assert_eq!(embedding.distance(), Distance::Cosine);
+assert_eq!(embedding.code(), /* deterministic u64 hash */);
+```
+
+### Configuring Search
+
+```rust
+use motlie_db::vector::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
+
+// Auto-selects strategy based on distance metric:
+// - Cosine → RaBitQ (Hamming approximation)
+// - L2/DotProduct → Exact
+let config = SearchConfig::new(embedding.clone(), 10);
+
+// Builder pattern for customization
+let config = SearchConfig::new(embedding.clone(), 10)
+    .with_ef(150)                              // Beam width (recall vs speed)
+    .with_rerank_factor(8)                     // Candidates = k * factor
+    .with_parallel_rerank_threshold(1200);     // Tune for your dimension
+
+// Force exact search (bypass RaBitQ)
+let config = SearchConfig::new(embedding.clone(), 10).exact();
+
+// Check strategy
+assert!(config.strategy().is_rabitq());  // or is_exact()
+assert_eq!(config.distance(), Distance::Cosine);
+
+// Compute distances (uses embedding's metric)
+let dist = config.compute_distance(&vec_a, &vec_b);
+```
+
+### Parallel Reranking API
+
+```rust
+use motlie_db::vector::parallel::{rerank_parallel, rerank_sequential, rerank_adaptive, rerank_auto};
+use motlie_db::vector::DEFAULT_PARALLEL_RERANK_THRESHOLD;
+
+// Manual selection
+let results = rerank_parallel(&candidates, |id| Some(distance(id)), k);
+let results = rerank_sequential(&candidates, |id| Some(distance(id)), k);
+
+// Adaptive (threshold-based)
+let results = rerank_adaptive(&candidates, |id| Some(distance(id)), k, 800);
+
+// Auto (uses DEFAULT_PARALLEL_RERANK_THRESHOLD = 800)
+let results = rerank_auto(&candidates, |id| Some(distance(id)), k);
+
+// Via SearchConfig
+if config.should_use_parallel_rerank(candidates.len()) {
+    rerank_parallel(...)
+} else {
+    rerank_sequential(...)
+}
+```
+
+### EmbeddingFilter API
+
+```rust
+use motlie_db::vector::{Distance, EmbeddingFilter, EmbeddingRegistry};
+
+// Find embeddings matching criteria
+let filter = EmbeddingFilter::default()
+    .model("gemma")
+    .dim(768)
+    .distance(Distance::Cosine);
+
+let matches = registry.find(&filter);
+
+// Individual filters
+let all_gemma = registry.find_by_model("gemma");
+let all_768d = registry.find_by_dim(768);
+let all_cosine = registry.find_by_distance(Distance::Cosine);
+```
+
+### Design Evaluation Points
+
+| Aspect | Current Design | Notes |
+|--------|----------------|-------|
+| **Embedding as source of truth** | ✅ SearchConfig takes Embedding | Ensures distance metric consistency |
+| **Strategy auto-selection** | ✅ Based on distance | Cosine→RaBitQ, L2→Exact |
+| **Builder pattern** | ✅ SearchConfig, EmbeddingBuilder | Fluent, chainable |
+| **Threshold configurability** | ✅ with_parallel_rerank_threshold() | Tunable per workload |
+| **Convenience functions** | ✅ rerank_auto(), component() | Sensible defaults |
+| **Type safety** | ✅ EmbeddingCode, VecId, VectorStorageType | Semantic wrapper types |
+| **Validation** | ✅ validate_embedding_code() | Catches mismatches at search time |
+
+---
+
+## Appendix A: Original VectorStorage Design (Outdated)
+
+> **Note:** This section documents the original design spec from Phase 0.
+> The actual implementation evolved to use the `StorageBuilder` and `Component` patterns.
+> Kept for historical reference.
+
+### VectorStorage Constructor (Original Design)
+
+```rust
+// libs/db/src/vector/mod.rs (OUTDATED - see actual implementation)
+
+/// Vector search storage - shares RocksDB with graph storage
+pub struct VectorStorage {
+    /// Shared TransactionDB (same instance as graph)
+    db: Arc<TransactionDB>,
+
+    /// Per-embedding-namespace state
+    indices: RwLock<HashMap<Embedding, IndexState>>,
+}
+
+struct IndexState {
+    id_allocator: IdAllocator,
+    graph_meta: GraphMeta,
+    rabitq: Option<RaBitQ>,
+}
+
+impl VectorStorage {
+    /// Create VectorStorage from existing graph storage
+    pub fn open(graph: &GraphStorage) -> Result<Self> {
+        let db = graph.transaction_db();
+        Self::ensure_column_families(&db)?;
+        Ok(Self {
+            db,
+            indices: RwLock::new(HashMap::new()),
+        })
+    }
+
+    pub fn get_or_create_index(&self, code: &Embedding, config: HnswConfig) -> Result<()> {
+        let mut indices = self.indices.write().unwrap();
+        if !indices.contains_key(code) {
+            let state = IndexState::load_or_create(&self.db, code, config)?;
+            indices.insert(code.clone(), state);
+        }
+        Ok(())
+    }
+}
+```
+
+### Why No Graph Module Changes?
+
+| Concern | Resolution |
+|---------|------------|
+| **Edge storage** | Vector uses its own `vector/edges` CF with RoaringBitmaps |
+| **Degree queries** | Vector uses `bitmap.len()` on its own edges |
+| **Batch edge fetch** | Vector iterates its own `vector/edges` CF |
+| **ID management** | Vector has separate u32 ID space per embedding namespace |
+
+The vector module is **completely self-contained**:
+- Only shares the `TransactionDB` instance for efficiency
+- Returns `Vec<(f32, Id)>` (distance + ULID)
+- No temporal filtering - caller's responsibility
+
+### Caller-Side Filtering Pattern
+
+```rust
+// Application code (not in vector module)
+let results = vector_storage.search(&embedding, &query, k * 3, ef)?;
+
+// Caller applies temporal filter using graph storage
+let visible_results: Vec<_> = results.into_iter()
+    .filter(|(_, ulid)| graph_storage.is_visible(*ulid, as_of))
+    .take(k)
+    .collect();
+```
