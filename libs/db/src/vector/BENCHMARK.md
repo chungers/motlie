@@ -324,11 +324,37 @@ cargo run --release --example laion_benchmark -- --rabitq-benchmark --rerank-siz
 | 3200 | 414.4 | 1,207 | 319.3 | 1,566 | **1.30x** |
 
 **System**: Linux aarch64, NEON SIMD, multi-core
+**Dataset**: LAION-CLIP 512D embeddings (confirmed: `LaionDataset::load()` in rabitq_bench.rs)
 
 **Findings**:
-- Crossover point ~3200 candidates (system-dependent)
+- Crossover point ~3200 candidates (was 800 in original tuning)
 - Sequential faster for typical RaBitQ rerank sizes (k×rerank_factor = 10×4 = 40)
 - Parallel benefits large candidate sets from high ef_search + high rerank_factor
+
+#### Why Crossover Moved from 800 → 3200
+
+Comparing original tuning (ROADMAP Task 4.20) vs current benchmark:
+
+| Candidates | Original Seq | Current Seq | Original Par | Current Par |
+|------------|--------------|-------------|--------------|-------------|
+| 800 | 142.5ms | 106.1ms | 136.7ms | 139.2ms |
+| 3200 | 572.9ms | 414.4ms | 332.9ms | 319.3ms |
+
+**Root cause**: Sequential got **25-30% faster**, but parallel throughput stayed constant.
+
+**Why sequential improved**:
+1. Code optimizations in distance computation since original tuning
+2. Better compiler optimizations (LLVM improvements)
+3. Improved SIMD utilization in scalar path
+
+**Why parallel didn't improve proportionally**:
+1. Rayon overhead is fixed (~50-100µs per call for thread coordination)
+2. Work-stealing overhead doesn't scale with faster per-item work
+3. Memory bandwidth, not CPU, may be the bottleneck for parallel
+
+**Implication**: The `DEFAULT_PARALLEL_RERANK_THRESHOLD` of 800 is now conservative.
+For this system, 3200+ would be more appropriate. The threshold is configurable via
+`SearchConfig::with_parallel_rerank_threshold()`.
 
 #### RaBitQ Configuration
 
