@@ -97,22 +97,26 @@ impl std::fmt::Display for SearchStrategy {
 /// // Search using the config
 /// let results = index.search(&storage, &config, &query)?;
 /// ```
-/// Default threshold for parallel re-ranking (800 candidates).
+/// Default threshold for parallel re-ranking (3200 candidates).
 ///
-/// Benchmark results from `--rabitq-benchmark` on 512D LAION-CLIP vectors:
+/// Benchmark results from `--rabitq-benchmark` on 512D LAION-CLIP vectors
+/// (January 2026, aarch64 NEON):
 ///
 /// | Candidates | Sequential | Parallel | Speedup |
 /// |------------|------------|----------|---------|
-/// | 50         | 9.13ms     | 18.96ms  | 0.48x   |
-/// | 100        | 19.54ms    | 30.27ms  | 0.65x   |
-/// | 400        | 81.42ms    | 86.18ms  | 0.94x   |
-/// | 800        | 142.46ms   | 136.68ms | 1.04x   | ← crossover
-/// | 1600       | 316.40ms   | 224.36ms | 1.41x   |
-/// | 6400       | 1163.48ms  | 497.65ms | 2.34x   |
-/// | 12800      | 2305.55ms  | 733.01ms | 3.15x   |
+/// | 50         | 6.6ms      | 19.0ms   | 0.35x   |
+/// | 100        | 11.4ms     | 30.0ms   | 0.38x   |
+/// | 400        | 45.6ms     | 91.2ms   | 0.50x   |
+/// | 800        | 106.1ms    | 139.2ms  | 0.76x   |
+/// | 1600       | 188.3ms    | 205.8ms  | 0.91x   |
+/// | 3200       | 414.4ms    | 319.3ms  | 1.30x   | ← crossover
 ///
-/// See: `libs/db/src/vector/ROADMAP.md` Task 4.20 for full analysis.
-pub const DEFAULT_PARALLEL_RERANK_THRESHOLD: usize = 800;
+/// Note: Crossover moved from 800 (original tuning) to 3200 because sequential
+/// distance computation got 25-30% faster due to code/compiler optimizations,
+/// while rayon overhead remained constant.
+///
+/// See: `libs/db/src/vector/BENCHMARK.md` for full analysis.
+pub const DEFAULT_PARALLEL_RERANK_THRESHOLD: usize = 3200;
 
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
@@ -129,11 +133,11 @@ pub struct SearchConfig {
     /// Minimum candidate count to use parallel (rayon) re-ranking.
     ///
     /// Below this threshold, sequential re-ranking is faster due to rayon overhead.
-    /// Default: 800 (based on LAION-CLIP 512D benchmarks).
+    /// Default: 3200 (based on LAION-CLIP 512D benchmarks, January 2026).
     ///
     /// Set to 0 to always use parallel, or `usize::MAX` to always use sequential.
     ///
-    /// See: `libs/db/src/vector/ROADMAP.md` Task 4.20 for benchmark methodology.
+    /// See: `libs/db/src/vector/BENCHMARK.md` for benchmark methodology.
     parallel_rerank_threshold: usize,
 }
 
@@ -253,7 +257,7 @@ impl SearchConfig {
     /// - `candidates >= threshold` → parallel (rayon)
     /// - `candidates < threshold` → sequential
     ///
-    /// Default: 800 (based on LAION-CLIP 512D benchmarks).
+    /// Default: 3200 (based on LAION-CLIP 512D benchmarks, January 2026).
     ///
     /// # Tuning Guidance
     ///
@@ -262,13 +266,12 @@ impl SearchConfig {
     /// - CPU core count (more cores → better parallel scaling)
     /// - Distance metric complexity
     ///
-    /// Benchmark results (512D, NEON SIMD):
-    /// - 400 candidates: parallel is 0.94x (slight overhead)
-    /// - 800 candidates: parallel is 1.04x (crossover)
-    /// - 1600 candidates: parallel is 1.41x
-    /// - 6400 candidates: parallel is 2.34x
+    /// Benchmark results (512D, NEON SIMD, January 2026):
+    /// - 800 candidates: parallel is 0.76x (overhead)
+    /// - 1600 candidates: parallel is 0.91x (near equal)
+    /// - 3200 candidates: parallel is 1.30x (crossover)
     ///
-    /// See: `libs/db/src/vector/ROADMAP.md` Task 4.20
+    /// See: `libs/db/src/vector/BENCHMARK.md` for full analysis.
     pub fn with_parallel_rerank_threshold(mut self, threshold: usize) -> Self {
         self.parallel_rerank_threshold = threshold;
         self

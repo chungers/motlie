@@ -44,7 +44,7 @@ and `search/config.rs` for implementation details.
 |-----------|---------|-----------------|-------------|
 | `ef_search` | 100 | 10-160 | Search beam width |
 | `k` | 10 | 1-20 | Number of results |
-| `parallel_rerank_threshold` | 800 | 800 | Candidates before parallel reranking |
+| `parallel_rerank_threshold` | 3200 | 3200 | Candidates before parallel reranking |
 
 **Search strategies**:
 - `SearchStrategy::Standard` - Full-precision distance during traversal
@@ -55,9 +55,9 @@ and `search/config.rs` for implementation details.
 
 | Threshold | Value | Rationale |
 |-----------|-------|-----------|
-| Default | 800 | Crossover point where rayon overhead is amortized |
-| Sequential | <400 candidates | Faster due to no thread coordination |
-| Parallel | >800 candidates | Faster with multi-core utilization |
+| Default | 3200 | Crossover point where rayon overhead is amortized |
+| Sequential | <1600 candidates | Faster due to no thread coordination |
+| Parallel | >3200 candidates | Faster with multi-core utilization |
 
 **Rayon configuration**: Uses system default thread pool. Override with `RAYON_NUM_THREADS` env var.
 
@@ -288,7 +288,7 @@ For RaBitQ search with `rerank_factor=4` and `ef_search=200`:
 - Candidates to rerank: `k * rerank_factor` = e.g., `10 * 4 = 40` (below threshold)
 - With higher ef or rerank_factor: `200 * 4 = 800` (at threshold)
 
-The threshold of 800 is the crossover point where rayon parallelism overhead
+The threshold of 3200 is the crossover point where rayon parallelism overhead
 is amortized by multi-core speedup.
 
 #### API Usage
@@ -301,7 +301,7 @@ let results = rerank_adaptive(
     &candidates,
     |id| Some(distance.compute(query, &vectors[id])),
     k,
-    DEFAULT_PARALLEL_RERANK_THRESHOLD,  // 800
+    DEFAULT_PARALLEL_RERANK_THRESHOLD,  // 3200
 );
 ```
 
@@ -352,9 +352,9 @@ Comparing original tuning (ROADMAP Task 4.20) vs current benchmark:
 2. Work-stealing overhead doesn't scale with faster per-item work
 3. Memory bandwidth, not CPU, may be the bottleneck for parallel
 
-**Implication**: The `DEFAULT_PARALLEL_RERANK_THRESHOLD` of 800 is now conservative.
-For this system, 3200+ would be more appropriate. The threshold is configurable via
-`SearchConfig::with_parallel_rerank_threshold()`.
+**Implication**: The `DEFAULT_PARALLEL_RERANK_THRESHOLD` has been updated from 800 to 3200
+based on these benchmarks. The threshold remains configurable via
+`SearchConfig::with_parallel_rerank_threshold()` for system-specific tuning.
 
 #### RaBitQ Configuration
 
