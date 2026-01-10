@@ -1,9 +1,11 @@
 # Vector Search Implementation Roadmap
 
 **Author:** David Chung + Claude
-**Date:** January 2, 2026 (Updated: January 9, 2026)
+**Date:** January 2, 2026 (Updated: January 10, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
 **Status:** Phase 4 Complete, Phase 5-6 Remaining
+
+**Benchmark Documentation:** See [`BENCHMARK.md`](./BENCHMARK.md) for detailed performance results and configuration reference.
 
 ---
 
@@ -15,15 +17,17 @@ while prioritizing simplicity, correctness, and RocksDB integration over raw thr
 
 ### Achieved Metrics (Phase 4 Complete)
 
-Benchmarks on LAION-CLIP 512D embeddings (50K vectors, aarch64 NEON):
+Benchmarks on LAION-CLIP 512D embeddings (aarch64 NEON). See [`BENCHMARK.md`](./BENCHMARK.md) for details.
 
 | Metric | Achieved | Notes |
 |--------|----------|-------|
-| Search QPS | 250-500 | Depends on ef, rerank_factor |
-| Recall@10 | 88-95% | Higher with ef=150, rerank=10 |
-| Insert throughput | ~9K vec/s | RaBitQ encoding |
-| Memory/vector | 528 bytes | 512B vector + 16B binary code |
-| Parallel speedup | 3.15x | At 12K+ candidates (rayon) |
+| Search QPS (50K) | 284 | Standard HNSW, ef=80 |
+| Search QPS (100K) | 254 | Standard HNSW, ef=80 |
+| Recall@10 (50K) | 89.2% | LAION-CLIP, January 2026 |
+| Recall@10 (100K) | 87.1% | LAION-CLIP, January 2026 |
+| Insert throughput | 97-109 vec/s | With HNSW graph construction |
+| Memory/vector | 528 bytes | 512B vector + 16B binary code (F16) |
+| Parallel speedup | 1.3x | At 3200+ candidates (rayon) |
 
 ### Context: RocksDB vs Purpose-Built Engines
 
@@ -47,7 +51,7 @@ dedicated vector databases or custom storage engines.
 1. **RaBitQ over PQ**: Training-free binary quantization (DATA-1 compliant)
 2. **RoaringBitmap edges**: O(1) degree queries, efficient serialization
 3. **Embedding as source of truth**: Distance metric encoded in type, not config
-4. **Adaptive parallelism**: Sequential below 800 candidates, rayon above
+4. **Adaptive parallelism**: Sequential below 3200 candidates, rayon above (tuned January 2026)
 
 ---
 
@@ -84,7 +88,8 @@ dedicated vector databases or custom storage engines.
 | [Task 4.17](#task-417-batch_distances-metric-bug-fix) | batch_distances Metric Bug Fix | ✅ Complete | `d5899f3` |
 | [Task 4.18](#task-418-vectorstoragetype-multi-float-support) | VectorStorageType (f16/f32) | ✅ Complete | `c90f15c` |
 | [Task 4.19](#task-419-parallel-reranking-with-rayon) | Parallel Reranking (rayon) | ✅ Complete | `27d6b74` |
-| [Task 4.20](#task-420-parallel-re-ranking-threshold-tuning) | Parallel Threshold Tuning | ✅ Complete | - |
+| [Task 4.20](#task-420-parallel-re-ranking-threshold-tuning) | Parallel Threshold Tuning | ✅ Complete | `a146d02` |
+| [Task 4.21](#task-421-benchmark-infrastructure--threshold-update) | Benchmark Infrastructure + Threshold Update | ✅ Complete | `2358ba8` |
 
 ### Other Sections
 
@@ -5169,8 +5174,11 @@ The parallel reranking infrastructure is now in place:
 
 #### Task 4.20: Parallel Re-ranking Threshold Tuning
 
-**Status:** ✅ Complete
+**Status:** ✅ Complete (Updated in Task 4.21)
 **Goal:** Determine optimal threshold for parallel vs sequential re-ranking
+
+> **Note (January 2026):** The threshold was updated from 800 to 3200 in Task 4.21 based on
+> re-benchmarking. See [`BENCHMARK.md`](./BENCHMARK.md) for current results and analysis.
 
 **Motivation:**
 
@@ -5260,6 +5268,81 @@ parallel::rerank_adaptive(candidates, distance_fn, k, config.parallel_rerank_thr
 - [x] Add `rerank_auto()` convenience function
 - [x] Unit tests for new functions (7 tests)
 - [x] Document threshold tuning guidance
+
+---
+
+#### Task 4.21: Benchmark Infrastructure + Threshold Update
+
+**Status:** ✅ Complete (Commits: `a4896e8`, `2358ba8`)
+**Goal:** Consolidate benchmark infrastructure, update parallel threshold based on new measurements
+
+**Summary:**
+
+This task consolidated benchmark infrastructure into `libs/db/src/vector/benchmark/` and
+re-ran parallel reranking benchmarks, discovering the crossover point had shifted from
+800 to 3200 candidates due to sequential code optimizations.
+
+**Changes:**
+
+1. **Module Refactor** - Split flat files into nested subdirectories:
+   - `hnsw/{mod,graph,insert,search}.rs`
+   - `cache/{mod,navigation,binary_codes}.rs`
+   - `quantization/{mod,rabitq}.rs`
+   - `search/{mod,parallel,config}.rs`
+   - `benchmark/{mod,dataset,metrics,runner}.rs`
+
+2. **Benchmark Infrastructure** - New `vector::benchmark` module:
+   - `LaionDataset`: LAION-400M CLIP loader with NPY parsing
+   - `LaionSubset`: Subset extraction with ground truth
+   - `RecallMetrics`, `LatencyStats`: Standardized metrics
+   - `ExperimentConfig`, `ExperimentResult`: Configurable benchmark runner
+
+3. **Threshold Update** - `DEFAULT_PARALLEL_RERANK_THRESHOLD`: 800 → 3200
+
+**Benchmark Results (January 2026):**
+
+Re-ran parallel reranking benchmark on LAION-CLIP 512D (50K vectors, aarch64 NEON):
+
+| Candidates | Original Seq | Current Seq | Original Par | Current Par | New Speedup |
+|------------|--------------|-------------|--------------|-------------|-------------|
+| 800 | 142.5ms | 106.1ms | 136.7ms | 139.2ms | 0.76x |
+| 1600 | 316.4ms | 188.3ms | 224.4ms | 205.8ms | 0.91x |
+| 3200 | 572.9ms | 414.4ms | 332.9ms | 319.3ms | **1.30x** |
+
+**Root Cause Analysis:**
+
+Sequential distance computation got **25-30% faster** due to:
+1. Code optimizations in distance functions
+2. Better compiler optimizations (LLVM improvements)
+3. Improved SIMD utilization
+
+Parallel throughput remained constant because:
+1. Rayon overhead is fixed (~50-100µs per call)
+2. Work-stealing overhead doesn't scale with faster per-item work
+3. Memory bandwidth may be bottleneck, not CPU
+
+**Documentation:**
+
+Created [`BENCHMARK.md`](./BENCHMARK.md) with:
+- Configuration reference for all parameters
+- LAION-CLIP benchmark results (50K, 100K scale)
+- Side-by-side comparison: Standard HNSW vs RaBitQ vs Faiss
+- Parallel reranking threshold analysis
+- When to use each search strategy
+
+**Acceptance Criteria:**
+- [x] Module hierarchy refactored
+- [x] Benchmark infrastructure in `vector::benchmark`
+- [x] Re-ran LAION benchmarks (no regression: Recall@10 89.2% at 50K)
+- [x] Updated `DEFAULT_PARALLEL_RERANK_THRESHOLD` to 3200
+- [x] Created comprehensive `BENCHMARK.md`
+- [x] All tests passing
+
+**Files Changed:**
+- `libs/db/src/vector/mod.rs` - Updated module structure
+- `libs/db/src/vector/search/config.rs` - Threshold 800→3200
+- `libs/db/src/vector/search/parallel.rs` - Updated docs and tests
+- `libs/db/src/vector/BENCHMARK.md` - New comprehensive documentation
 
 ---
 
