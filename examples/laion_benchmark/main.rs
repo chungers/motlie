@@ -17,10 +17,14 @@
 //!
 //!   # Generate charts from existing CSV data
 //!   cargo run --release --example laion_benchmark -- --charts-only
+//!
+//!   # Run RaBitQ parallel re-ranking benchmark
+//!   cargo run --release --example laion_benchmark -- --rabitq-benchmark
 
 mod loader;
 mod experiments;
 mod charts;
+mod rabitq_bench;
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -45,6 +49,14 @@ struct Args {
     /// Only generate charts from existing CSV data
     #[arg(long)]
     charts_only: bool,
+
+    /// Run RaBitQ parallel re-ranking benchmark (sequential vs rayon)
+    #[arg(long)]
+    rabitq_benchmark: bool,
+
+    /// Re-rank candidate sizes for RaBitQ benchmark (comma-separated)
+    #[arg(long, default_value = "50,100,200,400,800,1600")]
+    rerank_sizes: String,
 
     /// Data directory (default: examples/laion_benchmark/data)
     #[arg(long, default_value = "examples/laion_benchmark/data")]
@@ -83,6 +95,21 @@ fn main() -> anyhow::Result<()> {
         println!("Generating charts from existing CSV data...");
         charts::generate_all_charts(&args.results_dir)?;
         println!("Charts generated!\n");
+        return Ok(());
+    }
+
+    if args.rabitq_benchmark {
+        let rerank_sizes: Vec<usize> = args
+            .rerank_sizes
+            .split(',')
+            .map(|s| s.trim().parse().unwrap())
+            .collect();
+
+        rabitq_bench::run_rabitq_benchmark(
+            &args.data_dir,
+            args.num_queries,
+            &rerank_sizes,
+        )?;
         return Ok(());
     }
 
