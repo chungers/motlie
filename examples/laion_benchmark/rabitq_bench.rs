@@ -3,9 +3,10 @@
 //! Compares sequential vs parallel (rayon) re-ranking performance using
 //! real LAION-CLIP embeddings.
 
-use crate::loader::{LaionDataset, EMBEDDING_DIM};
 use anyhow::Result;
-use motlie_db::vector::{parallel, rabitq::RaBitQ, VecId};
+use motlie_db::vector::benchmark::{LaionDataset, LAION_EMBEDDING_DIM};
+use motlie_db::vector::search::rerank_parallel;
+use motlie_db::vector::{Distance, RaBitQ, VecId};
 use std::path::Path;
 use std::time::Instant;
 
@@ -29,11 +30,16 @@ pub fn run_rabitq_benchmark(
         .take(num_queries)
         .collect();
 
-    println!("  Loaded {} vectors, {} queries ({}D)\n", vectors.len(), queries.len(), EMBEDDING_DIM);
+    println!(
+        "  Loaded {} vectors, {} queries ({}D)\n",
+        vectors.len(),
+        queries.len(),
+        LAION_EMBEDDING_DIM
+    );
 
     // Create RaBitQ encoder
-    println!("Creating RaBitQ encoder ({}D, 1 bit)...", EMBEDDING_DIM);
-    let encoder = RaBitQ::new(EMBEDDING_DIM, 1, 42);
+    println!("Creating RaBitQ encoder ({}D, 1 bit)...", LAION_EMBEDDING_DIM);
+    let encoder = RaBitQ::new(LAION_EMBEDDING_DIM, 1, 42);
     println!("  Code size: {} bytes", encoder.code_size());
 
     // Encode all vectors
@@ -116,7 +122,7 @@ fn benchmark_reranking(
     for _ in 0..5 {
         for (qi, candidates) in candidates_per_query.iter().enumerate() {
             let _ = rerank_sequential(&queries[qi], vectors, candidates, k);
-            let _ = rerank_parallel(&queries[qi], vectors, candidates, k);
+            let _ = rerank_parallel_wrapper(&queries[qi], vectors, candidates, k);
         }
     }
 
@@ -130,7 +136,7 @@ fn benchmark_reranking(
     // Benchmark parallel
     let start = Instant::now();
     for (qi, candidates) in candidates_per_query.iter().enumerate() {
-        let _ = rerank_parallel(&queries[qi], vectors, candidates, k);
+        let _ = rerank_parallel_wrapper(&queries[qi], vectors, candidates, k);
     }
     let par_time = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -160,7 +166,7 @@ fn rerank_sequential(
     let mut results: Vec<(f32, VecId)> = candidates
         .iter()
         .map(|&id| {
-            let dist = l2_distance(query, &vectors[id as usize]);
+            let dist = Distance::L2.compute(query, &vectors[id as usize]);
             (dist, id)
         })
         .collect();
@@ -170,28 +176,16 @@ fn rerank_sequential(
     results
 }
 
-/// Parallel re-ranking using rayon.
-fn rerank_parallel(
+/// Parallel re-ranking using rayon (wrapper around vector::search::rerank_parallel).
+fn rerank_parallel_wrapper(
     query: &[f32],
     vectors: &[Vec<f32>],
     candidates: &[VecId],
     k: usize,
 ) -> Vec<(f32, VecId)> {
-    parallel::rerank_parallel(
+    rerank_parallel(
         candidates,
-        |id| Some(l2_distance(query, &vectors[id as usize])),
+        |id| Some(Distance::L2.compute(query, &vectors[id as usize])),
         k,
     )
-}
-
-/// L2 (Euclidean) distance squared.
-#[inline]
-fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| {
-            let d = x - y;
-            d * d
-        })
-        .sum()
 }

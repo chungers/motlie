@@ -8,40 +8,87 @@
 //!
 //! ## Module Structure
 //!
-//! - `mod.rs` - Module exports and VectorStorage
+//! ### Core Types (flat)
 //! - `config.rs` - Configuration types (HnswConfig, RaBitQConfig, VectorConfig)
 //! - `distance.rs` - Distance metrics (Cosine, L2, DotProduct)
 //! - `embedding.rs` - Embedding type and Embedder trait
 //! - `registry.rs` - EmbeddingRegistry for managing embedding spaces
 //! - `schema.rs` - RocksDB column family definitions
 //! - `error.rs` - Error handling utilities
+//! - `id.rs` - ID allocation
+//! - `merge.rs` - RocksDB merge operators
+//! - `subsystem.rs` - Storage subsystem configuration
+//!
+//! ### IO Operations (flat)
+//! - `api.rs` - High-level API
+//! - `mutation.rs` - Write operations
+//! - `query.rs` - Read operations
+//! - `reader.rs` - Reader implementation
+//! - `writer.rs` - Writer implementation
+//! - `processor.rs` - Query processor
+//!
+//! ### Nested Modules
+//! - `hnsw/` - HNSW index implementation
+//! - `cache/` - Caching infrastructure (NavigationCache, BinaryCodeCache)
+//! - `quantization/` - Vector quantization (RaBitQ)
+//! - `search/` - Search configuration and parallel utilities
+//! - `benchmark/` - Benchmark infrastructure (LAION dataset, metrics)
 //!
 //! ## Design Documents
 //!
+//! - `BENCHMARK.md` - Performance benchmarks and comparison with Faiss
 //! - `ROADMAP.md` - Implementation roadmap and phase details
 //! - `REQUIREMENTS.md` - Functional and architectural requirements
 
-// Submodules
+// Flat modules - Core types
 pub mod api;
 pub mod config;
 pub mod distance;
 pub mod embedding;
 mod error;
-pub mod hnsw;
 pub mod id;
 pub mod merge;
 pub mod mutation;
-pub mod navigation;
-pub mod parallel;
 pub mod processor;
 pub mod query;
-pub mod rabitq;
 pub mod reader;
 pub mod registry;
 pub mod schema;
-pub mod search_config;
 pub mod subsystem;
 pub mod writer;
+
+// Nested modules
+pub mod benchmark;
+pub mod cache;
+pub mod hnsw;
+pub mod quantization;
+pub mod search;
+
+// Legacy module aliases for backwards compatibility during transition
+// TODO: Remove these after updating all imports
+pub mod navigation {
+    //! Re-export from cache module for backwards compatibility.
+    pub use crate::vector::cache::{
+        BinaryCodeCache, NavigationCache, NavigationCacheConfig, NavigationLayerInfo,
+    };
+}
+pub mod rabitq {
+    //! Re-export from quantization module for backwards compatibility.
+    pub use crate::vector::quantization::RaBitQ;
+}
+pub mod parallel {
+    //! Re-export from search module for backwards compatibility.
+    pub use crate::vector::search::{
+        batch_distances_parallel, distances_from_vectors_parallel, rerank_adaptive, rerank_auto,
+        rerank_parallel, rerank_sequential,
+    };
+}
+pub mod search_config {
+    //! Re-export from search module for backwards compatibility.
+    pub use crate::vector::search::{
+        SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD,
+    };
+}
 
 // Re-exports for public API
 pub use config::{ConfigWarning, HnswConfig, RaBitQConfig, VectorConfig};
@@ -49,15 +96,15 @@ pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
 pub use hnsw::HnswIndex;
 pub use id::IdAllocator;
-pub use navigation::{BinaryCodeCache, NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
+pub use cache::{BinaryCodeCache, NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
 pub use processor::Processor;
-pub use rabitq::RaBitQ;
+pub use quantization::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
     ALL_COLUMN_FAMILIES, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode,
     EmbeddingSpec, VecId, VectorCfKey, VectorCfValue, VectorStorageType, Vectors,
 };
-pub use search_config::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
+pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{EmbeddingRegistryConfig, Subsystem, VectorBlockCacheConfig};
@@ -75,9 +122,6 @@ pub type Component = crate::rocksdb::ComponentWrapper<Subsystem>;
 pub fn component() -> Component {
     Component::new()
 }
-
-// Internal re-exports
-pub(crate) use error::Result;
 
 // ============================================================================
 // SystemInfo - Telemetry

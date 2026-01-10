@@ -22,8 +22,8 @@
 //! let config = SearchConfig::new(cosine_embedding.clone(), 10).exact();
 //! ```
 
-use super::distance::Distance;
-use super::embedding::Embedding;
+use crate::vector::distance::Distance;
+use crate::vector::embedding::Embedding;
 
 // ============================================================================
 // SearchStrategy
