@@ -29,11 +29,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use motlie_db::vector::parallel;
-//! use motlie_db::vector::search_config::DEFAULT_PARALLEL_RERANK_THRESHOLD;
+//! use motlie_db::vector::search::rerank_adaptive;
+//! use motlie_db::vector::search::DEFAULT_PARALLEL_RERANK_THRESHOLD;
 //!
 //! // Smart reranking - auto-selects sequential vs parallel
-//! let results = parallel::rerank_adaptive(
+//! let results = rerank_adaptive(
 //!     &candidates,
 //!     |vec_id| index.distance(&storage, query, vec_id).ok(),
 //!     k,
@@ -43,8 +43,8 @@
 
 use rayon::prelude::*;
 
-use super::schema::VecId;
-use super::search_config::DEFAULT_PARALLEL_RERANK_THRESHOLD;
+use crate::vector::schema::VecId;
+use super::config::DEFAULT_PARALLEL_RERANK_THRESHOLD;
 
 /// Parallel reranking - compute exact distances for candidates.
 ///
@@ -140,8 +140,8 @@ where
 /// # Example
 ///
 /// ```ignore
-/// use motlie_db::vector::parallel::rerank_adaptive;
-/// use motlie_db::vector::search_config::DEFAULT_PARALLEL_RERANK_THRESHOLD;
+/// use motlie_db::vector::search::rerank_adaptive;
+/// use motlie_db::vector::search::DEFAULT_PARALLEL_RERANK_THRESHOLD;
 ///
 /// // Auto-select based on candidate count
 /// let results = rerank_adaptive(

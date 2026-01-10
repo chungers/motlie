@@ -36,11 +36,14 @@ rand = "0.8"
 rand_chacha = "0.3"
 # Half-precision float support for VectorStorageType::F16
 half = "2.4"
+# Byte order reading for NPY format in benchmark module
+byteorder = "1.5"
 # Parallel reranking for search (Task 4.19)
 rayon = "1.10"
+# Temp directories for benchmark runner
+tempfile = "3.14"
 
 [dev-dependencies]
-tempfile = "3.14"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 # Re-export for benchmarks (already in main deps but needed for extern crate)
 lz4 = "1.28"

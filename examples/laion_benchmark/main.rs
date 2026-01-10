@@ -21,12 +21,11 @@
 //!   # Run RaBitQ parallel re-ranking benchmark
 //!   cargo run --release --example laion_benchmark -- --rabitq-benchmark
 
-mod loader;
-mod experiments;
 mod charts;
 mod rabitq_bench;
 
 use clap::Parser;
+use motlie_db::vector::benchmark::{ExperimentConfig, LaionDataset};
 use std::path::PathBuf;
 
 /// LAION-CLIP Benchmark: HNSW at Scale Experiments
@@ -87,7 +86,7 @@ fn main() -> anyhow::Result<()> {
 
     if args.download {
         println!("Downloading LAION-400M embeddings...");
-        loader::download_laion_embeddings(&args.data_dir)?;
+        LaionDataset::download(&args.data_dir)?;
         println!("Download complete!\n");
     }
 
@@ -105,11 +104,7 @@ fn main() -> anyhow::Result<()> {
             .map(|s| s.trim().parse().unwrap())
             .collect();
 
-        rabitq_bench::run_rabitq_benchmark(
-            &args.data_dir,
-            args.num_queries,
-            &rerank_sizes,
-        )?;
+        rabitq_bench::run_rabitq_benchmark(&args.data_dir, args.num_queries, &rerank_sizes)?;
         return Ok(());
     }
 
@@ -117,44 +112,45 @@ fn main() -> anyhow::Result<()> {
         println!("Running experiments at all scales: 50K, 100K, 150K, 200K\n");
 
         // Article parameters
-        let config = experiments::ExperimentConfig {
-            scales: vec![50_000, 100_000, 150_000, 200_000],
-            ef_search_values: vec![10, 20, 40, 80, 160],
-            k_values: vec![1, 5, 10, 15, 20],
-            num_queries: args.num_queries,
-            m: 16,                    // Match article
-            ef_construction: 100,     // Match article
-            data_dir: args.data_dir.clone(),
-            results_dir: args.results_dir.clone(),
-            verbose: args.verbose,
-        };
+        let config = ExperimentConfig::default()
+            .with_scales(vec![50_000, 100_000, 150_000, 200_000])
+            .with_ef_search(vec![10, 20, 40, 80, 160])
+            .with_k_values(vec![1, 5, 10, 15, 20])
+            .with_num_queries(args.num_queries)
+            .with_m(16)
+            .with_ef_construction(100)
+            .with_data_dir(args.data_dir.clone())
+            .with_results_dir(args.results_dir.clone())
+            .with_verbose(args.verbose);
 
-        experiments::run_all_experiments(&config)?;
+        motlie_db::vector::benchmark::run_all_experiments(&config)?;
 
         println!("\nGenerating charts...");
         charts::generate_all_charts(&args.results_dir)?;
-
     } else if let Some(scale) = args.scale {
         println!("Running experiment at scale: {}K\n", scale / 1000);
 
-        let config = experiments::ExperimentConfig {
-            scales: vec![scale],
-            ef_search_values: vec![10, 20, 40, 80, 160],
-            k_values: vec![1, 5, 10, 15, 20],
-            num_queries: args.num_queries,
-            m: 16,
-            ef_construction: 100,
-            data_dir: args.data_dir.clone(),
-            results_dir: args.results_dir.clone(),
-            verbose: args.verbose,
-        };
+        let config = ExperimentConfig::default()
+            .with_scales(vec![scale])
+            .with_ef_search(vec![10, 20, 40, 80, 160])
+            .with_k_values(vec![1, 5, 10, 15, 20])
+            .with_num_queries(args.num_queries)
+            .with_m(16)
+            .with_ef_construction(100)
+            .with_data_dir(args.data_dir.clone())
+            .with_results_dir(args.results_dir.clone())
+            .with_verbose(args.verbose);
 
-        experiments::run_all_experiments(&config)?;
+        motlie_db::vector::benchmark::run_all_experiments(&config)?;
     } else {
         println!("No action specified. Use --help for options.");
         println!("\nQuick start:");
-        println!("  1. Download data:  cargo run --release --example laion_benchmark -- --download");
-        println!("  2. Run experiments: cargo run --release --example laion_benchmark -- --run-all");
+        println!(
+            "  1. Download data:  cargo run --release --example laion_benchmark -- --download"
+        );
+        println!(
+            "  2. Run experiments: cargo run --release --example laion_benchmark -- --run-all"
+        );
     }
 
     println!("\n=== Benchmark Complete ===");
