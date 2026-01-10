@@ -245,7 +245,53 @@ the article's Faiss benchmarks by 10-15 percentage points.
 ### 5. Adaptive Parallel Reranking
 
 The `vector::search` module provides adaptive parallel reranking for the
-re-ranking phase in two-stage search (RaBitQ + exact distance):
+re-ranking phase in two-stage search (RaBitQ + exact distance).
+
+#### Why It Wasn't Used in LAION Benchmarks
+
+The LAION benchmarks use **Standard HNSW search**, not RaBitQ two-phase search.
+These are architecturally different:
+
+**Standard HNSW Search** (used in benchmarks):
+```
+search() → beam_search_layer0()
+              ↓
+         For each neighbor:
+           1. Compute exact distance immediately
+           2. Add to candidates/results heaps
+           3. Continue traversal
+
+         → No batching, no separate reranking phase
+```
+
+Distances are computed **incrementally during graph traversal**. There's never
+a batch of candidates that could benefit from parallel reranking.
+
+**RaBitQ Two-Phase Search** (where parallel reranking applies):
+```
+search_with_rabitq_cached()
+  ↓
+  Phase 1: Greedy descent through upper layers (exact distance)
+  Phase 2: Beam search at layer 0 using Hamming distance (fast, approximate)
+  Phase 3: Collect top N candidates → rerank_parallel() ← threshold applies here
+                                            ↓
+                                      Batch exact distance computation
+                                      (parallelized with rayon)
+```
+
+The `rerank_parallel()` call is at `hnsw/search.rs:276`, inside
+`search_with_rabitq_cached()`. It's only invoked when using `SearchStrategy::RaBitQCached`.
+
+#### When Parallel Reranking Triggers
+
+For RaBitQ search with `rerank_factor=4` and `ef_search=200`:
+- Candidates to rerank: `k * rerank_factor` = e.g., `10 * 4 = 40` (below threshold)
+- With higher ef or rerank_factor: `200 * 4 = 800` (at threshold)
+
+The threshold of 800 is the crossover point where rayon parallelism overhead
+is amortized by multi-core speedup.
+
+#### API Usage
 
 ```rust
 use motlie_db::vector::search::{rerank_adaptive, DEFAULT_PARALLEL_RERANK_THRESHOLD};
@@ -259,7 +305,7 @@ let results = rerank_adaptive(
 );
 ```
 
-**Threshold tuning** (based on 512D LAION-CLIP, NEON SIMD):
+#### Threshold Tuning (512D LAION-CLIP, NEON SIMD)
 
 | Candidates | Sequential | Parallel | Recommendation |
 |------------|------------|----------|----------------|
@@ -267,12 +313,15 @@ let results = rerank_adaptive(
 | 400-800 | ~Equal | ~Equal | Either |
 | > 800 | Slower | Faster | Parallel |
 
-The default threshold of 800 is tuned for the crossover point where rayon
-parallelism overhead is amortized.
+#### To Benchmark with Parallel Reranking
 
-**Note**: The LAION benchmarks above use standard HNSW search (which computes
-distances during graph traversal). Adaptive parallel reranking benefits
-RaBitQ two-phase search where many candidates need exact distance re-ranking.
+Run the RaBitQ benchmark which uses `search_with_rabitq_cached()`:
+
+```bash
+cargo run --release --example laion_benchmark -- --rabitq-benchmark
+```
+
+This exercises the parallel reranking code path with configurable candidate sizes.
 
 ## Running Benchmarks
 
