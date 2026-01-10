@@ -1,39 +1,53 @@
 # Vector Search Implementation Roadmap
 
 **Author:** David Chung + Claude
-**Date:** January 2, 2026
+**Date:** January 2, 2026 (Updated: January 9, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Implementation Planning
+**Status:** Phase 4 Complete, Phase 5-6 Remaining
 
 ---
 
 ## Executive Summary
 
-This document outlines the implementation roadmap for production-grade vector search in motlie_db.
-The plan builds on completed POC work and core database optimizations to deliver 125x insert
-throughput improvement and 10x search QPS improvement.
+This document tracks the implementation of HNSW-based vector search in motlie_db, built on RocksDB.
+Phases 0-4 are complete. The system provides competitive performance for an embedded database
+while prioritizing simplicity, correctness, and RocksDB integration over raw throughput.
 
-### Current State
+### Achieved Metrics (Phase 4 Complete)
 
-| Component | Status | Reference |
-|-----------|--------|-----------|
-| Core DB: Name Interning | ✅ Complete | `libs/db/2025-12-FOLLOW-UP-ROADMAP.md` Phase 1 |
-| Core DB: Blob Separation | ✅ Complete | `libs/db/2025-12-FOLLOW-UP-ROADMAP.md` Phase 2 |
-| Core DB: rkyv Zero-Copy | ✅ Complete | `libs/db/2025-12-FOLLOW-UP-ROADMAP.md` Phase 3 |
-| Vector POC: HNSW/Vamana | ✅ Complete | `examples/vector/POC.md` |
-| Vector POC: SIMD Distance | ✅ Complete | `motlie_core::distance` (AVX-512/AVX2/NEON) |
-| Vector: HNSW2 Optimization | 📋 Designed | `examples/vector/HNSW2.md` |
-| Vector: RaBitQ Compression | 📋 Designed | `examples/vector/HNSW2.md` |
-| Vector: HYBRID Architecture | 📋 Designed | `examples/vector/HYBRID.md` |
+Benchmarks on LAION-CLIP 512D embeddings (50K vectors, aarch64 NEON):
 
-### Target Metrics
+| Metric | Achieved | Notes |
+|--------|----------|-------|
+| Search QPS | 250-500 | Depends on ef, rerank_factor |
+| Recall@10 | 88-95% | Higher with ef=150, rerank=10 |
+| Insert throughput | ~9K vec/s | RaBitQ encoding |
+| Memory/vector | 528 bytes | 512B vector + 16B binary code |
+| Parallel speedup | 3.15x | At 12K+ candidates (rayon) |
 
-| Metric | Current | Target | Improvement |
-|--------|---------|--------|-------------|
-| Insert throughput | 40/s | 5,000/s | **125x** |
-| Search QPS at 1M | 47 | 500+ | **10x** |
-| Recall@10 at 1M | 95.3% | > 95% | ✅ Achieved |
-| Memory at 1B | N/A | < 64 GB | Projected |
+### Context: RocksDB vs Purpose-Built Engines
+
+Commercial vector databases (Pinecone, Weaviate, Milvus, Qdrant) use purpose-built storage
+engines optimized for vector workloads. motlie_db uses RocksDB, which provides:
+
+| Trade-off | RocksDB Approach | Purpose-Built |
+|-----------|------------------|---------------|
+| **Search QPS** | 250-500 (good) | 1K-10K (optimized) |
+| **Insert** | Transactional, ACID | Often eventual consistency |
+| **Integration** | Shared DB with graph | Separate system |
+| **Complexity** | Lower (reuse RocksDB) | Higher (custom engine) |
+| **Flexibility** | General-purpose | Vector-specialized |
+
+**Design Choice**: motlie_db prioritizes integration with the graph database over
+maximum vector throughput. For workloads requiring >1K QPS at 1M+ scale, consider
+dedicated vector databases or custom storage engines.
+
+### Key Technical Decisions
+
+1. **RaBitQ over PQ**: Training-free binary quantization (DATA-1 compliant)
+2. **RoaringBitmap edges**: O(1) degree queries, efficient serialization
+3. **Embedding as source of truth**: Distance metric encoded in type, not config
+4. **Adaptive parallelism**: Sequential below 800 candidates, rayon above
 
 ---
 
