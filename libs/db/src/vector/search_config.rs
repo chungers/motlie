@@ -97,6 +97,23 @@ impl std::fmt::Display for SearchStrategy {
 /// // Search using the config
 /// let results = index.search(&storage, &config, &query)?;
 /// ```
+/// Default threshold for parallel re-ranking (800 candidates).
+///
+/// Benchmark results from `--rabitq-benchmark` on 512D LAION-CLIP vectors:
+///
+/// | Candidates | Sequential | Parallel | Speedup |
+/// |------------|------------|----------|---------|
+/// | 50         | 9.13ms     | 18.96ms  | 0.48x   |
+/// | 100        | 19.54ms    | 30.27ms  | 0.65x   |
+/// | 400        | 81.42ms    | 86.18ms  | 0.94x   |
+/// | 800        | 142.46ms   | 136.68ms | 1.04x   | ← crossover
+/// | 1600       | 316.40ms   | 224.36ms | 1.41x   |
+/// | 6400       | 1163.48ms  | 497.65ms | 2.34x   |
+/// | 12800      | 2305.55ms  | 733.01ms | 3.15x   |
+///
+/// See: `libs/db/src/vector/ROADMAP.md` Task 4.20 for full analysis.
+pub const DEFAULT_PARALLEL_RERANK_THRESHOLD: usize = 800;
+
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
     /// Embedding space specification (source of truth)
@@ -109,6 +126,15 @@ pub struct SearchConfig {
     ef: usize,
     /// Re-rank factor for RaBitQ (ignored for Exact)
     rerank_factor: usize,
+    /// Minimum candidate count to use parallel (rayon) re-ranking.
+    ///
+    /// Below this threshold, sequential re-ranking is faster due to rayon overhead.
+    /// Default: 800 (based on LAION-CLIP 512D benchmarks).
+    ///
+    /// Set to 0 to always use parallel, or `usize::MAX` to always use sequential.
+    ///
+    /// See: `libs/db/src/vector/ROADMAP.md` Task 4.20 for benchmark methodology.
+    parallel_rerank_threshold: usize,
 }
 
 impl SearchConfig {
@@ -133,6 +159,7 @@ impl SearchConfig {
             k,
             ef: 100,          // sensible default
             rerank_factor: 10, // 10x re-ranking for ~90% recall at 10K scale
+            parallel_rerank_threshold: DEFAULT_PARALLEL_RERANK_THRESHOLD,
         }
     }
 
@@ -146,6 +173,7 @@ impl SearchConfig {
             k,
             ef: 100,
             rerank_factor: 10,
+            parallel_rerank_threshold: DEFAULT_PARALLEL_RERANK_THRESHOLD,
         }
     }
 
@@ -219,6 +247,33 @@ impl SearchConfig {
         self
     }
 
+    /// Builder: Set parallel re-ranking threshold.
+    ///
+    /// Controls when rayon parallel re-ranking is used vs sequential:
+    /// - `candidates >= threshold` → parallel (rayon)
+    /// - `candidates < threshold` → sequential
+    ///
+    /// Default: 800 (based on LAION-CLIP 512D benchmarks).
+    ///
+    /// # Tuning Guidance
+    ///
+    /// The crossover point depends on:
+    /// - Vector dimensionality (higher D → more work per distance → lower threshold)
+    /// - CPU core count (more cores → better parallel scaling)
+    /// - Distance metric complexity
+    ///
+    /// Benchmark results (512D, NEON SIMD):
+    /// - 400 candidates: parallel is 0.94x (slight overhead)
+    /// - 800 candidates: parallel is 1.04x (crossover)
+    /// - 1600 candidates: parallel is 1.41x
+    /// - 6400 candidates: parallel is 2.34x
+    ///
+    /// See: `libs/db/src/vector/ROADMAP.md` Task 4.20
+    pub fn with_parallel_rerank_threshold(mut self, threshold: usize) -> Self {
+        self.parallel_rerank_threshold = threshold;
+        self
+    }
+
     // ─────────────────────────────────────────────────────────────
     // Accessors
     // ─────────────────────────────────────────────────────────────
@@ -251,6 +306,23 @@ impl SearchConfig {
     #[inline]
     pub fn rerank_factor(&self) -> usize {
         self.rerank_factor
+    }
+
+    /// Get parallel re-ranking threshold.
+    ///
+    /// Returns the minimum candidate count to use parallel (rayon) re-ranking.
+    /// Below this threshold, sequential is faster due to rayon overhead.
+    #[inline]
+    pub fn parallel_rerank_threshold(&self) -> usize {
+        self.parallel_rerank_threshold
+    }
+
+    /// Check if parallel re-ranking should be used for the given candidate count.
+    ///
+    /// Returns `true` if `candidate_count >= parallel_rerank_threshold`.
+    #[inline]
+    pub fn should_use_parallel_rerank(&self, candidate_count: usize) -> bool {
+        candidate_count >= self.parallel_rerank_threshold
     }
 
     /// Get the distance metric from the embedding.
@@ -297,8 +369,8 @@ impl std::fmt::Display for SearchConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "SearchConfig {{ embedding: {}, strategy: {}, k: {}, ef: {}, rerank: {} }}",
-            self.embedding, self.strategy, self.k, self.ef, self.rerank_factor
+            "SearchConfig {{ embedding: {}, strategy: {}, k: {}, ef: {}, rerank: {}, parallel_threshold: {} }}",
+            self.embedding, self.strategy, self.k, self.ef, self.rerank_factor, self.parallel_rerank_threshold
         )
     }
 }

@@ -57,7 +57,7 @@ pub use schema::{
     ALL_COLUMN_FAMILIES, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode,
     EmbeddingSpec, VecId, VectorCfKey, VectorCfValue, VectorStorageType, Vectors,
 };
-pub use search_config::{SearchConfig, SearchStrategy};
+pub use search_config::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{EmbeddingRegistryConfig, Subsystem, VectorBlockCacheConfig};
