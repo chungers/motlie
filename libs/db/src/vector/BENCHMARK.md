@@ -305,13 +305,43 @@ let results = rerank_adaptive(
 );
 ```
 
-#### Threshold Tuning (512D LAION-CLIP, NEON SIMD)
+#### Threshold Tuning Results
 
-| Candidates | Sequential | Parallel | Recommendation |
-|------------|------------|----------|----------------|
-| < 400 | Faster | Slower | Sequential |
-| 400-800 | ~Equal | ~Equal | Either |
-| > 800 | Slower | Faster | Parallel |
+Benchmark on LAION-CLIP 512D embeddings (50K vectors, 500 queries):
+
+```bash
+cargo run --release --example laion_benchmark -- --rabitq-benchmark --rerank-sizes "50,100,200,400,800,1600,3200"
+```
+
+| Candidates | Seq (ms) | Seq QPS | Par (ms) | Par QPS | Speedup |
+|------------|----------|---------|----------|---------|---------|
+| 50 | 6.6 | 75,398 | 19.0 | 26,387 | 0.35x |
+| 100 | 11.4 | 43,962 | 30.0 | 16,697 | 0.38x |
+| 200 | 23.2 | 21,540 | 53.8 | 9,290 | 0.43x |
+| 400 | 45.6 | 10,958 | 91.2 | 5,481 | 0.50x |
+| 800 | 106.1 | 4,713 | 139.2 | 3,593 | 0.76x |
+| 1600 | 188.3 | 2,656 | 205.8 | 2,430 | 0.91x |
+| 3200 | 414.4 | 1,207 | 319.3 | 1,566 | **1.30x** |
+
+**System**: Linux aarch64, NEON SIMD, multi-core
+
+**Findings**:
+- Crossover point ~3200 candidates (system-dependent)
+- Sequential faster for typical RaBitQ rerank sizes (k×rerank_factor = 10×4 = 40)
+- Parallel benefits large candidate sets from high ef_search + high rerank_factor
+
+#### RaBitQ Configuration
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `bits_per_dim` | 1 | 1-bit quantization (64 bytes for 512D) |
+| `rotation_seed` | 42 | Deterministic orthogonal rotation matrix |
+| `rerank_factor` | 4 | Candidates = k × rerank_factor |
+| `ef_search` | 100-200 | Beam width for Hamming navigation |
+
+**Important**: RaBitQ requires **real embeddings** (CLIP, BERT, etc.) to work effectively.
+Random vectors show poor recall because Hamming distance doesn't correlate with
+actual distance without semantic structure.
 
 #### To Benchmark with Parallel Reranking
 
@@ -322,6 +352,57 @@ cargo run --release --example laion_benchmark -- --rabitq-benchmark
 ```
 
 This exercises the parallel reranking code path with configurable candidate sizes.
+
+### 6. Side-by-Side Comparison
+
+#### motlie_db: Standard HNSW vs RaBitQ
+
+| Metric | Standard HNSW | RaBitQ Cached | Notes |
+|--------|---------------|---------------|-------|
+| **Search Strategy** | Exact distance during traversal | Hamming nav + exact rerank | |
+| **Code Path** | `index.search()` | `index.search_with_rabitq_cached()` | |
+| **Distance Compute** | Per-neighbor (incremental) | Batch rerank (parallelizable) | |
+| **Memory** | Vectors only | Vectors + binary codes | +64 bytes/vec (512D) |
+| **Best For** | General use | High-throughput with real embeddings | |
+
+**When to use RaBitQ**:
+- Real embeddings (CLIP, BERT, Gemma, etc.)
+- Cosine/angular distance (Hamming ≈ angular)
+- High ef_search values where batch reranking helps
+- Memory-constrained environments (binary codes compress well)
+
+**When to use Standard HNSW**:
+- Random or synthetic vectors
+- L2/Euclidean distance
+- Low ef_search values
+- Maximum recall priority
+
+#### motlie_db vs Faiss vs hnswlib
+
+| Metric | Faiss HNSW | hnswlib | motlie_db Standard | motlie_db RaBitQ |
+|--------|------------|---------|-------------------|------------------|
+| **Storage** | In-memory | In-memory | RocksDB (disk) | RocksDB + cache |
+| **Recall@10 (100K)** | 97.8% | 98.5% | 87.1% | TBD* |
+| **QPS (100K)** | ~30,000 | ~16,000 | 254 | TBD* |
+| **Latency** | 0.03ms | 0.06ms | 3.7ms | TBD* |
+| **Persistence** | No | No | Yes | Yes |
+| **Scale Limit** | RAM | RAM | Disk | Disk |
+| **Binary Quant** | Separate | No | Integrated | Integrated |
+
+*TBD: Full RaBitQ LAION benchmark pending (requires search strategy integration)
+
+#### Performance Expectations
+
+| Scale | Standard QPS | RaBitQ QPS (est.) | Speedup |
+|-------|--------------|-------------------|---------|
+| 50K | 284 | 400-600 | 1.4-2.1x |
+| 100K | 254 | 350-500 | 1.4-2.0x |
+| 1M | ~50 | 100-200 | 2-4x |
+
+**Note**: RaBitQ speedup comes from:
+1. Hamming distance is ~10x faster than cosine (SIMD popcount)
+2. Binary codes fit in CPU cache (64 bytes vs 2KB per vector)
+3. Fewer exact distance computations (only top candidates)
 
 ## Running Benchmarks
 
@@ -341,6 +422,19 @@ cargo run --release --example laion_benchmark -- --run-all
 cargo run --release --example laion_benchmark -- --charts-only
 ```
 
+### RaBitQ Benchmark
+
+```bash
+# Parallel reranking threshold tuning
+cargo run --release --example laion_benchmark -- --rabitq-benchmark
+
+# With custom candidate sizes
+cargo run --release --example laion_benchmark -- --rabitq-benchmark --rerank-sizes "50,100,200,400,800,1600,3200"
+
+# RaBitQ search with vector2 (requires real embeddings for good recall)
+cargo run --release --example vector2 -- --num-vectors 10000 --cosine --rabitq-cached --rerank-factor 4
+```
+
 ### SIFT Benchmark
 
 ```bash
@@ -353,14 +447,32 @@ cargo run --release --example vector2 -- --dataset sift1m --num-vectors 100000
 
 ### Configuration Options
 
+#### LAION Benchmark (`laion_benchmark`)
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--scale` | 50000 | Number of vectors to index |
 | `--num-queries` | 500 | Number of search queries |
-| `--ef-search` | varies | Search beam width (10-160) |
 | `--m` | 16 | HNSW connectivity parameter |
 | `--ef-construction` | 100 | Build-time beam width |
+| `--rabitq-benchmark` | false | Run parallel reranking benchmark |
+| `--rerank-sizes` | "50,100,..." | Candidate sizes for rerank benchmark |
+
+#### Vector2 Benchmark (`vector2`)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--num-vectors` | 10000 | Number of vectors to index |
+| `--num-queries` | 100 | Number of search queries |
+| `--k` | 10 | Number of nearest neighbors |
+| `--ef` | 100 | Search beam width |
+| `--m` | 16 | HNSW connectivity parameter |
+| `--ef-construction` | 200 | Build-time beam width |
 | `--cache-size-mb` | 256 | RocksDB block cache size |
+| `--cosine` | false | Use cosine distance (recommended for RaBitQ) |
+| `--rabitq-cached` | false | Enable RaBitQ with in-memory codes |
+| `--rerank-factor` | 4 | Candidates = k × rerank_factor |
+| `--bits-per-dim` | 1 | RaBitQ bits (1, 2, or 4) |
 
 ## Benchmark Infrastructure
 
