@@ -168,7 +168,7 @@ if !warnings.is_empty() {
 
 ```rust
 use motlie_db::vector::{
-    hnsw, HnswIndex, NavigationCache, Distance, VectorStorageType,
+    hnsw, NavigationCache, Distance, VectorElementType,
 };
 use std::sync::Arc;
 
@@ -177,7 +177,7 @@ let nav_cache = Arc::new(NavigationCache::new());
 
 // Create HNSW index
 let config = hnsw::Config::for_dim(512);
-let index = HnswIndex::new(
+let index = hnsw::Index::new(
     embedding.code(),      // From registered embedding
     Distance::Cosine,
     config,
@@ -185,10 +185,10 @@ let index = HnswIndex::new(
 );
 
 // Or with explicit storage type (F16 saves 50% memory)
-let index = HnswIndex::with_storage_type(
+let index = hnsw::Index::with_storage_type(
     embedding.code(),
     Distance::Cosine,
-    VectorStorageType::F16,  // or F32 (default)
+    VectorElementType::F16,  // or F32 (default)
     config,
     nav_cache.clone(),
 );
@@ -200,7 +200,7 @@ for (id, vector) in vectors.iter().enumerate() {
 }
 ```
 
-**VectorStorageType:**
+**VectorElementType:**
 
 | Type | Size | Precision | Use Case |
 |------|------|-----------|----------|
@@ -441,7 +441,7 @@ let results = rerank_auto(&candidates, |vec_id| compute_distance(vec_id), k);
 ```rust
 use motlie_db::vector::{
     Storage, EmbeddingRegistry, EmbeddingBuilder, Distance,
-    hnsw, HnswIndex, NavigationCache, VectorStorageType,
+    hnsw, NavigationCache, VectorElementType,
 };
 use std::sync::Arc;
 
@@ -467,7 +467,7 @@ let config = hnsw::Config {
     ..Default::default()
 };
 
-let index = HnswIndex::new(
+let index = hnsw::Index::new(
     embedding.code(),
     Distance::L2,
     config,
@@ -491,7 +491,7 @@ for (dist, id) in results {
 ```rust
 use motlie_db::vector::{
     Storage, EmbeddingRegistry, EmbeddingBuilder, Distance,
-    hnsw, HnswIndex, NavigationCache, VectorStorageType,
+    hnsw, NavigationCache, VectorElementType,
     RaBitQ, BinaryCodeCache,
 };
 use std::sync::Arc;
@@ -511,10 +511,10 @@ let embedding = registry.register(
 let nav_cache = Arc::new(NavigationCache::new());
 let config = hnsw::Config::high_recall(512);
 
-let index = HnswIndex::with_storage_type(
+let index = hnsw::Index::with_storage_type(
     embedding.code(),
     Distance::Cosine,
-    VectorStorageType::F16,
+    VectorElementType::F16,
     config,
     nav_cache,
 );
@@ -703,7 +703,7 @@ impl VectorConfig {
 }
 
 // Vector storage precision
-pub enum VectorStorageType {
+pub enum VectorElementType {
     F32,  // 4 bytes/dim, full precision
     F16,  // 2 bytes/dim, ~0.1% loss for normalized vectors
 }
@@ -712,8 +712,9 @@ pub enum VectorStorageType {
 ### HNSW Index
 
 ```rust
-pub struct HnswIndex { /* private */ }
-impl HnswIndex {
+// Access via hnsw::Index
+pub struct Index { /* private */ }
+impl Index {
     // Construction
     pub fn new(
         embedding: EmbeddingCode,
@@ -725,14 +726,14 @@ impl HnswIndex {
     pub fn with_storage_type(
         embedding: EmbeddingCode,
         distance: Distance,
-        storage_type: VectorStorageType,
+        storage_type: VectorElementType,
         config: hnsw::Config,
         nav_cache: Arc<NavigationCache>,
     ) -> Self;
 
     // Accessors
     pub fn embedding(&self) -> EmbeddingCode;
-    pub fn storage_type(&self) -> VectorStorageType;
+    pub fn storage_type(&self) -> VectorElementType;
     pub fn config(&self) -> &hnsw::Config;
     pub fn distance_metric(&self) -> Distance;
     pub fn nav_cache(&self) -> &Arc<NavigationCache>;

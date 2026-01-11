@@ -15,8 +15,8 @@ use super::dataset::{LaionDataset, LaionSubset, LAION_EMBEDDING_DIM};
 use super::metrics::{compute_recall, percentile, LatencyStats};
 use crate::rocksdb::ColumnFamily;
 use crate::vector::{
-    hnsw, Distance, EmbeddingCode, HnswIndex, NavigationCache, Storage, VecId, VectorCfKey,
-    VectorStorageType, Vectors,
+    hnsw, Distance, EmbeddingCode, NavigationCache, Storage, VecId, VectorCfKey,
+    VectorElementType, Vectors,
 };
 
 /// Experiment configuration.
@@ -39,7 +39,7 @@ pub struct ExperimentConfig {
     /// Distance metric.
     pub distance: Distance,
     /// Vector storage type.
-    pub storage_type: VectorStorageType,
+    pub storage_type: VectorElementType,
     /// Data directory for dataset files.
     pub data_dir: PathBuf,
     /// Results directory for output files.
@@ -59,7 +59,7 @@ impl Default for ExperimentConfig {
             ef_construction: 100,
             dim: LAION_EMBEDDING_DIM,
             distance: Distance::Cosine,
-            storage_type: VectorStorageType::F16,
+            storage_type: VectorElementType::F16,
             data_dir: PathBuf::from("data"),
             results_dir: PathBuf::from("results"),
             verbose: false,
@@ -289,12 +289,12 @@ pub fn build_hnsw_index(
     vectors: &[Vec<f32>],
     hnsw_config: hnsw::Config,
     distance: Distance,
-    storage_type: VectorStorageType,
-) -> Result<(HnswIndex, f64)> {
+    storage_type: VectorElementType,
+) -> Result<(hnsw::Index, f64)> {
     let nav_cache = Arc::new(NavigationCache::new());
     let embedding_code: EmbeddingCode = 1;
 
-    let index = HnswIndex::with_storage_type(
+    let index = hnsw::Index::with_storage_type(
         embedding_code,
         distance,
         storage_type,
@@ -332,7 +332,7 @@ pub fn build_hnsw_index(
 
 /// Run a single experiment configuration.
 pub fn run_single_experiment(
-    index: &HnswIndex,
+    index: &hnsw::Index,
     storage: &Storage,
     subset: &LaionSubset,
     ground_truth: &[Vec<usize>],

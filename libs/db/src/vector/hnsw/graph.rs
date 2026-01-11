@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use roaring::RoaringBitmap;
 
-use super::HnswIndex;
+use super::Index;
 use crate::rocksdb::ColumnFamily;
 use crate::vector::distance::Distance;
 use crate::vector::merge::EdgeOp;
@@ -79,7 +79,7 @@ pub fn compute_distance_metric(distance: Distance, a: &[f32], b: &[f32]) -> f32 
 /// - Upper layers (>= 2): Full caching in HashMap
 /// - Lower layers (0-1): FIFO hot cache with bounded size
 pub fn get_neighbors(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     vec_id: VecId,
     layer: HnswLayer,
@@ -99,7 +99,7 @@ pub fn get_neighbors(
 
 /// Get neighbors directly from RocksDB (no cache).
 fn get_neighbors_uncached(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     vec_id: VecId,
     layer: HnswLayer,
@@ -126,7 +126,7 @@ fn get_neighbors_uncached(
 /// This uses `RoaringBitmap::len()` which is O(1) since the cardinality
 /// is stored in the bitmap structure. Used for degree-based pruning checks.
 pub fn get_neighbor_count(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     vec_id: VecId,
     layer: HnswLayer,
@@ -138,7 +138,7 @@ pub fn get_neighbor_count(
 
 /// Connect a node to its neighbors bidirectionally using merge operators.
 pub fn connect_neighbors(
-    index: &HnswIndex,
+    index: &Index,
     txn_db: &rocksdb::TransactionDB,
     vec_id: VecId,
     neighbors: &[(f32, VecId)],
@@ -175,13 +175,13 @@ pub fn connect_neighbors(
 // ============================================================================
 
 /// Compute distance between query vector and stored vector.
-pub fn distance(index: &HnswIndex, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
+pub fn distance(index: &Index, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
     let vector = get_vector(index, storage, vec_id)?;
     Ok(compute_distance_metric(index.distance_metric(), query, &vector))
 }
 
 /// Load a vector from storage.
-fn get_vector(index: &HnswIndex, storage: &Storage, vec_id: VecId) -> Result<Vec<f32>> {
+fn get_vector(index: &Index, storage: &Storage, vec_id: VecId) -> Result<Vec<f32>> {
     let txn_db = storage.transaction_db()?;
     let cf = txn_db
         .cf_handle(Vectors::CF_NAME)
@@ -207,7 +207,7 @@ fn get_vector(index: &HnswIndex, storage: &Storage, vec_id: VecId) -> Result<Vec
 /// # Arguments
 /// * `use_cache` - If true, uses edge cache (for search). If false, uncached (for build).
 pub fn greedy_search_layer(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     query: &[f32],
     entry: VecId,
@@ -264,7 +264,7 @@ pub fn greedy_search_layer(
 /// # Arguments
 /// * `use_cache` - If true, uses edge cache (for search). If false, uncached (for build).
 pub fn search_layer(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     query: &[f32],
     entry: VecId,
@@ -293,7 +293,7 @@ pub fn search_layer(
 /// Returns vectors in the same order as input vec_ids. Missing vectors
 /// are represented as None.
 pub fn get_vectors_batch(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     vec_ids: &[VecId],
 ) -> Result<Vec<Option<Vec<f32>>>> {
@@ -335,7 +335,7 @@ pub fn get_vectors_batch(
 /// in parallel using rayon. Uses the configured distance metric (L2, Cosine, DotProduct).
 /// Returns (vec_id, distance) pairs for vectors that exist.
 pub fn batch_distances(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     query: &[f32],
     vec_ids: &[VecId],
@@ -364,7 +364,7 @@ pub fn batch_distances(
 ///
 /// Uses multi_get_cf for efficient batch lookup. Returns (vec_id, bitmap) pairs.
 pub fn get_neighbors_batch(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     vec_ids: &[VecId],
     layer: HnswLayer,
@@ -412,7 +412,7 @@ pub fn get_neighbors_batch(
 // ============================================================================
 
 /// Get a binary code for a vector.
-pub fn get_binary_code(index: &HnswIndex, storage: &Storage, vec_id: VecId) -> Result<Option<Vec<u8>>> {
+pub fn get_binary_code(index: &Index, storage: &Storage, vec_id: VecId) -> Result<Option<Vec<u8>>> {
     let txn_db = storage.transaction_db()?;
     let cf = txn_db
         .cf_handle(BinaryCodes::CF_NAME)
@@ -429,7 +429,7 @@ pub fn get_binary_code(index: &HnswIndex, storage: &Storage, vec_id: VecId) -> R
 
 /// Batch retrieve binary codes for multiple vectors.
 pub fn get_binary_codes_batch(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     vec_ids: &[VecId],
 ) -> Result<Vec<Option<Vec<u8>>>> {

@@ -133,38 +133,12 @@ impl Default for AsyncUpdaterConfig {
     }
 }
 
-/// Navigation cache configuration.
-///
-/// Caches top HNSW layers in memory for faster search.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NavigationCacheConfig {
-    /// Enable navigation cache.
-    pub enabled: bool,
-
-    /// Maximum layers to cache (from top).
-    pub max_cached_layers: u8,
-
-    /// Maximum nodes per layer to cache.
-    pub max_nodes_per_layer: usize,
-}
-
-impl Default for NavigationCacheConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_cached_layers: 3,
-            max_nodes_per_layer: 10_000,
-        }
-    }
-}
-
 /// Complete vector storage configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VectorConfig {
     pub hnsw: Config,
     pub rabitq: RaBitQConfig,
     pub async_updater: AsyncUpdaterConfig,
-    pub navigation_cache: NavigationCacheConfig,
 }
 
 impl VectorConfig {

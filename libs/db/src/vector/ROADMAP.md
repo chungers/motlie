@@ -93,7 +93,7 @@ dedicated vector databases or custom storage engines.
 | [Task 4.15](#task-415-phase-5-integration-planning) | Phase 5 Integration Planning | 🔲 Not Started | - |
 | [Task 4.16](#task-416-hnsw-distance-metric-bug-fix) | HNSW Distance Metric Bug Fix | ✅ Complete | `0535e6a` |
 | [Task 4.17](#task-417-batch_distances-metric-bug-fix) | batch_distances Metric Bug Fix | ✅ Complete | `d5899f3` |
-| [Task 4.18](#task-418-vectorstoragetype-multi-float-support) | VectorStorageType (f16/f32) | ✅ Complete | `c90f15c` |
+| [Task 4.18](#task-418-vectorstoragetype-multi-float-support) | VectorElementType (f16/f32) | ✅ Complete | `c90f15c` |
 | [Task 4.19](#task-419-parallel-reranking-with-rayon) | Parallel Reranking (rayon) | ✅ Complete | `27d6b74` |
 | [Task 4.20](#task-420-parallel-re-ranking-threshold-tuning) | Parallel Threshold Tuning | ✅ Complete | `a146d02` |
 | [Task 4.21](#task-421-benchmark-infrastructure--threshold-update) | Benchmark Infrastructure + Threshold Update | ✅ Complete | `2358ba8` |
@@ -224,7 +224,7 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  ├── 4.10 In-memory BinaryCodeCache ✓                                      │
 │  ├── 4.11-4.14 API cleanup, SearchConfig redesign ✓                        │
 │  ├── 4.16-4.17 Distance metric bug fixes ✓                                 │
-│  ├── 4.18 VectorStorageType (f16/f32 support) ✓                            │
+│  ├── 4.18 VectorElementType (f16/f32 support) ✓                            │
 │  ├── 4.19-4.20 Parallel reranking (rayon) + threshold tuning ✓             │
 │  └── Files: rabitq.rs, search_config.rs, parallel.rs, navigation.rs        │
 │                                                                              │
@@ -1970,7 +1970,7 @@ impl HotColumnFamilyRecord for GraphMetaCF {
 
 **Status:** ✅ COMPLETED (2026-01-06)
 
-**Implementation:** [`hnsw.rs`](hnsw.rs) - `HnswIndex::insert()` method (lines 90-176)
+**Implementation:** [`hnsw/mod.rs`](hnsw/mod.rs) - `Index::insert()` method
 
 Port HNSW algorithm from `examples/vector/hnsw.rs` to use new schema:
 
@@ -2121,7 +2121,7 @@ impl NavigationLayerInfo {
 
 **Status:** ✅ COMPLETED (2026-01-06)
 
-**Implementation:** [`hnsw.rs`](hnsw.rs) - `HnswIndex::search()` method (lines 291-335)
+**Implementation:** [`hnsw/mod.rs`](hnsw/mod.rs) - `Index::search()` method
 
 The HNSW search algorithm descends through layers, narrowing the search region at each level:
 
@@ -4958,7 +4958,7 @@ beam search when neighbor count exceeds the batch threshold. The individual
 
 ---
 
-#### Task 4.18: VectorStorageType (Multi-Float Support)
+#### Task 4.18: VectorElementType (Multi-Float Support)
 
 **Status:** ✅ Complete
 **Commit:** `c90f15c`
@@ -4972,7 +4972,7 @@ Currently we:
 2. Convert to f32 in memory
 3. Store as f32 in RocksDB (4 bytes/element)
 
-With VectorStorageType, we can:
+With VectorElementType, we can:
 1. Store as f16 in RocksDB (2 bytes/element)
 2. Convert to f32 only for distance computation
 3. Save 50% storage with negligible precision loss for normalized vectors
@@ -4982,7 +4982,7 @@ With VectorStorageType, we can:
 ```rust
 // New enum in schema.rs
 #[derive(Serialize, Deserialize, Clone, Copy, Default)]
-pub enum VectorStorageType {
+pub enum VectorElementType {
     #[default]
     F32,  // 4 bytes/element, full precision
     F16,  // 2 bytes/element, 50% smaller
@@ -4994,13 +4994,13 @@ pub struct EmbeddingSpec {
     pub dim: u32,
     pub distance: Distance,
     #[serde(default)]
-    pub storage_type: VectorStorageType,  // NEW - defaults to F32
+    pub storage_type: VectorElementType,  // NEW - defaults to F32
 }
 
 // Updated Vectors CF serialization
 impl Vectors {
-    pub fn value_to_bytes(value: &[f32], storage_type: VectorStorageType) -> Vec<u8>;
-    pub fn value_from_bytes(bytes: &[u8], storage_type: VectorStorageType) -> Result<Vec<f32>>;
+    pub fn value_to_bytes(value: &[f32], storage_type: VectorElementType) -> Vec<u8>;
+    pub fn value_from_bytes(bytes: &[u8], storage_type: VectorElementType) -> Result<Vec<f32>>;
 }
 ```
 
@@ -5012,7 +5012,7 @@ impl Vectors {
 | F16 | 1,024 bytes | 200 MB | **50%** |
 
 **Implementation Steps:**
-- [x] Add `VectorStorageType` enum to `schema.rs`
+- [x] Add `VectorElementType` enum to `schema.rs`
 - [x] Add `storage_type` field to `EmbeddingSpec` (default F32)
 - [x] Update `Vectors::value_to_bytes_typed()` with f16 support
 - [x] Update `Vectors::value_from_bytes_typed()` with f16 support
@@ -5021,7 +5021,7 @@ impl Vectors {
 - [x] Run full benchmark suite (50K-200K scales)
 
 **Acceptance Criteria:**
-- [x] VectorStorageType enum with F32/F16 variants
+- [x] VectorElementType enum with F32/F16 variants
 - [x] Backward compatible (F32 default)
 - [x] LAION benchmark uses F16 storage
 - [x] Recall maintained (~87% at 200K scale)
@@ -7570,7 +7570,7 @@ cargo run -p motlie_core --example simd_check
 | 2026-01-08 | **5f2dac0** API cleanup Phases 2-4 (Tasks 4.12-4.14): removed dead code, Embedding-driven SearchConfig, config validation | Claude Opus 4.5 |
 | 2026-01-09 | **0535e6a** HNSW distance metric bug fix (Task 4.16): layer navigation now uses configured distance metric | Claude Opus 4.5 |
 | 2026-01-09 | **d5899f3** batch_distances metric bug fix (Task 4.17): batch operations use correct distance metric | Claude Opus 4.5 |
-| 2026-01-09 | **c90f15c** VectorStorageType (Task 4.18): f16/f32 support for storage flexibility | Claude Opus 4.5 |
+| 2026-01-09 | **c90f15c** VectorElementType (Task 4.18): f16/f32 support for storage flexibility | Claude Opus 4.5 |
 | 2026-01-09 | **27d6b74** Parallel reranking with rayon (Task 4.19): parallel.rs rerank_parallel function | Claude Opus 4.5 |
 | 2026-01-09 | **a146d02** Parallel threshold tuning (Task 4.20): DEFAULT_PARALLEL_RERANK_THRESHOLD=800, rerank_adaptive, documentation | Claude Opus 4.5 |
 | 2026-01-09 | **Phase 4 COMPLETE**: All 20 tasks finished, 433 unit tests passing | Claude Opus 4.5 |
@@ -7603,7 +7603,7 @@ pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 // ─────────────────────────────────────────────────────────────────────────────
 // Index and Quantization
 // ─────────────────────────────────────────────────────────────────────────────
-pub use hnsw::HnswIndex;
+// Note: HNSW index is at hnsw::Index (not re-exported to vector module)
 pub use rabitq::RaBitQ;
 pub use navigation::{BinaryCodeCache, NavigationCache, NavigationCacheConfig};
 
@@ -7615,7 +7615,7 @@ pub use search_config::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_TH
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema Types
 // ─────────────────────────────────────────────────────────────────────────────
-pub use schema::{EmbeddingCode, VecId, VectorStorageType, ALL_COLUMN_FAMILIES};
+pub use schema::{EmbeddingCode, VecId, VectorElementType, ALL_COLUMN_FAMILIES};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Storage Subsystem
@@ -7723,7 +7723,7 @@ let all_cosine = registry.find_by_distance(Distance::Cosine);
 | **Builder pattern** | ✅ SearchConfig, EmbeddingBuilder | Fluent, chainable |
 | **Threshold configurability** | ✅ with_parallel_rerank_threshold() | Tunable per workload |
 | **Convenience functions** | ✅ rerank_auto(), component() | Sensible defaults |
-| **Type safety** | ✅ EmbeddingCode, VecId, VectorStorageType | Semantic wrapper types |
+| **Type safety** | ✅ EmbeddingCode, VecId, VectorElementType | Semantic wrapper types |
 | **Validation** | ✅ validate_embedding_code() | Catches mismatches at search time |
 
 ---

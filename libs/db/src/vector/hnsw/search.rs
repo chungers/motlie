@@ -9,7 +9,7 @@ use roaring::RoaringBitmap;
 
 use super::graph::{distance, get_neighbors, greedy_search_layer};
 use super::insert::load_navigation;
-use super::HnswIndex;
+use super::Index;
 use crate::vector::cache::BinaryCodeCache;
 use crate::vector::rabitq::RaBitQ;
 use crate::vector::schema::{HnswLayer, VecId};
@@ -27,7 +27,7 @@ use crate::vector::Storage;
 /// # Returns
 /// Vector of (distance, vec_id) pairs, sorted by distance ascending.
 pub fn search(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     query: &[f32],
     k: usize,
@@ -71,7 +71,7 @@ pub fn search(
 /// # Arguments
 /// * `use_cache` - If true, uses edge cache (for search). If false, uncached (for build).
 fn beam_search_layer0(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     query: &[f32],
     entry: VecId,
@@ -94,7 +94,7 @@ fn beam_search_layer0(
 /// # Arguments
 /// * `use_cache` - If true, uses edge cache (for search). If false, uncached (for build).
 pub(super) fn beam_search(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     query: &[f32],
     entry: VecId,
@@ -211,7 +211,7 @@ pub(super) fn beam_search(
 /// * `ef` - Search beam width
 /// * `rerank_factor` - Multiplier for candidates to re-rank
 pub fn search_with_rabitq_cached(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     query: &[f32],
     encoder: &RaBitQ,
@@ -285,7 +285,7 @@ pub fn search_with_rabitq_cached(
 /// This version uses `BinaryCodeCache` instead of RocksDB reads, making
 /// Hamming distance computation essentially free (just SIMD popcount).
 fn beam_search_layer0_hamming_cached(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     query_code: &[u8],
     code_cache: &BinaryCodeCache,

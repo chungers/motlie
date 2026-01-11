@@ -43,7 +43,7 @@ use benchmark::{
 use motlie_db::rocksdb::{BlockCacheConfig, ColumnFamily};
 use motlie_db::vector::{
     hnsw, BinaryCodeCache, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, Distance, EmbeddingCode,
-    HnswIndex, NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue,
+    NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue,
     Vectors,
 };
 
@@ -270,7 +270,7 @@ async fn run_phase2_benchmark(
     let nav_cache = Arc::new(NavigationCache::new());
     let embedding_code: EmbeddingCode = 1; // Single embedding space for benchmark
     let distance = if args.cosine { Distance::Cosine } else { Distance::L2 };
-    let index = HnswIndex::new(embedding_code, distance, hnsw_config.clone(), nav_cache.clone());
+    let index = hnsw::Index::new(embedding_code, distance, hnsw_config.clone(), nav_cache.clone());
 
     // Prepare random number generator
     let mut rng = ChaCha8Rng::seed_from_u64(42);
