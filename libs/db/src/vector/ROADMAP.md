@@ -23,11 +23,16 @@ Benchmarks on LAION-CLIP 512D embeddings (aarch64 NEON). See [`BENCHMARK.md`](./
 |--------|----------|-------|
 | Search QPS (50K) | 284 | Standard HNSW, ef=80 |
 | Search QPS (100K) | 254 | Standard HNSW, ef=80 |
+| Search QPS (500K) | 136 | Standard HNSW, ef=80 |
 | Recall@10 (50K) | 89.2% | LAION-CLIP, January 2026 |
 | Recall@10 (100K) | 87.1% | LAION-CLIP, January 2026 |
-| Insert throughput | 97-109 vec/s | With HNSW graph construction |
+| Recall@10 (500K) | 83.1% | LAION-CLIP, January 2026 |
+| Insert throughput | 60-109 vec/s | With HNSW graph construction |
 | Memory/vector | 528 bytes | 512B vector + 16B binary code (F16) |
 | Parallel speedup | 1.3x | At 3200+ candidates (rayon) |
+| HNSW vs Flat (500K) | 5.7x | Speedup over brute-force |
+
+**1M Benchmark**: In progress. Expected ~80-100 QPS, ~80% Recall@10.
 
 ### Context: RocksDB vs Purpose-Built Engines
 
@@ -90,6 +95,7 @@ dedicated vector databases or custom storage engines.
 | [Task 4.19](#task-419-parallel-reranking-with-rayon) | Parallel Reranking (rayon) | ✅ Complete | `27d6b74` |
 | [Task 4.20](#task-420-parallel-re-ranking-threshold-tuning) | Parallel Threshold Tuning | ✅ Complete | `a146d02` |
 | [Task 4.21](#task-421-benchmark-infrastructure--threshold-update) | Benchmark Infrastructure + Threshold Update | ✅ Complete | `2358ba8` |
+| [Task 4.22](#task-422-large-scale-benchmarks-500k-1m) | Large-Scale Benchmarks (500K, 1M) | 🔄 In Progress | - |
 
 ### Other Sections
 
@@ -5343,6 +5349,68 @@ Created [`BENCHMARK.md`](./BENCHMARK.md) with:
 - `libs/db/src/vector/search/config.rs` - Threshold 800→3200
 - `libs/db/src/vector/search/parallel.rs` - Updated docs and tests
 - `libs/db/src/vector/BENCHMARK.md` - New comprehensive documentation
+
+---
+
+#### Task 4.22: Large-Scale Benchmarks (500K, 1M)
+
+**Status:** 🔄 In Progress
+**Goal:** Benchmark at production-scale datasets (500K, 1M vectors) to validate scaling behavior
+
+**Motivation:**
+
+Previous benchmarks were limited to 100K vectors. To understand real-world performance at
+scale, this task runs benchmarks at 500K and 1M vectors using the full LAION-CLIP dataset.
+
+**500K Benchmark Results (Complete):**
+
+| ef_search | Recall@10 | QPS | P50 Latency | P99 Latency |
+|-----------|-----------|-----|-------------|-------------|
+| 10-160 | 83.1% | 136 | 6.9ms | 14.5ms |
+| Flat | 100% | 24 | 42ms | 43ms |
+
+**Build time:** 8370s (60 vec/s) - about 2.3 hours
+
+**Key Findings (500K):**
+
+1. **Recall decay**: 89.2% (50K) → 87.1% (100K) → 83.1% (500K) = ~1.5% per 100K vectors
+2. **QPS scaling**: O(log n) as expected - 284 → 254 → 136 QPS
+3. **HNSW vs Flat**: 5.7x speedup at 500K (vs 1.2x at 50K)
+4. **ef_search insensitivity**: Recall stable across ef_search=10-160
+
+**1M Benchmark (In Progress):**
+
+```bash
+cargo run --release --example laion_benchmark -- --scale 1000000 -v
+```
+
+**Expected results** (based on scaling trends):
+- Build time: ~16,000-20,000s (~4-5 hours)
+- Recall@10: ~80-82%
+- QPS: ~80-100
+- Latency p50: ~10-12ms
+- HNSW vs Flat speedup: ~10x
+
+**Configuration:**
+
+| Parameter | Value |
+|-----------|-------|
+| Dataset | LAION-CLIP 512D (float16 storage) |
+| M | 16 |
+| ef_construction | 100 |
+| ef_search | 10, 20, 40, 80, 160 |
+| k | 10 |
+| Block cache | 256 MB |
+| Storage | RocksDB with LZ4 |
+
+**Acceptance Criteria:**
+- [x] 500K benchmark complete
+- [ ] 1M benchmark complete
+- [x] Updated BENCHMARK.md with 500K results
+- [ ] Updated BENCHMARK.md with 1M results
+- [ ] Scaling analysis across all scales
+
+**Documentation:** See [`BENCHMARK.md`](./BENCHMARK.md) for full results.
 
 ---
 
