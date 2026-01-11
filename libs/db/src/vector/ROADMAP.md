@@ -7589,9 +7589,10 @@ Use this for evaluating ergonomics and design consistency.
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration Types
 // ─────────────────────────────────────────────────────────────────────────────
-pub use hnsw::{Config as HnswConfig, ConfigWarning};  // HNSW config + warnings
+pub use hnsw::ConfigWarning;                   // HNSW config warnings
 pub use config::{RaBitQConfig, RaBitQConfigWarning, VectorConfig};
 pub use distance::Distance;                    // Cosine, L2, DotProduct
+// Note: HNSW configuration is at hnsw::Config (not re-exported as HnswConfig)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Embedding Types (identity + behavior)

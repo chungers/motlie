@@ -7,8 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
-// Re-export HnswConfig from hnsw module for VectorConfig
-pub use crate::vector::hnsw::Config as HnswConfig;
+// Re-export Config from hnsw module for VectorConfig (crate-internal only)
+pub(crate) use crate::vector::hnsw::Config;
 
 /// RaBitQ binary quantization parameters.
 ///
@@ -161,7 +161,7 @@ impl Default for NavigationCacheConfig {
 /// Complete vector storage configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VectorConfig {
-    pub hnsw: HnswConfig,
+    pub hnsw: Config,
     pub rabitq: RaBitQConfig,
     pub async_updater: AsyncUpdaterConfig,
     pub navigation_cache: NavigationCacheConfig,
@@ -171,7 +171,7 @@ impl VectorConfig {
     /// Configuration for 128-dimensional embeddings (e.g., SIFT).
     pub fn dim_128() -> Self {
         Self {
-            hnsw: HnswConfig::for_dim(128),
+            hnsw: Config::for_dim(128),
             ..Default::default()
         }
     }
@@ -179,7 +179,7 @@ impl VectorConfig {
     /// Configuration for 768-dimensional embeddings (e.g., BERT, Gemma).
     pub fn dim_768() -> Self {
         Self {
-            hnsw: HnswConfig::for_dim(768),
+            hnsw: Config::for_dim(768),
             ..Default::default()
         }
     }
@@ -187,7 +187,7 @@ impl VectorConfig {
     /// Configuration for 1024-dimensional embeddings (e.g., Qwen3).
     pub fn dim_1024() -> Self {
         Self {
-            hnsw: HnswConfig::for_dim(1024),
+            hnsw: Config::for_dim(1024),
             ..Default::default()
         }
     }
@@ -195,7 +195,7 @@ impl VectorConfig {
     /// Configuration for 1536-dimensional embeddings (e.g., OpenAI ada-002).
     pub fn dim_1536() -> Self {
         Self {
-            hnsw: HnswConfig::for_dim(1536),
+            hnsw: Config::for_dim(1536),
             ..Default::default()
         }
     }

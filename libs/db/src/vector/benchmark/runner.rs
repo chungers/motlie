@@ -15,7 +15,7 @@ use super::dataset::{LaionDataset, LaionSubset, LAION_EMBEDDING_DIM};
 use super::metrics::{compute_recall, percentile, LatencyStats};
 use crate::rocksdb::ColumnFamily;
 use crate::vector::{
-    Distance, EmbeddingCode, HnswConfig, HnswIndex, NavigationCache, Storage, VecId, VectorCfKey,
+    hnsw, Distance, EmbeddingCode, HnswIndex, NavigationCache, Storage, VecId, VectorCfKey,
     VectorStorageType, Vectors,
 };
 
@@ -223,7 +223,7 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
             "\nBuilding HNSW index (M={}, ef_construction={})...",
             config.m, config.ef_construction
         );
-        let hnsw_config = HnswConfig {
+        let hnsw_config = hnsw::Config {
             dim: config.dim,
             m: config.m,
             m_max: config.m * 2,
@@ -287,7 +287,7 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
 pub fn build_hnsw_index(
     storage: &Storage,
     vectors: &[Vec<f32>],
-    hnsw_config: HnswConfig,
+    hnsw_config: hnsw::Config,
     distance: Distance,
     storage_type: VectorStorageType,
 ) -> Result<(HnswIndex, f64)> {

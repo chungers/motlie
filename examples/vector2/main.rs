@@ -42,8 +42,8 @@ use benchmark::{
 };
 use motlie_db::rocksdb::{BlockCacheConfig, ColumnFamily};
 use motlie_db::vector::{
-    BinaryCodeCache, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, Distance, EmbeddingCode,
-    HnswConfig, HnswIndex, NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue,
+    hnsw, BinaryCodeCache, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, Distance, EmbeddingCode,
+    HnswIndex, NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue,
     Vectors,
 };
 
@@ -256,7 +256,7 @@ async fn run_phase2_benchmark(
     storage.ready()?;
 
     // Create HNSW configuration
-    let hnsw_config = HnswConfig {
+    let hnsw_config = hnsw::Config {
         dim: benchmark_data.map(|d| d.dimensions).unwrap_or(128),
         m: args.m,
         m_max: args.m * 2,

@@ -117,20 +117,20 @@ let by_model = registry.find_by_model("openai");
 HNSW (Hierarchical Navigable Small World) is a graph-based ANN algorithm. Key parameters:
 
 ```rust
-use motlie_db::vector::HnswConfig;
+use motlie_db::vector::hnsw;
 
 // Default configuration (dim=128, M=16)
-let config = HnswConfig::default();
+let config = hnsw::Config::default();
 
 // Auto-tuned for specific dimension
-let config = HnswConfig::for_dim(512);
+let config = hnsw::Config::for_dim(512);
 
 // Presets
-let high_recall = HnswConfig::high_recall(768);  // M=32, ef_construction=200
-let compact = HnswConfig::compact(768);          // M=8, ef_construction=50
+let high_recall = hnsw::Config::high_recall(768);  // M=32, ef_construction=200
+let compact = hnsw::Config::compact(768);          // M=8, ef_construction=50
 
 // Custom configuration
-let config = HnswConfig {
+let config = hnsw::Config {
     dim: 512,
     m: 16,              // Connections per node (layer > 0)
     m_max: 32,          // Max connections (layer > 0)
@@ -168,7 +168,7 @@ if !warnings.is_empty() {
 
 ```rust
 use motlie_db::vector::{
-    HnswIndex, HnswConfig, NavigationCache, Distance, VectorStorageType,
+    hnsw, HnswIndex, NavigationCache, Distance, VectorStorageType,
 };
 use std::sync::Arc;
 
@@ -176,7 +176,7 @@ use std::sync::Arc;
 let nav_cache = Arc::new(NavigationCache::new());
 
 // Create HNSW index
-let config = HnswConfig::for_dim(512);
+let config = hnsw::Config::for_dim(512);
 let index = HnswIndex::new(
     embedding.code(),      // From registered embedding
     Distance::Cosine,
@@ -441,7 +441,7 @@ let results = rerank_auto(&candidates, |vec_id| compute_distance(vec_id), k);
 ```rust
 use motlie_db::vector::{
     Storage, EmbeddingRegistry, EmbeddingBuilder, Distance,
-    HnswIndex, HnswConfig, NavigationCache, VectorStorageType,
+    hnsw, HnswIndex, NavigationCache, VectorStorageType,
 };
 use std::sync::Arc;
 
@@ -460,7 +460,7 @@ let embedding = registry.register(
 
 // 3. Create HNSW index
 let nav_cache = Arc::new(NavigationCache::new());
-let config = HnswConfig {
+let config = hnsw::Config {
     dim: 128,
     m: 16,
     ef_construction: 100,
@@ -491,7 +491,7 @@ for (dist, id) in results {
 ```rust
 use motlie_db::vector::{
     Storage, EmbeddingRegistry, EmbeddingBuilder, Distance,
-    HnswIndex, HnswConfig, NavigationCache, VectorStorageType,
+    hnsw, HnswIndex, NavigationCache, VectorStorageType,
     RaBitQ, BinaryCodeCache,
 };
 use std::sync::Arc;
@@ -509,7 +509,7 @@ let embedding = registry.register(
 
 // 3. Create HNSW index with F16 storage (50% smaller)
 let nav_cache = Arc::new(NavigationCache::new());
-let config = HnswConfig::high_recall(512);
+let config = hnsw::Config::high_recall(512);
 
 let index = HnswIndex::with_storage_type(
     embedding.code(),
@@ -658,22 +658,25 @@ impl EmbeddingFilter {
 ### Configuration Types
 
 ```rust
-// HNSW index configuration (also available as vector::hnsw::Config)
-pub struct HnswConfig {
-    pub dim: usize,
-    pub m: usize,
-    pub m_max: usize,
-    pub m_max_0: usize,
-    pub ef_construction: usize,
-    pub batch_threshold: usize,
-}
-impl HnswConfig {
-    pub fn default() -> Self;            // dim=128, m=16
-    pub fn for_dim(dim: usize) -> Self;  // Auto-tuned
-    pub fn high_recall(dim: usize) -> Self;  // m=32, ef_construction=200
-    pub fn compact(dim: usize) -> Self;      // m=8, ef_construction=50
-    pub fn validate(&self) -> Vec<hnsw::ConfigWarning>;
-    pub fn is_valid(&self) -> bool;
+// HNSW index configuration: vector::hnsw::Config
+pub mod hnsw {
+    pub struct Config {
+        pub dim: usize,
+        pub m: usize,
+        pub m_max: usize,
+        pub m_max_0: usize,
+        pub ef_construction: usize,
+        pub batch_threshold: usize,
+    }
+    impl Config {
+        pub fn default() -> Self;            // dim=128, m=16
+        pub fn for_dim(dim: usize) -> Self;  // Auto-tuned
+        pub fn high_recall(dim: usize) -> Self;  // m=32, ef_construction=200
+        pub fn compact(dim: usize) -> Self;      // m=8, ef_construction=50
+        pub fn validate(&self) -> Vec<ConfigWarning>;
+        pub fn is_valid(&self) -> bool;
+    }
+    pub enum ConfigWarning { LowM, HighM, LowEfConstruction, ... }
 }
 
 // RaBitQ configuration
@@ -689,7 +692,7 @@ impl RaBitQConfig {
 
 // Combined configuration
 pub struct VectorConfig {
-    pub hnsw: HnswConfig,
+    pub hnsw: hnsw::Config,
     pub rabitq: Option<RaBitQConfig>,
 }
 impl VectorConfig {
@@ -715,7 +718,7 @@ impl HnswIndex {
     pub fn new(
         embedding: EmbeddingCode,
         distance: Distance,
-        config: HnswConfig,
+        config: hnsw::Config,
         nav_cache: Arc<NavigationCache>,
     ) -> Self;
 
@@ -723,14 +726,14 @@ impl HnswIndex {
         embedding: EmbeddingCode,
         distance: Distance,
         storage_type: VectorStorageType,
-        config: HnswConfig,
+        config: hnsw::Config,
         nav_cache: Arc<NavigationCache>,
     ) -> Self;
 
     // Accessors
     pub fn embedding(&self) -> EmbeddingCode;
     pub fn storage_type(&self) -> VectorStorageType;
-    pub fn config(&self) -> &HnswConfig;
+    pub fn config(&self) -> &hnsw::Config;
     pub fn distance_metric(&self) -> Distance;
     pub fn nav_cache(&self) -> &Arc<NavigationCache>;
 
