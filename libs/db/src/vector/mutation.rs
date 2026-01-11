@@ -90,7 +90,7 @@ pub struct AddEmbeddingSpec {
     /// Distance metric for similarity computation
     pub distance: Distance,
     /// Storage type for vectors (default: F32)
-    pub storage_type: super::schema::VectorStorageType,
+    pub storage_type: super::schema::VectorElementType,
 }
 
 impl From<AddEmbeddingSpec> for Mutation {

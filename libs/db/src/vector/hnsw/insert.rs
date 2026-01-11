@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 use super::graph::{connect_neighbors, greedy_search_layer, search_layer};
-use super::HnswIndex;
+use super::Index;
 use crate::vector::cache::NavigationLayerInfo;
 use crate::vector::schema::{
     GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField, HnswLayer, VecId, VecMeta,
@@ -27,7 +27,7 @@ use crate::vector::Storage;
 /// 4. Otherwise: greedy descent from entry point to target layer
 /// 5. At each layer from target down to 0: find and connect neighbors
 /// 6. Update entry point if this node has higher layer
-pub fn insert(index: &HnswIndex, storage: &Storage, vec_id: VecId, vector: &[f32]) -> Result<()> {
+pub fn insert(index: &Index, storage: &Storage, vec_id: VecId, vector: &[f32]) -> Result<()> {
     let txn_db = storage.transaction_db()?;
 
     // 1. Assign random layer
@@ -107,7 +107,7 @@ pub fn insert(index: &HnswIndex, storage: &Storage, vec_id: VecId, vector: &[f32
 
 /// Initialize the first node in an empty graph.
 fn init_first_node(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     vec_id: VecId,
     node_layer: HnswLayer,
@@ -126,7 +126,7 @@ fn init_first_node(
 
 /// Store vector metadata (layer assignment).
 fn store_vec_meta(
-    index: &HnswIndex,
+    index: &Index,
     txn_db: &rocksdb::TransactionDB,
     vec_id: VecId,
     max_layer: HnswLayer,
@@ -156,7 +156,7 @@ fn store_vec_meta(
 
 /// Update the global entry point.
 fn update_entry_point(
-    index: &HnswIndex,
+    index: &Index,
     storage: &Storage,
     vec_id: VecId,
     layer: HnswLayer,
@@ -184,7 +184,7 @@ fn update_entry_point(
 }
 
 /// Get or initialize navigation info from cache or storage.
-pub(super) fn get_or_init_navigation(index: &HnswIndex, storage: &Storage) -> Result<NavigationLayerInfo> {
+pub(super) fn get_or_init_navigation(index: &Index, storage: &Storage) -> Result<NavigationLayerInfo> {
     if let Some(info) = index.nav_cache().get(index.embedding()) {
         return Ok(info);
     }
@@ -202,7 +202,7 @@ pub(super) fn get_or_init_navigation(index: &HnswIndex, storage: &Storage) -> Re
 }
 
 /// Load navigation info from GraphMeta CF.
-pub(super) fn load_navigation(index: &HnswIndex, storage: &Storage) -> Result<NavigationLayerInfo> {
+pub(super) fn load_navigation(index: &Index, storage: &Storage) -> Result<NavigationLayerInfo> {
     let txn_db = storage.transaction_db()?;
     let cf = txn_db
         .cf_handle(GraphMeta::CF_NAME)

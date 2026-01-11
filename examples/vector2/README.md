@@ -252,7 +252,7 @@ cargo run --release --example vector2 -- --dataset sift1m --num-vectors 1000000 
 
 This benchmark exercises the following components:
 
-- `motlie_db::vector::HnswIndex` - HNSW insert and search operations
+- `motlie_db::vector::hnsw::Index` - HNSW insert and search operations
 - `motlie_db::vector::NavigationCache` - Layer traversal optimization
 - `motlie_db::vector::Storage` - RocksDB-backed vector storage
 - `motlie_db::vector::merge::EdgeOp` - RocksDB merge operators for edges

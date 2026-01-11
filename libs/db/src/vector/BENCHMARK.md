@@ -61,7 +61,7 @@ and `search/config.rs` for implementation details.
 
 **Rayon configuration**: Uses system default thread pool. Override with `RAYON_NUM_THREADS` env var.
 
-### Storage Types (`VectorStorageType`)
+### Storage Types (`VectorElementType`)
 
 | Type | Bytes/Element | Memory (100K @ 512D) | Precision |
 |------|---------------|----------------------|-----------|

@@ -13,8 +13,8 @@ use motlie_db::vector::benchmark::{
     compute_recall, SiftSubset, LaionSubset, SIFT_EMBEDDING_DIM, LAION_EMBEDDING_DIM,
 };
 use motlie_db::vector::{
-    hnsw, BinaryCodeCache, Distance, HnswIndex, NavigationCache, Storage, VecId,
-    VectorStorageType,
+    hnsw, BinaryCodeCache, Distance, NavigationCache, Storage, VecId,
+    VectorElementType,
 };
 use motlie_db::vector::quantization::RaBitQ;
 use motlie_db::vector::search::rerank_adaptive;
@@ -108,10 +108,10 @@ fn build_index_with_navigation(
     storage: &Storage,
     vectors: &[Vec<f32>],
     distance: Distance,
-    storage_type: VectorStorageType,
+    storage_type: VectorElementType,
     m: usize,
     ef_construction: usize,
-) -> anyhow::Result<(HnswIndex, Arc<NavigationCache>)> {
+) -> anyhow::Result<(hnsw::Index, Arc<NavigationCache>)> {
     let dim = vectors.first().map(|v| v.len()).unwrap_or(128);
     let nav_cache = Arc::new(NavigationCache::new());
     let embedding_code = 1;
@@ -125,7 +125,7 @@ fn build_index_with_navigation(
         ..Default::default()
     };
 
-    let index = HnswIndex::with_storage_type(
+    let index = hnsw::Index::with_storage_type(
         embedding_code,
         distance,
         storage_type,
@@ -188,7 +188,7 @@ fn test_sift_l2_hnsw_with_navigation_cache() -> anyhow::Result<()> {
         &storage,
         &subset.db_vectors,
         Distance::L2,
-        VectorStorageType::F32,
+        VectorElementType::F32,
         16,  // M
         100, // ef_construction
     )?;
@@ -251,7 +251,7 @@ fn test_laion_clip_cosine_exact_hnsw() -> anyhow::Result<()> {
         &storage,
         &subset.db_vectors,
         Distance::Cosine,
-        VectorStorageType::F16, // Use F16 like real LAION-CLIP
+        VectorElementType::F16, // Use F16 like real LAION-CLIP
         32,  // M - higher for 512D
         200, // ef_construction - higher for 512D
     )?;
@@ -319,7 +319,7 @@ fn test_laion_clip_cosine_rabitq_with_caches() -> anyhow::Result<()> {
         &storage,
         &subset.db_vectors,
         Distance::Cosine,
-        VectorStorageType::F16, // Use F16 like real LAION-CLIP
+        VectorElementType::F16, // Use F16 like real LAION-CLIP
         16,  // M
         100, // ef_construction
     )?;

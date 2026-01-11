@@ -211,7 +211,7 @@ impl EmbeddingRegistry {
             model: builder.model.clone(),
             dim: builder.dim,
             distance: builder.distance,
-            storage_type: super::schema::VectorStorageType::default(), // F32 for backward compat
+            storage_type: super::schema::VectorElementType::default(), // F32 for backward compat
         };
         let (key_bytes, value_bytes) = add_op.to_cf_bytes()?;
 

@@ -22,7 +22,7 @@
 //!
 //! # Module Structure
 //!
-//! - `mod.rs` - HnswIndex struct and public API
+//! - `mod.rs` - Index struct and public API
 //! - `config.rs` - HNSW configuration (`Config`, `ConfigWarning`)
 //! - `insert.rs` - Insert algorithm implementation
 //! - `search.rs` - Search algorithms (standard and RaBitQ)
@@ -48,7 +48,7 @@ use anyhow::Result;
 use crate::vector::cache::{BinaryCodeCache, NavigationCache};
 use crate::vector::distance::Distance;
 use crate::vector::rabitq::RaBitQ;
-use crate::vector::schema::{EmbeddingCode, VecId, VectorStorageType};
+use crate::vector::schema::{EmbeddingCode, VecId, VectorElementType};
 use crate::vector::Storage;
 
 // Re-export for public API
@@ -61,20 +61,20 @@ pub use graph::{cosine_distance, dot_product_distance, l2_distance};
 /// HNSW index for a single embedding space.
 ///
 /// Provides insert and search operations backed by RocksDB storage.
-pub struct HnswIndex {
+pub struct Index {
     /// The embedding space code this index manages
     embedding: EmbeddingCode,
     /// Distance metric for this index (Cosine, L2, DotProduct)
     distance: Distance,
     /// Storage type for vectors (F32 or F16)
-    storage_type: VectorStorageType,
+    storage_type: VectorElementType,
     /// HNSW configuration (M, ef_construction, etc.)
     config: Config,
     /// Navigation cache for fast layer traversal
     nav_cache: Arc<NavigationCache>,
 }
 
-impl HnswIndex {
+impl Index {
     /// Create a new HNSW index for an embedding space.
     ///
     /// # Arguments
@@ -91,7 +91,7 @@ impl HnswIndex {
         Self {
             embedding,
             distance,
-            storage_type: VectorStorageType::default(), // F32 by default
+            storage_type: VectorElementType::default(), // F32 by default
             config,
             nav_cache,
         }
@@ -108,7 +108,7 @@ impl HnswIndex {
     pub fn with_storage_type(
         embedding: EmbeddingCode,
         distance: Distance,
-        storage_type: VectorStorageType,
+        storage_type: VectorElementType,
         config: Config,
         nav_cache: Arc<NavigationCache>,
     ) -> Self {
@@ -127,7 +127,7 @@ impl HnswIndex {
     }
 
     /// Get the storage type.
-    pub fn storage_type(&self) -> VectorStorageType {
+    pub fn storage_type(&self) -> VectorElementType {
         self.storage_type
     }
 
@@ -225,7 +225,16 @@ impl HnswIndex {
         ef: usize,
         rerank_factor: usize,
     ) -> Result<Vec<(f32, VecId)>> {
-        search::search_with_rabitq_cached(self, storage, query, encoder, code_cache, k, ef, rerank_factor)
+        search::search_with_rabitq_cached(
+            self,
+            storage,
+            query,
+            encoder,
+            code_cache,
+            k,
+            ef,
+            rerank_factor,
+        )
     }
 
     // =========================================================================
@@ -236,12 +245,7 @@ impl HnswIndex {
     ///
     /// This uses `RoaringBitmap::len()` which is O(1) since the cardinality
     /// is stored in the bitmap structure. Used for degree-based pruning checks.
-    pub fn get_neighbor_count(
-        &self,
-        storage: &Storage,
-        vec_id: VecId,
-        layer: u8,
-    ) -> Result<u64> {
+    pub fn get_neighbor_count(&self, storage: &Storage, vec_id: VecId, layer: u8) -> Result<u64> {
         graph::get_neighbor_count(self, storage, vec_id, layer)
     }
 
@@ -327,7 +331,7 @@ mod tests {
     fn test_hnsw_index_creation() {
         let config = Config::default();
         let nav_cache = Arc::new(NavigationCache::new());
-        let index = HnswIndex::new(1, Distance::L2, config.clone(), nav_cache);
+        let index = Index::new(1, Distance::L2, config.clone(), nav_cache);
 
         assert_eq!(index.embedding(), 1);
         assert_eq!(index.config().m, config.m);
@@ -392,7 +396,9 @@ mod tests {
         for (i, vector) in vectors.iter().enumerate() {
             let key = Vectors::key_to_bytes(&VectorCfKey(embedding, i as VecId));
             let value = Vectors::value_to_bytes(&VectorCfValue(vector.clone()));
-            txn_db.put_cf(&cf, key, value).expect("Failed to store vector");
+            txn_db
+                .put_cf(&cf, key, value)
+                .expect("Failed to store vector");
         }
     }
 
@@ -403,16 +409,18 @@ mod tests {
         distance: Distance,
         vectors: &[Vec<f32>],
         config: &Config,
-    ) -> HnswIndex {
+    ) -> Index {
         // First, store vectors in RocksDB so HNSW can access them
         store_vectors(storage, embedding, vectors);
 
         // Now build the HNSW index
         let nav_cache = Arc::new(NavigationCache::new());
-        let index = HnswIndex::new(embedding, distance, config.clone(), nav_cache);
+        let index = Index::new(embedding, distance, config.clone(), nav_cache);
 
         for (i, vector) in vectors.iter().enumerate() {
-            index.insert(storage, i as VecId, vector).expect("Insert failed");
+            index
+                .insert(storage, i as VecId, vector)
+                .expect("Insert failed");
         }
 
         index
@@ -452,7 +460,9 @@ mod tests {
         assert!(
             avg_recall >= 0.95,
             "Recall@{} should be >= 95% at {} vectors, got {:.1}%",
-            k, n_vectors, avg_recall * 100.0
+            k,
+            n_vectors,
+            avg_recall * 100.0
         );
     }
 
@@ -480,7 +490,9 @@ mod tests {
 
         let mut total_recall = 0.0;
         for query in &queries {
-            let results = index.search(&storage, query, k, 100).expect("Search failed");
+            let results = index
+                .search(&storage, query, k, 100)
+                .expect("Search failed");
             let ground_truth = brute_force_knn(query, &vectors, k);
             total_recall += compute_recall(&results, &ground_truth);
         }
@@ -489,7 +501,9 @@ mod tests {
         assert!(
             avg_recall >= 0.90,
             "Recall@{} should be >= 90% at {} vectors, got {:.1}%",
-            k, n_vectors, avg_recall * 100.0
+            k,
+            n_vectors,
+            avg_recall * 100.0
         );
     }
 
@@ -563,7 +577,9 @@ mod tests {
 
         let mut total_recall = 0.0;
         for query in &queries {
-            let results = index.search(&storage, query, k, 150).expect("Search failed");
+            let results = index
+                .search(&storage, query, k, 150)
+                .expect("Search failed");
             let ground_truth = brute_force_knn(query, &vectors, k);
             total_recall += compute_recall(&results, &ground_truth);
         }
@@ -594,7 +610,9 @@ mod tests {
         let mut total_recall = 0.0;
         for query in &queries {
             // Compact config needs higher ef to compensate for smaller M
-            let results = index.search(&storage, query, k, 100).expect("Search failed");
+            let results = index
+                .search(&storage, query, k, 100)
+                .expect("Search failed");
             let ground_truth = brute_force_knn(query, &vectors, k);
             total_recall += compute_recall(&results, &ground_truth);
         }
@@ -647,7 +665,9 @@ mod tests {
             assert!(
                 avg_recall >= min_recall,
                 "Recall@{} should be >= {:.0}%, got {:.1}%",
-                k, min_recall * 100.0, avg_recall * 100.0
+                k,
+                min_recall * 100.0,
+                avg_recall * 100.0
             );
         }
     }
@@ -696,7 +716,9 @@ mod tests {
 
         let mut total_recall = 0.0;
         for query in &queries {
-            let results = index.search(&storage, query, k, 100).expect("Search failed");
+            let results = index
+                .search(&storage, query, k, 100)
+                .expect("Search failed");
             let ground_truth = brute_force_knn(query, &vectors, k);
             total_recall += compute_recall(&results, &ground_truth);
         }
@@ -732,7 +754,10 @@ mod tests {
         let m_values = [8, 16, 32];
         let ef_values = [50, 100, 200];
 
-        println!("\n=== HNSW Parameter Recommendations ({}D, {} vectors) ===", dim, n_vectors);
+        println!(
+            "\n=== HNSW Parameter Recommendations ({}D, {} vectors) ===",
+            dim, n_vectors
+        );
         println!("| M | ef_search | Recall@{} |", k);
         println!("|---|-----------|----------|");
 
@@ -770,7 +795,7 @@ mod tests {
     // SearchConfig Integration Tests
     // =========================================================================
     //
-    // These tests verify SearchConfig works correctly with HnswIndex,
+    // These tests verify SearchConfig works correctly with Index,
     // including strategy selection, distance metric consistency, and
     // embedding code validation.
 
@@ -842,13 +867,19 @@ mod tests {
         // Same vector should have distance 0
         let a = vec![1.0, 2.0, 3.0, 4.0];
         let dist = config.compute_distance(&a, &a);
-        assert!(dist.abs() < 0.001, "Same vector cosine distance should be ~0");
+        assert!(
+            dist.abs() < 0.001,
+            "Same vector cosine distance should be ~0"
+        );
 
         // Orthogonal vectors
         let b = vec![1.0, 0.0, 0.0, 0.0];
         let c = vec![0.0, 1.0, 0.0, 0.0];
         let dist = config.compute_distance(&b, &c);
-        assert!((dist - 1.0).abs() < 0.001, "Orthogonal vectors cosine distance should be ~1");
+        assert!(
+            (dist - 1.0).abs() < 0.001,
+            "Orthogonal vectors cosine distance should be ~1"
+        );
     }
 
     #[test]
@@ -949,20 +980,30 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, embedding.code(), embedding.distance(), &vectors, &config);
+        let index = build_index(
+            &storage,
+            embedding.code(),
+            embedding.distance(),
+            &vectors,
+            &config,
+        );
 
         // Create SearchConfig - should auto-select Exact for L2
         let search_config = SearchConfig::new(embedding.clone(), k).with_ef(100);
         assert!(search_config.strategy().is_exact());
 
         // Validate embedding matches
-        assert!(search_config.validate_embedding_code(index.embedding()).is_ok());
+        assert!(search_config
+            .validate_embedding_code(index.embedding())
+            .is_ok());
 
         // Test recall using SearchConfig's compute_distance
         let mut total_recall = 0.0;
         for query in &queries {
             // Use the existing search method (SearchConfig will be integrated later)
-            let results = index.search(&storage, query, k, search_config.ef()).expect("Search failed");
+            let results = index
+                .search(&storage, query, k, search_config.ef())
+                .expect("Search failed");
             let ground_truth = brute_force_knn_with_distance(query, &vectors, k, Distance::L2);
             total_recall += compute_recall(&results, &ground_truth);
         }
@@ -971,7 +1012,9 @@ mod tests {
         assert!(
             avg_recall >= 0.90,
             "L2 recall@{} should be >= 90% at {} vectors, got {:.1}%",
-            k, n_vectors, avg_recall * 100.0
+            k,
+            n_vectors,
+            avg_recall * 100.0
         );
     }
 
@@ -999,7 +1042,13 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, embedding.code(), embedding.distance(), &vectors, &config);
+        let index = build_index(
+            &storage,
+            embedding.code(),
+            embedding.distance(),
+            &vectors,
+            &config,
+        );
 
         // Create SearchConfig - should auto-select RaBitQ for Cosine
         let search_config = SearchConfig::new(embedding.clone(), k).with_ef(100);
@@ -1010,13 +1059,17 @@ mod tests {
         assert!(exact_config.strategy().is_exact());
 
         // Validate embedding matches
-        assert!(search_config.validate_embedding_code(index.embedding()).is_ok());
+        assert!(search_config
+            .validate_embedding_code(index.embedding())
+            .is_ok());
 
         // Test recall using search_config's distance (currently uses L2 internally,
         // but we verify the config would use Cosine)
         let mut total_recall = 0.0;
         for query in &queries {
-            let results = index.search(&storage, query, k, search_config.ef()).expect("Search failed");
+            let results = index
+                .search(&storage, query, k, search_config.ef())
+                .expect("Search failed");
             // Ground truth computed with Cosine distance
             let ground_truth = brute_force_knn_with_distance(query, &vectors, k, Distance::Cosine);
             total_recall += compute_recall(&results, &ground_truth);
@@ -1028,7 +1081,8 @@ mod tests {
         assert!(
             avg_recall >= 0.60,
             "Cosine recall@{} should be >= 60% (L2 approximation), got {:.1}%",
-            k, avg_recall * 100.0
+            k,
+            avg_recall * 100.0
         );
     }
 
@@ -1090,7 +1144,13 @@ mod tests {
             ..Default::default()
         };
 
-        let index = build_index(&storage, embedding.code(), embedding.distance(), &vectors, &hnsw_config);
+        let index = build_index(
+            &storage,
+            embedding.code(),
+            embedding.distance(),
+            &vectors,
+            &hnsw_config,
+        );
 
         // Test different k values
         for k in [1, 5, 10, 20] {

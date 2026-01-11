@@ -96,14 +96,14 @@ pub use cache::{BinaryCodeCache, NavigationCache, NavigationCacheConfig, Navigat
 pub use config::{RaBitQConfig, RaBitQConfigWarning, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
-pub use hnsw::{ConfigWarning, HnswIndex};
+pub use hnsw::ConfigWarning;
 pub use id::IdAllocator;
 pub use processor::Processor;
 pub use quantization::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
     BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpec, VecId,
-    VectorCfKey, VectorCfValue, VectorStorageType, Vectors, ALL_COLUMN_FAMILIES,
+    VectorCfKey, VectorCfValue, VectorElementType, Vectors, ALL_COLUMN_FAMILIES,
 };
 pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
 

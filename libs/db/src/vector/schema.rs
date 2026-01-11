@@ -89,10 +89,10 @@ pub(crate) type RoaringBitmapBytes = Vec<u8>;
 /// Type alias for RaBitQ binary code
 pub type RabitqCode = Vec<u8>;
 
-/// Vector element storage type.
+/// Vector element type.
 ///
 /// Controls how vector elements are serialized in the Vectors CF.
-/// All computation is done in f32 regardless of storage type.
+/// All computation is done in f32 regardless of element type.
 ///
 /// # Storage Savings
 ///
@@ -101,7 +101,7 @@ pub type RabitqCode = Vec<u8>;
 /// | F32  | 4 bytes       | 2,048 bytes | -       |
 /// | F16  | 2 bytes       | 1,024 bytes | **50%** |
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum VectorStorageType {
+pub enum VectorElementType {
     /// 32-bit IEEE 754 floating point (default, full precision)
     #[default]
     F32,
@@ -153,7 +153,7 @@ pub struct EmbeddingSpec {
     pub distance: Distance,
     /// Storage type for vector elements (default: F32 for backward compatibility)
     #[serde(default)]
-    pub storage_type: VectorStorageType,
+    pub storage_type: VectorElementType,
 }
 
 /// EmbeddingSpecs key: the embedding space identifier (primary key)
@@ -263,12 +263,12 @@ impl Vectors {
 
     /// Store vector as raw f32 bytes (backward compatible, uses F32 storage)
     pub fn value_to_bytes(value: &VectorCfValue) -> Vec<u8> {
-        Self::value_to_bytes_typed(&value.0, VectorStorageType::F32)
+        Self::value_to_bytes_typed(&value.0, VectorElementType::F32)
     }
 
     /// Load vector from raw f32 bytes (backward compatible, assumes F32 storage)
     pub fn value_from_bytes(bytes: &[u8]) -> Result<VectorCfValue> {
-        Self::value_from_bytes_typed(bytes, VectorStorageType::F32).map(VectorCfValue)
+        Self::value_from_bytes_typed(bytes, VectorElementType::F32).map(VectorCfValue)
     }
 
     /// Store vector with specified storage type.
@@ -279,16 +279,16 @@ impl Vectors {
     ///
     /// # Returns
     /// Serialized bytes in the specified format
-    pub fn value_to_bytes_typed(value: &[f32], storage_type: VectorStorageType) -> Vec<u8> {
+    pub fn value_to_bytes_typed(value: &[f32], storage_type: VectorElementType) -> Vec<u8> {
         match storage_type {
-            VectorStorageType::F32 => {
+            VectorElementType::F32 => {
                 let mut bytes = Vec::with_capacity(value.len() * 4);
                 for &v in value {
                     bytes.extend_from_slice(&v.to_le_bytes());
                 }
                 bytes
             }
-            VectorStorageType::F16 => {
+            VectorElementType::F16 => {
                 use half::f16;
                 let mut bytes = Vec::with_capacity(value.len() * 2);
                 for &v in value {
@@ -308,9 +308,12 @@ impl Vectors {
     ///
     /// # Returns
     /// Vector as Vec<f32> (always returns f32 for computation)
-    pub fn value_from_bytes_typed(bytes: &[u8], storage_type: VectorStorageType) -> Result<Vec<f32>> {
+    pub fn value_from_bytes_typed(
+        bytes: &[u8],
+        storage_type: VectorElementType,
+    ) -> Result<Vec<f32>> {
         match storage_type {
-            VectorStorageType::F32 => {
+            VectorElementType::F32 => {
                 if bytes.len() % 4 != 0 {
                     anyhow::bail!(
                         "Invalid F32 vector bytes length: {} is not divisible by 4",
@@ -323,7 +326,7 @@ impl Vectors {
                 }
                 Ok(vector)
             }
-            VectorStorageType::F16 => {
+            VectorElementType::F16 => {
                 use half::f16;
                 if bytes.len() % 2 != 0 {
                     anyhow::bail!(
@@ -342,10 +345,10 @@ impl Vectors {
     }
 
     /// Calculate storage size in bytes for a vector of given dimension.
-    pub fn storage_size(dim: usize, storage_type: VectorStorageType) -> usize {
+    pub fn storage_size(dim: usize, storage_type: VectorElementType) -> usize {
         match storage_type {
-            VectorStorageType::F32 => dim * 4,
-            VectorStorageType::F16 => dim * 2,
+            VectorElementType::F32 => dim * 4,
+            VectorElementType::F16 => dim * 2,
         }
     }
 }
@@ -362,7 +365,11 @@ pub(crate) struct Edges;
 
 /// Edges key: (embedding_code, vec_id, layer)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EdgeCfKey(pub(crate) EmbeddingCode, pub(crate) VecId, pub(crate) HnswLayer);
+pub(crate) struct EdgeCfKey(
+    pub(crate) EmbeddingCode,
+    pub(crate) VecId,
+    pub(crate) HnswLayer,
+);
 
 /// Edges value: serialized RoaringBitmap of neighbor vec_ids
 #[derive(Debug, Clone)]
@@ -411,10 +418,7 @@ impl Edges {
 
     pub fn key_from_bytes(bytes: &[u8]) -> Result<EdgeCfKey> {
         if bytes.len() != 13 {
-            anyhow::bail!(
-                "Invalid EdgeCfKey length: expected 13, got {}",
-                bytes.len()
-            );
+            anyhow::bail!("Invalid EdgeCfKey length: expected 13, got {}", bytes.len());
         }
         let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
         let vec_id = u32::from_be_bytes(bytes[8..12].try_into()?);
@@ -728,9 +732,7 @@ impl GraphMeta {
                 }
                 GraphMetaField::Count(u32::from_be_bytes(bytes.try_into()?))
             }
-            GraphMetaField::Config(_) => {
-                GraphMetaField::Config(bytes.to_vec())
-            }
+            GraphMetaField::Config(_) => GraphMetaField::Config(bytes.to_vec()),
         };
         Ok(GraphMetaCfValue(field))
     }
@@ -998,9 +1000,7 @@ impl IdAlloc {
                 }
                 IdAllocField::NextId(u32::from_be_bytes(bytes.try_into()?))
             }
-            IdAllocField::FreeBitmap(_) => {
-                IdAllocField::FreeBitmap(bytes.to_vec())
-            }
+            IdAllocField::FreeBitmap(_) => IdAllocField::FreeBitmap(bytes.to_vec()),
         };
         Ok(IdAllocCfValue(field))
     }
@@ -1018,7 +1018,11 @@ pub(crate) struct Pending;
 
 /// Pending key: (embedding_code, timestamp, vec_id)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct PendingCfKey(pub(crate) EmbeddingCode, pub(crate) TimestampMilli, pub(crate) VecId);
+pub(crate) struct PendingCfKey(
+    pub(crate) EmbeddingCode,
+    pub(crate) TimestampMilli,
+    pub(crate) VecId,
+);
 
 /// Pending value: empty (presence in CF indicates pending status)
 #[derive(Debug, Clone)]
@@ -1047,7 +1051,7 @@ impl Pending {
     pub fn key_to_bytes(key: &PendingCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(20);
         bytes.extend_from_slice(&key.0.to_be_bytes());
-        bytes.extend_from_slice(&key.1.0.to_be_bytes());
+        bytes.extend_from_slice(&key.1 .0.to_be_bytes());
         bytes.extend_from_slice(&key.2.to_be_bytes());
         bytes
     }
@@ -1073,7 +1077,6 @@ impl Pending {
         Ok(PendingCfValue(()))
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1143,5 +1146,4 @@ mod tests {
         assert_eq!(parsed.1, TimestampMilli(1000));
         assert_eq!(parsed.2, 42);
     }
-
 }
