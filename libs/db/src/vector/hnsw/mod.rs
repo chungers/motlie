@@ -23,6 +23,7 @@
 //! # Module Structure
 //!
 //! - `mod.rs` - HnswIndex struct and public API
+//! - `config.rs` - HNSW configuration (`Config`, `ConfigWarning`)
 //! - `insert.rs` - Insert algorithm implementation
 //! - `search.rs` - Search algorithms (standard and RaBitQ)
 //! - `graph.rs` - Graph operations (neighbors, distances, batch)
@@ -32,16 +33,19 @@
 //! - [HNSW Paper](https://arxiv.org/abs/1603.09320)
 //! - [HNSW2 Optimization](examples/vector/HNSW2.md)
 
+pub mod config;
 mod graph;
 mod insert;
 mod search;
+
+// Re-export Config for public API as vector::hnsw::Config
+pub use config::{Config, ConfigWarning};
 
 use std::sync::Arc;
 
 use anyhow::Result;
 
 use crate::vector::cache::{BinaryCodeCache, NavigationCache};
-use crate::vector::config::HnswConfig;
 use crate::vector::distance::Distance;
 use crate::vector::rabitq::RaBitQ;
 use crate::vector::schema::{EmbeddingCode, VecId, VectorStorageType};
@@ -65,7 +69,7 @@ pub struct HnswIndex {
     /// Storage type for vectors (F32 or F16)
     storage_type: VectorStorageType,
     /// HNSW configuration (M, ef_construction, etc.)
-    config: HnswConfig,
+    config: Config,
     /// Navigation cache for fast layer traversal
     nav_cache: Arc<NavigationCache>,
 }
@@ -81,7 +85,7 @@ impl HnswIndex {
     pub fn new(
         embedding: EmbeddingCode,
         distance: Distance,
-        config: HnswConfig,
+        config: Config,
         nav_cache: Arc<NavigationCache>,
     ) -> Self {
         Self {
@@ -105,7 +109,7 @@ impl HnswIndex {
         embedding: EmbeddingCode,
         distance: Distance,
         storage_type: VectorStorageType,
-        config: HnswConfig,
+        config: Config,
         nav_cache: Arc<NavigationCache>,
     ) -> Self {
         Self {
@@ -128,7 +132,7 @@ impl HnswIndex {
     }
 
     /// Get the configuration.
-    pub fn config(&self) -> &HnswConfig {
+    pub fn config(&self) -> &Config {
         &self.config
     }
 
@@ -321,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_hnsw_index_creation() {
-        let config = HnswConfig::default();
+        let config = Config::default();
         let nav_cache = Arc::new(NavigationCache::new());
         let index = HnswIndex::new(1, Distance::L2, config.clone(), nav_cache);
 
@@ -398,7 +402,7 @@ mod tests {
         embedding: EmbeddingCode,
         distance: Distance,
         vectors: &[Vec<f32>],
-        config: &HnswConfig,
+        config: &Config,
     ) -> HnswIndex {
         // First, store vectors in RocksDB so HNSW can access them
         store_vectors(storage, embedding, vectors);
@@ -425,7 +429,7 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = HnswConfig {
+        let config = Config {
             dim,
             m: 16,
             m_max: 32,
@@ -463,7 +467,7 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = HnswConfig {
+        let config = Config {
             dim,
             m: 16,
             m_max: 32,
@@ -501,7 +505,7 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = HnswConfig {
+        let config = Config {
             dim,
             m: 16,
             m_max: 32,
@@ -554,7 +558,7 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = HnswConfig::high_recall(dim);
+        let config = Config::high_recall(dim);
         let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         let mut total_recall = 0.0;
@@ -584,7 +588,7 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = HnswConfig::compact(dim);
+        let config = Config::compact(dim);
         let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         let mut total_recall = 0.0;
@@ -615,7 +619,7 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = HnswConfig {
+        let config = Config {
             dim,
             m: 16,
             m_max: 32,
@@ -679,7 +683,7 @@ mod tests {
 
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = HnswConfig {
+        let config = Config {
             dim,
             m: 16,
             m_max: 32,
@@ -733,7 +737,7 @@ mod tests {
         println!("|---|-----------|----------|");
 
         for &m in &m_values {
-            let config = HnswConfig {
+            let config = Config {
                 dim,
                 m,
                 m_max: 2 * m,
@@ -936,7 +940,7 @@ mod tests {
         // Create embedding with L2 distance
         let embedding = make_test_embedding(1, dim as u32, Distance::L2);
 
-        let config = HnswConfig {
+        let config = Config {
             dim,
             m: 16,
             m_max: 32,
@@ -986,7 +990,7 @@ mod tests {
         // Create embedding with Cosine distance
         let embedding = make_test_embedding(1, dim as u32, Distance::Cosine);
 
-        let config = HnswConfig {
+        let config = Config {
             dim,
             m: 16,
             m_max: 32,
@@ -1038,7 +1042,7 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
 
         // Create index with embedding code 1
-        let config = HnswConfig::for_dim(dim);
+        let config = Config::for_dim(dim);
         let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
 
         // Create SearchConfig with different embedding code (2)
@@ -1079,7 +1083,7 @@ mod tests {
         let queries = generate_sift_like_vectors(n_queries, 123);
 
         let embedding = make_test_embedding(1, dim as u32, Distance::L2);
-        let hnsw_config = HnswConfig {
+        let hnsw_config = Config {
             dim,
             m: 16,
             ef_construction: 200,

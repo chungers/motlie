@@ -7589,7 +7589,8 @@ Use this for evaluating ergonomics and design consistency.
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration Types
 // ─────────────────────────────────────────────────────────────────────────────
-pub use config::{ConfigWarning, HnswConfig, RaBitQConfig, VectorConfig};
+pub use hnsw::{Config as HnswConfig, ConfigWarning};  // HNSW config + warnings
+pub use config::{RaBitQConfig, RaBitQConfigWarning, VectorConfig};
 pub use distance::Distance;                    // Cosine, L2, DotProduct
 
 // ─────────────────────────────────────────────────────────────────────────────

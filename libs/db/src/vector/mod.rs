@@ -91,7 +91,9 @@ pub mod search_config {
 }
 
 // Re-exports for public API
-pub use config::{ConfigWarning, HnswConfig, RaBitQConfig, VectorConfig};
+// HnswConfig is re-exported from hnsw::Config for backward compatibility
+pub use hnsw::{Config as HnswConfig, ConfigWarning};
+pub use config::{RaBitQConfig, RaBitQConfigWarning, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
 pub use hnsw::HnswIndex;
