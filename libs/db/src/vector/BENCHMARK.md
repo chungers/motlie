@@ -170,6 +170,19 @@ See [Configuration Reference](#configuration-reference) for full parameter detai
 
 **Build Time**: 8370s (60 vec/s)
 
+#### 1M Vectors
+
+| ef_search | Recall@1 | Recall@5 | Recall@10 | Latency P50 | Latency P99 | QPS |
+|-----------|----------|----------|-----------|-------------|-------------|-----|
+| 10 | 81.6% | 82.6% | 80.7% | 8.35ms | 17.17ms | 114 |
+| 20 | 81.6% | 82.6% | 80.7% | 8.43ms | 17.33ms | 113 |
+| 40 | 81.6% | 82.6% | 80.7% | 8.25ms | 17.36ms | 112 |
+| 80 | 81.6% | 82.6% | 80.7% | 8.54ms | 17.63ms | 111 |
+| 160 | 81.6% | 82.6% | 80.7% | 8.54ms | 18.10ms | 111 |
+| Flat | 100% | 100% | 100% | 85.37ms | 85.97ms | 12 |
+
+**Build Time**: 21357s (5.9 hours, 46.8 vec/s)
+
 ### Scaling Analysis
 
 | Scale | Recall@10 | QPS | P50 Latency | Build Rate | HNSW vs Flat Speedup |
@@ -177,13 +190,15 @@ See [Configuration Reference](#configuration-reference) for full parameter detai
 | 50K | 89.2% | 284 | 3.3ms | 109 vec/s | 1.2x |
 | 100K | 87.1% | 254 | 3.7ms | 97 vec/s | 2.2x |
 | 500K | 83.1% | 136 | 6.9ms | 60 vec/s | 5.7x |
+| 1M | 80.7% | 112 | 8.4ms | 47 vec/s | 9.5x |
 
 **Observations**:
-- **Recall degradation**: ~1.5% per 100K vectors (expected HNSW behavior with 512D embeddings)
-- **QPS scaling**: O(log n) as expected - 284→254→136 QPS from 50K→100K→500K
-- **Latency scaling**: Sub-linear - 3.3ms→3.7ms→6.9ms (p50)
-- **Build rate slows**: 109→97→60 vec/s as graph connectivity increases
-- **HNSW advantage grows**: 5.7x speedup over brute-force at 500K (vs 1.2x at 50K)
+- **Recall degradation**: ~1-2% per 100K vectors (expected HNSW behavior with 512D embeddings)
+- **QPS scaling**: O(log n) as expected - 284→254→136→112 QPS from 50K→1M
+- **Latency scaling**: Sub-linear - 3.3ms→3.7ms→6.9ms→8.4ms (p50)
+- **Build rate slows**: 109→97→60→47 vec/s as graph connectivity increases
+- **HNSW advantage grows**: 9.5x speedup over brute-force at 1M (vs 1.2x at 50K)
+- **Production viable**: 112 QPS with sub-10ms latency at 1M scale
 
 ## Comparison with Industry Implementations
 
@@ -556,6 +571,7 @@ Results are stored in `examples/laion_benchmark/results/` and
 
 | Date | Change | Impact |
 |------|--------|--------|
+| 2026-01-10 | 1M benchmark | 112 QPS, 80.7% R@10, 8.4ms p50 |
 | 2026-01-10 | 500K benchmark | 136 QPS, 83.1% R@10, 6.9ms p50 |
 | 2026-01-10 | Parallel threshold tuned | 800→3200 based on LAION-CLIP |
 | 2026-01-10 | Benchmark module refactor | No regression |
@@ -563,21 +579,11 @@ Results are stored in `examples/laion_benchmark/results/` and
 | 2026-01-08 | Phase 4 RaBitQ integration | +74% QPS with caching |
 | 2026-01-06 | Phase 3 edge caching | +31% QPS |
 
-## Pending Benchmarks
+## Future Benchmarks
 
-### 1M Scale (In Progress)
+Potential areas for additional benchmarking:
 
-The 1M scale benchmark is running with the following configuration:
-
-```bash
-cargo run --release --example laion_benchmark -- --scale 1000000 -v
-```
-
-**Expected results** (based on scaling trends):
-- Build time: ~16,000-20,000s (~4-5 hours)
-- Recall@10: ~80-82%
-- QPS: ~80-100
-- Latency p50: ~10-12ms
-- HNSW vs Flat speedup: ~10x
-
-Results will be documented upon completion.
+- **2M+ scale**: Test scaling beyond 1M vectors
+- **RaBitQ at scale**: Compare RaBitQ two-phase search at 500K/1M
+- **Different M values**: Trade-off between recall and build time
+- **Higher ef_construction**: Impact on recall at large scale
