@@ -96,6 +96,7 @@ dedicated vector databases or custom storage engines.
 | [Task 4.20](#task-420-parallel-re-ranking-threshold-tuning) | Parallel Threshold Tuning | ✅ Complete | `a146d02` |
 | [Task 4.21](#task-421-benchmark-infrastructure--threshold-update) | Benchmark Infrastructure + Threshold Update | ✅ Complete | `2358ba8` |
 | [Task 4.22](#task-422-large-scale-benchmarks-500k-1m) | Large-Scale Benchmarks (500K, 1M) | ✅ Complete | `4d73bf8` |
+| [Task 4.23](#task-423-multi-dataset-benchmark-infrastructure) | Multi-Dataset Benchmark Infrastructure | ✅ Complete | - |
 
 ### Other Sections
 
@@ -5397,6 +5398,135 @@ Results confirm O(log n) QPS scaling and sub-linear latency growth as expected f
 - [x] Scaling analysis across all scales
 
 **Documentation:** See [`BENCHMARK.md`](./BENCHMARK.md) for full results.
+
+---
+
+#### Task 4.23: Multi-Dataset Benchmark Infrastructure
+
+**Status:** ✅ Complete
+**Goal:** Extend `vector::benchmark` crate to support multiple datasets with integrated testing
+
+**Summary:**
+
+Ported SIFT dataset support from `examples/vector2` to `libs/db/src/vector/benchmark/` and added
+integration tests validating the complete search pipeline for both datasets.
+
+**Supported Datasets:**
+
+| Dataset | Dimensions | Distance | Format | Use Case |
+|---------|------------|----------|--------|----------|
+| LAION-CLIP | 512D | Cosine | NPY (float16) | RaBitQ, semantic search |
+| SIFT1M | 128D | L2/Euclidean | fvecs/ivecs | Standard HNSW, ANN benchmarks |
+
+**Features Implemented:**
+
+1. **SIFT Dataset Support** (`sift.rs`):
+   - `SiftDataset`: Load SIFT1M from HuggingFace
+   - `SiftSubset`: Create test subsets with ground truth
+   - `read_fvecs()`, `read_ivecs()`: Standard ANN benchmark formats
+   - L2 distance brute-force ground truth computation
+
+2. **Integration Tests** (`test_vector_benchmark_integration.rs`):
+   - SIFT: L2 + Exact HNSW + NavigationCache (90% recall at 1K)
+   - LAION-CLIP: Cosine + Exact HNSW + NavigationCache (87% recall at 1K)
+   - LAION-CLIP: Cosine + RaBitQ + BinaryCodeCache + NavigationCache + parallel rerank
+
+3. **Verified Claims:**
+
+   | Claim | Status | Notes |
+   |-------|--------|-------|
+   | 1. Both SIFT and LAION-CLIP supported | ✅ Verified | `vector::benchmark` exports both datasets |
+   | 2. SIFT uses L2/Euclidean distance | ✅ Verified | Default distance metric for SIFT |
+   | 3. LAION-CLIP uses Cosine distance | ✅ Verified | Supports both exact HNSW and RaBitQ modes |
+   | 4. Both leverage caching + parallel search | ✅ Verified | NavigationCache, BinaryCodeCache, adaptive rerank |
+
+**Test Results (1K synthetic data):**
+
+| Dataset | Distance | Search Mode | Recall@10 |
+|---------|----------|-------------|-----------|
+| SIFT | L2 | Exact HNSW + NavCache | 90.2% |
+| LAION-CLIP | Cosine | Exact HNSW + NavCache | 87.4% |
+| LAION-CLIP | Cosine | RaBitQ + BinaryCache + NavCache | 45.6%* |
+
+*RaBitQ at 1K scale with 1-bit quantization has high information loss. At production scale (100K+), recall improves significantly.
+
+**Note:** LAION-CLIP supports both search modes:
+- **Exact HNSW**: Higher recall, uses exact Cosine distance (M=32, ef_construction=200 for 512D)
+- **RaBitQ**: Faster search via Hamming pre-filtering, trades recall for speed
+
+**Files Changed:**
+
+| File | Purpose |
+|------|---------|
+| `benchmark/sift.rs` | NEW - SIFT dataset loading and fvecs/ivecs parsing |
+| `benchmark/mod.rs` | Updated - Export SIFT alongside LAION |
+| `tests/test_vector_benchmark_integration.rs` | NEW - Integration tests for both datasets |
+
+**Search Pipeline Verified:**
+
+```
+SIFT L2 Pipeline:
+  Query → HNSW Navigation (NavCache) → Beam Search L2 → Top-K Results
+
+LAION-CLIP RaBitQ Pipeline:
+  Query → Encode RaBitQ → HNSW Navigation (NavCache)
+        → Hamming Beam Search (BinaryCodeCache) → Candidates
+        → Adaptive Parallel Rerank (threshold: 3200) → Top-K Results
+```
+
+**Distance Metric & Search Mode Constraints:**
+
+| Search Mode | Cosine | L2 | DotProduct | Notes |
+|-------------|--------|-----|------------|-------|
+| Exact HNSW  | ✅ | ✅ | ✅ | All metrics supported via `Distance::compute()` |
+| RaBitQ      | ✅ | ❌ | ❌ | Enforced: "RaBitQ requires Cosine distance" |
+
+**Why RaBitQ requires Cosine (unit-normalized vectors):**
+
+1. **Sign quantization captures direction, not magnitude**
+   - Binary codes are sign bits of rotated vector components
+   - Works correctly when all vectors have unit norm
+   - Hamming distance ≈ angular distance for normalized vectors
+
+2. **L2 on unnormalized data loses magnitude information**
+   - Two vectors with same direction but different magnitudes → same binary code
+   - Hamming distance would incorrectly report them as identical
+
+3. **Code enforcement** (`search/config.rs:202-207`):
+   ```rust
+   pub fn rabitq(mut self) -> anyhow::Result<Self> {
+       if self.embedding.distance() != Distance::Cosine {
+           return Err(anyhow::anyhow!(
+               "RaBitQ requires Cosine distance (Hamming ≈ angular), got {:?}",
+               self.embedding.distance()
+           ));
+       }
+       // ...
+   }
+   ```
+
+**Parallel Reranking Threshold:**
+
+| Candidates | Sequential | Parallel | Speedup |
+|------------|------------|----------|---------|
+| 800        | 106.1ms    | 139.2ms  | 0.76x (overhead) |
+| 1600       | 188.3ms    | 205.8ms  | 0.91x (near equal) |
+| **3200**   | 414.4ms    | 319.3ms  | **1.30x** (crossover) |
+
+- `DEFAULT_PARALLEL_RERANK_THRESHOLD = 3200`
+- Below 3200: Sequential is faster (rayon overhead)
+- At/above 3200: Parallel wins (1.3x+ speedup)
+- Benchmarked on 512D LAION-CLIP, aarch64 NEON (January 2026)
+
+**Acceptance Criteria:**
+- [x] SIFT dataset ported to `vector::benchmark`
+- [x] fvecs/ivecs format readers implemented
+- [x] Integration test for SIFT + L2 + NavigationCache
+- [x] Integration test for LAION-CLIP + Cosine + Exact HNSW
+- [x] Integration test for LAION-CLIP + Cosine + RaBitQ + caches
+- [x] Claims 1-4 documented and verified
+- [x] Distance metric constraints documented (Exact: all, RaBitQ: Cosine only)
+- [x] Parallel reranking threshold documented (3200)
 
 ---
 
