@@ -13,7 +13,7 @@ use motlie_db::vector::benchmark::{
     compute_recall, SiftSubset, LaionSubset, SIFT_EMBEDDING_DIM, LAION_EMBEDDING_DIM,
 };
 use motlie_db::vector::{
-    BinaryCodeCache, Distance, HnswConfig, HnswIndex, NavigationCache, Storage, VecId,
+    hnsw, BinaryCodeCache, Distance, HnswIndex, NavigationCache, Storage, VecId,
     VectorStorageType,
 };
 use motlie_db::vector::quantization::RaBitQ;
@@ -116,7 +116,7 @@ fn build_index_with_navigation(
     let nav_cache = Arc::new(NavigationCache::new());
     let embedding_code = 1;
 
-    let config = HnswConfig {
+    let config = hnsw::Config {
         dim,
         m,
         m_max: m * 2,

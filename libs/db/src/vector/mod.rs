@@ -9,7 +9,8 @@
 //! ## Module Structure
 //!
 //! ### Core Types (flat)
-//! - `config.rs` - Configuration types (HnswConfig, RaBitQConfig, VectorConfig)
+//! - `config.rs` - Configuration types (RaBitQConfig, VectorConfig)
+//! - `hnsw/config.rs` - HNSW configuration (`hnsw::Config`)
 //! - `distance.rs` - Distance metrics (Cosine, L2, DotProduct)
 //! - `embedding.rs` - Embedding type and Embedder trait
 //! - `registry.rs` - EmbeddingRegistry for managing embedding spaces
@@ -91,20 +92,18 @@ pub mod search_config {
 }
 
 // Re-exports for public API
-// HnswConfig is re-exported from hnsw::Config for backward compatibility
-pub use hnsw::{Config as HnswConfig, ConfigWarning};
+pub use cache::{BinaryCodeCache, NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
 pub use config::{RaBitQConfig, RaBitQConfigWarning, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
-pub use hnsw::HnswIndex;
+pub use hnsw::{ConfigWarning, HnswIndex};
 pub use id::IdAllocator;
-pub use cache::{BinaryCodeCache, NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
 pub use processor::Processor;
 pub use quantization::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
-    ALL_COLUMN_FAMILIES, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode,
-    EmbeddingSpec, VecId, VectorCfKey, VectorCfValue, VectorStorageType, Vectors,
+    BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpec, VecId,
+    VectorCfKey, VectorCfValue, VectorStorageType, Vectors, ALL_COLUMN_FAMILIES,
 };
 pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
 
@@ -170,10 +169,22 @@ impl motlie_core::telemetry::SubsystemInfo for SystemInfo {
 
     fn info_lines(&self) -> Vec<(&'static str, String)> {
         vec![
-            ("Block Cache Size", format_bytes(self.block_cache_config.cache_size_bytes)),
-            ("Default Block Size", format_bytes(self.block_cache_config.default_block_size)),
-            ("Vector Block Size", format_bytes(self.block_cache_config.vector_block_size)),
-            ("Registry Prewarm", self.registry_config.prewarm_limit.to_string()),
+            (
+                "Block Cache Size",
+                format_bytes(self.block_cache_config.cache_size_bytes),
+            ),
+            (
+                "Default Block Size",
+                format_bytes(self.block_cache_config.default_block_size),
+            ),
+            (
+                "Vector Block Size",
+                format_bytes(self.block_cache_config.vector_block_size),
+            ),
+            (
+                "Registry Prewarm",
+                self.registry_config.prewarm_limit.to_string(),
+            ),
             ("Column Families", self.column_families.join(", ")),
         ]
     }
@@ -218,15 +229,15 @@ mod tests {
 
     #[test]
     fn test_hnsw_config_presets() {
-        let default = HnswConfig::default();
+        let default = hnsw::Config::default();
         assert_eq!(default.dim, 128);
         assert_eq!(default.m, 16);
 
-        let high_recall = HnswConfig::high_recall(768);
+        let high_recall = hnsw::Config::high_recall(768);
         assert_eq!(high_recall.dim, 768);
         assert_eq!(high_recall.m, 32);
 
-        let compact = HnswConfig::compact(768);
+        let compact = hnsw::Config::compact(768);
         assert_eq!(compact.dim, 768);
         assert_eq!(compact.m, 8);
     }
