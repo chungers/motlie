@@ -658,7 +658,7 @@ impl EmbeddingFilter {
 ### Configuration Types
 
 ```rust
-// HNSW index configuration
+// HNSW index configuration (also available as vector::hnsw::Config)
 pub struct HnswConfig {
     pub dim: usize,
     pub m: usize,
@@ -672,7 +672,7 @@ impl HnswConfig {
     pub fn for_dim(dim: usize) -> Self;  // Auto-tuned
     pub fn high_recall(dim: usize) -> Self;  // m=32, ef_construction=200
     pub fn compact(dim: usize) -> Self;      // m=8, ef_construction=50
-    pub fn validate(&self) -> Vec<ConfigWarning>;
+    pub fn validate(&self) -> Vec<hnsw::ConfigWarning>;
     pub fn is_valid(&self) -> bool;
 }
 
@@ -683,7 +683,7 @@ pub struct RaBitQConfig {
 }
 impl RaBitQConfig {
     pub fn code_size(&self, dim: usize) -> usize;
-    pub fn validate(&self) -> Vec<ConfigWarning>;
+    pub fn validate(&self) -> Vec<RaBitQConfigWarning>;
     pub fn is_valid(&self) -> bool;
 }
 
