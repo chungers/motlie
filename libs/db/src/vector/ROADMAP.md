@@ -5,7 +5,9 @@
 **Scope:** `libs/db/src/vector` - Vector Search Module
 **Status:** Phase 4 Complete, Phase 5-6 Remaining
 
-**Benchmark Documentation:** See [`BENCHMARK.md`](./BENCHMARK.md) for detailed performance results and configuration reference.
+**Documentation:**
+- [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
+- [`BENCHMARK.md`](./BENCHMARK.md) - Performance results and configuration reference
 
 ---
 
@@ -17,7 +19,7 @@ while prioritizing simplicity, correctness, and RocksDB integration over raw thr
 
 ### Achieved Metrics (Phase 4 Complete)
 
-Benchmarks on LAION-CLIP 512D embeddings (aarch64 NEON). See [`BENCHMARK.md`](./BENCHMARK.md) for details.
+Benchmarks on LAION-CLIP 512D embeddings (aarch64 NEON). See [`BENCHMARK.md`](./BENCHMARK.md) for details and [`API.md`](./API.md) for usage.
 
 | Metric | Achieved | Notes |
 |--------|----------|-------|
