@@ -1,6 +1,6 @@
-//! Integration tests for StorageBuilder with graph and vector components.
+//! Integration tests for StorageBuilder with graph and vector subsystems.
 //!
-//! These tests verify that graph::component() and vector::component() can share
+//! These tests verify that graph::Subsystem and vector::Subsystem can share
 //! a single RocksDB TransactionDB instance via StorageBuilder.
 
 use motlie_db::graph;
@@ -8,13 +8,13 @@ use motlie_db::storage_builder::{CacheConfig, SharedStorage, StorageBuilder};
 use motlie_db::vector;
 use tempfile::TempDir;
 
-/// Helper to create a shared storage with both graph and vector components
+/// Helper to create a shared storage with both graph and vector subsystems
 fn create_shared_storage(temp_dir: &TempDir) -> SharedStorage {
     let db_path = temp_dir.path().join("shared_db");
 
     StorageBuilder::new(&db_path)
-        .with_component(Box::new(graph::component()))
-        .with_component(Box::new(vector::component()))
+        .with_rocksdb(Box::new(graph::Subsystem::new()))
+        .with_rocksdb(Box::new(vector::Subsystem::new()))
         .with_cache_size(64 * 1024 * 1024) // 64MB for tests
         .build()
         .expect("Failed to build shared storage")
@@ -25,7 +25,7 @@ fn test_shared_storage_creation() {
     let temp_dir = TempDir::new().unwrap();
     let storage = create_shared_storage(&temp_dir);
 
-    // Verify both components are registered
+    // Verify both subsystems are registered (using RocksdbSubsystem::id())
     assert!(storage.get_component("graph").is_some());
     assert!(storage.get_component("vector").is_some());
 
@@ -147,17 +147,17 @@ fn test_shared_storage_cf_names_list() {
 }
 
 #[test]
-fn test_graph_component_name_cache_accessible() {
+fn test_graph_subsystem_name_cache_accessible() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("shared_db");
 
-    // Create component and get reference to its cache before boxing
-    let graph_component = graph::component();
-    let name_cache = graph_component.cache().clone();
+    // Create subsystem and get reference to its cache before boxing
+    let graph_subsystem = graph::Subsystem::new();
+    let name_cache = graph_subsystem.cache().clone();
 
     let storage = StorageBuilder::new(&db_path)
-        .with_component(Box::new(graph_component))
-        .with_component(Box::new(vector::component()))
+        .with_rocksdb(Box::new(graph_subsystem))
+        .with_rocksdb(Box::new(vector::Subsystem::new()))
         .build()
         .expect("Failed to build shared storage");
 
@@ -169,17 +169,17 @@ fn test_graph_component_name_cache_accessible() {
 }
 
 #[test]
-fn test_vector_component_registry_accessible() {
+fn test_vector_subsystem_registry_accessible() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("shared_db");
 
-    // Create component and get reference to its registry before boxing
-    let vector_component = vector::component();
-    let registry = vector_component.cache().clone();
+    // Create subsystem and get reference to its registry before boxing
+    let vector_subsystem = vector::Subsystem::new();
+    let registry = vector_subsystem.cache().clone();
 
     let storage = StorageBuilder::new(&db_path)
-        .with_component(Box::new(graph::component()))
-        .with_component(Box::new(vector_component))
+        .with_rocksdb(Box::new(graph::Subsystem::new()))
+        .with_rocksdb(Box::new(vector_subsystem))
         .build()
         .expect("Failed to build shared storage");
 
@@ -201,7 +201,7 @@ fn test_cache_config_applied() {
     };
 
     let storage = StorageBuilder::new(&db_path)
-        .with_component(Box::new(graph::component()))
+        .with_rocksdb(Box::new(graph::Subsystem::new()))
         .with_cache_config(config)
         .build()
         .expect("Failed to build storage");
@@ -230,7 +230,7 @@ fn test_storage_path() {
     let db_path = temp_dir.path().join("my_shared_db");
 
     let storage = StorageBuilder::new(&db_path)
-        .with_component(Box::new(graph::component()))
+        .with_rocksdb(Box::new(graph::Subsystem::new()))
         .build()
         .expect("Failed to build storage");
 
@@ -238,13 +238,13 @@ fn test_storage_path() {
 }
 
 #[test]
-fn test_single_provider_works() {
+fn test_single_subsystem_works() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("graph_only_db");
 
     // Graph only
     let storage = StorageBuilder::new(&db_path)
-        .with_component(Box::new(graph::component()))
+        .with_rocksdb(Box::new(graph::Subsystem::new()))
         .build()
         .expect("Failed to build storage");
 
@@ -263,7 +263,7 @@ fn test_vector_only_works() {
 
     // Vector only
     let storage = StorageBuilder::new(&db_path)
-        .with_component(Box::new(vector::component()))
+        .with_rocksdb(Box::new(vector::Subsystem::new()))
         .build()
         .expect("Failed to build storage");
 

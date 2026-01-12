@@ -82,13 +82,6 @@ pub type Storage = crate::rocksdb::Storage<Subsystem>;
 /// BlockCacheConfig re-export (alias to GraphBlockCacheConfig for backwards compat)
 pub type BlockCacheConfig = GraphBlockCacheConfig;
 
-/// Component type for use with StorageBuilder
-pub type Component = crate::rocksdb::ComponentWrapper<Subsystem>;
-
-/// Convenience constructor for graph component
-pub fn component() -> Component {
-    Component::new()
-}
 pub use writer::{
     // Mutation consumer functions
     create_mutation_consumer,
@@ -105,7 +98,6 @@ pub use writer::{
 };
 
 // Internal imports
-use schema::ALL_COLUMN_FAMILIES;
 use writer::Processor;
 
 
@@ -119,74 +111,7 @@ pub(crate) trait ValidRangePatchable {
     ) -> Result<Vec<u8>, anyhow::Error>;
 }
 
-// ============================================================================
-// SystemInfo - Telemetry
-// ============================================================================
-
-/// Static configuration info for the graph database subsystem.
-///
-/// Used by the `motlie info` command to display graph DB settings.
-/// Implements [`motlie_core::telemetry::SubsystemInfo`] for consistent formatting.
-///
-/// # Example
-///
-/// ```ignore
-/// use motlie_db::graph::SystemInfo;
-/// use motlie_core::telemetry::{format_subsystem_info, SubsystemInfo};
-///
-/// let info = SystemInfo::default();
-/// println!("{}", format_subsystem_info(&info));
-/// ```
-#[derive(Debug, Clone)]
-pub struct SystemInfo {
-    /// Block cache configuration
-    pub block_cache_config: BlockCacheConfig,
-    /// Name cache configuration
-    pub name_cache_config: NameCacheConfig,
-    /// List of column families
-    pub column_families: Vec<&'static str>,
-}
-
-impl Default for SystemInfo {
-    fn default() -> Self {
-        Self {
-            block_cache_config: BlockCacheConfig::default(),
-            name_cache_config: NameCacheConfig::default(),
-            column_families: ALL_COLUMN_FAMILIES.to_vec(),
-        }
-    }
-}
-
-impl motlie_core::telemetry::SubsystemInfo for SystemInfo {
-    fn name(&self) -> &'static str {
-        "Graph Database (RocksDB)"
-    }
-
-    fn info_lines(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("Block Cache Size", format_bytes(self.block_cache_config.cache_size_bytes)),
-            ("Graph Block Size", format_bytes(self.block_cache_config.graph_block_size)),
-            ("Fragment Block Size", format_bytes(self.block_cache_config.fragment_block_size)),
-            ("Cache Index/Filter", self.block_cache_config.cache_index_and_filter_blocks.to_string()),
-            ("Pin L0 Blocks", self.block_cache_config.pin_l0_filter_and_index.to_string()),
-            ("Name Cache Prewarm", self.name_cache_config.prewarm_limit.to_string()),
-            ("Column Families", self.column_families.join(", ")),
-        ]
-    }
-}
-
-/// Format a byte count as a human-readable string.
-fn format_bytes(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 * 1024 {
-        format!("{} GB", bytes / (1024 * 1024 * 1024))
-    } else if bytes >= 1024 * 1024 {
-        format!("{} MB", bytes / (1024 * 1024))
-    } else if bytes >= 1024 {
-        format!("{} KB", bytes / 1024)
-    } else {
-        format!("{} B", bytes)
-    }
-}
+// Note: SystemInfo functionality is now in Subsystem which implements SubsystemInfo
 
 // ============================================================================
 // Graph - Mutation Processor

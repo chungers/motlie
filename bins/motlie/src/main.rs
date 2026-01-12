@@ -43,12 +43,16 @@ fn main() {
             println!("{}", BuildInfo::current().detailed());
 
             // Graph database subsystem info
-            let graph_info = motlie_db::graph::SystemInfo::default();
-            println!("{}", format_subsystem_info(&graph_info));
+            let graph_subsystem = motlie_db::graph::Subsystem::new();
+            println!("{}", format_subsystem_info(&graph_subsystem));
+
+            // Vector database subsystem info
+            let vector_subsystem = motlie_db::vector::Subsystem::new();
+            println!("{}", format_subsystem_info(&vector_subsystem));
 
             // Fulltext search subsystem info
-            let fulltext_info = motlie_db::fulltext::SystemInfo::default();
-            println!("{}", format_subsystem_info(&fulltext_info));
+            let fulltext_schema = motlie_db::fulltext::Schema::new();
+            println!("{}", format_subsystem_info(&fulltext_schema));
         }
         Commands::Db(args) => {
             tracing::info!("starting");
