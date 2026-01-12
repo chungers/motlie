@@ -179,7 +179,33 @@ const fn to_gray_code(n: u8) -> u8 {
 
 *Note: Absolute recall is lower due to random dataset (vs LAION-CLIP). Key metric is relative ordering.*
 
-**Verification:** Recall now **increases** with more bits (2-bit > 1-bit), confirming Gray code fix is working.
+**Verification (Random Data):** Recall now **increases** with more bits (2-bit > 1-bit), confirming Gray code encoding is correct.
+
+#### Extended Verification: LAION-CLIP 512D
+
+| Bits | Recall@10 (rerank=10) | Status |
+|------|----------------------|--------|
+| 1-bit | **43.5%** | Baseline |
+| 2-bit | 24.2% | ❌ Worse than 1-bit |
+| 4-bit | 11.4% | ❌ Much worse than 1-bit |
+
+**Key Insight:** Gray code fixes the **local** Hamming distance problem (adjacent levels differ by 1 bit), but multi-bit quantization + symmetric Hamming distance has a **fundamental limitation**:
+
+| 4-bit Levels | Gray Code | Hamming Distance | Value Difference |
+|--------------|-----------|------------------|------------------|
+| 0 → 1 | 0000 → 0001 | 1 | 1 |
+| 0 → 8 | 0000 → 1100 | 2 | 8 |
+| 0 → 15 | 0000 → 1000 | **1** | **15** |
+
+Distant quantization levels can have **lower** Hamming distance than nearby levels, corrupting the similarity measure. This explains why:
+- **Random data** (uniformly distributed): Gray code helps
+- **LAION-CLIP** (semantically clustered): Multi-bit makes recall worse
+
+**Conclusion:**
+- Gray code implementation is **correct** for the stated issue #43
+- However, symmetric Hamming distance is **fundamentally unsuited** for multi-bit quantization
+- **Recommendation:** Use 1-bit quantization for RaBitQ (mathematically sound: sign bits ≈ angular distance)
+- For multi-bit precision gains, use **asymmetric distance** (ADC) or **product quantization** instead
 
 #### References
 

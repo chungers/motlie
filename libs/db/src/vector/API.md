@@ -282,14 +282,19 @@ let results = index.search_with_rabitq_cached(
 
 | Parameter | Value | Effect |
 |-----------|-------|--------|
-| `bits_per_dim` | 1 | 32x compression, ~50% recall (no rerank) |
-| `bits_per_dim` | 2 | 16x compression, ~65% recall (no rerank) |
-| `bits_per_dim` | 4 | 8x compression, ~80% recall (no rerank) |
+| `bits_per_dim` | 1 | 32x compression, **recommended** for Hamming search |
+| `bits_per_dim` | 2 | 16x compression, not recommended (see note) |
+| `bits_per_dim` | 4 | 8x compression, not recommended (see note) |
 | `rerank_factor` | 4-20 | Higher = better recall, more I/O |
 
-> **Note:** Multi-bit modes (2-bit, 4-bit) use Gray code encoding to ensure adjacent
-> quantization levels have Hamming distance 1. This is essential for correct distance
-> semantics. See Issue #43 for details.
+> **Important:** While 2-bit and 4-bit modes use Gray code encoding (Issue #43), symmetric
+> Hamming distance is fundamentally unsuited for multi-bit quantization. On structured data
+> like LAION-CLIP, multi-bit modes achieve **worse** recall than 1-bit. This is because
+> distant quantization levels can have lower Hamming distance than nearby levels.
+>
+> **Recommendation:** Use 1-bit mode for RaBitQ. For higher precision, increase `rerank_factor`
+> rather than using more bits. Sign-based (1-bit) quantization directly approximates angular
+> distance for unit vectors, which is mathematically sound.
 
 ### Search Configuration
 
