@@ -3,7 +3,7 @@
 **Author:** David Chung + Claude
 **Date:** January 2, 2026 (Updated: January 10, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Phase 4 Complete, Phase 5-6 Remaining
+**Status:** Phase 4 Complete, Phase 5-8 Remaining
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
@@ -73,8 +73,10 @@ dedicated vector databases or custom storage engines.
 | [Phase 2](#phase-2-hnsw2-core--navigation-layer--core-complete) | HNSW2 Core + Navigation Layer | ✅ Complete |
 | [Phase 3](#phase-3-batch-operations--deferred-items) | Batch Operations + Deferred Items | ✅ Complete |
 | [Phase 4](#phase-4-rabitq-compression) | RaBitQ Compression + Optimization | ✅ Complete |
-| [Phase 5](#phase-5-async-graph-updater-online-updates) | Async Graph Updater (Online Updates) | 🔲 Not Started |
-| [Phase 6](#phase-6-production-hardening) | Production Hardening | 🔲 Not Started |
+| [Phase 5](#phase-5-internal-mutationquery-api) | Internal Mutation/Query API | 🔲 Not Started |
+| [Phase 6](#phase-6-mpscmpmc-public-api) | MPSC/MPMC Public API | 🔲 Not Started |
+| [Phase 7](#phase-7-async-graph-updater) | Async Graph Updater | 🔲 Not Started |
+| [Phase 8](#phase-8-production-hardening) | Production Hardening | 🔲 Not Started |
 
 ### Phase 4 Tasks (Current)
 
@@ -228,16 +230,20 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  ├── 4.19-4.20 Parallel reranking (rayon) + threshold tuning ✓             │
 │  └── Files: rabitq.rs, search_config.rs, parallel.rs, navigation.rs        │
 │                                                                              │
-│  Phase 5: Async Graph Updater [NOT STARTED]                                  │
-│  ├── 5.1-5.5 Pending queue, async workers, crash recovery                  │
+│  Phase 5: Internal Mutation/Query API [NOT STARTED]                          │
+│  ├── 5.1-5.7 Processor methods, Storage search, dispatch logic             │
+│  └── Goal: Complete internal API for insert/delete/search                  │
+│                                                                              │
+│  Phase 6: MPSC/MPMC Public API [NOT STARTED]                                 │
+│  ├── 6.1-6.6 MutationExecutor, Consumer, Reader, spawn functions           │
+│  └── Goal: Channel-based wrappers matching graph/fulltext patterns         │
+│                                                                              │
+│  Phase 7: Async Graph Updater [NOT STARTED]                                  │
+│  ├── 7.1-7.5 Pending queue, async workers, crash recovery                  │
 │  └── Goal: Online updates without blocking search                          │
 │                                                                              │
-│  Phase 5.5: MPSC/MPMC API Infrastructure [NOT STARTED]                       │
-│  ├── 5.5.1-5.5.6 Mutation/Query executors, consumers, readers              │
-│  └── Goal: Consistent API matching graph/fulltext patterns                 │
-│                                                                              │
-│  Phase 6: Production Hardening [NOT STARTED]                                 │
-│  ├── 6.1-6.3 Delete support, concurrency, 1B validation                    │
+│  Phase 8: Production Hardening [NOT STARTED]                                 │
+│  ├── 8.1-8.3 Delete refinement, concurrency, 1B validation                 │
 │  └── Goal: Production-ready at scale                                        │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -5916,992 +5922,609 @@ fn test_data1_compliance_no_training() {
 
 ---
 
-## Phase 5: Async Graph Updater (Online Updates)
+## Phase 5: Internal Mutation/Query API
 
-**Goal:** Decouple insert latency from graph quality per [LAT-4, LAT-5].
+**Goal:** Complete the internal API for vector storage operations (insert, delete, search, embedding management).
 
-**Design Reference:** `examples/vector/HYBRID.md` - Async Graph Updater
+**Motivation:** Before wrapping with MPSC/MPMC channels (Phase 6), we need working internal APIs
+that the channel consumers will call. This mirrors how graph:: and fulltext:: have internal
+Processor methods that their consumers invoke.
 
-### Overview: Two-Phase Insert Pattern
-
-Online updates use a **two-phase pattern** to achieve low insert latency while
-maintaining graph quality:
+### Overview: Internal API Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                     Two-Phase Insert Pattern                                 │
+│                     Internal API Architecture                                │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
-│  Phase 1: Sync Write (< 5ms)                                                │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │ 1. Allocate internal u32 ID                                            │ │
-│  │ 2. Store ID mappings (ULID <-> u32)                                    │ │
-│  │ 3. Store vector in vector/vectors CF                                   │ │
-│  │ 4. Store binary code in vector/binary_codes CF (if RaBitQ enabled)     │ │
-│  │ 5. Add to pending queue (vector/pending CF)                            │ │
-│  │ 6. Return success immediately                                          │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-│                              │                                               │
-│                              ▼                                               │
-│  Phase 2: Async Graph Update (background, batched)                          │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │ 1. Batch pending vectors (e.g., every 100 vectors or 100ms)            │ │
-│  │ 2. For each vector: greedy search to find neighbors                    │ │
-│  │ 3. Add bidirectional edges (merge operator)                            │ │
-│  │ 4. Prune over-connected nodes if needed                                │ │
-│  │ 5. Remove from pending queue                                           │ │
-│  │ 6. Update graph metadata (entry point if needed)                       │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
+│  Mutation Path:                                                              │
+│  ┌────────────┐     ┌────────────┐     ┌────────────┐                       │
+│  │ Mutation   │ ──► │ Processor  │ ──► │ RocksDB    │                       │
+│  │ (enum)     │     │ (methods)  │     │ (CFs)      │                       │
+│  └────────────┘     └────────────┘     └────────────┘                       │
+│                                                                              │
+│  Query Path:                                                                 │
+│  ┌────────────┐     ┌────────────┐     ┌────────────┐                       │
+│  │ Query      │ ──► │ Storage    │ ──► │ RocksDB    │                       │
+│  │ (enum)     │     │ (methods)  │     │ + HNSW     │                       │
+│  └────────────┘     └────────────┘     └────────────┘                       │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Searchability Before Graph Edges
+### Task 5.1: Processor::insert_vector()
 
-**Key Insight:** Vectors are searchable immediately after Phase 1, even before
-graph edges are added. Here's how:
-
-1. **Brute-force fallback for new vectors**: If a vector has no edges yet,
-   it can still be found via the entry point's neighborhood expansion
-
-2. **Binary code availability**: RaBitQ binary codes are stored in Phase 1,
-   enabling approximate distance computation for candidate filtering
-
-3. **Eventually consistent**: Graph edges are added within milliseconds to seconds,
-   so the window of reduced connectivity is brief
+Implement the core vector insertion logic:
 
 ```rust
-impl VectorStorage {
-    /// Insert with async graph update (low latency)
-    pub fn insert_async(
-        &self,
-        code: &Embedding,
-        ulid: Id,
-        vector: &[f32],
-    ) -> Result<()> {
-        // Phase 1: Sync writes (fast)
-        let internal_id = self.allocate_id(code)?;
-        self.store_id_mappings(code, ulid, internal_id)?;
-        self.store_vector(code, internal_id, vector)?;
+// libs/db/src/vector/processor.rs
 
-        if let Some(rabitq) = self.get_rabitq(code) {
-            let binary_code = rabitq.encode(vector);
-            self.store_binary_code(code, internal_id, &binary_code)?;
+impl Processor {
+    /// Insert a single vector into an embedding space.
+    ///
+    /// Steps:
+    /// 1. Allocate internal u32 ID
+    /// 2. Store ULID <-> u32 mappings (IdForward, IdReverse)
+    /// 3. Store vector data (Vectors CF)
+    /// 4. Store vector metadata (VecMeta CF)
+    /// 5. Encode and store binary code if RaBitQ enabled (BinaryCodes CF)
+    /// 6. Build HNSW graph connections (Edges CF)
+    /// 7. Update graph metadata if needed (GraphMeta CF)
+    pub fn insert_vector(
+        &self,
+        embedding: EmbeddingCode,
+        id: Id,
+        vector: &[f32],
+        build_graph: bool,
+    ) -> Result<VecId> {
+        // Validate embedding exists
+        let spec = self.registry.get(embedding)
+            .ok_or_else(|| anyhow!("Unknown embedding: {}", embedding))?;
+
+        // Validate dimension
+        if vector.len() != spec.dim as usize {
+            return Err(anyhow!(
+                "Dimension mismatch: expected {}, got {}",
+                spec.dim, vector.len()
+            ));
         }
 
-        // Add to pending queue for async graph update
-        self.add_to_pending(code, internal_id)?;
+        let txn = self.db.transaction();
 
-        Ok(())  // Return immediately
+        // 1. Allocate internal ID
+        let vec_id = self.id_allocator.allocate(&txn, embedding)?;
+
+        // 2. Store ID mappings
+        self.store_id_mappings(&txn, embedding, id, vec_id)?;
+
+        // 3. Store vector
+        self.store_vector(&txn, embedding, vec_id, vector)?;
+
+        // 4. Store metadata
+        self.store_vec_meta(&txn, embedding, vec_id, VecMeta::new())?;
+
+        // 5. Store binary code if RaBitQ enabled
+        if let Some(rabitq) = self.get_rabitq(embedding) {
+            let code = rabitq.encode(vector);
+            self.store_binary_code(&txn, embedding, vec_id, &code)?;
+        }
+
+        // 6. Build graph connections (optional - can be deferred)
+        if build_graph {
+            self.build_graph_connections(&txn, embedding, vec_id, vector, spec.distance)?;
+        }
+
+        txn.commit()?;
+        Ok(vec_id)
     }
+}
+```
 
-    /// Insert with sync graph update (higher latency, immediate connectivity)
-    pub fn insert_sync(
+### Task 5.2: Processor::delete_vector()
+
+Implement vector deletion:
+
+```rust
+impl Processor {
+    /// Delete a vector from an embedding space.
+    ///
+    /// Steps:
+    /// 1. Look up internal vec_id from external ID
+    /// 2. Mark as deleted in VecMeta (for search filtering)
+    /// 3. Remove ID mappings
+    /// 4. Remove vector data
+    /// 5. Remove binary code
+    /// 6. Return ID to free list
+    /// 7. Edges cleaned up lazily (merge operator handles stale refs)
+    pub fn delete_vector(
         &self,
-        code: &Embedding,
-        ulid: Id,
-        vector: &[f32],
+        embedding: EmbeddingCode,
+        id: Id,
     ) -> Result<()> {
-        // Phase 1: Same as async
-        let internal_id = self.allocate_id(code)?;
-        self.store_id_mappings(code, ulid, internal_id)?;
-        self.store_vector(code, internal_id, vector)?;
+        let txn = self.db.transaction();
 
-        if let Some(rabitq) = self.get_rabitq(code) {
-            let binary_code = rabitq.encode(vector);
-            self.store_binary_code(code, internal_id, &binary_code)?;
-        }
+        // 1. Look up internal ID
+        let vec_id = self.get_internal_id(&txn, embedding, id)?
+            .ok_or_else(|| anyhow!("Vector not found: {}", id))?;
 
-        // Phase 2: Sync graph update (blocking)
-        self.build_graph_connections(code, internal_id, vector)?;
+        // 2. Mark as deleted (search will filter)
+        self.mark_deleted(&txn, embedding, vec_id)?;
 
+        // 3. Remove ID mappings
+        self.remove_id_mappings(&txn, embedding, id, vec_id)?;
+
+        // 4. Remove vector data
+        self.remove_vector(&txn, embedding, vec_id)?;
+
+        // 5. Remove binary code
+        self.remove_binary_code(&txn, embedding, vec_id)?;
+
+        // 6. Return ID to free list
+        self.id_allocator.free(&txn, embedding, vec_id)?;
+
+        // 7. Edges: lazily cleaned via merge operator
+        // No explicit edge removal needed
+
+        txn.commit()?;
         Ok(())
     }
-}
-```
 
-### Task 5.1: Pending Queue CF
-
-The pending queue tracks vectors awaiting graph integration:
-
-```rust
-// libs/db/src/vector/schema.rs
-
-/// Pending inserts queue
-/// Key: [embedding: u64] + [timestamp: u64] + [vec_id: u32] = 20 bytes
-/// Value: empty (vector already stored in vector/vectors)
-///
-/// Key structure ensures:
-/// - Namespace isolation via embedding prefix
-/// - FIFO ordering via timestamp
-/// - Efficient batch collection via prefix scan
-/// Uses ColumnFamily base trait only (key-only CF, no value serde needed)
-pub struct PendingInserts;
-
-impl ColumnFamily for PendingInserts {
-    const CF_NAME: &'static str = cf::PENDING;  // "vector/pending"
-}
-
-impl PendingInserts {
-    pub fn make_key(code: &Embedding, timestamp: u64, vec_id: u32) -> Vec<u8> {
-        let mut key = Vec::with_capacity(20);  // u64 + u64 + u32
-        key.extend_from_slice(&code.to_be_bytes());       // 8 bytes
-        key.extend_from_slice(&timestamp.to_be_bytes());  // 8 bytes (BE for ordering)
-        key.extend_from_slice(&vec_id.to_be_bytes());    // 4 bytes
-        key
-    }
-
-    pub fn parse_key(key: &[u8]) -> (Embedding, u64, u32) {
-        let code = Embedding::from_id(u64::from_be_bytes(key[0..8].try_into().unwrap()));
-        let timestamp = u64::from_be_bytes(key[8..16].try_into().unwrap());
-        let vec_id = u32::from_be_bytes(key[16..20].try_into().unwrap());
-        (code, timestamp, vec_id)
+    /// Check if a vector is marked as deleted.
+    pub fn is_deleted(&self, embedding: EmbeddingCode, vec_id: VecId) -> Result<bool> {
+        let meta = self.get_vec_meta(embedding, vec_id)?;
+        Ok(meta.map_or(true, |m| m.is_deleted()))
     }
 }
 ```
 
-### Task 5.2: Async Updater Configuration
+### Task 5.3: Processor::insert_batch()
+
+Batch insert for efficiency:
 
 ```rust
-// libs/db/src/vector/async_updater.rs
-
-/// Configuration for the async graph updater
-#[derive(Debug, Clone)]
-pub struct AsyncUpdaterConfig {
-    /// Maximum vectors per batch
-    pub batch_size: usize,          // Default: 100
-
-    /// Maximum time to wait for batch to fill
-    pub batch_timeout: Duration,    // Default: 100ms
-
-    /// Number of worker threads
-    pub num_workers: usize,         // Default: 2
-
-    /// ef_construction for greedy search
-    pub ef_construction: usize,     // Default: 200
-
-    /// Whether to process on startup (drain pending queue)
-    pub process_on_startup: bool,   // Default: true
-}
-
-impl Default for AsyncUpdaterConfig {
-    fn default() -> Self {
-        Self {
-            batch_size: 100,
-            batch_timeout: Duration::from_millis(100),
-            num_workers: 2,
-            ef_construction: 200,
-            process_on_startup: true,
-        }
-    }
-}
-```
-
-### Task 5.3: Async Updater Implementation
-
-```rust
-// libs/db/src/vector/async_updater.rs
-
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
-
-/// Background graph updater
-pub struct AsyncGraphUpdater {
-    storage: Arc<VectorStorage>,
-    config: AsyncUpdaterConfig,
-    shutdown: Arc<AtomicBool>,
-    workers: Vec<JoinHandle<()>>,
-}
-
-impl AsyncGraphUpdater {
-    /// Start the async updater with worker threads
-    pub fn start(storage: Arc<VectorStorage>, config: AsyncUpdaterConfig) -> Self {
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let num_workers = config.num_workers;
-
-        // Drain pending queue on startup if configured
-        if config.process_on_startup {
-            Self::drain_pending(&storage, &config);
+impl Processor {
+    /// Batch insert multiple vectors.
+    ///
+    /// More efficient than individual inserts:
+    /// - Single transaction for all vectors
+    /// - Batched ID allocation
+    /// - Batched RocksDB writes
+    pub fn insert_batch(
+        &self,
+        embedding: EmbeddingCode,
+        vectors: &[(Id, Vec<f32>)],
+        build_graph: bool,
+    ) -> Result<Vec<VecId>> {
+        if vectors.is_empty() {
+            return Ok(vec![]);
         }
 
-        // Spawn worker threads
-        let workers: Vec<_> = (0..num_workers)
-            .map(|worker_id| {
-                let storage = Arc::clone(&storage);
-                let config = config.clone();
-                let shutdown = Arc::clone(&shutdown);
+        let spec = self.registry.get(embedding)
+            .ok_or_else(|| anyhow!("Unknown embedding: {}", embedding))?;
 
-                thread::spawn(move || {
-                    Self::worker_loop(worker_id, storage, config, shutdown);
-                })
-            })
-            .collect();
+        let txn = self.db.transaction();
+        let mut vec_ids = Vec::with_capacity(vectors.len());
 
-        Self { storage, config, shutdown, workers }
-    }
-
-    /// Graceful shutdown
-    pub fn shutdown(self) {
-        self.shutdown.store(true, Ordering::SeqCst);
-        for worker in self.workers {
-            let _ = worker.join();
-        }
-    }
-
-    fn worker_loop(
-        worker_id: usize,
-        storage: Arc<VectorStorage>,
-        config: AsyncUpdaterConfig,
-        shutdown: Arc<AtomicBool>,
-    ) {
-        log::info!("Async updater worker {} started", worker_id);
-
-        loop {
-            if shutdown.load(Ordering::Relaxed) {
-                break;
+        for (id, vector) in vectors {
+            // Validate dimension
+            if vector.len() != spec.dim as usize {
+                return Err(anyhow!("Dimension mismatch for {}", id));
             }
 
-            // Collect a batch of pending inserts
-            let batch = Self::collect_batch(&storage, &config);
+            let vec_id = self.id_allocator.allocate(&txn, embedding)?;
+            self.store_id_mappings(&txn, embedding, *id, vec_id)?;
+            self.store_vector(&txn, embedding, vec_id, vector)?;
+            self.store_vec_meta(&txn, embedding, vec_id, VecMeta::new())?;
 
-            if batch.is_empty() {
-                // No work, sleep briefly
-                thread::sleep(Duration::from_millis(10));
+            if let Some(rabitq) = self.get_rabitq(embedding) {
+                let code = rabitq.encode(vector);
+                self.store_binary_code(&txn, embedding, vec_id, &code)?;
+            }
+
+            vec_ids.push(vec_id);
+        }
+
+        // Build graph connections after all vectors stored
+        if build_graph {
+            for (i, vec_id) in vec_ids.iter().enumerate() {
+                let vector = &vectors[i].1;
+                self.build_graph_connections(&txn, embedding, *vec_id, vector, spec.distance)?;
+            }
+        }
+
+        txn.commit()?;
+        Ok(vec_ids)
+    }
+}
+```
+
+### Task 5.4: Storage::search()
+
+Implement search with external ID resolution:
+
+```rust
+// libs/db/src/vector/storage.rs (or hnsw.rs)
+
+impl Storage {
+    /// Search for k nearest neighbors.
+    ///
+    /// Returns results with external IDs (not internal vec_ids).
+    pub fn search(
+        &self,
+        embedding: EmbeddingCode,
+        query: &[f32],
+        k: usize,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchResult>> {
+        // Get embedding spec
+        let spec = self.registry.get(embedding)
+            .ok_or_else(|| anyhow!("Unknown embedding: {}", embedding))?;
+
+        // Validate query dimension
+        if query.len() != spec.dim as usize {
+            return Err(anyhow!(
+                "Query dimension mismatch: expected {}, got {}",
+                spec.dim, query.len()
+            ));
+        }
+
+        // Perform HNSW search (returns vec_ids)
+        let internal_results = self.hnsw_search(embedding, query, k, config)?;
+
+        // Resolve to external IDs, filtering deleted
+        let mut results = Vec::with_capacity(internal_results.len());
+        for (distance, vec_id) in internal_results {
+            // Skip deleted vectors
+            if self.is_deleted(embedding, vec_id)? {
                 continue;
             }
 
-            log::debug!("Worker {} processing batch of {} vectors", worker_id, batch.len());
-
-            // Process each vector in the batch
-            for (code, vec_id) in &batch {
-                if let Err(e) = Self::process_insert(&storage, &config, code, *vec_id) {
-                    log::error!("Failed to process insert for node {}: {}", vec_id, e);
-                    // Continue with next - don't fail entire batch
-                }
-            }
-
-            // Remove processed items from pending queue
-            Self::clear_processed(&storage, &batch);
-        }
-
-        log::info!("Async updater worker {} stopped", worker_id);
-    }
-
-    fn collect_batch(
-        storage: &VectorStorage,
-        config: &AsyncUpdaterConfig,
-    ) -> Vec<(Embedding, u32)> {
-        let cf = storage.db.cf_handle(cf::PENDING).unwrap();
-        let mut batch = Vec::with_capacity(config.batch_size);
-        let deadline = Instant::now() + config.batch_timeout;
-
-        // Scan pending queue (ordered by timestamp)
-        let iter = storage.db.iterator_cf(cf, rocksdb::IteratorMode::Start);
-
-        for item in iter {
-            if batch.len() >= config.batch_size {
-                break;
-            }
-            if Instant::now() > deadline {
-                break;
-            }
-
-            if let Ok((key, _)) = item {
-                let (code, _timestamp, vec_id) = PendingInserts::parse_key(&key);
-                batch.push((code, vec_id));
+            // Resolve to external ID
+            if let Some(external_id) = self.get_external_id(embedding, vec_id)? {
+                results.push(SearchResult {
+                    distance,
+                    id: external_id,
+                    vec_id, // Include for debugging/advanced use
+                });
             }
         }
 
-        batch
-    }
-
-    fn process_insert(
-        storage: &VectorStorage,
-        config: &AsyncUpdaterConfig,
-        code: &Embedding,
-        vec_id: u32,
-    ) -> Result<()> {
-        // 1. Load the vector
-        let vector = storage.get_vector(code, vec_id)?
-            .ok_or_else(|| anyhow!("Vector not found for pending node {}", vec_id))?;
-
-        // 2. Determine layer for this node
-        let level = storage.get_node_level(code, vec_id)?;
-
-        // 3. Get entry point
-        let entry_point = storage.get_entry_point(code)?;
-
-        // 4. Greedy search from entry point to find neighbors at each layer
-        for layer in (0..=level).rev() {
-            let neighbors = storage.greedy_search_layer(
-                code,
-                &vector,
-                entry_point,
-                layer,
-                config.ef_construction,
-            )?;
-
-            // 5. Select M nearest neighbors
-            let m = storage.get_m_for_layer(code, layer);
-            let selected: Vec<u32> = neighbors.into_iter()
-                .take(m)
-                .map(|(_, id)| id)
-                .collect();
-
-            // 6. Add bidirectional edges (using merge operator)
-            storage.add_edges_batch(code, vec_id, &selected, layer)?;
-
-            // 7. Prune neighbors if they exceed M_max
-            for &neighbor in &selected {
-                storage.prune_if_needed(code, neighbor, layer)?;
-            }
-        }
-
-        // 8. Update entry point if this node has higher level
-        storage.maybe_update_entry_point(code, vec_id, level)?;
-
-        Ok(())
-    }
-
-    fn clear_processed(storage: &VectorStorage, batch: &[(Embedding, u32)]) {
-        let cf = storage.db.cf_handle(cf::PENDING).unwrap();
-
-        // Delete processed entries
-        // Note: We need to reconstruct the full key with timestamp
-        // In practice, store the full key in the batch
-        for (code, vec_id) in batch {
-            // Scan for this node's pending entry and delete
-            let prefix = code.to_be_bytes();
-            let iter = storage.db.prefix_iterator_cf(cf, &prefix);
-
-            for item in iter {
-                if let Ok((key, _)) = item {
-                    let (_, _, key_vec_id) = PendingInserts::parse_key(&key);
-                    if key_vec_id == *vec_id {
-                        let _ = storage.db.delete_cf(cf, &key);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    fn drain_pending(storage: &VectorStorage, config: &AsyncUpdaterConfig) {
-        log::info!("Draining pending queue on startup...");
-        let start = Instant::now();
-        let mut count = 0;
-
-        loop {
-            let batch = Self::collect_batch(storage, config);
-            if batch.is_empty() {
-                break;
-            }
-
-            for (code, vec_id) in &batch {
-                if let Err(e) = Self::process_insert(storage, config, code, *vec_id) {
-                    log::error!("Failed to drain pending node {}: {}", vec_id, e);
-                }
-                count += 1;
-            }
-
-            Self::clear_processed(storage, &batch);
-        }
-
-        log::info!("Drained {} pending vectors in {:?}", count, start.elapsed());
-    }
-}
-```
-
-### Task 5.4: Delete Handling
-
-Deletes also use the two-phase pattern:
-
-```rust
-impl VectorStorage {
-    /// Delete with async cleanup
-    pub fn delete_async(&self, code: &Embedding, ulid: Id) -> Result<()> {
-        let internal_id = self.get_internal_id(code, ulid)?
-            .ok_or_else(|| anyhow!("Vector not found"))?;
-
-        // Phase 1: Mark as deleted (fast)
-        self.mark_deleted(code, internal_id)?;
-
-        // Remove from pending queue if present
-        self.remove_from_pending(code, internal_id)?;
-
-        // Return ID to free list
-        self.free_id(code, internal_id);
-
-        // Phase 2: Async edge cleanup (background)
-        // Edges pointing to deleted nodes are cleaned up lazily:
-        // - During search: skip deleted nodes
-        // - During compaction: merge operator removes stale edges
-        // - Optionally: background cleanup thread
-
-        Ok(())
-    }
-
-    /// Check if a node is deleted (for search filtering)
-    fn is_deleted(&self, code: &Embedding, vec_id: u32) -> Result<bool> {
-        let meta = self.get_vec_meta(code, vec_id)?;
-        Ok(meta.map_or(true, |m| m.flags & FLAG_DELETED != 0))
+        Ok(results)
     }
 }
 
-// Node flags
-const FLAG_DELETED: u8 = 0x01;
-const FLAG_PENDING: u8 = 0x02;  // Still in pending queue
+/// Search result with distance and IDs.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    /// Distance from query vector
+    pub distance: f32,
+    /// External document ID (ULID)
+    pub id: Id,
+    /// Internal vector ID (for advanced use)
+    pub vec_id: VecId,
+}
 ```
 
-### Consistency Guarantees
+### Task 5.5: Processor::add_embedding_spec()
 
-| Guarantee | Description |
-|-----------|-------------|
-| **Durability** | Vector is durable after `insert_async` returns (stored in RocksDB) |
-| **Searchability** | Vector is searchable immediately (via brute-force expansion) |
-| **Eventual Connectivity** | Graph edges added within `batch_timeout` (default 100ms) |
-| **Crash Recovery** | Pending queue persisted; drained on restart |
-| **Delete Visibility** | Deleted vectors excluded from search immediately |
-
-### Effort Breakdown
-
-| Task | Description | Effort |
-|------|-------------|--------|
-| 5.1 | Pending queue CF and key encoding | 0.5 day |
-| 5.2 | Async updater configuration | 0.25 day |
-| 5.3 | Worker thread implementation | 1.5 days |
-| 5.4 | Delete handling | 0.5 day |
-| 5.5 | Testing and crash recovery | 1 day |
-| **Total** | | **3-4 days** |
-
-**Acceptance Criteria:**
-- [ ] `insert_async` latency < 5ms P99
-- [ ] `insert_sync` latency < 50ms P99
-- [ ] Pending queue drained within `batch_timeout`
-- [ ] Crash recovery: pending queue survives restart
-- [ ] Deleted nodes excluded from search results
-
-### Phase 5 Validation & Tests
+Embedding registry management:
 
 ```rust
-// libs/db/src/vector/tests/async_updater_tests.rs
-
-#[cfg(test)]
-mod async_updater_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{Duration, Instant};
-
-    // =========================================================================
-    // Two-Phase Insert Tests (Task 5.1)
-    // =========================================================================
-
-    #[test]
-    fn test_insert_async_immediate_searchability() {
-        let storage = setup_vector_storage_with_async_updater();
-        let code = Embedding::new("test");
-
-        let ulid = Id::new();
-        let vector = vec![1.0; 128];
-
-        // Async insert
-        storage.insert_async(&code, ulid, &vector).unwrap();
-
-        // Should be searchable IMMEDIATELY (brute force fallback)
-        let results = storage.search(&code, &vector, 1, 10).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1, ulid);
-    }
-
-    #[test]
-    fn test_insert_async_low_latency() {
-        let storage = setup_vector_storage_with_async_updater();
-        let code = Embedding::new("test");
-
-        let mut latencies = Vec::new();
-        for _ in 0..100 {
-            let ulid = Id::new();
-            let vector: Vec<f32> = (0..128).map(|i| i as f32).collect();
-
-            let start = Instant::now();
-            storage.insert_async(&code, ulid, &vector).unwrap();
-            latencies.push(start.elapsed());
+impl Processor {
+    /// Register a new embedding space.
+    ///
+    /// Persists to EmbeddingSpecs CF and updates in-memory registry.
+    pub fn add_embedding_spec(&self, spec: &AddEmbeddingSpec) -> Result<()> {
+        // Check if already exists
+        if self.registry.get(spec.code).is_some() {
+            return Err(anyhow!("Embedding {} already exists", spec.code));
         }
 
-        latencies.sort();
-        let p99 = latencies[98];
-        assert!(p99 < Duration::from_millis(5),
-            "insert_async P99 should be < 5ms, got {:?}", p99);
-    }
+        let txn = self.db.transaction();
 
-    #[test]
-    fn test_insert_sync_includes_graph_edges() {
-        let storage = setup_vector_storage_temp();
-        let code = Embedding::new("test");
-
-        // Insert some vectors synchronously
-        for i in 0..10 {
-            let ulid = Id::new();
-            let vector = vec![i as f32; 128];
-            storage.insert_sync(&code, ulid, &vector).unwrap();
-        }
-
-        // All should have graph edges
-        for id in 0u32..10 {
-            let neighbors = storage.get_neighbors(&code, id, 0).unwrap();
-            // After 10 inserts, each node should have some neighbors
-            if id > 0 {
-                assert!(neighbors.len() > 0, "Node {} should have neighbors", id);
-            }
-        }
-    }
-
-    // =========================================================================
-    // Pending Queue Tests (Task 5.1)
-    // =========================================================================
-
-    #[test]
-    fn test_pending_queue_ordering() {
-        let storage = setup_vector_storage_with_async_updater();
-        let code = Embedding::new("test");
-
-        // Insert in order
-        let ulids: Vec<Id> = (0..100).map(|_| Id::new()).collect();
-        for (i, ulid) in ulids.iter().enumerate() {
-            storage.insert_async(&code, *ulid, &[i as f32; 128]).unwrap();
-        }
-
-        // Read pending queue
-        let pending = storage.get_pending_ids(&code).unwrap();
-
-        // Should be in insertion order (FIFO)
-        assert_eq!(pending.len(), 100);
-    }
-
-    #[test]
-    fn test_pending_queue_per_embedding() {
-        let storage = setup_vector_storage_with_async_updater();
-        let qwen = Embedding::new("qwen3");
-        let gemma = Embedding::new("gemma");
-
-        // Insert into different spaces
-        for i in 0..50 {
-            storage.insert_async(&qwen, Id::new(), &[i as f32; 128]).unwrap();
-        }
-        for i in 0..30 {
-            storage.insert_async(&gemma, Id::new(), &[i as f32; 128]).unwrap();
-        }
-
-        // Pending counts should be independent
-        let qwen_pending = storage.get_pending_count(&qwen).unwrap();
-        let gemma_pending = storage.get_pending_count(&gemma).unwrap();
-
-        assert_eq!(qwen_pending, 50);
-        assert_eq!(gemma_pending, 30);
-    }
-
-    // =========================================================================
-    // Async Updater Worker Tests (Task 5.3)
-    // =========================================================================
-
-    #[test]
-    fn test_async_updater_drains_queue() {
-        let config = AsyncUpdaterConfig {
-            batch_size: 10,
-            batch_timeout: Duration::from_millis(100),
-            num_workers: 1,
-        };
-        let storage = setup_vector_storage_with_config(config);
-        let code = Embedding::new("test");
-
-        // Insert 50 vectors async
-        for i in 0..50 {
-            storage.insert_async(&code, Id::new(), &[i as f32; 128]).unwrap();
-        }
-
-        // Wait for queue to drain
-        std::thread::sleep(Duration::from_millis(1000));
-
-        // Pending queue should be empty
-        let pending = storage.get_pending_count(&code).unwrap();
-        assert_eq!(pending, 0, "Queue should be drained");
-
-        // All should have graph edges now
-        for id in 0u32..50 {
-            let neighbors = storage.get_neighbors(&code, id, 0).unwrap();
-            assert!(neighbors.len() > 0, "Node {} should have neighbors after drain", id);
-        }
-    }
-
-    #[test]
-    fn test_async_updater_batch_processing() {
-        let batch_count = Arc::new(AtomicUsize::new(0));
-        let batch_count_clone = Arc::clone(&batch_count);
-
-        let config = AsyncUpdaterConfig {
-            batch_size: 10,
-            batch_timeout: Duration::from_millis(50),
-            num_workers: 1,
-        };
-        let storage = setup_vector_storage_with_hooks(config, move |batch| {
-            batch_count_clone.fetch_add(1, Ordering::SeqCst);
+        // Persist to RocksDB
+        let key = EmbeddingSpecCfKey(spec.code);
+        let value = EmbeddingSpecCfValue(EmbeddingSpec {
+            model: spec.model.clone(),
+            dim: spec.dim,
+            distance: spec.distance,
+            storage_type: spec.storage_type,
         });
-        let code = Embedding::new("test");
 
-        // Insert 45 vectors (should be 5 batches: 4 full + 1 partial)
-        for i in 0..45 {
-            storage.insert_async(&code, Id::new(), &[i as f32; 128]).unwrap();
-        }
+        let cf = txn.cf_handle(EmbeddingSpecs::CF_NAME)?;
+        txn.put_cf(&cf, EmbeddingSpecs::key_to_bytes(&key), EmbeddingSpecs::value_to_bytes(&value))?;
 
-        std::thread::sleep(Duration::from_millis(500));
+        txn.commit()?;
 
-        let batches = batch_count.load(Ordering::SeqCst);
-        assert!(batches >= 4 && batches <= 5, "Expected 4-5 batches, got {}", batches);
-    }
+        // Update in-memory registry
+        self.registry.register_from_db(spec.code, &spec.model, spec.dim, spec.distance);
 
-    #[test]
-    fn test_async_updater_timeout_triggers_batch() {
-        let config = AsyncUpdaterConfig {
-            batch_size: 100,  // Large batch size
-            batch_timeout: Duration::from_millis(50),  // Short timeout
-            num_workers: 1,
-        };
-        let storage = setup_vector_storage_with_config(config);
-        let code = Embedding::new("test");
-
-        // Insert just 5 vectors (less than batch_size)
-        for i in 0..5 {
-            storage.insert_async(&code, Id::new(), &[i as f32; 128]).unwrap();
-        }
-
-        // Wait for timeout to trigger
-        std::thread::sleep(Duration::from_millis(200));
-
-        // Should be processed despite not reaching batch_size
-        let pending = storage.get_pending_count(&code).unwrap();
-        assert_eq!(pending, 0, "Timeout should trigger processing");
-    }
-
-    // =========================================================================
-    // Delete Handling Tests (Task 5.4)
-    // =========================================================================
-
-    #[test]
-    fn test_delete_removes_from_search() {
-        let storage = setup_vector_storage_with_async_updater();
-        let code = Embedding::new("test");
-
-        let ulid = Id::new();
-        storage.insert_sync(&code, ulid, &[1.0; 128]).unwrap();
-
-        // Verify searchable
-        let results = storage.search(&code, &[1.0; 128], 1, 10).unwrap();
-        assert_eq!(results.len(), 1);
-
-        // Delete
-        storage.delete(&code, ulid).unwrap();
-
-        // Should not appear in search
-        let results = storage.search(&code, &[1.0; 128], 1, 10).unwrap();
-        assert!(results.iter().all(|(_, id)| *id != ulid));
-    }
-
-    #[test]
-    fn test_delete_pending_vector() {
-        let storage = setup_vector_storage_with_async_updater();
-        let code = Embedding::new("test");
-
-        // Insert async (still pending)
-        let ulid = Id::new();
-        storage.insert_async(&code, ulid, &[1.0; 128]).unwrap();
-
-        // Delete before graph update
-        storage.delete(&code, ulid).unwrap();
-
-        // Wait for async updater
-        std::thread::sleep(Duration::from_millis(500));
-
-        // Should not appear in search
-        let results = storage.search(&code, &[1.0; 128], 10, 50).unwrap();
-        assert!(results.iter().all(|(_, id)| *id != ulid));
-    }
-
-    // =========================================================================
-    // Crash Recovery Tests (Task 5.5)
-    // =========================================================================
-
-    #[test]
-    fn test_crash_recovery_pending_queue() {
-        let tmp = TempDir::new().unwrap();
-
-        // First session: insert async, don't wait for drain
-        {
-            let storage = setup_vector_storage_at(tmp.path());
-            let code = Embedding::new("test");
-
-            for i in 0..50 {
-                storage.insert_async(&code, Id::new(), &[i as f32; 128]).unwrap();
-            }
-
-            // Don't wait - simulate crash
-            drop(storage);
-        }
-
-        // Second session: recovery
-        {
-            let storage = setup_vector_storage_at(tmp.path());
-            let code = Embedding::new("test");
-
-            // Should recover pending queue
-            let pending = storage.get_pending_count(&code).unwrap();
-            assert!(pending > 0, "Should have pending items after recovery");
-
-            // Wait for drain
-            std::thread::sleep(Duration::from_secs(2));
-
-            // All should be processed
-            let final_pending = storage.get_pending_count(&code).unwrap();
-            assert_eq!(final_pending, 0);
-        }
-    }
-
-    #[test]
-    fn test_recovery_maintains_searchability() {
-        let tmp = TempDir::new().unwrap();
-        let ulids: Vec<Id>;
-
-        // First session
-        {
-            let storage = setup_vector_storage_at(tmp.path());
-            let code = Embedding::new("test");
-
-            ulids = (0..100).map(|i| {
-                let ulid = Id::new();
-                storage.insert_async(&code, ulid, &[i as f32; 128]).unwrap();
-                ulid
-            }).collect();
-
-            // Partial drain
-            std::thread::sleep(Duration::from_millis(200));
-        }
-
-        // Second session: all should be searchable
-        {
-            let storage = setup_vector_storage_at(tmp.path());
-            let code = Embedding::new("test");
-
-            // Wait for full drain
-            std::thread::sleep(Duration::from_secs(2));
-
-            // All should be searchable
-            for ulid in &ulids {
-                let internal_id = storage.get_internal_id(&code, *ulid).unwrap();
-                assert!(internal_id.is_some(), "ULID {:?} should be searchable", ulid);
-            }
-        }
-    }
-
-    // =========================================================================
-    // Concurrency Tests
-    // =========================================================================
-
-    #[test]
-    fn test_concurrent_insert_async() {
-        let storage = Arc::new(setup_vector_storage_with_async_updater());
-        let code = Embedding::new("test");
-
-        let mut handles = Vec::new();
-        for t in 0..10 {
-            let s = Arc::clone(&storage);
-            let c = code.clone();
-            handles.push(thread::spawn(move || {
-                for i in 0..100 {
-                    let ulid = Id::new();
-                    s.insert_async(&c, ulid, &[(t * 100 + i) as f32; 128]).unwrap();
-                }
-            }));
-        }
-
-        for h in handles {
-            h.join().unwrap();
-        }
-
-        // Wait for drain
-        std::thread::sleep(Duration::from_secs(3));
-
-        // All 1000 should be indexed
-        assert_eq!(storage.count(&code).unwrap(), 1000);
+        Ok(())
     }
 }
 ```
 
-**Test Coverage Checklist:**
-- [ ] Async insert provides immediate searchability
-- [ ] Async insert latency < 5ms P99
-- [ ] Sync insert creates graph edges
-- [ ] Pending queue maintains insertion order
-- [ ] Per-embedding-space pending queues
-- [ ] Async updater drains queue
-- [ ] Batch processing respects batch_size
-- [ ] Timeout triggers partial batch processing
-- [ ] Delete removes from search immediately
-- [ ] Delete pending vectors correctly
-- [ ] Crash recovery preserves pending queue
-- [ ] Recovery maintains searchability
-- [ ] Concurrent async inserts
+### Task 5.6: Mutation Dispatch
 
-**Benchmarks:**
-```rust
-#[bench]
-fn bench_insert_async_latency(b: &mut Bencher) {
-    let storage = setup_vector_storage_with_async_updater();
-    let code = Embedding::new("bench");
-
-    b.iter(|| {
-        let ulid = Id::new();
-        storage.insert_async(&code, ulid, &random_vector(128)).unwrap();
-    });
-}
-// Target: < 1ms median, < 5ms P99
-
-#[bench]
-fn bench_insert_sync_latency(b: &mut Bencher) {
-    let storage = setup_vector_storage_temp();
-    let code = Embedding::new("bench");
-
-    b.iter(|| {
-        let ulid = Id::new();
-        storage.insert_sync(&code, ulid, &random_vector(128)).unwrap();
-    });
-}
-// Target: < 20ms median, < 50ms P99
-
-#[bench]
-fn bench_async_updater_throughput(b: &mut Bencher) {
-    // Measure sustained insert throughput with async updater
-    let storage = setup_vector_storage_with_async_updater();
-    let code = Embedding::new("bench");
-
-    b.iter(|| {
-        for _ in 0..1000 {
-            storage.insert_async(&code, Id::new(), &random_vector(128)).unwrap();
-        }
-        // Wait for drain
-        while storage.get_pending_count(&code).unwrap() > 0 {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    });
-}
-// Target: > 5,000 inserts/sec sustained
-```
-
----
-
-## Phase 5.5: MPSC/MPMC API Infrastructure
-
-**Goal:** Implement complete mutation and query API infrastructure matching graph:: and fulltext:: patterns.
-
-**Motivation:** The vector module currently has basic mutation/query types defined but lacks the complete
-channel-based processing infrastructure that enables:
-- Async mutation processing with flush semantics
-- MPMC query pools for concurrent read scaling
-- Consistent API patterns across all storage modules
-- Integration with the shared Writer/Reader infrastructure
-
-### Current State vs Required State
-
-| Component | graph:: | fulltext:: | vector:: (current) | vector:: (target) |
-|-----------|---------|------------|-------------------|-------------------|
-| mutation.rs | 1295 lines | 298 lines | 411 lines | ~800 lines |
-| query.rs | 4154 lines | 1327 lines | 622 lines | ~2000 lines |
-| MutationExecutor | ✅ | ✅ | ❌ | ✅ |
-| spawn_mutation_consumer | ✅ | ✅ | ❌ | ✅ |
-| spawn_query_consumer | ✅ | ✅ | ❌ | ✅ |
-| Reader (MPMC pool) | ✅ | ✅ | ❌ | ✅ |
-| SearchKNN query | N/A | N/A | ❌ | ✅ |
-| Runnable trait | ✅ | ✅ | ❌ | ✅ |
-| Consumer types | ✅ | ✅ | ❌ | ✅ |
-
-### Task 5.5.1: MutationExecutor Trait Implementation
-
-Implement `MutationExecutor` for all mutation types following graph::mutation pattern:
+Connect Mutation enum to Processor methods:
 
 ```rust
 // libs/db/src/vector/mutation.rs
 
-use crate::writer::MutationExecutor;
+impl Mutation {
+    /// Execute this mutation against the processor.
+    pub fn execute(&self, processor: &Processor) -> Result<()> {
+        match self {
+            Mutation::AddEmbeddingSpec(m) => {
+                processor.add_embedding_spec(m)?;
+            }
+            Mutation::InsertVector(m) => {
+                processor.insert_vector(
+                    m.embedding,
+                    m.id,
+                    &m.vector,
+                    m.immediate_index,
+                )?;
+            }
+            Mutation::DeleteVector(m) => {
+                processor.delete_vector(m.embedding, m.id)?;
+            }
+            Mutation::InsertVectorBatch(m) => {
+                processor.insert_batch(
+                    m.embedding,
+                    &m.vectors,
+                    m.immediate_index,
+                )?;
+            }
+            Mutation::UpdateEdges(m) => {
+                processor.update_edges(m)?;
+            }
+            Mutation::UpdateGraphMeta(m) => {
+                processor.update_graph_meta(m)?;
+            }
+            Mutation::Flush(marker) => {
+                marker.complete();
+            }
+        }
+        Ok(())
+    }
+}
+```
 
-/// Trait for executing mutations against vector storage.
+### Task 5.7: Query Dispatch
+
+Connect Query enum to Storage methods:
+
+```rust
+// libs/db/src/vector/query.rs
+
+impl Query {
+    /// Process this query against storage.
+    pub async fn process(self, storage: &Storage) {
+        match self {
+            Query::GetVector(dispatch) => {
+                let result = storage.get_vector(
+                    dispatch.params.embedding,
+                    dispatch.params.id,
+                );
+                dispatch.send_result(result);
+            }
+            Query::GetInternalId(dispatch) => {
+                let result = storage.get_internal_id(
+                    dispatch.params.embedding,
+                    dispatch.params.id,
+                );
+                dispatch.send_result(result);
+            }
+            Query::GetExternalId(dispatch) => {
+                let result = storage.get_external_id(
+                    dispatch.params.embedding,
+                    dispatch.params.vec_id,
+                );
+                dispatch.send_result(result);
+            }
+            Query::ResolveIds(dispatch) => {
+                let result = storage.resolve_ids(
+                    dispatch.params.embedding,
+                    &dispatch.params.vec_ids,
+                );
+                dispatch.send_result(result);
+            }
+            Query::SearchKNN(dispatch) => {
+                let result = storage.search(
+                    dispatch.params.embedding,
+                    &dispatch.params.query,
+                    dispatch.params.k,
+                    &dispatch.params.config,
+                );
+                dispatch.send_result(result);
+            }
+        }
+    }
+}
+```
+
+### Phase 5 File Changes Summary
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Add `insert_vector()`, `delete_vector()`, `insert_batch()`, `add_embedding_spec()` |
+| `storage.rs` | Add `search()` with external ID resolution |
+| `mutation.rs` | Add `Mutation::execute()` dispatch |
+| `query.rs` | Add `SearchKNN` query type, update `Query::process()` |
+| `schema.rs` | Add `VecMeta` with deleted flag |
+
+### Phase 5 Tests
+
+```rust
+#[cfg(test)]
+mod internal_api_tests {
+    use super::*;
+
+    #[test]
+    fn test_insert_and_search() {
+        let (storage, processor) = setup_temp_storage();
+
+        // Register embedding
+        processor.add_embedding_spec(&AddEmbeddingSpec {
+            code: 1,
+            model: "test".to_string(),
+            dim: 128,
+            distance: Distance::Cosine,
+            storage_type: VectorElementType::F32,
+        }).unwrap();
+
+        // Insert vectors
+        let id1 = Id::new();
+        let vec1 = vec![1.0f32; 128];
+        processor.insert_vector(1, id1, &vec1, true).unwrap();
+
+        // Search
+        let results = storage.search(1, &vec1, 1, &SearchConfig::default()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, id1);
+    }
+
+    #[test]
+    fn test_delete_excludes_from_search() {
+        let (storage, processor) = setup_temp_storage();
+        setup_embedding(&processor, 1);
+
+        let id = Id::new();
+        processor.insert_vector(1, id, &[1.0; 128], true).unwrap();
+
+        // Should find it
+        let results = storage.search(1, &[1.0; 128], 1, &SearchConfig::default()).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Delete
+        processor.delete_vector(1, id).unwrap();
+
+        // Should not find it
+        let results = storage.search(1, &[1.0; 128], 1, &SearchConfig::default()).unwrap();
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_batch_insert() {
+        let (storage, processor) = setup_temp_storage();
+        setup_embedding(&processor, 1);
+
+        let vectors: Vec<_> = (0..100)
+            .map(|i| (Id::new(), vec![i as f32; 128]))
+            .collect();
+
+        let vec_ids = processor.insert_batch(1, &vectors, true).unwrap();
+        assert_eq!(vec_ids.len(), 100);
+
+        // All should be searchable
+        let results = storage.search(1, &[50.0; 128], 10, &SearchConfig::default()).unwrap();
+        assert_eq!(results.len(), 10);
+    }
+}
+```
+
+---
+
+## Phase 6: MPSC/MPMC Public API
+
+**Goal:** Wrap the internal APIs (Phase 5) with channel-based infrastructure matching graph:: and fulltext:: patterns.
+
+**Motivation:** The MPSC/MPMC patterns provide:
+- Async mutation processing with flush semantics
+- MPMC query pools for concurrent read scaling
+- Consistent API patterns across all storage modules
+- Decoupled producers and consumers for better throughput
+
+### Overview: Channel-Based Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     MPSC/MPMC Architecture                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Mutation Path (MPSC):                                                       │
+│  ┌────────────┐     MPSC      ┌────────────┐     ┌────────────┐             │
+│  │ Writer     │───────────────│ Consumer   │────►│ Processor  │             │
+│  │ (handle)   │  Vec<Mutation>│ (loop)     │     │ (Phase 5)  │             │
+│  └────────────┘               └────────────┘     └────────────┘             │
+│       │                                                                      │
+│       │ .flush() ──► FlushMarker ──► oneshot response                       │
+│                                                                              │
+│  Query Path (MPMC):                                                          │
+│  ┌────────────┐     MPMC      ┌────────────┐     ┌────────────┐             │
+│  │ Reader     │───────────────│ Pool of    │────►│ Storage    │             │
+│  │ (handle)   │     Query     │ Consumers  │     │ (Phase 5)  │             │
+│  └────────────┘               └────────────┘     └────────────┘             │
+│       │                            (N workers)                               │
+│       │ oneshot ◄── result                                                   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Task 6.1: MutationExecutor Trait
+
+Define the trait that connects mutation types to the internal API:
+
+```rust
+// libs/db/src/vector/mutation.rs
+
+/// Trait for executing mutations against the Processor.
+/// Each mutation type implements this to define its execution logic.
 #[async_trait::async_trait]
-pub trait VectorMutationExecutor: Send + Sync {
-    /// Execute this mutation against the storage layer
+pub trait MutationExecutor: Send + Sync {
+    /// Execute this mutation against the processor
     async fn execute(&self, processor: &Processor) -> Result<()>;
 }
 
 #[async_trait::async_trait]
-impl VectorMutationExecutor for InsertVector {
+impl MutationExecutor for InsertVector {
     async fn execute(&self, processor: &Processor) -> Result<()> {
         processor.insert_vector(
             self.embedding,
             self.id,
             &self.vector,
             self.immediate_index,
-        ).await
+        )?;
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
-impl VectorMutationExecutor for DeleteVector {
+impl MutationExecutor for DeleteVector {
     async fn execute(&self, processor: &Processor) -> Result<()> {
-        processor.delete_vector(self.embedding, self.id).await
+        processor.delete_vector(self.embedding, self.id)?;
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
-impl VectorMutationExecutor for InsertVectorBatch {
+impl MutationExecutor for InsertVectorBatch {
     async fn execute(&self, processor: &Processor) -> Result<()> {
         processor.insert_batch(
             self.embedding,
             &self.vectors,
             self.immediate_index,
-        ).await
+        )?;
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
-impl VectorMutationExecutor for AddEmbeddingSpec {
+impl MutationExecutor for AddEmbeddingSpec {
     async fn execute(&self, processor: &Processor) -> Result<()> {
-        processor.add_embedding_spec(self).await
-    }
-}
-
-// Dispatch implementation
-impl Mutation {
-    pub async fn execute(&self, processor: &Processor) -> Result<()> {
-        match self {
-            Mutation::InsertVector(m) => m.execute(processor).await,
-            Mutation::DeleteVector(m) => m.execute(processor).await,
-            Mutation::InsertVectorBatch(m) => m.execute(processor).await,
-            Mutation::AddEmbeddingSpec(m) => m.execute(processor).await,
-            Mutation::UpdateEdges(m) => m.execute(processor).await,
-            Mutation::UpdateGraphMeta(m) => m.execute(processor).await,
-            Mutation::Flush(marker) => {
-                marker.complete();
-                Ok(())
-            }
-        }
+        processor.add_embedding_spec(self)?;
+        Ok(())
     }
 }
 ```
 
-### Task 5.5.2: Consumer Infrastructure
+### Task 6.2: Mutation Consumer
 
 Implement mutation consumer following graph::writer pattern:
 
 ```rust
-// libs/db/src/vector/writer.rs
+// libs/db/src/vector/consumer.rs
 
 /// Consumer that processes mutations from MPSC channel.
 pub struct Consumer {
@@ -6949,786 +6572,752 @@ pub fn spawn_mutation_consumer(
 }
 ```
 
-### Task 5.5.3: SearchKNN Query Implementation
+### Task 6.3: Query Consumer (MPMC Pool)
 
-Add the missing SearchKNN query to query.rs:
-
-```rust
-// libs/db/src/vector/query.rs
-
-/// K-nearest neighbor search query.
-#[derive(Debug, Clone)]
-pub struct SearchKNN {
-    /// Embedding space code
-    pub embedding: EmbeddingCode,
-    /// Query vector
-    pub query: Vec<f32>,
-    /// Number of results to return
-    pub k: usize,
-    /// Search configuration
-    pub config: SearchConfig,
-}
-
-impl SearchKNN {
-    pub fn new(embedding: EmbeddingCode, query: Vec<f32>, k: usize) -> Self {
-        Self {
-            embedding,
-            query,
-            k,
-            config: SearchConfig::default(),
-        }
-    }
-
-    pub fn with_config(mut self, config: SearchConfig) -> Self {
-        self.config = config;
-        self
-    }
-}
-
-/// Search result with distance and external ID.
-#[derive(Debug, Clone)]
-pub struct SearchResult {
-    pub distance: f32,
-    pub id: Id,
-}
-
-#[async_trait::async_trait]
-impl QueryExecutor for SearchKNN {
-    type Output = Vec<SearchResult>;
-
-    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        // Get embedding info from registry
-        let registry = storage.embedding_registry();
-        let embedding = registry.get(self.embedding)
-            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", self.embedding))?;
-
-        // Perform HNSW search
-        let hnsw = storage.hnsw_index()?;
-        let internal_results = hnsw.search(
-            &self.query,
-            self.k,
-            &self.config,
-        )?;
-
-        // Resolve internal IDs to external IDs
-        let mut results = Vec::with_capacity(internal_results.len());
-        for (distance, vec_id) in internal_results {
-            if let Some(external_id) = storage.get_external_id(self.embedding, vec_id)? {
-                results.push(SearchResult { distance, id: external_id });
-            }
-        }
-
-        Ok(results)
-    }
-
-    fn timeout(&self) -> Duration {
-        Duration::from_secs(30)  // Longer timeout for search
-    }
-}
-
-// Add to Query enum
-pub enum Query {
-    // ... existing variants ...
-    SearchKNN(SearchKNNDispatch),
-    SearchKNNFiltered(SearchKNNFilteredDispatch),
-}
-```
-
-### Task 5.5.4: Reader Infrastructure (MPMC Query Pool)
-
-Implement reader with MPMC pool following graph::reader pattern:
+Implement MPMC query pool following graph::reader pattern:
 
 ```rust
 // libs/db/src/vector/reader.rs
 
-use std::sync::Arc;
-use tokio::sync::mpsc;
-
-use super::query::Query;
-use super::Storage;
-
-/// Configuration for query reader.
-#[derive(Debug, Clone)]
-pub struct ReaderConfig {
-    /// Size of the query channel buffer
-    pub channel_buffer_size: usize,
-    /// Number of worker threads in the pool
-    pub pool_size: usize,
-}
-
-impl Default for ReaderConfig {
-    fn default() -> Self {
-        Self {
-            channel_buffer_size: 1000,
-            pool_size: num_cpus::get(),
-        }
-    }
-}
-
-/// Query consumer that processes queries from MPMC channel.
-pub struct Consumer {
-    receiver: async_channel::Receiver<Query>,
+/// MPMC query consumer that processes searches from multiple senders.
+pub struct QueryConsumer {
+    receiver: mpmc::Receiver<QueryRequest>,
     storage: Arc<Storage>,
 }
 
-impl Consumer {
-    pub fn new(receiver: async_channel::Receiver<Query>, storage: Arc<Storage>) -> Self {
+impl QueryConsumer {
+    pub fn new(receiver: mpmc::Receiver<QueryRequest>, storage: Arc<Storage>) -> Self {
         Self { receiver, storage }
     }
 
     /// Run the consumer loop.
     pub async fn run(self) {
-        while let Ok(query) = self.receiver.recv().await {
-            query.process(&self.storage).await;
+        while let Ok(request) = self.receiver.recv().await {
+            let result = request.query.execute(&self.storage).await;
+            let _ = request.response_tx.send(result);
         }
     }
 }
 
-/// Reader handle for sending queries.
-#[derive(Clone)]
-pub struct Reader {
-    sender: async_channel::Sender<Query>,
+/// Query request wrapper with response channel.
+pub struct QueryRequest {
+    pub query: Query,
+    pub response_tx: oneshot::Sender<Result<QueryResult>>,
 }
 
-impl Reader {
-    pub fn new(sender: async_channel::Sender<Query>) -> Self {
-        Self { sender }
-    }
-
-    /// Send a query for processing.
-    pub async fn send(&self, query: Query) -> Result<()> {
-        self.sender.send(query).await
-            .map_err(|_| anyhow::anyhow!("Query channel closed"))
-    }
-}
-
-/// Create a query reader and consumer pool.
-pub fn create_query_reader(
+/// Spawn a pool of query consumers.
+pub fn spawn_query_consumer_pool(
     storage: Arc<Storage>,
     config: ReaderConfig,
-) -> Reader {
-    let (tx, rx) = async_channel::bounded(config.channel_buffer_size);
+) -> mpmc::Sender<QueryRequest> {
+    let (tx, rx) = mpmc::channel(config.channel_buffer_size);
 
-    // Spawn pool of consumers
-    for _ in 0..config.pool_size {
-        let consumer = Consumer::new(rx.clone(), storage.clone());
+    for _ in 0..config.num_workers {
+        let consumer = QueryConsumer::new(rx.clone(), Arc::clone(&storage));
         tokio::spawn(consumer.run());
     }
 
-    Reader::new(tx)
-}
-
-/// Spawn a query consumer pool with shared storage.
-pub fn spawn_query_consumer_pool_shared(
-    storage: Arc<Storage>,
-    config: ReaderConfig,
-) -> Reader {
-    create_query_reader(storage, config)
+    tx
 }
 ```
 
-### Task 5.5.5: Runnable Trait Integration
+### Task 6.4: Reader Handle
 
-Integrate with the shared `Runnable` trait from `crate::writer`:
+Implement Reader handle for sending queries:
+
+```rust
+// libs/db/src/vector/reader.rs
+
+/// Handle for sending queries to the MPMC pool.
+pub struct Reader {
+    sender: mpmc::Sender<QueryRequest>,
+}
+
+impl Reader {
+    pub fn new(sender: mpmc::Sender<QueryRequest>) -> Self {
+        Self { sender }
+    }
+
+    /// Execute a search query and await the result.
+    pub async fn search(&self, query: SearchKNN) -> Result<Vec<SearchResult>> {
+        let (tx, rx) = oneshot::channel();
+        let request = QueryRequest {
+            query: Query::SearchKNN(query),
+            response_tx: tx,
+        };
+        self.sender.send(request).await
+            .map_err(|_| anyhow!("Query channel closed"))?;
+        rx.await.map_err(|_| anyhow!("Query response dropped"))?
+    }
+
+    /// Get embedding information.
+    pub async fn get_embedding(&self, code: EmbeddingCode) -> Result<Option<EmbeddingInfo>> {
+        let (tx, rx) = oneshot::channel();
+        let request = QueryRequest {
+            query: Query::GetEmbedding(GetEmbedding { code }),
+            response_tx: tx,
+        };
+        self.sender.send(request).await
+            .map_err(|_| anyhow!("Query channel closed"))?;
+        rx.await.map_err(|_| anyhow!("Query response dropped"))?
+    }
+
+    /// Get vector by external ID.
+    pub async fn get_vector(&self, embedding: EmbeddingCode, id: Id) -> Result<Option<Vec<f32>>> {
+        let (tx, rx) = oneshot::channel();
+        let request = QueryRequest {
+            query: Query::GetVector(GetVector { embedding, id }),
+            response_tx: tx,
+        };
+        self.sender.send(request).await
+            .map_err(|_| anyhow!("Query channel closed"))?;
+        rx.await.map_err(|_| anyhow!("Query response dropped"))?
+    }
+}
+```
+
+### Task 6.5: Runnable Trait
+
+Implement Runnable trait for lifecycle management:
 
 ```rust
 // libs/db/src/vector/mod.rs
 
-// Re-export Runnable trait
-pub use crate::writer::Runnable;
-pub use crate::reader::Runnable as QueryRunnable;
+/// Runnable trait for vector subsystem lifecycle.
+pub trait Runnable: Send + Sync {
+    /// Start the subsystem (spawn consumers).
+    fn start(&mut self) -> Result<()>;
 
-// Update exports
-pub use mutation::{
-    AddEmbeddingSpec, DeleteVector, EdgeOperation, FlushMarker, GraphMetaUpdate,
-    InsertVector, InsertVectorBatch, Mutation, UpdateEdges, UpdateGraphMeta,
-};
-pub use query::{
-    GetExternalId, GetInternalId, GetVector, Query, QueryExecutor,
-    ResolveIds, SearchKNN, SearchKNNFiltered, SearchResult,
-};
-pub use reader::{
-    create_query_reader, spawn_query_consumer_pool_shared,
-    Consumer as QueryConsumer, Reader, ReaderConfig,
-};
-pub use writer::{
-    create_mutation_consumer, spawn_mutation_consumer,
-    Consumer as MutationConsumer, Writer, WriterConfig,
-};
+    /// Stop the subsystem (shutdown consumers).
+    fn stop(&mut self) -> Result<()>;
+
+    /// Check if the subsystem is running.
+    fn is_running(&self) -> bool;
+}
+
+/// Vector subsystem runtime.
+pub struct Runtime {
+    storage: Arc<Storage>,
+    processor: Arc<Processor>,
+    writer: Option<Writer>,
+    reader: Option<Reader>,
+    config: RuntimeConfig,
+    running: bool,
+}
+
+impl Runtime {
+    pub fn new(storage: Arc<Storage>, config: RuntimeConfig) -> Self {
+        let processor = Arc::new(Processor::new(Arc::clone(&storage)));
+        Self {
+            storage,
+            processor,
+            writer: None,
+            reader: None,
+            config,
+            running: false,
+        }
+    }
+
+    /// Get mutation writer handle.
+    pub fn writer(&self) -> Option<&Writer> {
+        self.writer.as_ref()
+    }
+
+    /// Get query reader handle.
+    pub fn reader(&self) -> Option<&Reader> {
+        self.reader.as_ref()
+    }
+}
+
+impl Runnable for Runtime {
+    fn start(&mut self) -> Result<()> {
+        if self.running {
+            return Ok(());
+        }
+
+        // Spawn mutation consumer
+        self.writer = Some(spawn_mutation_consumer(
+            Arc::clone(&self.processor),
+            self.config.writer.clone(),
+        ));
+
+        // Spawn query consumer pool
+        let sender = spawn_query_consumer_pool(
+            Arc::clone(&self.storage),
+            self.config.reader.clone(),
+        );
+        self.reader = Some(Reader::new(sender));
+
+        self.running = true;
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        self.writer = None;
+        self.reader = None;
+        self.running = false;
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        self.running
+    }
+}
 ```
 
-### Task 5.5.6: Integration Tests
+### Task 6.6: Phase 6 Tests
 
 ```rust
-// libs/db/src/vector/tests/api_integration_tests.rs
+// libs/db/src/vector/tests/channel_tests.rs
 
 #[cfg(test)]
-mod api_integration_tests {
+mod channel_tests {
     use super::*;
-    use std::sync::Arc;
-    use tokio::time::{timeout, Duration};
 
     #[tokio::test]
-    async fn test_mutation_writer_consumer() {
-        let storage = setup_temp_storage();
-        let processor = Arc::new(Processor::new(storage.clone()));
-
-        let writer = spawn_mutation_consumer(processor, WriterConfig::default());
-
-        // Send mutations
-        let embedding = 1u64;
-        let id = Id::new();
-        let vector = vec![1.0f32; 128];
-
-        writer.send(vec![
-            InsertVector::new(embedding, id, vector).into()
-        ]).await.unwrap();
-
-        // Flush and verify
-        writer.flush().await.unwrap();
-
-        let result = GetVector::new(embedding, id)
-            .execute(&storage).await.unwrap();
-        assert!(result.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_query_reader_pool() {
-        let storage = Arc::new(setup_storage_with_vectors(1000));
-        let reader = spawn_query_consumer_pool_shared(
-            storage.clone(),
-            ReaderConfig { pool_size: 4, ..Default::default() }
+    async fn test_mutation_consumer_insert() {
+        let storage = setup_vector_storage_temp();
+        let writer = spawn_mutation_consumer(
+            Arc::new(Processor::new(storage.clone())),
+            WriterConfig::default(),
         );
 
-        // Send concurrent queries
-        let mut handles = vec![];
-        for _ in 0..100 {
+        let id = Id::new();
+        writer.send(Mutation::InsertVector(InsertVector {
+            embedding: test_embedding_code(),
+            id,
+            vector: vec![1.0; 128],
+            immediate_index: true,
+        })).await.unwrap();
+
+        writer.flush().await.unwrap();
+
+        // Verify insert
+        let exists = storage.readonly().exists(test_embedding_code(), id).unwrap();
+        assert!(exists);
+    }
+
+    #[tokio::test]
+    async fn test_query_pool_search() {
+        let storage = Arc::new(setup_vector_storage_with_vectors(1000));
+        let reader = Reader::new(spawn_query_consumer_pool(
+            storage,
+            ReaderConfig { num_workers: 4, ..Default::default() },
+        ));
+
+        let results = reader.search(SearchKNN::new(
+            test_embedding_code(),
+            vec![0.5; 128],
+            10,
+        )).await.unwrap();
+
+        assert_eq!(results.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_queries() {
+        let storage = Arc::new(setup_vector_storage_with_vectors(10_000));
+        let reader = Reader::new(spawn_query_consumer_pool(
+            storage,
+            ReaderConfig { num_workers: 8, ..Default::default() },
+        ));
+
+        let handles: Vec<_> = (0..100).map(|_| {
             let r = reader.clone();
-            handles.push(tokio::spawn(async move {
-                let query = SearchKNN::new(1, random_vector(128), 10);
-                // ... execute query via reader
-            }));
-        }
+            tokio::spawn(async move {
+                r.search(SearchKNN::new(
+                    test_embedding_code(),
+                    random_vector(128),
+                    10,
+                )).await
+            })
+        }).collect();
 
         for h in handles {
-            h.await.unwrap();
+            let result = h.await.unwrap();
+            assert!(result.is_ok());
         }
     }
 
     #[tokio::test]
-    async fn test_search_knn_query() {
-        let storage = setup_storage_with_vectors(10000);
+    async fn test_runtime_lifecycle() {
+        let storage = Arc::new(setup_vector_storage_temp());
+        let mut runtime = Runtime::new(storage, RuntimeConfig::default());
 
-        let query = SearchKNN::new(1, vec![0.5f32; 128], 10);
-        let results = query.execute(&storage).await.unwrap();
+        assert!(!runtime.is_running());
+        runtime.start().unwrap();
+        assert!(runtime.is_running());
 
-        assert_eq!(results.len(), 10);
-        // Results should be sorted by distance
-        for i in 1..results.len() {
-            assert!(results[i-1].distance <= results[i].distance);
+        // Should have writer and reader
+        assert!(runtime.writer().is_some());
+        assert!(runtime.reader().is_some());
+
+        runtime.stop().unwrap();
+        assert!(!runtime.is_running());
+    }
+}
+```
+
+### Effort Breakdown
+
+| Task | Description | Effort |
+|------|-------------|--------|
+| 6.1 | MutationExecutor trait | 0.5 day |
+| 6.2 | Mutation Consumer | 0.5 day |
+| 6.3 | Query Consumer (MPMC pool) | 1 day |
+| 6.4 | Reader handle | 0.5 day |
+| 6.5 | Runnable trait + Runtime | 1 day |
+| 6.6 | Tests | 0.5 day |
+| **Total** | | **4 days** |
+
+**Acceptance Criteria:**
+- [ ] Mutations execute via channel consumer
+- [ ] Queries use MPMC pool with configurable workers
+- [ ] Writer.flush() blocks until mutations processed
+- [ ] Reader.search() returns results via oneshot
+- [ ] Runtime start/stop lifecycle works correctly
+- [ ] Concurrent query tests pass
+
+---
+
+## Phase 7: Async Graph Updater
+
+**Goal:** Enable online updates by decoupling vector storage from HNSW graph construction.
+
+**Motivation:** Synchronous graph updates during insert create latency spikes (~50ms P99).
+Two-phase insert pattern:
+1. **Phase 1 (sync, fast):** Store vector data, metadata, binary code
+2. **Phase 2 (async, background):** Build HNSW graph connections
+
+This allows insert latency <5ms while graph quality builds in the background.
+
+### Overview: Two-Phase Insert Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     Two-Phase Insert Architecture                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Phase 1: Synchronous Write (< 5ms)                                         │
+│  ┌────────────┐     ┌────────────┐     ┌────────────┐                       │
+│  │ insert()   │ ──► │ Store      │ ──► │ Pending    │                       │
+│  │            │     │ Vector+Meta│     │ Queue      │                       │
+│  └────────────┘     └────────────┘     └────────────┘                       │
+│       │                                      │                               │
+│       │ Searchable immediately               │ Queued for graph build       │
+│       ▼                                      ▼                               │
+│  ┌────────────────────────────────────────────────────────────┐             │
+│  │                   Phase 2: Async Graph Build               │             │
+│  │  ┌────────────┐     ┌────────────┐     ┌────────────┐     │             │
+│  │  │ Worker     │ ──► │ Greedy     │ ──► │ Add HNSW   │     │             │
+│  │  │ Thread     │     │ Search     │     │ Edges      │     │             │
+│  │  └────────────┘     └────────────┘     └────────────┘     │             │
+│  └────────────────────────────────────────────────────────────┘             │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Task 7.1: Pending Queue CF
+
+Add column family for pending graph updates:
+
+```rust
+// libs/db/src/vector/schema.rs
+
+/// Pending inserts waiting for graph construction.
+/// Key: [embedding_code: u64][timestamp: u64][vec_id: u32] = 20 bytes
+/// Value: empty (all data stored in Vectors CF)
+pub struct PendingInserts;
+
+impl ColumnFamily for PendingInserts {
+    const CF_NAME: &'static str = "vector/pending";
+}
+
+impl PendingInserts {
+    /// Create key for pending insert.
+    pub fn key(embedding: EmbeddingCode, vec_id: VecId) -> [u8; 20] {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        let mut key = [0u8; 20];
+        key[0..8].copy_from_slice(&embedding.to_be_bytes());
+        key[8..16].copy_from_slice(&timestamp.to_be_bytes());
+        key[16..20].copy_from_slice(&vec_id.to_be_bytes());
+        key
+    }
+
+    /// Parse key components.
+    pub fn parse_key(key: &[u8]) -> (EmbeddingCode, u64, VecId) {
+        let embedding = u64::from_be_bytes(key[0..8].try_into().unwrap());
+        let timestamp = u64::from_be_bytes(key[8..16].try_into().unwrap());
+        let vec_id = u32::from_be_bytes(key[16..20].try_into().unwrap());
+        (embedding, timestamp, vec_id)
+    }
+}
+```
+
+### Task 7.2: Async Updater Configuration
+
+```rust
+// libs/db/src/vector/async_updater.rs
+
+/// Configuration for the async graph updater.
+#[derive(Debug, Clone)]
+pub struct AsyncUpdaterConfig {
+    /// Maximum vectors per batch
+    pub batch_size: usize,          // Default: 100
+
+    /// Maximum time to wait for batch to fill
+    pub batch_timeout: Duration,    // Default: 100ms
+
+    /// Number of worker threads
+    pub num_workers: usize,         // Default: 2
+
+    /// ef_construction for greedy search
+    pub ef_construction: usize,     // Default: 200
+
+    /// Whether to process on startup (drain pending queue)
+    pub process_on_startup: bool,   // Default: true
+}
+
+impl Default for AsyncUpdaterConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 100,
+            batch_timeout: Duration::from_millis(100),
+            num_workers: 2,
+            ef_construction: 200,
+            process_on_startup: true,
         }
     }
 }
 ```
 
-### Phase 5.5 File Changes Summary
-
-| File | Changes |
-|------|---------|
-| `mutation.rs` | Add `VectorMutationExecutor` trait and impls for all mutation types |
-| `query.rs` | Add `SearchKNN`, `SearchKNNFiltered` queries with `QueryExecutor` impls |
-| `writer.rs` | Add `Consumer`, `create_mutation_consumer`, `spawn_mutation_consumer` |
-| `reader.rs` | **NEW** - Add `Reader`, `Consumer`, `ReaderConfig`, spawn functions |
-| `mod.rs` | Update exports to match graph/fulltext patterns |
-| `processor.rs` | Add missing methods called by mutation executors |
-
-### Dependencies
-
-- Phase 2 (HNSW Core) must be complete for SearchKNN
-- Phase 4 (RaBitQ) optional but enhances SearchKNN performance
-
----
-
-## Phase 6: Production Hardening
-
-**Goal:** Production-ready vector search with full feature set.
-
-### Task 6.1: Delete Support [FUNC-3]
+### Task 7.3: Async Updater Implementation
 
 ```rust
-impl VectorStorage {
-    pub fn delete(&self, ulid: Id) -> Result<()> {
-        // 1. Lookup internal ID
-        let internal_id = self.get_internal_id(ulid)?
+// libs/db/src/vector/async_updater.rs
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+/// Background graph updater.
+pub struct AsyncGraphUpdater {
+    storage: Arc<Storage>,
+    config: AsyncUpdaterConfig,
+    shutdown: Arc<AtomicBool>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl AsyncGraphUpdater {
+    /// Start the async updater with worker threads.
+    pub fn start(storage: Arc<Storage>, config: AsyncUpdaterConfig) -> Self {
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        // Drain pending queue on startup if configured
+        if config.process_on_startup {
+            Self::drain_pending(&storage, &config);
+        }
+
+        // Spawn worker threads
+        let workers = (0..config.num_workers)
+            .map(|worker_id| {
+                let storage = Arc::clone(&storage);
+                let config = config.clone();
+                let shutdown = Arc::clone(&shutdown);
+                thread::spawn(move || {
+                    Self::worker_loop(worker_id, storage, config, shutdown);
+                })
+            })
+            .collect();
+
+        Self { storage, config, shutdown, workers }
+    }
+
+    /// Graceful shutdown.
+    pub fn shutdown(self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        for worker in self.workers {
+            let _ = worker.join();
+        }
+    }
+
+    fn worker_loop(
+        worker_id: usize,
+        storage: Arc<Storage>,
+        config: AsyncUpdaterConfig,
+        shutdown: Arc<AtomicBool>,
+    ) {
+        tracing::info!(worker_id, "Async updater worker started");
+
+        loop {
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // Collect a batch of pending inserts
+            let batch = Self::collect_batch(&storage, &config);
+
+            if batch.is_empty() {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+
+            // Process each vector in the batch
+            for (embedding, vec_id) in &batch {
+                if let Err(e) = Self::process_insert(&storage, &config, *embedding, *vec_id) {
+                    tracing::error!(vec_id, error = %e, "Failed to process pending insert");
+                }
+            }
+
+            // Remove processed items from pending queue
+            Self::clear_processed(&storage, &batch);
+        }
+
+        tracing::info!(worker_id, "Async updater worker stopped");
+    }
+
+    fn collect_batch(storage: &Storage, config: &AsyncUpdaterConfig) -> Vec<(EmbeddingCode, VecId)>;
+    fn process_insert(storage: &Storage, config: &AsyncUpdaterConfig, embedding: EmbeddingCode, vec_id: VecId) -> Result<()>;
+    fn clear_processed(storage: &Storage, batch: &[(EmbeddingCode, VecId)]);
+    fn drain_pending(storage: &Storage, config: &AsyncUpdaterConfig);
+}
+```
+
+### Task 7.4: Delete Handling
+
+Deletes use the same two-phase pattern:
+
+```rust
+impl Storage {
+    /// Delete with async cleanup.
+    pub fn delete(&self, embedding: EmbeddingCode, id: Id) -> Result<()> {
+        let vec_id = self.get_internal_id(embedding, id)?
             .ok_or_else(|| anyhow!("Vector not found"))?;
 
-        // 2. Mark as deleted in metadata
-        self.mark_deleted(internal_id)?;
+        // Phase 1: Mark as deleted (fast, sync)
+        self.mark_deleted(embedding, vec_id)?;
 
-        // 3. Remove edges (optional - can be lazy)
-        self.remove_all_edges(internal_id)?;
+        // Remove from pending queue if present
+        self.remove_from_pending(embedding, vec_id)?;
 
-        // 4. Return ID to free list
-        self.id_alloc.free(internal_id);
+        // Return ID to free list
+        self.id_allocator.free(embedding, vec_id);
 
-        // 5. Optionally remove from RocksDB (or leave for compaction)
-        self.remove_vector(internal_id)?;
-        self.remove_id_mappings(ulid, internal_id)?;
+        // Phase 2: Edge cleanup (lazy, via merge operator)
+        // Stale edges cleaned during:
+        // - Search: skip deleted nodes
+        // - Compaction: merge operator removes stale edges
 
         Ok(())
     }
 }
+
+// Node flags in VecMeta
+const FLAG_DELETED: u8 = 0x01;
+const FLAG_PENDING: u8 = 0x02;  // Still in pending queue
 ```
+
+### Task 7.5: Testing & Crash Recovery
+
+```rust
+#[cfg(test)]
+mod async_updater_tests {
+    use super::*;
+
+    #[test]
+    fn test_insert_async_immediate_searchability() {
+        let storage = setup_vector_storage_with_async_updater();
+        let embedding = test_embedding_code();
+
+        let id = Id::new();
+        let vector = vec![1.0; 128];
+
+        // Async insert
+        storage.insert_async(embedding, id, &vector).unwrap();
+
+        // Should be searchable IMMEDIATELY (brute-force fallback)
+        let results = storage.search(embedding, &vector, 1, 10).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_crash_recovery_pending_queue() {
+        let tmp = TempDir::new().unwrap();
+
+        // First session: insert async, don't wait for drain
+        {
+            let storage = setup_vector_storage_at(tmp.path());
+            for i in 0..50 {
+                storage.insert_async(test_embedding_code(), Id::new(), &[i as f32; 128]).unwrap();
+            }
+            // Don't wait - simulate crash
+        }
+
+        // Second session: recovery
+        {
+            let storage = setup_vector_storage_at(tmp.path());
+            // Should recover pending queue
+            let pending = storage.get_pending_count(test_embedding_code()).unwrap();
+            assert!(pending > 0, "Should have pending items after recovery");
+
+            // Wait for drain
+            std::thread::sleep(Duration::from_secs(2));
+
+            // All should be processed
+            let final_pending = storage.get_pending_count(test_embedding_code()).unwrap();
+            assert_eq!(final_pending, 0);
+        }
+    }
+}
+```
+
+### Consistency Guarantees
+
+| Guarantee | Description |
+|-----------|-------------|
+| **Durability** | Vector is durable after `insert()` returns (stored in RocksDB) |
+| **Searchability** | Vector is searchable immediately (brute-force expansion) |
+| **Eventual Connectivity** | Graph edges added within `batch_timeout` (default 100ms) |
+| **Crash Recovery** | Pending queue persisted; drained on restart |
+| **Delete Visibility** | Deleted vectors excluded from search immediately |
+
+### Effort Breakdown
+
+| Task | Description | Effort |
+|------|-------------|--------|
+| 7.1 | Pending queue CF | 0.5 day |
+| 7.2 | Async updater config | 0.25 day |
+| 7.3 | Worker thread implementation | 1.5 days |
+| 7.4 | Delete handling | 0.5 day |
+| 7.5 | Testing and crash recovery | 1 day |
+| **Total** | | **4 days** |
+
+**Acceptance Criteria:**
+- [ ] `insert()` latency < 5ms P99
+- [ ] Pending queue drained within `batch_timeout`
+- [ ] Crash recovery: pending queue survives restart
+- [ ] Deleted nodes excluded from search results
+
+---
+
+## Phase 8: Production Hardening
+
+**Goal:** Production-ready vector search with full feature set.
+
+### Task 8.1: Delete Refinement
+
+Refine delete implementation from Phase 5 and Phase 7:
+- Proper edge cleanup strategy
+- Garbage collection for freed IDs
+- Tombstone compaction
 
 **Effort:** 1-2 days
 
-### Task 6.2: Concurrent Access [CON-3]
+### Task 8.2: Concurrent Access [CON-3]
 
 - Use RocksDB snapshot isolation for reads
 - Write serialization via transaction API
+- Concurrent read/write stress tests
 
 **Effort:** 2-3 days
 
-### Task 6.3: 1B Scale Validation
+### Task 8.3: 1B Scale Validation
 
 - Benchmark at 10M, 100M, 1B scales
 - Validate memory constraints
 - Performance profiling
+- Document scaling characteristics
 
-**Effort:** 1-2 weeks (including hardware procurement if needed)
+**Effort:** 1-2 weeks
 
-### Phase 6 Validation & Tests
+### Phase 8 Validation & Tests
 
 ```rust
-// libs/db/src/vector/tests/production_tests.rs
-
 #[cfg(test)]
 mod production_tests {
     use super::*;
-    use std::sync::Arc;
-    use std::thread;
-
-    // =========================================================================
-    // Delete Support Tests (Task 6.1)
-    // =========================================================================
 
     #[test]
-    fn test_delete_basic() {
-        let storage = setup_vector_storage_temp();
-        let code = Embedding::new("test");
+    fn test_concurrent_read_write() {
+        let storage = Arc::new(setup_vector_storage_temp());
+        let embedding = test_embedding_code();
 
-        let ulid = Id::new();
-        storage.insert(&code, ulid, &[1.0; 128]).unwrap();
+        // Seed with some vectors
+        for i in 0..100 {
+            storage.insert(embedding, Id::new(), &[i as f32; 128]).unwrap();
+        }
 
-        assert!(storage.exists(&code, ulid).unwrap());
+        let mut handles = Vec::new();
 
-        storage.delete(&code, ulid).unwrap();
+        // Writers
+        for _ in 0..5 {
+            let s = Arc::clone(&storage);
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    s.insert(test_embedding_code(), Id::new(), &random_vector(128)).unwrap();
+                }
+            }));
+        }
 
-        assert!(!storage.exists(&code, ulid).unwrap());
-    }
+        // Readers
+        for _ in 0..10 {
+            let s = Arc::clone(&storage);
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    s.search(test_embedding_code(), &random_vector(128), 10, 50).unwrap();
+                }
+            }));
+        }
 
-    #[test]
-    fn test_delete_frees_internal_id() {
-        let storage = setup_vector_storage_temp();
-        let code = Embedding::new("test");
-
-        // Insert and delete
-        let ulid1 = Id::new();
-        storage.insert(&code, ulid1, &[1.0; 128]).unwrap();
-        let internal_id1 = storage.get_internal_id(&code, ulid1).unwrap().unwrap();
-
-        storage.delete(&code, ulid1).unwrap();
-
-        // New insert should reuse the freed ID
-        let ulid2 = Id::new();
-        storage.insert(&code, ulid2, &[2.0; 128]).unwrap();
-        let internal_id2 = storage.get_internal_id(&code, ulid2).unwrap().unwrap();
-
-        assert_eq!(internal_id1, internal_id2, "Freed ID should be reused");
-    }
-
-    #[test]
-    fn test_delete_removes_from_neighbors() {
-        let storage = setup_vector_storage_temp();
-        let code = Embedding::new("test");
-
-        // Insert several vectors
-        let ulids: Vec<Id> = (0..10).map(|i| {
-            let ulid = Id::new();
-            storage.insert(&code, ulid, &[i as f32; 128]).unwrap();
-            ulid
-        }).collect();
-
-        // Get neighbors of node 0
-        let initial_neighbors = storage.get_neighbors(&code, 0, 0).unwrap();
-        let has_node_5 = initial_neighbors.contains(5);
-
-        if has_node_5 {
-            // Delete node 5
-            storage.delete(&code, ulids[5]).unwrap();
-
-            // Node 5 should be removed from all neighbor lists (eventually)
-            // Note: lazy cleanup may not be immediate
-            storage.compact(&code).unwrap();
-
-            let updated_neighbors = storage.get_neighbors(&code, 0, 0).unwrap();
-            assert!(!updated_neighbors.contains(5), "Deleted node should be removed from neighbors");
+        for h in handles {
+            h.join().unwrap();
         }
     }
 
     #[test]
     fn test_delete_not_in_search_results() {
         let storage = setup_vector_storage_temp();
-        let code = Embedding::new("test");
+        let embedding = test_embedding_code();
 
         let ulids: Vec<Id> = (0..100).map(|i| {
-            let ulid = Id::new();
-            storage.insert(&code, ulid, &[i as f32; 128]).unwrap();
-            ulid
+            let id = Id::new();
+            storage.insert(embedding, id, &[i as f32; 128]).unwrap();
+            id
         }).collect();
 
-        // Delete some
+        // Delete even-indexed vectors
         for i in (0..100).step_by(2) {
-            storage.delete(&code, ulids[i]).unwrap();
+            storage.delete(embedding, ulids[i]).unwrap();
         }
 
-        // Search should not return deleted ULIDs
-        let results = storage.search(&code, &[50.0; 128], 20, 100).unwrap();
-
-        for (_, ulid) in &results {
-            let idx = ulids.iter().position(|u| u == ulid).unwrap();
-            assert!(idx % 2 == 1, "Deleted ULID {} (idx {}) appeared in results", ulid, idx);
+        // Search should not return deleted vectors
+        let results = storage.search(embedding, &[50.0; 128], 20, 100).unwrap();
+        for (_, id) in &results {
+            let idx = ulids.iter().position(|u| u == id).unwrap();
+            assert!(idx % 2 == 1, "Deleted vector appeared in results");
         }
-    }
-
-    // =========================================================================
-    // Concurrent Access Tests (Task 6.2)
-    // =========================================================================
-
-    #[test]
-    fn test_concurrent_reads() {
-        let storage = Arc::new(setup_vector_storage_with_vectors(10_000));
-        let code = Embedding::new("test");
-
-        let mut handles = Vec::new();
-        for _ in 0..10 {
-            let s = Arc::clone(&storage);
-            let c = code.clone();
-            handles.push(thread::spawn(move || {
-                for _ in 0..100 {
-                    let query = random_vector(128);
-                    s.search(&c, &query, 10, 50).unwrap();
-                }
-            }));
-        }
-
-        for h in handles {
-            h.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn test_concurrent_read_write() {
-        let storage = Arc::new(setup_vector_storage_temp());
-        let code = Embedding::new("test");
-
-        // Seed with some vectors
-        for i in 0..100 {
-            storage.insert(&code, Id::new(), &[i as f32; 128]).unwrap();
-        }
-
-        let mut handles = Vec::new();
-
-        // Writers
-        for t in 0..4 {
-            let s = Arc::clone(&storage);
-            let c = code.clone();
-            handles.push(thread::spawn(move || {
-                for i in 0..50 {
-                    s.insert(&c, Id::new(), &[(t * 50 + i) as f32; 128]).unwrap();
-                }
-            }));
-        }
-
-        // Readers
-        for _ in 0..4 {
-            let s = Arc::clone(&storage);
-            let c = code.clone();
-            handles.push(thread::spawn(move || {
-                for _ in 0..100 {
-                    let query = random_vector(128);
-                    let _ = s.search(&c, &query, 10, 50);
-                }
-            }));
-        }
-
-        for h in handles {
-            h.join().unwrap();
-        }
-
-        // Verify count
-        assert_eq!(storage.count(&code).unwrap(), 300); // 100 + 4*50
-    }
-
-    #[test]
-    fn test_snapshot_isolation() {
-        let storage = Arc::new(setup_vector_storage_temp());
-        let code = Embedding::new("test");
-
-        // Insert initial vectors
-        for i in 0..100 {
-            storage.insert(&code, Id::new(), &[i as f32; 128]).unwrap();
-        }
-
-        // Take snapshot
-        let snapshot = storage.snapshot(&code).unwrap();
-
-        // Insert more while holding snapshot
-        for i in 100..200 {
-            storage.insert(&code, Id::new(), &[i as f32; 128]).unwrap();
-        }
-
-        // Snapshot should only see original 100
-        let snapshot_count = snapshot.count().unwrap();
-        assert_eq!(snapshot_count, 100);
-
-        // Current should see 200
-        assert_eq!(storage.count(&code).unwrap(), 200);
-    }
-
-    // =========================================================================
-    // Scale Tests (Task 6.3) - Run with --release --ignored
-    // =========================================================================
-
-    #[test]
-    #[ignore]  // Run explicitly: cargo test --release scale -- --ignored
-    fn test_scale_10k() {
-        let storage = setup_vector_storage_temp();
-        let code = Embedding::new("test");
-
-        let start = Instant::now();
-        for _ in 0..10_000 {
-            storage.insert(&code, Id::new(), &random_vector(128)).unwrap();
-        }
-        let insert_time = start.elapsed();
-
-        println!("10K insert: {:?} ({:.0} vec/sec)",
-            insert_time, 10_000.0 / insert_time.as_secs_f64());
-
-        // Search benchmark
-        let start = Instant::now();
-        for _ in 0..1000 {
-            storage.search(&code, &random_vector(128), 10, 100).unwrap();
-        }
-        let search_time = start.elapsed();
-
-        println!("1K searches at 10K: {:?} ({:.1} QPS)",
-            search_time, 1000.0 / search_time.as_secs_f64());
-
-        // Recall check
-        let recall = measure_recall(&storage, &code, 100);
-        println!("Recall@10 at 10K: {:.1}%", recall * 100.0);
-
-        assert!(recall > 0.90, "Recall should be > 90%");
-    }
-
-    #[test]
-    #[ignore]
-    fn test_scale_100k() {
-        let storage = setup_vector_storage_temp();
-        let code = Embedding::new("test");
-
-        let start = Instant::now();
-        for _ in 0..100_000 {
-            storage.insert(&code, Id::new(), &random_vector(128)).unwrap();
-        }
-        let insert_time = start.elapsed();
-
-        println!("100K insert: {:?} ({:.0} vec/sec)",
-            insert_time, 100_000.0 / insert_time.as_secs_f64());
-
-        // Memory check
-        let stats = storage.stats(&code).unwrap();
-        println!("Memory at 100K: {} MB", stats.memory_bytes / 1_000_000);
-
-        // Search benchmark
-        let start = Instant::now();
-        for _ in 0..100 {
-            storage.search(&code, &random_vector(128), 10, 100).unwrap();
-        }
-        let search_time = start.elapsed();
-
-        println!("100 searches at 100K: {:?} ({:.1} QPS)",
-            search_time, 100.0 / search_time.as_secs_f64());
-
-        // Recall check
-        let recall = measure_recall(&storage, &code, 50);
-        println!("Recall@10 at 100K: {:.1}%", recall * 100.0);
-
-        assert!(recall > 0.90);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_scale_1m() {
-        let storage = setup_vector_storage_temp();
-        let code = Embedding::new("test");
-
-        println!("Building 1M vector index...");
-        let start = Instant::now();
-        for i in 0..1_000_000 {
-            if i % 100_000 == 0 {
-                println!("  {} vectors inserted...", i);
-            }
-            storage.insert(&code, Id::new(), &random_vector(128)).unwrap();
-        }
-        let insert_time = start.elapsed();
-
-        println!("1M insert: {:?} ({:.0} vec/sec)",
-            insert_time, 1_000_000.0 / insert_time.as_secs_f64());
-
-        // Memory check
-        let stats = storage.stats(&code).unwrap();
-        println!("Memory at 1M: {} GB", stats.memory_bytes / 1_000_000_000);
-        assert!(stats.memory_bytes < 5_000_000_000, "Memory should be < 5GB at 1M");
-
-        // Search benchmark
-        let start = Instant::now();
-        for _ in 0..100 {
-            storage.search(&code, &random_vector(128), 10, 100).unwrap();
-        }
-        let search_time = start.elapsed();
-
-        let qps = 100.0 / search_time.as_secs_f64();
-        println!("100 searches at 1M: {:?} ({:.1} QPS, {:.1}ms avg)",
-            search_time, qps, 1000.0 / qps);
-
-        // Recall check
-        let recall = measure_recall(&storage, &code, 20);
-        println!("Recall@10 at 1M: {:.1}%", recall * 100.0);
-
-        // Targets
-        assert!(qps > 100.0, "QPS at 1M should be > 100");
-        assert!(recall > 0.90, "Recall at 1M should be > 90%");
-    }
-
-    // =========================================================================
-    // End-to-End Integration Test
-    // =========================================================================
-
-    #[test]
-    fn test_e2e_workflow() {
-        let storage = setup_vector_storage_temp();
-
-        // Multiple embedding spaces
-        let qwen = Embedding::new("qwen3");
-        let gemma = Embedding::new("gemma");
-
-        // Insert into both spaces
-        for i in 0..100 {
-            let ulid = Id::new();
-            storage.insert(&qwen, ulid, &[i as f32; 128]).unwrap();
-            storage.insert(&gemma, ulid, &[(i + 100) as f32; 128]).unwrap();
-        }
-
-        // Search in both spaces
-        let qwen_results = storage.search(&qwen, &[50.0; 128], 10, 50).unwrap();
-        let gemma_results = storage.search(&gemma, &[150.0; 128], 10, 50).unwrap();
-
-        assert_eq!(qwen_results.len(), 10);
-        assert_eq!(gemma_results.len(), 10);
-
-        // Delete from one space shouldn't affect other
-        let ulid_to_delete = qwen_results[0].1;
-        storage.delete(&qwen, ulid_to_delete).unwrap();
-
-        // Should still exist in gemma
-        assert!(storage.exists(&gemma, ulid_to_delete).unwrap());
-
-        // Restart simulation
-        let tmp = TempDir::new().unwrap();
-        {
-            let storage = setup_vector_storage_at(tmp.path());
-            for i in 0..50 {
-                storage.insert(&qwen, Id::new(), &[i as f32; 128]).unwrap();
-            }
-        }
-        {
-            let storage = setup_vector_storage_at(tmp.path());
-            assert_eq!(storage.count(&qwen).unwrap(), 50);
-        }
-    }
-
-    // Helper function
-    fn measure_recall(storage: &VectorStorage, code: &Embedding, num_queries: usize) -> f64 {
-        let mut total_recall = 0.0;
-        // ... brute force comparison logic
-        total_recall / num_queries as f64
     }
 }
 ```
 
-**Test Coverage Checklist:**
-- [ ] Basic delete functionality
-- [ ] Delete frees internal ID for reuse
-- [ ] Delete removes node from neighbor lists
-- [ ] Deleted nodes excluded from search
-- [ ] Concurrent reads don't conflict
-- [ ] Concurrent read/write correctness
-- [ ] Snapshot isolation
-- [ ] Scale test: 10K vectors
-- [ ] Scale test: 100K vectors
-- [ ] Scale test: 1M vectors
-- [ ] End-to-end workflow test
+### Effort Breakdown
 
-**Benchmarks:**
-```rust
-// Run with: cargo bench --release
+| Task | Description | Effort |
+|------|-------------|--------|
+| 8.1 | Delete refinement | 1-2 days |
+| 8.2 | Concurrent access | 2-3 days |
+| 8.3 | 1B scale validation | 1-2 weeks |
+| **Total** | | **2-3 weeks** |
 
-#[bench]
-fn bench_full_workflow(b: &mut Bencher) {
-    b.iter(|| {
-        let storage = setup_vector_storage_temp();
-        let code = Embedding::new("bench");
-
-        // Insert
-        for _ in 0..1000 {
-            storage.insert(&code, Id::new(), &random_vector(128)).unwrap();
-        }
-
-        // Search
-        for _ in 0..100 {
-            storage.search(&code, &random_vector(128), 10, 50).unwrap();
-        }
-
-        // Delete
-        for id in storage.all_ulids(&code).unwrap().take(100) {
-            storage.delete(&code, id).unwrap();
-        }
-    });
-}
-```
-
-**Scale Validation Script:**
-```bash
-#!/bin/bash
-# scripts/scale_validation.sh
-
-echo "=== Vector Index Scale Validation ==="
-
-# 10K
-cargo test --release test_scale_10k -- --ignored --nocapture
-
-# 100K
-cargo test --release test_scale_100k -- --ignored --nocapture
-
-# 1M (requires ~8GB RAM)
-cargo test --release test_scale_1m -- --ignored --nocapture
-
-# Generate report
-echo "=== Summary ==="
-# ... parse output and generate report
-```
+**Acceptance Criteria:**
+- [ ] Delete removes vectors from search results
+- [ ] Concurrent read/write stress tests pass
+- [ ] 1B scale benchmark completed
+- [ ] Memory usage within 64GB budget
 
 ---
 
@@ -7747,10 +7336,16 @@ Phase 2: HNSW2 Core + Navigation ◄─ Phase 3: Batch  │
 Phase 4: RaBitQ ◄──────────────────────────┘          │
     │                                                 │
     ▼                                                 │
-Phase 5: Async Updater ───────────────────────────────┘
+Phase 5: Internal Mutation/Query API                  │
+    │                                                 │
+    ▼                                                 │
+Phase 6: MPSC/MPMC Public API ────────────────────────┘
     │
     ▼
-Phase 6: Production Hardening
+Phase 7: Async Graph Updater
+    │
+    ▼
+Phase 8: Production Hardening
 ```
 
 **Navigation Layer Integration:** Tasks 2.7-2.9 are placed in Phase 2 (rather than a
@@ -7767,10 +7362,12 @@ The memory caching (2.9) can be deferred if timeline is tight, but 2.7-2.8 are r
 | Phase 1: ID Management | 1.1-1.5 | ✅ COMPLETE | ✅ |
 | Phase 2: HNSW2 Core + Navigation | 2.1-2.9 | 11-17 days | ~11-17 days |
 | Phase 3: Batch + Deferred | 3.1-3.7 | 4.5-6 days | 17-28 days |
-| Phase 4: RaBitQ | 4.1-4.5 | 5-7 days | 22-32 days |
-| Phase 5: Async Updater | 5.1-5.5 | 3-4 days | 25-36 days |
-| Phase 6: Production | 6.1-6.3 | 4-7 days | 29-43 days |
-| **Total** | | **~6-9 weeks** | |
+| Phase 4: RaBitQ | 4.1-4.23 | ✅ COMPLETE | ✅ |
+| Phase 5: Internal Mutation/Query API | 5.1-5.7 | 4-5 days | ~4-5 days |
+| Phase 6: MPSC/MPMC Public API | 6.1-6.6 | 4 days | 8-9 days |
+| Phase 7: Async Graph Updater | 7.1-7.5 | 4 days | 12-13 days |
+| Phase 8: Production Hardening | 8.1-8.3 | 2-3 weeks | 4-6 weeks |
+| **Total (Remaining)** | | **~4-6 weeks** | |
 
 **Phase 2 Breakdown:**
 | Task | Description | Effort |
