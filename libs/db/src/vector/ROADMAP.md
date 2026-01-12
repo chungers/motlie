@@ -232,8 +232,9 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │                                                                              │
 │  Phase 5: Internal Mutation/Query API [NOT STARTED]                          │
 │  ├── 5.1-5.7 Processor methods, Storage search, dispatch logic             │
-│  ├── 5.8-5.10 Concurrency stress tests, metrics infra, benchmarks          │
-│  └── Goal: Complete internal API + concurrent validation                   │
+│  ├── 5.8 Migrate examples/laion_benchmark + integration tests              │
+│  ├── 5.9-5.11 Concurrency stress tests, metrics infra, benchmarks          │
+│  └── Goal: Complete internal API + migration + concurrent validation       │
 │                                                                              │
 │  Phase 6: MPSC/MPMC Public API [NOT STARTED]                                 │
 │  ├── 6.1-6.6 MutationExecutor, Consumer, Reader, spawn functions           │
@@ -6425,7 +6426,99 @@ mod internal_api_tests {
 }
 ```
 
-### Task 5.8: Multi-Threaded Stress Tests
+### Task 5.8: Migrate Examples and Integration Tests
+
+**Goal:** Update all examples and integration tests to use the new Processor/Storage API.
+
+**Scope:**
+
+1. **`examples/laion_benchmark/`**:
+   - Replace direct `hnsw::Index::insert()` with `Processor::insert_vector()`
+   - Replace manual CF writes with `Processor::insert_batch()`
+   - Keep direct `Index::search()` for raw performance measurement OR migrate to `Storage::search()`
+   - Update RaBitQ integration to use Processor-managed encoders
+
+2. **`libs/db/tests/test_vector_benchmark_integration.rs`**:
+   - Replace `build_index_with_navigation()` helper with Processor-based setup
+   - Remove manual `txn_db.put_cf()` calls for vector storage
+   - Use `Processor::insert_batch()` for test data setup
+   - Use `Storage::search()` for search validation
+
+3. **Other integration tests** (if any):
+   - Audit all tests using direct Index/CF access
+   - Migrate to Processor/Storage API
+
+**Migration Pattern:**
+
+```rust
+// BEFORE: Direct Index + manual CF writes
+fn build_index_with_navigation(
+    storage: &Storage,
+    vectors: &[Vec<f32>],
+    ...
+) -> Result<(hnsw::Index, Arc<NavigationCache>)> {
+    let txn_db = storage.transaction_db()?;
+    let vectors_cf = txn_db.cf_handle(Vectors::CF_NAME)?;
+
+    for (i, vector) in vectors.iter().enumerate() {
+        let vec_id = i as VecId;
+        // Manual CF write
+        txn_db.put_cf(&vectors_cf, key_bytes, value_bytes)?;
+        // Manual graph insert
+        index.insert(storage, vec_id, vector)?;
+    }
+}
+
+// AFTER: Processor API
+fn setup_test_vectors(
+    processor: &Processor,
+    storage: &Storage,
+    embedding: EmbeddingCode,
+    vectors: &[Vec<f32>],
+) -> Result<Vec<VecId>> {
+    // Register embedding if needed
+    processor.add_embedding_spec(&AddEmbeddingSpec {
+        code: embedding,
+        model: "test".into(),
+        dim: vectors[0].len() as u32,
+        distance: Distance::Cosine,
+        storage_type: VectorElementType::F32,
+    })?;
+
+    // Batch insert handles: ID allocation, CF writes, graph building
+    let ids_and_vectors: Vec<_> = vectors.iter()
+        .map(|v| (Id::new(), v.clone()))
+        .collect();
+    processor.insert_batch(embedding, &ids_and_vectors, true)
+}
+
+// Search using Storage API
+let results = storage.search(embedding, &query, k, &SearchConfig::default())?;
+```
+
+**Benchmark-Specific Considerations:**
+
+For `laion_benchmark`, provide two modes:
+1. **API mode** (default): Uses Processor/Storage for realistic end-to-end measurement
+2. **Raw mode** (optional flag): Direct Index access for isolating HNSW performance
+
+```rust
+// examples/laion_benchmark/main.rs
+if args.raw_mode {
+    // Direct Index access (current behavior, for HNSW-only benchmarks)
+    index.insert(&storage, vec_id, &vector)?;
+} else {
+    // Full API (Phase 5+, measures complete insert path)
+    processor.insert_vector(embedding, id, &vector, true)?;
+}
+```
+
+**Validation Criteria:**
+- All existing tests pass with new API
+- Benchmark results within 10% of direct Index performance
+- No functionality regression
+
+### Task 5.9: Multi-Threaded Stress Tests
 
 **Goal:** Validate concurrent access patterns under load.
 
@@ -6502,7 +6595,7 @@ mod concurrent_tests {
 }
 ```
 
-### Task 5.9: Metrics Collection Infrastructure
+### Task 5.10: Metrics Collection Infrastructure
 
 **Goal:** Add metrics collection for concurrent operation analysis.
 
@@ -6577,7 +6670,7 @@ pub struct MetricsSummary {
 }
 ```
 
-### Task 5.10: Concurrent Benchmark Baseline
+### Task 5.11: Concurrent Benchmark Baseline
 
 **Goal:** Establish baseline metrics for concurrent operations.
 
@@ -7627,7 +7720,7 @@ The memory caching (2.9) can be deferred if timeline is tight, but 2.7-2.8 are r
 | Phase 2: HNSW2 Core + Navigation | 2.1-2.9 | 11-17 days | ~11-17 days |
 | Phase 3: Batch + Deferred | 3.1-3.7 | 4.5-6 days | 17-28 days |
 | Phase 4: RaBitQ | 4.1-4.23 | ✅ COMPLETE | ✅ |
-| Phase 5: Internal Mutation/Query API | 5.1-5.10 | 5-7 days | ~5-7 days |
+| Phase 5: Internal Mutation/Query API | 5.1-5.11 | 6-8 days | ~6-8 days |
 | Phase 6: MPSC/MPMC Public API | 6.1-6.6 | 4 days | 8-9 days |
 | Phase 7: Async Graph Updater | 7.1-7.5 | 4 days | 12-13 days |
 | Phase 8: Production Hardening | 8.1-8.3 | 2-3 weeks | 4-6 weeks |
