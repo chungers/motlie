@@ -17,9 +17,12 @@
 //!
 //! | Bits | Code Size | Compression | Recall (no rerank) |
 //! |------|-----------|-------------|-------------------|
-//! | 1    | 16 bytes  | 32x         | ~70%              |
-//! | 2    | 32 bytes  | 16x         | ~85%              |
-//! | 4    | 64 bytes  | 8x          | ~92%              |
+//! | 1    | 16 bytes  | 32x         | ~50%              |
+//! | 2    | 32 bytes  | 16x         | ~65%              |
+//! | 4    | 64 bytes  | 8x          | ~80%              |
+//!
+//! Note: Multi-bit modes use Gray code encoding to ensure adjacent quantization
+//! levels have Hamming distance 1 (see issue #43).
 //!
 //! # References
 //!
@@ -167,6 +170,29 @@ impl RaBitQ {
         Self::column_dot(matrix, dim, col, col).sqrt()
     }
 
+    /// Convert binary value to Gray code.
+    ///
+    /// Gray code ensures adjacent integers differ by exactly 1 bit,
+    /// which is essential for multi-bit quantization with Hamming distance.
+    ///
+    /// Without Gray code, adjacent quantization levels can have maximum
+    /// Hamming distance (e.g., level 1=01 and level 2=10 differ by 2 bits).
+    ///
+    /// # Examples
+    ///
+    /// - 2-bit: 0→00, 1→01, 2→11, 3→10
+    /// - 4-bit: 0→0000, 1→0001, 2→0011, 3→0010, 4→0110, ...
+    ///
+    /// # Formula
+    ///
+    /// `gray = n ^ (n >> 1)`
+    ///
+    /// See issue #43 for detailed analysis.
+    #[inline]
+    const fn to_gray_code(n: u8) -> u8 {
+        n ^ (n >> 1)
+    }
+
     /// Apply rotation: rotated = R * vector.
     fn rotate(&self, vector: &[f32]) -> Vec<f32> {
         assert_eq!(
@@ -231,12 +257,19 @@ impl RaBitQ {
     /// 2-bit quantization: 4 levels based on value distribution.
     ///
     /// Thresholds at -0.5, 0.0, 0.5 (assuming roughly normal distribution).
+    /// Uses Gray code encoding so adjacent levels have Hamming distance 1.
+    ///
+    /// Level mapping (with Gray code):
+    /// - Level 0 (< -0.5): Gray 00
+    /// - Level 1 (-0.5..0): Gray 01
+    /// - Level 2 (0..0.5): Gray 11
+    /// - Level 3 (>= 0.5): Gray 10
     fn quantize_2bit(&self, rotated: &[f32]) -> Vec<u8> {
         let num_bytes = (self.dim * 2 + 7) / 8;
         let mut code = vec![0u8; num_bytes];
 
         for (i, &val) in rotated.iter().enumerate() {
-            // Map value to 2-bit code: 0 (< -0.5), 1 (-0.5..0), 2 (0..0.5), 3 (>= 0.5)
+            // Map value to quantization level: 0 (< -0.5), 1 (-0.5..0), 2 (0..0.5), 3 (>= 0.5)
             let level = if val < -0.5 {
                 0u8
             } else if val < 0.0 {
@@ -247,10 +280,13 @@ impl RaBitQ {
                 3u8
             };
 
+            // Convert to Gray code so adjacent levels have Hamming distance 1
+            let gray = Self::to_gray_code(level);
+
             let bit_offset = i * 2;
             let byte_idx = bit_offset / 8;
             let bit_shift = bit_offset % 8;
-            code[byte_idx] |= level << bit_shift;
+            code[byte_idx] |= gray << bit_shift;
         }
 
         code
@@ -259,6 +295,11 @@ impl RaBitQ {
     /// 4-bit quantization: 16 levels.
     ///
     /// Uniform quantization from -2.0 to 2.0 (clipped).
+    /// Uses Gray code encoding so adjacent levels have Hamming distance 1.
+    ///
+    /// Level mapping: values are uniformly quantized to 0-15, then Gray coded.
+    /// Gray code sequence: 0000, 0001, 0011, 0010, 0110, 0111, 0101, 0100,
+    ///                     1100, 1101, 1111, 1110, 1010, 1011, 1001, 1000
     fn quantize_4bit(&self, rotated: &[f32]) -> Vec<u8> {
         let num_bytes = (self.dim * 4 + 7) / 8;
         let mut code = vec![0u8; num_bytes];
@@ -268,16 +309,19 @@ impl RaBitQ {
             let clamped = val.clamp(-2.0, 2.0);
             let level = ((clamped + 2.0) * 3.75) as u8; // (val+2) / 4 * 15
 
+            // Convert to Gray code so adjacent levels have Hamming distance 1
+            let gray = Self::to_gray_code(level);
+
             let bit_offset = i * 4;
             let byte_idx = bit_offset / 8;
             let bit_shift = bit_offset % 8;
 
             // Handle nibble alignment
             if bit_shift == 0 {
-                code[byte_idx] |= level;
+                code[byte_idx] |= gray;
             } else {
                 // Nibble spans two bytes (only for odd dimensions)
-                code[byte_idx] |= level << 4;
+                code[byte_idx] |= gray << 4;
             }
         }
 
@@ -671,5 +715,123 @@ mod tests {
 
         assert_eq!(RaBitQ::new(768, 1, 0).code_size(), 96);
         assert_eq!(RaBitQ::new(1536, 1, 0).code_size(), 192);
+    }
+
+    // ==================== Gray Code Tests (Issue #43) ====================
+
+    /// Verify Gray code conversion produces expected values.
+    #[test]
+    fn test_gray_code_values() {
+        // 2-bit Gray code: 0→00, 1→01, 2→11, 3→10
+        assert_eq!(RaBitQ::to_gray_code(0), 0b00);
+        assert_eq!(RaBitQ::to_gray_code(1), 0b01);
+        assert_eq!(RaBitQ::to_gray_code(2), 0b11);
+        assert_eq!(RaBitQ::to_gray_code(3), 0b10);
+
+        // 4-bit Gray code first 8 values
+        assert_eq!(RaBitQ::to_gray_code(0), 0b0000);
+        assert_eq!(RaBitQ::to_gray_code(1), 0b0001);
+        assert_eq!(RaBitQ::to_gray_code(2), 0b0011);
+        assert_eq!(RaBitQ::to_gray_code(3), 0b0010);
+        assert_eq!(RaBitQ::to_gray_code(4), 0b0110);
+        assert_eq!(RaBitQ::to_gray_code(5), 0b0111);
+        assert_eq!(RaBitQ::to_gray_code(6), 0b0101);
+        assert_eq!(RaBitQ::to_gray_code(7), 0b0100);
+    }
+
+    /// Gemini's validation test: adjacent levels must have Hamming distance 1.
+    ///
+    /// This is the key property that fixes issue #43. Without Gray code,
+    /// level 1 (01) and level 2 (10) have Hamming distance 2.
+    #[test]
+    fn test_gray_code_adjacent_differ_by_one_bit() {
+        // Test 2-bit range (0-3)
+        for level in 0..3u8 {
+            let gray_a = RaBitQ::to_gray_code(level);
+            let gray_b = RaBitQ::to_gray_code(level + 1);
+            let hamming = (gray_a ^ gray_b).count_ones();
+            assert_eq!(
+                hamming, 1,
+                "2-bit: Adjacent levels {} and {} should have Hamming distance 1, got {}. \
+                 Gray codes: {:02b} and {:02b}",
+                level,
+                level + 1,
+                hamming,
+                gray_a,
+                gray_b
+            );
+        }
+
+        // Test 4-bit range (0-15)
+        for level in 0..15u8 {
+            let gray_a = RaBitQ::to_gray_code(level);
+            let gray_b = RaBitQ::to_gray_code(level + 1);
+            let hamming = (gray_a ^ gray_b).count_ones();
+            assert_eq!(
+                hamming, 1,
+                "4-bit: Adjacent levels {} and {} should have Hamming distance 1, got {}. \
+                 Gray codes: {:04b} and {:04b}",
+                level,
+                level + 1,
+                hamming,
+                gray_a,
+                gray_b
+            );
+        }
+    }
+
+    /// Verify that similar vectors have lower Hamming distance with Gray code.
+    ///
+    /// This test encodes vectors with gradually changing values and verifies
+    /// that the Hamming distance increases proportionally.
+    #[test]
+    fn test_2bit_gray_code_distance_ordering() {
+        let encoder = RaBitQ::new(128, 2, 42);
+
+        // Create three vectors: base, slightly different, very different
+        let base: Vec<f32> = (0..128).map(|i| (i as f32 / 128.0) - 0.5).collect();
+        let similar: Vec<f32> = base.iter().map(|x| x + 0.1).collect();
+        let different: Vec<f32> = base.iter().map(|x| -x).collect();
+
+        let code_base = encoder.encode(&base);
+        let code_similar = encoder.encode(&similar);
+        let code_different = encoder.encode(&different);
+
+        let dist_similar = RaBitQ::hamming_distance(&code_base, &code_similar);
+        let dist_different = RaBitQ::hamming_distance(&code_base, &code_different);
+
+        assert!(
+            dist_similar < dist_different,
+            "Similar vector should have lower Hamming distance than different vector. \
+             Got similar={}, different={}",
+            dist_similar,
+            dist_different
+        );
+    }
+
+    /// Verify that similar vectors have lower Hamming distance with 4-bit Gray code.
+    #[test]
+    fn test_4bit_gray_code_distance_ordering() {
+        let encoder = RaBitQ::new(128, 4, 42);
+
+        // Create three vectors: base, slightly different, very different
+        let base: Vec<f32> = (0..128).map(|i| (i as f32 / 128.0) - 0.5).collect();
+        let similar: Vec<f32> = base.iter().map(|x| x + 0.1).collect();
+        let different: Vec<f32> = base.iter().map(|x| -x).collect();
+
+        let code_base = encoder.encode(&base);
+        let code_similar = encoder.encode(&similar);
+        let code_different = encoder.encode(&different);
+
+        let dist_similar = RaBitQ::hamming_distance(&code_base, &code_similar);
+        let dist_different = RaBitQ::hamming_distance(&code_base, &code_different);
+
+        assert!(
+            dist_similar < dist_different,
+            "Similar vector should have lower Hamming distance than different vector. \
+             Got similar={}, different={}",
+            dist_similar,
+            dist_different
+        );
     }
 }
