@@ -1,15 +1,15 @@
 //! Vector storage subsystem implementation.
 //!
-//! Defines the vector subsystem for use with `rocksdb::Storage<S>`.
+//! Defines the vector subsystem implementing the unified SubsystemProvider pattern.
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use rocksdb::{Cache, ColumnFamilyDescriptor};
+use rocksdb::{Cache, ColumnFamilyDescriptor, TransactionDB};
 
-use crate::rocksdb::{
-    prewarm_cf, BlockCacheConfig, ColumnFamily, ColumnFamilyConfig, DbAccess, StorageSubsystem,
-};
+use crate::rocksdb::{prewarm_cf, BlockCacheConfig, ColumnFamily, ColumnFamilyConfig, DbAccess, RocksdbSubsystem, StorageSubsystem};
+use crate::SubsystemProvider;
+use motlie_core::telemetry::SubsystemInfo;
 
 use super::registry::EmbeddingRegistry;
 use super::schema::{self, ALL_COLUMN_FAMILIES, EmbeddingSpecs};
@@ -20,24 +20,58 @@ use super::schema::{self, ALL_COLUMN_FAMILIES, EmbeddingSpecs};
 
 /// Vector storage subsystem.
 ///
-/// Implements `StorageSubsystem` to define:
-/// - Column families for vectors, edges, embeddings, etc.
-/// - EmbeddingRegistry for embedding spec lookups
-/// - Pre-warming logic for the embedding registry
-pub struct Subsystem;
+/// Implements the unified SubsystemProvider pattern:
+/// - [`SubsystemInfo`] - Identity and observability
+/// - [`SubsystemProvider<TransactionDB>`] - Lifecycle hooks
+/// - [`RocksdbSubsystem`] - Column family management
+///
+/// # Example
+///
+/// ```ignore
+/// use motlie_db::vector::Subsystem;
+/// use motlie_db::storage_builder::StorageBuilder;
+///
+/// let subsystem = Subsystem::new();
+/// let registry = subsystem.cache().clone();
+///
+/// let storage = StorageBuilder::new(path)
+///     .with_rocksdb(Box::new(subsystem))
+///     .build()?;
+/// ```
+pub struct Subsystem {
+    /// In-memory embedding registry.
+    cache: Arc<EmbeddingRegistry>,
+    /// Pre-warm configuration.
+    prewarm_config: EmbeddingRegistryConfig,
+}
 
-impl StorageSubsystem for Subsystem {
-    const NAME: &'static str = "vector";
-    const COLUMN_FAMILIES: &'static [&'static str] = ALL_COLUMN_FAMILIES;
-
-    type PrewarmConfig = EmbeddingRegistryConfig;
-    type Cache = EmbeddingRegistry;
-
-    fn create_cache() -> Arc<Self::Cache> {
-        Arc::new(EmbeddingRegistry::new())
+impl Subsystem {
+    /// Create a new vector subsystem with default configuration.
+    pub fn new() -> Self {
+        Self {
+            cache: Arc::new(EmbeddingRegistry::new()),
+            prewarm_config: EmbeddingRegistryConfig::default(),
+        }
     }
 
-    fn cf_descriptors(
+    /// Set the pre-warm configuration.
+    pub fn with_prewarm_config(mut self, config: EmbeddingRegistryConfig) -> Self {
+        self.prewarm_config = config;
+        self
+    }
+
+    /// Get a reference to the embedding registry.
+    pub fn cache(&self) -> &Arc<EmbeddingRegistry> {
+        &self.cache
+    }
+
+    /// Get the pre-warm configuration.
+    pub fn prewarm_config(&self) -> &EmbeddingRegistryConfig {
+        &self.prewarm_config
+    }
+
+    /// Internal method to build CF descriptors.
+    fn build_cf_descriptors(
         block_cache: &Cache,
         config: &BlockCacheConfig,
     ) -> Vec<ColumnFamilyDescriptor> {
@@ -90,6 +124,95 @@ impl StorageSubsystem for Subsystem {
                 <schema::Pending as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
         ]
+    }
+}
+
+impl Default for Subsystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ----------------------------------------------------------------------------
+// SubsystemInfo Implementation (from motlie_core::telemetry)
+// ----------------------------------------------------------------------------
+
+impl SubsystemInfo for Subsystem {
+    fn name(&self) -> &'static str {
+        "Vector Database (RocksDB)"
+    }
+
+    fn info_lines(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("Prewarm Limit", self.prewarm_config.prewarm_limit.to_string()),
+            ("Column Families", ALL_COLUMN_FAMILIES.len().to_string()),
+        ]
+    }
+}
+
+// ----------------------------------------------------------------------------
+// SubsystemProvider<TransactionDB> Implementation
+// ----------------------------------------------------------------------------
+
+impl SubsystemProvider<TransactionDB> for Subsystem {
+    fn on_ready(&self, db: &TransactionDB) -> Result<()> {
+        let count = prewarm_cf::<EmbeddingSpecs, _>(db, self.prewarm_config.prewarm_limit, |key, value| {
+            let spec = &value.0;
+            self.cache.register_from_db(key.0, &spec.model, spec.dim, spec.distance);
+            Ok(())
+        })?;
+        tracing::info!(subsystem = "vector", count, "Pre-warmed embedding registry");
+        Ok(())
+    }
+
+    fn on_shutdown(&self) -> Result<()> {
+        tracing::info!(subsystem = "vector", "Shutting down");
+        Ok(())
+    }
+}
+
+// ----------------------------------------------------------------------------
+// RocksdbSubsystem Implementation
+// ----------------------------------------------------------------------------
+
+impl RocksdbSubsystem for Subsystem {
+    fn id(&self) -> &'static str {
+        "vector"
+    }
+
+    fn cf_names(&self) -> &'static [&'static str] {
+        ALL_COLUMN_FAMILIES
+    }
+
+    fn cf_descriptors(
+        &self,
+        block_cache: &Cache,
+        config: &BlockCacheConfig,
+    ) -> Vec<ColumnFamilyDescriptor> {
+        Self::build_cf_descriptors(block_cache, config)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// StorageSubsystem Implementation (for standalone Storage<S>)
+// ----------------------------------------------------------------------------
+
+impl StorageSubsystem for Subsystem {
+    const NAME: &'static str = "vector";
+    const COLUMN_FAMILIES: &'static [&'static str] = ALL_COLUMN_FAMILIES;
+
+    type PrewarmConfig = EmbeddingRegistryConfig;
+    type Cache = EmbeddingRegistry;
+
+    fn create_cache() -> Arc<Self::Cache> {
+        Arc::new(EmbeddingRegistry::new())
+    }
+
+    fn cf_descriptors(
+        block_cache: &Cache,
+        config: &BlockCacheConfig,
+    ) -> Vec<ColumnFamilyDescriptor> {
+        Self::build_cf_descriptors(block_cache, config)
     }
 
     fn prewarm(
@@ -167,12 +290,32 @@ mod tests {
     }
 
     #[test]
-    fn test_subsystem_constants() {
-        assert_eq!(Subsystem::NAME, "vector");
-        assert!(!Subsystem::COLUMN_FAMILIES.is_empty());
+    fn test_subsystem_new() {
+        let subsystem = Subsystem::new();
+        assert_eq!(subsystem.prewarm_config().prewarm_limit, 1000);
+    }
+
+    #[test]
+    fn test_subsystem_with_config() {
+        let subsystem = Subsystem::new()
+            .with_prewarm_config(EmbeddingRegistryConfig { prewarm_limit: 500 });
+        assert_eq!(subsystem.prewarm_config().prewarm_limit, 500);
+    }
+
+    #[test]
+    fn test_subsystem_cf_names() {
+        let subsystem = Subsystem::new();
+        let cf_names = subsystem.cf_names();
+        assert!(!cf_names.is_empty());
         // Verify all CFs have vector/ prefix
-        for cf in Subsystem::COLUMN_FAMILIES {
+        for cf in cf_names {
             assert!(cf.starts_with("vector/"), "CF {} should have vector/ prefix", cf);
         }
+    }
+
+    #[test]
+    fn test_subsystem_info_name() {
+        let subsystem = Subsystem::new();
+        assert_eq!(SubsystemInfo::name(&subsystem), "Vector Database (RocksDB)");
     }
 }

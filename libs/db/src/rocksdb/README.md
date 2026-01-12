@@ -220,19 +220,19 @@ pub struct Storage<S: StorageSubsystem> {
 }
 ```
 
-### `ComponentWrapper<S>`
+### `RocksdbSubsystem` Trait
 
-Adapter that implements `ColumnFamilyProvider` for use with `StorageBuilder`:
+Extension trait for subsystems used with `StorageBuilder` (shared storage):
 
 ```rust
-pub struct ComponentWrapper<S: StorageSubsystem> {
-    cache: Arc<S::Cache>,
-    prewarm_config: S::PrewarmConfig,
+pub trait RocksdbSubsystem: SubsystemProvider<TransactionDB> {
+    fn id(&self) -> &'static str;           // Short lookup ID ("graph", "vector")
+    fn cf_names(&self) -> &'static [&'static str];
+    fn cf_descriptors(&self, cache: &Cache, config: &BlockCacheConfig) -> Vec<ColumnFamilyDescriptor>;
 }
-
-// Automatically implements ColumnFamilyProvider
-impl<S: StorageSubsystem> ColumnFamilyProvider for ComponentWrapper<S> { ... }
 ```
+
+See [SUBSYSTEM.md](../../SUBSYSTEM.md) for full trait hierarchy documentation.
 
 ## Usage Patterns
 
@@ -262,22 +262,27 @@ storage.try_catch_up_with_primary()?;
 For applications sharing one TransactionDB across multiple subsystems:
 
 ```rust
-use motlie_db::{graph, vector, StorageBuilder};
+use motlie_db::{graph, vector};
+use motlie_db::storage_builder::StorageBuilder;
 
-// Create components and get cache references before boxing
-let graph_component = graph::component();
-let name_cache = graph_component.cache().clone();
+// Create subsystems and get cache references before boxing
+let graph_subsystem = graph::Subsystem::new();
+let name_cache = graph_subsystem.cache().clone();
 
-let vector_component = vector::component();
-let registry = vector_component.cache().clone();
+let vector_subsystem = vector::Subsystem::new();
+let registry = vector_subsystem.cache().clone();
 
 let shared = StorageBuilder::new(path)
-    .with_component(Box::new(graph_component))
-    .with_component(Box::new(vector_component))
+    .with_rocksdb(Box::new(graph_subsystem))
+    .with_rocksdb(Box::new(vector_subsystem))
     .build()?;
 
 // Access shared TransactionDB
 let db = shared.db().unwrap();
+
+// Access subsystems by ID
+let graph = shared.get_component("graph");
+let vector = shared.get_component("vector");
 
 // name_cache and registry are still accessible via the cloned Arcs
 assert_eq!(name_cache.len(), 0);  // Empty initially
@@ -379,24 +384,34 @@ Rust doesn't have inheritance. The generic approach provides:
 2. **Type safety**: `storage.cache()` returns the correct cache type
 3. **Code reuse**: ~250 lines of boilerplate eliminated per subsystem
 
-### Why `ComponentWrapper` for `ColumnFamilyProvider`?
+### Why Two Traits: `StorageSubsystem` and `RocksdbSubsystem`?
 
-The `ColumnFamilyProvider` trait is object-safe (uses `&self`) for dynamic
-dispatch in `StorageBuilder`. `StorageSubsystem` uses associated types and
-constants which aren't object-safe. `ComponentWrapper` bridges these:
+Two different usage patterns require different trait designs:
+
+1. **`StorageSubsystem`** (static dispatch, for `Storage<S>`):
+   - Uses associated types (`type Cache`) for zero-cost abstractions
+   - Uses associated constants (`const NAME`) for compile-time values
+   - Not object-safe, but provides type-safe cache access
+
+2. **`RocksdbSubsystem`** (dynamic dispatch, for `StorageBuilder`):
+   - Object-safe trait for heterogeneous collections
+   - Uses methods instead of associated types/constants
+   - Enables `Vec<Box<dyn RocksdbSubsystem>>` in builder
 
 ```rust
-// StorageSubsystem: static dispatch, associated types
-impl StorageSubsystem for GraphSubsystem {
-    type Cache = NameCache;  // Associated type
-    const NAME: &'static str = "graph";  // Associated constant
+// StorageSubsystem: static dispatch, not object-safe
+impl StorageSubsystem for graph::Subsystem {
+    type Cache = NameCache;           // Associated type
+    const NAME: &'static str = "graph"; // Associated constant
 }
 
-// ColumnFamilyProvider: dynamic dispatch, object-safe
-impl ColumnFamilyProvider for ComponentWrapper<GraphSubsystem> {
-    fn name(&self) -> &'static str { ... }  // Method, not constant
+// RocksdbSubsystem: dynamic dispatch, object-safe
+impl RocksdbSubsystem for graph::Subsystem {
+    fn id(&self) -> &'static str { "graph" }  // Method, not constant
 }
 ```
+
+Both traits are implemented by the same struct, allowing seamless use in either pattern.
 
 ### Pre-warming Architecture
 
@@ -418,7 +433,8 @@ This isolation means:
 |-----------|---------|--------|
 | `Storage<S>` | Single subsystem, standalone | Owns DB + cache |
 | `StorageBuilder` | Multiple subsystems, shared DB | `SharedStorage` |
-| `ComponentWrapper<S>` | Adapts subsystem for builder | Implements `ColumnFamilyProvider` |
+| `Subsystem` structs | Implement both traits | Works in either pattern |
 
-Both patterns use the same `StorageSubsystem` implementation, ensuring
-consistency between standalone and shared deployments.
+Both patterns use the same `Subsystem` struct. Implementing both
+`StorageSubsystem` and `RocksdbSubsystem` ensures consistency between
+standalone and shared deployments. See [SUBSYSTEM.md](../../SUBSYSTEM.md).
