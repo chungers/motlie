@@ -282,10 +282,16 @@ let results = index.search_with_rabitq_cached(
 
 | Parameter | Value | Effect |
 |-----------|-------|--------|
-| `bits_per_dim` | 1 | 32x compression, ~70% recall (no rerank) |
-| `bits_per_dim` | 2 | 16x compression, ~85% recall (no rerank) |
-| `bits_per_dim` | 4 | 8x compression, ~92% recall (no rerank) |
+| `bits_per_dim` | 1 | 32x compression, ~50% recall (no rerank), **recommended** |
+| `bits_per_dim` | 2 | 16x compression, ⚠️ **broken** - see note below |
+| `bits_per_dim` | 4 | 8x compression, ⚠️ **broken** - see note below |
 | `rerank_factor` | 4-20 | Higher = better recall, more I/O |
+
+> ⚠️ **2-bit and 4-bit modes are currently broken** (Issue #43). Binary encoding + Hamming
+> distance is incompatible with multi-bit quantization: adjacent quantization levels
+> (e.g., level 1=01, level 2=10) have maximum Hamming distance instead of minimum.
+> Benchmarks show 2-bit achieves 45.4% recall and 4-bit achieves 37.6% - **worse than 1-bit**.
+> Fix requires Gray code encoding (00→01→11→10). Use 1-bit mode until this is resolved.
 
 ### Search Configuration
 

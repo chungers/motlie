@@ -59,3 +59,95 @@ The use of `RoaringBitmap` for edge lists in `schema.rs` is an excellent design 
 3.  **Implement Async Graph Updater (Phase 7):**
     *   **File:** `libs/db/src/vector/async_updater.rs` (to be created)
     *   **Action:** Create a background worker that consumes from the `Pending` CF (or `writer` queue) and applies HNSW updates. This is necessary to decouple write latency from graph construction cost (which can be high). Until this is done, `immediate_index: true` is the only way to make data searchable via HNSW.
+
+---
+
+## 4. Additional Findings (Post-Review)
+
+### 4.1 RaBitQ √D Scaling Fix (Issue #42) - RESOLVED
+
+**Date:** January 12, 2026
+**Discovered by:** Gemini (see Section 2.1)
+**Implemented by:** Claude
+
+The RaBitQ threshold scaling issue identified in Section 2.1 has been fixed:
+- **Commit:** f533140
+- **Fix:** Scale rotation matrix by √D in `generate_rotation_matrix()`
+- **Validation:** Added tests `test_rotated_unit_vector_variance`, `test_2bit_uses_all_levels`, `test_4bit_uses_many_levels`
+
+### 4.2 Multi-bit Hamming Distance Incompatibility (Issue #43) - OPEN
+
+**Date:** January 12, 2026
+**Discovered by:** Claude (during benchmark verification of RaBitQ recall claims)
+**Status:** Open - requires Gray code encoding fix
+
+#### Discovery Context
+
+During verification of the recall claims in `API.md` (2-bit ~85%, 4-bit ~92%), Claude ran benchmarks using `examples/vector2` with the LAION-400M-CLIP512 dataset (100K vectors). The results revealed a critical bug:
+
+#### Benchmark Results
+
+| Bits | Recall@10 (rerank=10) | Expected | Status |
+|------|----------------------|----------|--------|
+| 1-bit | **50.8%** | ~50% | ✅ Working |
+| 2-bit | **45.4%** | ~85% | ❌ **Worse than 1-bit** |
+| 4-bit | **37.6%** | ~92% | ❌ **Much worse than 1-bit** |
+
+```
+Test configuration:
+- Dataset: LAION-400M-CLIP512 (hdf5, 100K vectors)
+- Query count: 1000
+- ef_search: 100
+- rerank_factor: 10
+- k: 10
+```
+
+#### Root Cause Analysis
+
+**Problem:** Binary encoding + Hamming distance is fundamentally incompatible with multi-bit quantization.
+
+For 2-bit quantization with 4 levels (0, 1, 2, 3):
+- Binary encoding: 00, 01, 10, 11
+- Level 1 (01) to Level 2 (10): Hamming distance = **2** (maximum!)
+- Level 0 (00) to Level 3 (11): Hamming distance = **2** (maximum)
+- Level 0 (00) to Level 1 (01): Hamming distance = 1
+- Level 1 (01) to Level 3 (11): Hamming distance = 1
+
+**Result:** Adjacent quantization levels have maximum Hamming distance, while distant levels have minimum distance. This inverts the distance semantics, causing recall to **decrease** as more bits are used.
+
+#### Why 1-bit Works
+
+1-bit quantization (sign-only) is mathematically sound because:
+- Sign quantization directly captures the direction of each rotated component
+- For unit vectors under Cosine distance, sign agreement approximates angular similarity
+- Hamming distance on sign bits ≈ normalized angular distance
+
+#### Proposed Fix: Gray Code Encoding
+
+Use Gray code instead of binary encoding for multi-bit quantization:
+
+| Level | Binary | Gray Code |
+|-------|--------|-----------|
+| 0 | 00 | 00 |
+| 1 | 01 | 01 |
+| 2 | 10 | **11** |
+| 3 | 11 | **10** |
+
+Gray code ensures adjacent levels differ by exactly 1 bit, preserving distance semantics.
+
+**Implementation changes required:**
+- `quantize_2bit()`: Map levels [0,1,2,3] → Gray codes [0b00, 0b01, 0b11, 0b10]
+- `quantize_4bit()`: Map levels 0-15 → 4-bit Gray codes
+- No changes to Hamming distance computation needed
+
+#### Impact Assessment
+
+- **1-bit mode:** Unaffected, continues to work correctly
+- **2-bit/4-bit modes:** Currently unusable, return worse recall than 1-bit
+- **Documentation:** `API.md` updated with warning (commit pending)
+- **GitHub Issue:** #43 tracks the fix
+
+#### References
+
+- Issue #43: https://github.com/chungers/motlie/issues/43
+- Gray code: https://en.wikipedia.org/wiki/Gray_code
