@@ -29,6 +29,11 @@ The RaBitQ implementation in `quantization/rabitq.rs` uses a random orthonormal 
 *   **Result:** A threshold of $0.5$ is $>5\sigma$. Practically all values will fall into the central bins (effectively just sign quantization). The 2-bit and 4-bit modes waste storage without providing additional precision over 1-bit quantization.
 *   **Fix:** Scale the random rotation matrix by $\sqrt{D}$ during generation, or scale the input/thresholds appropriate to the dimension.
 
+**Update (2026-01-12): Fixed**
+*   **Status:** Resolved in commit `f533140`.
+*   **Resolution:** The `generate_rotation_matrix` function was updated to scale the rotation matrix by $\sqrt{D}$. This ensures rotated unit vector components have variance $\approx 1$, matching the standard normal quantization thresholds.
+*   **Verification:** New unit tests (`test_rotated_unit_vector_variance`, `test_2bit_uses_all_levels`) confirm that the variance is correct and that all quantization levels are now effectively utilized (e.g., 2-bit mode uses all 4 levels, whereas before it only used 2).
+
 ### 2.2 HNSW Graph Storage
 The use of `RoaringBitmap` for edge lists in `schema.rs` is an excellent design choice for minimizing storage overhead. The implementation of `edge_merge_operator` in `merge.rs` correctly handles concurrent updates.
 
