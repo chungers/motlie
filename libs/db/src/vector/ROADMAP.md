@@ -232,7 +232,8 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │                                                                              │
 │  Phase 5: Internal Mutation/Query API [NOT STARTED]                          │
 │  ├── 5.1-5.7 Processor methods, Storage search, dispatch logic             │
-│  └── Goal: Complete internal API for insert/delete/search                  │
+│  ├── 5.8-5.10 Concurrency stress tests, metrics infra, benchmarks          │
+│  └── Goal: Complete internal API + concurrent validation                   │
 │                                                                              │
 │  Phase 6: MPSC/MPMC Public API [NOT STARTED]                                 │
 │  ├── 6.1-6.6 MutationExecutor, Consumer, Reader, spawn functions           │
@@ -6424,6 +6425,269 @@ mod internal_api_tests {
 }
 ```
 
+### Task 5.8: Multi-Threaded Stress Tests
+
+**Goal:** Validate concurrent access patterns under load.
+
+**Test Categories:**
+
+1. **Concurrent Read/Write:**
+   - Multiple threads inserting while others search
+   - Verify no data corruption or panics
+   - Test with varying thread counts (4, 8, 16, 32)
+
+2. **Concurrent Insert/Search:**
+   - Simulate real-world pattern of continuous ingestion + queries
+   - Verify search results remain consistent
+   - Test eventual visibility of newly inserted vectors
+
+3. **Concurrent Delete/Search:**
+   - Delete vectors while searches are in progress
+   - Verify deleted vectors don't appear in results
+   - Test tombstone visibility timing
+
+**Implementation:**
+
+```rust
+// libs/db/src/vector/tests/concurrent.rs
+
+#[cfg(test)]
+mod concurrent_tests {
+    use std::sync::Arc;
+    use std::thread;
+    use super::*;
+
+    #[test]
+    fn test_concurrent_insert_search() {
+        let (storage, processor) = setup_temp_storage();
+        let storage = Arc::new(storage);
+        let processor = Arc::new(processor);
+        setup_embedding(&processor, 1);
+
+        let insert_handle = {
+            let processor = Arc::clone(&processor);
+            thread::spawn(move || {
+                for i in 0..1000 {
+                    let id = Id::new();
+                    let vector = vec![i as f32; 128];
+                    processor.insert_vector(1, id, &vector, true).unwrap();
+                }
+            })
+        };
+
+        let search_handle = {
+            let storage = Arc::clone(&storage);
+            thread::spawn(move || {
+                for _ in 0..100 {
+                    let query = vec![500.0; 128];
+                    let _ = storage.search(1, &query, 10, &SearchConfig::default());
+                    thread::sleep(std::time::Duration::from_millis(5));
+                }
+            })
+        };
+
+        insert_handle.join().unwrap();
+        search_handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_concurrent_delete_search() {
+        // Similar pattern for delete + search
+    }
+
+    #[test]
+    fn test_high_thread_count_stress() {
+        // 32 threads, 10K operations each
+    }
+}
+```
+
+### Task 5.9: Metrics Collection Infrastructure
+
+**Goal:** Add metrics collection for concurrent operation analysis.
+
+**Location:** `libs/db/src/vector/benchmark/` subcrate
+
+**Metrics to Collect:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `insert_latency_ns` | Histogram | Per-operation insert latency |
+| `search_latency_ns` | Histogram | Per-operation search latency |
+| `delete_latency_ns` | Histogram | Per-operation delete latency |
+| `concurrent_ops` | Gauge | Active concurrent operations |
+| `throughput_ops_sec` | Counter | Operations per second |
+
+**Implementation:**
+
+```rust
+// libs/db/src/vector/benchmark/metrics.rs
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+/// Lightweight metrics collector for benchmarking.
+/// Uses atomics for lock-free concurrent updates.
+pub struct BenchMetrics {
+    insert_count: AtomicU64,
+    search_count: AtomicU64,
+    delete_count: AtomicU64,
+    insert_total_ns: AtomicU64,
+    search_total_ns: AtomicU64,
+    delete_total_ns: AtomicU64,
+    // Latency histograms (bucket counts)
+    insert_latency_buckets: [AtomicU64; 16],  // log2 buckets
+    search_latency_buckets: [AtomicU64; 16],
+}
+
+impl BenchMetrics {
+    pub fn new() -> Self { ... }
+
+    pub fn record_insert(&self, duration_ns: u64) { ... }
+    pub fn record_search(&self, duration_ns: u64) { ... }
+    pub fn record_delete(&self, duration_ns: u64) { ... }
+
+    /// Calculate percentiles from histogram buckets
+    pub fn percentile(&self, op: &str, p: f64) -> u64 { ... }
+
+    /// Generate summary report
+    pub fn summary(&self) -> MetricsSummary {
+        MetricsSummary {
+            insert_p50: self.percentile("insert", 0.50),
+            insert_p95: self.percentile("insert", 0.95),
+            insert_p99: self.percentile("insert", 0.99),
+            search_p50: self.percentile("search", 0.50),
+            search_p95: self.percentile("search", 0.95),
+            search_p99: self.percentile("search", 0.99),
+            // ...
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetricsSummary {
+    pub insert_p50: u64,
+    pub insert_p95: u64,
+    pub insert_p99: u64,
+    pub search_p50: u64,
+    pub search_p95: u64,
+    pub search_p99: u64,
+    pub insert_throughput: f64,
+    pub search_throughput: f64,
+}
+```
+
+### Task 5.10: Concurrent Benchmark Baseline
+
+**Goal:** Establish baseline metrics for concurrent operations.
+
+**Location:** `libs/db/src/vector/benchmark/` subcrate
+
+**Benchmark Scenarios:**
+
+| Scenario | Writers | Readers | Duration | Expected |
+|----------|---------|---------|----------|----------|
+| Read-heavy | 1 | 8 | 30s | High QPS, stable latency |
+| Write-heavy | 8 | 1 | 30s | Consistent throughput |
+| Balanced | 4 | 4 | 30s | Baseline mixed workload |
+| Stress | 16 | 16 | 60s | Identify bottlenecks |
+
+**Implementation:**
+
+```rust
+// libs/db/src/vector/benchmark/concurrent_bench.rs
+
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+pub struct ConcurrentBench {
+    storage: Arc<Storage>,
+    processor: Arc<Processor>,
+    metrics: Arc<BenchMetrics>,
+}
+
+impl ConcurrentBench {
+    pub fn new(storage: Storage, processor: Processor) -> Self { ... }
+
+    /// Run benchmark with specified thread configuration
+    pub fn run(
+        &self,
+        writer_threads: usize,
+        reader_threads: usize,
+        duration: Duration,
+        vectors_per_writer: usize,
+    ) -> BenchResult {
+        let start = Instant::now();
+        let mut handles = Vec::new();
+
+        // Spawn writer threads
+        for _ in 0..writer_threads {
+            let processor = Arc::clone(&self.processor);
+            let metrics = Arc::clone(&self.metrics);
+            handles.push(thread::spawn(move || {
+                writer_workload(processor, metrics, vectors_per_writer);
+            }));
+        }
+
+        // Spawn reader threads
+        for _ in 0..reader_threads {
+            let storage = Arc::clone(&self.storage);
+            let metrics = Arc::clone(&self.metrics);
+            let dur = duration;
+            handles.push(thread::spawn(move || {
+                reader_workload(storage, metrics, dur);
+            }));
+        }
+
+        // Wait for completion
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        BenchResult {
+            duration: start.elapsed(),
+            metrics: self.metrics.summary(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct BenchResult {
+    pub duration: Duration,
+    pub metrics: MetricsSummary,
+}
+
+fn writer_workload(processor: Arc<Processor>, metrics: Arc<BenchMetrics>, count: usize) {
+    for i in 0..count {
+        let start = Instant::now();
+        let id = Id::new();
+        let vector = generate_random_vector(128);
+        processor.insert_vector(1, id, &vector, true).unwrap();
+        metrics.record_insert(start.elapsed().as_nanos() as u64);
+    }
+}
+
+fn reader_workload(storage: Arc<Storage>, metrics: Arc<BenchMetrics>, duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        let start = Instant::now();
+        let query = generate_random_vector(128);
+        let _ = storage.search(1, &query, 10, &SearchConfig::default());
+        metrics.record_search(start.elapsed().as_nanos() as u64);
+    }
+}
+```
+
+**Expected Baseline Results (100K vectors, 8-core):**
+
+| Scenario | Search P50 | Search P99 | Search QPS | Insert/s |
+|----------|------------|------------|------------|----------|
+| Read-heavy (1W/8R) | 3.5ms | 12ms | 2000+ | 50 |
+| Write-heavy (8W/1R) | 4.0ms | 15ms | 200 | 400 |
+| Balanced (4W/4R) | 3.8ms | 14ms | 1000 | 200 |
+| Stress (16W/16R) | 5.0ms | 25ms | 2500 | 600 |
+
 ---
 
 ## Phase 6: MPSC/MPMC Public API
@@ -7363,7 +7627,7 @@ The memory caching (2.9) can be deferred if timeline is tight, but 2.7-2.8 are r
 | Phase 2: HNSW2 Core + Navigation | 2.1-2.9 | 11-17 days | ~11-17 days |
 | Phase 3: Batch + Deferred | 3.1-3.7 | 4.5-6 days | 17-28 days |
 | Phase 4: RaBitQ | 4.1-4.23 | ✅ COMPLETE | ✅ |
-| Phase 5: Internal Mutation/Query API | 5.1-5.7 | 4-5 days | ~4-5 days |
+| Phase 5: Internal Mutation/Query API | 5.1-5.10 | 5-7 days | ~5-7 days |
 | Phase 6: MPSC/MPMC Public API | 6.1-6.6 | 4 days | 8-9 days |
 | Phase 7: Async Graph Updater | 7.1-7.5 | 4 days | 12-13 days |
 | Phase 8: Production Hardening | 8.1-8.3 | 2-3 weeks | 4-6 weeks |
