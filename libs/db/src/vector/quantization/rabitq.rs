@@ -108,6 +108,17 @@ impl RaBitQ {
     /// Generate a random orthonormal rotation matrix via Gram-Schmidt.
     ///
     /// Uses ChaCha20Rng for deterministic generation from seed.
+    ///
+    /// # Scaling for Unit Vectors
+    ///
+    /// The matrix is scaled by √D to ensure quantization thresholds work correctly
+    /// for unit vectors. Without scaling, unit vector components after rotation have
+    /// variance 1/D, causing 2-bit/4-bit thresholds to be ineffective (see issue #42).
+    ///
+    /// With √D scaling:
+    /// - Rotated components have variance ≈ 1 (matching threshold assumptions)
+    /// - 2-bit thresholds [-0.5, 0, 0.5] distribute values across all 4 levels
+    /// - 4-bit thresholds [-2, 2] utilize all 16 levels effectively
     fn generate_rotation_matrix(dim: usize, seed: u64) -> Vec<f32> {
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
 
@@ -131,6 +142,14 @@ impl RaBitQ {
                     matrix[k * dim + i] /= norm;
                 }
             }
+        }
+
+        // Scale by √D so rotated unit vectors have component variance ≈ 1.
+        // This ensures quantization thresholds (designed for variance=1) work correctly.
+        // See issue #42 for detailed analysis.
+        let scale = (dim as f32).sqrt();
+        for val in &mut matrix {
+            *val *= scale;
         }
 
         matrix
@@ -292,10 +311,13 @@ impl RaBitQ {
             .collect()
     }
 
-    /// Check if rotation matrix is orthonormal (for testing).
+    /// Check if rotation matrix is scaled orthonormal (for testing).
+    ///
+    /// After √D scaling, the matrix satisfies R * R^T = D * I (not I).
     #[cfg(test)]
-    fn is_orthonormal(&self, tolerance: f32) -> bool {
-        // Check R * R^T = I
+    fn is_scaled_orthonormal(&self, tolerance: f32) -> bool {
+        // Check R * R^T = D * I (scaled identity due to √D scaling)
+        let scale_sq = self.dim as f32; // D = (√D)²
         for i in 0..self.dim {
             for j in 0..self.dim {
                 // Compute (R * R^T)[i][j] = sum_k R[i][k] * R[j][k]
@@ -304,13 +326,46 @@ impl RaBitQ {
                     dot += self.rotation[i * self.dim + k] * self.rotation[j * self.dim + k];
                 }
 
-                let expected = if i == j { 1.0 } else { 0.0 };
-                if (dot - expected).abs() > tolerance {
+                let expected = if i == j { scale_sq } else { 0.0 };
+                if (dot - expected).abs() > tolerance * scale_sq {
                     return false;
                 }
             }
         }
         true
+    }
+
+    /// Compute variance of rotated unit vector components (for testing).
+    ///
+    /// For a random unit vector, after √D-scaled rotation, components should
+    /// have variance ≈ 1 (not 1/D as with unscaled orthonormal rotation).
+    #[cfg(test)]
+    fn rotated_component_variance(&self, num_samples: usize, seed: u64) -> f32 {
+        use rand::Rng;
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+
+        let mut all_components = Vec::with_capacity(num_samples * self.dim);
+
+        for _ in 0..num_samples {
+            // Generate random unit vector
+            let mut v: Vec<f32> = (0..self.dim).map(|_| rng.gen::<f32>() - 0.5).collect();
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            for x in &mut v {
+                *x /= norm;
+            }
+
+            // Rotate and collect components
+            let rotated = self.rotate(&v);
+            all_components.extend(rotated);
+        }
+
+        // Compute variance: E[X²] - E[X]²
+        let n = all_components.len() as f32;
+        let mean: f32 = all_components.iter().sum::<f32>() / n;
+        let variance: f32 =
+            all_components.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / n;
+
+        variance
     }
 }
 
@@ -319,11 +374,127 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rotation_matrix_is_orthonormal() {
+    fn test_rotation_matrix_is_scaled_orthonormal() {
         let encoder = RaBitQ::new(128, 1, 42);
         assert!(
-            encoder.is_orthonormal(1e-5),
-            "Rotation matrix should be orthonormal"
+            encoder.is_scaled_orthonormal(1e-4),
+            "Rotation matrix should satisfy R*R^T = D*I after √D scaling"
+        );
+    }
+
+    /// Verify that rotated unit vectors have component variance ≈ 1 (issue #42 fix).
+    ///
+    /// Before the fix, variance was 1/D ≈ 0.0078 for D=128.
+    /// After √D scaling, variance should be ≈ 1.
+    #[test]
+    fn test_rotated_unit_vector_variance() {
+        let encoder = RaBitQ::new(128, 1, 42);
+        let variance = encoder.rotated_component_variance(1000, 123);
+
+        // Variance should be close to 1.0 (within 20% tolerance for sampling noise)
+        assert!(
+            (0.8..1.2).contains(&variance),
+            "Rotated unit vector variance should be ≈1.0, got {:.4}. \
+             Before fix it would be ≈{:.4}",
+            variance,
+            1.0 / 128.0
+        );
+    }
+
+    /// Verify 2-bit quantization uses all 4 levels for unit vectors (issue #42 fix).
+    ///
+    /// Before the fix, only levels 1 and 2 were used (sign only).
+    /// After fix, all 4 levels should be populated.
+    #[test]
+    fn test_2bit_uses_all_levels() {
+        use rand::Rng;
+        let encoder = RaBitQ::new(128, 2, 42);
+        let mut rng = ChaCha20Rng::seed_from_u64(999);
+
+        let mut level_counts = [0u32; 4];
+
+        // Encode many random unit vectors
+        for _ in 0..500 {
+            let mut v: Vec<f32> = (0..128).map(|_| rng.gen::<f32>() - 0.5).collect();
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            for x in &mut v {
+                *x /= norm;
+            }
+
+            let code = encoder.encode(&v);
+
+            // Count levels in the 2-bit code
+            for byte in &code {
+                for shift in (0..8).step_by(2) {
+                    let level = (byte >> shift) & 0b11;
+                    level_counts[level as usize] += 1;
+                }
+            }
+        }
+
+        // All 4 levels should have significant counts
+        let total: u32 = level_counts.iter().sum();
+        let min_expected = total / 20; // At least 5% in each level
+
+        for (level, &count) in level_counts.iter().enumerate() {
+            assert!(
+                count >= min_expected,
+                "2-bit level {} has only {} counts ({}%), expected at least {}%. \
+                 Level distribution: {:?}. Before fix, levels 0 and 3 would be ~0%.",
+                level,
+                count,
+                count * 100 / total,
+                min_expected * 100 / total,
+                level_counts
+            );
+        }
+    }
+
+    /// Verify 4-bit quantization uses many levels for unit vectors (issue #42 fix).
+    ///
+    /// Before the fix, only ~3 central levels were used.
+    /// After fix, values should spread across many levels.
+    #[test]
+    fn test_4bit_uses_many_levels() {
+        use rand::Rng;
+        let encoder = RaBitQ::new(128, 4, 42);
+        let mut rng = ChaCha20Rng::seed_from_u64(888);
+
+        let mut level_counts = [0u32; 16];
+
+        // Encode many random unit vectors
+        for _ in 0..500 {
+            let mut v: Vec<f32> = (0..128).map(|_| rng.gen::<f32>() - 0.5).collect();
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            for x in &mut v {
+                *x /= norm;
+            }
+
+            let code = encoder.encode(&v);
+
+            // Count levels in the 4-bit code
+            for (i, byte) in code.iter().enumerate() {
+                // Even indices: low nibble, odd indices: high nibble
+                if i * 2 < 128 {
+                    level_counts[(byte & 0x0F) as usize] += 1;
+                }
+                if i * 2 + 1 < 128 {
+                    level_counts[((byte >> 4) & 0x0F) as usize] += 1;
+                }
+            }
+        }
+
+        // Count how many of the 16 levels have non-trivial usage (>1%)
+        let total: u32 = level_counts.iter().sum();
+        let threshold = total / 100; // 1% threshold
+        let levels_used = level_counts.iter().filter(|&&c| c > threshold).count();
+
+        assert!(
+            levels_used >= 8,
+            "4-bit should use at least 8 of 16 levels significantly, but only {} used. \
+             Before fix, only ~3 levels would be used. Distribution: {:?}",
+            levels_used,
+            level_counts
         );
     }
 
