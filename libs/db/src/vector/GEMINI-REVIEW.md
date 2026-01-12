@@ -151,3 +151,22 @@ Gray code ensures adjacent levels differ by exactly 1 bit, preserving distance s
 
 - Issue #43: https://github.com/chungers/motlie/issues/43
 - Gray code: https://en.wikipedia.org/wiki/Gray_code
+
+### 4.3 Evaluation of Issue #43 (Gray Code)
+
+**Reviewer:** Gemini Agent
+**Date:** January 12, 2026
+
+*   **Assessment:** **AGREE**. The claim is technically correct. Standard binary encoding fails to preserve local similarity in Hamming space for values > 1 bit.
+    *   *Proof:* In standard binary, `1 (01)` and `2 (10)` have Hamming distance 2. In Gray code, `1 (01)` and `2 (11)` have Hamming distance 1.
+    *   *Impact:* The observed degradation in recall for 2-bit/4-bit modes (vs 1-bit) is directly explained by this. The "precision" added by extra bits is effectively scrambling the distance metric for adjacent bins.
+*   **Recommendation:** Implement Gray Code encoding immediately. This is a standard technique for binary quantization (e.g., used in ITQ and PQ).
+*   **Validation Plan:**
+    1.  **Unit Test:** Verify `hamming_distance(encode(i), encode(i+1)) == 1` for all adjacent integer levels $i$.
+    2.  **Benchmark:** Re-run the `vector2` benchmark on Random-1024D (or SIFT). We expect 2-bit recall to significantly exceed 1-bit recall (should be >80% with re-ranking).
+
+## 5. Summary of Recommendations
+
+1.  **Implement Gray Code:** Fixes Issue #43 (Critical for 2/4-bit).
+2.  **Tune RaBitQ:** Use the new benchmark infrastructure (GEMINI-BENCHMARK.md) to find optimal `rerank_factor` for the fixed 2/4-bit modes.
+3.  **Connect Write Path:** Ensure `InsertVector` actually updates the HNSW graph (Phase 5).

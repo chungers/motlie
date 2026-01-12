@@ -91,3 +91,9 @@ Once implemented, run the following suite to finalize tuning:
 3.  **Cache Sizing**:
     -   Vary `BinaryCodeCache` capacity.
     -   Goal: Measure performance cliff when cache doesn't fit in RAM.
+
+4.  **Gray Code Verification (Issue #43)**:
+    -   **Objective:** Confirm that 2-bit/4-bit recall improves after Gray Code implementation.
+    -   **Test:** Compare `bits=1` vs `bits=2` vs `bits=4` on Random-1024D.
+    -   **Success Criteria:** Recall must increase with bits. (Current broken state: Recall decreases).
+
