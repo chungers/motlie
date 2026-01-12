@@ -232,6 +232,10 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  ├── 5.1-5.5 Pending queue, async workers, crash recovery                  │
 │  └── Goal: Online updates without blocking search                          │
 │                                                                              │
+│  Phase 5.5: MPSC/MPMC API Infrastructure [NOT STARTED]                       │
+│  ├── 5.5.1-5.5.6 Mutation/Query executors, consumers, readers              │
+│  └── Goal: Consistent API matching graph/fulltext patterns                 │
+│                                                                              │
 │  Phase 6: Production Hardening [NOT STARTED]                                 │
 │  ├── 6.1-6.3 Delete support, concurrency, 1B validation                    │
 │  └── Goal: Production-ready at scale                                        │
@@ -6792,6 +6796,456 @@ fn bench_async_updater_throughput(b: &mut Bencher) {
 }
 // Target: > 5,000 inserts/sec sustained
 ```
+
+---
+
+## Phase 5.5: MPSC/MPMC API Infrastructure
+
+**Goal:** Implement complete mutation and query API infrastructure matching graph:: and fulltext:: patterns.
+
+**Motivation:** The vector module currently has basic mutation/query types defined but lacks the complete
+channel-based processing infrastructure that enables:
+- Async mutation processing with flush semantics
+- MPMC query pools for concurrent read scaling
+- Consistent API patterns across all storage modules
+- Integration with the shared Writer/Reader infrastructure
+
+### Current State vs Required State
+
+| Component | graph:: | fulltext:: | vector:: (current) | vector:: (target) |
+|-----------|---------|------------|-------------------|-------------------|
+| mutation.rs | 1295 lines | 298 lines | 411 lines | ~800 lines |
+| query.rs | 4154 lines | 1327 lines | 622 lines | ~2000 lines |
+| MutationExecutor | ✅ | ✅ | ❌ | ✅ |
+| spawn_mutation_consumer | ✅ | ✅ | ❌ | ✅ |
+| spawn_query_consumer | ✅ | ✅ | ❌ | ✅ |
+| Reader (MPMC pool) | ✅ | ✅ | ❌ | ✅ |
+| SearchKNN query | N/A | N/A | ❌ | ✅ |
+| Runnable trait | ✅ | ✅ | ❌ | ✅ |
+| Consumer types | ✅ | ✅ | ❌ | ✅ |
+
+### Task 5.5.1: MutationExecutor Trait Implementation
+
+Implement `MutationExecutor` for all mutation types following graph::mutation pattern:
+
+```rust
+// libs/db/src/vector/mutation.rs
+
+use crate::writer::MutationExecutor;
+
+/// Trait for executing mutations against vector storage.
+#[async_trait::async_trait]
+pub trait VectorMutationExecutor: Send + Sync {
+    /// Execute this mutation against the storage layer
+    async fn execute(&self, processor: &Processor) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl VectorMutationExecutor for InsertVector {
+    async fn execute(&self, processor: &Processor) -> Result<()> {
+        processor.insert_vector(
+            self.embedding,
+            self.id,
+            &self.vector,
+            self.immediate_index,
+        ).await
+    }
+}
+
+#[async_trait::async_trait]
+impl VectorMutationExecutor for DeleteVector {
+    async fn execute(&self, processor: &Processor) -> Result<()> {
+        processor.delete_vector(self.embedding, self.id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl VectorMutationExecutor for InsertVectorBatch {
+    async fn execute(&self, processor: &Processor) -> Result<()> {
+        processor.insert_batch(
+            self.embedding,
+            &self.vectors,
+            self.immediate_index,
+        ).await
+    }
+}
+
+#[async_trait::async_trait]
+impl VectorMutationExecutor for AddEmbeddingSpec {
+    async fn execute(&self, processor: &Processor) -> Result<()> {
+        processor.add_embedding_spec(self).await
+    }
+}
+
+// Dispatch implementation
+impl Mutation {
+    pub async fn execute(&self, processor: &Processor) -> Result<()> {
+        match self {
+            Mutation::InsertVector(m) => m.execute(processor).await,
+            Mutation::DeleteVector(m) => m.execute(processor).await,
+            Mutation::InsertVectorBatch(m) => m.execute(processor).await,
+            Mutation::AddEmbeddingSpec(m) => m.execute(processor).await,
+            Mutation::UpdateEdges(m) => m.execute(processor).await,
+            Mutation::UpdateGraphMeta(m) => m.execute(processor).await,
+            Mutation::Flush(marker) => {
+                marker.complete();
+                Ok(())
+            }
+        }
+    }
+}
+```
+
+### Task 5.5.2: Consumer Infrastructure
+
+Implement mutation consumer following graph::writer pattern:
+
+```rust
+// libs/db/src/vector/writer.rs
+
+/// Consumer that processes mutations from MPSC channel.
+pub struct Consumer {
+    receiver: mpsc::Receiver<Vec<Mutation>>,
+    processor: Arc<Processor>,
+}
+
+impl Consumer {
+    pub fn new(receiver: mpsc::Receiver<Vec<Mutation>>, processor: Arc<Processor>) -> Self {
+        Self { receiver, processor }
+    }
+
+    /// Run the consumer loop, processing mutations until channel closes.
+    pub async fn run(mut self) {
+        while let Some(mutations) = self.receiver.recv().await {
+            for mutation in mutations {
+                if let Err(e) = mutation.execute(&self.processor).await {
+                    tracing::error!(error = %e, "Failed to execute mutation");
+                }
+            }
+        }
+        tracing::info!("Vector mutation consumer shutting down");
+    }
+}
+
+/// Create a mutation writer and consumer pair.
+pub fn create_mutation_consumer(
+    processor: Arc<Processor>,
+    config: WriterConfig,
+) -> (Writer, Consumer) {
+    let (tx, rx) = mpsc::channel(config.channel_buffer_size);
+    let writer = Writer::new(tx);
+    let consumer = Consumer::new(rx, processor);
+    (writer, consumer)
+}
+
+/// Spawn a mutation consumer as a background task.
+pub fn spawn_mutation_consumer(
+    processor: Arc<Processor>,
+    config: WriterConfig,
+) -> Writer {
+    let (writer, consumer) = create_mutation_consumer(processor, config);
+    tokio::spawn(consumer.run());
+    writer
+}
+```
+
+### Task 5.5.3: SearchKNN Query Implementation
+
+Add the missing SearchKNN query to query.rs:
+
+```rust
+// libs/db/src/vector/query.rs
+
+/// K-nearest neighbor search query.
+#[derive(Debug, Clone)]
+pub struct SearchKNN {
+    /// Embedding space code
+    pub embedding: EmbeddingCode,
+    /// Query vector
+    pub query: Vec<f32>,
+    /// Number of results to return
+    pub k: usize,
+    /// Search configuration
+    pub config: SearchConfig,
+}
+
+impl SearchKNN {
+    pub fn new(embedding: EmbeddingCode, query: Vec<f32>, k: usize) -> Self {
+        Self {
+            embedding,
+            query,
+            k,
+            config: SearchConfig::default(),
+        }
+    }
+
+    pub fn with_config(mut self, config: SearchConfig) -> Self {
+        self.config = config;
+        self
+    }
+}
+
+/// Search result with distance and external ID.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub distance: f32,
+    pub id: Id,
+}
+
+#[async_trait::async_trait]
+impl QueryExecutor for SearchKNN {
+    type Output = Vec<SearchResult>;
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        // Get embedding info from registry
+        let registry = storage.embedding_registry();
+        let embedding = registry.get(self.embedding)
+            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", self.embedding))?;
+
+        // Perform HNSW search
+        let hnsw = storage.hnsw_index()?;
+        let internal_results = hnsw.search(
+            &self.query,
+            self.k,
+            &self.config,
+        )?;
+
+        // Resolve internal IDs to external IDs
+        let mut results = Vec::with_capacity(internal_results.len());
+        for (distance, vec_id) in internal_results {
+            if let Some(external_id) = storage.get_external_id(self.embedding, vec_id)? {
+                results.push(SearchResult { distance, id: external_id });
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(30)  // Longer timeout for search
+    }
+}
+
+// Add to Query enum
+pub enum Query {
+    // ... existing variants ...
+    SearchKNN(SearchKNNDispatch),
+    SearchKNNFiltered(SearchKNNFilteredDispatch),
+}
+```
+
+### Task 5.5.4: Reader Infrastructure (MPMC Query Pool)
+
+Implement reader with MPMC pool following graph::reader pattern:
+
+```rust
+// libs/db/src/vector/reader.rs
+
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+use super::query::Query;
+use super::Storage;
+
+/// Configuration for query reader.
+#[derive(Debug, Clone)]
+pub struct ReaderConfig {
+    /// Size of the query channel buffer
+    pub channel_buffer_size: usize,
+    /// Number of worker threads in the pool
+    pub pool_size: usize,
+}
+
+impl Default for ReaderConfig {
+    fn default() -> Self {
+        Self {
+            channel_buffer_size: 1000,
+            pool_size: num_cpus::get(),
+        }
+    }
+}
+
+/// Query consumer that processes queries from MPMC channel.
+pub struct Consumer {
+    receiver: async_channel::Receiver<Query>,
+    storage: Arc<Storage>,
+}
+
+impl Consumer {
+    pub fn new(receiver: async_channel::Receiver<Query>, storage: Arc<Storage>) -> Self {
+        Self { receiver, storage }
+    }
+
+    /// Run the consumer loop.
+    pub async fn run(self) {
+        while let Ok(query) = self.receiver.recv().await {
+            query.process(&self.storage).await;
+        }
+    }
+}
+
+/// Reader handle for sending queries.
+#[derive(Clone)]
+pub struct Reader {
+    sender: async_channel::Sender<Query>,
+}
+
+impl Reader {
+    pub fn new(sender: async_channel::Sender<Query>) -> Self {
+        Self { sender }
+    }
+
+    /// Send a query for processing.
+    pub async fn send(&self, query: Query) -> Result<()> {
+        self.sender.send(query).await
+            .map_err(|_| anyhow::anyhow!("Query channel closed"))
+    }
+}
+
+/// Create a query reader and consumer pool.
+pub fn create_query_reader(
+    storage: Arc<Storage>,
+    config: ReaderConfig,
+) -> Reader {
+    let (tx, rx) = async_channel::bounded(config.channel_buffer_size);
+
+    // Spawn pool of consumers
+    for _ in 0..config.pool_size {
+        let consumer = Consumer::new(rx.clone(), storage.clone());
+        tokio::spawn(consumer.run());
+    }
+
+    Reader::new(tx)
+}
+
+/// Spawn a query consumer pool with shared storage.
+pub fn spawn_query_consumer_pool_shared(
+    storage: Arc<Storage>,
+    config: ReaderConfig,
+) -> Reader {
+    create_query_reader(storage, config)
+}
+```
+
+### Task 5.5.5: Runnable Trait Integration
+
+Integrate with the shared `Runnable` trait from `crate::writer`:
+
+```rust
+// libs/db/src/vector/mod.rs
+
+// Re-export Runnable trait
+pub use crate::writer::Runnable;
+pub use crate::reader::Runnable as QueryRunnable;
+
+// Update exports
+pub use mutation::{
+    AddEmbeddingSpec, DeleteVector, EdgeOperation, FlushMarker, GraphMetaUpdate,
+    InsertVector, InsertVectorBatch, Mutation, UpdateEdges, UpdateGraphMeta,
+};
+pub use query::{
+    GetExternalId, GetInternalId, GetVector, Query, QueryExecutor,
+    ResolveIds, SearchKNN, SearchKNNFiltered, SearchResult,
+};
+pub use reader::{
+    create_query_reader, spawn_query_consumer_pool_shared,
+    Consumer as QueryConsumer, Reader, ReaderConfig,
+};
+pub use writer::{
+    create_mutation_consumer, spawn_mutation_consumer,
+    Consumer as MutationConsumer, Writer, WriterConfig,
+};
+```
+
+### Task 5.5.6: Integration Tests
+
+```rust
+// libs/db/src/vector/tests/api_integration_tests.rs
+
+#[cfg(test)]
+mod api_integration_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn test_mutation_writer_consumer() {
+        let storage = setup_temp_storage();
+        let processor = Arc::new(Processor::new(storage.clone()));
+
+        let writer = spawn_mutation_consumer(processor, WriterConfig::default());
+
+        // Send mutations
+        let embedding = 1u64;
+        let id = Id::new();
+        let vector = vec![1.0f32; 128];
+
+        writer.send(vec![
+            InsertVector::new(embedding, id, vector).into()
+        ]).await.unwrap();
+
+        // Flush and verify
+        writer.flush().await.unwrap();
+
+        let result = GetVector::new(embedding, id)
+            .execute(&storage).await.unwrap();
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_query_reader_pool() {
+        let storage = Arc::new(setup_storage_with_vectors(1000));
+        let reader = spawn_query_consumer_pool_shared(
+            storage.clone(),
+            ReaderConfig { pool_size: 4, ..Default::default() }
+        );
+
+        // Send concurrent queries
+        let mut handles = vec![];
+        for _ in 0..100 {
+            let r = reader.clone();
+            handles.push(tokio::spawn(async move {
+                let query = SearchKNN::new(1, random_vector(128), 10);
+                // ... execute query via reader
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_knn_query() {
+        let storage = setup_storage_with_vectors(10000);
+
+        let query = SearchKNN::new(1, vec![0.5f32; 128], 10);
+        let results = query.execute(&storage).await.unwrap();
+
+        assert_eq!(results.len(), 10);
+        // Results should be sorted by distance
+        for i in 1..results.len() {
+            assert!(results[i-1].distance <= results[i].distance);
+        }
+    }
+}
+```
+
+### Phase 5.5 File Changes Summary
+
+| File | Changes |
+|------|---------|
+| `mutation.rs` | Add `VectorMutationExecutor` trait and impls for all mutation types |
+| `query.rs` | Add `SearchKNN`, `SearchKNNFiltered` queries with `QueryExecutor` impls |
+| `writer.rs` | Add `Consumer`, `create_mutation_consumer`, `spawn_mutation_consumer` |
+| `reader.rs` | **NEW** - Add `Reader`, `Consumer`, `ReaderConfig`, spawn functions |
+| `mod.rs` | Update exports to match graph/fulltext patterns |
+| `processor.rs` | Add missing methods called by mutation executors |
+
+### Dependencies
+
+- Phase 2 (HNSW Core) must be complete for SearchKNN
+- Phase 4 (RaBitQ) optional but enhances SearchKNN performance
 
 ---
 
