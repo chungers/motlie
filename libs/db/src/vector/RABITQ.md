@@ -27,7 +27,7 @@ RaBitQ (Random Bit Quantization) is a training-free binary quantization method f
 | Symmetric Hamming distance | ✅ Complete | HNSW navigation, **poor recall** (see Part 5) |
 | ADC distance computation | ✅ Complete | `adc_distance()`, `binary_dot_product()` |
 | AdcCorrection storage | ✅ Complete | `encode_with_correction()`, schema support |
-| ADC + HNSW navigation | ❌ Not implemented | **Critical next step** (see Part 5.9) |
+| ADC + HNSW navigation | ✅ Complete | Implemented in `search_with_rabitq_cached` |
 | Brute-force ADC search | ✅ Complete | Benchmark only, 99.1% recall at 4-bit |
 
 ---
