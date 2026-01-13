@@ -19,11 +19,13 @@ This module (`libs/db/src/vector/benchmark`) provides benchmarking infrastructur
 
 ### Supported Datasets
 
-| Dataset | Dimensions | Distance | Format | Status |
-|---------|------------|----------|--------|--------|
-| LAION-CLIP | 512 | Cosine | NPY (f16) | ✅ Supported |
-| SIFT-1M | 128 | L2 | fvecs | ✅ Supported |
-| GIST-960 | 960 | L2 | fvecs | ✅ Supported |
+| Dataset | Dimensions | Distance | Format | Feature | Status |
+|---------|------------|----------|--------|---------|--------|
+| LAION-CLIP | 512 | Cosine | NPY (f16) | default | ✅ Supported |
+| SIFT-1M | 128 | L2 | fvecs | default | ✅ Supported |
+| GIST-960 | 960 | L2 | fvecs | default | ✅ Supported |
+| Cohere Wikipedia | 768 | Cosine | Parquet | `parquet` | ✅ Supported |
+| GloVe-100 | 100 | Angular | HDF5 | `hdf5` | ✅ Supported |
 
 ### Implementation Status
 
@@ -36,10 +38,27 @@ This module (`libs/db/src/vector/benchmark`) provides benchmarking infrastructur
 | A.5 | Rotated variance metric | ✅ Complete |
 | B.1 | GistDataset loader | ✅ Complete |
 | B.2 | Shared fvecs/ivecs loaders | ✅ Complete (in sift.rs) |
-| C | Parquet + Cohere Wikipedia | Planned |
-| D | HDF5 + ann-benchmarks | Planned |
+| C.1 | Parquet loader | ✅ Complete (`--features parquet`) |
+| C.2 | CohereWikipediaDataset | ✅ Complete (768D, Cosine) |
+| D.1 | HDF5 loader | ✅ Complete (`--features hdf5`*) |
+| D.2 | GloveDataset | ✅ Complete (100D, angular) |
 | E | CLI tool (bins/bench_vector) | Planned |
 | F | Example migration | Planned |
+
+*Note: HDF5 feature requires system library installation (`libhdf5-dev` on Ubuntu).
+
+### Optional Features
+
+```toml
+# Enable Parquet support (Cohere Wikipedia dataset)
+cargo build --features parquet
+
+# Enable HDF5 support (requires system libhdf5)
+cargo build --features hdf5
+
+# Enable all benchmark formats
+cargo build --features benchmark-all
+```
 
 ---
 
