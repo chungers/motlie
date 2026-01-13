@@ -229,4 +229,31 @@ Distant quantization levels can have **lower** Hamming distance than nearby leve
 
 1.  **Implement Gray Code:** Fixes Issue #43 (Critical for 2/4-bit).
 2.  **Tune RaBitQ:** Use the new benchmark infrastructure (GEMINI-BENCHMARK.md) to find optimal `rerank_factor` for the fixed 2/4-bit modes.
-3.  **Connect Write Path:** Ensure `InsertVector` actually updates the HNSW graph (Phase 5).
+## 6. Gemini Review of RABITQ.md (ADC Findings)
+
+**Date:** January 12, 2026
+
+I have reviewed the new `RABITQ.md` document and independently verified its claims regarding Symmetric Hamming Distance vs. Asymmetric Distance Computation (ADC).
+
+### 6.1 Summary of Findings
+
+1.  **Symmetric Hamming is Flawed for Multi-bit:**
+    *   While 1-bit (sign) Hamming distance works well as a proxy for angular distance, multi-bit Hamming distance (even with Gray codes) fails to preserve the metric properties required for accurate search.
+    *   **Reason:** The distance between quantization levels in Hamming space does not correlate monotonically with their numeric difference (e.g., in 4-bit Gray code, levels 0 and 15 are numerically far but have Hamming distance 1).
+    *   **Impact:** This explains why 2-bit/4-bit quantization previously yielded worse recall than 1-bit on structured data like LAION-CLIP.
+
+2.  **ADC is the Correct Implementation:**
+    *   **Asymmetric Distance Computation (ADC)** avoids binarizing the query vector. Instead, it computes the dot product between the *float32 query* (rotated) and the *reconstructed centroid* of the binary code.
+    *   This preserves the full precision of the query and the correct numeric ordering of the quantized data levels.
+    *   Independent research confirms this is the standard approach in Product Quantization (PQ) and the method used in the original RaBitQ paper.
+
+3.  **Gray Code Implementation Verified:**
+    *   The recent Gray Code implementation in `rabitq.rs` is **correct** (`n ^ (n >> 1)`).
+    *   It solves the *local adjacency* problem but cannot solve the *global metric* problem inherent to Hamming distance.
+
+### 6.2 Recommendations
+
+1.  **Adopt ADC:** Proceed with the plan to implement ADC for RaBitQ. This is necessary to unlock the recall benefits of >1 bit quantization.
+2.  **Benchmark Strategy:** Future benchmarks should focus on tuning `rerank_factor` with ADC, as it should provide much better candidate quality than Symmetric Hamming, potentially allowing for lower re-ranking costs.
+3.  **Documentation:** `RABITQ.md` accurately reflects the state of the art and the path forward. See **Appendix C** in that document for the detailed independent review.
+
