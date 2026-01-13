@@ -11,7 +11,7 @@ use super::graph::{distance, get_neighbors, greedy_search_layer};
 use super::insert::load_navigation;
 use super::Index;
 use crate::vector::cache::BinaryCodeCache;
-use crate::vector::rabitq::RaBitQ;
+use crate::vector::quantization::RaBitQ;
 use crate::vector::schema::{HnswLayer, VecId};
 use crate::vector::Storage;
 
@@ -188,17 +188,28 @@ pub(super) fn beam_search(
 
 /// Two-phase search using RaBitQ with in-memory cached binary codes.
 ///
-/// Uses `BinaryCodeCache` for binary codes instead of fetching from RocksDB,
-/// avoiding the "double I/O" problem that would make RaBitQ slower than L2.
+/// Uses ADC (Asymmetric Distance Computation) for beam search at layer 0,
+/// replacing symmetric Hamming distance which has fundamental issues with
+/// multi-bit quantization (see RABITQ.md Section 5.9).
+///
+/// # ADC vs Hamming Performance
+///
+/// | Mode | Recall@10 | Notes |
+/// |------|-----------|-------|
+/// | Hamming 4-bit | ~24% | Symmetric, loses numeric ordering |
+/// | ADC 4-bit | ~92% | Asymmetric, preserves ordering |
+///
+/// ADC keeps the query as float32 and computes weighted dot products with
+/// binary codes, using stored correction factors for accurate estimation.
 ///
 /// # Performance
 ///
 /// With cached codes:
-/// - Hamming distance: ~ns (SIMD popcount on in-memory bytes)
+/// - ADC distance: ~10-20ns per vector (decode + dot product)
 /// - No RocksDB reads during beam search
 /// - Only re-ranking phase reads vectors from disk
 ///
-/// Expected speedup: 2-4x over standard L2 search.
+/// Expected: >90% recall with proper re-ranking.
 ///
 /// # Arguments
 ///
@@ -206,7 +217,7 @@ pub(super) fn beam_search(
 /// * `storage` - Vector storage (only used for re-ranking)
 /// * `query` - Query vector
 /// * `encoder` - RaBitQ encoder
-/// * `code_cache` - In-memory cache of binary codes
+/// * `code_cache` - In-memory cache of binary codes with ADC corrections
 /// * `k` - Number of results to return
 /// * `ef` - Search beam width
 /// * `rerank_factor` - Multiplier for candidates to re-rank
@@ -233,8 +244,9 @@ pub fn search_with_rabitq_cached(
     let entry_point = nav_info.entry_point().unwrap();
     let max_layer = nav_info.max_layer;
 
-    // Encode query to binary code
-    let query_code = encoder.encode(query);
+    // ADC mode: rotate query (keep as float32), compute query norm
+    let query_rotated = encoder.rotate_query(query);
+    let query_norm: f32 = query.iter().map(|x| x * x).sum::<f32>().sqrt();
 
     // Phase 1: Greedy descent through upper layers using exact distance
     let mut current = entry_point;
@@ -248,25 +260,27 @@ pub fn search_with_rabitq_cached(
     // Suppress unused variable warning
     let _ = current_dist;
 
-    // Phase 2: Beam search at layer 0 using CACHED Hamming distance
+    // Phase 2: Beam search at layer 0 using CACHED ADC distance
     let rerank_count = k * rerank_factor;
     let effective_ef = ef.max(rerank_count);
-    let hamming_candidates = beam_search_layer0_hamming_cached(
+    let adc_candidates = beam_search_layer0_adc_cached(
         index,
         storage,
-        &query_code,
+        encoder,
+        &query_rotated,
+        query_norm,
         code_cache,
         current,
         effective_ef,
     )?;
 
-    if hamming_candidates.is_empty() {
+    if adc_candidates.is_empty() {
         return Ok(Vec::new());
     }
 
     // Phase 3: Re-rank top candidates with exact distance (PARALLEL)
-    let candidates_to_rerank = hamming_candidates.len().min(rerank_count);
-    let vec_ids: Vec<VecId> = hamming_candidates
+    let candidates_to_rerank = adc_candidates.len().min(rerank_count);
+    let vec_ids: Vec<VecId> = adc_candidates
         .iter()
         .take(candidates_to_rerank)
         .map(|(_, id)| *id)
@@ -280,36 +294,51 @@ pub fn search_with_rabitq_cached(
     Ok(exact_results)
 }
 
-/// Beam search at layer 0 using in-memory cached binary codes.
+/// Beam search at layer 0 using ADC distance with in-memory cached binary codes.
 ///
-/// This version uses `BinaryCodeCache` instead of RocksDB reads, making
-/// Hamming distance computation essentially free (just SIMD popcount).
-fn beam_search_layer0_hamming_cached(
+/// Uses ADC (Asymmetric Distance Computation) instead of symmetric Hamming distance.
+/// ADC keeps the query as float32 and computes weighted dot products with binary codes,
+/// achieving 91-99% recall vs Hamming's 10-24% for multi-bit quantization.
+///
+/// # Arguments
+///
+/// * `index` - The HNSW index
+/// * `storage` - Storage for edge lookups
+/// * `encoder` - RaBitQ encoder for ADC distance computation
+/// * `query_rotated` - Pre-rotated query vector (from encoder.rotate_query())
+/// * `query_norm` - L2 norm of original query
+/// * `code_cache` - In-memory cache of (binary_code, AdcCorrection) tuples
+/// * `entry` - Entry point for beam search
+/// * `ef` - Search beam width
+fn beam_search_layer0_adc_cached(
     index: &Index,
     storage: &Storage,
-    query_code: &[u8],
+    encoder: &RaBitQ,
+    query_rotated: &[f32],
+    query_norm: f32,
     code_cache: &BinaryCodeCache,
     entry: VecId,
     ef: usize,
-) -> Result<Vec<(u32, VecId)>> {
-    let mut candidates: BinaryHeap<Reverse<(u32, VecId)>> = BinaryHeap::new();
-    let mut results: BinaryHeap<(u32, VecId)> = BinaryHeap::new();
+) -> Result<Vec<(OrderedFloat<f32>, VecId)>> {
+    let mut candidates: BinaryHeap<Reverse<(OrderedFloat<f32>, VecId)>> = BinaryHeap::new();
+    let mut results: BinaryHeap<(OrderedFloat<f32>, VecId)> = BinaryHeap::new();
     let mut visited = RoaringBitmap::new();
 
-    // Get entry point's Hamming distance from cache
-    let entry_code = code_cache
-        .get(index.embedding(), entry)
-        .unwrap_or_default();
-    let entry_dist = RaBitQ::hamming_distance(query_code, &entry_code);
+    // Get entry point's ADC distance from cache
+    let entry_dist = if let Some((code, correction)) = code_cache.get(index.embedding(), entry) {
+        encoder.adc_distance(query_rotated, query_norm, &code, &correction)
+    } else {
+        f32::MAX // No cached code, use max distance
+    };
 
-    candidates.push(Reverse((entry_dist, entry)));
-    results.push((entry_dist, entry));
+    candidates.push(Reverse((OrderedFloat(entry_dist), entry)));
+    results.push((OrderedFloat(entry_dist), entry));
     visited.insert(entry);
 
-    while let Some(Reverse((current_dist, current))) = candidates.pop() {
+    while let Some(Reverse((OrderedFloat(current_dist), current))) = candidates.pop() {
         // Stop if current is worse than worst result
         if results.len() >= ef {
-            if let Some(&(worst_dist, _)) = results.peek() {
+            if let Some(&(OrderedFloat(worst_dist), _)) = results.peek() {
                 if current_dist > worst_dist {
                     break;
                 }
@@ -329,34 +358,34 @@ fn beam_search_layer0_hamming_cached(
             continue;
         }
 
-        // Batch fetch binary codes from CACHE (not RocksDB!)
+        // Batch fetch binary codes with corrections from CACHE (not RocksDB!)
         let codes = code_cache.get_batch(index.embedding(), &unvisited);
 
         for (neighbor, code_opt) in unvisited.into_iter().zip(codes.into_iter()) {
             visited.insert(neighbor);
 
-            let dist = if let Some(code) = code_opt {
-                RaBitQ::hamming_distance(query_code, &code)
+            let dist = if let Some((code, correction)) = code_opt {
+                encoder.adc_distance(query_rotated, query_norm, &code, &correction)
             } else {
-                u32::MAX // No cached code, skip (shouldn't happen if cache is populated)
+                f32::MAX // No cached code, skip (shouldn't happen if cache is populated)
             };
 
             // Add to results if better than worst or results not full
             if results.len() < ef {
-                candidates.push(Reverse((dist, neighbor)));
-                results.push((dist, neighbor));
-            } else if let Some(&(worst_dist, _)) = results.peek() {
+                candidates.push(Reverse((OrderedFloat(dist), neighbor)));
+                results.push((OrderedFloat(dist), neighbor));
+            } else if let Some(&(OrderedFloat(worst_dist), _)) = results.peek() {
                 if dist < worst_dist {
-                    candidates.push(Reverse((dist, neighbor)));
+                    candidates.push(Reverse((OrderedFloat(dist), neighbor)));
                     results.pop();
-                    results.push((dist, neighbor));
+                    results.push((OrderedFloat(dist), neighbor));
                 }
             }
         }
     }
 
-    // Extract results sorted by Hamming distance (ascending)
-    let mut result_vec: Vec<(u32, VecId)> = results.into_iter().collect();
+    // Extract results sorted by ADC distance (ascending)
+    let mut result_vec: Vec<(OrderedFloat<f32>, VecId)> = results.into_iter().collect();
     result_vec.sort_by_key(|(dist, _)| *dist);
 
     Ok(result_vec)

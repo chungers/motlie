@@ -1,40 +1,42 @@
-//! In-memory cache for RaBitQ binary codes.
+//! In-memory cache for RaBitQ binary codes with ADC corrections.
 //!
-//! This module provides caching for binary codes to enable fast Hamming distance
-//! computation during RaBitQ search, avoiding the "double I/O" problem.
+//! This module provides caching for binary codes and ADC correction factors
+//! to enable fast ADC distance computation during RaBitQ search.
+//!
+//! ADC (Asymmetric Distance Computation) achieves 91-99% recall vs Hamming's
+//! 10-24% by keeping the query as float32 and using weighted dot products.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use crate::vector::schema::{EmbeddingCode, VecId};
+use crate::vector::schema::{AdcCorrection, EmbeddingCode, VecId};
 
-/// In-memory cache for RaBitQ binary codes.
+/// In-memory cache for RaBitQ binary codes with ADC corrections.
 ///
-/// Caches binary codes to avoid RocksDB reads during Hamming-based beam search.
-/// This addresses the "double I/O" problem where RaBitQ is slower than standard
-/// L2 search due to fetching both binary codes and vectors from disk.
+/// Caches binary codes and ADC correction factors to enable fast ADC distance
+/// computation during RaBitQ beam search, avoiding RocksDB reads.
 ///
-/// # Background
+/// # ADC vs Hamming
 ///
-/// Task 4.9 benchmarking revealed that RaBitQ with RocksDB-backed binary codes
-/// is SLOWER at 100K scale because:
-/// 1. Binary code fetch: RocksDB read for each candidate's code
-/// 2. Vector fetch: RocksDB read for top candidates during re-ranking
+/// | Mode | Recall@10 | Notes |
+/// |------|-----------|-------|
+/// | Hamming 4-bit | 24% | Symmetric, loses numeric ordering |
+/// | ADC 4-bit | 92% | Asymmetric, preserves ordering |
 ///
-/// With in-memory caching, Hamming distance computation becomes nearly free
-/// (SIMD popcount on cached bytes), making RaBitQ viable for speedup.
+/// ADC keeps the query as float32 and computes weighted dot products,
+/// correcting for quantization error using stored correction factors.
 ///
 /// # Memory Usage
 ///
-/// For 1-bit RaBitQ at 128D:
-/// - Binary code: 16 bytes per vector
-/// - 100K vectors: ~1.6 MB
-/// - 1M vectors: ~16 MB
-///
-/// This is small compared to the 512 bytes/vector for full vectors.
+/// For 4-bit RaBitQ at 128D:
+/// - Binary code: 64 bytes per vector
+/// - ADC correction: 8 bytes per vector (2×f32)
+/// - Total: 72 bytes per vector
+/// - 100K vectors: ~7 MB
+/// - 1M vectors: ~70 MB
 pub struct BinaryCodeCache {
-    /// Cached binary codes: (embedding_code, vec_id) -> binary_code
-    codes: RwLock<HashMap<(EmbeddingCode, VecId), Vec<u8>>>,
+    /// Cached binary codes with ADC corrections: (embedding_code, vec_id) -> (code, correction)
+    codes: RwLock<HashMap<(EmbeddingCode, VecId), (Vec<u8>, AdcCorrection)>>,
 
     /// Total bytes cached (for monitoring)
     cache_bytes: RwLock<usize>,
@@ -49,27 +51,41 @@ impl BinaryCodeCache {
         }
     }
 
-    /// Insert a binary code into the cache.
-    pub fn put(&self, embedding: EmbeddingCode, vec_id: VecId, code: Vec<u8>) {
+    /// Insert a binary code with ADC correction into the cache.
+    pub fn put(
+        &self,
+        embedding: EmbeddingCode,
+        vec_id: VecId,
+        code: Vec<u8>,
+        correction: AdcCorrection,
+    ) {
         if let Ok(mut cache) = self.codes.write() {
             let code_len = code.len();
-            cache.insert((embedding, vec_id), code);
+            cache.insert((embedding, vec_id), (code, correction));
             if let Ok(mut bytes) = self.cache_bytes.write() {
-                *bytes += code_len;
+                *bytes += code_len + 8; // +8 for AdcCorrection (2×f32)
             }
         }
     }
 
-    /// Get a binary code from the cache.
-    pub fn get(&self, embedding: EmbeddingCode, vec_id: VecId) -> Option<Vec<u8>> {
+    /// Get a binary code with ADC correction from the cache.
+    pub fn get(
+        &self,
+        embedding: EmbeddingCode,
+        vec_id: VecId,
+    ) -> Option<(Vec<u8>, AdcCorrection)> {
         self.codes.read().ok()?.get(&(embedding, vec_id)).cloned()
     }
 
-    /// Get binary codes for multiple vectors.
+    /// Get binary codes with corrections for multiple vectors.
     ///
-    /// Returns a vector of Option<Vec<u8>> in the same order as vec_ids.
-    /// Missing codes are None.
-    pub fn get_batch(&self, embedding: EmbeddingCode, vec_ids: &[VecId]) -> Vec<Option<Vec<u8>>> {
+    /// Returns a vector of Option in the same order as vec_ids.
+    /// Missing entries are None.
+    pub fn get_batch(
+        &self,
+        embedding: EmbeddingCode,
+        vec_ids: &[VecId],
+    ) -> Vec<Option<(Vec<u8>, AdcCorrection)>> {
         if let Ok(cache) = self.codes.read() {
             vec_ids
                 .iter()
@@ -125,16 +141,24 @@ impl Default for BinaryCodeCache {
 mod tests {
     use super::*;
 
+    fn default_correction() -> AdcCorrection {
+        AdcCorrection::new(1.0, 1.0)
+    }
+
     #[test]
     fn test_put_and_get() {
         let cache = BinaryCodeCache::new();
         let code = vec![0x12, 0x34, 0x56, 0x78];
+        let correction = AdcCorrection::new(0.99, 0.85);
 
-        cache.put(1, 100, code.clone());
+        cache.put(1, 100, code.clone(), correction);
         let retrieved = cache.get(1, 100);
 
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap(), code);
+        let (ret_code, ret_corr) = retrieved.unwrap();
+        assert_eq!(ret_code, code);
+        assert_eq!(ret_corr.vector_norm, 0.99);
+        assert_eq!(ret_corr.quantization_error, 0.85);
     }
 
     #[test]
@@ -146,23 +170,26 @@ mod tests {
     #[test]
     fn test_get_batch() {
         let cache = BinaryCodeCache::new();
-        cache.put(1, 10, vec![0x01]);
-        cache.put(1, 20, vec![0x02]);
-        cache.put(1, 30, vec![0x03]);
+        cache.put(1, 10, vec![0x01], default_correction());
+        cache.put(1, 20, vec![0x02], default_correction());
+        cache.put(1, 30, vec![0x03], default_correction());
 
         let results = cache.get_batch(1, &[10, 20, 99, 30]);
 
         assert_eq!(results.len(), 4);
-        assert_eq!(results[0], Some(vec![0x01]));
-        assert_eq!(results[1], Some(vec![0x02]));
-        assert_eq!(results[2], None); // 99 not in cache
-        assert_eq!(results[3], Some(vec![0x03]));
+        assert!(results[0].is_some());
+        assert_eq!(results[0].as_ref().unwrap().0, vec![0x01]);
+        assert!(results[1].is_some());
+        assert_eq!(results[1].as_ref().unwrap().0, vec![0x02]);
+        assert!(results[2].is_none()); // 99 not in cache
+        assert!(results[3].is_some());
+        assert_eq!(results[3].as_ref().unwrap().0, vec![0x03]);
     }
 
     #[test]
     fn test_contains() {
         let cache = BinaryCodeCache::new();
-        cache.put(1, 100, vec![0x12]);
+        cache.put(1, 100, vec![0x12], default_correction());
 
         assert!(cache.contains(1, 100));
         assert!(!cache.contains(1, 200));
@@ -174,19 +201,19 @@ mod tests {
         let cache = BinaryCodeCache::new();
         assert_eq!(cache.stats(), (0, 0));
 
-        cache.put(1, 10, vec![0x01, 0x02, 0x03, 0x04]); // 4 bytes
-        cache.put(1, 20, vec![0x05, 0x06]); // 2 bytes
+        cache.put(1, 10, vec![0x01, 0x02, 0x03, 0x04], default_correction()); // 4 + 8 = 12 bytes
+        cache.put(1, 20, vec![0x05, 0x06], default_correction()); // 2 + 8 = 10 bytes
 
         let (count, bytes) = cache.stats();
         assert_eq!(count, 2);
-        assert_eq!(bytes, 6);
+        assert_eq!(bytes, 22); // 12 + 10
     }
 
     #[test]
     fn test_clear() {
         let cache = BinaryCodeCache::new();
-        cache.put(1, 10, vec![0x01]);
-        cache.put(1, 20, vec![0x02]);
+        cache.put(1, 10, vec![0x01], default_correction());
+        cache.put(1, 20, vec![0x02], default_correction());
 
         assert_eq!(cache.stats().0, 2);
 
@@ -199,11 +226,11 @@ mod tests {
     #[test]
     fn test_count_for_embedding() {
         let cache = BinaryCodeCache::new();
-        cache.put(1, 10, vec![0x01]);
-        cache.put(1, 20, vec![0x02]);
-        cache.put(2, 10, vec![0x03]);
-        cache.put(2, 20, vec![0x04]);
-        cache.put(2, 30, vec![0x05]);
+        cache.put(1, 10, vec![0x01], default_correction());
+        cache.put(1, 20, vec![0x02], default_correction());
+        cache.put(2, 10, vec![0x03], default_correction());
+        cache.put(2, 20, vec![0x04], default_correction());
+        cache.put(2, 30, vec![0x05], default_correction());
 
         assert_eq!(cache.count_for_embedding(1), 2);
         assert_eq!(cache.count_for_embedding(2), 3);
@@ -213,10 +240,15 @@ mod tests {
     #[test]
     fn test_different_embeddings_isolated() {
         let cache = BinaryCodeCache::new();
-        cache.put(1, 100, vec![0x11]);
-        cache.put(2, 100, vec![0x22]);
+        cache.put(1, 100, vec![0x11], AdcCorrection::new(1.0, 0.9));
+        cache.put(2, 100, vec![0x22], AdcCorrection::new(1.0, 0.8));
 
-        assert_eq!(cache.get(1, 100), Some(vec![0x11]));
-        assert_eq!(cache.get(2, 100), Some(vec![0x22]));
+        let (code1, corr1) = cache.get(1, 100).unwrap();
+        let (code2, corr2) = cache.get(2, 100).unwrap();
+
+        assert_eq!(code1, vec![0x11]);
+        assert_eq!(code2, vec![0x22]);
+        assert_eq!(corr1.quantization_error, 0.9);
+        assert_eq!(corr2.quantization_error, 0.8);
     }
 }

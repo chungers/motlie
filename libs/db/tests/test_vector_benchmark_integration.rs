@@ -335,8 +335,8 @@ fn test_laion_clip_cosine_rabitq_with_caches() -> anyhow::Result<()> {
 
     for (i, vector) in subset.db_vectors.iter().enumerate() {
         let vec_id = i as VecId;
-        let code = rabitq.encode(vector);
-        binary_cache.put(embedding_code, vec_id, code);
+        let (code, correction) = rabitq.encode_with_correction(vector);
+        binary_cache.put(embedding_code, vec_id, code, correction);
     }
 
     println!("RaBitQ encoding complete, BinaryCodeCache populated with {} entries",

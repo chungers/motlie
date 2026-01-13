@@ -355,6 +355,277 @@ impl RaBitQ {
             .collect()
     }
 
+    // =========================================================================
+    // ADC (Asymmetric Distance Computation) Methods
+    // =========================================================================
+
+    /// Convert Gray code back to binary.
+    ///
+    /// Inverse of `to_gray_code()`. Used for decoding multi-bit quantization levels.
+    #[inline]
+    const fn from_gray_code(gray: u8) -> u8 {
+        let mut n = gray;
+        let mut mask = n >> 1;
+        while mask != 0 {
+            n ^= mask;
+            mask >>= 1;
+        }
+        n
+    }
+
+    /// Non-const version for use in const contexts workaround.
+    #[inline]
+    fn from_gray_code_runtime(gray: u8) -> u8 {
+        let mut n = gray;
+        n ^= n >> 4;
+        n ^= n >> 2;
+        n ^= n >> 1;
+        n
+    }
+
+    /// Rotate query vector without quantizing.
+    ///
+    /// In ADC mode, the query is rotated but kept as float32 (not binarized).
+    /// This preserves full precision for the asymmetric distance computation.
+    #[inline]
+    pub fn rotate_query(&self, query: &[f32]) -> Vec<f32> {
+        self.rotate(query)
+    }
+
+    /// Encode vector with ADC corrective factors.
+    ///
+    /// Returns both the binary code and the correction factors needed for
+    /// accurate ADC distance estimation.
+    ///
+    /// # Arguments
+    ///
+    /// * `vector` - Input vector (should be normalized for best results)
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (binary_code, AdcCorrection)
+    pub fn encode_with_correction(
+        &self,
+        vector: &[f32],
+    ) -> (Vec<u8>, crate::vector::schema::AdcCorrection) {
+        use crate::vector::schema::AdcCorrection;
+
+        // Compute vector norm
+        let vector_norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        // Normalize vector for encoding
+        let normalized: Vec<f32> = if vector_norm > 1e-10 {
+            vector.iter().map(|x| x / vector_norm).collect()
+        } else {
+            vector.to_vec()
+        };
+
+        // Rotate and encode
+        let rotated = self.rotate(&normalized);
+        let code = match self.bits_per_dim {
+            1 => self.quantize_1bit(&rotated),
+            2 => self.quantize_2bit(&rotated),
+            4 => self.quantize_4bit(&rotated),
+            _ => unreachable!(),
+        };
+
+        // Compute quantization error: dot product of decoded quantized vector with rotated original
+        // This measures how well the binary code represents the rotated vector
+        let decoded = self.decode_to_float(&code);
+        let quantization_error: f32 = rotated
+            .iter()
+            .zip(decoded.iter())
+            .map(|(r, d)| r * d)
+            .sum();
+
+        // Ensure quantization_error is not zero to avoid division by zero
+        let quantization_error = if quantization_error.abs() < 1e-10 {
+            1.0
+        } else {
+            quantization_error
+        };
+
+        (code, AdcCorrection::new(vector_norm, quantization_error))
+    }
+
+    /// Decode binary code to float representation.
+    ///
+    /// Used for computing quantization error correction factor.
+    fn decode_to_float(&self, code: &[u8]) -> Vec<f32> {
+        match self.bits_per_dim {
+            1 => self.decode_1bit(code),
+            2 => self.decode_2bit(code),
+            4 => self.decode_4bit(code),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Decode 1-bit code to float: 0 → -1.0, 1 → +1.0
+    fn decode_1bit(&self, code: &[u8]) -> Vec<f32> {
+        let mut result = Vec::with_capacity(self.dim);
+        for i in 0..self.dim {
+            let byte_idx = i / 8;
+            let bit_idx = i % 8;
+            let bit = (code[byte_idx] >> bit_idx) & 1;
+            result.push(if bit == 1 { 1.0 } else { -1.0 });
+        }
+        result
+    }
+
+    /// Decode 2-bit Gray code to float: levels 0,1,2,3 → -1.5, -0.5, +0.5, +1.5
+    fn decode_2bit(&self, code: &[u8]) -> Vec<f32> {
+        const LEVEL_VALUES: [f32; 4] = [-1.5, -0.5, 0.5, 1.5];
+        let mut result = Vec::with_capacity(self.dim);
+        for i in 0..self.dim {
+            let bit_offset = i * 2;
+            let byte_idx = bit_offset / 8;
+            let bit_shift = bit_offset % 8;
+            let gray = (code[byte_idx] >> bit_shift) & 0b11;
+            let level = Self::from_gray_code_runtime(gray) as usize;
+            result.push(LEVEL_VALUES[level.min(3)]);
+        }
+        result
+    }
+
+    /// Decode 4-bit Gray code to float: levels 0-15 → -2.0 to +2.0
+    fn decode_4bit(&self, code: &[u8]) -> Vec<f32> {
+        let mut result = Vec::with_capacity(self.dim);
+        for i in 0..self.dim {
+            let bit_offset = i * 4;
+            let byte_idx = bit_offset / 8;
+            let bit_shift = bit_offset % 8;
+            let gray = if bit_shift == 0 {
+                code[byte_idx] & 0x0F
+            } else {
+                (code[byte_idx] >> 4) & 0x0F
+            };
+            let level = Self::from_gray_code_runtime(gray);
+            // Map level 0-15 to -2.0 to +2.0 (inverse of encode: level = (val+2)*3.75)
+            let value = (level as f32 / 3.75) - 2.0;
+            result.push(value);
+        }
+        result
+    }
+
+    /// Compute ADC distance estimate between query and stored vector.
+    ///
+    /// This is the core ADC operation that avoids the symmetric Hamming problem.
+    /// The query remains as float32, and we compute a weighted dot product with
+    /// the binary code, corrected by the stored factors.
+    ///
+    /// # Arguments
+    ///
+    /// * `query_rotated` - Rotated query vector (from `rotate_query()`)
+    /// * `query_norm` - L2 norm of original query: ||q||
+    /// * `code` - Binary code of stored vector
+    /// * `correction` - ADC correction factors for stored vector
+    ///
+    /// # Returns
+    ///
+    /// Estimated distance (lower = more similar for cosine-like behavior)
+    pub fn adc_distance(
+        &self,
+        query_rotated: &[f32],
+        query_norm: f32,
+        code: &[u8],
+        correction: &crate::vector::schema::AdcCorrection,
+    ) -> f32 {
+        // Compute binary dot product: query_rotated · decode(code)
+        let binary_dot = self.binary_dot_product(query_rotated, code);
+
+        // Estimate inner product using correction factor
+        // ⟨q, v⟩ ≈ binary_dot / quantization_error
+        let inner_product_est = binary_dot / correction.quantization_error;
+
+        // For cosine distance: 1 - cos(θ) = 1 - ⟨q,v⟩/(||q||·||v||)
+        // We return a distance-like value where lower = more similar
+        let cos_sim = inner_product_est / (query_norm * correction.vector_norm + 1e-10);
+
+        // Clamp to valid range and convert to distance
+        1.0 - cos_sim.clamp(-1.0, 1.0)
+    }
+
+    /// Compute binary dot product: float query × binary code.
+    ///
+    /// Dispatches to bit-width specific implementation.
+    #[inline]
+    pub fn binary_dot_product(&self, query: &[f32], code: &[u8]) -> f32 {
+        match self.bits_per_dim {
+            1 => self.binary_dot_1bit(query, code),
+            2 => self.binary_dot_2bit(query, code),
+            4 => self.binary_dot_4bit(query, code),
+            _ => unreachable!(),
+        }
+    }
+
+    /// 1-bit binary dot product (optimized).
+    ///
+    /// For 1-bit: decode maps bit=0 → -1, bit=1 → +1
+    /// So: dot = sum(q where bit=1) - sum(q where bit=0)
+    ///         = 2 * sum(q where bit=1) - sum(all q)
+    ///
+    /// This avoids per-element branches.
+    fn binary_dot_1bit(&self, query: &[f32], code: &[u8]) -> f32 {
+        let query_sum: f32 = query.iter().sum();
+        let mut positive_sum = 0.0f32;
+
+        for i in 0..self.dim {
+            let byte_idx = i / 8;
+            let bit_idx = i % 8;
+            if (code[byte_idx] >> bit_idx) & 1 == 1 {
+                positive_sum += query[i];
+            }
+        }
+
+        // dot = positive_sum - negative_sum
+        //     = positive_sum - (query_sum - positive_sum)
+        //     = 2 * positive_sum - query_sum
+        2.0 * positive_sum - query_sum
+    }
+
+    /// 2-bit binary dot product.
+    ///
+    /// Decodes Gray code to level, maps to value, multiplies by query.
+    fn binary_dot_2bit(&self, query: &[f32], code: &[u8]) -> f32 {
+        const LEVEL_VALUES: [f32; 4] = [-1.5, -0.5, 0.5, 1.5];
+        let mut sum = 0.0f32;
+
+        for i in 0..self.dim {
+            let bit_offset = i * 2;
+            let byte_idx = bit_offset / 8;
+            let bit_shift = bit_offset % 8;
+            let gray = (code[byte_idx] >> bit_shift) & 0b11;
+            let level = Self::from_gray_code_runtime(gray) as usize;
+            sum += query[i] * LEVEL_VALUES[level.min(3)];
+        }
+
+        sum
+    }
+
+    /// 4-bit binary dot product.
+    ///
+    /// Decodes Gray code to level, maps to value in [-2, 2], multiplies by query.
+    fn binary_dot_4bit(&self, query: &[f32], code: &[u8]) -> f32 {
+        let mut sum = 0.0f32;
+
+        for i in 0..self.dim {
+            let bit_offset = i * 4;
+            let byte_idx = bit_offset / 8;
+            let bit_shift = bit_offset % 8;
+            let gray = if bit_shift == 0 {
+                code[byte_idx] & 0x0F
+            } else {
+                (code[byte_idx] >> 4) & 0x0F
+            };
+            let level = Self::from_gray_code_runtime(gray);
+            // Map level 0-15 to -2.0 to +2.0 (inverse of encode: level = (val+2)*3.75)
+            let value = (level as f32 / 3.75) - 2.0;
+            sum += query[i] * value;
+        }
+
+        sum
+    }
+
     /// Check if rotation matrix is scaled orthonormal (for testing).
     ///
     /// After √D scaling, the matrix satisfies R * R^T = D * I (not I).
