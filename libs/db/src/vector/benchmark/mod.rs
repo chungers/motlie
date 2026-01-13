@@ -56,6 +56,11 @@ pub mod sift;
 // Re-exports for public API - LAION
 pub use dataset::{DatasetConfig, LaionDataset, LaionSubset, NpyLoader, LAION_EMBEDDING_DIM};
 
+// Re-exports for public API - GIST
+pub use dataset::{
+    GistDataset, GistSubset, GIST_BASE_VECTORS, GIST_EMBEDDING_DIM, GIST_QUERIES,
+};
+
 // Re-exports for public API - SIFT
 pub use sift::{
     read_fvecs, read_fvecs_limited, read_ivecs, read_ivecs_limited, SiftDataset, SiftSubset,
@@ -63,10 +68,15 @@ pub use sift::{
 };
 
 // Re-exports for public API - Metrics and Runner
-pub use metrics::{compute_recall, percentile, LatencyStats, RecallMetrics};
+pub use metrics::{
+    compute_pareto_frontier, compute_pareto_frontier_for_k, compute_recall,
+    compute_rotated_variance, percentile, print_pareto_frontier, print_rotation_stats,
+    LatencyStats, ParetoInput, ParetoPoint, RecallMetrics, RotationStats,
+};
 pub use runner::{
-    build_hnsw_index, run_all_experiments, run_flat_baseline, run_single_experiment,
-    ExperimentConfig, ExperimentResult,
+    build_hnsw_index, run_all_experiments, run_flat_baseline, run_rabitq_experiments,
+    run_single_experiment, save_rabitq_results_csv, ExperimentConfig, ExperimentResult,
+    RabitqExperimentResult,
 };
 
 // Re-exports for public API - Metadata (incremental builds)

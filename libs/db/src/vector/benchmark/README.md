@@ -11,18 +11,35 @@ This module (`libs/db/src/vector/benchmark`) provides benchmarking infrastructur
 | File | Purpose | Status |
 |------|---------|--------|
 | `mod.rs` | Module exports | Complete |
-| `dataset.rs` | LAION-CLIP dataset loader (512D, NPY) | Complete |
+| `dataset.rs` | LAION-CLIP + GIST dataset loaders | Complete |
 | `sift.rs` | SIFT dataset loader (128D, fvecs) | Complete |
-| `runner.rs` | Experiment runner (HNSW only) | Needs RaBitQ |
-| `metrics.rs` | Recall, latency statistics | Needs Pareto |
+| `runner.rs` | Experiment runner (HNSW + RaBitQ) | Complete |
+| `metrics.rs` | Recall, latency, Pareto, rotation stats | Complete |
 | `metadata.rs` | Checkpoint/resume for incremental builds | Complete |
 
 ### Supported Datasets
 
 | Dataset | Dimensions | Distance | Format | Status |
 |---------|------------|----------|--------|--------|
-| LAION-CLIP | 512 | Cosine | NPY (f16) | Supported |
-| SIFT-1M | 128 | L2 | fvecs | Supported |
+| LAION-CLIP | 512 | Cosine | NPY (f16) | ✅ Supported |
+| SIFT-1M | 128 | L2 | fvecs | ✅ Supported |
+| GIST-960 | 960 | L2 | fvecs | ✅ Supported |
+
+### Implementation Status
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| A.1 | ExperimentConfig RaBitQ fields | ✅ Complete |
+| A.2 | RabitqExperimentResult struct | ✅ Complete |
+| A.3 | run_rabitq_experiments() function | ✅ Complete |
+| A.4 | Pareto frontier computation | ✅ Complete |
+| A.5 | Rotated variance metric | ✅ Complete |
+| B.1 | GistDataset loader | ✅ Complete |
+| B.2 | Shared fvecs/ivecs loaders | ✅ Complete (in sift.rs) |
+| C | Parquet + Cohere Wikipedia | Planned |
+| D | HDF5 + ann-benchmarks | Planned |
+| E | CLI tool (bins/bench_vector) | Planned |
+| F | Example migration | Planned |
 
 ---
 
