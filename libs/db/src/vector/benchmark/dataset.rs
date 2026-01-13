@@ -412,6 +412,227 @@ fn download_file(url: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
+// ============================================================================
+// GIST-960 Dataset
+// ============================================================================
+
+/// GIST dataset dimensions.
+pub const GIST_EMBEDDING_DIM: usize = 960;
+
+/// GIST dataset size constraints.
+pub const GIST_BASE_VECTORS: usize = 1_000_000;
+pub const GIST_QUERIES: usize = 1_000;
+
+/// GIST dataset URL (texmex corpus).
+const GIST_BASE_URL: &str = "ftp://ftp.irisa.fr/local/texmex/corpus/gist.tar.gz";
+
+/// GIST-960 dataset with high-dimensional descriptors.
+///
+/// GIST is a high-dimensional (960D) dataset of image descriptors.
+/// Unlike SIFT, these are unnormalized L2 vectors - useful for testing
+/// RaBitQ's behavior on non-unit vectors.
+///
+/// ## Files
+/// - `gist_base.fvecs`: 1M base vectors × 960D
+/// - `gist_query.fvecs`: 1K query vectors × 960D
+/// - `gist_groundtruth.ivecs`: 1K × 100 ground truth indices
+///
+/// ## Source
+/// - http://corpus-texmex.irisa.fr/
+#[derive(Debug, Clone)]
+pub struct GistDataset {
+    /// Base vectors for indexing.
+    pub base_vectors: Vec<Vec<f32>>,
+    /// Query vectors for search evaluation.
+    pub query_vectors: Vec<Vec<f32>>,
+    /// Pre-computed ground truth (indices into base_vectors).
+    pub ground_truth_full: Vec<Vec<usize>>,
+    /// Embedding dimension.
+    pub dim: usize,
+}
+
+impl GistDataset {
+    /// Load GIST dataset from data directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_dir` - Directory containing gist_*.fvecs/ivecs files
+    /// * `max_base` - Maximum number of base vectors to load
+    /// * `max_queries` - Maximum number of query vectors to load
+    pub fn load(data_dir: &Path, max_base: usize, max_queries: usize) -> Result<Self> {
+        let base_path = data_dir.join("gist_base.fvecs");
+        let query_path = data_dir.join("gist_query.fvecs");
+        let gt_path = data_dir.join("gist_groundtruth.ivecs");
+
+        if !base_path.exists() || !query_path.exists() || !gt_path.exists() {
+            anyhow::bail!(
+                "GIST dataset not found. Please download from {}\n\
+                 Expected: {:?}, {:?}, {:?}",
+                GIST_BASE_URL,
+                base_path,
+                query_path,
+                gt_path
+            );
+        }
+
+        println!("Loading GIST base vectors (max {})...", max_base);
+        let base_vectors = super::sift::read_fvecs_limited(&base_path, max_base)?;
+        println!(
+            "  Loaded {} base vectors ({}D)",
+            base_vectors.len(),
+            base_vectors.first().map(|v| v.len()).unwrap_or(0)
+        );
+
+        println!("Loading GIST query vectors (max {})...", max_queries);
+        let query_vectors = super::sift::read_fvecs_limited(&query_path, max_queries)?;
+        println!("  Loaded {} query vectors", query_vectors.len());
+
+        println!("Loading GIST ground truth...");
+        let gt_raw = super::sift::read_ivecs_limited(&gt_path, max_queries)?;
+        // Convert i32 to usize
+        let ground_truth_full: Vec<Vec<usize>> = gt_raw
+            .into_iter()
+            .map(|v| v.into_iter().map(|i| i as usize).collect())
+            .collect();
+        println!(
+            "  Loaded ground truth for {} queries",
+            ground_truth_full.len()
+        );
+
+        Ok(Self {
+            dim: base_vectors
+                .first()
+                .map(|v| v.len())
+                .unwrap_or(GIST_EMBEDDING_DIM),
+            base_vectors,
+            query_vectors,
+            ground_truth_full,
+        })
+    }
+
+    /// Get a subset of the dataset for benchmarking.
+    ///
+    /// For small subsets (< full 1M), ground truth is recomputed
+    /// via brute force since the pre-computed indices reference the full 1M.
+    pub fn subset(&self, num_vectors: usize, num_queries: usize) -> GistSubset {
+        let num_vectors = num_vectors.min(self.base_vectors.len());
+        let num_queries = num_queries.min(self.query_vectors.len());
+
+        let db_vectors: Vec<Vec<f32>> = self.base_vectors[..num_vectors].to_vec();
+        let queries: Vec<Vec<f32>> = self.query_vectors[..num_queries].to_vec();
+
+        // For subsets smaller than full dataset, we can't use pre-computed ground truth
+        // since indices may reference vectors not in our subset
+        let ground_truth: Option<Vec<Vec<usize>>> = if num_vectors >= self.base_vectors.len() {
+            // Can use pre-computed ground truth
+            Some(self.ground_truth_full[..num_queries].to_vec())
+        } else {
+            // Will need to recompute
+            None
+        };
+
+        GistSubset {
+            db_vectors,
+            queries,
+            precomputed_ground_truth: ground_truth,
+            dim: self.dim,
+        }
+    }
+
+    /// Number of loaded base vectors.
+    pub fn len(&self) -> usize {
+        self.base_vectors.len()
+    }
+
+    /// Whether dataset is empty.
+    pub fn is_empty(&self) -> bool {
+        self.base_vectors.is_empty()
+    }
+}
+
+/// A subset of GIST data for benchmarking.
+#[derive(Debug, Clone)]
+pub struct GistSubset {
+    /// Database vectors (base vectors).
+    pub db_vectors: Vec<Vec<f32>>,
+    /// Query vectors.
+    pub queries: Vec<Vec<f32>>,
+    /// Pre-computed ground truth (if using full dataset).
+    precomputed_ground_truth: Option<Vec<Vec<usize>>>,
+    /// Embedding dimension.
+    pub dim: usize,
+}
+
+impl GistSubset {
+    /// Compute brute-force ground truth for Recall@k calculation using L2 distance.
+    ///
+    /// Returns top-k indices for each query using exact search.
+    /// If pre-computed ground truth exists (full dataset), uses that instead.
+    pub fn compute_ground_truth_topk(&self, k: usize) -> Vec<Vec<usize>> {
+        // Use pre-computed if available and sufficient
+        if let Some(ref gt) = self.precomputed_ground_truth {
+            if gt.first().map(|v| v.len()).unwrap_or(0) >= k {
+                println!("Using pre-computed ground truth (k={})...", k);
+                return gt.iter().map(|v| v[..k].to_vec()).collect();
+            }
+        }
+
+        // Otherwise compute brute-force
+        self.compute_ground_truth_topk_with_distance(k, Distance::L2)
+    }
+
+    /// Compute brute-force ground truth with specified distance metric.
+    pub fn compute_ground_truth_topk_with_distance(
+        &self,
+        k: usize,
+        distance: Distance,
+    ) -> Vec<Vec<usize>> {
+        println!(
+            "Computing brute-force ground truth (k={}, {:?})...",
+            k, distance
+        );
+
+        let mut results = Vec::with_capacity(self.queries.len());
+
+        for (qi, query) in self.queries.iter().enumerate() {
+            // Compute distances to all database vectors
+            let mut distances: Vec<(usize, f32)> = self
+                .db_vectors
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (i, distance.compute(query, v)))
+                .collect();
+
+            // Sort by distance (ascending)
+            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+            // Take top-k
+            let topk: Vec<usize> = distances.iter().take(k).map(|(i, _)| *i).collect();
+            results.push(topk);
+
+            if (qi + 1) % 100 == 0 || qi + 1 == self.queries.len() {
+                println!("  Computed {}/{} queries", qi + 1, self.queries.len());
+            }
+        }
+
+        results
+    }
+
+    /// Number of database vectors.
+    pub fn num_vectors(&self) -> usize {
+        self.db_vectors.len()
+    }
+
+    /// Number of queries.
+    pub fn num_queries(&self) -> usize {
+        self.queries.len()
+    }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
 /// Normalize a vector to unit length.
 pub fn normalize(v: &[f32]) -> Vec<f32> {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();

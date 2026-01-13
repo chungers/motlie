@@ -15,8 +15,8 @@ use super::dataset::{LaionDataset, LaionSubset, LAION_EMBEDDING_DIM};
 use super::metrics::{compute_recall, percentile, LatencyStats};
 use crate::rocksdb::ColumnFamily;
 use crate::vector::{
-    hnsw, Distance, EmbeddingCode, NavigationCache, Storage, VecId, VectorCfKey,
-    VectorElementType, Vectors,
+    hnsw, BinaryCodeCache, Distance, EmbeddingCode, NavigationCache, RaBitQ, Storage, VecId,
+    VectorCfKey, VectorElementType, Vectors,
 };
 
 /// Experiment configuration.
@@ -46,6 +46,16 @@ pub struct ExperimentConfig {
     pub results_dir: PathBuf,
     /// Enable verbose output.
     pub verbose: bool,
+
+    // RaBitQ parameters (Phase A)
+    /// Enable RaBitQ quantization for search.
+    pub use_rabitq: bool,
+    /// Bits per dimension to test (1, 2, or 4).
+    pub rabitq_bits: Vec<u8>,
+    /// Rerank factors to test (e.g., [1, 4, 10, 20]).
+    pub rerank_factors: Vec<usize>,
+    /// Use in-memory binary code cache.
+    pub use_binary_cache: bool,
 }
 
 impl Default for ExperimentConfig {
@@ -63,6 +73,11 @@ impl Default for ExperimentConfig {
             data_dir: PathBuf::from("data"),
             results_dir: PathBuf::from("results"),
             verbose: false,
+            // RaBitQ defaults
+            use_rabitq: false,
+            rabitq_bits: vec![1, 2, 4],
+            rerank_factors: vec![1, 4, 10, 20],
+            use_binary_cache: true,
         }
     }
 }
@@ -127,6 +142,32 @@ impl ExperimentConfig {
         self.verbose = verbose;
         self
     }
+
+    /// Enable RaBitQ mode with specified bits and rerank factors.
+    pub fn with_rabitq(mut self, bits: Vec<u8>, rerank_factors: Vec<usize>) -> Self {
+        self.use_rabitq = true;
+        self.rabitq_bits = bits;
+        self.rerank_factors = rerank_factors;
+        self
+    }
+
+    /// Set RaBitQ bits per dimension to test.
+    pub fn with_rabitq_bits(mut self, bits: Vec<u8>) -> Self {
+        self.rabitq_bits = bits;
+        self
+    }
+
+    /// Set rerank factors to test.
+    pub fn with_rerank_factors(mut self, factors: Vec<usize>) -> Self {
+        self.rerank_factors = factors;
+        self
+    }
+
+    /// Enable/disable binary code cache.
+    pub fn with_binary_cache(mut self, enabled: bool) -> Self {
+        self.use_binary_cache = enabled;
+        self
+    }
 }
 
 /// Results from a single experiment run.
@@ -175,6 +216,69 @@ impl ExperimentResult {
             qps: self.qps,
             ..Default::default()
         }
+    }
+}
+
+/// Results from a RaBitQ experiment run.
+///
+/// Extends standard experiment results with RaBitQ-specific parameters.
+#[derive(Debug, Clone)]
+pub struct RabitqExperimentResult {
+    /// Number of vectors in index.
+    pub scale: usize,
+    /// Bits per dimension (1, 2, or 4).
+    pub bits_per_dim: u8,
+    /// ef_search parameter used.
+    pub ef_search: usize,
+    /// Rerank factor (candidates = k * rerank_factor).
+    pub rerank_factor: usize,
+    /// k value for Recall@k.
+    pub k: usize,
+    /// Mean recall across all queries.
+    pub recall_mean: f64,
+    /// Standard deviation of recall.
+    pub recall_std: f64,
+    /// Average latency in milliseconds.
+    pub latency_avg_ms: f64,
+    /// Median latency in milliseconds.
+    pub latency_p50_ms: f64,
+    /// 95th percentile latency.
+    pub latency_p95_ms: f64,
+    /// 99th percentile latency.
+    pub latency_p99_ms: f64,
+    /// Queries per second.
+    pub qps: f64,
+    /// Binary code encoding time (seconds).
+    pub encode_time_s: f64,
+    /// Index build time in seconds.
+    pub build_time_s: f64,
+}
+
+impl RabitqExperimentResult {
+    /// Format as CSV row.
+    pub fn to_csv_row(&self) -> String {
+        format!(
+            "{},{},{},{},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.1},{:.2},{:.2}",
+            self.scale,
+            self.bits_per_dim,
+            self.ef_search,
+            self.rerank_factor,
+            self.k,
+            self.recall_mean,
+            self.recall_std,
+            self.latency_avg_ms,
+            self.latency_p50_ms,
+            self.latency_p95_ms,
+            self.latency_p99_ms,
+            self.qps,
+            self.encode_time_s,
+            self.build_time_s,
+        )
+    }
+
+    /// CSV header for RaBitQ results.
+    pub fn csv_header() -> &'static str {
+        "scale,bits,ef_search,rerank_factor,k,recall_mean,recall_std,latency_avg_ms,latency_p50_ms,latency_p95_ms,latency_p99_ms,qps,encode_time_s,build_time_s"
     }
 }
 
@@ -482,6 +586,166 @@ pub fn run_flat_baseline(
         qps,
         build_time_s: 0.0,
     })
+}
+
+/// Run RaBitQ experiments with parameter sweep.
+///
+/// Iterates over all combinations of (bits_per_dim, ef_search, rerank_factor)
+/// and records RaBitQ-specific metrics including encoding time.
+///
+/// # Arguments
+///
+/// * `config` - Experiment configuration including RaBitQ parameters
+/// * `index` - Built HNSW index
+/// * `storage` - Vector storage
+/// * `subset` - Dataset subset with queries and db vectors
+/// * `ground_truth` - Ground truth results for recall computation
+/// * `build_time` - Time taken to build the HNSW index
+///
+/// # Returns
+///
+/// Vector of `RabitqExperimentResult` for each parameter combination.
+pub fn run_rabitq_experiments(
+    config: &ExperimentConfig,
+    index: &hnsw::Index,
+    storage: &Storage,
+    subset: &LaionSubset,
+    ground_truth: &[Vec<usize>],
+    build_time: f64,
+) -> Result<Vec<RabitqExperimentResult>> {
+    let mut results = Vec::new();
+    let embedding_code: EmbeddingCode = 1;
+
+    for &bits in &config.rabitq_bits {
+        println!("\n  --- RaBitQ {} bits ---", bits);
+
+        // Create encoder for this bit configuration
+        let encoder = RaBitQ::new(config.dim, bits, 42);
+        println!("  Encoder created: {} bits/dim", bits);
+
+        // Create and populate binary code cache
+        let cache = BinaryCodeCache::new();
+        let encode_start = Instant::now();
+
+        for (i, vector) in subset.db_vectors.iter().enumerate() {
+            let vec_id = i as VecId;
+            let (code, correction) = encoder.encode_with_correction(vector);
+            cache.put(embedding_code, vec_id, code, correction);
+        }
+
+        let encode_time_s = encode_start.elapsed().as_secs_f64();
+        let (cache_count, cache_bytes) = cache.stats();
+        println!(
+            "  Binary codes cached: {} vectors, {:.2} MB, {:.2}s",
+            cache_count,
+            cache_bytes as f64 / 1_000_000.0,
+            encode_time_s
+        );
+
+        // Run experiments for each (ef_search, rerank_factor, k) combination
+        for &ef_search in &config.ef_search_values {
+            for &rerank_factor in &config.rerank_factors {
+                for &k in &config.k_values {
+                    let mut latencies = Vec::with_capacity(subset.queries.len());
+                    let mut recalls = Vec::with_capacity(subset.queries.len());
+
+                    // Run all queries
+                    for (qi, query) in subset.queries.iter().enumerate() {
+                        let start = Instant::now();
+                        let search_results = index.search_with_rabitq_cached(
+                            storage,
+                            query,
+                            &encoder,
+                            &cache,
+                            k,
+                            ef_search,
+                            rerank_factor,
+                        )?;
+                        let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+                        latencies.push(latency_ms);
+
+                        // Compute recall for this query
+                        let result_ids: Vec<usize> =
+                            search_results.iter().map(|(_, id)| *id as usize).collect();
+                        let gt = &ground_truth[qi];
+                        let hits = result_ids
+                            .iter()
+                            .take(k)
+                            .filter(|id| gt.iter().take(k).any(|gt_id| gt_id == *id))
+                            .count();
+                        let recall = hits as f64 / k.min(gt.len()) as f64;
+                        recalls.push(recall);
+                    }
+
+                    // Compute statistics
+                    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let latency_avg_ms = latencies.iter().sum::<f64>() / latencies.len() as f64;
+                    let latency_p50_ms = percentile(&latencies, 50.0);
+                    let latency_p95_ms = percentile(&latencies, 95.0);
+                    let latency_p99_ms = percentile(&latencies, 99.0);
+                    let qps = 1000.0 / latency_avg_ms;
+
+                    let recall_mean = recalls.iter().sum::<f64>() / recalls.len() as f64;
+                    let recall_std = if recalls.len() > 1 {
+                        let variance = recalls
+                            .iter()
+                            .map(|r| (r - recall_mean).powi(2))
+                            .sum::<f64>()
+                            / (recalls.len() - 1) as f64;
+                        variance.sqrt()
+                    } else {
+                        0.0
+                    };
+
+                    println!(
+                        "    bits={}, ef={}, rerank={}, k={}: recall={:.1}%±{:.1}%, {:.2}ms, {:.0} QPS",
+                        bits, ef_search, rerank_factor, k,
+                        recall_mean * 100.0, recall_std * 100.0,
+                        latency_avg_ms, qps
+                    );
+
+                    results.push(RabitqExperimentResult {
+                        scale: subset.db_vectors.len(),
+                        bits_per_dim: bits,
+                        ef_search,
+                        rerank_factor,
+                        k,
+                        recall_mean,
+                        recall_std,
+                        latency_avg_ms,
+                        latency_p50_ms,
+                        latency_p95_ms,
+                        latency_p99_ms,
+                        qps,
+                        encode_time_s,
+                        build_time_s: build_time,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Save RaBitQ results to CSV file.
+pub fn save_rabitq_results_csv(
+    results: &[RabitqExperimentResult],
+    results_dir: &PathBuf,
+) -> Result<()> {
+    let csv_path = results_dir.join("rabitq_results.csv");
+    let mut file = File::create(&csv_path)?;
+
+    // Header
+    writeln!(file, "{}", RabitqExperimentResult::csv_header())?;
+
+    // Data rows
+    for r in results {
+        writeln!(file, "{}", r.to_csv_row())?;
+    }
+
+    println!("RaBitQ results saved to: {:?}", csv_path);
+    Ok(())
 }
 
 /// Save results to CSV file.
