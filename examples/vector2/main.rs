@@ -8,18 +8,25 @@
 //! - Load SIFT benchmark datasets (SIFT10K, SIFT1M)
 //! - Compare new RocksDB-backed HNSW vs old graph-based implementation
 //! - Collect detailed performance metrics (build time, QPS, recall, latency)
+//! - **Incremental index builds** for large-scale testing
 //!
 //! # Usage
 //!
 //! ```bash
-//! # Run with synthetic data
+//! # Run with synthetic data (temp directory)
 //! cargo run --release --example vector2 -- --num-vectors 10000 --num-queries 100 --k 10
 //!
-//! # Run with SIFT10K dataset
-//! cargo run --release --example vector2 -- --dataset sift10k --num-vectors 10000 --num-queries 100 --k 10
+//! # Incremental build: start with 100K vectors
+//! cargo run --release --example vector2 -- --db-path /data/bench --num-vectors 100000 --cosine --rabitq-cached --bits-per-dim 4
 //!
-//! # Compare implementations
-//! cargo run --release --example vector2 -- --dataset sift10k --num-vectors 10000 --compare
+//! # Incremental build: extend to 500K vectors (adds 400K to existing index)
+//! cargo run --release --example vector2 -- --db-path /data/bench --num-vectors 500000 --cosine --rabitq-cached --bits-per-dim 4
+//!
+//! # Query-only mode (skip indexing, just run queries on existing index)
+//! cargo run --release --example vector2 -- --db-path /data/bench --num-vectors 500000 --query-only --num-queries 1000
+//!
+//! # Fresh start (delete existing index)
+//! cargo run --release --example vector2 -- --db-path /data/bench --num-vectors 100000 --fresh
 //! ```
 
 // Local benchmark utilities (standalone, no dependency on examples/vector)
@@ -40,10 +47,11 @@ use benchmark::{
     BenchmarkDataset, BenchmarkMetrics, DatasetConfig, DatasetName,
     compute_ground_truth_cosine, cosine_distance_f32, normalize_vector, normalize_vectors,
 };
+use motlie_db::vector::benchmark::{BenchmarkMetadata, GroundTruthCache};
 use motlie_db::rocksdb::{BlockCacheConfig, ColumnFamily};
 use motlie_db::vector::{
-    hnsw, BinaryCodeCache, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, Distance, EmbeddingCode,
-    NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue,
+    hnsw, BinaryCodeCache, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes,
+    Distance, EmbeddingCode, NavigationCache, RaBitQ, Storage, VecId, VectorCfKey, VectorCfValue,
     Vectors,
 };
 
@@ -114,6 +122,26 @@ struct Args {
     #[arg(long)]
     cosine: bool,
 
+    /// Use ADC (Asymmetric Distance Computation) instead of symmetric Hamming.
+    /// Requires --rabitq-cached. Query stays float32, uses weighted dot product.
+    /// This should fix multi-bit recall issues (see RABITQ.md).
+    #[arg(long)]
+    adc: bool,
+
+    /// Force fresh start (delete existing index and start over)
+    /// Without this flag, incremental builds will add vectors to existing index
+    #[arg(long)]
+    fresh: bool,
+
+    /// Query-only mode (skip indexing, just run queries on existing index)
+    /// Requires --db-path with existing index
+    #[arg(long)]
+    query_only: bool,
+
+    /// Checkpoint interval (save metadata every N vectors during indexing)
+    #[arg(long, default_value = "10000")]
+    checkpoint_interval: usize,
+
     /// Verbose output
     #[arg(long, short)]
     verbose: bool,
@@ -129,6 +157,22 @@ async fn main() -> Result<()> {
     motlie_core::telemetry::init_dev_subscriber_with_env_filter();
 
     let args = Args::parse();
+
+    // Validate ADC mode requirements
+    if args.adc && !args.rabitq_cached {
+        anyhow::bail!("--adc requires --rabitq-cached");
+    }
+    if args.adc && !args.cosine {
+        anyhow::bail!("--adc requires --cosine (ADC is designed for cosine/angular distance)");
+    }
+
+    // Validate query-only mode
+    if args.query_only && args.db_path.is_none() {
+        anyhow::bail!("--query-only requires --db-path with existing index");
+    }
+    if args.query_only && args.fresh {
+        anyhow::bail!("--query-only and --fresh are mutually exclusive");
+    }
 
     println!("=== Vector2: Phase 2 HNSW Benchmark ===");
     println!();
@@ -151,7 +195,9 @@ async fn main() -> Result<()> {
     println!("  Cache Size:      {} MB", args.cache_size_mb);
     println!("  Distance:        {}", distance_str);
     let search_mode_str = if args.rabitq_cached {
-        if args.cosine {
+        if args.adc {
+            "rabitq-ADC (asymmetric distance + Cosine rerank)"
+        } else if args.cosine {
             "rabitq-cached (in-memory Hamming nav + Cosine rerank)"
         } else {
             "rabitq-cached (in-memory Hamming nav + L2 rerank)"
@@ -165,6 +211,9 @@ async fn main() -> Result<()> {
     if args.rabitq_cached {
         println!("  Rerank Factor:   {}", args.rerank_factor);
         println!("  Bits/Dim:        {}", args.bits_per_dim);
+        if args.adc {
+            println!("  ADC Mode:        enabled (query stays float32)");
+        }
     }
     println!();
 
@@ -237,9 +286,6 @@ async fn run_phase2_benchmark(
     // Create temp directory or use specified path
     let _temp_dir: Option<TempDir>;
     let db_path = if let Some(ref path) = args.db_path {
-        if path.exists() {
-            std::fs::remove_dir_all(path)?;
-        }
         path.clone()
     } else {
         let temp = TempDir::new()?;
@@ -247,6 +293,80 @@ async fn run_phase2_benchmark(
         _temp_dir = Some(temp);
         path
     };
+
+    // Determine distance string for metadata
+    let distance_str = if args.cosine { "cosine" } else { "l2" };
+    let dim = benchmark_data.map(|d| d.dimensions).unwrap_or(128);
+
+    // Handle incremental builds via metadata
+    let mut bench_metadata = if args.fresh {
+        // Fresh start: delete existing database
+        if db_path.exists() {
+            println!("Deleting existing database for fresh start...");
+            std::fs::remove_dir_all(&db_path)?;
+        }
+        BenchmarkMetadata::new(
+            dim,
+            distance_str,
+            args.rabitq_cached,
+            args.bits_per_dim,
+            args.adc,
+            args.m,
+            args.ef_construction,
+            &dataset_str,
+        )
+    } else if BenchmarkMetadata::exists(&db_path) {
+        // Incremental build: load existing metadata
+        let existing = BenchmarkMetadata::load(&db_path)?;
+        println!(
+            "Found existing index with {} vectors (created {})",
+            existing.num_vectors, existing.last_updated
+        );
+
+        // Validate configuration matches
+        existing.validate_config(
+            dim,
+            distance_str,
+            args.rabitq_cached,
+            args.bits_per_dim,
+            args.adc,
+            args.m,
+            args.ef_construction,
+            &dataset_str,
+        )?;
+
+        if args.query_only {
+            println!("Query-only mode: skipping indexing");
+        } else if existing.num_vectors >= args.num_vectors {
+            println!(
+                "Index already has {} vectors (requested {}), skipping indexing",
+                existing.num_vectors, args.num_vectors
+            );
+        } else {
+            println!(
+                "Will add {} vectors (from {} to {})",
+                args.num_vectors - existing.num_vectors,
+                existing.num_vectors,
+                args.num_vectors
+            );
+        }
+
+        existing
+    } else {
+        // New index
+        BenchmarkMetadata::new(
+            dim,
+            distance_str,
+            args.rabitq_cached,
+            args.bits_per_dim,
+            args.adc,
+            args.m,
+            args.ef_construction,
+            &dataset_str,
+        )
+    };
+
+    let starting_vectors = bench_metadata.num_vectors;
 
     println!("Database path: {}", db_path.display());
 
@@ -257,7 +377,7 @@ async fn run_phase2_benchmark(
 
     // Create HNSW configuration
     let hnsw_config = hnsw::Config {
-        dim: benchmark_data.map(|d| d.dimensions).unwrap_or(128),
+        dim: bench_metadata.dim,
         m: args.m,
         m_max: args.m * 2,
         ef_construction: args.ef_construction,
@@ -272,8 +392,19 @@ async fn run_phase2_benchmark(
     let distance = if args.cosine { Distance::Cosine } else { Distance::L2 };
     let index = hnsw::Index::new(embedding_code, distance, hnsw_config.clone(), nav_cache.clone());
 
-    // Prepare random number generator
-    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    // Prepare random number generator with seed from metadata (for reproducibility)
+    let mut rng = ChaCha8Rng::seed_from_u64(bench_metadata.vector_seed);
+
+    // Skip vectors that are already indexed (advance RNG state)
+    if starting_vectors > 0 && benchmark_data.is_none() {
+        println!("Skipping RNG state for {} already-indexed vectors...", starting_vectors);
+        for _ in 0..starting_vectors {
+            // Generate and discard vector to advance RNG state
+            for _ in 0..bench_metadata.dim {
+                let _: f32 = rng.gen();
+            }
+        }
+    }
 
     // Create RaBitQ encoder for binary code generation (if rabitq_cached enabled)
     let build_encoder = if args.rabitq_cached {
@@ -290,11 +421,7 @@ async fn run_phase2_benchmark(
         None
     };
 
-    // Index vectors
-    println!("\nIndexing {} vectors...", args.num_vectors);
-    let start = Instant::now();
-
-    // First, store all vectors in the Vectors CF
+    // Get database handles
     let txn_db = storage.transaction_db()?;
     let vectors_cf = txn_db
         .cf_handle(Vectors::CF_NAME)
@@ -313,73 +440,144 @@ async fn run_phase2_benchmark(
 
     let mut vec_id_to_index: HashMap<VecId, usize> = HashMap::new();
 
-    for i in 0..args.num_vectors {
-        let vec_id = i as VecId;
-        let vector = if args.cosine {
-            // Use normalized vectors for cosine mode
-            if let Some(ref norm_base) = base_vectors {
-                norm_base[i].clone()
-            } else {
-                let v = generate_random_vector(128, &mut rng);
-                normalize_vector(&v)
+    // Build vec_id_to_index mapping for already-indexed vectors
+    for i in 0..starting_vectors {
+        vec_id_to_index.insert(i as VecId, i);
+    }
+
+    // Load existing binary codes with ADC corrections into cache (for query phase)
+    if args.rabitq_cached && starting_vectors > 0 {
+        println!("Loading {} existing binary codes into cache...", starting_vectors);
+        if let Some(ref cache) = code_cache {
+            for i in 0..starting_vectors {
+                let vec_id = i as VecId;
+                let bc_key = BinaryCodeCfKey(embedding_code, vec_id);
+                if let Ok(Some(bytes)) = txn_db.get_cf(binary_codes_cf.as_ref().unwrap(), BinaryCodes::key_to_bytes(&bc_key)) {
+                    if let Ok(bc_value) = BinaryCodes::value_from_bytes(&bytes) {
+                        // Cache now stores both code and correction
+                        cache.put(embedding_code, vec_id, bc_value.code, bc_value.correction);
+                    }
+                }
             }
-        } else if let Some(data) = benchmark_data {
-            data.base_vectors[i].clone()
-        } else {
-            generate_random_vector(128, &mut rng)
-        };
+        }
+    }
 
-        // Store vector in Vectors CF
-        let key = VectorCfKey(embedding_code, vec_id);
-        let value = VectorCfValue(vector.clone());
-        txn_db.put_cf(
-            &vectors_cf,
-            Vectors::key_to_bytes(&key),
-            Vectors::value_to_bytes(&value),
-        )?;
+    // Determine what to index
+    let vectors_to_index = if args.query_only || starting_vectors >= args.num_vectors {
+        0
+    } else {
+        args.num_vectors - starting_vectors
+    };
 
-        // Store binary code if RaBitQ enabled
-        if let (Some(ref encoder), Some(ref cf)) = (&build_encoder, &binary_codes_cf) {
-            let code = encoder.encode(&vector);
+    // Index new vectors (incremental)
+    let start = Instant::now();
+    if vectors_to_index > 0 {
+        println!(
+            "\nIndexing {} vectors (from {} to {})...",
+            vectors_to_index, starting_vectors, args.num_vectors
+        );
 
-            // Store in RocksDB
-            let bc_key = BinaryCodeCfKey(embedding_code, vec_id);
-            let bc_value = BinaryCodeCfValue(code.clone());
+        for i in starting_vectors..args.num_vectors {
+            let vec_id = i as VecId;
+            let vector = if args.cosine {
+                // Use normalized vectors for cosine mode
+                if let Some(ref norm_base) = base_vectors {
+                    norm_base[i].clone()
+                } else {
+                    let v = generate_random_vector(bench_metadata.dim, &mut rng);
+                    normalize_vector(&v)
+                }
+            } else if let Some(data) = benchmark_data {
+                data.base_vectors[i].clone()
+            } else {
+                generate_random_vector(bench_metadata.dim, &mut rng)
+            };
+
+            // Store vector in Vectors CF
+            let key = VectorCfKey(embedding_code, vec_id);
+            let value = VectorCfValue(vector.clone());
             txn_db.put_cf(
-                cf,
-                BinaryCodes::key_to_bytes(&bc_key),
-                BinaryCodes::value_to_bytes(&bc_value),
+                &vectors_cf,
+                Vectors::key_to_bytes(&key),
+                Vectors::value_to_bytes(&value),
             )?;
 
-            // Also populate in-memory cache if rabitq_cached mode
-            if let Some(ref cache) = code_cache {
-                cache.put(embedding_code, vec_id, code);
+            // Store binary code with ADC correction if RaBitQ enabled
+            if let (Some(ref encoder), Some(ref cf)) = (&build_encoder, &binary_codes_cf) {
+                // Always use encode_with_correction for ADC support
+                let (code, correction) = encoder.encode_with_correction(&vector);
+
+                // Store in RocksDB
+                let bc_key = BinaryCodeCfKey(embedding_code, vec_id);
+                let bc_value = BinaryCodeCfValue { code: code.clone(), correction };
+                txn_db.put_cf(
+                    cf,
+                    BinaryCodes::key_to_bytes(&bc_key),
+                    BinaryCodes::value_to_bytes(&bc_value),
+                )?;
+
+                // Also populate in-memory cache if rabitq_cached mode
+                if let Some(ref cache) = code_cache {
+                    cache.put(embedding_code, vec_id, code, correction);
+                }
+            }
+
+            vec_id_to_index.insert(vec_id, i);
+
+            // Insert into HNSW index
+            index.insert(&storage, vec_id, &vector)?;
+
+            // Progress and checkpointing
+            let vectors_indexed = i - starting_vectors + 1;
+            if vectors_indexed % args.checkpoint_interval == 0 {
+                bench_metadata.num_vectors = i + 1;
+                bench_metadata.checkpoint(&db_path)?;
+
+                let elapsed = start.elapsed();
+                let rate = vectors_indexed as f64 / elapsed.as_secs_f64();
+                println!(
+                    "  Checkpoint: {}/{} vectors indexed ({:.1} vec/s)",
+                    i + 1,
+                    args.num_vectors,
+                    rate
+                );
+            } else if args.verbose && vectors_indexed % 1000 == 0 {
+                let elapsed = start.elapsed();
+                let rate = vectors_indexed as f64 / elapsed.as_secs_f64();
+                println!(
+                    "  Indexed {}/{} vectors ({:.1} vec/s)",
+                    i + 1,
+                    args.num_vectors,
+                    rate
+                );
             }
         }
 
-        vec_id_to_index.insert(vec_id, i);
-
-        // Insert into HNSW index
-        index.insert(&storage, vec_id, &vector)?;
-
-        if args.verbose && (i + 1) % 1000 == 0 {
-            let elapsed = start.elapsed();
-            let rate = (i + 1) as f64 / elapsed.as_secs_f64();
-            println!("  Indexed {}/{} vectors ({:.1} vec/s)", i + 1, args.num_vectors, rate);
-        }
+        // Final metadata update
+        bench_metadata.num_vectors = args.num_vectors;
+        bench_metadata.checkpoint(&db_path)?;
+    } else if args.query_only {
+        println!("\nQuery-only mode: skipping indexing");
+    } else {
+        println!("\nIndex already at target size, skipping indexing");
     }
 
     let index_time = start.elapsed();
     metrics.num_vectors = args.num_vectors;
     metrics.cache_size_mb = args.cache_size_mb;
-    metrics.build_time_secs = index_time.as_secs_f64();
-    metrics.build_throughput = args.num_vectors as f64 / index_time.as_secs_f64();
 
-    println!(
-        "Indexing complete: {:.2}s ({:.1} vectors/sec)",
-        index_time.as_secs_f64(),
-        metrics.build_throughput
-    );
+    if vectors_to_index > 0 {
+        metrics.build_time_secs = index_time.as_secs_f64();
+        metrics.build_throughput = vectors_to_index as f64 / index_time.as_secs_f64();
+        println!(
+            "Indexing complete: {:.2}s ({:.1} vectors/sec)",
+            index_time.as_secs_f64(),
+            metrics.build_throughput
+        );
+    } else {
+        metrics.build_time_secs = 0.0;
+        metrics.build_throughput = 0.0;
+    }
 
     // Run queries
     let actual_queries = if let Some(data) = benchmark_data {
@@ -391,8 +589,13 @@ async fn run_phase2_benchmark(
     // Use the same encoder for search (if RaBitQ enabled)
     let rabitq_encoder = build_encoder;
 
-    let search_mode = if args.rabitq_cached {
-        format!("RaBitQ-cached (in-memory, rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
+    // Create separate RNG for query generation (independent of vector generation)
+    let mut query_rng = ChaCha8Rng::seed_from_u64(bench_metadata.query_seed);
+
+    let search_mode = if args.adc {
+        format!("RaBitQ-ADC (asymmetric, rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
+    } else if args.rabitq_cached {
+        format!("RaBitQ-cached (Hamming, rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
     } else {
         "standard".to_string()
     };
@@ -413,18 +616,63 @@ async fn run_phase2_benchmark(
             if let Some(ref norm_query) = query_vectors {
                 norm_query[i].clone()
             } else {
-                let v = generate_random_vector(128, &mut rng);
+                let v = generate_random_vector(bench_metadata.dim, &mut query_rng);
                 normalize_vector(&v)
             }
         } else if let Some(data) = benchmark_data {
             data.query_vectors[i].clone()
         } else {
-            generate_random_vector(128, &mut rng)
+            generate_random_vector(bench_metadata.dim, &mut query_rng)
         };
 
-        // HNSW search (standard or rabitq_cached)
+        // HNSW search (standard, rabitq_cached Hamming, or ADC)
         let search_start = Instant::now();
-        let results = if args.rabitq_cached {
+        let results = if args.adc {
+            // ADC brute-force search for benchmarking
+            // (No HNSW navigation yet - this measures pure ADC distance quality)
+            let encoder = rabitq_encoder.as_ref().expect("Encoder required for ADC mode");
+            let cache = code_cache.as_ref().expect("Code cache required for ADC mode");
+
+            // Rotate query once (NOT binarized - this is the key ADC difference)
+            let query_rotated = encoder.rotate_query(&query);
+            let query_norm: f32 = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+            // Compute ADC distance to all vectors
+            let mut adc_candidates: Vec<(f32, VecId)> = Vec::with_capacity(args.num_vectors);
+            for vec_id in 0..args.num_vectors as VecId {
+                // Cache now stores (code, correction) tuples directly
+                if let Some((code, correction)) = cache.get(embedding_code, vec_id) {
+                    let adc_dist = encoder.adc_distance(&query_rotated, query_norm, &code, &correction);
+                    adc_candidates.push((adc_dist, vec_id));
+                }
+            }
+
+            // Sort by ADC distance (lower = more similar)
+            adc_candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Take top k * rerank_factor candidates for re-ranking
+            let rerank_count = args.k * args.rerank_factor;
+            adc_candidates.truncate(rerank_count);
+
+            // Re-rank with exact cosine distance
+            let mut reranked: Vec<(f32, VecId)> = adc_candidates
+                .iter()
+                .filter_map(|(_, vec_id)| {
+                    let key = VectorCfKey(embedding_code, *vec_id);
+                    let bytes = txn_db
+                        .get_cf(&vectors_cf, Vectors::key_to_bytes(&key))
+                        .ok()
+                        .flatten()?;
+                    let vector = Vectors::value_from_bytes(&bytes).ok()?.0;
+                    let exact_dist = cosine_distance_f32(&query, &vector);
+                    Some((exact_dist, *vec_id))
+                })
+                .collect();
+
+            reranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            reranked.truncate(args.k);
+            reranked
+        } else if args.rabitq_cached {
             let encoder = rabitq_encoder.as_ref().expect("Encoder required for rabitq_cached mode");
             let cache = code_cache.as_ref().expect("Code cache required for rabitq_cached mode");
             index.search_with_rabitq_cached(&storage, &query, encoder, cache, args.k, args.ef, args.rerank_factor)?

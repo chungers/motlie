@@ -89,6 +89,50 @@ pub(crate) type RoaringBitmapBytes = Vec<u8>;
 /// Type alias for RaBitQ binary code
 pub type RabitqCode = Vec<u8>;
 
+/// ADC (Asymmetric Distance Computation) corrective factors.
+///
+/// Stores per-vector correction data needed for accurate distance estimation
+/// in RaBitQ ADC mode. Unlike symmetric Hamming, ADC keeps the query as float32
+/// and uses these factors to correct the binary approximation.
+///
+/// # Storage
+///
+/// 8 bytes per vector (2 × f32).
+///
+/// # Formula
+///
+/// Distance estimation uses:
+/// ```text
+/// ⟨q, v⟩_estimated = binary_dot(q_rotated, v_code) / quantization_error
+/// ```
+///
+/// See `RABITQ.md` for detailed explanation of why ADC solves the multi-bit problem.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AdcCorrection {
+    /// L2 norm of the vector: ||v||
+    ///
+    /// For normalized unit vectors this is ~1.0, but we store it for generality
+    /// and to handle vectors that aren't perfectly normalized.
+    pub vector_norm: f32,
+
+    /// Quantization error correction: ⟨v_quantized_decoded, v_normalized⟩
+    ///
+    /// This captures how much the quantized representation deviates from the
+    /// original vector. Used to unbias the inner product estimate.
+    pub quantization_error: f32,
+}
+
+impl AdcCorrection {
+    /// Create a new ADC correction.
+    #[inline]
+    pub fn new(vector_norm: f32, quantization_error: f32) -> Self {
+        Self {
+            vector_norm,
+            quantization_error,
+        }
+    }
+}
+
 /// Vector element type.
 ///
 /// Controls how vector elements are serialized in the Vectors CF.
@@ -441,19 +485,28 @@ impl Edges {
 // BinaryCodes CF
 // ============================================================================
 
-/// Binary codes column family - RaBitQ quantized vectors.
+/// Binary codes column family - RaBitQ quantized vectors with ADC corrections.
 ///
 /// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
-/// Value: u8[code_size] (e.g., 16 bytes for 128-dim 1-bit RaBitQ)
+/// Value: [binary_code: N bytes] + [vector_norm: f32] + [quantization_error: f32]
+///
+/// The ADC correction factors (8 bytes) enable high-recall search:
+/// - Hamming distance: ~24% recall (multi-bit broken due to Gray code wraparound)
+/// - ADC distance: ~92% recall (preserves numeric ordering)
 pub struct BinaryCodes;
 
 /// BinaryCodes key: (embedding_code, vec_id)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BinaryCodeCfKey(pub EmbeddingCode, pub VecId);
 
-/// BinaryCodes value: RaBitQ quantized code
+/// BinaryCodes value: RaBitQ quantized code with ADC correction factors.
 #[derive(Debug, Clone)]
-pub struct BinaryCodeCfValue(pub RabitqCode);
+pub struct BinaryCodeCfValue {
+    /// Binary quantized code
+    pub code: RabitqCode,
+    /// ADC correction factors for distance estimation
+    pub correction: AdcCorrection,
+}
 
 impl ColumnFamily for BinaryCodes {
     const CF_NAME: &'static str = "vector/binary_codes";
@@ -495,14 +548,32 @@ impl BinaryCodes {
         Ok(BinaryCodeCfKey(embedding_code, vec_id))
     }
 
-    /// Serialize binary code value
+    /// Serialize binary code value with ADC correction.
+    ///
+    /// Format: [code bytes][vector_norm: f32 LE][quantization_error: f32 LE]
     pub fn value_to_bytes(value: &BinaryCodeCfValue) -> Vec<u8> {
-        value.0.clone()
+        let mut bytes = value.code.clone();
+        bytes.extend_from_slice(&value.correction.vector_norm.to_le_bytes());
+        bytes.extend_from_slice(&value.correction.quantization_error.to_le_bytes());
+        bytes
     }
 
-    /// Deserialize binary code value
+    /// Deserialize binary code value with ADC correction.
     pub fn value_from_bytes(bytes: &[u8]) -> Result<BinaryCodeCfValue> {
-        Ok(BinaryCodeCfValue(bytes.to_vec()))
+        if bytes.len() < 8 {
+            anyhow::bail!(
+                "Invalid BinaryCodeCfValue length: expected >= 8, got {}",
+                bytes.len()
+            );
+        }
+        let code_len = bytes.len() - 8;
+        let code = bytes[..code_len].to_vec();
+        let norm = f32::from_le_bytes(bytes[code_len..code_len + 4].try_into()?);
+        let qerr = f32::from_le_bytes(bytes[code_len + 4..].try_into()?);
+        Ok(BinaryCodeCfValue {
+            code,
+            correction: AdcCorrection::new(norm, qerr),
+        })
     }
 }
 

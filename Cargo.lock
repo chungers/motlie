@@ -2156,6 +2156,7 @@ dependencies = [
  "roaring",
  "rocksdb",
  "serde",
+ "serde_json",
  "tantivy",
  "tempfile",
  "tokio",

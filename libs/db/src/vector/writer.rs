@@ -352,11 +352,11 @@ impl Consumer {
                     Vectors::value_to_bytes(&vec_value),
                 )?;
 
-                // 5. Store binary code (if RaBitQ enabled)
+                // 5. Store binary code with ADC correction (if RaBitQ enabled)
                 if let Some(encoder) = self.processor.get_or_create_encoder(op.embedding) {
-                    let binary_code = encoder.encode(&op.vector);
+                    let (code, correction) = encoder.encode_with_correction(&op.vector);
                     let code_key = BinaryCodeCfKey(op.embedding, vec_id);
-                    let code_value = BinaryCodeCfValue(binary_code);
+                    let code_value = BinaryCodeCfValue { code, correction };
                     let codes_cf = txn_db
                         .cf_handle(BinaryCodes::CF_NAME)
                         .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;

@@ -48,6 +48,7 @@
 //! ```
 
 pub mod dataset;
+pub mod metadata;
 pub mod metrics;
 pub mod runner;
 pub mod sift;
@@ -67,3 +68,6 @@ pub use runner::{
     build_hnsw_index, run_all_experiments, run_flat_baseline, run_single_experiment,
     ExperimentConfig, ExperimentResult,
 };
+
+// Re-exports for public API - Metadata (incremental builds)
+pub use metadata::{BenchmarkMetadata, GroundTruthCache};
