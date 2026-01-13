@@ -36,6 +36,8 @@ RaBitQ (Random Bit Quantization) is a training-free binary quantization method f
 
 ### 1.1 Symmetric Hamming Distance Limitations
 
+**Gemini Review:** The analysis below regarding the wraparound problem with Hamming distance for multi-bit codes is **correct**. While Gray codes ensure adjacent levels have Hamming distance 1, they do not guarantee that *non-adjacent* levels have proportionally larger Hamming distances. This non-monotonicity breaks the triangle inequality assumptions of metric spaces and confuses the HNSW graph traversal.
+
 Our current implementation uses **symmetric Hamming distance**:
 - Both query and data vectors are encoded to binary
 - Distance = popcount(query_code XOR data_code)
@@ -419,7 +421,8 @@ impl HnswIndex {
     }
 
     /// Symmetric Hamming search (current implementation).
-    fn search_symmetric_hamming(&self, query: &[f32], config: &SearchConfig) -> Result<...> {
+    fn search_symmetric_hamming(&self, query: &[f32], config: &SearchConfig) -> Result<...>
+    {
         // 1. Encode query to binary
         let query_code = self.rabitq.encode(query);
 
@@ -431,7 +434,8 @@ impl HnswIndex {
     }
 
     /// ADC search (NEW - true RaBitQ).
-    fn search_adc(&self, query: &[f32], config: &SearchConfig) -> Result<...> {
+    fn search_adc(&self, query: &[f32], config: &SearchConfig) -> Result<...>
+    {
         // 1. Rotate query (but don't binarize!)
         let query_rotated = self.rabitq.rotate(query);
         let query_norm = l2_norm(&subtract(query, &self.centroid));
@@ -714,6 +718,59 @@ If we decide to deprecate Symmetric Hamming:
 **Phase 4: Remove (major version)**
 - Remove Symmetric codepath
 - Simplify to single ADC implementation
+
+---
+
+## Part 5: Comprehensive Testing & Validation Strategy
+
+**Gemini Review:** To prevent future regressions and validate the complex ADC implementation, a more rigorous testing strategy is required.
+
+### 5.1 Validation Hierarchy
+
+1.  **Component Tests (Unit Level)**
+    *   **Rotation:** Verify orthonormal property (√D scaled) using `test_rotation_matrix`.
+    *   **Quantization:** Verify bin usage distribution on random unit vectors (`test_bin_distribution`).
+    *   **Encoding:** Test `Symmetric` vs `ADC` encodings on known vectors.
+    *   **Distance:**
+        *   Test `adc_distance` monotonicity against ground truth dot product.
+        *   Test `symmetric_hamming` behavior on adjacent/non-adjacent Gray codes.
+
+2.  **System Tests (Integration Level)**
+    *   **Correctness:** Insert 10K vectors, verify `search()` returns same results as `search_with_rabitq()` (within error bounds).
+    *   **Persistence:** Verify corrective factors survive DB restart.
+    *   **Mode Compatibility:** Verify error when using Multi-bit with Symmetric mode.
+
+3.  **Accuracy Benchmarks (Recall)**
+    *   **Dataset:** LAION-CLIP 50K (Structured) & Random-1024D (Unstructured).
+    *   **Metric:** Recall@10, Recall@100.
+    *   **Goal:** Confirm 2-bit ADC > 1-bit ADC > 1-bit Symmetric > 2-bit Symmetric.
+
+### 5.2 Automated Validation Pipeline
+
+Create a new binary `bins/validate_vector` that runs the following suite:
+
+```bash
+# 1. Component Sanity Check
+check_rotation_orthogonality --tolerance 1e-5
+check_quantization_distribution --dim 128 --samples 10000
+
+# 2. Distance Monotonicity
+# Generates pairs of vectors with varying cosine similarity
+# Checks if ADC distance correlates strongly with Cosine distance (Spearman rank correlation > 0.9)
+check_distance_correlation --mode ADC --bits 2 --samples 1000
+
+# 3. Recall Regression Test
+# Runs mini-benchmark (10K vectors) to ensure no regression
+check_recall --dataset random --target 0.9 --mode ADC --bits 2 --rerank 20
+```
+
+### 5.3 Performance Regression Guard
+
+Add a CI job that runs `examples/vector2/benchmark.rs` on a small subset (10K vectors) and asserts:
+*   QPS > Baseline (e.g., 1000 QPS)
+*   Recall > Baseline (e.g., 90%)
+
+This ensures no commit introduces a 10x performance regression or recall collapse.
 
 ---
 
@@ -1144,3 +1201,30 @@ cargo run --release --example vector2 -- \
 - **2026-01-12**: Added section 5.10 with incremental benchmark infrastructure design
 - **Issue #42**: √D scaling fix for rotation matrix
 - **Issue #43**: Gray code encoding for multi-bit (doesn't fix fundamental Hamming limitation)
+
+---
+
+## Appendix C: Independent Review (Gemini)
+
+**Date:** January 12, 2026
+
+### C.1 Research Validation (Symmetric Hamming vs ADC)
+
+Independent research confirms the core claims of this document:
+
+1.  **RaBitQ Paper:** The original SIGMOD 2024 paper explicitly defines the distance estimator using **Asymmetric Distance Computation (ADC)**. The estimator $\langle q, v \rangle \approx C \cdot \sum (Rq)_i \cdot \bar{v}_i$ involves the *float32 rotated query* ($Rq$) and the *binary quantized vector* ($ar{v}$), not two binary vectors.
+2.  **Industry Practice:** Product Quantization (PQ) literature (Jégou et al., 2011) firmly establishes ADC as superior to Symmetric Distance Computation (SDC) for search accuracy ($O(\text{error}_v)$ vs $O(\text{error}_q + \text{error}_v)$).
+3.  **Conclusion:** The move to ADC is theoretically sound and necessary for high-precision multi-bit quantization. Symmetric Hamming is a valid optimization for 1-bit (sign) but fails for multi-bit depth due to the non-metric nature of Hamming distance on integer values.
+
+### C.2 Code Audit: Gray Code Implementation
+
+Reviewed implementation in `libs/db/src/vector/quantization/rabitq.rs` (commit `5bb562d`):
+
+1.  **Gray Code Formula:** `n ^ (n >> 1)` is the correct standard binary reflected Gray code implementation.
+2.  **2-bit Quantization:** Maps value levels 0-3 to Gray codes `00`, `01`, `11`, `10`. Adjacency check:
+    *   0$\\leftrightarrow$1: `00`$\\leftrightarrow$`01` (Hamming 1) ✅
+    *   1$\\leftrightarrow$2: `01`$\\leftrightarrow$`11` (Hamming 1) ✅
+    *   2$\\leftrightarrow$3: `11`$\\leftrightarrow$`10` (Hamming 1) ✅
+3.  **4-bit Quantization:** Correctly applies the helper function to linearly mapped levels 0-15.
+
+**Verdict:** The Gray Code implementation is **correct**. It solves the local adjacency problem but, as noted in the research findings, does not solve the global metric wrapping problem, confirming the need for ADC.
