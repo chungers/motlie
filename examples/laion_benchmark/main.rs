@@ -1,5 +1,10 @@
 //! LAION-CLIP Benchmark for HNSW at Scale
 //!
+//! **⚠️ DEPRECATION NOTICE**: This example will be removed in a future release.
+//! For dataset downloads, use `bench_vector download --dataset laion`.
+//! For listing datasets, use `bench_vector datasets`.
+//! Full benchmark functionality will be migrated to `bins/bench_vector`.
+//!
 //! This benchmark reproduces experiments from the article:
 //! "HNSW at Scale: Why Your RAG System Gets Worse as the Vector Database Grows"
 //! https://towardsdatascience.com/hnsw-at-scale-why-your-rag-system-gets-worse-as-the-vector-database-grows/

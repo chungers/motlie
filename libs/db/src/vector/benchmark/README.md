@@ -43,7 +43,7 @@ This module (`libs/db/src/vector/benchmark`) provides benchmarking infrastructur
 | D.1 | HDF5 loader | ✅ Complete (`--features hdf5`*) |
 | D.2 | GloveDataset | ✅ Complete (100D, angular) |
 | E | CLI tool (bins/bench_vector) | ✅ Complete (download + datasets commands) |
-| F | Example migration | Planned |
+| F | Example migration | ✅ Complete (deprecation notices added) |
 
 *Note: HDF5 feature requires system library installation (`libhdf5-dev` on Ubuntu).
 

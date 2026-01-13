@@ -1,5 +1,10 @@
 //! Vector2: Benchmark for Phase 2 HNSW Implementation
 //!
+//! **⚠️ DEPRECATION NOTICE**: This example will be removed in a future release.
+//! For dataset downloads, use `bench_vector download --dataset <name>`.
+//! For listing datasets, use `bench_vector datasets`.
+//! Full benchmark functionality will be migrated to `bins/bench_vector`.
+//!
 //! This example demonstrates and validates the new HNSW implementation in
 //! `motlie_db::vector` using RocksDB storage with RoaringBitmap edges.
 //!
