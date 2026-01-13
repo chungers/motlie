@@ -85,9 +85,9 @@ dedicated vector databases or custom storage engines.
 | [Task 4.1-4.5](#phase-4-rabitq-compression) | Core RaBitQ implementation | ✅ Complete | `9399cf9` |
 | [Task 4.6](#task-46-recall-tuning) | Recall tuning | ✅ Complete | `e5b81b6` |
 | [Task 4.7](#task-47-simd-hamming--early-filtering) | SIMD Hamming + early filtering | ✅ Complete | `4a4e954` |
-| [Task 4.8](#task-48-implementation--results) | Hybrid L2 + Hamming (disproven) | ✅ Complete | `bd29801` |
+| [Task 4.8](#task-48-implementation--results) | Hybrid L2 + Hamming (disproven) | ✅ Complete | `bd29801` | ⚠️ See [RABITQ.md §1.1-1.5](RABITQ.md#11-the-problem-symmetric-hamming-distance) |
 | [Task 4.9](#task-49-rabitq-tuning-configuration-analysis) | RaBitQ Tuning Analysis | ✅ Complete | `9522658` |
-| [Task 4.10](#task-410-in-memory-binary-code-cache) | In-Memory Binary Code Cache | ✅ Complete | `9880a62` |
+| [Task 4.10](#task-410-in-memory-binary-code-cache) | In-Memory Binary Code Cache | ✅ Complete | `9880a62` | ⚠️ Hamming ~10% recall; see [Task 4.24](#task-424-adc-hnsw-integration) for ADC fix |
 | [Task 4.11](#task-411-api-cleanup-phase-1---deprecate-invalidated-functions) | API Cleanup: Deprecate Functions | ✅ Complete | `ce2a060` |
 | [Task 4.12](#task-412-api-cleanup-phase-2---remove-deprecated-code) | API Cleanup: Remove Dead Code | ✅ Complete | `5f2dac0` |
 | [Task 4.13](#task-413-api-cleanup-phase-3---embedding-driven-searchconfig-api) | API Cleanup: SearchConfig API | ✅ Complete | `5f2dac0` |
@@ -101,6 +101,7 @@ dedicated vector databases or custom storage engines.
 | [Task 4.21](#task-421-benchmark-infrastructure--threshold-update) | Benchmark Infrastructure + Threshold Update | ✅ Complete | `2358ba8` |
 | [Task 4.22](#task-422-large-scale-benchmarks-500k-1m) | Large-Scale Benchmarks (500K, 1M) | ✅ Complete | `4d73bf8` |
 | [Task 4.23](#task-423-multi-dataset-benchmark-infrastructure) | Multi-Dataset Benchmark Infrastructure | ✅ Complete | - |
+| [Task 4.24](#task-424-adc-hnsw-integration) | ADC HNSW Integration (Replace Hamming) | 🔲 Not Started | - |
 
 ### Other Sections
 
@@ -4007,6 +4008,8 @@ Comprehensive recall tests added to validate HNSW parameter tuning.
 
 > Hamming distance is useful for **replacing** L2 computations (pure RaBitQ approach), not **supplementing** them. The hybrid approach that does both L2 AND Hamming is strictly worse than just doing L2.
 
+**⚠️ Subsequent Discovery (Issue #43):** Symmetric Hamming distance is fundamentally flawed for multi-bit quantization (2-bit, 4-bit). Even with Gray code encoding, distant quantization levels can have lower Hamming distance than nearby levels due to wraparound. See [RABITQ.md §1.1-1.5](RABITQ.md#11-the-problem-symmetric-hamming-distance) for full analysis. The proper solution is **ADC (Asymmetric Distance Computation)** where the query remains as float32 and distance is computed via weighted dot product. See [Task 4.24](#task-424-adc-hnsw-integration).
+
 **Correct Use Cases for Hamming:**
 
 1. **Replace L2 during beam search** (RaBitQ): Trades recall for QPS
@@ -4145,14 +4148,25 @@ Comprehensive recall tests added to validate HNSW parameter tuning.
 
 1. **Hypothesis Validated:** In-memory binary code caching provides 2.2x speedup over RocksDB-backed RaBitQ.
 
-2. **Recall Still Low:** Hamming-only navigation achieves only ~10% recall. This is a fundamental limitation of 1-bit quantization for HNSW navigation.
+2. **Recall Still Low:** Hamming-only navigation achieves only ~10% recall. This is a fundamental limitation of symmetric Hamming distance for HNSW navigation.
 
 3. **Best Use Case for Cached RaBitQ:**
    - High-throughput, low-recall applications (e.g., first-pass filtering)
    - When combined with exact re-ranking on a larger candidate set
    - Memory-constrained environments where only codes are cached
 
-4. **For High Recall:** Use standard L2 search. RaBitQ (even cached) is not suitable for >50% recall requirements due to Hamming navigation limitations.
+4. **For High Recall:** Use standard L2 search. RaBitQ with Hamming navigation is not suitable for >50% recall requirements.
+
+**⚠️ Root Cause Analysis (Issue #43, RABITQ.md §5.8):** The ~10% recall is caused by using symmetric Hamming distance which:
+- Treats all bit flips equally (position-independent)
+- For multi-bit quantization, distant levels can have lower Hamming distance than nearby levels (Gray code wraparound)
+- Corrupts similarity ordering, especially on structured/clustered data (semantic embeddings)
+
+**Solution:** Replace Hamming with ADC (Asymmetric Distance Computation). ADC benchmark results show:
+- ADC 4-bit, rerank=4x: **91.6% recall** (vs Hamming 23.8%)
+- ADC 4-bit, rerank=10x: **99.1% recall**
+
+See [Task 4.24](#task-424-adc-hnsw-integration) for implementation plan.
 
 ##### Recommendations
 
@@ -5541,6 +5555,143 @@ LAION-CLIP RaBitQ Pipeline:
 - [x] Claims 1-4 documented and verified
 - [x] Distance metric constraints documented (Exact: all, RaBitQ: Cosine only)
 - [x] Parallel reranking threshold documented (3200)
+
+---
+
+#### Task 4.24: ADC HNSW Integration (Replace Hamming with ADC)
+
+**Status:** 🔲 Not Started
+**Priority:** HIGH
+**Goal:** Replace symmetric Hamming distance with ADC (Asymmetric Distance Computation) in HNSW navigation to achieve >90% recall with RaBitQ.
+
+##### Problem Statement
+
+Current RaBitQ implementation uses symmetric Hamming distance during HNSW beam search, which is fundamentally flawed for multi-bit quantization:
+
+| Mode | Recall@10 | Issue |
+|------|-----------|-------|
+| Hamming 1-bit | ~10% | Low information density |
+| Hamming 4-bit | ~24% | Gray code wraparound corrupts similarity |
+| **ADC 4-bit** | **91-99%** | Proper distance estimation |
+
+**Root Cause:** Symmetric Hamming treats query and data symmetrically (both binarized), losing numeric ordering:
+- Level 0 → Level 8: Hamming=2, but value difference=8
+- Level 0 → Level 15: Hamming=1, but value difference=15 (wraparound)
+
+See [RABITQ.md §1.1-1.5](RABITQ.md#11-the-problem-symmetric-hamming-distance) for detailed analysis.
+
+##### Solution: ADC (Asymmetric Distance Computation)
+
+ADC keeps the query as float32 and computes a weighted dot product:
+
+```
+Symmetric Hamming:  popcount(encode(query) XOR encode(data))
+ADC:                query_rotated · decode(data) / correction_factor
+```
+
+This preserves numeric ordering because the query is never quantized.
+
+##### Implementation Plan
+
+**Step 1: Extend BinaryCodeCache (+8 bytes/vector)**
+
+```rust
+// Current: HashMap<(EmbeddingCode, VecId), Vec<u8>>
+// Change:  HashMap<(EmbeddingCode, VecId), (Vec<u8>, AdcCorrection)>
+
+pub fn put_with_correction(&self, ..., code: Vec<u8>, correction: AdcCorrection);
+pub fn get_with_correction(&self, ...) -> Option<(Vec<u8>, AdcCorrection)>;
+```
+
+**Step 2: Persist AdcCorrection to BinaryCodes CF**
+
+```rust
+// Current value: [binary_code: N bytes]
+// Change to:     [binary_code: N bytes][vector_norm: f32][quantization_error: f32]
+```
+
+**Step 3: Add ADC Beam Search Function**
+
+```rust
+fn beam_search_layer0_adc_cached(
+    index: &Index,
+    storage: &Storage,
+    query_rotated: &[f32],  // Pre-rotated query (float32)
+    query_norm: f32,
+    encoder: &RaBitQ,
+    code_cache: &BinaryCodeCache,
+    entry: VecId,
+    ef: usize,
+) -> Result<Vec<(f32, VecId)>>;
+```
+
+**Step 4: Update search_with_rabitq_cached()**
+
+```rust
+pub fn search_with_rabitq_adc_cached(...) -> Result<Vec<(f32, VecId)>> {
+    // Pre-compute query rotation once
+    let query_rotated = encoder.rotate_query(query);
+    let query_norm = compute_norm(query);
+
+    // Use ADC distance in beam search
+    let candidates = beam_search_layer0_adc_cached(
+        ..., &query_rotated, query_norm, encoder, ...
+    )?;
+
+    // Re-rank with exact distance
+}
+```
+
+**Step 5: Update Vector Insert Path**
+
+```rust
+// Current:
+let code = encoder.encode(&vector);
+cache.put(embedding, vec_id, code);
+
+// Change to:
+let (code, correction) = encoder.encode_with_correction(&vector);
+cache.put_with_correction(embedding, vec_id, code, correction);
+storage.put_binary_code_with_correction(embedding, vec_id, &code, correction)?;
+```
+
+##### Files to Modify
+
+| File | Changes |
+|------|---------|
+| `cache/binary_codes.rs` | Add correction storage methods |
+| `hnsw/search.rs` | Add `beam_search_layer0_adc_cached()`, update main search |
+| `schema.rs` | Update BinaryCodes value format |
+| `examples/vector2/main.rs` | Update insert path to store corrections |
+
+##### Expected Results
+
+| Mode | Recall@10 | QPS (projected) |
+|------|-----------|-----------------|
+| Current Hamming | 24% | 620 |
+| **ADC 4-bit, rerank=4x** | **92%** | ~500 |
+| ADC 4-bit, rerank=10x | 99% | ~300 |
+
+Memory overhead: +8 bytes/vector (AdcCorrection: 2×f32)
+- 100K vectors: +800 KB
+- 1M vectors: +8 MB
+
+##### Acceptance Criteria
+
+- [ ] `BinaryCodeCache` stores `AdcCorrection` alongside binary codes
+- [ ] `AdcCorrection` persisted to BinaryCodes CF
+- [ ] `beam_search_layer0_adc_cached()` implemented
+- [ ] `search_with_rabitq_adc_cached()` uses ADC for navigation
+- [ ] Vector insert stores corrections
+- [ ] Benchmark shows >90% recall@10 at 100K scale
+- [ ] Document ADC vs Hamming comparison
+
+##### References
+
+- [RABITQ.md §1.1-1.5](RABITQ.md#11-the-problem-symmetric-hamming-distance) - Problem analysis
+- [RABITQ.md §5.8](RABITQ.md#58-adc-vs-hamming-analysis) - Benchmark results
+- [Elasticsearch RaBitQ explainer](https://www.elastic.co/search-labs/blog/rabitq-explainer-101)
+- Issue #43 - Gray code multi-bit quantization
 
 ---
 

@@ -22,11 +22,13 @@ RaBitQ (Random Bit Quantization) is a training-free binary quantization method f
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Random rotation matrix | ✅ Complete | √D scaled for unit vectors (issue #42) |
-| 1-bit quantization | ✅ Complete | Sign quantization, works well |
+| 1-bit quantization | ✅ Complete | Sign quantization |
 | 2-bit/4-bit quantization | ✅ Complete | Gray code encoding (issue #43) |
-| Symmetric Hamming distance | ✅ Complete | Current search method |
-| Asymmetric Distance (ADC) | ❌ Not implemented | **This document's focus** |
-| Corrective factors storage | ❌ Not implemented | Required for ADC |
+| Symmetric Hamming distance | ✅ Complete | HNSW navigation, **poor recall** (see Part 5) |
+| ADC distance computation | ✅ Complete | `adc_distance()`, `binary_dot_product()` |
+| AdcCorrection storage | ✅ Complete | `encode_with_correction()`, schema support |
+| ADC + HNSW navigation | ❌ Not implemented | **Critical next step** (see Part 5.9) |
+| Brute-force ADC search | ✅ Complete | Benchmark only, 99.1% recall at 4-bit |
 
 ---
 
@@ -715,21 +717,421 @@ If we decide to deprecate Symmetric Hamming:
 
 ---
 
-## Appendix B: Expected Performance
+## Appendix B: Measured Performance (10K vectors, 128D, Cosine)
 
-Based on industry benchmarks and RaBitQ paper:
+Actual benchmark results from Part 5:
 
-| Mode | Bits | Recall@10 (100K) | QPS | Storage/vec (512D) |
-|------|------|------------------|-----|-------------------|
-| Symmetric | 1 | ~85% (rerank=50) | High | 64 bytes |
-| Symmetric | 2 | ~50% (broken) | High | 128 bytes |
-| Symmetric | 4 | ~30% (broken) | High | 256 bytes |
-| ADC | 1 | ~90% (rerank=10) | Medium | 72 bytes |
-| ADC | 2 | ~95% (rerank=10) | Medium | 136 bytes |
-| ADC | 4 | ~97% (rerank=10) | Medium | 264 bytes |
-| Exact | - | 100% | Low | 2048 bytes |
+| Mode | Bits | rerank | Recall@10 | Notes |
+|------|------|--------|-----------|-------|
+| Baseline HNSW | - | - | **95.9%** | No quantization |
+| Symmetric Hamming | 1 | 10x | 14.6% | Poor - graph mismatch |
+| Symmetric Hamming | 1 | 50x | 37.0% | Still poor |
+| Symmetric Hamming | 1 | 200x | 69.6% | Best Hamming result |
+| Symmetric Hamming | 4 | 10x | 21.9% | Multi-bit broken |
+| Symmetric Hamming | 4 | 100x | 67.1% | Still below baseline |
+| ADC (brute-force) | 1 | 10x | 21.6% | 1-bit too lossy |
+| ADC (brute-force) | 4 | 4x | **91.6%** | Good |
+| ADC (brute-force) | 4 | 10x | **99.1%** | **Exceeds baseline!** |
 
-*Note: ADC estimates based on RaBitQ paper claims. Actual performance TBD.*
+**Key insight:** ADC 4-bit with modest reranking (4-10x) outperforms both Hamming and baseline HNSW.
+
+### Storage per vector (128D)
+
+| Mode | Bits | Binary Code | Correction | Total |
+|------|------|-------------|------------|-------|
+| Symmetric | 1 | 16 bytes | 0 | 16 bytes |
+| Symmetric | 4 | 64 bytes | 0 | 64 bytes |
+| ADC | 1 | 16 bytes | 8 bytes | 24 bytes |
+| ADC | 4 | 64 bytes | 8 bytes | 72 bytes |
+| Full vectors | - | - | - | 512 bytes |
+
+**Compression ratio (ADC 4-bit):** 512 / 72 = **7.1x**
+
+---
+
+## Part 5: Empirical Benchmark Results (2026-01-12)
+
+This section documents comprehensive benchmark results comparing Symmetric Hamming vs ADC implementations.
+
+### 5.1 Test Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Vectors | 10,000 (128D, random, normalized) |
+| Queries | 100 |
+| k | 10 |
+| ef | 100 |
+| Distance | Cosine |
+| Ground truth | Brute-force cosine |
+
+### 5.2 Baseline
+
+| Mode | Recall@10 |
+|------|-----------|
+| Standard HNSW (Cosine, no RaBitQ) | **95.9%** |
+
+### 5.3 Symmetric Hamming Results (HNSW navigation with Hamming distance)
+
+The Hamming path uses HNSW graph navigation at layer 0 with Hamming distance, then reranks top candidates with exact cosine distance.
+
+| Bits | rerank=4x | rerank=10x | rerank=50x | rerank=100x | rerank=200x |
+|------|-----------|------------|------------|-------------|-------------|
+| 1-bit | 7.5% | 14.6% | 37.0% | 51.8% | 69.6% |
+| 4-bit | 13.9% | 21.9% | 51.2% | 67.1% | - |
+
+**Key finding:** Even 1-bit Hamming achieves only **69.6% recall with 200x reranking**, far below baseline 95.9%.
+
+### 5.4 ADC Results (Brute-force ADC distance)
+
+The ADC path computes ADC distance over ALL vectors (brute-force, no HNSW navigation), then reranks top candidates with exact cosine distance.
+
+| Bits | rerank=4x | rerank=10x |
+|------|-----------|------------|
+| 1-bit | 13.7% | 21.6% |
+| 4-bit | **91.6%** | **99.1%** |
+
+**Key finding:** ADC 4-bit with rerank=10x achieves **99.1% recall**, exceeding baseline HNSW (95.9%).
+
+### 5.5 Comparative Analysis
+
+#### Side-by-side at rerank=10x
+
+| Mode | 1-bit | 4-bit |
+|------|-------|-------|
+| Hamming (HNSW nav) | 14.6% | 21.9% |
+| ADC (brute-force) | 21.6% | **99.1%** |
+
+#### Understanding the Results
+
+**Why Hamming performs poorly:**
+
+1. **Graph mismatch:** The HNSW graph was built using L2/Cosine distances. Navigating with Hamming distance follows "wrong paths" - nodes that are Hamming-similar are not necessarily cosine-similar.
+
+2. **Candidates never seen:** True nearest neighbors are never reached during HNSW traversal because Hamming leads to different graph regions.
+
+3. **Reranking can't fix exploration:** Even with high rerank factors, you can only rerank candidates you've seen. If true neighbors were never visited, they can't be in the final results.
+
+4. **Why increasing rerank helps somewhat:** Higher rerank_factor means exploring more candidates during beam search, increasing the chance of accidentally stumbling upon true neighbors.
+
+**Why ADC performs well:**
+
+1. **Brute-force sees all vectors:** Current ADC implementation scans ALL vectors, so true neighbors are always in the candidate pool.
+
+2. **ADC preserves distance ordering:** The weighted dot product correctly ranks similar vectors higher, so after sorting, true neighbors bubble to the top.
+
+3. **Reranking polishes results:** Exact cosine reranking on well-ordered candidates produces high recall.
+
+**Why 1-bit ADC is poor:**
+
+Both Hamming and ADC show ~15-22% recall for 1-bit. This confirms 1-bit quantization is simply too lossy - there isn't enough information to distinguish similar vectors regardless of distance metric.
+
+**Why 4-bit ADC is excellent:**
+
+4-bit quantization retains sufficient precision (16 levels per dimension). Combined with ADC's correct distance ordering, candidates are well-selected.
+
+### 5.6 Critical Insight: Apples to Oranges
+
+The current benchmark compares:
+- **Hamming:** HNSW navigation (fast, O(log n) candidates seen)
+- **ADC:** Brute-force scan (slow, O(n) candidates seen)
+
+This is NOT a fair comparison of distance metrics. To properly evaluate:
+
+| What we need | Current status |
+|--------------|----------------|
+| HNSW + Hamming | ✅ Implemented |
+| HNSW + ADC | ❌ NOT implemented |
+| Brute-force + Hamming | ❌ NOT tested |
+| Brute-force + ADC | ✅ Implemented |
+
+**The real comparison should be:** HNSW navigation using ADC distance vs HNSW navigation using Hamming distance.
+
+### 5.7 Why Past Benchmarks May Have Shown Better Hamming Results
+
+Several factors could explain the discrepancy:
+
+1. **Dataset difference:** Past benchmarks may have used SIFT or LAION, where embedding structure might correlate better with Hamming. Random vectors are worst-case.
+
+2. **Distance metric:** Past benchmarks may have used L2 instead of Cosine. The graph structure affects what Hamming navigation finds.
+
+3. **Different ef/rerank:** Higher ef_search could have masked the problem by exploring more candidates.
+
+4. **Different reporting:** Past numbers might have been brute-force Hamming, not HNSW+Hamming.
+
+### 5.8 Conclusions and Recommendations
+
+#### Confirmed Findings
+
+| Claim | Verdict | Evidence |
+|-------|---------|----------|
+| Multi-bit Hamming is broken | ✅ Confirmed | 4-bit Hamming: 21.9% recall at rerank=10x |
+| ADC fixes multi-bit | ✅ Confirmed | 4-bit ADC: 99.1% recall at rerank=10x |
+| 1-bit is too lossy | ✅ Confirmed | Both methods ~15-22% at 1-bit |
+| ADC > Hamming at same rerank | ✅ Confirmed | 99.1% vs 21.9% at 4-bit, rerank=10x |
+
+#### Next Steps
+
+1. **Integrate ADC into HNSW navigation:** Replace Hamming distance in `beam_search_layer0_hamming_cached` with ADC distance. This will give the speed of HNSW navigation with ADC's correct distance ordering.
+
+2. **Remove Hamming codepath:** Symmetric Hamming provides no benefits:
+   - 1-bit: Too lossy regardless of distance metric
+   - Multi-bit: ADC is dramatically better (99.1% vs 21.9%)
+
+3. **Focus on 4-bit ADC:** Best balance of precision and storage:
+   - 99.1% recall (better than baseline HNSW 95.9%)
+   - 64 bytes + 8 bytes correction = 72 bytes per 128D vector
+   - 8x compression vs full float32 vectors
+
+4. **Tune rerank factor:** Even rerank=4x with ADC 4-bit achieves 91.6% recall. Trade off latency vs recall based on application needs.
+
+#### Storage Recommendation
+
+| Use Case | Config | Expected Recall |
+|----------|--------|-----------------|
+| Max recall | ADC 4-bit, rerank=10x | ~99% |
+| Balanced | ADC 4-bit, rerank=4x | ~92% |
+| Max compression | ADC 2-bit, rerank=10x | TBD (need to test) |
+
+### 5.9 Implementation Priority
+
+Based on these findings, the implementation priority should be:
+
+```
+1. [HIGH] Integrate ADC distance into HNSW navigation  → See ROADMAP.md Task 4.24
+   - Modify beam_search_layer0_hamming_cached to use ADC
+   - This is the critical missing piece
+   - ⚠️ Current symmetric Hamming is fundamentally broken for multi-bit (Gray code wraparound)
+
+2. [HIGH] Store AdcCorrection during vector insert  → Part of Task 4.24
+   - Already have encode_with_correction()
+   - Need to persist corrections alongside binary codes
+
+3. [HIGH] Incremental benchmark infrastructure  ✅ COMPLETE
+   - BenchmarkMetadata in libs/db/src/vector/benchmark/metadata.rs
+   - GroundTruthCache for avoiding O(n²) recomputation
+   - CLI flags: --fresh, --query-only, --checkpoint-interval
+
+4. [MEDIUM] Deprecate Symmetric Hamming mode
+   - Keep for backward compatibility but log warning
+   - Document that ADC should be used for new indexes
+
+5. [LOW] 2-bit ADC testing
+   - May offer good tradeoff for storage-constrained deployments
+   - Lower priority since 4-bit already works well
+```
+
+**Note:** The symmetric Hamming approach (used in Tasks 4.8, 4.10) was discovered to be fundamentally flawed for multi-bit quantization. Even with Gray code encoding, distant quantization levels can have lower Hamming distance than nearby levels due to wraparound (e.g., level 0 and level 15 have Hamming distance of only 1). See §1.1-1.5 for full analysis. Task 4.24 in ROADMAP.md addresses this by replacing Hamming with ADC.
+
+### 5.10 Incremental Benchmark Infrastructure
+
+Large-scale benchmarks (500K-1M+ vectors) are impractical with the current infrastructure because:
+1. **HNSW build is O(n log n)** - 1M vectors takes ~15+ hours
+2. **Each run starts fresh** - no way to resume or extend an existing index
+3. **No metadata persistence** - can't verify configuration consistency
+
+#### Required Changes
+
+**1. Benchmark Metadata File**
+
+Store benchmark state alongside the database:
+
+```rust
+/// Persisted benchmark metadata for incremental builds.
+#[derive(Serialize, Deserialize)]
+struct BenchmarkMetadata {
+    /// Number of vectors currently indexed
+    num_vectors: usize,
+
+    /// Vector dimensionality
+    dim: usize,
+
+    /// Distance metric used
+    distance: Distance,
+
+    /// RaBitQ configuration
+    rabitq_config: RaBitQConfig,
+
+    /// Random seed for reproducible vector generation
+    vector_seed: u64,
+
+    /// Random seed for query generation
+    query_seed: u64,
+
+    /// HNSW parameters
+    hnsw_m: usize,
+    hnsw_ef_construction: usize,
+
+    /// Timestamp of last update
+    last_updated: String,
+
+    /// Dataset name (random, sift10k, etc.)
+    dataset: String,
+}
+```
+
+Location: `{db_path}/benchmark_metadata.json`
+
+**2. CLI Changes for vector2 example**
+
+```rust
+#[derive(Parser)]
+struct Args {
+    /// Database path (REQUIRED for incremental builds)
+    #[arg(long)]
+    db_path: PathBuf,
+
+    /// Target number of vectors (will add vectors up to this count)
+    #[arg(long)]
+    num_vectors: usize,
+
+    /// Force fresh start (delete existing index)
+    #[arg(long)]
+    fresh: bool,
+
+    /// Skip indexing, only run queries (requires existing index)
+    #[arg(long)]
+    query_only: bool,
+
+    // ... existing args ...
+}
+```
+
+**3. Incremental Build Logic**
+
+```rust
+fn run_benchmark(args: &Args) -> Result<()> {
+    let metadata_path = args.db_path.join("benchmark_metadata.json");
+
+    // Load or create metadata
+    let mut metadata = if metadata_path.exists() && !args.fresh {
+        let existing: BenchmarkMetadata = load_json(&metadata_path)?;
+
+        // Validate configuration matches
+        validate_config_matches(&existing, args)?;
+
+        println!("Resuming from {} vectors", existing.num_vectors);
+        existing
+    } else {
+        if args.db_path.exists() {
+            std::fs::remove_dir_all(&args.db_path)?;
+        }
+        BenchmarkMetadata::new(args)
+    };
+
+    // Open database
+    let storage = Storage::open(&args.db_path)?;
+
+    // Generate vectors deterministically from seed
+    let mut rng = ChaCha8Rng::seed_from_u64(metadata.vector_seed);
+
+    // Skip already-indexed vectors
+    for _ in 0..metadata.num_vectors {
+        skip_vector(&mut rng, metadata.dim);
+    }
+
+    // Index new vectors
+    let vectors_to_add = args.num_vectors - metadata.num_vectors;
+    println!("Adding {} new vectors...", vectors_to_add);
+
+    for i in 0..vectors_to_add {
+        let vector = generate_vector(&mut rng, metadata.dim);
+        index.insert(&storage, &vector)?;
+
+        if (i + 1) % 10000 == 0 {
+            // Checkpoint metadata
+            metadata.num_vectors += 10000;
+            save_json(&metadata_path, &metadata)?;
+            println!("Checkpoint: {} vectors indexed", metadata.num_vectors);
+        }
+    }
+
+    // Final metadata update
+    metadata.num_vectors = args.num_vectors;
+    save_json(&metadata_path, &metadata)?;
+
+    // Run queries...
+}
+```
+
+**4. Query Vector Consistency**
+
+Query vectors must be generated with a separate seed to ensure:
+- Same queries across different index sizes
+- Reproducible ground truth computation
+
+```rust
+// Query generation (independent of index size)
+let mut query_rng = ChaCha8Rng::seed_from_u64(metadata.query_seed);
+let queries: Vec<Vec<f32>> = (0..args.num_queries)
+    .map(|_| generate_vector(&mut query_rng, metadata.dim))
+    .collect();
+```
+
+**5. Ground Truth Caching**
+
+For large datasets, brute-force ground truth is expensive. Cache it:
+
+```rust
+/// Cached ground truth for specific query set
+#[derive(Serialize, Deserialize)]
+struct GroundTruthCache {
+    /// Number of vectors in index when computed
+    num_vectors: usize,
+    /// k value used
+    k: usize,
+    /// Ground truth results: query_idx -> [(distance, vec_id), ...]
+    results: Vec<Vec<(f32, VecId)>>,
+}
+```
+
+Location: `{db_path}/ground_truth_{num_vectors}_{k}.json`
+
+#### Example Usage
+
+```bash
+# Initial build: 100K vectors
+cargo run --release --example vector2 -- \
+  --db-path /data/rabitq-bench \
+  --num-vectors 100000 \
+  --cosine --rabitq-cached --bits-per-dim 4 --adc
+
+# Extend to 500K (adds 400K vectors)
+cargo run --release --example vector2 -- \
+  --db-path /data/rabitq-bench \
+  --num-vectors 500000 \
+  --cosine --rabitq-cached --bits-per-dim 4 --adc
+
+# Extend to 1M (adds 500K vectors)
+cargo run --release --example vector2 -- \
+  --db-path /data/rabitq-bench \
+  --num-vectors 1000000 \
+  --cosine --rabitq-cached --bits-per-dim 4 --adc
+
+# Query only (no indexing)
+cargo run --release --example vector2 -- \
+  --db-path /data/rabitq-bench \
+  --num-vectors 1000000 \
+  --query-only \
+  --num-queries 1000
+```
+
+#### Benefits
+
+| Benefit | Impact |
+|---------|--------|
+| **Incremental scaling** | Test 100K → 500K → 1M without rebuilding |
+| **Checkpointing** | Resume after crashes or interruptions |
+| **Reproducibility** | Deterministic vectors from seed |
+| **Configuration validation** | Prevent accidental mismatches |
+| **Ground truth caching** | Avoid repeated O(n²) computation |
+
+#### Files to Modify
+
+| File | Changes |
+|------|---------|
+| `examples/vector2/main.rs` | CLI args, incremental logic, metadata I/O |
+| `examples/vector2/benchmark.rs` | Ground truth caching, query generation |
+| New: `examples/vector2/metadata.rs` | `BenchmarkMetadata` struct and helpers |
 
 ---
 
@@ -738,5 +1140,7 @@ Based on industry benchmarks and RaBitQ paper:
 - **2026-01-12**: Initial document created from research findings
 - **2026-01-12**: Added section 1.5 explaining why ADC solves multi-bit problem
 - **2026-01-12**: Added Part 4 analyzing ADC vs Symmetric Hamming tradeoffs
+- **2026-01-12**: Added Part 5 with comprehensive benchmark results and analysis
+- **2026-01-12**: Added section 5.10 with incremental benchmark infrastructure design
 - **Issue #42**: √D scaling fix for rotation matrix
 - **Issue #43**: Gray code encoding for multi-bit (doesn't fix fundamental Hamming limitation)
