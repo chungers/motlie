@@ -61,6 +61,20 @@ pub use dataset::{
     GistDataset, GistSubset, GIST_BASE_VECTORS, GIST_EMBEDDING_DIM, GIST_QUERIES,
 };
 
+// Re-exports for public API - Parquet datasets (optional)
+#[cfg(feature = "parquet")]
+pub use dataset::{
+    load_parquet_embeddings, CohereWikipediaDataset, CohereWikipediaSubset,
+    COHERE_WIKI_DIM, COHERE_WIKI_VECTORS,
+};
+
+// Re-exports for public API - HDF5 datasets (optional)
+#[cfg(feature = "hdf5")]
+pub use dataset::{
+    load_hdf5_embeddings, load_hdf5_ground_truth, GloveDataset, GloveSubset,
+    GLOVE_DIM, GLOVE_QUERIES, GLOVE_VECTORS,
+};
+
 // Re-exports for public API - SIFT
 pub use sift::{
     read_fvecs, read_fvecs_limited, read_ivecs, read_ivecs_limited, SiftDataset, SiftSubset,

@@ -630,6 +630,547 @@ impl GistSubset {
 }
 
 // ============================================================================
+// Parquet Format Support (optional feature)
+// ============================================================================
+
+/// Cohere Wikipedia dataset configuration.
+#[cfg(feature = "parquet")]
+pub const COHERE_WIKI_DIM: usize = 768;
+
+/// Cohere Wikipedia dataset size.
+#[cfg(feature = "parquet")]
+pub const COHERE_WIKI_VECTORS: usize = 485_000;
+
+/// HuggingFace URL for Cohere Wikipedia embeddings.
+#[cfg(feature = "parquet")]
+const COHERE_WIKI_URL: &str =
+    "https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings/resolve/main/data/train-00000-of-00001.parquet";
+
+/// Load embeddings from a Parquet file.
+///
+/// Expects a column containing fixed-size float arrays (FixedSizeList<Float32>).
+///
+/// # Arguments
+///
+/// * `path` - Path to the Parquet file
+/// * `embedding_column` - Name of the column containing embeddings
+/// * `max_vectors` - Maximum number of vectors to load
+///
+/// # Example
+///
+/// ```ignore
+/// let vectors = load_parquet_embeddings(&path, "emb", 100_000)?;
+/// ```
+#[cfg(feature = "parquet")]
+pub fn load_parquet_embeddings(
+    path: &Path,
+    embedding_column: &str,
+    max_vectors: usize,
+) -> Result<Vec<Vec<f32>>> {
+    use arrow::array::{Array, FixedSizeListArray, Float32Array};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::fs::File;
+
+    let file = File::open(path)
+        .with_context(|| format!("Failed to open Parquet file: {}", path.display()))?;
+
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .context("Failed to create Parquet reader")?;
+
+    let reader = builder.build().context("Failed to build Parquet reader")?;
+
+    let mut vectors = Vec::new();
+
+    for batch_result in reader {
+        let batch = batch_result.context("Failed to read batch")?;
+
+        let column = batch
+            .column_by_name(embedding_column)
+            .ok_or_else(|| anyhow::anyhow!("Column '{}' not found in Parquet", embedding_column))?;
+
+        let list_array = column
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Expected FixedSizeListArray for column '{}', got {:?}",
+                    embedding_column,
+                    column.data_type()
+                )
+            })?;
+
+        for i in 0..list_array.len() {
+            if vectors.len() >= max_vectors {
+                break;
+            }
+
+            let values = list_array.value(i);
+            let float_array = values.as_any().downcast_ref::<Float32Array>().ok_or_else(|| {
+                anyhow::anyhow!("Expected Float32Array inside FixedSizeList")
+            })?;
+
+            let vec: Vec<f32> = float_array.values().to_vec();
+            vectors.push(vec);
+        }
+
+        if vectors.len() >= max_vectors {
+            break;
+        }
+    }
+
+    Ok(vectors)
+}
+
+/// Cohere Wikipedia embeddings dataset (768D, embed-english-v3.0).
+///
+/// Real production embeddings from Wikipedia articles with natural clustering
+/// from semantic similarity. Good for testing RaBitQ on realistic data.
+///
+/// ## Source
+/// - HuggingFace: Cohere/wikipedia-22-12-simple-embeddings
+///
+/// ## Properties
+/// - 768 dimensions
+/// - ~485K vectors
+/// - Cosine distance (embeddings are normalized)
+#[cfg(feature = "parquet")]
+#[derive(Debug, Clone)]
+pub struct CohereWikipediaDataset {
+    /// Database embeddings.
+    pub embeddings: Vec<Vec<f32>>,
+    /// Query embeddings (sampled from end of dataset).
+    pub queries: Vec<Vec<f32>>,
+    /// Pre-computed ground truth (top-k indices for each query).
+    pub ground_truth: Vec<Vec<usize>>,
+    /// Embedding dimension.
+    pub dim: usize,
+}
+
+#[cfg(feature = "parquet")]
+impl CohereWikipediaDataset {
+    /// Download Cohere Wikipedia dataset from HuggingFace.
+    pub fn download(data_dir: &Path) -> Result<()> {
+        let dest = data_dir.join("cohere_wikipedia.parquet");
+        if !dest.exists() {
+            println!("Downloading Cohere Wikipedia embeddings (~1.5GB)...");
+            download_file(COHERE_WIKI_URL, &dest)?;
+        } else {
+            println!("Cohere Wikipedia embeddings already exist: {:?}", dest);
+        }
+        Ok(())
+    }
+
+    /// Load Cohere Wikipedia dataset.
+    ///
+    /// Uses last `num_queries` vectors as queries, computes ground truth via brute force.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_dir` - Directory containing cohere_wikipedia.parquet
+    /// * `num_db` - Number of database vectors to load
+    /// * `num_queries` - Number of query vectors (taken from end of dataset)
+    pub fn load(data_dir: &Path, num_db: usize, num_queries: usize) -> Result<Self> {
+        let parquet_path = data_dir.join("cohere_wikipedia.parquet");
+
+        if !parquet_path.exists() {
+            anyhow::bail!(
+                "Cohere Wikipedia dataset not found. Run download first.\n\
+                 Expected: {:?}",
+                parquet_path
+            );
+        }
+
+        println!(
+            "Loading Cohere Wikipedia embeddings ({}+{} vectors)...",
+            num_db, num_queries
+        );
+
+        let total = num_db + num_queries;
+        let all_embeddings = load_parquet_embeddings(&parquet_path, "emb", total)?;
+
+        if all_embeddings.len() < num_db + num_queries {
+            anyhow::bail!(
+                "Not enough vectors in dataset: got {}, need {}",
+                all_embeddings.len(),
+                num_db + num_queries
+            );
+        }
+
+        let (db_vectors, query_vectors) = all_embeddings.split_at(num_db);
+
+        println!(
+            "  Loaded {} db vectors + {} queries ({}D)",
+            db_vectors.len(),
+            query_vectors.len(),
+            db_vectors.first().map(|v| v.len()).unwrap_or(0)
+        );
+
+        // Compute brute-force ground truth using cosine distance
+        println!("Computing ground truth (top-100)...");
+        let ground_truth = compute_ground_truth_batch(db_vectors, query_vectors, 100, Distance::Cosine);
+        println!("  Ground truth computed for {} queries", ground_truth.len());
+
+        Ok(Self {
+            embeddings: db_vectors.to_vec(),
+            queries: query_vectors.to_vec(),
+            ground_truth,
+            dim: COHERE_WIKI_DIM,
+        })
+    }
+
+    /// Get a subset for benchmarking.
+    pub fn subset(&self, num_vectors: usize, num_queries: usize) -> CohereWikipediaSubset {
+        let num_vectors = num_vectors.min(self.embeddings.len());
+        let num_queries = num_queries.min(self.queries.len());
+
+        CohereWikipediaSubset {
+            db_vectors: self.embeddings[..num_vectors].to_vec(),
+            queries: self.queries[..num_queries].to_vec(),
+            precomputed_ground_truth: Some(self.ground_truth[..num_queries].to_vec()),
+            dim: self.dim,
+        }
+    }
+
+    /// Number of embeddings.
+    pub fn len(&self) -> usize {
+        self.embeddings.len()
+    }
+
+    /// Whether dataset is empty.
+    pub fn is_empty(&self) -> bool {
+        self.embeddings.is_empty()
+    }
+}
+
+/// Subset of Cohere Wikipedia data for benchmarking.
+#[cfg(feature = "parquet")]
+#[derive(Debug, Clone)]
+pub struct CohereWikipediaSubset {
+    /// Database vectors.
+    pub db_vectors: Vec<Vec<f32>>,
+    /// Query vectors.
+    pub queries: Vec<Vec<f32>>,
+    /// Pre-computed ground truth.
+    precomputed_ground_truth: Option<Vec<Vec<usize>>>,
+    /// Embedding dimension.
+    pub dim: usize,
+}
+
+#[cfg(feature = "parquet")]
+impl CohereWikipediaSubset {
+    /// Compute ground truth using cosine distance.
+    pub fn compute_ground_truth_topk(&self, k: usize) -> Vec<Vec<usize>> {
+        if let Some(ref gt) = self.precomputed_ground_truth {
+            if gt.first().map(|v| v.len()).unwrap_or(0) >= k {
+                println!("Using pre-computed ground truth (k={})...", k);
+                return gt.iter().map(|v| v[..k].to_vec()).collect();
+            }
+        }
+
+        compute_ground_truth_batch(&self.db_vectors, &self.queries, k, Distance::Cosine)
+    }
+
+    /// Number of database vectors.
+    pub fn num_vectors(&self) -> usize {
+        self.db_vectors.len()
+    }
+
+    /// Number of queries.
+    pub fn num_queries(&self) -> usize {
+        self.queries.len()
+    }
+}
+
+// ============================================================================
+// HDF5 Format Support (optional feature)
+// ============================================================================
+
+/// GloVe dataset configuration (from ann-benchmarks).
+#[cfg(feature = "hdf5")]
+pub const GLOVE_DIM: usize = 100;
+
+/// GloVe dataset size.
+#[cfg(feature = "hdf5")]
+pub const GLOVE_VECTORS: usize = 1_183_514;
+
+/// GloVe queries count.
+#[cfg(feature = "hdf5")]
+pub const GLOVE_QUERIES: usize = 10_000;
+
+/// ANN-benchmarks URL for GloVe-100 angular.
+#[cfg(feature = "hdf5")]
+const GLOVE_100_URL: &str = "http://ann-benchmarks.com/glove-100-angular.hdf5";
+
+/// Load embeddings from an HDF5 file (ann-benchmarks format).
+///
+/// The ann-benchmarks format uses datasets named "train", "test", "neighbors", "distances".
+///
+/// # Arguments
+///
+/// * `path` - Path to the HDF5 file
+/// * `dataset_name` - Name of the dataset to load ("train" or "test")
+/// * `max_vectors` - Maximum number of vectors to load
+#[cfg(feature = "hdf5")]
+pub fn load_hdf5_embeddings(
+    path: &Path,
+    dataset_name: &str,
+    max_vectors: usize,
+) -> Result<Vec<Vec<f32>>> {
+    let file = hdf5::File::open(path)
+        .with_context(|| format!("Failed to open HDF5 file: {}", path.display()))?;
+
+    let dataset = file
+        .dataset(dataset_name)
+        .with_context(|| format!("Dataset '{}' not found in HDF5 file", dataset_name))?;
+
+    let shape = dataset.shape();
+    if shape.len() != 2 {
+        anyhow::bail!("Expected 2D dataset, got {}D", shape.len());
+    }
+
+    let num_vectors = shape[0].min(max_vectors);
+    let dim = shape[1];
+
+    // Read as 2D array
+    let data: ndarray::Array2<f32> = dataset
+        .read_slice(ndarray::s![..num_vectors, ..])
+        .context("Failed to read HDF5 dataset")?;
+
+    // Convert to Vec<Vec<f32>>
+    let vectors: Vec<Vec<f32>> = data
+        .rows()
+        .into_iter()
+        .map(|row| row.to_vec())
+        .collect();
+
+    println!(
+        "  Loaded {} vectors ({}D) from HDF5 '{}'",
+        vectors.len(),
+        dim,
+        dataset_name
+    );
+
+    Ok(vectors)
+}
+
+/// Load ground truth from HDF5 file (ann-benchmarks format).
+///
+/// The "neighbors" dataset contains pre-computed nearest neighbor indices.
+#[cfg(feature = "hdf5")]
+pub fn load_hdf5_ground_truth(path: &Path, max_queries: usize) -> Result<Vec<Vec<usize>>> {
+    let file = hdf5::File::open(path)
+        .with_context(|| format!("Failed to open HDF5 file: {}", path.display()))?;
+
+    let dataset = file
+        .dataset("neighbors")
+        .context("Dataset 'neighbors' not found in HDF5 file")?;
+
+    let shape = dataset.shape();
+    let num_queries = shape[0].min(max_queries);
+
+    // Read as 2D array of i32 (ann-benchmarks format)
+    let data: ndarray::Array2<i32> = dataset
+        .read_slice(ndarray::s![..num_queries, ..])
+        .context("Failed to read HDF5 neighbors")?;
+
+    // Convert to Vec<Vec<usize>>
+    let ground_truth: Vec<Vec<usize>> = data
+        .rows()
+        .into_iter()
+        .map(|row| row.iter().map(|&i| i as usize).collect())
+        .collect();
+
+    println!(
+        "  Loaded ground truth for {} queries (k={})",
+        ground_truth.len(),
+        ground_truth.first().map(|v| v.len()).unwrap_or(0)
+    );
+
+    Ok(ground_truth)
+}
+
+/// GloVe-100 angular dataset from ann-benchmarks.
+///
+/// Word embeddings with angular (cosine) distance. Standard benchmark for
+/// ANN algorithms.
+///
+/// ## Source
+/// - ann-benchmarks.com: glove-100-angular.hdf5
+///
+/// ## Properties
+/// - 100 dimensions
+/// - ~1.18M vectors
+/// - 10K queries with pre-computed ground truth
+/// - Angular/Cosine distance
+#[cfg(feature = "hdf5")]
+#[derive(Debug, Clone)]
+pub struct GloveDataset {
+    /// Database vectors (train set).
+    pub train_vectors: Vec<Vec<f32>>,
+    /// Query vectors (test set).
+    pub test_vectors: Vec<Vec<f32>>,
+    /// Pre-computed ground truth from ann-benchmarks.
+    pub ground_truth: Vec<Vec<usize>>,
+    /// Embedding dimension.
+    pub dim: usize,
+}
+
+#[cfg(feature = "hdf5")]
+impl GloveDataset {
+    /// Download GloVe dataset from ann-benchmarks.
+    pub fn download(data_dir: &Path) -> Result<()> {
+        let dest = data_dir.join("glove-100-angular.hdf5");
+        if !dest.exists() {
+            println!("Downloading GloVe-100 angular (~500MB)...");
+            download_file(GLOVE_100_URL, &dest)?;
+        } else {
+            println!("GloVe dataset already exists: {:?}", dest);
+        }
+        Ok(())
+    }
+
+    /// Load GloVe dataset from HDF5 file.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_dir` - Directory containing glove-100-angular.hdf5
+    /// * `max_train` - Maximum training vectors to load
+    /// * `max_test` - Maximum test vectors to load
+    pub fn load(data_dir: &Path, max_train: usize, max_test: usize) -> Result<Self> {
+        let hdf5_path = data_dir.join("glove-100-angular.hdf5");
+
+        if !hdf5_path.exists() {
+            anyhow::bail!(
+                "GloVe dataset not found. Run download first.\n\
+                 Expected: {:?}",
+                hdf5_path
+            );
+        }
+
+        println!("Loading GloVe-100 angular dataset...");
+
+        let train_vectors = load_hdf5_embeddings(&hdf5_path, "train", max_train)?;
+        let test_vectors = load_hdf5_embeddings(&hdf5_path, "test", max_test)?;
+        let ground_truth = load_hdf5_ground_truth(&hdf5_path, max_test)?;
+
+        let dim = train_vectors.first().map(|v| v.len()).unwrap_or(GLOVE_DIM);
+
+        Ok(Self {
+            train_vectors,
+            test_vectors,
+            ground_truth,
+            dim,
+        })
+    }
+
+    /// Get a subset for benchmarking.
+    pub fn subset(&self, num_vectors: usize, num_queries: usize) -> GloveSubset {
+        let num_vectors = num_vectors.min(self.train_vectors.len());
+        let num_queries = num_queries.min(self.test_vectors.len());
+
+        // Filter ground truth to only include indices within our subset
+        let filtered_gt: Vec<Vec<usize>> = self.ground_truth[..num_queries]
+            .iter()
+            .map(|gt| gt.iter().filter(|&&i| i < num_vectors).copied().collect())
+            .collect();
+
+        GloveSubset {
+            db_vectors: self.train_vectors[..num_vectors].to_vec(),
+            queries: self.test_vectors[..num_queries].to_vec(),
+            precomputed_ground_truth: Some(filtered_gt),
+            dim: self.dim,
+        }
+    }
+
+    /// Number of training vectors.
+    pub fn len(&self) -> usize {
+        self.train_vectors.len()
+    }
+
+    /// Whether dataset is empty.
+    pub fn is_empty(&self) -> bool {
+        self.train_vectors.is_empty()
+    }
+}
+
+/// Subset of GloVe data for benchmarking.
+#[cfg(feature = "hdf5")]
+#[derive(Debug, Clone)]
+pub struct GloveSubset {
+    /// Database vectors.
+    pub db_vectors: Vec<Vec<f32>>,
+    /// Query vectors.
+    pub queries: Vec<Vec<f32>>,
+    /// Pre-computed ground truth (may be filtered for subset).
+    precomputed_ground_truth: Option<Vec<Vec<usize>>>,
+    /// Embedding dimension.
+    pub dim: usize,
+}
+
+#[cfg(feature = "hdf5")]
+impl GloveSubset {
+    /// Compute ground truth using angular/cosine distance.
+    pub fn compute_ground_truth_topk(&self, k: usize) -> Vec<Vec<usize>> {
+        if let Some(ref gt) = self.precomputed_ground_truth {
+            if gt.first().map(|v| v.len()).unwrap_or(0) >= k {
+                println!("Using pre-computed ground truth (k={})...", k);
+                return gt.iter().map(|v| v[..k.min(v.len())].to_vec()).collect();
+            }
+        }
+
+        compute_ground_truth_batch(&self.db_vectors, &self.queries, k, Distance::Cosine)
+    }
+
+    /// Number of database vectors.
+    pub fn num_vectors(&self) -> usize {
+        self.db_vectors.len()
+    }
+
+    /// Number of queries.
+    pub fn num_queries(&self) -> usize {
+        self.queries.len()
+    }
+}
+
+// ============================================================================
+// Shared Ground Truth Computation
+// ============================================================================
+
+/// Compute brute-force ground truth for a batch of queries.
+fn compute_ground_truth_batch(
+    db_vectors: &[Vec<f32>],
+    queries: &[Vec<f32>],
+    k: usize,
+    distance: Distance,
+) -> Vec<Vec<usize>> {
+    println!(
+        "Computing brute-force ground truth (k={}, {:?})...",
+        k, distance
+    );
+
+    let mut results = Vec::with_capacity(queries.len());
+
+    for (qi, query) in queries.iter().enumerate() {
+        let mut distances: Vec<(usize, f32)> = db_vectors
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i, distance.compute(query, v)))
+            .collect();
+
+        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        let topk: Vec<usize> = distances.iter().take(k).map(|(i, _)| *i).collect();
+        results.push(topk);
+
+        if (qi + 1) % 100 == 0 || qi + 1 == queries.len() {
+            println!("  Computed {}/{} queries", qi + 1, queries.len());
+        }
+    }
+
+    results
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
