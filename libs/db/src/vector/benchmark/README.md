@@ -42,7 +42,7 @@ This module (`libs/db/src/vector/benchmark`) provides benchmarking infrastructur
 | C.2 | CohereWikipediaDataset | ✅ Complete (768D, Cosine) |
 | D.1 | HDF5 loader | ✅ Complete (`--features hdf5`*) |
 | D.2 | GloveDataset | ✅ Complete (100D, angular) |
-| E | CLI tool (bins/bench_vector) | ✅ Complete (download + datasets commands) |
+| E | CLI tool (bins/bench_vector) | ✅ Complete (all commands: download, index, query, sweep, datasets) |
 | F | Example migration | ✅ Complete (deprecation notices added) |
 
 *Note: HDF5 feature requires system library installation (`libhdf5-dev` on Ubuntu).
