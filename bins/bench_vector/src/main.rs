@@ -49,6 +49,9 @@ enum Commands {
     /// Parameter sweep (grid search over bits, ef, rerank)
     Sweep(commands::SweepArgs),
 
+    /// Check RaBitQ rotation distribution (validates √D scaling)
+    CheckDistribution(commands::CheckDistributionArgs),
+
     /// List available datasets
     Datasets,
 }
@@ -68,6 +71,7 @@ async fn main() -> Result<()> {
         Commands::Index(args) => commands::index(args).await,
         Commands::Query(args) => commands::query(args).await,
         Commands::Sweep(args) => commands::sweep(args).await,
+        Commands::CheckDistribution(args) => commands::check_distribution(args),
         Commands::Datasets => commands::list_datasets(),
     }
 }

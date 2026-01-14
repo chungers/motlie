@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use motlie_db::vector::benchmark::{
-    self, compute_recall, BenchmarkMetadata,
-    GistDataset, LaionDataset, LatencyStats, RabitqExperimentResult, RandomDataset, SiftDataset,
-    save_rabitq_results_csv, GIST_QUERIES,
+    self, compute_recall, compute_rotated_variance, print_pareto_frontier, print_rotation_stats,
+    BenchmarkMetadata, GistDataset, LaionDataset, LatencyStats, ParetoInput, RabitqExperimentResult,
+    RandomDataset, SiftDataset, save_rabitq_results_csv, GIST_QUERIES,
 };
 use motlie_db::vector::{
     hnsw, BinaryCodeCache, Distance, EmbeddingCode, NavigationCache, RaBitQ,
@@ -450,6 +450,10 @@ pub struct SweepArgs {
     /// Compare SIMD vs scalar (runs sweep twice)
     #[arg(long)]
     pub compare_simd: bool,
+
+    /// Show Pareto frontier after sweep (optimal recall-QPS trade-offs)
+    #[arg(long)]
+    pub show_pareto: bool,
 }
 
 pub async fn sweep(args: SweepArgs) -> Result<()> {
@@ -588,6 +592,7 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
                 build_time,
                 &args.results_dir,
                 true, // use_simd_dot
+                args.show_pareto,
             )?;
 
             println!("\n--- Scalar Mode ---");
@@ -605,6 +610,7 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
                 build_time,
                 &args.results_dir,
                 false, // use_simd_dot
+                args.show_pareto,
             )?;
         } else {
             // Single mode sweep
@@ -622,6 +628,7 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
                 build_time,
                 &args.results_dir,
                 args.simd_dot,
+                args.show_pareto,
             )?;
         }
     } else {
@@ -770,6 +777,7 @@ fn run_rabitq_sweep(
     build_time: f64,
     results_dir: &PathBuf,
     use_simd_dot: bool,
+    show_pareto: bool,
 ) -> Result<()> {
     let simd_mode = if use_simd_dot { "SIMD" } else { "scalar" };
     println!("\n=== RaBitQ Parameter Sweep ({}) ===", simd_mode);
@@ -865,6 +873,30 @@ fn run_rabitq_sweep(
     save_rabitq_results_csv(&all_results, results_dir)?;
     println!("\nResults saved to {:?}", csv_path);
 
+    // Show Pareto frontier if requested
+    if show_pareto {
+        // Convert to ParetoInput format
+        let pareto_inputs: Vec<ParetoInput> = all_results
+            .iter()
+            .map(|r| ParetoInput {
+                bits_per_dim: r.bits_per_dim,
+                ef_search: r.ef_search,
+                rerank_factor: r.rerank_factor,
+                k: r.k,
+                recall: r.recall_mean,
+                qps: r.qps,
+            })
+            .collect();
+
+        // Compute and display Pareto frontier for each k
+        for &k in k_values {
+            let frontier = benchmark::compute_pareto_frontier_for_k(&pareto_inputs, k);
+            if !frontier.is_empty() {
+                print_pareto_frontier(&frontier, &format!("Pareto Frontier (Recall@{} vs QPS)", k));
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -875,6 +907,109 @@ fn std_dev(values: &[f64]) -> f64 {
     let mean = values.iter().sum::<f64>() / values.len() as f64;
     let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
     variance.sqrt()
+}
+
+// ============================================================================
+// Check Distribution Command
+// ============================================================================
+
+#[derive(Parser)]
+pub struct CheckDistributionArgs {
+    /// Dataset: laion, sift, gist, random
+    #[arg(long)]
+    pub dataset: String,
+
+    /// Data directory (not used for 'random' dataset)
+    #[arg(long, default_value = "./data")]
+    pub data_dir: PathBuf,
+
+    /// Number of vectors to sample
+    #[arg(long, default_value = "1000")]
+    pub sample_size: usize,
+
+    /// Vector dimension (only for 'random' dataset)
+    #[arg(long, default_value = "1024")]
+    pub dim: usize,
+
+    /// RaBitQ bits per dimension
+    #[arg(long, default_value = "4")]
+    pub bits: u8,
+
+    /// Random seed
+    #[arg(long, default_value = "42")]
+    pub seed: u64,
+}
+
+/// Check RaBitQ rotation distribution to validate √D scaling.
+///
+/// This command samples vectors from a dataset, applies RaBitQ rotation,
+/// and reports component variance statistics. For correctly scaled rotation:
+/// - Component mean should be ≈ 0
+/// - Component variance should be ≈ 1.0 (in range [0.8, 1.2])
+///
+/// If variance is too low (e.g., ≈ 1/D), the rotation matrix lacks √D scaling.
+pub fn check_distribution(args: CheckDistributionArgs) -> Result<()> {
+    println!("=== RaBitQ Distribution Check ===");
+    println!("Dataset: {}", args.dataset);
+    println!("Sample size: {}", args.sample_size);
+    println!("Bits per dim: {}", args.bits);
+
+    // Load vectors
+    let (vectors, dim) = match args.dataset.to_lowercase().as_str() {
+        "laion" => {
+            let ds = LaionDataset::load(&args.data_dir, args.sample_size)?;
+            (ds.image_embeddings, ds.dim)
+        }
+        "sift" => {
+            let ds = SiftDataset::load(&args.data_dir, args.sample_size, 0)?;
+            (ds.base_vectors, benchmark::SIFT_EMBEDDING_DIM)
+        }
+        "gist" => {
+            let ds = GistDataset::load(&args.data_dir, args.sample_size, 0)?;
+            (ds.base_vectors, benchmark::GIST_EMBEDDING_DIM)
+        }
+        "random" => {
+            let ds = RandomDataset::generate(args.sample_size, 0, args.dim, args.seed);
+            (ds.vectors, ds.dim)
+        }
+        _ => anyhow::bail!(
+            "Unknown dataset: {}. Use: laion, sift, gist, random",
+            args.dataset
+        ),
+    };
+
+    println!("Loaded {} vectors, dim={}", vectors.len(), dim);
+
+    // Create RaBitQ encoder
+    let encoder = RaBitQ::new(dim, args.bits, args.seed);
+
+    // Compute rotation statistics
+    let stats = compute_rotated_variance(
+        |v| encoder.rotate_query(v),
+        &vectors,
+        args.sample_size,
+    );
+
+    // Print results
+    print_rotation_stats(&stats, &format!("RaBitQ Rotation Stats ({}-bit)", args.bits));
+
+    // Provide interpretation
+    println!("\nInterpretation:");
+    if stats.scaling_valid {
+        println!("  ✓ Rotation matrix has correct √D scaling");
+        println!("  ✓ RaBitQ should work well on this dataset");
+    } else if stats.component_variance < 0.1 {
+        println!("  ✗ Variance too low ({:.4}) - rotation matrix may lack √D scaling", stats.component_variance);
+        println!("  ✗ This will cause poor quantization quality");
+    } else if stats.component_variance > 2.0 {
+        println!("  ✗ Variance too high ({:.4}) - vectors may not be normalized", stats.component_variance);
+        println!("  ✗ Consider normalizing vectors before indexing");
+    } else {
+        println!("  ⚠ Variance ({:.4}) outside expected range [0.8, 1.2]", stats.component_variance);
+        println!("  ⚠ RaBitQ may have suboptimal recall on this dataset");
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -930,7 +1065,13 @@ pub fn list_datasets() -> Result<()> {
     println!("  bench_vector sweep --dataset laion --num-vectors 50000 --rabitq --bits 1,2,4 --rerank 1,4,10,20\n");
 
     println!("Parameter sweep (Random dataset):");
-    println!("  bench_vector sweep --dataset random --dim 1024 --num-vectors 100000 --num-queries 1000 --rabitq");
+    println!("  bench_vector sweep --dataset random --dim 1024 --num-vectors 100000 --num-queries 1000 --rabitq\n");
+
+    println!("Parameter sweep with Pareto frontier:");
+    println!("  bench_vector sweep --dataset laion --rabitq --show-pareto\n");
+
+    println!("Check RaBitQ distribution (√D scaling validation):");
+    println!("  bench_vector check-distribution --dataset random --dim 1024 --sample-size 1000");
 
     Ok(())
 }
