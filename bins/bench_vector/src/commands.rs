@@ -89,7 +89,7 @@ pub async fn download(args: DownloadArgs) -> Result<()> {
 
 #[derive(Parser)]
 pub struct IndexArgs {
-    /// Dataset: laion, sift, gist
+    /// Dataset: laion, sift, gist, random
     #[arg(long)]
     pub dataset: String,
 
@@ -101,7 +101,7 @@ pub struct IndexArgs {
     #[arg(long)]
     pub db_path: PathBuf,
 
-    /// Data directory (for dataset files)
+    /// Data directory (for dataset files, not used for 'random')
     #[arg(long, default_value = "./data")]
     pub data_dir: PathBuf,
 
@@ -124,6 +124,14 @@ pub struct IndexArgs {
     /// Use L2/Euclidean distance
     #[arg(long)]
     pub l2: bool,
+
+    /// Vector dimension (only for 'random' dataset)
+    #[arg(long, default_value = "1024")]
+    pub dim: usize,
+
+    /// Random seed (only for 'random' dataset)
+    #[arg(long, default_value = "42")]
+    pub seed: u64,
 }
 
 pub async fn index(args: IndexArgs) -> Result<()> {
@@ -141,7 +149,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     } else {
         // Auto-detect from dataset
         match args.dataset.to_lowercase().as_str() {
-            "laion" | "cohere" => Distance::Cosine,
+            "laion" | "cohere" | "random" => Distance::Cosine,
             "sift" | "gist" => Distance::L2,
             _ => Distance::Cosine,
         }
@@ -149,7 +157,13 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     println!("Distance: {:?}", distance);
 
     // Load dataset
-    let (vectors, dim) = load_dataset_vectors(&args.dataset, &args.data_dir, args.num_vectors)?;
+    let (vectors, dim) = load_dataset_vectors_with_random(
+        &args.dataset,
+        &args.data_dir,
+        args.num_vectors,
+        args.dim,
+        args.seed,
+    )?;
     println!("Loaded {} vectors, dim={}", vectors.len(), dim);
 
     // Handle fresh start
@@ -672,7 +686,25 @@ fn load_dataset_vectors(
             let dim = benchmark::GIST_EMBEDDING_DIM;
             Ok((ds.base_vectors, dim))
         }
-        _ => anyhow::bail!("Unknown dataset: {}", dataset),
+        _ => anyhow::bail!("Unknown dataset: {}. Use: laion, sift, gist", dataset),
+    }
+}
+
+/// Load dataset vectors with support for random dataset generation.
+fn load_dataset_vectors_with_random(
+    dataset: &str,
+    data_dir: &PathBuf,
+    max_vectors: usize,
+    dim: usize,
+    seed: u64,
+) -> Result<(Vec<Vec<f32>>, usize)> {
+    match dataset.to_lowercase().as_str() {
+        "random" => {
+            println!("Generating {} random vectors (dim={}, seed={})...", max_vectors, dim, seed);
+            let ds = RandomDataset::generate(max_vectors, 0, dim, seed);
+            Ok((ds.vectors, ds.dim))
+        }
+        _ => load_dataset_vectors(dataset, data_dir, max_vectors),
     }
 }
 

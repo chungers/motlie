@@ -67,14 +67,18 @@ bench_vector download --dataset <name> --data-dir <path>
 Creates a persistent HNSW index with incremental checkpoint support.
 
 ```bash
+# Index LAION dataset
 bench_vector index --dataset laion --num-vectors 100000 --db-path ./bench_db
+
+# Index random synthetic vectors
+bench_vector index --dataset random --num-vectors 100000 --dim 512 --db-path ./random_db
 ```
 
 **Options:**
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--dataset` | Required | Dataset name |
+| `--dataset` | Required | Dataset name (`laion`, `sift`, `gist`, `random`) |
 | `--num-vectors` | Required | Number of vectors to index |
 | `--db-path` | Required | RocksDB storage path |
 | `--data-dir` | `./data` | Dataset files location |
@@ -83,6 +87,8 @@ bench_vector index --dataset laion --num-vectors 100000 --db-path ./bench_db
 | `--fresh` | false | Delete existing index and start fresh |
 | `--cosine` | auto | Force cosine distance |
 | `--l2` | auto | Force L2/Euclidean distance |
+| `--dim` | 1024 | Vector dimension (random only) |
+| `--seed` | 42 | RNG seed for reproducibility (random only) |
 
 **Why incremental?** Building large indices takes hours. The `index` command saves metadata checkpoints, allowing you to resume after interruption.
 
