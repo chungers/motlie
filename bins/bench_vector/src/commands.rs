@@ -434,6 +434,14 @@ pub struct SweepArgs {
     /// Results output directory
     #[arg(long, default_value = "./results")]
     pub results_dir: PathBuf,
+
+    /// Use SIMD-optimized dot products (default: true)
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub simd_dot: bool,
+
+    /// Compare SIMD vs scalar (runs sweep twice)
+    #[arg(long)]
+    pub compare_simd: bool,
 }
 
 pub async fn sweep(args: SweepArgs) -> Result<()> {
@@ -547,21 +555,61 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
     std::fs::create_dir_all(&args.results_dir)?;
 
     if args.rabitq {
-        // RaBitQ sweep
-        run_rabitq_sweep(
-            &index,
-            &storage,
-            &db_vectors,
-            &queries,
-            &ground_truth,
-            &ef_values,
-            &k_values,
-            &bits_values,
-            &rerank_values,
-            dim,
-            build_time,
-            &args.results_dir,
-        )?;
+        if args.compare_simd {
+            // Run both SIMD and scalar modes for comparison
+            println!("\n=== SIMD vs Scalar Comparison ===\n");
+
+            println!("--- SIMD Mode ---");
+            run_rabitq_sweep(
+                &index,
+                &storage,
+                &db_vectors,
+                &queries,
+                &ground_truth,
+                &ef_values,
+                &k_values,
+                &bits_values,
+                &rerank_values,
+                dim,
+                build_time,
+                &args.results_dir,
+                true, // use_simd_dot
+            )?;
+
+            println!("\n--- Scalar Mode ---");
+            run_rabitq_sweep(
+                &index,
+                &storage,
+                &db_vectors,
+                &queries,
+                &ground_truth,
+                &ef_values,
+                &k_values,
+                &bits_values,
+                &rerank_values,
+                dim,
+                build_time,
+                &args.results_dir,
+                false, // use_simd_dot
+            )?;
+        } else {
+            // Single mode sweep
+            run_rabitq_sweep(
+                &index,
+                &storage,
+                &db_vectors,
+                &queries,
+                &ground_truth,
+                &ef_values,
+                &k_values,
+                &bits_values,
+                &rerank_values,
+                dim,
+                build_time,
+                &args.results_dir,
+                args.simd_dot,
+            )?;
+        }
     } else {
         // Standard HNSW sweep
         run_hnsw_sweep(
@@ -707,17 +755,19 @@ fn run_rabitq_sweep(
     dim: usize,
     build_time: f64,
     results_dir: &PathBuf,
+    use_simd_dot: bool,
 ) -> Result<()> {
-    println!("\n=== RaBitQ Parameter Sweep ===");
+    let simd_mode = if use_simd_dot { "SIMD" } else { "scalar" };
+    println!("\n=== RaBitQ Parameter Sweep ({}) ===", simd_mode);
 
     let embedding_code: EmbeddingCode = 1;
     let mut all_results: Vec<RabitqExperimentResult> = Vec::new();
 
     for &bits in bits_values {
-        println!("\n--- {} bits/dim ---", bits);
+        println!("\n--- {} bits/dim ({}) ---", bits, simd_mode);
 
-        // Create encoder
-        let encoder = RaBitQ::new(dim, bits, 42);
+        // Create encoder with SIMD option
+        let encoder = RaBitQ::with_options(dim, bits, 42, use_simd_dot);
 
         // Build binary code cache
         let cache = BinaryCodeCache::new();
