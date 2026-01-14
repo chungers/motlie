@@ -61,6 +61,9 @@ pub use dataset::{
     GistDataset, GistSubset, GIST_BASE_VECTORS, GIST_EMBEDDING_DIM, GIST_QUERIES,
 };
 
+// Re-exports for public API - Random (synthetic)
+pub use dataset::{compute_ground_truth_parallel, RandomDataset};
+
 // Re-exports for public API - Parquet datasets (optional)
 #[cfg(feature = "parquet")]
 pub use dataset::{

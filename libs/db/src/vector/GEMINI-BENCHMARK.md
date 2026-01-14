@@ -64,9 +64,9 @@ Add support for the following datasets to validate RaBitQ robustness:
 | **GIST-1M** | 960 | L2 | High-dimensional, unnormalized. | ✅ Implemented |
 | **GloVe-100** | 100 | Cosine | Angular distance, standard NLP benchmark. | ✅ Implemented (hdf5) |
 | **Cohere/OpenAI** | 768/1536 | Cosine | Modern high-dim embedding distributions. | ✅ Implemented (parquet) |
-| **Random (Unit)**| 1024 | Cosine | "Worst case" for ranking (equidistant). | ❌ Missing |
+| **Random (Unit)**| 1024 | Cosine | "Worst case" for ranking (equidistant). | ✅ Implemented |
 
-**Status: ⚠️ Partial.** Real-world datasets are implemented, but the synthetic `RandomDataset` was not ported.
+**Status: ✅ Complete.** All datasets including synthetic `RandomDataset` are now implemented.
 
 ### 2.4 Metrics Enhancements
 
@@ -79,7 +79,7 @@ Add support for the following datasets to validate RaBitQ robustness:
 
 ### Step 1: Promote Random Dataset
 Move `RandomDataset` generation logic from `examples/vector2/benchmark.rs` to `libs/db/src/vector/benchmark/dataset.rs`.
-**Status: ❌ Not Started.**
+**Status: ✅ Complete.** `RandomDataset` added to `dataset.rs` with parallel ground truth computation.
 
 ### Step 2: HDF5/Parquet Support
 Many modern benchmarks (ann-benchmarks) use HDF5. Add optional `hdf5` feature to load these directly.
@@ -121,7 +121,7 @@ Once implemented, run the following suite to finalize tuning:
 
 ## 5. Post-Implementation Recommendations
 
-1.  **Implement `RandomDataset`:** Add the synthetic generator to `libs/db` to allow unit-testing of scaling laws and worst-case ranking behavior without requiring external downloads.
+1.  ~~**Implement `RandomDataset`:**~~ ✅ **DONE** - `RandomDataset` added to `libs/db/src/vector/benchmark/dataset.rs` with CLI support via `--dataset random`.
 2.  **Add `check-distribution` Command:** Add a CLI command to sample vectors, apply RaBitQ rotation, and report component variance. This is critical to verifying the $\sqrt{D}$ scaling fix works on novel distributions (like GIST or Cohere).
 3.  **Automated Pareto Reporter:** Add a tool (or CLI subcommand) that consumes the `rabitq_results.csv` and outputs the optimal configuration for specific recall targets (e.g., "Best config for 95% recall: bits=4, rerank=12").
 

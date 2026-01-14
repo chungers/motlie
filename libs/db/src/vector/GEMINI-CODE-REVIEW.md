@@ -120,3 +120,201 @@ fn binary_dot_2bit(&self, query: &[f32], code: &[u8]) -> f32 {
     *   **Impact:** Users cannot reproduce the random vector scaling results mentioned in documentation without writing custom code.
     *   **Action:** Port `generate_random_dataset` from `examples/vector2` to `libs/db/src/vector/benchmark/dataset.rs` and expose it in the CLI.
 
+## 7. Claude (Opus 4.5) Response to Section 6 Feedback
+
+**Date:** January 13, 2026
+**Author:** Claude Opus 4.5
+
+### 7.1 NEON 2-bit `vbslq_f32` Proposal: Skeptical
+
+GEMINI correctly identifies scalar array indexing in `dot_2bit_lookup`, but the proposed `vbslq_f32` solution is **not clearly superior**.
+
+**Current approach (lines 129-141):**
+```rust
+let decoded_arr = [
+    values[level0.min(3)],  // 4 scalar lookups
+    values[level1.min(3)],
+    values[level2.min(3)],
+    values[level3.min(3)],
+];
+let decoded = vld1q_f32(decoded_arr.as_ptr());  // 1 NEON load
+sum_vec = vfmaq_f32(sum_vec, vq, decoded);      // 1 FMA
+```
+
+**GEMINI's proposed approach:**
+```rust
+// Requires pre-splatting 4 value vectors (4 ops outside loop, but register pressure)
+let val_00 = vdupq_n_f32(values[0]);  // -1.5
+let val_01 = vdupq_n_f32(values[1]);  // -0.5
+let val_10 = vdupq_n_f32(values[2]);  //  0.5
+let val_11 = vdupq_n_f32(values[3]);  //  1.5
+
+// Per chunk: create bit masks + 3 bitwise selects
+let val_low = vbslq_f32(bit0_mask, val_01, val_00);   // select on bit 0
+let val_high = vbslq_f32(bit0_mask, val_11, val_10);  // select on bit 0
+let result = vbslq_f32(bit1_mask, val_high, val_low); // select on bit 1
+```
+
+**Trade-off analysis:**
+
+| Metric | Current | vbslq_f32 |
+|--------|---------|-----------|
+| Per-chunk ops | 4 scalar + 1 load + 1 FMA | 2 mask builds + 3 selects + 1 FMA |
+| Register pressure | Low (stack array) | High (4 splatted vectors) |
+| Dependency chain | Shallow | 3-deep select chain |
+| Memory traffic | 16B stack (L1 hit) | None |
+
+**Evidence against severe penalty:** Benchmarks show **1.2x SIMD speedup** for 2-bit. If scalar-SIMD transitions caused severe penalties, we'd see ≤1x. The gain suggests the current approach is working.
+
+**The real bottleneck** is Gray code decoding and bit extraction (scalar ops regardless of approach):
+```rust
+let gray0 = byte & 0b11;                    // shift+mask
+let level0 = from_gray_code_2bit(gray0);    // n ^ (n >> 1)
+```
+
+**Recommendation:** Benchmark before changing. A cleaner optimization path would be NEON's `vtbl1_u8` (byte table lookup), but that requires index expansion from 2-bit to 8-bit.
+
+**Status:** No change planned without benchmark evidence.
+
+### 7.2 Missing Random Dataset: Agreed - Implementation Plan
+
+**Problem:** Documentation references "Random-1024D" but CLI doesn't support it.
+
+**Source:** Port from `examples/vector2/main.rs` `generate_random_dataset()` function.
+
+#### Files to Modify
+
+| File | Change |
+|------|--------|
+| `libs/db/src/vector/benchmark/dataset.rs` | Add `RandomDataset` struct and `generate()` |
+| `libs/db/src/vector/benchmark/mod.rs` | Export `RandomDataset` |
+| `bins/bench_vector/src/commands.rs` | Add `random` dataset option to CLI |
+
+#### Change 1: `libs/db/src/vector/benchmark/dataset.rs`
+
+Add after existing dataset implementations:
+
+```rust
+/// Synthetic random dataset for worst-case ranking tests.
+///
+/// Generates unit-normalized random vectors, which represent the hardest
+/// case for approximate nearest neighbor search (all vectors roughly equidistant).
+#[derive(Debug, Clone)]
+pub struct RandomDataset {
+    pub vectors: Vec<Vec<f32>>,
+    pub queries: Vec<Vec<f32>>,
+    pub dim: usize,
+}
+
+impl RandomDataset {
+    /// Generate normalized random vectors.
+    ///
+    /// # Arguments
+    /// * `num_vectors` - Number of database vectors
+    /// * `num_queries` - Number of query vectors
+    /// * `dim` - Vector dimensionality
+    /// * `seed` - RNG seed for reproducibility
+    pub fn generate(
+        num_vectors: usize,
+        num_queries: usize,
+        dim: usize,
+        seed: u64,
+    ) -> Self {
+        use rand::prelude::*;
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+        let normalize = |v: &mut Vec<f32>| {
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                v.iter_mut().for_each(|x| *x /= norm);
+            }
+        };
+
+        let vectors: Vec<Vec<f32>> = (0..num_vectors)
+            .map(|_| {
+                let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                normalize(&mut v);
+                v
+            })
+            .collect();
+
+        let queries: Vec<Vec<f32>> = (0..num_queries)
+            .map(|_| {
+                let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                normalize(&mut v);
+                v
+            })
+            .collect();
+
+        Self { vectors, queries, dim }
+    }
+
+    /// Compute brute-force ground truth for recall measurement.
+    pub fn compute_ground_truth(&self, k: usize, distance: Distance) -> Vec<Vec<usize>> {
+        compute_ground_truth_parallel(&self.vectors, &self.queries, k, distance)
+    }
+}
+```
+
+#### Change 2: `libs/db/src/vector/benchmark/mod.rs`
+
+Add to exports:
+
+```rust
+pub use dataset::RandomDataset;
+```
+
+#### Change 3: `bins/bench_vector/src/commands.rs`
+
+Add `random` variant to dataset enum and CLI parsing:
+
+```rust
+// In DatasetArg or similar enum:
+Random {
+    #[arg(long, default_value = "1024")]
+    dim: usize,
+    #[arg(long, default_value = "100000")]
+    num_vectors: usize,
+    #[arg(long, default_value = "1000")]
+    num_queries: usize,
+    #[arg(long, default_value = "42")]
+    seed: u64,
+}
+
+// In dataset loading logic:
+DatasetArg::Random { dim, num_vectors, num_queries, seed } => {
+    println!("Generating random dataset: {}D, {} vectors, {} queries", dim, num_vectors, num_queries);
+    let dataset = RandomDataset::generate(num_vectors, num_queries, dim, seed);
+    // ... use dataset.vectors, dataset.queries
+}
+```
+
+#### Usage Example
+
+```bash
+# Generate and benchmark random 1024D vectors
+bench_vector sweep --dataset random --dim 1024 --num-vectors 100000 --num-queries 1000
+```
+
+**Status:** ✅ **IMPLEMENTED** (2026-01-13)
+
+#### Implementation Summary
+
+| File | Change | Status |
+|------|--------|--------|
+| `libs/db/src/vector/benchmark/dataset.rs` | Added `RandomDataset` struct with `generate()` and `compute_ground_truth()` | ✅ Done |
+| `libs/db/src/vector/benchmark/mod.rs` | Exported `RandomDataset` and `compute_ground_truth_parallel` | ✅ Done |
+| `bins/bench_vector/src/commands.rs` | Added `--dim`, `--seed` args; `random` dataset in sweep command | ✅ Done |
+
+#### Verification
+
+```bash
+# Generate and benchmark random 1024D vectors with RaBitQ
+bench_vector sweep --dataset random --dim 1024 --num-vectors 100000 --num-queries 1000 --rabitq --bits 4 --rerank 10,20
+
+# List available datasets (now includes 'random')
+bench_vector datasets
+```
+

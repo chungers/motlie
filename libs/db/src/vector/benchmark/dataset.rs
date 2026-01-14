@@ -1133,10 +1133,152 @@ impl GloveSubset {
 }
 
 // ============================================================================
+// Random Dataset (Synthetic)
+// ============================================================================
+
+/// Synthetic random dataset for worst-case ranking tests.
+///
+/// Generates unit-normalized random vectors, which represent the hardest
+/// case for approximate nearest neighbor search (all vectors roughly equidistant).
+/// Useful for stress-testing RaBitQ and validating scaling behavior.
+///
+/// ## Properties
+/// - Configurable dimensions (e.g., 1024D)
+/// - Unit-normalized vectors (Cosine distance)
+/// - Deterministic via seed for reproducibility
+/// - No external data download required
+#[derive(Debug, Clone)]
+pub struct RandomDataset {
+    /// Database vectors.
+    pub vectors: Vec<Vec<f32>>,
+    /// Query vectors.
+    pub queries: Vec<Vec<f32>>,
+    /// Embedding dimension.
+    pub dim: usize,
+}
+
+impl RandomDataset {
+    /// Generate normalized random vectors.
+    ///
+    /// Creates a synthetic dataset with unit-normalized random vectors.
+    /// This represents a worst-case scenario for ANN algorithms since
+    /// random unit vectors are roughly equidistant in high dimensions.
+    ///
+    /// # Arguments
+    /// * `num_vectors` - Number of database vectors
+    /// * `num_queries` - Number of query vectors
+    /// * `dim` - Vector dimensionality
+    /// * `seed` - RNG seed for reproducibility
+    ///
+    /// # Example
+    /// ```ignore
+    /// let dataset = RandomDataset::generate(100_000, 1_000, 1024, 42);
+    /// let ground_truth = dataset.compute_ground_truth(10, Distance::Cosine);
+    /// ```
+    pub fn generate(num_vectors: usize, num_queries: usize, dim: usize, seed: u64) -> Self {
+        use rand::prelude::*;
+        use rand_chacha::ChaCha8Rng;
+
+        println!(
+            "Generating random dataset: {} vectors, {} queries, {}D, seed={}",
+            num_vectors, num_queries, dim, seed
+        );
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+        let normalize = |v: &mut Vec<f32>| {
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                v.iter_mut().for_each(|x| *x /= norm);
+            }
+        };
+
+        let vectors: Vec<Vec<f32>> = (0..num_vectors)
+            .map(|_| {
+                let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                normalize(&mut v);
+                v
+            })
+            .collect();
+
+        let queries: Vec<Vec<f32>> = (0..num_queries)
+            .map(|_| {
+                let mut v: Vec<f32> = (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect();
+                normalize(&mut v);
+                v
+            })
+            .collect();
+
+        println!(
+            "  Generated {} vectors + {} queries",
+            vectors.len(),
+            queries.len()
+        );
+
+        Self {
+            vectors,
+            queries,
+            dim,
+        }
+    }
+
+    /// Compute brute-force ground truth for recall measurement.
+    ///
+    /// Returns top-k indices for each query using exact distance computation.
+    pub fn compute_ground_truth(&self, k: usize, distance: Distance) -> Vec<Vec<usize>> {
+        compute_ground_truth_parallel(&self.vectors, &self.queries, k, distance)
+    }
+
+    /// Number of database vectors.
+    pub fn num_vectors(&self) -> usize {
+        self.vectors.len()
+    }
+
+    /// Number of queries.
+    pub fn num_queries(&self) -> usize {
+        self.queries.len()
+    }
+}
+
+// ============================================================================
 // Shared Ground Truth Computation
 // ============================================================================
 
-/// Compute brute-force ground truth for a batch of queries.
+/// Compute brute-force ground truth for a batch of queries (parallel).
+///
+/// Uses rayon for parallel computation when available.
+pub fn compute_ground_truth_parallel(
+    db_vectors: &[Vec<f32>],
+    queries: &[Vec<f32>],
+    k: usize,
+    distance: Distance,
+) -> Vec<Vec<usize>> {
+    use rayon::prelude::*;
+
+    println!(
+        "Computing brute-force ground truth (k={}, {:?}, parallel)...",
+        k, distance
+    );
+
+    let results: Vec<Vec<usize>> = queries
+        .par_iter()
+        .map(|query| {
+            let mut distances: Vec<(usize, f32)> = db_vectors
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (i, distance.compute(query, v)))
+                .collect();
+
+            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            distances.iter().take(k).map(|(i, _)| *i).collect()
+        })
+        .collect();
+
+    println!("  Computed ground truth for {} queries", results.len());
+    results
+}
+
+/// Compute brute-force ground truth for a batch of queries (sequential).
 fn compute_ground_truth_batch(
     db_vectors: &[Vec<f32>],
     queries: &[Vec<f32>],
@@ -1191,6 +1333,44 @@ pub fn normalize_all(vectors: &[Vec<f32>]) -> Vec<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_random_dataset_generate() {
+        let dataset = RandomDataset::generate(100, 10, 128, 42);
+
+        assert_eq!(dataset.vectors.len(), 100);
+        assert_eq!(dataset.queries.len(), 10);
+        assert_eq!(dataset.dim, 128);
+
+        // Verify vectors are normalized (unit length)
+        for v in &dataset.vectors {
+            let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-5, "Vector not normalized: {}", norm);
+        }
+
+        // Verify determinism with same seed
+        let dataset2 = RandomDataset::generate(100, 10, 128, 42);
+        assert_eq!(dataset.vectors[0], dataset2.vectors[0]);
+
+        // Verify different seeds produce different vectors
+        let dataset3 = RandomDataset::generate(100, 10, 128, 43);
+        assert_ne!(dataset.vectors[0], dataset3.vectors[0]);
+    }
+
+    #[test]
+    fn test_random_dataset_ground_truth() {
+        let dataset = RandomDataset::generate(50, 5, 64, 42);
+        let gt = dataset.compute_ground_truth(10, Distance::Cosine);
+
+        assert_eq!(gt.len(), 5); // One per query
+        for topk in &gt {
+            assert_eq!(topk.len(), 10); // k=10
+            // All indices should be in range
+            for &idx in topk {
+                assert!(idx < 50);
+            }
+        }
+    }
 
     #[test]
     fn test_normalize() {
