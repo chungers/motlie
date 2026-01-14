@@ -325,8 +325,8 @@ fn beam_search_layer0_adc_cached(
     let mut visited = RoaringBitmap::new();
 
     // Get entry point's ADC distance from cache
-    let entry_dist = if let Some((code, correction)) = code_cache.get(index.embedding(), entry) {
-        encoder.adc_distance(query_rotated, query_norm, &code, &correction)
+    let entry_dist = if let Some(entry_code) = code_cache.get(index.embedding(), entry) {
+        encoder.adc_distance(query_rotated, query_norm, &entry_code.code, &entry_code.correction)
     } else {
         f32::MAX // No cached code, use max distance
     };
@@ -364,8 +364,8 @@ fn beam_search_layer0_adc_cached(
         for (neighbor, code_opt) in unvisited.into_iter().zip(codes.into_iter()) {
             visited.insert(neighbor);
 
-            let dist = if let Some((code, correction)) = code_opt {
-                encoder.adc_distance(query_rotated, query_norm, &code, &correction)
+            let dist = if let Some(entry) = code_opt {
+                encoder.adc_distance(query_rotated, query_norm, &entry.code, &entry.correction)
             } else {
                 f32::MAX // No cached code, skip (shouldn't happen if cache is populated)
             };
