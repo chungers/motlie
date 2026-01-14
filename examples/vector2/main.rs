@@ -133,6 +133,11 @@ struct Args {
     #[arg(long)]
     adc: bool,
 
+    /// Use SIMD-optimized dot products (default: true).
+    /// Pass --no-simd-dot to use scalar implementation for comparison.
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    simd_dot: bool,
+
     /// Force fresh start (delete existing index and start over)
     /// Without this flag, incremental builds will add vectors to existing index
     #[arg(long)]
@@ -219,6 +224,7 @@ async fn main() -> Result<()> {
         if args.adc {
             println!("  ADC Mode:        enabled (query stays float32)");
         }
+        println!("  SIMD Dot:        {}", if args.simd_dot { "enabled" } else { "disabled (scalar)" });
     }
     println!();
 
@@ -414,7 +420,7 @@ async fn run_phase2_benchmark(
     // Create RaBitQ encoder for binary code generation (if rabitq_cached enabled)
     let build_encoder = if args.rabitq_cached {
         let dim = benchmark_data.map(|d| d.dimensions).unwrap_or(128);
-        Some(RaBitQ::new(dim, args.bits_per_dim, 42))
+        Some(RaBitQ::with_options(dim, args.bits_per_dim, 42, args.simd_dot))
     } else {
         None
     };

@@ -37,6 +37,16 @@ pub struct RaBitQConfig {
 
     /// Enable RaBitQ (can be disabled for full-precision search).
     pub enabled: bool,
+
+    /// Use SIMD-optimized dot products from motlie_core::distance::quantized.
+    /// When true (default), uses AVX2/NEON accelerated implementations.
+    /// When false, uses local scalar implementation for debugging/comparison.
+    #[serde(default = "default_use_simd")]
+    pub use_simd_dot: bool,
+}
+
+fn default_use_simd() -> bool {
+    true
 }
 
 impl Default for RaBitQConfig {
@@ -45,6 +55,7 @@ impl Default for RaBitQConfig {
             bits_per_dim: 1,
             rotation_seed: 42,
             enabled: true,
+            use_simd_dot: true,
         }
     }
 }

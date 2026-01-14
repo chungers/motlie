@@ -42,6 +42,12 @@
 
 mod scalar;
 
+/// Quantized dot product operations for ADC (Asymmetric Distance Computation).
+///
+/// Provides SIMD-optimized functions for computing dot products between
+/// float query vectors and packed binary codes (1-bit, 2-bit, 4-bit).
+pub mod quantized;
+
 #[cfg(all(target_arch = "x86_64", any(simd_level = "avx2", simd_level = "runtime")))]
 mod avx2;
 

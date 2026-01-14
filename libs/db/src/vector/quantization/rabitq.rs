@@ -32,6 +32,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
 use crate::vector::config::RaBitQConfig;
+use motlie_core::distance::quantized as simd_quantized;
 
 /// RaBitQ binary quantization encoder.
 ///
@@ -48,6 +49,9 @@ pub struct RaBitQ {
 
     /// Bits per dimension (1, 2, or 4).
     bits_per_dim: u8,
+
+    /// Use SIMD-optimized dot products from motlie_core::distance::quantized.
+    use_simd_dot: bool,
 }
 
 impl std::fmt::Debug for RaBitQ {
@@ -56,12 +60,13 @@ impl std::fmt::Debug for RaBitQ {
             .field("dim", &self.dim)
             .field("bits_per_dim", &self.bits_per_dim)
             .field("rotation_size", &self.rotation.len())
+            .field("use_simd_dot", &self.use_simd_dot)
             .finish()
     }
 }
 
 impl RaBitQ {
-    /// Create a new RaBitQ encoder.
+    /// Create a new RaBitQ encoder with SIMD enabled by default.
     ///
     /// # Arguments
     ///
@@ -73,6 +78,22 @@ impl RaBitQ {
     ///
     /// Panics if `dim` is 0 or `bits_per_dim` is not 1, 2, or 4.
     pub fn new(dim: usize, bits_per_dim: u8, seed: u64) -> Self {
+        Self::with_options(dim, bits_per_dim, seed, true)
+    }
+
+    /// Create a new RaBitQ encoder with explicit SIMD option.
+    ///
+    /// # Arguments
+    ///
+    /// * `dim` - Vector dimensionality (must be > 0)
+    /// * `bits_per_dim` - Bits per dimension (1, 2, or 4)
+    /// * `seed` - Random seed for rotation matrix generation
+    /// * `use_simd_dot` - Use SIMD-optimized dot products (true) or scalar (false)
+    ///
+    /// # Panics
+    ///
+    /// Panics if `dim` is 0 or `bits_per_dim` is not 1, 2, or 4.
+    pub fn with_options(dim: usize, bits_per_dim: u8, seed: u64, use_simd_dot: bool) -> Self {
         assert!(dim > 0, "Dimension must be positive");
         assert!(
             bits_per_dim == 1 || bits_per_dim == 2 || bits_per_dim == 4,
@@ -85,12 +106,13 @@ impl RaBitQ {
             rotation,
             dim,
             bits_per_dim,
+            use_simd_dot,
         }
     }
 
     /// Create a RaBitQ encoder from configuration.
     pub fn from_config(dim: usize, config: &RaBitQConfig) -> Self {
-        Self::new(dim, config.bits_per_dim, config.rotation_seed)
+        Self::with_options(dim, config.bits_per_dim, config.rotation_seed, config.use_simd_dot)
     }
 
     /// Get the dimensionality.
@@ -547,14 +569,35 @@ impl RaBitQ {
 
     /// Compute binary dot product: float query × binary code.
     ///
-    /// Dispatches to bit-width specific implementation.
+    /// Dispatches to SIMD-optimized (motlie_core) or scalar implementation
+    /// based on `use_simd_dot` configuration.
     #[inline]
     pub fn binary_dot_product(&self, query: &[f32], code: &[u8]) -> f32 {
-        match self.bits_per_dim {
-            1 => self.binary_dot_1bit(query, code),
-            2 => self.binary_dot_2bit(query, code),
-            4 => self.binary_dot_4bit(query, code),
-            _ => unreachable!(),
+        if self.use_simd_dot {
+            // Use SIMD-optimized implementations from motlie_core
+            match self.bits_per_dim {
+                1 => simd_quantized::dot_1bit(query, code),
+                2 => simd_quantized::dot_2bit_lookup(
+                    query,
+                    code,
+                    &simd_quantized::rabitq::LEVEL_VALUES_2BIT,
+                ),
+                4 => simd_quantized::dot_4bit_linear(
+                    query,
+                    code,
+                    simd_quantized::rabitq::SCALE_4BIT,
+                    simd_quantized::rabitq::OFFSET_4BIT,
+                ),
+                _ => unreachable!(),
+            }
+        } else {
+            // Use local scalar implementations
+            match self.bits_per_dim {
+                1 => self.binary_dot_1bit(query, code),
+                2 => self.binary_dot_2bit(query, code),
+                4 => self.binary_dot_4bit(query, code),
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -970,6 +1013,7 @@ mod tests {
             bits_per_dim: 2,
             rotation_seed: 123,
             enabled: true,
+            ..Default::default()
         };
 
         let encoder = RaBitQ::from_config(768, &config);
