@@ -15,5 +15,5 @@
 mod binary_codes;
 mod navigation;
 
-pub use binary_codes::BinaryCodeCache;
+pub use binary_codes::{BinaryCodeCache, BinaryCodeEntry};
 pub use navigation::{NavigationCache, NavigationCacheConfig, NavigationLayerInfo};

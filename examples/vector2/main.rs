@@ -651,9 +651,9 @@ async fn run_phase2_benchmark(
             // Compute ADC distance to all vectors
             let mut adc_candidates: Vec<(f32, VecId)> = Vec::with_capacity(args.num_vectors);
             for vec_id in 0..args.num_vectors as VecId {
-                // Cache now stores (code, correction) tuples directly
-                if let Some((code, correction)) = cache.get(embedding_code, vec_id) {
-                    let adc_dist = encoder.adc_distance(&query_rotated, query_norm, &code, &correction);
+                // Cache returns Arc<BinaryCodeEntry> for zero-copy access
+                if let Some(entry) = cache.get(embedding_code, vec_id) {
+                    let adc_dist = encoder.adc_distance(&query_rotated, query_norm, &entry.code, &entry.correction);
                     adc_candidates.push((adc_dist, vec_id));
                 }
             }

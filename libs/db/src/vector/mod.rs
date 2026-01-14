@@ -92,7 +92,7 @@ pub mod search_config {
 }
 
 // Re-exports for public API
-pub use cache::{BinaryCodeCache, NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
+pub use cache::{BinaryCodeCache, BinaryCodeEntry, NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
 pub use config::{RaBitQConfig, RaBitQConfigWarning, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
