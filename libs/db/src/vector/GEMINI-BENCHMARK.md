@@ -8,8 +8,8 @@
 
 **Overall Status:** Mostly Complete. The core infrastructure, CLI tool, and major datasets are implemented.
 
-**Missing Items:**
-1.  **Random Dataset:** The synthetic random vector generator was not promoted from `examples/vector2` to the benchmark library. This limits lightweight testing.
+**Missing Items & Inconsistencies:**
+1.  **Random Dataset (Inconsistency):** `BENCHMARK2.md` includes "Random (Unit)" in the Experiment Matrix and results, but the `bench_vector` CLI **does not support** the `random` dataset. The synthetic generator exists only in `examples/vector2`, not in the shared library.
 2.  **Distribution Metrics:** Logic to compute/log post-rotation vector component variance is missing.
 
 ---
