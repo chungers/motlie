@@ -99,3 +99,24 @@ fn binary_dot_2bit(&self, query: &[f32], code: &[u8]) -> f32 {
     motlie_core::distance::quantized::dot_2bit_lookup(query, code, &LEVEL_VALUES)
 }
 ```
+
+## 6. Implementation Feedback (Post-SIMD Review)
+
+**Date:** January 13, 2026
+
+### 6.1 Code Implementation (`motlie_core`)
+*   **NEON 2-bit Optimization:** The current `dot_2bit_lookup` in `neon.rs` uses scalar array indexing (`values[level]`) inside the vector loop. This causes scalar-vector pipeline transition penalties.
+    *   **Recommendation:** Use `vbslq_f32` (Bitwise Select) to construct the result vector without leaving SIMD registers. Since there are only 4 possible values based on 2 bits, we can select between splatted constants:
+        ```rust
+        // Pseudo-code
+        let val_low = vbslq_f32(bit0_mask, val_01, val_00);
+        let val_high = vbslq_f32(bit0_mask, val_11, val_10);
+        let result = vbslq_f32(bit1_mask, val_high, val_low);
+        ```
+*   **AVX2 4-bit Optimization:** The `dot_4bit_linear` implementation uses `_mm256_cvtepi32_ps` which is efficient. Correct usage of `vfmadd`.
+
+### 6.2 CLI & Benchmarks
+*   **Missing Dataset:** `BENCHMARK2.md` references "Random-1024D (Unit)" tests, but the `bench_vector` CLI (`bins/bench_vector/src/commands.rs`) does not implement the `random` dataset option. It only supports `laion`, `sift`, `gist`, `cohere`, `glove`.
+    *   **Impact:** Users cannot reproduce the random vector scaling results mentioned in documentation without writing custom code.
+    *   **Action:** Port `generate_random_dataset` from `examples/vector2` to `libs/db/src/vector/benchmark/dataset.rs` and expose it in the CLI.
+
