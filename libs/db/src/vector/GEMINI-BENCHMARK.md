@@ -6,12 +6,12 @@
 
 ## 0. Implementation Status Summary (2026-01-13)
 
-**Overall Status:** ✅ Complete. All infrastructure, CLI tools, datasets, and diagnostic commands are implemented.
+**Overall Status:** ✅ Complete.
 
-**Resolved Items:**
-1.  ✅ **Random Dataset:** `RandomDataset` ported to shared library with CLI support (`--dataset random`).
-2.  ✅ **Distribution Metrics:** `check-distribution` command validates √D scaling on any dataset.
-3.  ✅ **Pareto Analysis:** `--show-pareto` flag displays optimal recall-QPS trade-offs after sweep.
+**Status Updates (Gemini Review):**
+1.  **Random Dataset:** **✅ Complete.** Implemented in library and supported in both `sweep` and `index` commands.
+2.  **Distribution Metrics:** **✅ Complete.** Implemented in `metrics.rs` and `check-distribution` command.
+3.  **Pareto Analysis:** **✅ Complete.** Implemented via `--show-pareto`.
 
 ---
 
@@ -134,4 +134,10 @@ Once implemented, run the following suite to finalize tuning:
     ```bash
     bench_vector sweep --dataset random --rabitq --show-pareto
     ```
+
+## 6. Final Recommendations (Post-Review)
+
+1.  **SIMD 2-bit Optimization:** Implement `vbslq_f32` (bitwise select) optimization for NEON 2-bit dot product in `libs/core/src/distance/quantized/neon.rs` to avoid scalar pipeline penalties.
+2.  **CLI Fix:** Update `bench_vector index` command to support `RandomDataset`. Currently, only `sweep` supports it; `index` fails because `load_dataset_vectors` lacks the "random" case.
+3.  **Deprecate Symmetric Hamming:** Officially mark `Symmetric` mode as deprecated in favor of `ADC` for multi-bit quantization in the next release cycle, given the clear superiority of ADC.
 
