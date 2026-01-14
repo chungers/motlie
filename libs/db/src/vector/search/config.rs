@@ -32,15 +32,15 @@ use crate::vector::embedding::Embedding;
 /// Search strategy - determines how distance computation is performed.
 ///
 /// Auto-selected based on `embedding.distance()`:
-/// - Cosine → RaBitQ (Hamming approximates angular distance)
-/// - L2/DotProduct → Exact (Hamming not compatible)
+/// - Cosine → RaBitQ (ADC approximates angular distance)
+/// - L2/DotProduct → Exact (ADC not compatible)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchStrategy {
     /// Exact distance computation at all layers.
     /// Works with all distance metrics.
     Exact,
 
-    /// RaBitQ: Hamming filtering at layer 0 + exact re-rank.
+    /// RaBitQ: ADC filtering at layer 0 + exact re-rank.
     /// Only valid when embedding.distance == Cosine.
     /// Requires BinaryCodeCache for good performance.
     RaBitQ {
@@ -145,8 +145,8 @@ impl SearchConfig {
     /// Create search config with automatic strategy selection.
     ///
     /// Strategy is chosen based on embedding's distance metric:
-    /// - Cosine → RaBitQ (Hamming approximates angular distance)
-    /// - L2/DotProduct → Exact (Hamming not compatible)
+    /// - Cosine → RaBitQ (ADC approximates angular distance)
+    /// - L2/DotProduct → Exact (ADC not compatible)
     ///
     /// # Arguments
     ///
@@ -198,11 +198,11 @@ impl SearchConfig {
     /// # Errors
     ///
     /// Returns error if `embedding.distance() != Cosine` because
-    /// Hamming distance only approximates angular (cosine) distance.
+    /// ADC distance only approximates angular (cosine) distance.
     pub fn rabitq(mut self) -> anyhow::Result<Self> {
         if self.embedding.distance() != Distance::Cosine {
             return Err(anyhow::anyhow!(
-                "RaBitQ requires Cosine distance (Hamming ≈ angular), got {:?}",
+                "RaBitQ requires Cosine distance (ADC ≈ angular), got {:?}",
                 self.embedding.distance()
             ));
         }
@@ -218,7 +218,7 @@ impl SearchConfig {
     pub fn rabitq_uncached(mut self) -> anyhow::Result<Self> {
         if self.embedding.distance() != Distance::Cosine {
             return Err(anyhow::anyhow!(
-                "RaBitQ requires Cosine distance (Hamming ≈ angular), got {:?}",
+                "RaBitQ requires Cosine distance (ADC ≈ angular), got {:?}",
                 self.embedding.distance()
             ));
         }

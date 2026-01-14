@@ -32,7 +32,7 @@ The vector module provides approximate nearest neighbor (ANN) search using the H
 
 - **HNSW Graph Index**: Hierarchical navigable small world graph for O(log n) search
 - **Multiple Distance Metrics**: Cosine, L2 (Euclidean), DotProduct
-- **RaBitQ Quantization**: Training-free binary codes for fast Hamming pre-filtering
+- **RaBitQ Quantization**: Training-free binary codes with ADC for fast approximate search
 - **Caching**: NavigationCache for layer traversal, BinaryCodeCache for RaBitQ codes
 - **Parallel Reranking**: Adaptive rayon parallelism for large candidate sets
 
@@ -240,10 +240,10 @@ for (distance, vec_id) in results {
 
 ### RaBitQ Search (Cosine Only)
 
-RaBitQ uses binary quantization for fast Hamming distance pre-filtering, then reranks top candidates with exact distance. **Only works with Cosine distance** because:
+RaBitQ uses binary quantization with ADC (Asymmetric Distance Computation) for fast approximate search, then reranks top candidates with exact distance. **Only works with Cosine distance** because:
 
 1. Sign quantization captures **direction**, not magnitude
-2. Hamming distance approximates **angular distance** for unit vectors
+2. ADC computes weighted dot products that approximate **angular distance**
 3. L2 on unnormalized data would lose magnitude information
 
 ```rust
@@ -252,28 +252,28 @@ use motlie_db::vector::{RaBitQ, BinaryCodeCache};
 // Initialize RaBitQ encoder
 let rabitq = RaBitQ::new(
     512,  // dimension
-    1,    // bits per dimension (1, 2, or 4)
+    4,    // bits per dimension (1, 2, or 4) - 4-bit recommended with ADC
     42,   // seed for rotation matrix
 );
 
 // Build binary code cache (in-memory for speed)
 let binary_cache = BinaryCodeCache::new();
 
-// Encode all vectors and cache
+// Encode all vectors with ADC correction factors
 for (id, vector) in vectors.iter().enumerate() {
     let vec_id = id as u32;
-    let code = rabitq.encode(vector);
-    binary_cache.put(embedding.code(), vec_id, code);
+    let (code, correction) = rabitq.encode_with_correction(vector);
+    binary_cache.put(embedding.code(), vec_id, code, correction);
 }
 
-// Two-phase search: Hamming filtering → exact reranking
+// Two-phase search: ADC navigation → exact reranking
 let results = index.search_with_rabitq_cached(
     &storage,
     &query,
     &rabitq,
     &binary_cache,
     k,              // top-k results
-    ef_search,      // beam width for Hamming search
+    ef_search,      // beam width for ADC search
     rerank_factor,  // candidates to rerank = k * rerank_factor
 )?;
 ```
@@ -282,19 +282,15 @@ let results = index.search_with_rabitq_cached(
 
 | Parameter | Value | Effect |
 |-----------|-------|--------|
-| `bits_per_dim` | 1 | 32x compression, **recommended** for Hamming search |
-| `bits_per_dim` | 2 | 16x compression, not recommended (see note) |
-| `bits_per_dim` | 4 | 8x compression, not recommended (see note) |
+| `bits_per_dim` | 1 | 32x compression, ~70% recall with ADC |
+| `bits_per_dim` | 2 | 16x compression, ~85% recall with ADC |
+| `bits_per_dim` | 4 | 8x compression, **recommended** - ~92-99% recall with ADC |
 | `rerank_factor` | 4-20 | Higher = better recall, more I/O |
 
-> **Important:** While 2-bit and 4-bit modes use Gray code encoding (Issue #43), symmetric
-> Hamming distance is fundamentally unsuited for multi-bit quantization. On structured data
-> like LAION-CLIP, multi-bit modes achieve **worse** recall than 1-bit. This is because
-> distant quantization levels can have lower Hamming distance than nearby levels.
->
-> **Recommendation:** Use 1-bit mode for RaBitQ. For higher precision, increase `rerank_factor`
-> rather than using more bits. Sign-based (1-bit) quantization directly approximates angular
-> distance for unit vectors, which is mathematically sound.
+> **Note:** The implementation uses ADC (Asymmetric Distance Computation), NOT symmetric
+> Hamming distance. ADC keeps the query as float32 and computes weighted dot products
+> with quantized codes, preserving numeric ordering. This achieves 91-99% recall with
+> 4-bit quantization vs only ~24% with symmetric Hamming. See RABITQ.md for details.
 
 ### Search Configuration
 
@@ -544,7 +540,7 @@ for (i, vector) in base_vectors.iter().enumerate() {
     binary_cache.put(embedding.code(), vec_id, code);
 }
 
-// 6. Two-phase search: Hamming pre-filter → exact rerank
+// 6. Two-phase search: ADC pre-filter → exact rerank
 let results = index.search_with_rabitq_cached(
     &storage,
     &query,
@@ -885,11 +881,15 @@ impl RaBitQ {
 
     // Encoding
     pub fn encode(&self, vector: &[f32]) -> Vec<u8>;
+    pub fn encode_with_correction(&self, vector: &[f32]) -> (Vec<u8>, AdcCorrection);
 
-    // Distance computation
+    // ADC Distance computation (recommended)
+    pub fn rotate_query(&self, query: &[f32]) -> Vec<f32>;
+    pub fn adc_distance(&self, query_rotated: &[f32], query_norm: f32,
+                        code: &[u8], correction: &AdcCorrection) -> f32;
+
+    // Hamming distance (legacy - not used in search, kept for diagnostics)
     pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32;
-    pub fn hamming_distance_fast(a: &[u8], b: &[u8]) -> u32;
-    pub fn batch_hamming_distances(query_code: &[u8], candidate_codes: &[&[u8]]) -> Vec<u32>;
 }
 ```
 

@@ -2445,7 +2445,6 @@ dependencies = [
  "num_cpus",
  "pathfinding",
  "petgraph",
- "plotters",
  "pmcp",
  "pulp",
  "rand 0.8.5",

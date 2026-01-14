@@ -291,10 +291,10 @@ fn test_laion_clip_cosine_exact_hnsw() -> anyhow::Result<()> {
 /// - LAION-CLIP dataset support in benchmark crate
 /// - Cosine distance metric
 /// - RaBitQ binary quantization
-/// - BinaryCodeCache for Hamming distance
+/// - BinaryCodeCache for ADC distance computation
 /// - NavigationCache for layer traversal
 /// - Adaptive parallel reranking
-/// - Two-phase search: Hamming pre-filtering + exact rerank
+/// - Two-phase search: ADC navigation + exact rerank
 #[test]
 fn test_laion_clip_cosine_rabitq_with_caches() -> anyhow::Result<()> {
     let temp_dir = TempDir::new()?;

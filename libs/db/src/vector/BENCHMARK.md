@@ -48,7 +48,7 @@ and `search/config.rs` for implementation details.
 
 **Search strategies**:
 - `SearchStrategy::Standard` - Full-precision distance during traversal
-- `SearchStrategy::RaBitQ` - Hamming filtering + exact rerank (requires `RaBitQ`)
+- `SearchStrategy::RaBitQ` - ADC filtering + exact rerank (requires `RaBitQ`)
 - `SearchStrategy::RaBitQCached` - Same with `BinaryCodeCache` (recommended)
 
 ### Parallel Reranking (`DEFAULT_PARALLEL_RERANK_THRESHOLD`)
@@ -302,7 +302,7 @@ a batch of candidates that could benefit from parallel reranking.
 search_with_rabitq_cached()
   ↓
   Phase 1: Greedy descent through upper layers (exact distance)
-  Phase 2: Beam search at layer 0 using Hamming distance (fast, approximate)
+  Phase 2: Beam search at layer 0 using ADC distance (fast, approximate)
   Phase 3: Collect top N candidates → rerank_parallel() ← threshold applies here
                                             ↓
                                       Batch exact distance computation
@@ -338,10 +338,6 @@ let results = rerank_adaptive(
 #### Threshold Tuning Results
 
 Benchmark on LAION-CLIP 512D embeddings (50K vectors, 500 queries):
-
-```bash
-cargo run --release --example laion_benchmark -- --rabitq-benchmark --rerank-sizes "50,100,200,400,800,1600,3200"
-```
 
 | Candidates | Seq (ms) | Seq QPS | Par (ms) | Par QPS | Speedup |
 |------------|----------|---------|----------|---------|---------|
@@ -390,21 +386,20 @@ based on these benchmarks. The threshold remains configurable via
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| `bits_per_dim` | 1 | 1-bit quantization (64 bytes for 512D) |
+| `bits_per_dim` | 4 | 4-bit quantization (256 bytes for 512D) - recommended with ADC |
 | `rotation_seed` | 42 | Deterministic orthogonal rotation matrix |
-| `rerank_factor` | 4 | Candidates = k × rerank_factor |
-| `ef_search` | 100-200 | Beam width for Hamming navigation |
+| `rerank_factor` | 4-10 | Candidates = k × rerank_factor |
+| `ef_search` | 100-200 | Beam width for ADC navigation |
 
-**Important**: RaBitQ requires **real embeddings** (CLIP, BERT, etc.) to work effectively.
-Random vectors show poor recall because Hamming distance doesn't correlate with
-actual distance without semantic structure.
+**Note**: RaBitQ now uses ADC (Asymmetric Distance Computation) which achieves 91-99% recall
+with 4-bit quantization. Random vectors work well because ADC preserves numeric ordering.
 
 #### To Benchmark with Parallel Reranking
 
-Run the RaBitQ benchmark which uses `search_with_rabitq_cached()`:
+Run the benchmark tool with RaBitQ:
 
 ```bash
-cargo run --release --example laion_benchmark -- --rabitq-benchmark
+bench_vector sweep --dataset laion --rabitq --bits 4 --rerank 4,10 --show-pareto
 ```
 
 This exercises the parallel reranking code path with configurable candidate sizes.
@@ -415,15 +410,15 @@ This exercises the parallel reranking code path with configurable candidate size
 
 | Metric | Standard HNSW | RaBitQ Cached | Notes |
 |--------|---------------|---------------|-------|
-| **Search Strategy** | Exact distance during traversal | Hamming nav + exact rerank | |
+| **Search Strategy** | Exact distance during traversal | ADC nav + exact rerank | |
 | **Code Path** | `index.search()` | `index.search_with_rabitq_cached()` | |
 | **Distance Compute** | Per-neighbor (incremental) | Batch rerank (parallelizable) | |
-| **Memory** | Vectors only | Vectors + binary codes | +64 bytes/vec (512D) |
+| **Memory** | Vectors only | Vectors + binary codes | +256 bytes/vec (512D, 4-bit) |
 | **Best For** | General use | High-throughput with real embeddings | |
 
 **When to use RaBitQ**:
 - Real embeddings (CLIP, BERT, Gemma, etc.)
-- Cosine/angular distance (Hamming ≈ angular)
+- Cosine/angular distance (ADC approximates angular)
 - High ef_search values where batch reranking helps
 - Memory-constrained environments (binary codes compress well)
 
@@ -456,38 +451,32 @@ This exercises the parallel reranking code path with configurable candidate size
 | 1M | ~50 | 100-200 | 2-4x |
 
 **Note**: RaBitQ speedup comes from:
-1. Hamming distance is ~10x faster than cosine (SIMD popcount)
-2. Binary codes fit in CPU cache (64 bytes vs 2KB per vector)
+1. ADC distance is ~5x faster than exact cosine (SIMD dot products on quantized codes)
+2. Binary codes fit in CPU cache (256 bytes vs 2KB per vector for 4-bit)
 3. Fewer exact distance computations (only top candidates)
 
 ## Running Benchmarks
 
-### LAION-CLIP Benchmark
+### bench_vector Tool
 
 ```bash
-# Download data (~2GB)
-cargo run --release --example laion_benchmark -- --download
+# Download LAION data (~2GB)
+bench_vector download --dataset laion --data-dir ./data
 
-# Run at specific scale
-cargo run --release --example laion_benchmark -- --scale 50000
+# Run parameter sweep with RaBitQ
+bench_vector sweep --dataset laion --num-vectors 50000 --rabitq --show-pareto
 
-# Run full suite (50K-200K)
-cargo run --release --example laion_benchmark -- --run-all
-
-# Generate charts from results
-cargo run --release --example laion_benchmark -- --charts-only
+# Check rotation quality on custom dataset
+bench_vector check-distribution --dataset random --dim 1024
 ```
 
 ### RaBitQ Benchmark
 
 ```bash
-# Parallel reranking threshold tuning
-cargo run --release --example laion_benchmark -- --rabitq-benchmark
+# RaBitQ parameter sweep
+bench_vector sweep --dataset laion --num-vectors 100000 --rabitq --bits 1,2,4 --rerank 4,10,20
 
-# With custom candidate sizes
-cargo run --release --example laion_benchmark -- --rabitq-benchmark --rerank-sizes "50,100,200,400,800,1600,3200"
-
-# RaBitQ search with vector2 (requires real embeddings for good recall)
+# RaBitQ search with vector2
 cargo run --release --example vector2 -- --num-vectors 10000 --cosine --rabitq-cached --rerank-factor 4
 ```
 
@@ -503,14 +492,16 @@ cargo run --release --example vector2 -- --dataset sift1m --num-vectors 100000
 
 ### Configuration Options
 
-#### LAION Benchmark (`laion_benchmark`)
+#### bench_vector Tool
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--scale` | 50000 | Number of vectors to index |
-| `--num-queries` | 500 | Number of search queries |
-| `--m` | 16 | HNSW connectivity parameter |
-| `--ef-construction` | 100 | Build-time beam width |
+| `--dataset` | Required | Dataset name (laion, sift, gist, random) |
+| `--num-vectors` | 100000 | Number of vectors to index |
+| `--num-queries` | 1000 | Number of search queries |
+| `--rabitq` | false | Enable RaBitQ mode |
+| `--bits` | 1,2,4 | Bits per dimension to sweep |
+| `--rerank` | 1,4,10,20 | Rerank factors to sweep |
 | `--rabitq-benchmark` | false | Run parallel reranking benchmark |
 | `--rerank-sizes` | "50,100,..." | Candidate sizes for rerank benchmark |
 
@@ -566,8 +557,8 @@ let results = run_all_experiments(&config)?;
 
 ## Historical Results
 
-Results are stored in `examples/laion_benchmark/results/` and
-`examples/vector2/results/` for tracking performance across versions.
+Results are stored in `examples/vector2/results/` for tracking performance across versions.
+Use `bench_vector sweep --results-dir ./results` to generate new benchmark data.
 
 | Date | Change | Impact |
 |------|--------|--------|

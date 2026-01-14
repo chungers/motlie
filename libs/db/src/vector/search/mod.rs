@@ -11,8 +11,8 @@
 //! The `Embedding` struct is the single source of truth for distance metrics.
 //! `SearchConfig` captures this and auto-selects the optimal search strategy:
 //!
-//! - Cosine → RaBitQ (Hamming approximates angular distance)
-//! - L2/DotProduct → Exact (Hamming not compatible)
+//! - Cosine → RaBitQ (ADC approximates angular distance)
+//! - L2/DotProduct → Exact (ADC not compatible)
 
 mod config;
 mod parallel;
