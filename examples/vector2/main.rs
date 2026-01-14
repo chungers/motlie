@@ -109,7 +109,7 @@ struct Args {
     cache_size_mb: usize,
 
     /// Enable RaBitQ with in-memory cached binary codes
-    /// Uses Hamming filtering at layer 0 + exact L2 re-ranking
+    /// Uses ADC (Asymmetric Distance Computation) at layer 0 + exact re-ranking
     #[arg(long)]
     rabitq_cached: bool,
 
@@ -123,13 +123,13 @@ struct Args {
 
     /// Use Cosine distance instead of L2
     /// Normalizes vectors and computes cosine ground truth
-    /// Enables optimal RaBitQ performance (Hamming ≈ angular)
+    /// Enables optimal RaBitQ performance (ADC works best with normalized vectors)
     #[arg(long)]
     cosine: bool,
 
-    /// Use ADC (Asymmetric Distance Computation) instead of symmetric Hamming.
+    /// Use brute-force ADC search instead of HNSW+ADC navigation.
     /// Requires --rabitq-cached. Query stays float32, uses weighted dot product.
-    /// This should fix multi-bit recall issues (see RABITQ.md).
+    /// Note: --rabitq-cached already uses ADC for HNSW navigation (not Hamming).
     #[arg(long)]
     adc: bool,
 
@@ -206,11 +206,11 @@ async fn main() -> Result<()> {
     println!("  Distance:        {}", distance_str);
     let search_mode_str = if args.rabitq_cached {
         if args.adc {
-            "rabitq-ADC (asymmetric distance + Cosine rerank)"
+            "rabitq-ADC (brute-force ADC + Cosine rerank)"
         } else if args.cosine {
-            "rabitq-cached (in-memory Hamming nav + Cosine rerank)"
+            "rabitq-cached (HNSW+ADC nav + Cosine rerank)"
         } else {
-            "rabitq-cached (in-memory Hamming nav + L2 rerank)"
+            "rabitq-cached (HNSW+ADC nav + L2 rerank)"
         }
     } else if args.cosine {
         "standard (Cosine)"
@@ -604,9 +604,9 @@ async fn run_phase2_benchmark(
     let mut query_rng = ChaCha8Rng::seed_from_u64(bench_metadata.query_seed);
 
     let search_mode = if args.adc {
-        format!("RaBitQ-ADC (asymmetric, rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
+        format!("RaBitQ-ADC (brute-force, rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
     } else if args.rabitq_cached {
-        format!("RaBitQ-cached (Hamming, rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
+        format!("RaBitQ-cached (HNSW+ADC, rerank={}x, bits={})", args.rerank_factor, args.bits_per_dim)
     } else {
         "standard".to_string()
     };
@@ -636,7 +636,7 @@ async fn run_phase2_benchmark(
             generate_random_vector(bench_metadata.dim, &mut query_rng)
         };
 
-        // HNSW search (standard, rabitq_cached Hamming, or ADC)
+        // HNSW search (standard, rabitq_cached HNSW+ADC, or brute-force ADC)
         let search_start = Instant::now();
         let results = if args.adc {
             // ADC brute-force search for benchmarking
