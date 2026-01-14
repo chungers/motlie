@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use motlie_db::vector::benchmark::{
     self, compute_recall, BenchmarkMetadata,
-    GistDataset, LaionDataset, LatencyStats, RabitqExperimentResult, SiftDataset,
+    GistDataset, LaionDataset, LatencyStats, RabitqExperimentResult, RandomDataset, SiftDataset,
     save_rabitq_results_csv, GIST_QUERIES,
 };
 use motlie_db::vector::{
@@ -387,11 +387,11 @@ pub async fn query(args: QueryArgs) -> Result<()> {
 
 #[derive(Parser)]
 pub struct SweepArgs {
-    /// Dataset: laion, sift, gist
+    /// Dataset: laion, sift, gist, random
     #[arg(long)]
     pub dataset: String,
 
-    /// Data directory
+    /// Data directory (not used for 'random' dataset)
     #[arg(long, default_value = "./data")]
     pub data_dir: PathBuf,
 
@@ -402,6 +402,14 @@ pub struct SweepArgs {
     /// Number of queries
     #[arg(long, default_value = "1000")]
     pub num_queries: usize,
+
+    /// Vector dimension (only for 'random' dataset)
+    #[arg(long, default_value = "1024")]
+    pub dim: usize,
+
+    /// Random seed (only for 'random' dataset)
+    #[arg(long, default_value = "42")]
+    pub seed: u64,
 
     /// ef_search values (comma-separated)
     #[arg(long, default_value = "50,100,200")]
@@ -475,16 +483,22 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
         "laion" => (Distance::Cosine, benchmark::LAION_EMBEDDING_DIM),
         "sift" => (Distance::L2, benchmark::SIFT_EMBEDDING_DIM),
         "gist" => (Distance::L2, benchmark::GIST_EMBEDDING_DIM),
-        _ => anyhow::bail!("Unknown dataset: {}", args.dataset),
+        "random" => (Distance::Cosine, args.dim),
+        _ => anyhow::bail!("Unknown dataset: {}. Use: laion, sift, gist, random", args.dataset),
     };
 
     // Load dataset
-    let (db_vectors, queries, _dim) = load_dataset_for_query(
-        &args.dataset,
-        &args.data_dir,
-        args.num_vectors,
-        args.num_queries,
-    )?;
+    let (db_vectors, queries, _dim) = if args.dataset.to_lowercase() == "random" {
+        let ds = RandomDataset::generate(args.num_vectors, args.num_queries, args.dim, args.seed);
+        (ds.vectors, ds.queries, ds.dim)
+    } else {
+        load_dataset_for_query(
+            &args.dataset,
+            &args.data_dir,
+            args.num_vectors,
+            args.num_queries,
+        )?
+    };
     println!("Loaded {} db vectors, {} queries, dim={}", db_vectors.len(), queries.len(), dim);
 
     // Compute ground truth
@@ -874,6 +888,7 @@ pub fn list_datasets() -> Result<()> {
     println!("  laion       - LAION-CLIP 512D (NPY, Cosine)");
     println!("  sift        - SIFT-1M 128D (fvecs, L2)");
     println!("  gist        - GIST-960 960D (fvecs, L2)");
+    println!("  random      - Synthetic unit-normalized (configurable dim, Cosine)");
 
     #[cfg(feature = "parquet")]
     {
@@ -912,7 +927,10 @@ pub fn list_datasets() -> Result<()> {
     println!("  bench_vector sweep --dataset laion --num-vectors 50000 --ef 50,100,200 --k 1,10\n");
 
     println!("Parameter sweep (RaBitQ):");
-    println!("  bench_vector sweep --dataset laion --num-vectors 50000 --rabitq --bits 1,2,4 --rerank 1,4,10,20");
+    println!("  bench_vector sweep --dataset laion --num-vectors 50000 --rabitq --bits 1,2,4 --rerank 1,4,10,20\n");
+
+    println!("Parameter sweep (Random dataset):");
+    println!("  bench_vector sweep --dataset random --dim 1024 --num-vectors 100000 --num-queries 1000 --rabitq");
 
     Ok(())
 }
