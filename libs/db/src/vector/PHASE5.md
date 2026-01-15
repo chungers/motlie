@@ -440,6 +440,24 @@ impl Processor {
 
 ---
 
+## CODEX Review (Task 5.1)
+
+Overall, the implementation is solid: validation is up-front, all writes are within a single transaction, and cache updates are deferred. Two correctness gaps remain to address before relying on this API in production:
+
+1) **Transactional IdAllocator persistence is incomplete for reused IDs.**
+   - `allocate_in_txn()` persists `next_id` but does not persist the updated free bitmap after popping an ID from `free_ids`.
+   - Crash scenario: if a reused ID is allocated and the process dies before any future `free_in_txn()` write, `IdAlloc` recovery will still include that ID in the free bitmap, allowing duplicate allocation.
+   - **Suggested fix:** persist the free bitmap inside `allocate_in_txn()` whenever allocation consumes a freed ID (or persist the bitmap unconditionally).
+
+2) **Duplicate external IDs are not checked.**
+   - `insert_vector()` writes IdForward/IdReverse without checking if the external `Id` already exists.
+   - This can overwrite IdForward to a new vec_id while leaving the old vec_id orphaned (and its IdReverse mapping stale).
+   - **Suggested fix:** check `IdForward` before insert; either return an error or treat this as an upsert with a proper delete + insert flow.
+
+Once these are addressed, Task 5.1 will be complete from a correctness perspective.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
