@@ -1871,6 +1871,37 @@ fn execute_single(
 
 ---
 
+## Task 5.6: CODEX Review - Mutation Dispatch Assessment
+
+**Overall:** The dispatch wiring matches the graph/fulltext pattern, but several invariants enforced in `Processor` are now bypassed in the mutation path. This is a correctness gap if the public mutation API is used by clients.
+
+**Findings**
+
+1) **InsertVector bypasses critical validation (correctness).**  
+   The `MutationExecutor` implementation does not check:
+   - dimension mismatch,
+   - duplicate external IDs (no `get_for_update_cf` lock),
+   - `SpecHash` drift validation.  
+   These checks exist in `Processor::insert_vector()` and are now skipped in the writer path.
+
+2) **DeleteVector diverges from soft-delete behavior (correctness).**  
+   `MutationExecutor` hard-deletes vectors and frees IDs even when HNSW is enabled. This contradicts `Processor::delete_vector()` which intentionally **does not** delete vectors/binary codes or reuse IDs when HNSW is on. This can corrupt the HNSW graph or cause ID reuse issues.
+
+3) **BinaryCodeCache is not updated (performance).**  
+   Writer only applies `CacheUpdate` (nav cache) after commit. The `BinaryCodeCache` never receives updates on mutation inserts, which can degrade RaBitQ search performance (cold cache misses).
+
+4) **InsertVectorBatch expansion lacks batch validation (correctness).**  
+   In `Consumer::execute_mutations()`, batch mutations are expanded into individual `InsertVector` ops, but there is no duplicate-in-batch detection or existing-ID check. This regresses the protections in `Processor::insert_batch()`.
+
+5) **AddEmbeddingSpec does not update the in-memory registry (correctness).**  
+   The mutation writes to `EmbeddingSpecs` CF but never updates `EmbeddingRegistry`. Subsequent mutations in the same process may fail to resolve the new embedding code (registry miss), or use stale config.
+
+**Recommendation**
+
+Consider refactoring mutation execution to call shared internal helpers that include validation, spec hash enforcement, and cache updates. If the mutation API is intended to be “trusted internal only”, document that clearly and keep it out of public-facing paths.
+
+---
+
 ## Task 5.7: Query Dispatch (COMPLETE)
 
 **Status:** ✅ Complete
@@ -2004,6 +2035,24 @@ pub use reader::{
 ### Tests
 
 All 520 tests pass after implementing Tasks 5.6 and 5.7.
+
+---
+
+## Task 5.7: CODEX Review - Query Dispatch Assessment
+
+**Overall:** SearchKNN dispatch is wired in and matches graph query patterns, but the reader/consumer API still assumes Storage-only execution. SearchKNN now requires a Processor, which changes how callers must construct queries.
+
+**Findings**
+
+1) **SearchKNN requires Processor, but Reader/Consumer is Storage-only (API mismatch).**  
+   `SearchKNNDispatch` carries `Arc<Processor>`, while `Consumer` only owns `Arc<Storage>`. This is fine technically (dispatch ignores storage), but it means:
+   - clients must have a `Processor` on the query construction side, and
+   - this differs from other query types, which are Storage-only.  
+   Consider documenting this explicitly or adding a `Processor`-backed reader/consumer variant.
+
+**Recommendation**
+
+Document how callers should obtain/hold a `Processor` for SearchKNN (or add a dedicated `SearchReader` that bundles Storage + Processor).
 
 ---
 
