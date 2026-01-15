@@ -2175,6 +2175,12 @@ Processor-backed reader/consumer is still missing. Recommend adding a `spawn_que
 
 ---
 
+**Update (Embedding-based public APIs):**
+
+- **Resolved:** `Processor::{insert_vector, insert_batch, delete_vector, search}` now accept `&Embedding`; `SearchReader::search_knn` takes `&Embedding`. This removes the need for callers to pass raw `EmbeddingCode`.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
