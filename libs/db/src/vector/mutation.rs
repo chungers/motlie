@@ -21,7 +21,6 @@ use super::distance::Distance;
 use super::processor::Processor;
 use super::schema::{
     EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecCfValue, EmbeddingSpecs,
-    HnswLayer, VecId,
 };
 use super::writer::{MutationCacheUpdate, MutationExecutor};
 
@@ -33,6 +32,10 @@ use super::writer::{MutationCacheUpdate, MutationExecutor};
 ///
 /// All vector mutations are variants of this enum, enabling type-safe
 /// dispatch in mutation consumers.
+///
+/// **Note on graph repair:** HNSW graph operations (edge updates, metadata)
+/// are handled internally during InsertVector. There is no public API for
+/// partial graph repair - repair requires full rebuild.
 #[derive(Debug)]
 pub enum Mutation {
     // ─────────────────────────────────────────────────────────────
@@ -50,14 +53,6 @@ pub enum Mutation {
     DeleteVector(DeleteVector),
     /// Batch insert multiple vectors (optimization)
     InsertVectorBatch(InsertVectorBatch),
-
-    // ─────────────────────────────────────────────────────────────
-    // HNSW Graph Operations (internal, used by InsertVector)
-    // ─────────────────────────────────────────────────────────────
-    /// Add/update edges for a node in the HNSW graph
-    UpdateEdges(UpdateEdges),
-    /// Update graph metadata (entry_point, max_level, count)
-    UpdateGraphMeta(UpdateGraphMeta),
 
     // ─────────────────────────────────────────────────────────────
     // Synchronization
@@ -261,76 +256,6 @@ impl From<InsertVectorBatch> for Mutation {
 }
 
 // ============================================================================
-// UpdateEdges
-// ============================================================================
-
-/// Update HNSW graph edges for a node.
-///
-/// **Internal mutation** - used during HNSW graph construction and maintenance.
-/// Not exposed in public API; graph repair requires full rebuild.
-#[derive(Debug, Clone)]
-pub(crate) struct UpdateEdges {
-    /// Embedding space
-    pub(crate) embedding: EmbeddingCode,
-    /// Vector ID
-    pub(crate) vec_id: VecId,
-    /// Layer to update
-    pub(crate) layer: HnswLayer,
-    /// Operation: add or replace neighbors
-    pub(crate) operation: EdgeOperation,
-}
-
-/// Edge update operation type.
-#[derive(Debug, Clone)]
-pub(crate) enum EdgeOperation {
-    /// Add neighbors (merge with existing)
-    Add(Vec<VecId>),
-    /// Replace all neighbors at this layer
-    Replace(Vec<VecId>),
-}
-
-impl From<UpdateEdges> for Mutation {
-    fn from(op: UpdateEdges) -> Self {
-        Mutation::UpdateEdges(op)
-    }
-}
-
-// ============================================================================
-// UpdateGraphMeta
-// ============================================================================
-
-/// Update graph-level metadata.
-///
-/// **Internal mutation** - used during HNSW graph state updates.
-/// Not exposed in public API; graph repair requires full rebuild.
-#[derive(Debug, Clone)]
-pub(crate) struct UpdateGraphMeta {
-    /// Embedding space
-    pub(crate) embedding: EmbeddingCode,
-    /// Field to update
-    pub(crate) update: GraphMetaUpdate,
-}
-
-/// Graph metadata update type.
-#[derive(Debug, Clone)]
-pub(crate) enum GraphMetaUpdate {
-    /// Set the entry point for the HNSW graph
-    EntryPoint(VecId),
-    /// Set the maximum level in the graph
-    MaxLevel(HnswLayer),
-    /// Increment the vector count
-    IncrementCount,
-    /// Decrement the vector count
-    DecrementCount,
-}
-
-impl From<UpdateGraphMeta> for Mutation {
-    fn from(op: UpdateGraphMeta) -> Self {
-        Mutation::UpdateGraphMeta(op)
-    }
-}
-
-// ============================================================================
 // FlushMarker
 // ============================================================================
 
@@ -384,8 +309,6 @@ impl Mutation {
             Mutation::InsertVector(op) => op.execute(txn, txn_db, processor),
             Mutation::DeleteVector(op) => op.execute(txn, txn_db, processor),
             Mutation::InsertVectorBatch(op) => op.execute(txn, txn_db, processor),
-            Mutation::UpdateEdges(op) => op.execute(txn, txn_db, processor),
-            Mutation::UpdateGraphMeta(op) => op.execute(txn, txn_db, processor),
             Mutation::Flush(_) => Ok(None), // No-op for storage
         }
     }
@@ -491,32 +414,6 @@ impl MutationExecutor for InsertVectorBatch {
     }
 }
 
-impl MutationExecutor for UpdateEdges {
-    fn execute(
-        &self,
-        _txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        _txn_db: &rocksdb::TransactionDB,
-        _processor: &Processor,
-    ) -> Result<Option<MutationCacheUpdate>> {
-        // Direct edge updates are handled internally by HNSW insert
-        tracing::debug!("UpdateEdges handled internally by HNSW insert");
-        Ok(None)
-    }
-}
-
-impl MutationExecutor for UpdateGraphMeta {
-    fn execute(
-        &self,
-        _txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-        _txn_db: &rocksdb::TransactionDB,
-        _processor: &Processor,
-    ) -> Result<Option<MutationCacheUpdate>> {
-        // Graph metadata updates are handled internally by HNSW insert
-        tracing::debug!("UpdateGraphMeta handled internally by HNSW insert");
-        Ok(None)
-    }
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -563,19 +460,8 @@ mod tests {
         let delete = DeleteVector::new(1, Id::new());
         let _: Mutation = delete.into();
 
-        let edges = UpdateEdges {
-            embedding: 1,
-            vec_id: 0,
-            layer: 0,
-            operation: EdgeOperation::Add(vec![1, 2, 3]),
-        };
-        let _: Mutation = edges.into();
-
-        let meta = UpdateGraphMeta {
-            embedding: 1,
-            update: GraphMetaUpdate::IncrementCount,
-        };
-        let _: Mutation = meta.into();
+        let batch = InsertVectorBatch::new(1, vec![(Id::new(), vec![1.0])]);
+        let _: Mutation = batch.into();
     }
 
     #[test]

@@ -433,20 +433,6 @@ impl Consumer {
                         "Processing InsertVectorBatch"
                     );
                 }
-                Mutation::UpdateEdges(args) => {
-                    tracing::debug!(
-                        embedding = args.embedding,
-                        vec_id = args.vec_id,
-                        layer = args.layer,
-                        "Processing UpdateEdges"
-                    );
-                }
-                Mutation::UpdateGraphMeta(args) => {
-                    tracing::debug!(
-                        embedding = args.embedding,
-                        "Processing UpdateGraphMeta"
-                    );
-                }
                 Mutation::Flush(_) => {
                     tracing::debug!("Processing Flush marker");
                 }
