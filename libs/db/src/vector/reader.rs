@@ -33,9 +33,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use super::embedding::Embedding;
 use super::processor::{Processor, SearchResult};
 use super::query::{Query, SearchKNN, SearchKNNDispatch};
-use super::schema::EmbeddingCode;
 use super::Storage;
 
 // ============================================================================
@@ -345,7 +345,7 @@ impl SearchReader {
     ///
     /// # Arguments
     ///
-    /// * `embedding` - Embedding space code
+    /// * `embedding` - Embedding space reference
     /// * `query` - Query vector
     /// * `k` - Number of results to return
     /// * `ef` - Search expansion factor (higher = more accurate, slower)
@@ -353,16 +353,16 @@ impl SearchReader {
     ///
     /// # Returns
     ///
-    /// Vector of `(distance, external_id)` pairs, sorted by distance (ascending).
+    /// Vector of `SearchResult` structs, sorted by distance (ascending).
     pub async fn search_knn(
         &self,
-        embedding: EmbeddingCode,
+        embedding: &Embedding,
         query: Vec<f32>,
         k: usize,
         ef: usize,
         timeout: Duration,
     ) -> Result<Vec<SearchResult>> {
-        let params = SearchKNN::new(embedding, query, k).with_ef(ef);
+        let params = SearchKNN::new(embedding.code(), query, k).with_ef(ef);
         let (dispatch, rx) = SearchKNNDispatch::new(params, timeout, self.processor.clone());
 
         self.reader
