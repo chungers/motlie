@@ -818,6 +818,26 @@ impl Processor {
 
 ---
 
+## Task 5.3: CODEX Review - Batch Insert Assessment
+
+**Overall:** Solid implementation with correct transactional semantics, spec-hash validation once per batch, and deferred HNSW insertion for better connectivity. Tests cover the critical failure modes and atomicity.
+
+**Remaining issues / improvements**
+
+1) **BinaryCodes CF handling is inconsistent with single insert.**  
+   `insert_batch()` treats `BinaryCodes` CF as optional (`codes_cf` is `Option`), so when RaBitQ is enabled but the CF is missing it silently skips code writes. `insert_vector()` hard-fails in this case.  
+   - **Risk:** silent perf regression and cache misses in search; violates “config implies data exists.”  
+   - **Fix:** align with `insert_vector()` by requiring the CF when encoder is present, or explicitly disable RaBitQ in this path with a warning.
+
+2) **Spec hash lookup uses `txn_db.get_cf` instead of `txn.get_cf`.**  
+   This mirrors `insert_vector()`, so it’s not new, but it means the spec-hash read is outside the transaction snapshot.  
+   - **Risk:** benign race if another writer updates spec hash between validation and commit (should be impossible if spec is immutable, but worth keeping consistent).  
+   - **Fix:** use the transaction handle for all reads in the batch path for clarity.
+
+No other correctness issues found in the batch implementation.
+
+---
+
 ## Task 5.4a: Processor::search() (COMPLETE)
 
 ### Overview
