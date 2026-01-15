@@ -1,6 +1,6 @@
 # Phase 5: Internal Mutation/Query API
 
-**Status:** In Progress (Tasks 5.0-5.2, 5.4-5.5 Complete; 5.3, 5.6-5.11 Pending)
+**Status:** In Progress (Tasks 5.0-5.5 Complete; 5.6-5.11 Pending)
 **Date:** January 14, 2026
 **Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`, `c29dceb`, `6ee252b`, `0cbd597`, `dc4c3f9`
 
@@ -11,7 +11,7 @@
 | 5.0 | HNSW Transaction Refactoring | ✅ Complete |
 | 5.1 | Processor::insert_vector() | ✅ Complete |
 | 5.2 | Processor::delete_vector() | ✅ Complete |
-| 5.3 | Processor::insert_batch() | 🔲 Not Started |
+| 5.3 | Processor::insert_batch() | ✅ Complete |
 | 5.4 | Storage/Processor Search | ✅ Complete (5.4a-5.4g) |
 | 5.5 | Processor::add_embedding_spec() | ✅ Complete (via registry) |
 | 5.6 | Mutation Dispatch | 🔲 Not Started |
@@ -720,13 +720,101 @@ This approach:
 
 ---
 
-## Task 5.3: Processor::insert_batch() (NOT STARTED)
+## Task 5.3: Processor::insert_batch() (COMPLETE)
 
-**Status:** 🔲 Not Started
+### Overview
 
-Per ROADMAP.md, this task implements batch vector insertion for efficiency. Currently, individual `insert_vector()` calls can be used. Batch optimization deferred to future work.
+Task 5.3 implements batch vector insertion for efficiency. More efficient than individual `insert_vector()` calls:
+- Single transaction for all vectors (atomic commit)
+- Spec hash validated once per batch
+- Batched RocksDB writes
+- HNSW graph built after all vectors stored (better connectivity)
 
-See ROADMAP.md Task 5.3 for full specification.
+### API Signature
+
+```rust
+impl Processor {
+    /// Batch insert multiple vectors into an embedding space.
+    pub fn insert_batch(
+        &self,
+        embedding: EmbeddingCode,
+        vectors: &[(Id, Vec<f32>)],
+        build_index: bool,
+    ) -> Result<Vec<VecId>>;
+}
+```
+
+### Implementation Details
+
+#### Transaction Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    insert_batch()                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. Validate embedding exists                               │
+│  2. Validate ALL dimensions upfront (fail fast)            │
+│  3. Check for duplicate IDs within batch                   │
+│                                                             │
+│  4. txn = txn_db.transaction()                              │
+│                                                             │
+│  5. Check for existing external IDs (acquire locks)        │
+│  6. Validate/store spec hash (once per batch)              │
+│                                                             │
+│  7. For each vector:                                        │
+│     ├── vec_id = allocator.allocate_in_txn()              │
+│     ├── IdForward: txn.put_cf(id → vec_id)                │
+│     ├── IdReverse: txn.put_cf(vec_id → id)                │
+│     ├── Vectors: txn.put_cf(vec_id → vector_bytes)        │
+│     └── BinaryCodes: txn.put_cf() (if RaBitQ)             │
+│                                                             │
+│  8. Build HNSW index (if build_index):                     │
+│     └── For each vec_id: insert_in_txn() → CacheUpdate    │
+│                                                             │
+│  9. txn.commit() ─────────────────── ATOMIC BOUNDARY ───   │
+│                                                             │
+│  10. Apply nav_cache and code_cache updates                │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Key Features
+
+1. **Fail-Fast Validation**: All dimensions and IDs validated before transaction starts
+2. **Duplicate Detection**: Checks both within-batch and against existing data
+3. **Spec Hash Once**: Drift detection run only once for the entire batch
+4. **Deferred HNSW Build**: All vectors stored before graph connections (better connectivity)
+5. **Atomic Commit**: All-or-nothing - failed batch leaves no partial state
+
+#### Error Cases
+
+| Error | Condition |
+|-------|-----------|
+| Unknown embedding | Embedding code not in registry |
+| Dimension mismatch | Any vector dimension != embedding spec |
+| Duplicate in batch | Same external ID appears twice in input |
+| Duplicate existing | External ID already exists in embedding space |
+| Spec hash mismatch | EmbeddingSpec changed since previous insert |
+
+### Tests
+
+| Test | Purpose |
+|------|---------|
+| `test_insert_batch_basic` | Insert 10 vectors without index, verify VecIds |
+| `test_insert_batch_with_index` | Insert 20 vectors with HNSW, verify search works |
+| `test_insert_batch_empty` | Empty batch returns empty result |
+| `test_insert_batch_dimension_mismatch` | Verify error on wrong dimension |
+| `test_insert_batch_duplicate_in_batch` | Detect duplicate IDs within batch |
+| `test_insert_batch_duplicate_existing` | Detect conflict with existing data |
+| `test_insert_batch_unknown_embedding` | Verify error on unknown embedding |
+| `test_insert_batch_atomicity` | Failed batch does not partially commit |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Added `insert_batch()` method (~250 lines) and 8 tests |
 
 ---
 
@@ -1623,7 +1711,7 @@ See ROADMAP.md Task 5.7 for full specification.
 | 5.0 | HNSW Transaction Refactoring | ✅ **Complete** |
 | 5.1 | Processor::insert_vector() | ✅ **Complete** |
 | 5.2 | Processor::delete_vector() | ✅ **Complete** |
-| 5.3 | Processor::insert_batch() | 🔲 Not Started |
+| 5.3 | Processor::insert_batch() | ✅ **Complete** |
 | 5.4 | Processor::search() + Storage layer | ✅ **Complete** (5.4a-5.4g) |
 | 5.5 | Processor::add_embedding_spec() | ✅ **Complete** (via registry) |
 | 5.6 | Mutation Dispatch | 🔲 Not Started |
