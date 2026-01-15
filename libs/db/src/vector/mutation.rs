@@ -4,19 +4,28 @@
 //! Following the pattern from `graph::mutation`, mutations are grouped in an enum
 //! for type-safe dispatch.
 //!
+//! Each mutation type implements `MutationExecutor` to define how it executes
+//! against storage. The `Mutation::execute()` method dispatches to the appropriate
+//! executor.
+//!
 //! Mutations implement `MutationCodec` to marshal themselves to CF key-value pairs.
 //! This keeps marshaling logic with the mutation definitions rather than in schema.
 
+use anyhow::Result;
 use tokio::sync::oneshot;
 
-use crate::rocksdb::MutationCodec;
+use crate::rocksdb::{ColumnFamily, MutationCodec};
 use crate::Id;
 
 use super::distance::Distance;
+use super::hnsw::{insert_in_txn, CacheUpdate};
+use super::processor::Processor;
 use super::schema::{
-    EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecCfValue, EmbeddingSpecs,
-    HnswLayer, VecId,
+    BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpec,
+    EmbeddingSpecCfKey, EmbeddingSpecCfValue, EmbeddingSpecs, HnswLayer, IdForward, IdForwardCfKey,
+    IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue, VecId, VectorCfKey, Vectors,
 };
+use super::writer::MutationExecutor;
 
 // ============================================================================
 // Mutation Enum
@@ -349,6 +358,248 @@ impl FlushMarker {
 impl From<FlushMarker> for Mutation {
     fn from(op: FlushMarker) -> Self {
         Mutation::Flush(op)
+    }
+}
+
+// ============================================================================
+// Mutation Dispatch
+// ============================================================================
+
+impl Mutation {
+    /// Execute this mutation against storage.
+    ///
+    /// This is the main dispatch method that routes to the appropriate
+    /// `MutationExecutor` implementation based on the mutation variant.
+    ///
+    /// Returns an optional `CacheUpdate` if HNSW indexing was performed.
+    /// The cache update should be applied AFTER transaction commit.
+    pub fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<Option<CacheUpdate>> {
+        match self {
+            Mutation::AddEmbeddingSpec(op) => op.execute(txn, txn_db, processor),
+            Mutation::InsertVector(op) => op.execute(txn, txn_db, processor),
+            Mutation::DeleteVector(op) => op.execute(txn, txn_db, processor),
+            Mutation::InsertVectorBatch(op) => op.execute(txn, txn_db, processor),
+            Mutation::UpdateEdges(op) => op.execute(txn, txn_db, processor),
+            Mutation::UpdateGraphMeta(op) => op.execute(txn, txn_db, processor),
+            Mutation::Flush(_) => Ok(None), // No-op for storage
+        }
+    }
+}
+
+// ============================================================================
+// MutationExecutor Implementations
+// ============================================================================
+
+impl MutationExecutor for AddEmbeddingSpec {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        _processor: &Processor,
+    ) -> Result<Option<CacheUpdate>> {
+        let (key_bytes, value_bytes) = self.to_cf_bytes()?;
+        let cf = txn_db
+            .cf_handle(EmbeddingSpecs::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
+        txn.put_cf(&cf, key_bytes, value_bytes)?;
+        Ok(None)
+    }
+}
+
+impl MutationExecutor for InsertVector {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<Option<CacheUpdate>> {
+        // 0. Look up embedding spec to get storage type
+        let storage_type = processor
+            .registry()
+            .get_by_code(self.embedding)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Embedding {} not registered; cannot determine storage type",
+                    self.embedding
+                )
+            })?
+            .storage_type();
+
+        // 1. Allocate vec_id
+        let vec_id = {
+            let allocator = processor.get_or_create_allocator(self.embedding);
+            allocator.allocate_in_txn(txn, txn_db, self.embedding)?
+        };
+
+        // 2. Store Id -> VecId mapping (IdForward)
+        let forward_key = IdForwardCfKey(self.embedding, self.id);
+        let forward_value = IdForwardCfValue(vec_id);
+        let forward_cf = txn_db
+            .cf_handle(IdForward::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
+        txn.put_cf(
+            &forward_cf,
+            IdForward::key_to_bytes(&forward_key),
+            IdForward::value_to_bytes(&forward_value),
+        )?;
+
+        // 3. Store VecId -> Id mapping (IdReverse)
+        let reverse_key = IdReverseCfKey(self.embedding, vec_id);
+        let reverse_value = IdReverseCfValue(self.id);
+        let reverse_cf = txn_db
+            .cf_handle(IdReverse::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+        txn.put_cf(
+            &reverse_cf,
+            IdReverse::key_to_bytes(&reverse_key),
+            IdReverse::value_to_bytes(&reverse_value),
+        )?;
+
+        // 4. Store vector data
+        let vec_key = VectorCfKey(self.embedding, vec_id);
+        let vectors_cf = txn_db
+            .cf_handle(Vectors::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+        txn.put_cf(
+            &vectors_cf,
+            Vectors::key_to_bytes(&vec_key),
+            Vectors::value_to_bytes_typed(&self.vector, storage_type),
+        )?;
+
+        // 5. Store binary code (if RaBitQ enabled)
+        if let Some(encoder) = processor.get_or_create_encoder(self.embedding) {
+            let (code, correction) = encoder.encode_with_correction(&self.vector);
+            let code_key = BinaryCodeCfKey(self.embedding, vec_id);
+            let code_value = BinaryCodeCfValue { code, correction };
+            let codes_cf = txn_db
+                .cf_handle(BinaryCodes::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+            txn.put_cf(
+                &codes_cf,
+                BinaryCodes::key_to_bytes(&code_key),
+                BinaryCodes::value_to_bytes(&code_value),
+            )?;
+        }
+
+        // 6. HNSW indexing (if immediate_index)
+        if self.immediate_index {
+            if let Some(index) = processor.get_or_create_index(self.embedding) {
+                let cache_update =
+                    insert_in_txn(&index, txn, txn_db, processor.storage(), vec_id, &self.vector)?;
+                return Ok(Some(cache_update));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+impl MutationExecutor for DeleteVector {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<Option<CacheUpdate>> {
+        // 1. Look up vec_id from external Id
+        let forward_key = IdForwardCfKey(self.embedding, self.id);
+        let forward_cf = txn_db
+            .cf_handle(IdForward::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
+
+        let vec_id = match txn.get_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))? {
+            Some(bytes) => IdForward::value_from_bytes(&bytes)?.0,
+            None => return Ok(None), // Already deleted or never existed
+        };
+
+        // 2. Delete IdForward mapping
+        txn.delete_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))?;
+
+        // 3. Delete IdReverse mapping
+        let reverse_key = IdReverseCfKey(self.embedding, vec_id);
+        let reverse_cf = txn_db
+            .cf_handle(IdReverse::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+        txn.delete_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))?;
+
+        // 4. Delete vector data
+        let vec_key = VectorCfKey(self.embedding, vec_id);
+        let vectors_cf = txn_db
+            .cf_handle(Vectors::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+        txn.delete_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?;
+
+        // 5. Delete binary code (if RaBitQ enabled)
+        if processor.rabitq_enabled() {
+            let code_key = BinaryCodeCfKey(self.embedding, vec_id);
+            let codes_cf = txn_db
+                .cf_handle(BinaryCodes::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+            txn.delete_cf(&codes_cf, BinaryCodes::key_to_bytes(&code_key))?;
+        }
+
+        // 6. Return vec_id to free list
+        {
+            let allocator = processor.get_or_create_allocator(self.embedding);
+            allocator.free_in_txn(txn, txn_db, self.embedding, vec_id)?;
+        }
+
+        // TODO: HNSW edge cleanup (mark node as deleted)
+        Ok(None)
+    }
+}
+
+impl MutationExecutor for InsertVectorBatch {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<Option<CacheUpdate>> {
+        // Batch mutations are expanded in Consumer::execute_mutations()
+        // This implementation handles single-transaction batch execution
+        // when called directly (not through Consumer)
+        for (id, vector) in &self.vectors {
+            let single = InsertVector {
+                embedding: self.embedding,
+                id: *id,
+                vector: vector.clone(),
+                immediate_index: self.immediate_index,
+            };
+            single.execute(txn, txn_db, processor)?;
+        }
+        Ok(None)
+    }
+}
+
+impl MutationExecutor for UpdateEdges {
+    fn execute(
+        &self,
+        _txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        _txn_db: &rocksdb::TransactionDB,
+        _processor: &Processor,
+    ) -> Result<Option<CacheUpdate>> {
+        // Direct edge updates are handled internally by HNSW insert
+        tracing::debug!("UpdateEdges handled internally by HNSW insert");
+        Ok(None)
+    }
+}
+
+impl MutationExecutor for UpdateGraphMeta {
+    fn execute(
+        &self,
+        _txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        _txn_db: &rocksdb::TransactionDB,
+        _processor: &Processor,
+    ) -> Result<Option<CacheUpdate>> {
+        // Graph metadata updates are handled internally by HNSW insert
+        tracing::debug!("UpdateGraphMeta handled internally by HNSW insert");
+        Ok(None)
     }
 }
 

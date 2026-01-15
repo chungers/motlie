@@ -5,6 +5,7 @@
 //! - WriterConfig - configuration
 //! - Consumer - processes mutations from channel
 //! - Spawn functions for creating consumers
+//! - MutationExecutor trait for mutation dispatch
 //!
 //! # Architecture
 //!
@@ -32,6 +33,48 @@ use tokio::sync::mpsc;
 use super::hnsw::{insert_in_txn, CacheUpdate};
 use super::mutation::{FlushMarker, Mutation};
 use super::processor::Processor;
+
+// ============================================================================
+// MutationExecutor Trait
+// ============================================================================
+
+/// Trait for mutations to execute themselves directly against storage.
+///
+/// This trait defines HOW to write the mutation to the database.
+/// Each mutation type knows how to execute its own database write operations.
+///
+/// Following the same pattern as `graph::writer::MutationExecutor`.
+///
+/// Note: This is synchronous because RocksDB operations are blocking.
+pub trait MutationExecutor: Send + Sync {
+    /// Execute this mutation directly against a RocksDB transaction.
+    ///
+    /// Returns an optional CacheUpdate if HNSW indexing was performed.
+    /// The CacheUpdate should be applied AFTER transaction commit.
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<Option<CacheUpdate>>;
+}
+
+// ============================================================================
+// Processor Trait
+// ============================================================================
+
+/// Trait for processing batches of mutations atomically.
+///
+/// Consumers delegate to a MutationProcessor to handle the actual database operations.
+/// This separation allows:
+/// - Different storage backends
+/// - Multiple consumers to process the same mutations
+/// - Testing with mock processors
+#[async_trait::async_trait]
+pub trait MutationProcessor: Send + Sync {
+    /// Process a batch of mutations atomically.
+    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()>;
+}
 
 // ============================================================================
 // WriterConfig
@@ -317,6 +360,9 @@ impl Consumer {
 
     /// Execute a single mutation.
     ///
+    /// Delegates to `Mutation::execute()` which dispatches to the appropriate
+    /// `MutationExecutor` implementation.
+    ///
     /// Returns an optional CacheUpdate if HNSW indexing was performed.
     /// The CacheUpdate should be applied AFTER transaction commit.
     fn execute_single(
@@ -325,181 +371,7 @@ impl Consumer {
         txn_db: &rocksdb::TransactionDB,
         mutation: &Mutation,
     ) -> Result<Option<CacheUpdate>> {
-        use super::schema::{
-            BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingSpecs, IdForward,
-            IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue,
-            VectorCfKey, Vectors,
-        };
-        use crate::rocksdb::{ColumnFamily, MutationCodec};
-
-        match mutation {
-            Mutation::AddEmbeddingSpec(op) => {
-                // Use MutationCodec to serialize
-                let (key_bytes, value_bytes) = op.to_cf_bytes()?;
-                let cf = txn_db
-                    .cf_handle(EmbeddingSpecs::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
-                txn.put_cf(&cf, key_bytes, value_bytes)?;
-                return Ok(None);
-            }
-
-            Mutation::InsertVector(op) => {
-                // 0. Look up embedding spec to get storage type (hard-fail if not registered)
-                // This prevents silent data corruption from storage type mismatch
-                let storage_type = self
-                    .processor
-                    .registry()
-                    .get_by_code(op.embedding)
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "Embedding {} not registered; cannot determine storage type",
-                        op.embedding
-                    ))?
-                    .storage_type();
-
-                // 1. Allocate vec_id (transactionally persisted to IdAlloc CF)
-                let vec_id = {
-                    let allocator = self.processor.get_or_create_allocator(op.embedding);
-                    allocator.allocate_in_txn(txn, txn_db, op.embedding)?
-                };
-
-                // 2. Store Id -> VecId mapping (IdForward)
-                let forward_key = IdForwardCfKey(op.embedding, op.id);
-                let forward_value = IdForwardCfValue(vec_id);
-                let forward_cf = txn_db
-                    .cf_handle(IdForward::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
-                txn.put_cf(
-                    &forward_cf,
-                    IdForward::key_to_bytes(&forward_key),
-                    IdForward::value_to_bytes(&forward_value),
-                )?;
-
-                // 3. Store VecId -> Id mapping (IdReverse)
-                let reverse_key = IdReverseCfKey(op.embedding, vec_id);
-                let reverse_value = IdReverseCfValue(op.id);
-                let reverse_cf = txn_db
-                    .cf_handle(IdReverse::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-                txn.put_cf(
-                    &reverse_cf,
-                    IdReverse::key_to_bytes(&reverse_key),
-                    IdReverse::value_to_bytes(&reverse_value),
-                )?;
-
-                // 4. Store vector data using correct storage type (F32 or F16)
-                let vec_key = VectorCfKey(op.embedding, vec_id);
-                let vectors_cf = txn_db
-                    .cf_handle(Vectors::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-                txn.put_cf(
-                    &vectors_cf,
-                    Vectors::key_to_bytes(&vec_key),
-                    Vectors::value_to_bytes_typed(&op.vector, storage_type),
-                )?;
-
-                // 5. Store binary code with ADC correction (if RaBitQ enabled)
-                if let Some(encoder) = self.processor.get_or_create_encoder(op.embedding) {
-                    let (code, correction) = encoder.encode_with_correction(&op.vector);
-                    let code_key = BinaryCodeCfKey(op.embedding, vec_id);
-                    let code_value = BinaryCodeCfValue { code, correction };
-                    let codes_cf = txn_db
-                        .cf_handle(BinaryCodes::CF_NAME)
-                        .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
-                    txn.put_cf(
-                        &codes_cf,
-                        BinaryCodes::key_to_bytes(&code_key),
-                        BinaryCodes::value_to_bytes(&code_value),
-                    )?;
-                }
-
-                // 6. HNSW indexing (if immediate_index is true)
-                if op.immediate_index {
-                    if let Some(index) = self.processor.get_or_create_index(op.embedding) {
-                        let cache_update = insert_in_txn(
-                            &index,
-                            txn,
-                            txn_db,
-                            self.processor.storage(),
-                            vec_id,
-                            &op.vector,
-                        )?;
-                        return Ok(Some(cache_update));
-                    }
-                }
-                return Ok(None);
-            }
-
-            Mutation::DeleteVector(op) => {
-                // 1. Look up vec_id from external Id
-                let forward_key = IdForwardCfKey(op.embedding, op.id);
-                let forward_cf = txn_db
-                    .cf_handle(IdForward::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
-
-                let vec_id = match txn.get_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))? {
-                    Some(bytes) => IdForward::value_from_bytes(&bytes)?.0,
-                    None => return Ok(None), // Already deleted or never existed
-                };
-
-                // 2. Delete IdForward mapping
-                txn.delete_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))?;
-
-                // 3. Delete IdReverse mapping
-                let reverse_key = IdReverseCfKey(op.embedding, vec_id);
-                let reverse_cf = txn_db
-                    .cf_handle(IdReverse::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-                txn.delete_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))?;
-
-                // 4. Delete vector data
-                let vec_key = VectorCfKey(op.embedding, vec_id);
-                let vectors_cf = txn_db
-                    .cf_handle(Vectors::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-                txn.delete_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?;
-
-                // 5. Delete binary code (if RaBitQ enabled)
-                if self.processor.rabitq_enabled() {
-                    let code_key = BinaryCodeCfKey(op.embedding, vec_id);
-                    let codes_cf = txn_db
-                        .cf_handle(BinaryCodes::CF_NAME)
-                        .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
-                    txn.delete_cf(&codes_cf, BinaryCodes::key_to_bytes(&code_key))?;
-                }
-
-                // 6. Return vec_id to free list (transactionally persisted to IdAlloc CF)
-                {
-                    let allocator = self.processor.get_or_create_allocator(op.embedding);
-                    allocator.free_in_txn(txn, txn_db, op.embedding, vec_id)?;
-                }
-
-                // TODO: HNSW edge cleanup (mark node as deleted, don't remove edges)
-                return Ok(None);
-            }
-
-            Mutation::InsertVectorBatch(_) => {
-                // Batch mutations are expanded in execute_mutations() to ensure
-                // all CacheUpdates are collected. This arm should not be reached.
-                unreachable!("InsertVectorBatch should be expanded before execute_single");
-            }
-
-            Mutation::UpdateEdges(_) => {
-                // Direct edge updates are handled internally by HNSW insert
-                tracing::debug!("UpdateEdges handled internally by HNSW insert");
-                return Ok(None);
-            }
-
-            Mutation::UpdateGraphMeta(_) => {
-                // Graph metadata updates are handled internally by HNSW insert
-                tracing::debug!("UpdateGraphMeta handled internally by HNSW insert");
-                return Ok(None);
-            }
-
-            Mutation::Flush(_) => {
-                // No-op for storage - flush marker is handled after commit
-                return Ok(None);
-            }
-        }
+        mutation.execute(txn, txn_db, &self.processor)
     }
 }
 
