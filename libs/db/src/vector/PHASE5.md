@@ -1902,6 +1902,15 @@ Consider refactoring mutation execution to call shared internal helpers that inc
 
 ---
 
+**API Direction (agreed): Transaction-only public surface**
+
+- **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
+- **Internal helpers can stay txn-aware** for composition (batching, mutation dispatch). Keep them `pub(crate)` only.
+- **Naming cleanup:** remove `_in_txn` suffixes by scoping helpers under a module like `ops::insert_vector`, `ops::delete_vector`, `ops::insert_batch`.
+- This avoids exposing “non-transactional” APIs externally while still enabling internal reuse in mutation/consumer paths.
+
+---
+
 ## Task 5.7: Query Dispatch (COMPLETE)
 
 **Status:** ✅ Complete
