@@ -809,6 +809,22 @@ impl Processor {
 
 ---
 
+## CODEX Review (Task 5.3)
+
+Search works and correctly filters deleted vectors, but there are two practical improvements worth addressing:
+
+1) **Underfilled results when many tombstones exist.**
+   - The search runs HNSW with `k` and then filters deleted results. If many results are soft-deleted, callers may receive fewer than `k` results.
+   - **Suggested fix:** overfetch candidates (e.g., `k * 2` or `k + deleted_slack`) and then filter down to `k`, or add a loop to increase `ef_search`/`k` until enough live results are found (bounded).
+
+2) **IdReverse lookups are per-result, not batched.**
+   - Current filter uses `txn_db.get_cf()` in a loop, which is fine for small `k` but becomes costly as `k` or ef_search grows.
+   - **Suggested fix:** use `multi_get_cf` or a small batch read for IdReverse keys to reduce RocksDB overhead.
+
+These are performance/UX improvements rather than correctness blockers, but they become important as the number of soft-deleted nodes grows.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
