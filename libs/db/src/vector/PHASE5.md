@@ -852,6 +852,13 @@ All 506 tests pass. Task 5.3 improvements complete.
 
 ---
 
+## CODEX Verification (Post-overfetch/batch)
+
+- ✅ Overfetch + batched IdReverse lookup fixes the two performance/UX concerns raised for Task 5.3.
+- ⚠️ **Remaining improvement:** if `ef_search < overfetch_k`, the HNSW search still returns at most `ef_search` candidates, so tombstones can still reduce results below `k`. Consider setting `effective_ef = max(ef_search, overfetch_k)` or scaling `ef_search` along with overfetch.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
