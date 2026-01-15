@@ -1962,6 +1962,14 @@ Even as `pub(crate)`, these variants are still no-ops and can be accidentally us
 
 ---
 
+**New Feedback (public API parity):**
+
+- **AddEmbeddingSpec should share validation with EmbeddingRegistry::register.**  
+  Since `AddEmbeddingSpec` is public, it must enforce the same build-parameter validation (hnsw_m >= 2, ef_construction >= 1, rabitq_bits ∈ {1,2,4}). Right now it bypasses builder validation in the mutation path.  
+  - **Fix:** route mutation spec validation through the same helper as `EmbeddingBuilder::validate()` or call it directly before persisting.
+
+---
+
 **API Direction (agreed): Transaction-only public surface**
 
 - **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
@@ -2127,6 +2135,14 @@ Document how callers should obtain/hold a `Processor` for SearchKNN (or add a de
 
 **Update (post ops/ refactor):**  
 Processor-backed reader/consumer is still missing. Recommend adding a `spawn_query_consumer_with_processor(...)` or a `SearchReader` wrapper so SearchKNN doesn’t require ad-hoc Processor plumbing at call sites.
+
+---
+
+**New Feedback (public search correctness):**
+
+- **SearchKNN is the only public search API; it must enforce SpecHash drift checks.**  
+  `SearchKNN` dispatch calls `Processor::search()` which does not validate SpecHash (only `search_with_config()` does). This allows searching against a stale index without error.  
+  - **Fix:** either add SpecHash validation to `Processor::search()` or route `SearchKNN` to `search_with_config()` with a derived `SearchConfig` from the registry spec.
 
 ---
 
