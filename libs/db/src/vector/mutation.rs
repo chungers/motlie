@@ -326,7 +326,7 @@ impl MutationExecutor for AddEmbeddingSpec {
         processor: &Processor,
     ) -> Result<Option<MutationCacheUpdate>> {
         // Delegate to shared ops helper (also updates in-memory registry)
-        super::ops::add_embedding_spec_in_txn(txn, txn_db, processor, self)?;
+        super::ops::embedding::spec(txn, txn_db, processor, self)?;
         Ok(None)
     }
 }
@@ -339,7 +339,7 @@ impl MutationExecutor for InsertVector {
         processor: &Processor,
     ) -> Result<Option<MutationCacheUpdate>> {
         // Delegate to shared ops helper (includes all validation)
-        let result = super::ops::insert_vector_in_txn(
+        let result = super::ops::insert::vector(
             txn,
             txn_db,
             processor,
@@ -368,7 +368,7 @@ impl MutationExecutor for DeleteVector {
     ) -> Result<Option<MutationCacheUpdate>> {
         // Delegate to shared ops helper (handles soft-delete when HNSW enabled)
         let result =
-            super::ops::delete_vector_in_txn(txn, txn_db, processor, self.embedding, self.id)?;
+            super::ops::delete::vector(txn, txn_db, processor, self.embedding, self.id)?;
 
         // Log soft-delete if it occurred
         if result.is_soft_delete() {
@@ -390,7 +390,7 @@ impl MutationExecutor for InsertVectorBatch {
         processor: &Processor,
     ) -> Result<Option<MutationCacheUpdate>> {
         // Delegate to shared ops helper (includes batch validation)
-        let result = super::ops::insert_batch_in_txn(
+        let result = super::ops::insert::batch(
             txn,
             txn_db,
             processor,

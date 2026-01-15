@@ -12,13 +12,22 @@ use crate::vector::processor::Processor;
 use crate::vector::schema::EmbeddingSpecs;
 
 // ============================================================================
-// add_embedding_spec_in_txn
+// ops::embedding::spec
 // ============================================================================
 
 /// Add an embedding spec within an existing transaction.
 ///
 /// This is the shared implementation used by both direct registration and
 /// `MutationExecutor for AddEmbeddingSpec`.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// use crate::vector::ops;
+///
+/// ops::embedding::spec(&txn, &txn_db, processor, &add_spec)?;
+/// txn.commit()?;
+/// ```
 ///
 /// # What it does
 /// 1. Validates build parameters via EmbeddingBuilder (single source of truth)
@@ -29,7 +38,7 @@ use crate::vector::schema::EmbeddingSpecs;
 /// * `txn` - Active RocksDB transaction
 /// * `txn_db` - Transaction DB for CF handles
 /// * `processor` - Processor for registry access
-/// * `spec` - The AddEmbeddingSpec to persist
+/// * `add_spec` - The AddEmbeddingSpec to persist
 ///
 /// # Errors
 /// - Invalid build parameters (hnsw_m < 2, ef_construction < 1, invalid rabitq_bits)
@@ -46,7 +55,7 @@ use crate::vector::schema::EmbeddingSpecs;
 ///
 /// For stricter atomicity, consider adding a rollback callback, but this
 /// is overkill for the current use case.
-pub fn add_embedding_spec_in_txn(
+pub fn spec(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     processor: &Processor,

@@ -406,7 +406,7 @@ impl Processor {
         let txn = txn_db.transaction();
 
         // Delegate to shared ops helper (all validation happens there)
-        let result = super::ops::insert_vector_in_txn(
+        let result = super::ops::insert::vector(
             &txn,
             &txn_db,
             self,
@@ -481,7 +481,7 @@ impl Processor {
         let txn = txn_db.transaction();
 
         // Delegate to shared ops helper (all validation happens there)
-        let result = super::ops::insert_batch_in_txn(
+        let result = super::ops::insert::batch(
             &txn,
             &txn_db,
             self,
@@ -552,7 +552,7 @@ impl Processor {
         let txn = txn_db.transaction();
 
         // Delegate to shared ops helper (soft-delete logic happens there)
-        let result = super::ops::delete_vector_in_txn(&txn, &txn_db, self, embedding, id)?;
+        let result = super::ops::delete::vector(&txn, &txn_db, self, embedding, id)?;
 
         // Commit transaction
         txn.commit().context("Failed to commit delete transaction")?;

@@ -89,13 +89,23 @@ impl InsertBatchResult {
 }
 
 // ============================================================================
-// insert_vector_in_txn
+// ops::insert::vector
 // ============================================================================
 
 /// Insert a single vector within an existing transaction.
 ///
 /// This is the shared implementation used by both `Processor::insert_vector()`
 /// and `MutationExecutor for InsertVector`.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// use crate::vector::ops;
+///
+/// let result = ops::insert::vector(&txn, &txn_db, processor, embedding, id, &vec, true)?;
+/// txn.commit()?;
+/// result.apply_cache_updates(embedding, nav_cache, code_cache);
+/// ```
 ///
 /// # Validation
 /// - Embedding exists in registry
@@ -114,7 +124,7 @@ impl InsertBatchResult {
 ///
 /// # Returns
 /// `InsertResult` with vec_id and deferred cache updates.
-pub fn insert_vector_in_txn(
+pub fn vector(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     processor: &Processor,
@@ -244,13 +254,23 @@ pub fn insert_vector_in_txn(
 }
 
 // ============================================================================
-// insert_batch_in_txn
+// ops::insert::batch
 // ============================================================================
 
 /// Insert multiple vectors within an existing transaction.
 ///
 /// This is the shared implementation used by both `Processor::insert_batch()`
 /// and `MutationExecutor` for batch operations.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// use crate::vector::ops;
+///
+/// let result = ops::insert::batch(&txn, &txn_db, processor, embedding, &vectors, true)?;
+/// txn.commit()?;
+/// result.apply_cache_updates(embedding, nav_cache, code_cache);
+/// ```
 ///
 /// # Validation
 /// - Embedding exists in registry
@@ -269,7 +289,7 @@ pub fn insert_vector_in_txn(
 ///
 /// # Returns
 /// `InsertBatchResult` with vec_ids and deferred cache updates.
-pub fn insert_batch_in_txn(
+pub fn batch(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     processor: &Processor,

@@ -16,9 +16,9 @@
 //!
 //! # Module Structure
 //!
-//! - `insert` - Vector insertion operations
-//! - `delete` - Vector deletion operations
-//! - `embedding` - Embedding spec operations
+//! - `insert` - Vector insertion operations (`ops::insert::vector`, `ops::insert::batch`)
+//! - `delete` - Vector deletion operations (`ops::delete::vector`)
+//! - `embedding` - Embedding spec operations (`ops::embedding::spec`)
 //!
 //! # Example
 //!
@@ -27,12 +27,12 @@
 //!
 //! // In Processor::insert_vector():
 //! let txn = txn_db.transaction();
-//! let result = ops::insert_vector_in_txn(&txn, &txn_db, processor, ...)?;
+//! let result = ops::insert::vector(&txn, &txn_db, processor, ...)?;
 //! txn.commit()?;
-//! result.apply_cache_updates(processor);
+//! result.apply_cache_updates(embedding, nav_cache, code_cache);
 //!
 //! // In MutationExecutor for InsertVector:
-//! let result = ops::insert_vector_in_txn(txn, txn_db, processor, ...)?;
+//! let result = ops::insert::vector(txn, txn_db, processor, ...)?;
 //! // CacheUpdate returned for Consumer to apply after commit
 //! ```
 
@@ -40,7 +40,6 @@ pub mod delete;
 pub mod embedding;
 pub mod insert;
 
-// Re-export main types for convenience
-pub use delete::{delete_vector_in_txn, DeleteResult};
-pub use embedding::add_embedding_spec_in_txn;
-pub use insert::{insert_batch_in_txn, insert_vector_in_txn, InsertBatchResult, InsertResult};
+// Re-export result types for convenience
+pub use delete::DeleteResult;
+pub use insert::{InsertBatchResult, InsertResult};
