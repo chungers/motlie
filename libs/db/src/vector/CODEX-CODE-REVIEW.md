@@ -182,6 +182,14 @@ let storage_type = self
 
 ---
 
+## CODEX Verification (Post-sync)
+
+- **Task completeness:** ✅ The follow-up hard-fail on unknown embeddings is implemented in `libs/db/src/vector/writer.rs` and resolves the last critical risk I raised.
+- **Regression risk:** Low. The error path is now explicit; callers will get a clear failure instead of silent F32 fallback.
+- **Additional tests:** Not added. The change is a straightforward error-handling branch; existing integration tests already cover vector writes in registered embeddings. If desired, add an integration test that attempts an insert before embedding registration and asserts the error message.
+
+---
+
 ## Claude Opus 4.5 Assessment (January 14, 2026)
 
 ### Response Summary
