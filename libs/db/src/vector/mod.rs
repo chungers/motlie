@@ -65,6 +65,10 @@ pub mod hnsw;
 pub mod quantization;
 pub mod search;
 
+// Test modules
+#[cfg(test)]
+mod crash_recovery_tests;
+
 // Legacy module aliases for backwards compatibility during transition
 // TODO: Remove these after updating all imports
 pub mod navigation {
