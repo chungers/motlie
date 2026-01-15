@@ -1,18 +1,76 @@
 //! HNSW insert algorithm implementation.
+//!
+//! This module provides two insert APIs:
+//! - `insert()` - Legacy API that creates its own transaction (for tests/benchmarks)
+//! - `insert_in_txn()` - Transaction-aware API that accepts a transaction and returns
+//!   a `CacheUpdate` to apply after commit (for production use)
+//!
+//! # Transaction Safety
+//!
+//! For atomic inserts, use `insert_in_txn()` within a transaction scope:
+//! ```rust,ignore
+//! let txn = txn_db.transaction();
+//! let cache_update = insert_in_txn(&index, &txn, &txn_db, vec_id, &vector)?;
+//! txn.commit()?;
+//! cache_update.apply(&nav_cache, config.m);  // Only after successful commit
+//! ```
 
 use anyhow::Result;
 
-use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
-use super::graph::{connect_neighbors, greedy_search_layer, search_layer};
+use super::graph::{connect_neighbors_in_txn, greedy_search_layer, search_layer};
 use super::Index;
-use crate::vector::cache::NavigationLayerInfo;
+use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
+use crate::vector::cache::{NavigationCache, NavigationLayerInfo};
 use crate::vector::schema::{
-    GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField, HnswLayer, VecId, VecMeta,
-    VecMetaCfKey, VecMetaCfValue, VecMetadata,
+    EmbeddingCode, GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField, HnswLayer, VecId,
+    VecMeta, VecMetaCfKey, VecMetaCfValue, VecMetadata,
 };
 use crate::vector::Storage;
 
-/// Insert a vector into the HNSW index.
+// ============================================================================
+// CacheUpdate - Deferred cache update after transaction commit
+// ============================================================================
+
+/// Deferred cache update to apply after transaction commits successfully.
+///
+/// This struct holds the information needed to update the navigation cache
+/// after a successful insert. It should only be applied after `txn.commit()`
+/// succeeds to avoid caching uncommitted state.
+#[derive(Debug, Clone)]
+pub struct CacheUpdate {
+    /// Embedding space code
+    pub embedding: EmbeddingCode,
+    /// The inserted vector's ID
+    pub vec_id: VecId,
+    /// The layer assigned to this vector
+    pub node_layer: HnswLayer,
+    /// Whether this node became the new entry point
+    pub is_new_entry_point: bool,
+    /// M parameter for cache update
+    pub m: usize,
+}
+
+impl CacheUpdate {
+    /// Apply this cache update to the navigation cache.
+    ///
+    /// **IMPORTANT**: Only call this after `txn.commit()` succeeds.
+    /// Calling before commit risks caching uncommitted state.
+    pub fn apply(self, nav_cache: &NavigationCache) {
+        nav_cache.update(self.embedding, self.m, |info| {
+            info.maybe_update_entry(self.vec_id, self.node_layer);
+            info.increment_layer_count(self.node_layer);
+        });
+    }
+}
+
+// ============================================================================
+// Transaction-aware insert API
+// ============================================================================
+
+/// Insert a vector into the HNSW index (legacy API).
+///
+/// This is the legacy API that creates its own transaction internally.
+/// For production use with atomic commits, use `insert_in_txn()` instead.
 ///
 /// # Arguments
 /// * `index` - The HNSW index
@@ -29,7 +87,52 @@ use crate::vector::Storage;
 /// 6. Update entry point if this node has higher layer
 pub fn insert(index: &Index, storage: &Storage, vec_id: VecId, vector: &[f32]) -> Result<()> {
     let txn_db = storage.transaction_db()?;
+    let txn = txn_db.transaction();
 
+    // Use the transactional insert
+    let cache_update = insert_in_txn(index, &txn, &txn_db, storage, vec_id, vector)?;
+
+    // Commit the transaction
+    txn.commit()?;
+
+    // Apply cache update AFTER successful commit
+    cache_update.apply(index.nav_cache());
+
+    Ok(())
+}
+
+/// Insert a vector into the HNSW index within a transaction.
+///
+/// This is the recommended API for production use. It accepts a transaction
+/// reference and returns a `CacheUpdate` that should be applied only after
+/// the transaction commits successfully.
+///
+/// # Arguments
+/// * `index` - The HNSW index
+/// * `txn` - RocksDB transaction to write within
+/// * `txn_db` - TransactionDB for CF handle lookup
+/// * `storage` - Storage for reads during graph traversal
+/// * `vec_id` - Internal vector ID (already allocated)
+/// * `vector` - The vector data (already stored in Vectors CF)
+///
+/// # Returns
+/// A `CacheUpdate` to apply after `txn.commit()` succeeds.
+///
+/// # Example
+/// ```rust,ignore
+/// let txn = txn_db.transaction();
+/// let cache_update = insert_in_txn(&index, &txn, &txn_db, &storage, vec_id, &vector)?;
+/// txn.commit()?;
+/// cache_update.apply(index.nav_cache());
+/// ```
+pub fn insert_in_txn(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    storage: &Storage,
+    vec_id: VecId,
+    vector: &[f32],
+) -> Result<CacheUpdate> {
     // 1. Get or initialize navigation state FIRST (fixes cold cache bug)
     // This ensures we have correct max_layer for layer distribution even after restart
     let nav_info = get_or_init_navigation(index, storage)?;
@@ -38,13 +141,21 @@ pub fn insert(index: &Index, storage: &Storage, vec_id: VecId, vector: &[f32]) -
     let mut rng = rand::thread_rng();
     let node_layer = nav_info.random_layer(&mut rng);
 
-    // 3. Store node metadata
-    store_vec_meta(index, txn_db, vec_id, node_layer)?;
+    // 3. Store node metadata (using transaction)
+    store_vec_meta_in_txn(index, txn, txn_db, vec_id, node_layer)?;
 
     // 4. Handle empty graph case
     if nav_info.is_empty() {
-        init_first_node(index, storage, vec_id, node_layer)?;
-        return Ok(());
+        // Persist entry point within transaction
+        update_entry_point_in_txn(index, txn, txn_db, vec_id, node_layer)?;
+
+        return Ok(CacheUpdate {
+            embedding: index.embedding(),
+            vec_id,
+            node_layer,
+            is_new_entry_point: true,
+            m: index.config().m,
+        });
     }
 
     // 5. Greedy descent to find entry point at target layer
@@ -64,8 +175,15 @@ pub fn insert(index: &Index, storage: &Storage, vec_id: VecId, vector: &[f32]) -
     // 6. At each layer from node_layer down to 0: find neighbors and connect
     for layer in (0..=node_layer).rev() {
         // Search for neighbors at this layer (use_cache: false for build)
-        let neighbors =
-            search_layer(index, storage, vector, current, index.config().ef_construction, layer, false)?;
+        let neighbors = search_layer(
+            index,
+            storage,
+            vector,
+            current,
+            index.config().ef_construction,
+            layer,
+            false,
+        )?;
 
         // Select M neighbors (simple heuristic: take closest)
         let m = if layer == 0 {
@@ -75,8 +193,8 @@ pub fn insert(index: &Index, storage: &Storage, vec_id: VecId, vector: &[f32]) -
         };
         let selected: Vec<_> = neighbors.into_iter().take(m as usize).collect();
 
-        // Connect bidirectionally
-        connect_neighbors(index, txn_db, vec_id, &selected, layer)?;
+        // Connect bidirectionally (using transaction)
+        connect_neighbors_in_txn(index, txn, txn_db, vec_id, &selected, layer)?;
 
         // Update current for next layer
         if let Some(&(dist, id)) = selected.first() {
@@ -88,42 +206,30 @@ pub fn insert(index: &Index, storage: &Storage, vec_id: VecId, vector: &[f32]) -
     // Suppress unused variable warning
     let _ = current_dist;
 
-    // 7. Update entry point if needed
-    if node_layer > max_layer {
-        update_entry_point(index, storage, vec_id, node_layer)?;
+    // 7. Update entry point if needed (using transaction)
+    let is_new_entry_point = node_layer > max_layer;
+    if is_new_entry_point {
+        update_entry_point_in_txn(index, txn, txn_db, vec_id, node_layer)?;
     }
 
-    // Update navigation cache
-    index.nav_cache().update(index.embedding(), index.config().m, |info| {
-        info.maybe_update_entry(vec_id, node_layer);
-        info.increment_layer_count(node_layer);
-    });
-
-    Ok(())
+    // Return cache update to apply AFTER commit
+    Ok(CacheUpdate {
+        embedding: index.embedding(),
+        vec_id,
+        node_layer,
+        is_new_entry_point,
+        m: index.config().m,
+    })
 }
 
-/// Initialize the first node in an empty graph.
-fn init_first_node(
+// ============================================================================
+// Transaction-aware helper functions
+// ============================================================================
+
+/// Store vector metadata (layer assignment) within a transaction.
+fn store_vec_meta_in_txn(
     index: &Index,
-    storage: &Storage,
-    vec_id: VecId,
-    node_layer: HnswLayer,
-) -> Result<()> {
-    // Update navigation cache
-    index.nav_cache().update(index.embedding(), index.config().m, |info| {
-        info.maybe_update_entry(vec_id, node_layer);
-        info.increment_layer_count(0);
-    });
-
-    // Persist to GraphMeta
-    update_entry_point(index, storage, vec_id, node_layer)?;
-
-    Ok(())
-}
-
-/// Store vector metadata (layer assignment).
-fn store_vec_meta(
-    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     vec_id: VecId,
     max_layer: HnswLayer,
@@ -142,7 +248,7 @@ fn store_vec_meta(
         .cf_handle(VecMeta::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("VecMeta CF not found"))?;
 
-    txn_db.put_cf(
+    txn.put_cf(
         &cf,
         VecMeta::key_to_bytes(&key),
         VecMeta::value_to_bytes(&value)?,
@@ -151,14 +257,14 @@ fn store_vec_meta(
     Ok(())
 }
 
-/// Update the global entry point.
-fn update_entry_point(
+/// Update the global entry point within a transaction.
+fn update_entry_point_in_txn(
     index: &Index,
-    storage: &Storage,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
     vec_id: VecId,
     layer: HnswLayer,
 ) -> Result<()> {
-    let txn_db = storage.transaction_db()?;
     let cf = txn_db
         .cf_handle(GraphMeta::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
@@ -166,12 +272,16 @@ fn update_entry_point(
     // Store entry point
     let ep_key = GraphMetaCfKey::entry_point(index.embedding());
     let ep_value = GraphMetaCfValue(GraphMetaField::EntryPoint(vec_id));
-    txn_db.put_cf(&cf, GraphMeta::key_to_bytes(&ep_key), GraphMeta::value_to_bytes(&ep_value))?;
+    txn.put_cf(
+        &cf,
+        GraphMeta::key_to_bytes(&ep_key),
+        GraphMeta::value_to_bytes(&ep_value),
+    )?;
 
     // Store max level
     let level_key = GraphMetaCfKey::max_level(index.embedding());
     let level_value = GraphMetaCfValue(GraphMetaField::MaxLevel(layer));
-    txn_db.put_cf(
+    txn.put_cf(
         &cf,
         GraphMeta::key_to_bytes(&level_key),
         GraphMeta::value_to_bytes(&level_value),
@@ -179,6 +289,10 @@ fn update_entry_point(
 
     Ok(())
 }
+
+// ============================================================================
+// Navigation info loading (read-only, no transaction needed)
+// ============================================================================
 
 /// Get or initialize navigation info from cache or storage.
 pub(super) fn get_or_init_navigation(index: &Index, storage: &Storage) -> Result<NavigationLayerInfo> {

@@ -111,10 +111,87 @@ impl IdAllocator {
         self.free_ids.lock().unwrap().len()
     }
 
+    /// Allocate an ID and persist state within a transaction.
+    ///
+    /// Unlike `allocate()`, this writes to IdAlloc CF within the
+    /// provided transaction for atomic commit with other writes.
+    ///
+    /// # Arguments
+    /// * `txn` - Transaction to write within
+    /// * `txn_db` - TransactionDB for CF handle lookup
+    /// * `embedding` - Embedding space code
+    ///
+    /// # Returns
+    /// The allocated VecId (persisted atomically with transaction)
+    pub fn allocate_in_txn(
+        &self,
+        txn: &rocksdb::Transaction<'_, TransactionDB>,
+        txn_db: &TransactionDB,
+        embedding: EmbeddingCode,
+    ) -> Result<VecId> {
+        let id = self.allocate(); // Get ID from in-memory state
+
+        // Persist next_id within transaction
+        let cf = txn_db
+            .cf_handle(IdAlloc::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdAlloc::CF_NAME))?;
+
+        let next_key = IdAllocCfKey::next_id(embedding);
+        let next_val = IdAllocCfValue(IdAllocField::NextId(self.next_id.load(Ordering::SeqCst)));
+        txn.put_cf(
+            &cf,
+            IdAlloc::key_to_bytes(&next_key),
+            IdAlloc::value_to_bytes(&next_val),
+        )?;
+
+        Ok(id)
+    }
+
+    /// Free an ID and persist within a transaction.
+    ///
+    /// Updates both in-memory state and persists the free bitmap
+    /// within the provided transaction.
+    ///
+    /// # Arguments
+    /// * `txn` - Transaction to write within
+    /// * `txn_db` - TransactionDB for CF handle lookup
+    /// * `embedding` - Embedding space code
+    /// * `id` - The VecId to free
+    pub fn free_in_txn(
+        &self,
+        txn: &rocksdb::Transaction<'_, TransactionDB>,
+        txn_db: &TransactionDB,
+        embedding: EmbeddingCode,
+        id: VecId,
+    ) -> Result<()> {
+        self.free(id); // Update in-memory state
+
+        // Persist free bitmap within transaction
+        let cf = txn_db
+            .cf_handle(IdAlloc::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdAlloc::CF_NAME))?;
+
+        let bitmap_key = IdAllocCfKey::free_bitmap(embedding);
+        let free = self.free_ids.lock().unwrap();
+        let mut bitmap_bytes = Vec::new();
+        free.serialize_into(&mut bitmap_bytes)?;
+        let bitmap_val = IdAllocCfValue(IdAllocField::FreeBitmap(bitmap_bytes));
+        txn.put_cf(
+            &cf,
+            IdAlloc::key_to_bytes(&bitmap_key),
+            IdAlloc::value_to_bytes(&bitmap_val),
+        )?;
+
+        Ok(())
+    }
+
     /// Persist allocator state to RocksDB.
     ///
     /// Stores both `next_id` and `free_ids` bitmap to the IdAlloc CF.
     /// Should be called periodically or on shutdown.
+    ///
+    /// Note: For transactional writes, use `allocate_in_txn()` and
+    /// `free_in_txn()` instead.
     pub fn persist(&self, db: &TransactionDB, embedding: EmbeddingCode) -> Result<()> {
         let cf = db
             .cf_handle(IdAlloc::CF_NAME)
