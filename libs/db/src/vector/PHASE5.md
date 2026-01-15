@@ -838,6 +838,54 @@ No other correctness issues found in the batch implementation.
 
 ---
 
+## Task 5.3: CODEX Review Fixes (COMPLETE)
+
+Both issues identified in the CODEX review have been addressed:
+
+### Fix 1: BinaryCodes CF Consistency
+
+**Before:** `insert_batch()` treated BinaryCodes CF as optional, silently skipping writes if CF was missing.
+
+**After:** Now fails with error if encoder exists but CF is missing, matching `insert_vector()` behavior.
+
+```rust
+// Before (buggy): silently skipped
+let codes_cf = txn_db.cf_handle(BinaryCodes::CF_NAME);  // Option
+if let Some(ref enc) = encoder {
+    if let Some(ref cf) = codes_cf {  // silently skipped if None
+        // ...
+    }
+}
+
+// After (fixed): fails if CF missing when encoder present
+if let Some(ref enc) = encoder {
+    let codes_cf = txn_db
+        .cf_handle(BinaryCodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+    // ...
+}
+```
+
+### Fix 2: Spec Hash Transaction Consistency
+
+**Before:** Used `txn_db.get_cf()` for spec hash lookup (outside transaction snapshot).
+
+**After:** Uses `txn.get_cf()` for snapshot consistency within the transaction.
+
+```rust
+// Before: outside transaction snapshot
+let spec_bytes = txn_db.get_cf(&specs_cf, ...)?;
+if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, ...)? { ... }
+
+// After: within transaction snapshot
+let spec_bytes = txn.get_cf(&specs_cf, ...)?;
+if let Some(stored_bytes) = txn.get_cf(&graph_meta_cf, ...)? { ... }
+```
+
+All 524 tests pass after fixes.
+
+---
+
 ## Task 5.4a: Processor::search() (COMPLETE)
 
 ### Overview

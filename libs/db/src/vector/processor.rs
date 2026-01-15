@@ -677,7 +677,6 @@ impl Processor {
         let vectors_cf = txn_db
             .cf_handle(Vectors::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-        let codes_cf = txn_db.cf_handle(BinaryCodes::CF_NAME);
         let specs_cf = txn_db
             .cf_handle(EmbeddingSpecs::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
@@ -701,9 +700,10 @@ impl Processor {
         }
 
         // 7. Validate/store spec hash (drift detection) - once per batch
+        // Use txn.get_cf() for snapshot consistency within the transaction
         {
             let spec_key = EmbeddingSpecCfKey(embedding);
-            let spec_bytes = txn_db
+            let spec_bytes = txn
                 .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
                 .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
             let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
@@ -712,7 +712,7 @@ impl Processor {
             let hash_key = GraphMetaCfKey::spec_hash(embedding);
             let hash_key_bytes = GraphMeta::key_to_bytes(&hash_key);
 
-            if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, &hash_key_bytes)? {
+            if let Some(stored_bytes) = txn.get_cf(&graph_meta_cf, &hash_key_bytes)? {
                 // Validate against stored hash
                 let stored_value = GraphMeta::value_from_bytes(&hash_key, &stored_bytes)?;
                 if let GraphMetaField::SpecHash(stored_hash) = stored_value.0 {
@@ -777,21 +777,23 @@ impl Processor {
             )?;
 
             // Store binary code with ADC correction (if RaBitQ enabled)
+            // Consistent with insert_vector(): fail if encoder exists but CF missing
             if let Some(ref enc) = encoder {
-                if let Some(ref cf) = codes_cf {
-                    let (code, correction) = enc.encode_with_correction(vector);
-                    let code_key = BinaryCodeCfKey(embedding, vec_id);
-                    let code_value = BinaryCodeCfValue {
-                        code: code.clone(),
-                        correction,
-                    };
-                    txn.put_cf(
-                        cf,
-                        BinaryCodes::key_to_bytes(&code_key),
-                        BinaryCodes::value_to_bytes(&code_value),
-                    )?;
-                    code_cache_updates.push((vec_id, code, correction));
-                }
+                let codes_cf = txn_db
+                    .cf_handle(BinaryCodes::CF_NAME)
+                    .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+                let (code, correction) = enc.encode_with_correction(vector);
+                let code_key = BinaryCodeCfKey(embedding, vec_id);
+                let code_value = BinaryCodeCfValue {
+                    code: code.clone(),
+                    correction,
+                };
+                txn.put_cf(
+                    &codes_cf,
+                    BinaryCodes::key_to_bytes(&code_key),
+                    BinaryCodes::value_to_bytes(&code_value),
+                )?;
+                code_cache_updates.push((vec_id, code, correction));
             }
         }
 
