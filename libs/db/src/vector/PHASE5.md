@@ -857,6 +857,18 @@ All 506 tests pass. Task 5.3 improvements complete.
 - ✅ Overfetch + batched IdReverse lookup fixes the two performance/UX concerns raised for Task 5.3.
 - ⚠️ **Remaining improvement:** if `ef_search < overfetch_k`, the HNSW search still returns at most `ef_search` candidates, so tombstones can still reduce results below `k`. Consider setting `effective_ef = max(ef_search, overfetch_k)` or scaling `ef_search` along with overfetch.
 
+### Resolution
+
+Fixed by ensuring `ef_search >= overfetch_k`:
+
+```rust
+let overfetch_k = k * 2;
+let effective_ef = ef_search.max(overfetch_k);
+let raw_results = index.search(&self.storage, query, overfetch_k, effective_ef)?;
+```
+
+This guarantees HNSW explores enough candidates to return `overfetch_k` results.
+
 ---
 
 ## Remaining Phase 5 Tasks
