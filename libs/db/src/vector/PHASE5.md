@@ -2189,6 +2189,13 @@ Processor-backed reader/consumer is still missing. Recommend adding a `spawn_que
 
 ---
 
+**New Feedback (mutation consumer ergonomics):**
+
+- Consider a `spawn_mutation_consumer_with_storage(...)` helper that accepts `Arc<Storage>` and `Arc<EmbeddingRegistry>` and constructs the internal `Processor`, so users don’t have to wire a Processor manually (matching graph’s pattern).  
+  - Optionally add `spawn_mutation_consumer_with_storage_autoreg(...)` that creates + prewarms a registry from storage for quickstart use.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
