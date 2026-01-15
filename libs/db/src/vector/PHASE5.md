@@ -1567,6 +1567,15 @@ The changes align well with the workflow and close the key correctness hole. Onc
 
 ---
 
+**Update (post-task numbering alignment / commit 8f93965):**
+
+- **Idempotent registration preserved.** Validation now runs only on new registrations; existing embeddings return without failing on invalid builder params.
+- **`hnsw_ef_construction` validated.** Builder rejects values `< 1`, preventing invalid HNSW configs.
+
+No further issues from this review pass.
+
+---
+
 ## Task 5.5: Processor::add_embedding_spec() (COMPLETE)
 
 **Status:** ✅ Complete (via `EmbeddingRegistry::register()`)
