@@ -1944,6 +1944,12 @@ No further issues found in this pass.
 
 ---
 
+**Update (public API cleanup applied):**
+
+- **Resolved:** internal graph mutation types (`UpdateEdges`, `UpdateGraphMeta`, `EdgeOperation`, `GraphMetaUpdate`) are now `pub(crate)` and no longer re-exported. Public API now aligns with “repair = rebuild”.
+
+---
+
 **API Direction (agreed): Transaction-only public surface**
 
 - **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
