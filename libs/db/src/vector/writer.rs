@@ -310,6 +310,14 @@ impl Consumer {
             }
 
             Mutation::InsertVector(op) => {
+                // 0. Look up embedding spec to get storage type
+                let storage_type = self
+                    .processor
+                    .registry()
+                    .get_by_code(op.embedding)
+                    .map(|emb| emb.storage_type())
+                    .unwrap_or_default(); // F32 fallback for unknown embeddings
+
                 // 1. Allocate vec_id
                 let vec_id = {
                     let allocator = self.processor.get_or_create_allocator(op.embedding);
@@ -340,16 +348,15 @@ impl Consumer {
                     IdReverse::value_to_bytes(&reverse_value),
                 )?;
 
-                // 4. Store vector data
+                // 4. Store vector data using correct storage type (F32 or F16)
                 let vec_key = VectorCfKey(op.embedding, vec_id);
-                let vec_value = VectorCfValue(op.vector.clone());
                 let vectors_cf = txn_db
                     .cf_handle(Vectors::CF_NAME)
                     .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
                 txn.put_cf(
                     &vectors_cf,
                     Vectors::key_to_bytes(&vec_key),
-                    Vectors::value_to_bytes(&vec_value),
+                    Vectors::value_to_bytes_typed(&op.vector, storage_type),
                 )?;
 
                 // 5. Store binary code with ADC correction (if RaBitQ enabled)

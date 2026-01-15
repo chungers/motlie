@@ -89,6 +89,8 @@ pub struct Embedding {
     dim: u32,
     /// Distance metric for similarity computation
     distance: Distance,
+    /// Storage type for vector elements (F32 or F16)
+    storage_type: super::schema::VectorElementType,
     /// Optional embedder for computing vectors from documents
     embedder: Option<Arc<dyn Embedder>>,
 }
@@ -100,6 +102,7 @@ impl Embedding {
         model: impl Into<Arc<str>>,
         dim: u32,
         distance: Distance,
+        storage_type: super::schema::VectorElementType,
         embedder: Option<Arc<dyn Embedder>>,
     ) -> Self {
         Self {
@@ -107,6 +110,7 @@ impl Embedding {
             model: model.into(),
             dim,
             distance,
+            storage_type,
             embedder,
         }
     }
@@ -143,6 +147,12 @@ impl Embedding {
     #[inline]
     pub fn distance(&self) -> Distance {
         self.distance
+    }
+
+    /// Storage type for vector elements (F32 or F16).
+    #[inline]
+    pub fn storage_type(&self) -> super::schema::VectorElementType {
+        self.storage_type
     }
 
     /// Check if this embedding has compute capability.
@@ -304,10 +314,11 @@ impl fmt::Debug for EmbeddingBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::schema::VectorElementType;
 
     #[test]
     fn test_embedding_accessors() {
-        let emb = Embedding::new(42, "gemma", 768, Distance::Cosine, None);
+        let emb = Embedding::new(42, "gemma", 768, Distance::Cosine, VectorElementType::default(), None);
 
         assert_eq!(emb.code(), 42);
         assert_eq!(emb.model(), "gemma");
@@ -318,16 +329,16 @@ mod tests {
 
     #[test]
     fn test_embedding_code_bytes() {
-        let emb = Embedding::new(0x0102030405060708, "test", 128, Distance::L2, None);
+        let emb = Embedding::new(0x0102030405060708, "test", 128, Distance::L2, VectorElementType::default(), None);
         let bytes = emb.code_bytes();
         assert_eq!(bytes, [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
     }
 
     #[test]
     fn test_embedding_equality() {
-        let emb1 = Embedding::new(42, "gemma", 768, Distance::Cosine, None);
-        let emb2 = Embedding::new(42, "different", 1024, Distance::L2, None);
-        let emb3 = Embedding::new(43, "gemma", 768, Distance::Cosine, None);
+        let emb1 = Embedding::new(42, "gemma", 768, Distance::Cosine, VectorElementType::default(), None);
+        let emb2 = Embedding::new(42, "different", 1024, Distance::L2, VectorElementType::default(), None);
+        let emb3 = Embedding::new(43, "gemma", 768, Distance::Cosine, VectorElementType::default(), None);
 
         // Same code = equal (regardless of other fields)
         assert_eq!(emb1, emb2);
@@ -337,13 +348,13 @@ mod tests {
 
     #[test]
     fn test_embedding_display() {
-        let emb = Embedding::new(1, "gemma", 768, Distance::Cosine, None);
+        let emb = Embedding::new(1, "gemma", 768, Distance::Cosine, VectorElementType::default(), None);
         assert_eq!(format!("{}", emb), "gemma:768:cosine");
     }
 
     #[test]
     fn test_embedding_validate_vector() {
-        let emb = Embedding::new(1, "test", 4, Distance::Cosine, None);
+        let emb = Embedding::new(1, "test", 4, Distance::Cosine, VectorElementType::default(), None);
 
         // Correct dimension
         assert!(emb.validate_vector(&[1.0, 2.0, 3.0, 4.0]).is_ok());
@@ -364,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_embedding_no_embedder_error() {
-        let emb = Embedding::new(1, "test", 128, Distance::Cosine, None);
+        let emb = Embedding::new(1, "test", 128, Distance::Cosine, VectorElementType::default(), None);
         let result = emb.embed("hello");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No embedder"));

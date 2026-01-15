@@ -30,19 +30,16 @@ use crate::vector::Storage;
 pub fn insert(index: &Index, storage: &Storage, vec_id: VecId, vector: &[f32]) -> Result<()> {
     let txn_db = storage.transaction_db()?;
 
-    // 1. Assign random layer
-    let mut rng = rand::thread_rng();
-    let node_layer = index
-        .nav_cache()
-        .get(index.embedding())
-        .map(|info| info.random_layer(&mut rng))
-        .unwrap_or(0);
-
-    // 2. Store node metadata
-    store_vec_meta(index, txn_db, vec_id, node_layer)?;
-
-    // 3. Get current navigation state
+    // 1. Get or initialize navigation state FIRST (fixes cold cache bug)
+    // This ensures we have correct max_layer for layer distribution even after restart
     let nav_info = get_or_init_navigation(index, storage)?;
+
+    // 2. Assign random layer using proper exponential distribution
+    let mut rng = rand::thread_rng();
+    let node_layer = nav_info.random_layer(&mut rng);
+
+    // 3. Store node metadata
+    store_vec_meta(index, txn_db, vec_id, node_layer)?;
 
     // 4. Handle empty graph case
     if nav_info.is_empty() {
