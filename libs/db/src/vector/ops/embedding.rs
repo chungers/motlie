@@ -20,8 +20,9 @@ use crate::vector::schema::EmbeddingSpecs;
 /// `MutationExecutor for AddEmbeddingSpec`.
 ///
 /// # What it does
-/// 1. Writes the EmbeddingSpec to RocksDB (transactional)
-/// 2. Updates the in-memory EmbeddingRegistry
+/// 1. Validates build parameters (hnsw_m, ef_construction, rabitq_bits)
+/// 2. Writes the EmbeddingSpec to RocksDB (transactional)
+/// 3. Updates the in-memory EmbeddingRegistry
 ///
 /// # Arguments
 /// * `txn` - Active RocksDB transaction
@@ -29,12 +30,16 @@ use crate::vector::schema::EmbeddingSpecs;
 /// * `processor` - Processor for registry access
 /// * `spec` - The AddEmbeddingSpec to persist
 ///
+/// # Errors
+/// - Invalid build parameters (hnsw_m < 2, ef_construction < 1, invalid rabitq_bits)
+/// - RocksDB write failure
+///
 /// # Note on atomicity
 ///
 /// The registry update happens immediately (before transaction commit).
 /// If the transaction is rolled back, the registry will be inconsistent.
 /// However:
-/// - In practice, AddEmbeddingSpec rarely fails
+/// - In practice, AddEmbeddingSpec rarely fails after validation
 /// - Registry is eventually consistent on restart (prewarm from DB)
 /// - This matches the pattern used elsewhere in the codebase
 ///
@@ -46,14 +51,17 @@ pub fn add_embedding_spec_in_txn(
     processor: &Processor,
     spec: &AddEmbeddingSpec,
 ) -> Result<()> {
-    // 1. Serialize and write to RocksDB
+    // 1. Validate build parameters (same rules as EmbeddingBuilder::validate())
+    spec.validate()?;
+
+    // 2. Serialize and write to RocksDB
     let (key_bytes, value_bytes) = spec.to_cf_bytes()?;
     let cf = txn_db
         .cf_handle(EmbeddingSpecs::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
     txn.put_cf(&cf, key_bytes, value_bytes)?;
 
-    // 2. Update in-memory registry
+    // 3. Update in-memory registry
     // This ensures subsequent mutations in the same process can resolve the code
     processor.registry().register_from_db(
         spec.code,

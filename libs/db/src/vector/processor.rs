@@ -620,19 +620,65 @@ impl Processor {
             ));
         }
 
-        // 4. Get or create HNSW index
+        // 4. Validate SpecHash (drift detection)
+        // This ensures the index was built with the current EmbeddingSpec configuration
+        {
+            let txn_db = self.storage.transaction_db()?;
+
+            // Get current EmbeddingSpec from storage
+            let specs_cf = txn_db
+                .cf_handle(EmbeddingSpecs::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
+            let spec_key = EmbeddingSpecCfKey(embedding);
+            let spec_bytes = txn_db
+                .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
+                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
+            let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
+
+            // Compute current hash
+            let current_hash = embedding_spec.compute_spec_hash();
+
+            // Check stored hash
+            let graph_meta_cf = txn_db
+                .cf_handle(GraphMeta::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
+            let hash_key = GraphMetaCfKey::spec_hash(embedding);
+            let hash_key_bytes = GraphMeta::key_to_bytes(&hash_key);
+
+            if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, &hash_key_bytes)? {
+                let stored_value = GraphMeta::value_from_bytes(&hash_key, &stored_bytes)?;
+                if let GraphMetaField::SpecHash(stored_hash) = stored_value.0 {
+                    if stored_hash != current_hash {
+                        return Err(anyhow::anyhow!(
+                            "EmbeddingSpec changed since index build (hash {} != {}). Rebuild required.",
+                            current_hash,
+                            stored_hash
+                        ));
+                    }
+                }
+            } else {
+                // Legacy index without SpecHash - drift check skipped
+                // This is expected for indexes built before Phase 5.6
+                tracing::warn!(
+                    embedding = embedding,
+                    "Legacy index without SpecHash - drift check skipped"
+                );
+            }
+        }
+
+        // 5. Get or create HNSW index
         let index = self
             .get_or_create_index(embedding)
             .ok_or_else(|| anyhow::anyhow!("Failed to get HNSW index for embedding {}", embedding))?;
 
-        // 5. Perform HNSW search with overfetch to handle tombstones
+        // 6. Perform HNSW search with overfetch to handle tombstones
         // Overfetch by 2x to ensure we get enough live results after filtering
         // Ensure ef_search >= overfetch_k so HNSW can return enough candidates
         let overfetch_k = k * 2;
         let effective_ef = ef_search.max(overfetch_k);
         let raw_results = index.search(&self.storage, query, overfetch_k, effective_ef)?;
 
-        // 6. Filter deleted vectors using batched IdReverse lookup
+        // 7. Filter deleted vectors using batched IdReverse lookup
         let txn_db = self.storage.transaction_db()?;
         let reverse_cf = txn_db
             .cf_handle(IdReverse::CF_NAME)
