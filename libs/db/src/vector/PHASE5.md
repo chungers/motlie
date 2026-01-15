@@ -1212,6 +1212,62 @@ I agree with the overall plan: EmbeddingSpec as source of truth, GraphMeta holdi
 
 These are minor tweaks; the plan is sound.
 
+### Resolution
+
+**Aligned with all four points.** Updated plan:
+
+1. **Hash includes model** - Updated `compute_spec_hash()`:
+   ```rust
+   fn compute_spec_hash(spec: &EmbeddingSpec) -> u64 {
+       let mut hasher = DefaultHasher::new();
+       spec.model.hash(&mut hasher);  // Added
+       spec.dim.hash(&mut hasher);
+       spec.distance.hash(&mut hasher);
+       spec.storage_type.hash(&mut hasher);
+       spec.hnsw_m.hash(&mut hasher);
+       spec.hnsw_ef_construction.hash(&mut hasher);
+       spec.rabitq_bits.hash(&mut hasher);
+       spec.rabitq_seed.hash(&mut hasher);
+       hasher.finish()
+   }
+   ```
+
+2. **SpecHash immutable after first write** - In `insert_vector()`:
+   ```rust
+   // On first insert: store spec_hash
+   if graph_meta.spec_hash.is_none() {
+       let hash = compute_spec_hash(&spec);
+       txn.put_cf(&cf, GraphMeta::spec_hash_key(embedding), hash.to_le_bytes())?;
+   } else {
+       // On subsequent inserts: validate hash matches
+       let stored_hash = graph_meta.spec_hash.unwrap();
+       let current_hash = compute_spec_hash(&spec);
+       if stored_hash != current_hash {
+           return Err(anyhow!("EmbeddingSpec changed since index build - rebuild required"));
+       }
+   }
+   ```
+
+3. **Double validation in search** - In `search_with_config()`:
+   ```rust
+   // Validate config vs registry spec
+   validate_config_vs_spec(config, &registry_spec)?;
+
+   // Validate registry spec hash vs stored graph hash
+   if let Some(stored_hash) = graph_meta.spec_hash {
+       let registry_hash = compute_spec_hash(&registry_spec);
+       if stored_hash != registry_hash {
+           return Err(anyhow!("Registry spec changed since build - rebuild required"));
+       }
+   } else {
+       log::warn!("Legacy index without SpecHash - drift check skipped");
+   }
+   ```
+
+4. **Legacy warning** - Implemented via `log::warn!` as shown above.
+
+Implementation will proceed with schema changes to EmbeddingSpec and GraphMeta.
+
 ---
 
 ## Remaining Phase 5 Tasks
