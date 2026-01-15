@@ -1929,6 +1929,14 @@ The shared ops helpers now centralize validation and soft-delete behavior (good)
 
 ---
 
+**Update (post Batch MutationCacheUpdate):**
+
+- **Resolved:** `InsertVectorBatch::execute()` now returns batch cache updates via `MutationCacheUpdate::Batch`, and `apply()` handles nested updates. Cache consistency is preserved even for direct batch execution.
+
+No further issues found in this pass.
+
+---
+
 **API Direction (agreed): Transaction-only public surface**
 
 - **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
