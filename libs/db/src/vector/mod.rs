@@ -126,6 +126,7 @@ pub use writer::{
 };
 
 // Query types and infrastructure (following graph::query pattern)
+pub use crate::reader::Runnable;
 pub use query::{
     GetExternalId, GetInternalId, GetVector, Query, QueryExecutor, QueryProcessor,
     QueryWithTimeout, ResolveIds, SearchKNN,
