@@ -346,11 +346,105 @@ No additional follow-up items at this time.
 
 ---
 
+## Task 5.1: Processor::insert_vector() (COMPLETE)
+
+### Overview
+
+Task 5.1 implements the high-level `insert_vector()` method on the `Processor` struct, providing a unified API for inserting vectors with full transactional guarantees.
+
+### API Signature
+
+```rust
+impl Processor {
+    /// Insert a vector into an embedding space.
+    ///
+    /// This method performs all necessary operations atomically:
+    /// 1. Validates embedding exists and dimension matches
+    /// 2. Allocates internal VecId
+    /// 3. Stores ID mappings (forward: Id→VecId, reverse: VecId→Id)
+    /// 4. Stores vector data
+    /// 5. Encodes and stores binary codes (RaBitQ)
+    /// 6. Optionally builds HNSW index
+    ///
+    /// # Arguments
+    /// * `embedding` - Embedding space code
+    /// * `id` - External ID for the vector
+    /// * `vector` - Vector data (must match embedding dimension)
+    /// * `build_index` - Whether to add to HNSW index immediately
+    ///
+    /// # Returns
+    /// The allocated internal VecId on success.
+    pub fn insert_vector(
+        &self,
+        embedding: EmbeddingCode,
+        id: Id,
+        vector: &[f32],
+        build_index: bool,
+    ) -> Result<VecId>;
+}
+```
+
+### Implementation Details
+
+#### Transaction Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    insert_vector()                           │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. Validate embedding exists in registry                   │
+│  2. Validate vector dimension matches spec                  │
+│                                                             │
+│  3. txn = txn_db.transaction()                              │
+│                                                             │
+│  4. vec_id = allocator.allocate_in_txn()                   │
+│                                                             │
+│  5. IdForward: txn.put_cf(id → vec_id)                     │
+│  6. IdReverse: txn.put_cf(vec_id → id)                     │
+│  7. Vectors: txn.put_cf(vec_id → vector_bytes)             │
+│                                                             │
+│  8. BinaryCodes (if RaBitQ encoder available):             │
+│     └── txn.put_cf(vec_id → binary_code)                   │
+│                                                             │
+│  9. HNSW (if build_index && hnsw_config.enabled):          │
+│     └── insert_in_txn() → CacheUpdate                      │
+│                                                             │
+│  10. txn.commit() ─────────────────── ATOMIC BOUNDARY ───  │
+│                                                             │
+│  11. cache_update.apply(nav_cache) ── Only after commit ── │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Key Features
+
+1. **Validation First**: Embedding existence and dimension validated before transaction starts
+2. **Single Transaction**: All writes (ID mappings, vector, codes, HNSW) in same transaction
+3. **Deferred Cache Update**: HNSW cache updated only after commit succeeds
+4. **Optional Indexing**: `build_index` flag allows deferring HNSW indexing for batch loads
+
+### Tests
+
+| Test | Purpose |
+|------|---------|
+| `test_insert_vector_unknown_embedding` | Verify error for unknown embedding code |
+| `test_insert_vector_dimension_mismatch` | Verify error for wrong dimension |
+| `test_insert_vector_integration` | Full insert with ID mappings, vector storage, binary codes |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Added `insert_vector()` method (~100 lines) and 3 tests |
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
 |------|-------------|--------|
-| 5.1 | Processor::insert_vector() | Pending |
+| 5.1 | Processor::insert_vector() | **Complete** |
 | 5.2 | Processor::delete_vector() | Pending |
 | 5.3 | Processor::search() | Pending |
 | 5.4 | Storage layer search methods | Pending |

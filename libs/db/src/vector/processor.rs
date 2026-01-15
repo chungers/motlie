@@ -21,17 +21,22 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dashmap::DashMap;
 
 use super::cache::NavigationCache;
 use super::config::RaBitQConfig;
-use super::hnsw;
+use super::hnsw::{self, insert_in_txn};
 use super::id::IdAllocator;
 use super::rabitq::RaBitQ;
 use super::registry::EmbeddingRegistry;
-use super::schema::EmbeddingCode;
+use super::schema::{
+    BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, IdForward, IdForwardCfKey,
+    IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue, VecId, VectorCfKey, Vectors,
+};
 use super::Storage;
+use crate::rocksdb::ColumnFamily;
+use crate::Id;
 
 // ============================================================================
 // Processor
@@ -272,6 +277,154 @@ impl Processor {
     pub fn index_count(&self) -> usize {
         self.hnsw_indices.len()
     }
+
+    // ========================================================================
+    // Vector Operations
+    // ========================================================================
+
+    /// Insert a single vector into an embedding space.
+    ///
+    /// This is the primary API for inserting vectors. All operations are
+    /// executed within a single transaction for atomicity.
+    ///
+    /// # Arguments
+    /// * `embedding` - The embedding space code
+    /// * `id` - External ID (ULID) for the vector
+    /// * `vector` - The vector data (dimension must match embedding spec)
+    /// * `build_index` - Whether to build HNSW graph connections
+    ///
+    /// # Returns
+    /// The internal VecId assigned to this vector.
+    ///
+    /// # Errors
+    /// - Unknown embedding code
+    /// - Dimension mismatch
+    /// - Storage errors
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let vec_id = processor.insert_vector(
+    ///     embedding_code,
+    ///     Id::new(),
+    ///     &[0.1, 0.2, 0.3, ...],
+    ///     true,  // build HNSW index
+    /// )?;
+    /// ```
+    pub fn insert_vector(
+        &self,
+        embedding: EmbeddingCode,
+        id: Id,
+        vector: &[f32],
+        build_index: bool,
+    ) -> Result<VecId> {
+        // 1. Validate embedding exists and get spec
+        let spec = self
+            .registry
+            .get_by_code(embedding)
+            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding))?;
+
+        // 2. Validate dimension
+        if vector.len() != spec.dim() as usize {
+            return Err(anyhow::anyhow!(
+                "Dimension mismatch: expected {}, got {}",
+                spec.dim(),
+                vector.len()
+            ));
+        }
+
+        let storage_type = spec.storage_type();
+
+        // 3. Begin transaction
+        let txn_db = self
+            .storage
+            .transaction_db()
+            .context("Failed to get transaction DB")?;
+        let txn = txn_db.transaction();
+
+        // 4. Allocate internal ID (transactionally persisted)
+        let vec_id = {
+            let allocator = self.get_or_create_allocator(embedding);
+            allocator.allocate_in_txn(&txn, &txn_db, embedding)?
+        };
+
+        // 5. Store Id -> VecId mapping (IdForward)
+        let forward_key = IdForwardCfKey(embedding, id);
+        let forward_value = IdForwardCfValue(vec_id);
+        let forward_cf = txn_db
+            .cf_handle(IdForward::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
+        txn.put_cf(
+            &forward_cf,
+            IdForward::key_to_bytes(&forward_key),
+            IdForward::value_to_bytes(&forward_value),
+        )?;
+
+        // 6. Store VecId -> Id mapping (IdReverse)
+        let reverse_key = IdReverseCfKey(embedding, vec_id);
+        let reverse_value = IdReverseCfValue(id);
+        let reverse_cf = txn_db
+            .cf_handle(IdReverse::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+        txn.put_cf(
+            &reverse_cf,
+            IdReverse::key_to_bytes(&reverse_key),
+            IdReverse::value_to_bytes(&reverse_value),
+        )?;
+
+        // 7. Store vector data
+        let vec_key = VectorCfKey(embedding, vec_id);
+        let vectors_cf = txn_db
+            .cf_handle(Vectors::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+        txn.put_cf(
+            &vectors_cf,
+            Vectors::key_to_bytes(&vec_key),
+            Vectors::value_to_bytes_typed(vector, storage_type),
+        )?;
+
+        // 8. Store binary code with ADC correction (if RaBitQ enabled)
+        if let Some(encoder) = self.get_or_create_encoder(embedding) {
+            let (code, correction) = encoder.encode_with_correction(vector);
+            let code_key = BinaryCodeCfKey(embedding, vec_id);
+            let code_value = BinaryCodeCfValue { code, correction };
+            let codes_cf = txn_db
+                .cf_handle(BinaryCodes::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+            txn.put_cf(
+                &codes_cf,
+                BinaryCodes::key_to_bytes(&code_key),
+                BinaryCodes::value_to_bytes(&code_value),
+            )?;
+        }
+
+        // 9. Build HNSW index (if requested)
+        let cache_update = if build_index {
+            if let Some(index) = self.get_or_create_index(embedding) {
+                Some(insert_in_txn(
+                    &index,
+                    &txn,
+                    &txn_db,
+                    &self.storage,
+                    vec_id,
+                    vector,
+                )?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 10. Commit transaction
+        txn.commit().context("Failed to commit transaction")?;
+
+        // 11. Apply cache update AFTER successful commit
+        if let Some(update) = cache_update {
+            update.apply(&self.nav_cache);
+        }
+
+        Ok(vec_id)
+    }
 }
 
 // ============================================================================
@@ -330,5 +483,116 @@ mod tests {
         // Inserting same key doesn't increase count
         allocators.insert(1, IdAllocator::new());
         assert_eq!(allocators.len(), 2);
+    }
+
+    #[test]
+    fn test_insert_vector_integration() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        // Create registry with an embedding spec
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register embedding");
+        let embedding_code = embedding.code();
+
+        // Create processor
+        let processor = Processor::new(storage.clone(), registry);
+
+        // Generate test vector
+        let vector: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
+        let id = crate::Id::new();
+
+        // Insert without building index
+        let vec_id = processor
+            .insert_vector(embedding_code, id, &vector, false)
+            .expect("Insert should succeed");
+
+        assert_eq!(vec_id, 0, "First vector should get ID 0");
+
+        // Insert another with building index
+        let id2 = crate::Id::new();
+        let vector2: Vec<f32> = (0..64).map(|i| (i + 1) as f32 / 64.0).collect();
+        let vec_id2 = processor
+            .insert_vector(embedding_code, id2, &vector2, true)
+            .expect("Insert with index should succeed");
+
+        assert_eq!(vec_id2, 1, "Second vector should get ID 1");
+
+        // Verify allocator state
+        assert_eq!(processor.allocator_count(), 1);
+        {
+            let allocator = processor.get_or_create_allocator(embedding_code);
+            assert_eq!(allocator.next_id(), 2);
+        }
+    }
+
+    #[test]
+    fn test_insert_vector_dimension_mismatch() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        // Create registry with 64-dim embedding
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage, registry);
+
+        // Try to insert 128-dim vector into 64-dim embedding
+        let wrong_dim_vector: Vec<f32> = (0..128).map(|i| i as f32).collect();
+        let result =
+            processor.insert_vector(embedding_code, crate::Id::new(), &wrong_dim_vector, false);
+
+        assert!(result.is_err(), "Should fail on dimension mismatch");
+        assert!(
+            result.unwrap_err().to_string().contains("Dimension mismatch"),
+            "Error should mention dimension mismatch"
+        );
+    }
+
+    #[test]
+    fn test_insert_vector_unknown_embedding() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        // Empty registry
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let processor = Processor::new(storage, registry);
+
+        // Try to insert into non-existent embedding
+        let vector: Vec<f32> = vec![0.0; 64];
+        let result = processor.insert_vector(999, crate::Id::new(), &vector, false);
+
+        assert!(result.is_err(), "Should fail on unknown embedding");
+        assert!(
+            result.unwrap_err().to_string().contains("Unknown embedding"),
+            "Error should mention unknown embedding"
+        );
     }
 }
