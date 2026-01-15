@@ -410,6 +410,7 @@ impl EmbeddingBuilder {
     /// # Validation Rules
     ///
     /// - `hnsw_m >= 2`: Required for valid `m_l = 1/ln(m)` computation
+    /// - `hnsw_ef_construction >= 1`: Required for valid HNSW config
     /// - `rabitq_bits ∈ {1, 2, 4}`: Only supported quantization levels
     ///
     /// # Example
@@ -427,6 +428,14 @@ impl EmbeddingBuilder {
             return Err(anyhow::anyhow!(
                 "hnsw_m must be >= 2 (got {}). Values <= 1 cause invalid layer assignment (m_l = 1/ln(m)).",
                 self.hnsw_m
+            ));
+        }
+
+        // HNSW ef_construction must be >= 1 for valid config
+        if self.hnsw_ef_construction < 1 {
+            return Err(anyhow::anyhow!(
+                "hnsw_ef_construction must be >= 1 (got {})",
+                self.hnsw_ef_construction
             ));
         }
 
@@ -572,6 +581,21 @@ mod tests {
     }
 
     #[test]
+    fn test_embedding_builder_validate_invalid_ef_construction() {
+        // ef_construction = 0 is invalid
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
+            .with_hnsw_ef_construction(0);
+        let result = builder.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("hnsw_ef_construction must be >= 1"));
+
+        // ef_construction = 1 is valid (minimum)
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
+            .with_hnsw_ef_construction(1);
+        assert!(builder.validate().is_ok());
+    }
+
+    #[test]
     fn test_embedding_builder_validate_success() {
         // Default builder should pass validation
         let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine);
@@ -580,6 +604,7 @@ mod tests {
         // Custom valid params should also pass
         let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
             .with_hnsw_m(32)
+            .with_hnsw_ef_construction(400)
             .with_rabitq_bits(4);
         assert!(builder.validate().is_ok());
     }

@@ -183,19 +183,20 @@ impl EmbeddingRegistry {
     /// Register a new embedding space.
     ///
     /// Idempotent: returns existing embedding if spec already registered.
+    /// Build parameters are only validated for NEW registrations.
     ///
     /// # Errors
     ///
-    /// Returns an error if build parameters are invalid:
+    /// Returns an error if build parameters are invalid (new registration only):
     /// - `hnsw_m < 2`: Invalid for `m_l = 1/ln(m)` computation
+    /// - `hnsw_ef_construction < 1`: Invalid HNSW config
     /// - `rabitq_bits ∉ {1, 2, 4}`: Unsupported quantization level
     pub fn register(&self, builder: EmbeddingBuilder, db: &TransactionDB) -> Result<Embedding> {
-        // Validate build parameters before registration
-        builder.validate()?;
-
         let spec_key = (builder.model.clone(), builder.dim, builder.distance);
 
-        // Fast path: already registered
+        // Fast path: already registered (idempotent - no validation needed)
+        // This preserves idempotent behavior: caller can retrieve existing
+        // embedding even with invalid build params in the builder.
         if let Some(existing) = self.by_spec.get(&spec_key) {
             let mut emb = existing.clone();
             // Attach embedder if provided
@@ -208,7 +209,10 @@ impl EmbeddingRegistry {
             return Ok(emb);
         }
 
-        // Slow path: allocate new code and persist
+        // Slow path: new registration - validate build parameters
+        builder.validate()?;
+
+        // Allocate new code and persist
         let code = self.next_code.fetch_add(1, Ordering::SeqCst);
 
         // Persist to RocksDB using ColumnFamilyRecord trait
