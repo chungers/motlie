@@ -2217,6 +2217,19 @@ No issues found in this update.
 
 ---
 
+**Update (run() ergonomics added):**
+
+- **Resolved:** `SearchKNN` now implements `Runnable<SearchReader>` with `run(&reader, timeout)` and `SearchKNNDispatch` is `pub(crate)`. This aligns vector query usage with graph’s public pattern.
+
+---
+
+**New Feedback (mutation run() ergonomics):**
+
+- Mutations still require `writer.send(...)` + `flush()`; there is no `Runnable<Writer>` implementation for `InsertVector`, `InsertVectorBatch`, `DeleteVector`, etc.  
+  - **Recommendation:** add `Runnable<Writer>` impls (and a `MutationBatch` helper) so users can do `InsertVector::new(...).run(&writer, timeout)` like graph. This fully hides `send` in the public API.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
