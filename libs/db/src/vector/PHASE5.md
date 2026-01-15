@@ -869,6 +869,11 @@ let raw_results = index.search(&self.storage, query, overfetch_k, effective_ef)?
 
 This guarantees HNSW explores enough candidates to return `overfetch_k` results.
 
+## CODEX Verification (Post-ef scaling)
+
+- ✅ `effective_ef = max(ef_search, overfetch_k)` addresses the underfilled-results risk when tombstones are present.
+- ✅ No further issues identified for Task 5.3 at this time.
+
 ---
 
 ## Remaining Phase 5 Tasks
