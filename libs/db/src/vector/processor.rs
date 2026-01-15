@@ -439,6 +439,104 @@ impl Processor {
 
         Ok(vec_id)
     }
+
+    /// Delete a vector from an embedding space.
+    ///
+    /// This method performs all necessary cleanup atomically:
+    /// 1. Looks up internal VecId from external Id
+    /// 2. Deletes ID mappings (forward and reverse)
+    /// 3. Deletes vector data
+    /// 4. Deletes binary codes (if RaBitQ enabled)
+    /// 5. Returns VecId to free list for reuse
+    ///
+    /// # Arguments
+    /// * `embedding` - The embedding space code
+    /// * `id` - External ID (ULID) of the vector to delete
+    ///
+    /// # Returns
+    /// - `Ok(Some(vec_id))` - Vector was deleted, returns the freed VecId
+    /// - `Ok(None)` - Vector did not exist (idempotent)
+    /// - `Err(...)` - Storage or transaction error
+    ///
+    /// # Note
+    /// HNSW graph edges are NOT cleaned up on delete. Deleted nodes are
+    /// skipped during search. This is the standard HNSW approach - edges
+    /// are cleaned up lazily during compaction or rebuild.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// match processor.delete_vector(embedding_code, id)? {
+    ///     Some(vec_id) => println!("Deleted vector with internal ID {}", vec_id),
+    ///     None => println!("Vector did not exist"),
+    /// }
+    /// ```
+    pub fn delete_vector(
+        &self,
+        embedding: EmbeddingCode,
+        id: Id,
+    ) -> Result<Option<VecId>> {
+        // 1. Begin transaction
+        let txn_db = self
+            .storage
+            .transaction_db()
+            .context("Failed to get transaction DB")?;
+        let txn = txn_db.transaction();
+
+        // 2. Look up VecId from external Id (with lock to prevent races)
+        let forward_cf = txn_db
+            .cf_handle(IdForward::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
+        let forward_key = IdForwardCfKey(embedding, id);
+
+        let vec_id = match txn.get_for_update_cf(
+            &forward_cf,
+            IdForward::key_to_bytes(&forward_key),
+            true,
+        )? {
+            Some(bytes) => IdForward::value_from_bytes(&bytes)?.0,
+            None => return Ok(None), // Already deleted or never existed
+        };
+
+        // 3. Delete IdForward mapping
+        txn.delete_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))?;
+
+        // 4. Delete IdReverse mapping
+        let reverse_key = IdReverseCfKey(embedding, vec_id);
+        let reverse_cf = txn_db
+            .cf_handle(IdReverse::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+        txn.delete_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))?;
+
+        // 5. Delete vector data
+        let vec_key = VectorCfKey(embedding, vec_id);
+        let vectors_cf = txn_db
+            .cf_handle(Vectors::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+        txn.delete_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?;
+
+        // 6. Delete binary code (if RaBitQ enabled)
+        if self.rabitq_enabled() {
+            let code_key = BinaryCodeCfKey(embedding, vec_id);
+            let codes_cf = txn_db
+                .cf_handle(BinaryCodes::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+            txn.delete_cf(&codes_cf, BinaryCodes::key_to_bytes(&code_key))?;
+        }
+
+        // 7. Return VecId to free list (transactionally persisted)
+        {
+            let allocator = self.get_or_create_allocator(embedding);
+            allocator.free_in_txn(&txn, &txn_db, embedding, vec_id)?;
+        }
+
+        // 8. Commit transaction
+        txn.commit().context("Failed to commit delete transaction")?;
+
+        // Note: HNSW edges are NOT cleaned up. Deleted nodes are skipped
+        // during search. This is standard HNSW behavior.
+
+        Ok(Some(vec_id))
+    }
 }
 
 // ============================================================================
@@ -648,5 +746,144 @@ mod tests {
             result.unwrap_err().to_string().contains("already exists"),
             "Error should mention ID already exists"
         );
+    }
+
+    #[test]
+    fn test_delete_vector_success() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage.clone(), registry);
+
+        // Insert a vector
+        let vector: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
+        let id = crate::Id::new();
+        let vec_id = processor
+            .insert_vector(embedding_code, id, &vector, false)
+            .expect("Insert should succeed");
+
+        assert_eq!(vec_id, 0, "First vector should get ID 0");
+
+        // Delete the vector
+        let deleted = processor
+            .delete_vector(embedding_code, id)
+            .expect("Delete should succeed");
+
+        assert_eq!(deleted, Some(0), "Should return deleted VecId");
+
+        // Verify IdForward mapping is gone
+        let forward_cf = txn_db
+            .cf_handle(IdForward::CF_NAME)
+            .expect("CF should exist");
+        let forward_key = IdForwardCfKey(embedding_code, id);
+        let result = txn_db
+            .get_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))
+            .expect("Read should succeed");
+        assert!(result.is_none(), "IdForward mapping should be deleted");
+    }
+
+    #[test]
+    fn test_delete_vector_not_found() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage, registry);
+
+        // Try to delete non-existent vector (should be idempotent)
+        let id = crate::Id::new();
+        let result = processor
+            .delete_vector(embedding_code, id)
+            .expect("Delete should not error");
+
+        assert_eq!(result, None, "Should return None for non-existent vector");
+    }
+
+    #[test]
+    fn test_delete_vector_id_reuse() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage, registry);
+
+        // Insert two vectors
+        let vector: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
+        let id1 = crate::Id::new();
+        let id2 = crate::Id::new();
+
+        let vec_id1 = processor
+            .insert_vector(embedding_code, id1, &vector, false)
+            .expect("Insert 1 should succeed");
+        let vec_id2 = processor
+            .insert_vector(embedding_code, id2, &vector, false)
+            .expect("Insert 2 should succeed");
+
+        assert_eq!(vec_id1, 0);
+        assert_eq!(vec_id2, 1);
+
+        // Delete first vector
+        processor
+            .delete_vector(embedding_code, id1)
+            .expect("Delete should succeed");
+
+        // Insert new vector - should reuse VecId 0
+        let id3 = crate::Id::new();
+        let vec_id3 = processor
+            .insert_vector(embedding_code, id3, &vector, false)
+            .expect("Insert 3 should succeed");
+
+        assert_eq!(vec_id3, 0, "Should reuse freed VecId 0");
+
+        // Next insert should get fresh ID
+        let id4 = crate::Id::new();
+        let vec_id4 = processor
+            .insert_vector(embedding_code, id4, &vector, false)
+            .expect("Insert 4 should succeed");
+
+        assert_eq!(vec_id4, 2, "Should get next fresh ID");
     }
 }

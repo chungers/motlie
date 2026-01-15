@@ -534,12 +534,90 @@ The `get_for_update_cf()` acquires a lock on the key, preventing concurrent inse
 
 ---
 
+## Task 5.2: Processor::delete_vector() (COMPLETE)
+
+### Overview
+
+Task 5.2 implements the `delete_vector()` method on the `Processor` struct, providing atomic vector deletion with ID reuse.
+
+### API Signature
+
+```rust
+impl Processor {
+    /// Delete a vector from an embedding space.
+    ///
+    /// # Returns
+    /// - `Ok(Some(vec_id))` - Vector was deleted, returns the freed VecId
+    /// - `Ok(None)` - Vector did not exist (idempotent)
+    /// - `Err(...)` - Storage or transaction error
+    pub fn delete_vector(
+        &self,
+        embedding: EmbeddingCode,
+        id: Id,
+    ) -> Result<Option<VecId>>;
+}
+```
+
+### Implementation Details
+
+#### Transaction Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    delete_vector()                           │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. txn = txn_db.transaction()                              │
+│                                                             │
+│  2. vec_id = txn.get_for_update_cf(IdForward, id)          │
+│     └── Return Ok(None) if not found (idempotent)          │
+│                                                             │
+│  3. txn.delete_cf(IdForward, id)                           │
+│  4. txn.delete_cf(IdReverse, vec_id)                       │
+│  5. txn.delete_cf(Vectors, vec_id)                         │
+│  6. txn.delete_cf(BinaryCodes, vec_id) ── if RaBitQ ──    │
+│  7. allocator.free_in_txn(vec_id)                          │
+│                                                             │
+│  8. txn.commit() ─────────────────── ATOMIC BOUNDARY ───   │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Key Features
+
+1. **Idempotent**: Deleting non-existent vector returns `Ok(None)` instead of error
+2. **Race-safe**: Uses `get_for_update_cf()` to lock the key during lookup
+3. **ID Reuse**: Freed VecIds are returned to allocator for reuse
+4. **Atomic**: All deletes in single transaction
+
+#### HNSW Note
+
+HNSW graph edges are NOT cleaned up on delete. This is standard HNSW behavior:
+- Deleted nodes are skipped during search
+- Edges cleaned up lazily during compaction or rebuild
+
+### Tests
+
+| Test | Purpose |
+|------|---------|
+| `test_delete_vector_success` | Delete existing vector, verify mappings removed |
+| `test_delete_vector_not_found` | Delete non-existent vector (idempotent) |
+| `test_delete_vector_id_reuse` | Verify VecId reuse after delete |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Added `delete_vector()` method (~65 lines) and 3 tests |
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
 |------|-------------|--------|
 | 5.1 | Processor::insert_vector() | **Complete** |
-| 5.2 | Processor::delete_vector() | Pending |
+| 5.2 | Processor::delete_vector() | **Complete** |
 | 5.3 | Processor::search() | Pending |
 | 5.4 | Storage layer search methods | Pending |
 | 5.5 | Dispatch logic for search strategies | Pending |
