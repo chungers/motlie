@@ -39,6 +39,23 @@ use crate::rocksdb::ColumnFamily;
 use crate::Id;
 
 // ============================================================================
+// SearchResult
+// ============================================================================
+
+/// Search result containing external ID, internal ID, and distance.
+///
+/// Returned by `Processor::search()` for each matched vector.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    /// External ID (ULID) for the vector
+    pub id: Id,
+    /// Internal vector ID (compact u32)
+    pub vec_id: VecId,
+    /// Distance from query vector (lower = more similar)
+    pub distance: f32,
+}
+
+// ============================================================================
 // Processor
 // ============================================================================
 
@@ -556,6 +573,97 @@ impl Processor {
 
         Ok(Some(vec_id))
     }
+
+    /// Search for nearest neighbors in an embedding space.
+    ///
+    /// Performs HNSW approximate nearest neighbor search and returns results
+    /// with external IDs. Soft-deleted vectors are automatically filtered out.
+    ///
+    /// # Arguments
+    /// * `embedding` - The embedding space code
+    /// * `query` - Query vector (must match embedding dimension)
+    /// * `k` - Number of results to return
+    /// * `ef_search` - Search beam width (higher = better recall, slower)
+    ///
+    /// # Returns
+    /// Up to k nearest neighbors as `SearchResult` structs, sorted by distance
+    /// (ascending). May return fewer than k results if:
+    /// - Index has fewer than k vectors
+    /// - Some results were soft-deleted
+    ///
+    /// # Errors
+    /// - Unknown embedding code
+    /// - Dimension mismatch
+    /// - HNSW not enabled
+    /// - Storage errors
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let results = processor.search(embedding_code, &query, 10, 100)?;
+    /// for result in results {
+    ///     println!("ID: {}, distance: {}", result.id, result.distance);
+    /// }
+    /// ```
+    pub fn search(
+        &self,
+        embedding: EmbeddingCode,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+    ) -> Result<Vec<SearchResult>> {
+        // 1. Validate embedding exists and get spec
+        let spec = self
+            .registry
+            .get_by_code(embedding)
+            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding))?;
+
+        // 2. Validate dimension
+        if query.len() != spec.dim() as usize {
+            return Err(anyhow::anyhow!(
+                "Dimension mismatch: expected {}, got {}",
+                spec.dim(),
+                query.len()
+            ));
+        }
+
+        // 3. Check HNSW is enabled
+        if !self.hnsw_config.enabled {
+            return Err(anyhow::anyhow!(
+                "HNSW indexing is disabled - search not available"
+            ));
+        }
+
+        // 4. Get or create HNSW index
+        let index = self
+            .get_or_create_index(embedding)
+            .ok_or_else(|| anyhow::anyhow!("Failed to get HNSW index for embedding {}", embedding))?;
+
+        // 5. Perform HNSW search
+        let raw_results = index.search(&self.storage, query, k, ef_search)?;
+
+        // 6. Filter deleted vectors and resolve external IDs
+        let txn_db = self.storage.transaction_db()?;
+        let reverse_cf = txn_db
+            .cf_handle(IdReverse::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+
+        let mut results = Vec::with_capacity(raw_results.len());
+        for (distance, vec_id) in raw_results {
+            // Check if IdReverse exists (not deleted)
+            let key = IdReverseCfKey(embedding, vec_id);
+            if let Some(bytes) = txn_db.get_cf(&reverse_cf, IdReverse::key_to_bytes(&key))? {
+                let id = IdReverse::value_from_bytes(&bytes)?.0;
+                results.push(SearchResult {
+                    id,
+                    vec_id,
+                    distance,
+                });
+            }
+            // Skip deleted vectors (IdReverse missing)
+        }
+
+        Ok(results)
+    }
 }
 
 // ============================================================================
@@ -913,5 +1021,217 @@ mod tests {
             .expect("Insert 4 should succeed");
 
         assert_eq!(vec_id4, 2, "Should get next fresh ID");
+    }
+
+    #[test]
+    fn test_search_basic() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        // Create processor with HNSW enabled
+        let mut hnsw_config = hnsw::Config::default();
+        hnsw_config.enabled = true;
+        hnsw_config.dim = 64;
+        let processor = Processor::with_config(
+            storage,
+            registry,
+            RaBitQConfig::default(),
+            hnsw_config,
+        );
+
+        // Insert several vectors (with index building)
+        let mut inserted_ids = Vec::new();
+        for i in 0..10 {
+            let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
+            let id = crate::Id::new();
+            processor
+                .insert_vector(embedding_code, id, &vector, true)
+                .expect("Insert should succeed");
+            inserted_ids.push(id);
+        }
+
+        // Search for nearest neighbors using first vector as query
+        let query: Vec<f32> = (0..64).map(|j| j as f32 / 1000.0).collect();
+        let results = processor
+            .search(embedding_code, &query, 5, 100)
+            .expect("Search should succeed");
+
+        // Should return at most k results
+        assert!(!results.is_empty(), "Should have results");
+        assert!(results.len() <= 5, "Should return at most k results");
+
+        // First result should be closest to query
+        let first = &results[0];
+        assert_eq!(first.id, inserted_ids[0], "First inserted vector should be closest");
+
+        // All results should have valid distances
+        for (i, result) in results.iter().enumerate() {
+            if i > 0 {
+                assert!(
+                    result.distance >= results[i - 1].distance,
+                    "Results should be sorted by distance"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_search_filters_deleted() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        // Create processor with HNSW enabled
+        let mut hnsw_config = hnsw::Config::default();
+        hnsw_config.enabled = true;
+        hnsw_config.dim = 64;
+        let processor = Processor::with_config(
+            storage,
+            registry,
+            RaBitQConfig::default(),
+            hnsw_config,
+        );
+
+        // Insert 5 vectors
+        let mut inserted_ids = Vec::new();
+        for i in 0..5 {
+            let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
+            let id = crate::Id::new();
+            processor
+                .insert_vector(embedding_code, id, &vector, true)
+                .expect("Insert should succeed");
+            inserted_ids.push(id);
+        }
+
+        // Delete first two vectors (soft delete - mappings removed)
+        processor
+            .delete_vector(embedding_code, inserted_ids[0])
+            .expect("Delete should succeed");
+        processor
+            .delete_vector(embedding_code, inserted_ids[1])
+            .expect("Delete should succeed");
+
+        // Search - deleted vectors should be filtered from results
+        let query: Vec<f32> = (0..64).map(|j| j as f32 / 1000.0).collect();
+        let results = processor
+            .search(embedding_code, &query, 10, 100)
+            .expect("Search should succeed");
+
+        // Should have at most 3 results (5 - 2 deleted)
+        assert!(results.len() <= 3, "Should only return non-deleted vectors");
+
+        // Verify deleted IDs are not in results
+        let result_ids: Vec<_> = results.iter().map(|r| r.id).collect();
+        assert!(
+            !result_ids.contains(&inserted_ids[0]),
+            "First deleted ID should not be in results"
+        );
+        assert!(
+            !result_ids.contains(&inserted_ids[1]),
+            "Second deleted ID should not be in results"
+        );
+    }
+
+    #[test]
+    fn test_search_dimension_mismatch() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage, registry);
+
+        // Try to search with wrong dimension
+        let wrong_dim_query: Vec<f32> = (0..128).map(|i| i as f32).collect();
+        let result = processor.search(embedding_code, &wrong_dim_query, 10, 100);
+
+        assert!(result.is_err(), "Should fail on dimension mismatch");
+        assert!(
+            result.unwrap_err().to_string().contains("Dimension mismatch"),
+            "Error should mention dimension mismatch"
+        );
+    }
+
+    #[test]
+    fn test_search_hnsw_disabled() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        // Create processor with HNSW disabled
+        let mut hnsw_config = hnsw::Config::default();
+        hnsw_config.enabled = false;
+        let processor = Processor::with_config(
+            storage,
+            registry,
+            RaBitQConfig::default(),
+            hnsw_config,
+        );
+
+        // Try to search when HNSW is disabled
+        let query: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
+        let result = processor.search(embedding_code, &query, 10, 100);
+
+        assert!(result.is_err(), "Should fail when HNSW disabled");
+        assert!(
+            result.unwrap_err().to_string().contains("HNSW indexing is disabled"),
+            "Error should mention HNSW disabled"
+        );
     }
 }
