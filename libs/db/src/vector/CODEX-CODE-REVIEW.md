@@ -194,13 +194,13 @@ let storage_type = self
 
 ### Response Summary
 
-| Finding | CODEX Severity | Claude Assessment | Action |
-|---------|---------------|-------------------|--------|
-| #1 Storage type mismatch | HIGH | ✅ **AGREE** | Fix in Phase 4.5.1 (blocking) |
-| #2 Layer assignment cold cache | HIGH | ✅ **AGREE** | Fix in Phase 4.5.2 (blocking) |
-| #3 Empty index error | MEDIUM | ⚠️ **PARTIALLY AGREE** | Fix in Phase 4.5.4 (non-blocking) |
-| #4 MAX-distance for missing codes | MEDIUM | ✅ **AGREE, ELEVATE** | Fix in Phase 4.5.3 (blocking) |
-| #5 Cache size overcount | LOW | ✅ **AGREE** | Fix in Phase 4.5.5 (non-blocking) |
+| Finding | CODEX Severity | Claude Assessment | Action | Status |
+|---------|---------------|-------------------|--------|--------|
+| #1 Storage type mismatch | HIGH | ✅ **AGREE** | Fix in Phase 4.5.1 (blocking) | ✅ Done |
+| #2 Layer assignment cold cache | HIGH | ✅ **AGREE** | Fix in Phase 4.5.2 (blocking) | ✅ Done |
+| #3 Empty index error | MEDIUM | ⚠️ **PARTIALLY AGREE** | Fix in Phase 4.5.4 (non-blocking) | ✅ Done |
+| #4 MAX-distance for missing codes | MEDIUM | ✅ **AGREE, ELEVATE** | Fix in Phase 4.5.3 (blocking) | ✅ Done |
+| #5 Cache size overcount | LOW | ✅ **AGREE** | Fix in Phase 4.5.5 (non-blocking) | ✅ Done |
 
 ### Finding #1: Storage Type Mismatch
 
@@ -302,12 +302,12 @@ Recommend: Document that pre-normalized vectors skip norm computation, but keep 
 
 ### Conclusion
 
-CODEX review is thorough and accurate. Three findings (1, 2, 4) are blocking for Phase 5 and
-have been added to ROADMAP.md as Phase 4.5. Two findings (3, 5) are valid but non-blocking.
-Performance notes are acknowledged but not actionable for Phase 5.
+CODEX review is thorough and accurate. All five findings have been addressed in Phase 4.5.
 
-**Next Steps:**
-1. Implement Phase 4.5 tasks (5 fixes)
-2. Run full test suite + benchmarks to verify no regression
-3. Update this document with resolution commits
-4. Proceed to Phase 5: Internal Mutation/Query API
+**Resolution Summary:**
+- ✅ All 5 CODEX findings fixed
+- ✅ CODEX follow-up concern (silent F32 fallback) addressed
+- ✅ All 487 tests pass
+- ✅ Phase 4.5 complete
+
+**Next Step:** Proceed to Phase 5: Internal Mutation/Query API
