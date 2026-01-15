@@ -1950,6 +1950,12 @@ No further issues found in this pass.
 
 ---
 
+**Follow-up Recommendation (prefer removal):**
+
+Even as `pub(crate)`, these variants are still no-ops and can be accidentally used internally. Recommend **removing them entirely** until a real repair workflow exists, and explicitly documenting “repair = rebuild” in API docs and ROADMAP. This keeps the mutation surface minimal and avoids implying partial graph repair is supported.
+
+---
+
 **API Direction (agreed): Transaction-only public surface**
 
 - **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
