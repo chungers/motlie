@@ -442,26 +442,35 @@ impl Processor {
 
     /// Delete a vector from an embedding space.
     ///
-    /// This method performs all necessary cleanup atomically:
-    /// 1. Looks up internal VecId from external Id
-    /// 2. Deletes ID mappings (forward and reverse)
-    /// 3. Deletes vector data
-    /// 4. Deletes binary codes (if RaBitQ enabled)
-    /// 5. Returns VecId to free list for reuse
+    /// This method performs cleanup atomically, with behavior depending on
+    /// whether HNSW indexing is enabled:
+    ///
+    /// **When HNSW is disabled:**
+    /// - Deletes ID mappings (forward and reverse)
+    /// - Deletes vector data and binary codes
+    /// - Returns VecId to free list for reuse
+    ///
+    /// **When HNSW is enabled (soft delete):**
+    /// - Deletes ID mappings only (vector unreachable by external ID)
+    /// - Keeps vector data (needed for HNSW distance calculations)
+    /// - Does NOT free VecId (prevents graph corruption from reuse)
+    /// - HNSW edges remain intact (standard tombstone approach)
     ///
     /// # Arguments
     /// * `embedding` - The embedding space code
     /// * `id` - External ID (ULID) of the vector to delete
     ///
     /// # Returns
-    /// - `Ok(Some(vec_id))` - Vector was deleted, returns the freed VecId
+    /// - `Ok(Some(vec_id))` - Vector was deleted, returns the VecId
     /// - `Ok(None)` - Vector did not exist (idempotent)
     /// - `Err(...)` - Storage or transaction error
     ///
-    /// # Note
-    /// HNSW graph edges are NOT cleaned up on delete. Deleted nodes are
-    /// skipped during search. This is the standard HNSW approach - edges
-    /// are cleaned up lazily during compaction or rebuild.
+    /// # HNSW Considerations
+    /// When HNSW is enabled, this performs a "soft delete":
+    /// - The vector is unreachable via external ID
+    /// - Vector data is kept for HNSW graph traversal
+    /// - VecId is NOT reused to prevent edge corruption
+    /// - Full cleanup requires index rebuild or compaction (future work)
     ///
     /// # Example
     /// ```rust,ignore
@@ -507,15 +516,22 @@ impl Processor {
             .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
         txn.delete_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))?;
 
-        // 5. Delete vector data
+        // Check if HNSW indexing is enabled - affects cleanup strategy
+        let hnsw_enabled = self.hnsw_config.enabled;
+
+        // 5. Delete vector data (only if HNSW disabled)
+        // If HNSW is enabled, keep vector data for distance calculations
+        // during search traversal (entry point or neighbor edges may reference it)
         let vec_key = VectorCfKey(embedding, vec_id);
         let vectors_cf = txn_db
             .cf_handle(Vectors::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-        txn.delete_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?;
+        if !hnsw_enabled {
+            txn.delete_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?;
+        }
 
-        // 6. Delete binary code (if RaBitQ enabled)
-        if self.rabitq_enabled() {
+        // 6. Delete binary code (only if RaBitQ enabled AND HNSW disabled)
+        if self.rabitq_enabled() && !hnsw_enabled {
             let code_key = BinaryCodeCfKey(embedding, vec_id);
             let codes_cf = txn_db
                 .cf_handle(BinaryCodes::CF_NAME)
@@ -523,8 +539,10 @@ impl Processor {
             txn.delete_cf(&codes_cf, BinaryCodes::key_to_bytes(&code_key))?;
         }
 
-        // 7. Return VecId to free list (transactionally persisted)
-        {
+        // 7. Return VecId to free list (only if HNSW disabled)
+        // If HNSW is enabled, we cannot reuse the VecId because existing
+        // HNSW edges still reference it. Reuse would corrupt graph semantics.
+        if !hnsw_enabled {
             let allocator = self.get_or_create_allocator(embedding);
             allocator.free_in_txn(&txn, &txn_db, embedding, vec_id)?;
         }
@@ -532,8 +550,9 @@ impl Processor {
         // 8. Commit transaction
         txn.commit().context("Failed to commit delete transaction")?;
 
-        // Note: HNSW edges are NOT cleaned up. Deleted nodes are skipped
-        // during search. This is standard HNSW behavior.
+        // Note: When HNSW is enabled, this is a "soft delete" - ID mappings
+        // are removed but vector data is kept and VecId is not reused.
+        // Full cleanup requires index rebuild or compaction (future work).
 
         Ok(Some(vec_id))
     }
@@ -833,6 +852,7 @@ mod tests {
         use tempfile::TempDir;
 
         use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::RaBitQConfig;
         use crate::vector::Distance;
 
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -848,7 +868,15 @@ mod tests {
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
-        let processor = Processor::new(storage, registry);
+        // Create processor with HNSW disabled to test full delete with ID reuse
+        let mut hnsw_config = hnsw::Config::default();
+        hnsw_config.enabled = false;
+        let processor = Processor::with_config(
+            storage,
+            registry,
+            RaBitQConfig::default(),
+            hnsw_config,
+        );
 
         // Insert two vectors
         let vector: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();

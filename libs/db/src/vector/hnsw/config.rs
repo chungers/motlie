@@ -22,6 +22,11 @@ use serde::{Deserialize, Serialize};
 /// | 1B    | 16| 200             | 100       | ~0.5KB        |
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
+    /// Whether HNSW indexing is enabled.
+    /// When disabled, vectors are stored but not indexed for ANN search.
+    /// Default: true
+    pub enabled: bool,
+
     /// Vector dimensionality (must match embedding model).
     /// Common values: 128 (SIFT), 768 (BERT), 1536 (OpenAI ada-002)
     pub dim: usize,
@@ -78,6 +83,7 @@ impl Default for Config {
     fn default() -> Self {
         let m = 16;
         Self {
+            enabled: true,
             dim: 128,
             m,
             m_max: 2 * m,
@@ -226,6 +232,7 @@ impl Config {
     /// Best for applications where recall is critical.
     pub fn high_recall(dim: usize) -> Self {
         Self {
+            enabled: true,
             dim,
             m: 32,
             m_max: 64,
@@ -241,6 +248,7 @@ impl Config {
     /// Best for resource-constrained environments.
     pub fn compact(dim: usize) -> Self {
         Self {
+            enabled: true,
             dim,
             m: 8,
             m_max: 16,
