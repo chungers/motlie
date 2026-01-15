@@ -521,6 +521,92 @@ pub fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>>
     tokio::spawn(async move { consumer.run().await })
 }
 
+/// Spawn a mutation consumer with storage and registry.
+///
+/// This is the recommended way to create a mutation consumer - it constructs
+/// the internal Processor automatically, hiding the implementation detail.
+///
+/// # Arguments
+///
+/// * `receiver` - The mpsc receiver from `create_writer()`
+/// * `config` - Writer configuration
+/// * `storage` - Vector storage instance
+/// * `registry` - Embedding registry (typically from `storage.cache().clone()`)
+///
+/// # Returns
+///
+/// A JoinHandle for the spawned consumer task.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let storage = Arc::new(Storage::readwrite(path));
+/// let registry = storage.cache().clone();
+/// let (writer, receiver) = create_writer(WriterConfig::default());
+///
+/// let handle = spawn_mutation_consumer_with_storage(
+///     receiver,
+///     WriterConfig::default(),
+///     storage,
+///     registry,
+/// );
+///
+/// // Send mutations via writer
+/// writer.send(vec![mutation.into()]).await?;
+/// ```
+pub fn spawn_mutation_consumer_with_storage(
+    receiver: mpsc::Receiver<Vec<Mutation>>,
+    config: WriterConfig,
+    storage: Arc<super::Storage>,
+    registry: Arc<super::registry::EmbeddingRegistry>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    let processor = Arc::new(Processor::new(storage, registry));
+    let consumer = Consumer::new(receiver, config, processor);
+    spawn_consumer(consumer)
+}
+
+/// Spawn a mutation consumer with storage and auto-created registry.
+///
+/// Convenience function for quick setup - creates the embedding registry
+/// from storage automatically.
+///
+/// # Arguments
+///
+/// * `receiver` - The mpsc receiver from `create_writer()`
+/// * `config` - Writer configuration
+/// * `storage` - Vector storage instance
+///
+/// # Returns
+///
+/// A JoinHandle for the spawned consumer task.
+pub fn spawn_mutation_consumer_with_storage_autoreg(
+    receiver: mpsc::Receiver<Vec<Mutation>>,
+    config: WriterConfig,
+    storage: Arc<super::Storage>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    let registry = storage.cache().clone();
+    spawn_mutation_consumer_with_storage(receiver, config, storage, registry)
+}
+
+/// Spawn a mutation consumer with an explicit Processor.
+///
+/// This is a lower-level API for cases where you need direct Processor access
+/// (e.g., for search operations). For simple mutation handling, prefer
+/// `spawn_mutation_consumer_with_storage()`.
+///
+/// # Note
+///
+/// This function is `pub(crate)` to encourage use of the storage-based API
+/// which hides the Processor abstraction.
+pub(crate) fn spawn_mutation_consumer_with_processor(
+    receiver: mpsc::Receiver<Vec<Mutation>>,
+    config: WriterConfig,
+    processor: Arc<Processor>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    let consumer = Consumer::new(receiver, config, processor);
+    spawn_consumer(consumer)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

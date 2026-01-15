@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use motlie_db::vector::benchmark::LAION_EMBEDDING_DIM;
 use motlie_db::vector::{
@@ -352,14 +353,15 @@ fn test_vector_batch_insert_workflow() {
     println!("Search returned {} results", results.len());
 }
 
-/// Test SearchReader API with both exact and RaBitQ strategies.
+/// Test SearchReader API with both exact and auto-strategy modes.
 ///
-/// This test verifies the fix for the "SearchReader strategy gap" where
-/// the original `search_knn()` always used exact search. The new
-/// `search_with_config()` method allows strategy selection.
-#[test]
-fn test_search_reader_strategy_selection() {
-    use motlie_db::vector::{create_search_reader, ReaderConfig};
+/// This test verifies that:
+/// - `search_knn_exact()` forces exact distance computation
+/// - `search_knn()` auto-selects strategy based on distance metric (RaBitQ for Cosine)
+/// - `Processor::search_with_config()` works for direct access
+#[tokio::test]
+async fn test_search_reader_strategy_selection() {
+    use motlie_db::vector::{create_search_reader, spawn_query_consumers_with_processor, ReaderConfig};
 
     let temp_dir = TempDir::new().expect("temp dir");
     let mut storage = Storage::readwrite(temp_dir.path());
@@ -385,8 +387,9 @@ fn test_search_reader_strategy_selection() {
         hnsw_config,
     ));
 
-    // Create SearchReader
-    let (search_reader, _receiver) = create_search_reader(ReaderConfig::default(), processor.clone());
+    // Create SearchReader and spawn consumers to process channel queries
+    let (search_reader, receiver) = create_search_reader(ReaderConfig::default(), processor.clone());
+    let _consumers = spawn_query_consumers_with_processor(receiver, ReaderConfig::default(), processor.clone(), 2);
 
     // Insert test vectors
     println!("Inserting 200 test vectors...");
@@ -403,27 +406,33 @@ fn test_search_reader_strategy_selection() {
     let query = generate_laion_vectors(1, 999)[0].clone();
 
     // =========================================================================
-    // Test 1: SearchReader with EXACT strategy
+    // Test 1: SearchKNN with EXACT strategy via SearchReader
     // =========================================================================
-    println!("\n=== Testing SearchReader::search_with_config (Exact) ===");
-    let exact_config = SearchConfig::new(embedding.clone(), 10)
-        .exact()
-        .with_ef(50);
-
-    assert!(exact_config.strategy().is_exact(), "Config should be exact");
-    println!("  Strategy: {}", exact_config.strategy());
-
+    println!("\n=== Testing SearchReader::search_knn_exact ===");
     let exact_results = search_reader
-        .search_with_config(&exact_config, &query)
+        .search_knn_exact(&embedding, query.clone(), 10, 50, Duration::from_secs(5))
+        .await
         .expect("exact search via SearchReader");
 
     assert!(!exact_results.is_empty(), "Exact search should return results");
     println!("  Exact search returned {} results", exact_results.len());
 
     // =========================================================================
-    // Test 2: SearchReader with RaBitQ strategy
+    // Test 2: SearchKNN with auto-strategy (RaBitQ for Cosine)
     // =========================================================================
-    println!("\n=== Testing SearchReader::search_with_config (RaBitQ) ===");
+    println!("\n=== Testing SearchReader::search_knn (auto-strategy) ===");
+    let rabitq_results = search_reader
+        .search_knn(&embedding, query.clone(), 10, 50, Duration::from_secs(5))
+        .await
+        .expect("auto-strategy search via SearchReader");
+
+    assert!(!rabitq_results.is_empty(), "Auto-strategy search should return results");
+    println!("  Auto-strategy search returned {} results", rabitq_results.len());
+
+    // =========================================================================
+    // Test 3: Verify Processor.search_with_config still works directly
+    // =========================================================================
+    println!("\n=== Testing Processor::search_with_config (RaBitQ) ===");
     let rabitq_config = SearchConfig::new(embedding.clone(), 10)
         .with_ef(50)
         .with_rerank_factor(10);
@@ -431,12 +440,12 @@ fn test_search_reader_strategy_selection() {
     assert!(rabitq_config.strategy().is_rabitq(), "Config should be RaBitQ for Cosine");
     println!("  Strategy: {}", rabitq_config.strategy());
 
-    let rabitq_results = search_reader
+    let direct_results = processor
         .search_with_config(&rabitq_config, &query)
-        .expect("RaBitQ search via SearchReader");
+        .expect("RaBitQ search via Processor");
 
-    assert!(!rabitq_results.is_empty(), "RaBitQ search should return results");
-    println!("  RaBitQ search returned {} results", rabitq_results.len());
+    assert!(!direct_results.is_empty(), "Direct RaBitQ search should return results");
+    println!("  Direct RaBitQ search returned {} results", direct_results.len());
 
     // =========================================================================
     // Verify both strategies produce similar top results
