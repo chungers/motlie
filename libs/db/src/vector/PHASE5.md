@@ -1,8 +1,25 @@
 # Phase 5: Internal Mutation/Query API
 
-**Status:** In Progress (Tasks 5.0-5.5 Complete)
+**Status:** In Progress (Tasks 5.0-5.2, 5.4-5.5 Complete; 5.3, 5.6-5.11 Pending)
 **Date:** January 14, 2026
 **Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`, `c29dceb`, `6ee252b`, `0cbd597`, `dc4c3f9`
+
+## Task Numbering Alignment with ROADMAP.md
+
+| ROADMAP Task | Description | PHASE5 Status |
+|--------------|-------------|---------------|
+| 5.0 | HNSW Transaction Refactoring | ✅ Complete |
+| 5.1 | Processor::insert_vector() | ✅ Complete |
+| 5.2 | Processor::delete_vector() | ✅ Complete |
+| 5.3 | Processor::insert_batch() | 🔲 Not Started |
+| 5.4 | Storage/Processor Search | ✅ Complete (5.4a-5.4g) |
+| 5.5 | Processor::add_embedding_spec() | ✅ Complete (via registry) |
+| 5.6 | Mutation Dispatch | 🔲 Not Started |
+| 5.7 | Query Dispatch | 🔲 Not Started |
+| 5.8 | Migrate Examples/Integration Tests | 🔲 Not Started |
+| 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
+| 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |
+| 5.11 | Concurrent Benchmark Baseline | 🔲 Not Started |
 
 ---
 
@@ -703,11 +720,21 @@ This approach:
 
 ---
 
-## Task 5.3: Processor::search() (COMPLETE)
+## Task 5.3: Processor::insert_batch() (NOT STARTED)
+
+**Status:** 🔲 Not Started
+
+Per ROADMAP.md, this task implements batch vector insertion for efficiency. Currently, individual `insert_vector()` calls can be used. Batch optimization deferred to future work.
+
+See ROADMAP.md Task 5.3 for full specification.
+
+---
+
+## Task 5.4a: Processor::search() (COMPLETE)
 
 ### Overview
 
-Task 5.3 implements the unified search API that:
+Task 5.4a implements the unified search API that:
 1. Performs HNSW approximate nearest neighbor search
 2. Filters out soft-deleted vectors
 3. Returns external IDs with distances
@@ -876,7 +903,7 @@ This guarantees HNSW explores enough candidates to return `overfetch_k` results.
 
 ---
 
-## Task 5.4: Storage Layer Search (COMPLETE)
+## Task 5.4b: Storage Layer Search (COMPLETE)
 
 ### Overview
 
@@ -922,7 +949,7 @@ pub use processor::{Processor, SearchResult};
 
 ---
 
-## Task 5.5: Search Strategy Dispatch (COMPLETE)
+## Task 5.4c: Search Strategy Dispatch (COMPLETE)
 
 ### Overview
 
@@ -1056,7 +1083,11 @@ This keeps the search API consistent with how the index was built while allowing
 
 ---
 
-## Proposed: Build Config Persistence Design
+## Task 5.4d: Build Config Persistence (COMPLETE)
+
+**Note:** This task was added via CODEX feedback to ensure build parameters are persisted and validated.
+
+### Proposed Design
 
 ### Problem
 
@@ -1337,17 +1368,17 @@ This keeps **SearchStrategy constrained by how the index was built**, while stil
 
 **Bottom line**
 
-Task 5.6 added the necessary **persisted spec + drift detection**, but **the runtime still ignores the spec** for index/encoder construction. This is the next correctness gap to close before the workflow can be considered fully consistent.
+Task 5.4d added the necessary **persisted spec + drift detection**, but **the runtime still ignores the spec** for index/encoder construction. This is the next correctness gap to close before the workflow can be considered fully consistent.
 
 ---
 
-## Task 5.7: Runtime Uses EmbeddingSpec (COMPLETE)
+## Task 5.4e: Runtime Uses EmbeddingSpec (COMPLETE)
 
 **Date:** January 14, 2026
 
 ### Problem Statement
 
-Task 5.6 established config persistence and drift detection via `SpecHash`, but the runtime was **not using** the persisted build parameters:
+Task 5.4d established config persistence and drift detection via `SpecHash`, but the runtime was **not using** the persisted build parameters:
 
 ```rust
 // BEFORE: Ignored EmbeddingSpec build params
@@ -1487,7 +1518,7 @@ Added tests in `embedding.rs`:
 
 ---
 
-## CODEX Review: Task 5.7 Assessment
+## Task 5.4f: CODEX Review - Runtime EmbeddingSpec Assessment
 
 **Overall:** This change closes the main correctness gap I flagged: runtime HNSW/RaBitQ construction now uses persisted `EmbeddingSpec` parameters, and `search_with_config()` validates `storage_type`. Good alignment with the register → build → search workflow and SpecHash drift detection.
 
@@ -1512,7 +1543,7 @@ This is a strong improvement: persisted build params now drive runtime behavior,
 
 ---
 
-## CODEX Review: Task 5.8 Assessment
+## Task 5.4g: CODEX Review - Validation Assessment
 
 **Overall:** This addresses the two issues I raised:
 - `hnsw_m >= 2` validation prevents invalid `m_l = 1/ln(m)` computation.
@@ -1536,21 +1567,62 @@ The changes align well with the workflow and close the key correctness hole. Onc
 
 ---
 
-## Remaining Phase 5 Tasks
+## Task 5.5: Processor::add_embedding_spec() (COMPLETE)
+
+**Status:** ✅ Complete (via `EmbeddingRegistry::register()`)
+
+Per ROADMAP.md, this task implements embedding spec registration. This functionality is provided via `EmbeddingRegistry::register()` which:
+- Validates build parameters
+- Persists to `EmbeddingSpecs` CF
+- Returns registered `Embedding`
+
+See `registry.rs` for implementation.
+
+---
+
+## Task 5.6: Mutation Dispatch (NOT STARTED)
+
+**Status:** 🔲 Not Started
+
+Per ROADMAP.md, this task connects `Mutation` enum to `Processor` methods:
+- `Mutation::AddEmbeddingSpec` → `processor.add_embedding_spec()`
+- `Mutation::InsertVector` → `processor.insert_vector()`
+- `Mutation::DeleteVector` → `processor.delete_vector()`
+- etc.
+
+See ROADMAP.md Task 5.6 for full specification.
+
+---
+
+## Task 5.7: Query Dispatch (NOT STARTED)
+
+**Status:** 🔲 Not Started
+
+Per ROADMAP.md, this task connects `Query` enum to `Storage` methods:
+- `Query::SearchKNN` → `storage.search()`
+- `Query::GetVector` → `storage.get_vector()`
+- etc.
+
+See ROADMAP.md Task 5.7 for full specification.
+
+---
+
+## Remaining Phase 5 Tasks (Aligned with ROADMAP.md)
 
 | Task | Description | Status |
 |------|-------------|--------|
-| 5.1 | Processor::insert_vector() | **Complete** |
-| 5.2 | Processor::delete_vector() | **Complete** |
-| 5.3 | Processor::search() | **Complete** |
-| 5.4 | Storage layer search methods | **Complete** (via Processor) |
-| 5.5 | Dispatch logic for search strategies | **Complete** |
-| 5.6 | Migration utilities | Pending |
-| 5.7 | Stress tests | Pending |
-| 5.8 | Search metrics | Pending |
-| 5.9 | Batch insert benchmark | Pending |
-| 5.10 | Delete + compact benchmark | Pending |
-| 5.11 | Documentation update | Pending |
+| 5.0 | HNSW Transaction Refactoring | ✅ **Complete** |
+| 5.1 | Processor::insert_vector() | ✅ **Complete** |
+| 5.2 | Processor::delete_vector() | ✅ **Complete** |
+| 5.3 | Processor::insert_batch() | 🔲 Not Started |
+| 5.4 | Processor::search() + Storage layer | ✅ **Complete** (5.4a-5.4g) |
+| 5.5 | Processor::add_embedding_spec() | ✅ **Complete** (via registry) |
+| 5.6 | Mutation Dispatch | 🔲 Not Started |
+| 5.7 | Query Dispatch | 🔲 Not Started |
+| 5.8 | Migrate Examples/Integration Tests | 🔲 Not Started |
+| 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
+| 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |
+| 5.11 | Concurrent Benchmark Baseline | 🔲 Not Started |
 
 ---
 
