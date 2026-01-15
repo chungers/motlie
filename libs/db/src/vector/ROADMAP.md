@@ -3,7 +3,7 @@
 **Author:** David Chung + Claude
 **Date:** January 2, 2026 (Updated: January 14, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Phase 4 Complete, Phase 4.5 (CODEX Pre-Phase 5 Fixes) In Progress, Phase 5-8 Remaining
+**Status:** Phase 4 Complete, Phase 4.5 Critical Tasks Done (3/5), Phase 5-8 Remaining
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
@@ -73,7 +73,7 @@ dedicated vector databases or custom storage engines.
 | [Phase 2](#phase-2-hnsw2-core--navigation-layer--core-complete) | HNSW2 Core + Navigation Layer | ✅ Complete |
 | [Phase 3](#phase-3-batch-operations--deferred-items) | Batch Operations + Deferred Items | ✅ Complete |
 | [Phase 4](#phase-4-rabitq-compression) | RaBitQ Compression + Optimization | ✅ Complete |
-| [Phase 4.5](#phase-45-codex-pre-phase-5-critical-fixes) | CODEX Pre-Phase 5 Critical Fixes | 🔄 In Progress |
+| [Phase 4.5](#phase-45-codex-pre-phase-5-critical-fixes) | CODEX Pre-Phase 5 Critical Fixes | ✅ Critical Done (3/5) |
 | [Phase 5](#phase-5-internal-mutationquery-api) | Internal Mutation/Query API | 🔲 Not Started |
 | [Phase 6](#phase-6-mpscmpmc-public-api) | MPSC/MPMC Public API | 🔲 Not Started |
 | [Phase 7](#phase-7-async-graph-updater) | Async Graph Updater | 🔲 Not Started |
@@ -108,13 +108,13 @@ dedicated vector databases or custom storage engines.
 
 Based on CODEX code review (January 2026). See [CODEX-CODE-REVIEW.md](./CODEX-CODE-REVIEW.md) for details.
 
-| Task | Description | Severity | Status |
-|------|-------------|----------|--------|
-| [Task 4.5.1](#task-451-storage-type-mismatch-fix) | Fix storage-type mismatch in write path | 🔴 HIGH | 🔲 Not Started |
-| [Task 4.5.2](#task-452-layer-assignment-cold-cache-fix) | Fix HNSW layer assignment on cold cache | 🔴 HIGH | 🔲 Not Started |
-| [Task 4.5.3](#task-453-adc-missing-code-handling) | Handle missing codes in ADC search (avoid MAX-distance) | 🔴 HIGH | 🔲 Not Started |
-| [Task 4.5.4](#task-454-empty-index-search-handling) | Return empty results for empty index search | 🟡 MEDIUM | 🔲 Not Started |
-| [Task 4.5.5](#task-455-binarycodecache-size-accounting) | Fix BinaryCodeCache size accounting on overwrite | 🟢 LOW | 🔲 Not Started |
+| Task | Description | Severity | Status | Commit |
+|------|-------------|----------|--------|--------|
+| [Task 4.5.1](#task-451-storage-type-mismatch-fix) | Fix storage-type mismatch in write path | 🔴 HIGH | ✅ Complete | `af7a90b` |
+| [Task 4.5.2](#task-452-layer-assignment-cold-cache-fix) | Fix HNSW layer assignment on cold cache | 🔴 HIGH | ✅ Complete | `af7a90b` |
+| [Task 4.5.3](#task-453-adc-missing-code-handling) | Handle missing codes in ADC search (avoid MAX-distance) | 🔴 HIGH | ✅ Complete | `af7a90b` |
+| [Task 4.5.4](#task-454-empty-index-search-handling) | Return empty results for empty index search | 🟡 MEDIUM | 🔲 Not Started | - |
+| [Task 4.5.5](#task-455-binarycodecache-size-accounting) | Fix BinaryCodeCache size accounting on overwrite | 🟢 LOW | 🔲 Not Started | - |
 
 ### Other Sections
 
@@ -8349,6 +8349,8 @@ cargo run -p motlie_core --example simd_check
 | 2026-01-14 | Added random dataset support to `bench_vector index` command | Claude Opus 4.5 |
 | 2026-01-14 | Synced with CODEX code review (abc8e8d, 3cbf71c) | Claude Opus 4.5 |
 | 2026-01-14 | **Added Phase 4.5**: Pre-Phase 5 critical fixes based on CODEX review (5 tasks) | Claude Opus 4.5 |
+| 2026-01-14 | **af7a90b** Phase 4.5 Tasks 4.5.1-4.5.3 COMPLETE: storage-type fix, layer assignment fix, ADC missing code fix | Claude Opus 4.5 |
+| 2026-01-14 | Addressed CODEX follow-up: replaced silent F32 fallback with hard error on unknown embedding | Claude Opus 4.5 |
 
 ---
 
