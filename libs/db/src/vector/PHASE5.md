@@ -1916,6 +1916,19 @@ The shared ops helpers now centralize validation and soft-delete behavior (good)
 
 ---
 
+**Update (post MutationCacheUpdate):**
+
+- **Resolved:** registry now uses `spec.storage_type` (F16 correctness).
+- **Resolved:** writer now applies both nav + code cache updates via `MutationCacheUpdate`.
+
+**Remaining**
+
+1) **Direct `InsertVectorBatch::execute()` drops cache updates (correctness/perf).**  
+   The mutation executor logs that cache updates are lost when `InsertVectorBatch` is executed directly (not via `Writer` expansion). For external users calling mutation APIs directly, this can lead to stale caches.  
+   - Fix: return a batch cache update (e.g., extend `MutationCacheUpdate` with a batch variant), or document that `InsertVectorBatch` must be sent via `Writer`.
+
+---
+
 **API Direction (agreed): Transaction-only public surface**
 
 - **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
