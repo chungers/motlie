@@ -60,6 +60,7 @@ pub mod writer;
 pub mod benchmark;
 pub mod cache;
 pub mod hnsw;
+pub mod ops;
 pub mod quantization;
 pub mod search;
 
