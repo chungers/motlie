@@ -288,6 +288,25 @@ cargo test -p motlie-db --lib
 
 ---
 
+## CODEX Review (Post-sync)
+
+**Assessment:** Overall direction is sound: HNSW writes are transaction-scoped, cache updates are deferred until commit, and crash recovery tests are comprehensive. Two correctness gaps remain that should be addressed before declaring Task 5.0 fully complete:
+
+1) **IdAllocator transactional persistence not wired into the write path.**
+   - The code introduces `allocate_in_txn()` / `free_in_txn()`, but `writer.rs` still calls `allocator.allocate()` and `allocator.free()` outside the transaction.
+   - This means IdAlloc CF may lag behind committed inserts/deletes, and a crash could re-use IDs that were already committed (collision risk).
+   - **Action:** Use `allocate_in_txn()` and `free_in_txn()` inside `execute_single()` so allocator state is persisted in the same transaction as vector writes.
+
+2) **Layer count update behavior changed for the empty-graph case.**
+   - `insert_in_txn()` returns a `CacheUpdate` that increments `layer_counts[node_layer]`.
+   - In the prior empty-graph path, the cache incremented layer 0 unconditionally, ensuring `layer_counts[0]` equals total nodes even when `node_layer > 0`.
+   - If `node_layer` is ever > 0 on the first insert, `layer_counts[0]` may remain 0 (affecting `total_nodes()` and diagnostics).
+   - **Action:** Consider incrementing layer 0 for the first node (or updating `CacheUpdate::apply` logic for the empty-graph path).
+
+If these are addressed, Task 5.0 aligns with the CODEX concerns raised earlier.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
