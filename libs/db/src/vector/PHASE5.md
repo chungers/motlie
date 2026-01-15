@@ -1512,6 +1512,30 @@ This is a strong improvement: persisted build params now drive runtime behavior,
 
 ---
 
+## CODEX Review: Task 5.8 Assessment
+
+**Overall:** This addresses the two issues I raised:
+- `hnsw_m >= 2` validation prevents invalid `m_l = 1/ln(m)` computation.
+- `with_rabitq_bits()` no longer panics; validation moved to `EmbeddingBuilder::validate()` and invoked during registration.
+- API.md now documents SpecHash timing and the immutability expectation.
+
+**Remaining issues / improvements**
+
+1) **Validation happens before idempotent fast-path.**  
+   `EmbeddingRegistry::register()` now calls `builder.validate()` before checking if the spec already exists. Because the registry’s identity key is `(model, dim, distance)` only, a caller can supply invalid build params but still expect to retrieve the existing embedding.  
+   - **Risk:** This breaks the “idempotent” expectation and makes read-only calls fail.  
+   - **Fix:** Check `by_spec` first; if found, return existing embedding without validating build params (or validate only if caller explicitly requests a new spec with build params).
+
+2) **Missing validation for `hnsw_ef_construction` and `rabitq_seed` ranges.**  
+   - `hnsw_ef_construction` can be set to `0` (u16) and will produce an invalid HNSW config (`Config::is_valid()` requires > 0).  
+   - **Fix:** enforce `hnsw_ef_construction >= 1` in `EmbeddingBuilder::validate()`.
+
+**Quality assessment**
+
+The changes align well with the workflow and close the key correctness hole. Once validation order is adjusted to preserve idempotent registration behavior, and `hnsw_ef_construction` is validated, this should be robust.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
