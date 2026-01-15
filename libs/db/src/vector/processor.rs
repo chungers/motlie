@@ -26,6 +26,7 @@ use dashmap::DashMap;
 
 use super::cache::{BinaryCodeCache, NavigationCache};
 use super::config::RaBitQConfig;
+use super::embedding::Embedding;
 use super::hnsw;
 use super::id::IdAllocator;
 use super::rabitq::RaBitQ;
@@ -393,11 +394,13 @@ impl Processor {
     /// ```
     pub fn insert_vector(
         &self,
-        embedding: EmbeddingCode,
+        embedding: &Embedding,
         id: Id,
         vector: &[f32],
         build_index: bool,
     ) -> Result<VecId> {
+        let embedding_code = embedding.code();
+
         // Begin transaction
         let txn_db = self
             .storage
@@ -410,7 +413,7 @@ impl Processor {
             &txn,
             &txn_db,
             self,
-            embedding,
+            embedding_code,
             id,
             vector,
             build_index,
@@ -423,7 +426,7 @@ impl Processor {
         txn.commit().context("Failed to commit transaction")?;
 
         // Apply cache updates AFTER successful commit
-        result.apply_cache_updates(embedding, &self.nav_cache, &self.code_cache);
+        result.apply_cache_updates(embedding_code, &self.nav_cache, &self.code_cache);
 
         Ok(vec_id)
     }
@@ -464,7 +467,7 @@ impl Processor {
     /// ```
     pub fn insert_batch(
         &self,
-        embedding: EmbeddingCode,
+        embedding: &Embedding,
         vectors: &[(Id, Vec<f32>)],
         build_index: bool,
     ) -> Result<Vec<VecId>> {
@@ -472,6 +475,8 @@ impl Processor {
         if vectors.is_empty() {
             return Ok(vec![]);
         }
+
+        let embedding_code = embedding.code();
 
         // Begin transaction
         let txn_db = self
@@ -485,7 +490,7 @@ impl Processor {
             &txn,
             &txn_db,
             self,
-            embedding,
+            embedding_code,
             vectors,
             build_index,
         )?;
@@ -495,7 +500,7 @@ impl Processor {
 
         // Apply cache updates AFTER successful commit
         let vec_ids = result.vec_ids.clone();
-        result.apply_cache_updates(embedding, &self.nav_cache, &self.code_cache);
+        result.apply_cache_updates(embedding_code, &self.nav_cache, &self.code_cache);
 
         Ok(vec_ids)
     }
@@ -541,9 +546,11 @@ impl Processor {
     /// ```
     pub fn delete_vector(
         &self,
-        embedding: EmbeddingCode,
+        embedding: &Embedding,
         id: Id,
     ) -> Result<Option<VecId>> {
+        let embedding_code = embedding.code();
+
         // Begin transaction
         let txn_db = self
             .storage
@@ -552,7 +559,7 @@ impl Processor {
         let txn = txn_db.transaction();
 
         // Delegate to shared ops helper (soft-delete logic happens there)
-        let result = super::ops::delete::vector(&txn, &txn_db, self, embedding, id)?;
+        let result = super::ops::delete::vector(&txn, &txn_db, self, embedding_code, id)?;
 
         // Commit transaction
         txn.commit().context("Failed to commit delete transaction")?;
@@ -593,34 +600,30 @@ impl Processor {
     /// ```
     pub fn search(
         &self,
-        embedding: EmbeddingCode,
+        embedding: &Embedding,
         query: &[f32],
         k: usize,
         ef_search: usize,
     ) -> Result<Vec<SearchResult>> {
-        // 1. Validate embedding exists and get spec
-        let spec = self
-            .registry
-            .get_by_code(embedding)
-            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding))?;
+        let embedding_code = embedding.code();
 
-        // 2. Validate dimension
-        if query.len() != spec.dim() as usize {
+        // 1. Validate dimension (Embedding already validated via registry)
+        if query.len() != embedding.dim() as usize {
             return Err(anyhow::anyhow!(
                 "Dimension mismatch: expected {}, got {}",
-                spec.dim(),
+                embedding.dim(),
                 query.len()
             ));
         }
 
-        // 3. Check HNSW is enabled
+        // 2. Check HNSW is enabled
         if !self.hnsw_config.enabled {
             return Err(anyhow::anyhow!(
                 "HNSW indexing is disabled - search not available"
             ));
         }
 
-        // 4. Validate SpecHash (drift detection)
+        // 3. Validate SpecHash (drift detection)
         // This ensures the index was built with the current EmbeddingSpec configuration
         {
             let txn_db = self.storage.transaction_db()?;
@@ -629,10 +632,10 @@ impl Processor {
             let specs_cf = txn_db
                 .cf_handle(EmbeddingSpecs::CF_NAME)
                 .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
-            let spec_key = EmbeddingSpecCfKey(embedding);
+            let spec_key = EmbeddingSpecCfKey(embedding_code);
             let spec_bytes = txn_db
                 .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
-                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
+                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding_code))?;
             let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
 
             // Compute current hash
@@ -642,7 +645,7 @@ impl Processor {
             let graph_meta_cf = txn_db
                 .cf_handle(GraphMeta::CF_NAME)
                 .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
-            let hash_key = GraphMetaCfKey::spec_hash(embedding);
+            let hash_key = GraphMetaCfKey::spec_hash(embedding_code);
             let hash_key_bytes = GraphMeta::key_to_bytes(&hash_key);
 
             if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, &hash_key_bytes)? {
@@ -660,25 +663,25 @@ impl Processor {
                 // Legacy index without SpecHash - drift check skipped
                 // This is expected for indexes built before Phase 5.6
                 tracing::warn!(
-                    embedding = embedding,
+                    embedding = embedding_code,
                     "Legacy index without SpecHash - drift check skipped"
                 );
             }
         }
 
-        // 5. Get or create HNSW index
+        // 4. Get or create HNSW index
         let index = self
-            .get_or_create_index(embedding)
-            .ok_or_else(|| anyhow::anyhow!("Failed to get HNSW index for embedding {}", embedding))?;
+            .get_or_create_index(embedding_code)
+            .ok_or_else(|| anyhow::anyhow!("Failed to get HNSW index for embedding {}", embedding_code))?;
 
-        // 6. Perform HNSW search with overfetch to handle tombstones
+        // 5. Perform HNSW search with overfetch to handle tombstones
         // Overfetch by 2x to ensure we get enough live results after filtering
         // Ensure ef_search >= overfetch_k so HNSW can return enough candidates
         let overfetch_k = k * 2;
         let effective_ef = ef_search.max(overfetch_k);
         let raw_results = index.search(&self.storage, query, overfetch_k, effective_ef)?;
 
-        // 7. Filter deleted vectors using batched IdReverse lookup
+        // 6. Filter deleted vectors using batched IdReverse lookup
         let txn_db = self.storage.transaction_db()?;
         let reverse_cf = txn_db
             .cf_handle(IdReverse::CF_NAME)
@@ -688,7 +691,7 @@ impl Processor {
         let keys: Vec<_> = raw_results
             .iter()
             .map(|(_, vec_id)| {
-                let key = IdReverseCfKey(embedding, *vec_id);
+                let key = IdReverseCfKey(embedding_code, *vec_id);
                 IdReverse::key_to_bytes(&key)
             })
             .collect();
@@ -1007,7 +1010,7 @@ mod tests {
 
         // Insert without building index
         let vec_id = processor
-            .insert_vector(embedding_code, id, &vector, false)
+            .insert_vector(&embedding, id, &vector, false)
             .expect("Insert should succeed");
 
         assert_eq!(vec_id, 0, "First vector should get ID 0");
@@ -1016,7 +1019,7 @@ mod tests {
         let id2 = crate::Id::new();
         let vector2: Vec<f32> = (0..64).map(|i| (i + 1) as f32 / 64.0).collect();
         let vec_id2 = processor
-            .insert_vector(embedding_code, id2, &vector2, true)
+            .insert_vector(&embedding, id2, &vector2, true)
             .expect("Insert with index should succeed");
 
         assert_eq!(vec_id2, 1, "Second vector should get ID 1");
@@ -1055,7 +1058,7 @@ mod tests {
         // Try to insert 128-dim vector into 64-dim embedding
         let wrong_dim_vector: Vec<f32> = (0..128).map(|i| i as f32).collect();
         let result =
-            processor.insert_vector(embedding_code, crate::Id::new(), &wrong_dim_vector, false);
+            processor.insert_vector(&embedding, crate::Id::new(), &wrong_dim_vector, false);
 
         assert!(result.is_err(), "Should fail on dimension mismatch");
         assert!(
@@ -1064,29 +1067,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_insert_vector_unknown_embedding() {
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().expect("Failed to create temp dir");
-        let mut storage = Storage::readwrite(temp_dir.path());
-        storage.ready().expect("Failed to initialize storage");
-        let storage = Arc::new(storage);
-
-        // Empty registry
-        let registry = Arc::new(EmbeddingRegistry::new());
-        let processor = Processor::new(storage, registry);
-
-        // Try to insert into non-existent embedding
-        let vector: Vec<f32> = vec![0.0; 64];
-        let result = processor.insert_vector(999, crate::Id::new(), &vector, false);
-
-        assert!(result.is_err(), "Should fail on unknown embedding");
-        assert!(
-            result.unwrap_err().to_string().contains("Unknown embedding"),
-            "Error should mention unknown embedding"
-        );
-    }
+    // Note: test_insert_vector_unknown_embedding removed - with &Embedding API,
+    // you can't pass an invalid embedding (must register first to get Embedding)
 
     #[test]
     fn test_insert_vector_duplicate_id() {
@@ -1114,12 +1096,12 @@ mod tests {
         let vector: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
         let id = crate::Id::new();
         processor
-            .insert_vector(embedding_code, id, &vector, false)
+            .insert_vector(&embedding, id, &vector, false)
             .expect("First insert should succeed");
 
         // Try to insert with same external ID
         let vector2: Vec<f32> = (0..64).map(|i| (i + 1) as f32 / 64.0).collect();
-        let result = processor.insert_vector(embedding_code, id, &vector2, false);
+        let result = processor.insert_vector(&embedding, id, &vector2, false);
 
         assert!(result.is_err(), "Should fail on duplicate ID");
         assert!(
@@ -1154,14 +1136,14 @@ mod tests {
         let vector: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
         let id = crate::Id::new();
         let vec_id = processor
-            .insert_vector(embedding_code, id, &vector, false)
+            .insert_vector(&embedding, id, &vector, false)
             .expect("Insert should succeed");
 
         assert_eq!(vec_id, 0, "First vector should get ID 0");
 
         // Delete the vector
         let deleted = processor
-            .delete_vector(embedding_code, id)
+            .delete_vector(&embedding, id)
             .expect("Delete should succeed");
 
         assert_eq!(deleted, Some(0), "Should return deleted VecId");
@@ -1202,7 +1184,7 @@ mod tests {
         // Try to delete non-existent vector (should be idempotent)
         let id = crate::Id::new();
         let result = processor
-            .delete_vector(embedding_code, id)
+            .delete_vector(&embedding, id)
             .expect("Delete should not error");
 
         assert_eq!(result, None, "Should return None for non-existent vector");
@@ -1245,10 +1227,10 @@ mod tests {
         let id2 = crate::Id::new();
 
         let vec_id1 = processor
-            .insert_vector(embedding_code, id1, &vector, false)
+            .insert_vector(&embedding, id1, &vector, false)
             .expect("Insert 1 should succeed");
         let vec_id2 = processor
-            .insert_vector(embedding_code, id2, &vector, false)
+            .insert_vector(&embedding, id2, &vector, false)
             .expect("Insert 2 should succeed");
 
         assert_eq!(vec_id1, 0);
@@ -1256,13 +1238,13 @@ mod tests {
 
         // Delete first vector
         processor
-            .delete_vector(embedding_code, id1)
+            .delete_vector(&embedding, id1)
             .expect("Delete should succeed");
 
         // Insert new vector - should reuse VecId 0
         let id3 = crate::Id::new();
         let vec_id3 = processor
-            .insert_vector(embedding_code, id3, &vector, false)
+            .insert_vector(&embedding, id3, &vector, false)
             .expect("Insert 3 should succeed");
 
         assert_eq!(vec_id3, 0, "Should reuse freed VecId 0");
@@ -1270,7 +1252,7 @@ mod tests {
         // Next insert should get fresh ID
         let id4 = crate::Id::new();
         let vec_id4 = processor
-            .insert_vector(embedding_code, id4, &vector, false)
+            .insert_vector(&embedding, id4, &vector, false)
             .expect("Insert 4 should succeed");
 
         assert_eq!(vec_id4, 2, "Should get next fresh ID");
@@ -1313,7 +1295,7 @@ mod tests {
             let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
             let id = crate::Id::new();
             processor
-                .insert_vector(embedding_code, id, &vector, true)
+                .insert_vector(&embedding, id, &vector, true)
                 .expect("Insert should succeed");
             inserted_ids.push(id);
         }
@@ -1321,7 +1303,7 @@ mod tests {
         // Search for nearest neighbors using first vector as query
         let query: Vec<f32> = (0..64).map(|j| j as f32 / 1000.0).collect();
         let results = processor
-            .search(embedding_code, &query, 5, 100)
+            .search(&embedding, &query, 5, 100)
             .expect("Search should succeed");
 
         // Should return at most k results
@@ -1380,23 +1362,23 @@ mod tests {
             let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
             let id = crate::Id::new();
             processor
-                .insert_vector(embedding_code, id, &vector, true)
+                .insert_vector(&embedding, id, &vector, true)
                 .expect("Insert should succeed");
             inserted_ids.push(id);
         }
 
         // Delete first two vectors (soft delete - mappings removed)
         processor
-            .delete_vector(embedding_code, inserted_ids[0])
+            .delete_vector(&embedding, inserted_ids[0])
             .expect("Delete should succeed");
         processor
-            .delete_vector(embedding_code, inserted_ids[1])
+            .delete_vector(&embedding, inserted_ids[1])
             .expect("Delete should succeed");
 
         // Search - deleted vectors should be filtered from results
         let query: Vec<f32> = (0..64).map(|j| j as f32 / 1000.0).collect();
         let results = processor
-            .search(embedding_code, &query, 10, 100)
+            .search(&embedding, &query, 10, 100)
             .expect("Search should succeed");
 
         // Should have at most 3 results (5 - 2 deleted)
@@ -1438,7 +1420,7 @@ mod tests {
 
         // Try to search with wrong dimension
         let wrong_dim_query: Vec<f32> = (0..128).map(|i| i as f32).collect();
-        let result = processor.search(embedding_code, &wrong_dim_query, 10, 100);
+        let result = processor.search(&embedding, &wrong_dim_query, 10, 100);
 
         assert!(result.is_err(), "Should fail on dimension mismatch");
         assert!(
@@ -1479,7 +1461,7 @@ mod tests {
 
         // Try to search when HNSW is disabled
         let query: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
-        let result = processor.search(embedding_code, &query, 10, 100);
+        let result = processor.search(&embedding, &query, 10, 100);
 
         assert!(result.is_err(), "Should fail when HNSW disabled");
         assert!(
@@ -1526,7 +1508,7 @@ mod tests {
             let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
             let id = crate::Id::new();
             processor
-                .insert_vector(embedding_code, id, &vector, true)
+                .insert_vector(&embedding, id, &vector, true)
                 .expect("Insert should succeed");
             inserted_ids.push(id);
         }
@@ -1601,7 +1583,7 @@ mod tests {
             let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
             let id = crate::Id::new();
             processor
-                .insert_vector(embedding_code, id, &vector, true)
+                .insert_vector(&embedding, id, &vector, true)
                 .expect("Insert should succeed");
             inserted_ids.push(id);
         }
@@ -1666,7 +1648,7 @@ mod tests {
         let vector: Vec<f32> = (0..64).map(|i| i as f32 / 100.0).collect();
         let id = crate::Id::new();
         processor
-            .insert_vector(embedding_code, id, &vector, true)
+            .insert_vector(&embedding, id, &vector, true)
             .expect("insert");
 
         // Verify spec hash was stored
@@ -1714,7 +1696,7 @@ mod tests {
         let vector: Vec<f32> = (0..64).map(|i| i as f32 / 100.0).collect();
         let id1 = crate::Id::new();
         processor
-            .insert_vector(embedding_code, id1, &vector, true)
+            .insert_vector(&embedding, id1, &vector, true)
             .expect("first insert");
 
         // Get the stored hash
@@ -1739,7 +1721,7 @@ mod tests {
 
         // Try to insert second vector - should fail due to hash mismatch
         let id2 = crate::Id::new();
-        let result = processor.insert_vector(embedding_code, id2, &vector, true);
+        let result = processor.insert_vector(&embedding, id2, &vector, true);
         assert!(result.is_err(), "Should fail with hash mismatch");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1759,7 +1741,7 @@ mod tests {
 
         // Now insert should succeed
         processor
-            .insert_vector(embedding_code, id2, &vector, true)
+            .insert_vector(&embedding, id2, &vector, true)
             .expect("second insert should succeed");
     }
 
@@ -1792,7 +1774,7 @@ mod tests {
             let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
             let id = crate::Id::new();
             processor
-                .insert_vector(embedding_code, id, &vector, true)
+                .insert_vector(&embedding, id, &vector, true)
                 .expect("insert");
         }
 
@@ -1863,7 +1845,7 @@ mod tests {
 
         // Insert batch without index
         let vec_ids = processor
-            .insert_batch(embedding_code, &vectors, false)
+            .insert_batch(&embedding, &vectors, false)
             .expect("batch insert should succeed");
 
         // Verify results
@@ -1920,7 +1902,7 @@ mod tests {
 
         // Insert batch with index building
         let vec_ids = processor
-            .insert_batch(embedding_code, &vectors, true)
+            .insert_batch(&embedding, &vectors, true)
             .expect("batch insert with index should succeed");
 
         assert_eq!(vec_ids.len(), 20, "Should return 20 VecIds");
@@ -1928,7 +1910,7 @@ mod tests {
         // Verify search works
         let query: Vec<f32> = (0..64).map(|j| j as f32 / 1000.0).collect();
         let results = processor
-            .search(embedding_code, &query, 5, 100)
+            .search(&embedding, &query, 5, 100)
             .expect("search should succeed");
 
         assert!(!results.is_empty(), "Should have search results");
@@ -1974,7 +1956,7 @@ mod tests {
 
         // Empty batch should return empty vec
         let vec_ids = processor
-            .insert_batch(embedding_code, &[], false)
+            .insert_batch(&embedding, &[], false)
             .expect("empty batch should succeed");
 
         assert!(vec_ids.is_empty(), "Empty input should return empty output");
@@ -2007,7 +1989,7 @@ mod tests {
             (crate::Id::new(), vec![0.0; 64]),  // Correct
         ];
 
-        let result = processor.insert_batch(embedding_code, &vectors, false);
+        let result = processor.insert_batch(&embedding, &vectors, false);
         assert!(result.is_err(), "Should fail on dimension mismatch");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2045,7 +2027,7 @@ mod tests {
             (duplicate_id, vec![0.0; 64]), // Duplicate!
         ];
 
-        let result = processor.insert_batch(embedding_code, &vectors, false);
+        let result = processor.insert_batch(&embedding, &vectors, false);
         assert!(result.is_err(), "Should fail on duplicate ID in batch");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2079,7 +2061,7 @@ mod tests {
         let existing_id = crate::Id::new();
         let vector: Vec<f32> = vec![0.0; 64];
         processor
-            .insert_vector(embedding_code, existing_id, &vector, false)
+            .insert_vector(&embedding, existing_id, &vector, false)
             .expect("initial insert");
 
         // Try batch with that existing ID
@@ -2088,7 +2070,7 @@ mod tests {
             (existing_id, vec![0.0; 64]), // Already exists!
         ];
 
-        let result = processor.insert_batch(embedding_code, &vectors, false);
+        let result = processor.insert_batch(&embedding, &vectors, false);
         assert!(result.is_err(), "Should fail on existing ID");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2098,29 +2080,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_insert_batch_unknown_embedding() {
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().expect("temp dir");
-        let mut storage = Storage::readwrite(temp_dir.path());
-        storage.ready().expect("storage init");
-        let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
-
-        let processor = Processor::new(storage, registry);
-
-        let vectors: Vec<(Id, Vec<f32>)> = vec![(crate::Id::new(), vec![0.0; 64])];
-
-        let result = processor.insert_batch(999, &vectors, false);
-        assert!(result.is_err(), "Should fail on unknown embedding");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Unknown embedding"),
-            "Error should mention unknown embedding: {}",
-            err
-        );
-    }
+    // Note: test_insert_batch_unknown_embedding removed - with &Embedding API,
+    // you can't pass an invalid embedding (must register first to get Embedding)
 
     #[test]
     fn test_insert_batch_atomicity() {
@@ -2145,7 +2106,7 @@ mod tests {
         // Insert a vector first
         let existing_id = crate::Id::new();
         processor
-            .insert_vector(embedding_code, existing_id, &vec![0.0; 64], false)
+            .insert_vector(&embedding, existing_id, &vec![0.0; 64], false)
             .expect("initial insert");
 
         // Try batch where the LAST vector will fail (duplicate)
@@ -2158,7 +2119,7 @@ mod tests {
             (existing_id, vec![3.0; 64]), // Will fail!
         ];
 
-        let result = processor.insert_batch(embedding_code, &vectors, false);
+        let result = processor.insert_batch(&embedding, &vectors, false);
         assert!(result.is_err(), "Batch should fail");
 
         // Verify new_id1 and new_id2 were NOT inserted (atomicity)

@@ -554,7 +554,11 @@ impl SearchKNN {
 
     /// Execute with a Processor (for direct execution without channel).
     pub fn execute_with_processor(&self, processor: &Processor) -> Result<Vec<SearchResult>> {
-        processor.search(self.embedding, &self.query, self.k, self.ef)
+        let embedding = processor
+            .registry()
+            .get_by_code(self.embedding)
+            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", self.embedding))?;
+        processor.search(&embedding, &self.query, self.k, self.ef)
     }
 }
 

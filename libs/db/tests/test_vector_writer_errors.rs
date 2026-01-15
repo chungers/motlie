@@ -36,6 +36,6 @@ async fn test_insert_unknown_embedding_fails() {
     let err = result.expect_err("expected consumer error");
     let matches = err
         .chain()
-        .any(|cause| cause.to_string().contains("Embedding 42 not registered"));
+        .any(|cause| cause.to_string().contains("Unknown embedding code: 42"));
     assert!(matches, "unexpected error chain: {:?}", err);
 }
