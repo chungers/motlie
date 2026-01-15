@@ -2181,6 +2181,14 @@ Processor-backed reader/consumer is still missing. Recommend adding a `spawn_que
 
 ---
 
+**New Feedback (public SearchReader strategy gap):**
+
+- `SearchReader::search_knn` always uses `Processor::search()` (exact HNSW). This means the public reader API **cannot select RaBitQ** even when the index is built with quantization.  
+  - From a user perspective, this is surprising and likely a bug: quantized search should be available via the public reader path just like `SearchConfig` allows.  
+  - **Fix:** add a `SearchReader::search_with_config(&SearchConfig, ...)` (or `SearchQuery::SearchKNNConfig`) to expose `SearchConfig` strategy selection (Exact vs RaBitQ) through the reader/consumer pipeline.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
