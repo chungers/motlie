@@ -527,6 +527,11 @@ if txn.get_for_update_cf(&forward_cf, key, true)?.is_some() { ... }
 
 The `get_for_update_cf()` acquires a lock on the key, preventing concurrent inserts of the same external ID from racing. All 499 tests pass.
 
+## CODEX Verification (Post-race-fix)
+
+- ✅ Duplicate-ID check is now transactional via `get_for_update_cf`, removing the race noted in the prior review.
+- ✅ No additional correctness gaps found in Task 5.1 after this change.
+
 ---
 
 ## Remaining Phase 5 Tasks
