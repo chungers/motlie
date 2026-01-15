@@ -385,9 +385,10 @@ impl std::fmt::Display for SearchConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vector::schema::VectorElementType;
 
     fn make_embedding(distance: Distance) -> Embedding {
-        Embedding::new(1, "test", 128, distance, None)
+        Embedding::new(1, "test", 128, distance, VectorElementType::default(), None)
     }
 
     #[test]
@@ -629,8 +630,8 @@ mod tests {
     #[test]
     fn test_multiple_embeddings_different_codes() {
         // Test that different embedding codes are properly distinguished
-        let emb1 = Embedding::new(1, "model1", 128, Distance::Cosine, None);
-        let emb2 = Embedding::new(2, "model2", 768, Distance::L2, None);
+        let emb1 = Embedding::new(1, "model1", 128, Distance::Cosine, VectorElementType::default(), None);
+        let emb2 = Embedding::new(2, "model2", 768, Distance::L2, VectorElementType::default(), None);
 
         let config1 = SearchConfig::new(emb1, 10);
         let config2 = SearchConfig::new(emb2, 10);

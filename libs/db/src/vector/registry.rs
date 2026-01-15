@@ -156,6 +156,7 @@ impl EmbeddingRegistry {
                 spec.model.clone(),
                 spec.dim,
                 spec.distance,
+                spec.storage_type,
                 None,
             );
 
@@ -223,6 +224,7 @@ impl EmbeddingRegistry {
             builder.model,
             builder.dim,
             builder.distance,
+            super::schema::VectorElementType::default(), // F32 for backward compat
             builder.embedder,
         );
 
@@ -333,8 +335,15 @@ impl EmbeddingRegistry {
     ///
     /// This method is used by `vector::Storage` when pre-warming from
     /// read-only DB (where `prewarm(&TransactionDB)` isn't available).
-    pub(crate) fn register_from_db(&self, code: u64, model: &str, dim: u32, distance: Distance) {
-        let embedding = Embedding::new(code, model, dim, distance, None);
+    pub(crate) fn register_from_db(
+        &self,
+        code: u64,
+        model: &str,
+        dim: u32,
+        distance: Distance,
+        storage_type: super::schema::VectorElementType,
+    ) {
+        let embedding = Embedding::new(code, model, dim, distance, storage_type, None);
         let spec_key = (model.to_string(), dim, distance);
 
         self.by_spec.insert(spec_key, embedding.clone());
@@ -360,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_embedding_filter() {
-        let emb = Embedding::new(1, "gemma", 768, Distance::Cosine, None);
+        let emb = Embedding::new(1, "gemma", 768, Distance::Cosine, crate::vector::schema::VectorElementType::default(), None);
 
         // Empty filter matches everything
         assert!(EmbeddingFilter::default().matches(&emb));

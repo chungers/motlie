@@ -266,6 +266,7 @@ pub fn search_with_rabitq_cached(
     let adc_candidates = beam_search_layer0_adc_cached(
         index,
         storage,
+        query,
         encoder,
         &query_rotated,
         query_norm,
@@ -300,10 +301,17 @@ pub fn search_with_rabitq_cached(
 /// ADC keeps the query as float32 and computes weighted dot products with binary codes,
 /// achieving 91-99% recall vs Hamming's 10-24% for multi-bit quantization.
 ///
+/// # Missing Code Handling
+///
+/// When a binary code is not in the cache (e.g., during incremental indexing or
+/// partial cache warmup), the function falls back to exact distance computation.
+/// This ensures correctness at the cost of occasional RocksDB reads.
+///
 /// # Arguments
 ///
 /// * `index` - The HNSW index
-/// * `storage` - Storage for edge lookups
+/// * `storage` - Storage for edge lookups and exact distance fallback
+/// * `query` - Original query vector (for exact distance fallback)
 /// * `encoder` - RaBitQ encoder for ADC distance computation
 /// * `query_rotated` - Pre-rotated query vector (from encoder.rotate_query())
 /// * `query_norm` - L2 norm of original query
@@ -313,6 +321,7 @@ pub fn search_with_rabitq_cached(
 fn beam_search_layer0_adc_cached(
     index: &Index,
     storage: &Storage,
+    query: &[f32],
     encoder: &RaBitQ,
     query_rotated: &[f32],
     query_norm: f32,
@@ -324,11 +333,13 @@ fn beam_search_layer0_adc_cached(
     let mut results: BinaryHeap<(OrderedFloat<f32>, VecId)> = BinaryHeap::new();
     let mut visited = RoaringBitmap::new();
 
-    // Get entry point's ADC distance from cache
+    // Get entry point's ADC distance from cache (fallback to exact if missing)
     let entry_dist = if let Some(entry_code) = code_cache.get(index.embedding(), entry) {
         encoder.adc_distance(query_rotated, query_norm, &entry_code.code, &entry_code.correction)
     } else {
-        f32::MAX // No cached code, use max distance
+        // Fallback to exact distance when code is not cached
+        // This happens during incremental indexing or partial cache warmup
+        distance(index, storage, query, entry)?
     };
 
     candidates.push(Reverse((OrderedFloat(entry_dist), entry)));
@@ -364,10 +375,16 @@ fn beam_search_layer0_adc_cached(
         for (neighbor, code_opt) in unvisited.into_iter().zip(codes.into_iter()) {
             visited.insert(neighbor);
 
+            // Compute distance: use ADC if cached, fallback to exact if not
             let dist = if let Some(entry) = code_opt {
                 encoder.adc_distance(query_rotated, query_norm, &entry.code, &entry.correction)
             } else {
-                f32::MAX // No cached code, skip (shouldn't happen if cache is populated)
+                // Fallback to exact distance when code is not cached
+                // This happens during incremental indexing or partial cache warmup
+                match distance(index, storage, query, neighbor) {
+                    Ok(d) => d,
+                    Err(_) => continue, // Skip if we can't compute distance
+                }
             };
 
             // Add to results if better than worst or results not full

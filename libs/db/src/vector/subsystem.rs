@@ -158,7 +158,7 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
     fn on_ready(&self, db: &TransactionDB) -> Result<()> {
         let count = prewarm_cf::<EmbeddingSpecs, _>(db, self.prewarm_config.prewarm_limit, |key, value| {
             let spec = &value.0;
-            self.cache.register_from_db(key.0, &spec.model, spec.dim, spec.distance);
+            self.cache.register_from_db(key.0, &spec.model, spec.dim, spec.distance, spec.storage_type);
             Ok(())
         })?;
         tracing::info!(subsystem = "vector", count, "Pre-warmed embedding registry");
@@ -222,7 +222,7 @@ impl StorageSubsystem for Subsystem {
     ) -> Result<usize> {
         prewarm_cf::<EmbeddingSpecs, _>(db, config.prewarm_limit, |key, value| {
             let spec = &value.0;
-            cache.register_from_db(key.0, &spec.model, spec.dim, spec.distance);
+            cache.register_from_db(key.0, &spec.model, spec.dim, spec.distance, spec.storage_type);
             Ok(())
         })
     }

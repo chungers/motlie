@@ -801,7 +801,7 @@ mod tests {
 
     /// Helper: Create an Embedding for testing
     fn make_test_embedding(code: u64, dim: u32, distance: Distance) -> Embedding {
-        Embedding::new(code, "test-model", dim, distance, None)
+        Embedding::new(code, "test-model", dim, distance, crate::vector::schema::VectorElementType::default(), None)
     }
 
     #[test]
