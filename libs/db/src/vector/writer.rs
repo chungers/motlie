@@ -29,6 +29,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
+use super::hnsw::{insert_in_txn, CacheUpdate};
 use super::mutation::{FlushMarker, Mutation};
 use super::processor::Processor;
 
@@ -271,31 +272,63 @@ impl Consumer {
 
     /// Execute mutations against storage.
     ///
-    /// Phase 1: Basic implementation - execute mutations synchronously
-    /// Phase 2+: Will add proper batching and transaction support
+    /// All mutations are executed within a single transaction for atomicity.
+    /// Cache updates (HNSW navigation) are deferred until after commit.
     async fn execute_mutations(&self, mutations: &[Mutation]) -> Result<()> {
         let txn_db = self.processor.storage().transaction_db()?;
         let txn = txn_db.transaction();
 
+        // Collect cache updates to apply after commit
+        let mut cache_updates: Vec<CacheUpdate> = Vec::new();
+
         for mutation in mutations {
-            self.execute_single(&txn, &txn_db, mutation)?;
+            // Expand batch mutations into individual operations
+            // This ensures we collect CacheUpdates from each vector
+            if let Mutation::InsertVectorBatch(batch) = mutation {
+                for (id, vector) in &batch.vectors {
+                    let single = super::mutation::InsertVector {
+                        embedding: batch.embedding,
+                        id: *id,
+                        vector: vector.clone(),
+                        immediate_index: batch.immediate_index,
+                    };
+                    if let Some(update) =
+                        self.execute_single(&txn, &txn_db, &Mutation::InsertVector(single))?
+                    {
+                        cache_updates.push(update);
+                    }
+                }
+            } else if let Some(update) = self.execute_single(&txn, &txn_db, mutation)? {
+                cache_updates.push(update);
+            }
         }
 
+        // Commit transaction - all mutations are atomic
         txn.commit()?;
+
+        // Apply cache updates ONLY after successful commit
+        // This ensures cache never contains uncommitted state
+        for update in cache_updates {
+            update.apply(self.processor.nav_cache());
+        }
+
         Ok(())
     }
 
     /// Execute a single mutation.
+    ///
+    /// Returns an optional CacheUpdate if HNSW indexing was performed.
+    /// The CacheUpdate should be applied AFTER transaction commit.
     fn execute_single(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         mutation: &Mutation,
-    ) -> Result<()> {
+    ) -> Result<Option<CacheUpdate>> {
         use super::schema::{
             BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingSpecs, IdForward,
             IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue,
-            VectorCfKey, VectorCfValue, Vectors,
+            VectorCfKey, Vectors,
         };
         use crate::rocksdb::{ColumnFamily, MutationCodec};
 
@@ -307,6 +340,7 @@ impl Consumer {
                     .cf_handle(EmbeddingSpecs::CF_NAME)
                     .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
                 txn.put_cf(&cf, key_bytes, value_bytes)?;
+                return Ok(None);
             }
 
             Mutation::InsertVector(op) => {
@@ -378,7 +412,21 @@ impl Consumer {
                     )?;
                 }
 
-                // Note: HNSW indexing will be added in Phase 2
+                // 6. HNSW indexing (if immediate_index is true)
+                if op.immediate_index {
+                    if let Some(index) = self.processor.get_or_create_index(op.embedding) {
+                        let cache_update = insert_in_txn(
+                            &index,
+                            txn,
+                            txn_db,
+                            self.processor.storage(),
+                            vec_id,
+                            &op.vector,
+                        )?;
+                        return Ok(Some(cache_update));
+                    }
+                }
+                return Ok(None);
             }
 
             Mutation::DeleteVector(op) => {
@@ -390,7 +438,7 @@ impl Consumer {
 
                 let vec_id = match txn.get_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))? {
                     Some(bytes) => IdForward::value_from_bytes(&bytes)?.0,
-                    None => return Ok(()), // Already deleted or never existed
+                    None => return Ok(None), // Already deleted or never existed
                 };
 
                 // 2. Delete IdForward mapping
@@ -425,38 +473,33 @@ impl Consumer {
                     allocator.free(vec_id);
                 }
 
-                // Note: HNSW edge cleanup will be added in Phase 2
+                // TODO: HNSW edge cleanup (mark node as deleted, don't remove edges)
+                return Ok(None);
             }
 
-            Mutation::InsertVectorBatch(op) => {
-                // Process each vector in the batch
-                for (id, vector) in &op.vectors {
-                    let single = super::mutation::InsertVector {
-                        embedding: op.embedding,
-                        id: *id,
-                        vector: vector.clone(),
-                        immediate_index: op.immediate_index,
-                    };
-                    self.execute_single(txn, txn_db, &Mutation::InsertVector(single))?;
-                }
+            Mutation::InsertVectorBatch(_) => {
+                // Batch mutations are expanded in execute_mutations() to ensure
+                // all CacheUpdates are collected. This arm should not be reached.
+                unreachable!("InsertVectorBatch should be expanded before execute_single");
             }
 
             Mutation::UpdateEdges(_) => {
-                // Phase 2: HNSW graph updates
-                tracing::warn!("UpdateEdges not implemented in Phase 1");
+                // Direct edge updates are handled internally by HNSW insert
+                tracing::debug!("UpdateEdges handled internally by HNSW insert");
+                return Ok(None);
             }
 
             Mutation::UpdateGraphMeta(_) => {
-                // Phase 2: HNSW graph metadata
-                tracing::warn!("UpdateGraphMeta not implemented in Phase 1");
+                // Graph metadata updates are handled internally by HNSW insert
+                tracing::debug!("UpdateGraphMeta handled internally by HNSW insert");
+                return Ok(None);
             }
 
             Mutation::Flush(_) => {
                 // No-op for storage - flush marker is handled after commit
+                return Ok(None);
             }
         }
-
-        Ok(())
     }
 }
 
