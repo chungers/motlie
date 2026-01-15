@@ -876,6 +876,52 @@ This guarantees HNSW explores enough candidates to return `overfetch_k` results.
 
 ---
 
+## Task 5.4: Storage Layer Search (COMPLETE)
+
+### Overview
+
+The ROADMAP specified `Storage::search()` as a convenience wrapper. This functionality is **already implemented** via `Processor::search()`, which is the recommended high-level API.
+
+### Architecture Decision
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Layer                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Processor  ◄─── Primary API for vector operations          │
+│    ├── insert_vector()                                      │
+│    ├── delete_vector()                                      │
+│    └── search()  ◄─── Implements all ROADMAP 5.4 features   │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Storage = rocksdb::Storage<Subsystem>                      │
+│    └── Low-level RocksDB wrapper                           │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### What Was Implemented (via Processor)
+
+| ROADMAP Requirement | Implementation |
+|---------------------|----------------|
+| Search with external ID resolution | `Processor::search()` |
+| `SearchResult` struct | `processor::SearchResult` (now re-exported) |
+| Dimension validation | ✅ Validates query.len() vs spec.dim() |
+| Tombstone filtering | ✅ Via IdReverse existence check |
+| Batch lookups | ✅ Via `multi_get_cf` |
+| Overfetch for tombstones | ✅ 2x overfetch with ef scaling |
+
+### Export Added
+
+```rust
+// libs/db/src/vector/mod.rs
+pub use processor::{Processor, SearchResult};
+```
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
@@ -883,7 +929,7 @@ This guarantees HNSW explores enough candidates to return `overfetch_k` results.
 | 5.1 | Processor::insert_vector() | **Complete** |
 | 5.2 | Processor::delete_vector() | **Complete** |
 | 5.3 | Processor::search() | **Complete** |
-| 5.4 | Storage layer search methods | Pending |
+| 5.4 | Storage layer search methods | **Complete** (via Processor) |
 | 5.5 | Dispatch logic for search strategies | Pending |
 | 5.6 | Migration utilities | Pending |
 | 5.7 | Stress tests | Pending |
