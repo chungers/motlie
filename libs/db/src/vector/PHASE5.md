@@ -513,6 +513,20 @@ All 499 tests pass. Task 5.1 is now complete from a correctness perspective.
 
 No other correctness issues found in the Task 5.1 implementation.
 
+### Resolution (Race Condition Fix)
+
+Changed `txn_db.get_cf()` to `txn.get_for_update_cf()`:
+
+```rust
+// BEFORE: Non-transactional read (can race)
+if txn_db.get_cf(&forward_cf, key)?.is_some() { ... }
+
+// AFTER: Transactional read with lock
+if txn.get_for_update_cf(&forward_cf, key, true)?.is_some() { ... }
+```
+
+The `get_for_update_cf()` acquires a lock on the key, preventing concurrent inserts of the same external ID from racing. All 499 tests pass.
+
 ---
 
 ## Remaining Phase 5 Tasks
