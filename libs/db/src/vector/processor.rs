@@ -31,8 +31,9 @@ use super::id::IdAllocator;
 use super::rabitq::RaBitQ;
 use super::registry::EmbeddingRegistry;
 use super::schema::{
-    BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, IdForward, IdForwardCfKey,
-    IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue, VecId, VectorCfKey, Vectors,
+    BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, GraphMeta, GraphMetaCfKey,
+    GraphMetaCfValue, GraphMetaField, IdForward, IdForwardCfKey, IdForwardCfValue, IdReverse,
+    IdReverseCfKey, IdReverseCfValue, VecId, VectorCfKey, Vectors,
 };
 use super::search::{SearchConfig, SearchStrategy};
 use super::Storage;
@@ -444,6 +445,55 @@ impl Processor {
             None
         };
 
+        // 8b. Validate/store spec hash (drift detection)
+        // First insert stores the hash; subsequent inserts validate against it
+        {
+            use super::schema::{EmbeddingSpecCfKey, EmbeddingSpecs};
+            use crate::rocksdb::ColumnFamilySerde;
+
+            // Get EmbeddingSpec from storage (has build params)
+            let specs_cf = txn_db
+                .cf_handle(EmbeddingSpecs::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
+            let spec_key = EmbeddingSpecCfKey(embedding);
+            let spec_bytes = txn_db
+                .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
+                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
+            let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
+
+            // Compute current hash
+            let current_hash = embedding_spec.compute_spec_hash();
+
+            // Check if spec_hash already exists
+            let graph_meta_cf = txn_db
+                .cf_handle(GraphMeta::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
+            let hash_key = GraphMetaCfKey::spec_hash(embedding);
+            let hash_key_bytes = GraphMeta::key_to_bytes(&hash_key);
+
+            if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, &hash_key_bytes)? {
+                // Validate against stored hash
+                let stored_value = GraphMeta::value_from_bytes(&hash_key, &stored_bytes)?;
+                if let GraphMetaField::SpecHash(stored_hash) = stored_value.0 {
+                    if stored_hash != current_hash {
+                        return Err(anyhow::anyhow!(
+                            "EmbeddingSpec changed since index build (hash {} != {}). Rebuild required.",
+                            current_hash,
+                            stored_hash
+                        ));
+                    }
+                }
+            } else {
+                // First insert: store the hash
+                let hash_value = GraphMetaCfValue(GraphMetaField::SpecHash(current_hash));
+                txn.put_cf(
+                    &graph_meta_cf,
+                    hash_key_bytes,
+                    GraphMeta::value_to_bytes(&hash_value),
+                )?;
+            }
+        }
+
         // 9. Build HNSW index (if requested)
         let nav_cache_update = if build_index {
             if let Some(index) = self.get_or_create_index(embedding) {
@@ -754,6 +804,55 @@ impl Processor {
                 config_embedding.distance(),
                 spec.distance()
             ));
+        }
+
+        // 2b. Validate registry spec hash vs stored GraphMeta::SpecHash (drift detection)
+        // This ensures the index was built with the current EmbeddingSpec configuration
+        {
+            use super::schema::{EmbeddingSpecCfKey, EmbeddingSpecs};
+            use crate::rocksdb::ColumnFamilySerde;
+
+            let txn_db = self.storage.transaction_db()?;
+
+            // Get current EmbeddingSpec from storage
+            let specs_cf = txn_db
+                .cf_handle(EmbeddingSpecs::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
+            let spec_key = EmbeddingSpecCfKey(embedding_code);
+            let spec_bytes = txn_db
+                .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
+                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding_code))?;
+            let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
+
+            // Compute current hash
+            let current_hash = embedding_spec.compute_spec_hash();
+
+            // Check stored hash
+            let graph_meta_cf = txn_db
+                .cf_handle(GraphMeta::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
+            let hash_key = GraphMetaCfKey::spec_hash(embedding_code);
+            let hash_key_bytes = GraphMeta::key_to_bytes(&hash_key);
+
+            if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, &hash_key_bytes)? {
+                let stored_value = GraphMeta::value_from_bytes(&hash_key, &stored_bytes)?;
+                if let GraphMetaField::SpecHash(stored_hash) = stored_value.0 {
+                    if stored_hash != current_hash {
+                        return Err(anyhow::anyhow!(
+                            "EmbeddingSpec changed since index build (hash {} != {}). Rebuild required.",
+                            current_hash,
+                            stored_hash
+                        ));
+                    }
+                }
+            } else {
+                // Legacy index without SpecHash - drift check skipped
+                // This is expected for indexes built before Phase 5.6
+                tracing::warn!(
+                    embedding = embedding_code,
+                    "Legacy index without SpecHash - drift check skipped"
+                );
+            }
         }
 
         // 3. Validate query dimension
@@ -1562,5 +1661,197 @@ mod tests {
                 );
             }
         }
+    }
+
+    // =========================================================================
+    // Spec Hash (Config Persistence) Tests
+    // =========================================================================
+
+    #[test]
+    fn test_spec_hash_stored_on_first_insert() {
+        use tempfile::TempDir;
+
+        use crate::rocksdb::ColumnFamily;
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        // Register embedding
+        let txn_db = storage.transaction_db().expect("txn_db");
+        let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
+        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding_code = embedding.code();
+
+        // Create processor
+        let processor = Processor::new(storage.clone(), registry);
+
+        // Insert a vector (first insert should store spec hash)
+        let vector: Vec<f32> = (0..64).map(|i| i as f32 / 100.0).collect();
+        let id = crate::Id::new();
+        processor
+            .insert_vector(embedding_code, id, &vector, true)
+            .expect("insert");
+
+        // Verify spec hash was stored
+        let graph_meta_cf = txn_db
+            .cf_handle(GraphMeta::CF_NAME)
+            .expect("GraphMeta CF");
+        let hash_key = GraphMetaCfKey::spec_hash(embedding_code);
+        let hash_bytes = txn_db
+            .get_cf(&graph_meta_cf, GraphMeta::key_to_bytes(&hash_key))
+            .expect("get")
+            .expect("spec hash should exist after first insert");
+
+        let hash_value = GraphMeta::value_from_bytes(&hash_key, &hash_bytes).expect("parse");
+        if let GraphMetaField::SpecHash(hash) = hash_value.0 {
+            assert!(hash != 0, "Spec hash should be non-zero");
+        } else {
+            panic!("Expected SpecHash variant");
+        }
+    }
+
+    #[test]
+    fn test_spec_hash_validated_on_subsequent_insert() {
+        use tempfile::TempDir;
+
+        use crate::rocksdb::ColumnFamily;
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        // Register embedding
+        let txn_db = storage.transaction_db().expect("txn_db");
+        let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
+        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding_code = embedding.code();
+
+        // Create processor
+        let processor = Processor::new(storage.clone(), registry);
+
+        // Insert first vector (stores spec hash)
+        let vector: Vec<f32> = (0..64).map(|i| i as f32 / 100.0).collect();
+        let id1 = crate::Id::new();
+        processor
+            .insert_vector(embedding_code, id1, &vector, true)
+            .expect("first insert");
+
+        // Get the stored hash
+        let graph_meta_cf = txn_db
+            .cf_handle(GraphMeta::CF_NAME)
+            .expect("GraphMeta CF");
+        let hash_key = GraphMetaCfKey::spec_hash(embedding_code);
+        let original_hash_bytes = txn_db
+            .get_cf(&graph_meta_cf, GraphMeta::key_to_bytes(&hash_key))
+            .expect("get")
+            .expect("hash should exist");
+
+        // Tamper with spec hash (simulate config drift)
+        let wrong_hash_value = GraphMetaCfValue(GraphMetaField::SpecHash(12345));
+        txn_db
+            .put_cf(
+                &graph_meta_cf,
+                GraphMeta::key_to_bytes(&hash_key),
+                GraphMeta::value_to_bytes(&wrong_hash_value),
+            )
+            .expect("put tampered hash");
+
+        // Try to insert second vector - should fail due to hash mismatch
+        let id2 = crate::Id::new();
+        let result = processor.insert_vector(embedding_code, id2, &vector, true);
+        assert!(result.is_err(), "Should fail with hash mismatch");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("EmbeddingSpec changed") || err.contains("Rebuild required"),
+            "Error should mention spec change: {}",
+            err
+        );
+
+        // Restore original hash
+        txn_db
+            .put_cf(
+                &graph_meta_cf,
+                GraphMeta::key_to_bytes(&hash_key),
+                &original_hash_bytes,
+            )
+            .expect("restore hash");
+
+        // Now insert should succeed
+        processor
+            .insert_vector(embedding_code, id2, &vector, true)
+            .expect("second insert should succeed");
+    }
+
+    #[test]
+    fn test_search_validates_spec_hash() {
+        use tempfile::TempDir;
+
+        use crate::rocksdb::ColumnFamily;
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::search::SearchConfig;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        // Register embedding
+        let txn_db = storage.transaction_db().expect("txn_db");
+        let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
+        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding_code = embedding.code();
+
+        // Create processor
+        let processor = Processor::new(storage.clone(), registry);
+
+        // Insert vectors (stores spec hash)
+        for i in 0..5 {
+            let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
+            let id = crate::Id::new();
+            processor
+                .insert_vector(embedding_code, id, &vector, true)
+                .expect("insert");
+        }
+
+        // Search should work initially
+        let config = SearchConfig::new(embedding.clone(), 3).with_ef(50);
+        let query: Vec<f32> = (0..64).map(|j| j as f32 / 500.0).collect();
+        let results = processor.search_with_config(&config, &query);
+        assert!(results.is_ok(), "Search should succeed initially");
+
+        // Tamper with spec hash
+        let graph_meta_cf = txn_db
+            .cf_handle(GraphMeta::CF_NAME)
+            .expect("GraphMeta CF");
+        let hash_key = GraphMetaCfKey::spec_hash(embedding_code);
+        let wrong_hash_value = GraphMetaCfValue(GraphMetaField::SpecHash(99999));
+        txn_db
+            .put_cf(
+                &graph_meta_cf,
+                GraphMeta::key_to_bytes(&hash_key),
+                GraphMeta::value_to_bytes(&wrong_hash_value),
+            )
+            .expect("put tampered hash");
+
+        // Search should now fail
+        let result = processor.search_with_config(&config, &query);
+        assert!(result.is_err(), "Search should fail with tampered hash");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("EmbeddingSpec changed") || err.contains("Rebuild required"),
+            "Error should mention spec change: {}",
+            err
+        );
     }
 }

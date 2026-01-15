@@ -91,6 +91,14 @@ pub struct AddEmbeddingSpec {
     pub distance: Distance,
     /// Storage type for vectors (default: F32)
     pub storage_type: super::schema::VectorElementType,
+    /// HNSW M parameter (default: 16)
+    pub hnsw_m: u16,
+    /// HNSW ef_construction parameter (default: 200)
+    pub hnsw_ef_construction: u16,
+    /// RaBitQ bits per dimension (default: 1)
+    pub rabitq_bits: u8,
+    /// RaBitQ rotation seed (default: 42)
+    pub rabitq_seed: u64,
 }
 
 impl From<AddEmbeddingSpec> for Mutation {
@@ -113,6 +121,10 @@ impl MutationCodec for AddEmbeddingSpec {
             dim: self.dim,
             distance: self.distance,
             storage_type: self.storage_type,
+            hnsw_m: self.hnsw_m,
+            hnsw_ef_construction: self.hnsw_ef_construction,
+            rabitq_bits: self.rabitq_bits,
+            rabitq_seed: self.rabitq_seed,
         });
         (key, value)
     }
