@@ -1341,6 +1341,152 @@ Task 5.6 added the necessary **persisted spec + drift detection**, but **the run
 
 ---
 
+## Task 5.7: Runtime Uses EmbeddingSpec (COMPLETE)
+
+**Date:** January 14, 2026
+
+### Problem Statement
+
+Task 5.6 established config persistence and drift detection via `SpecHash`, but the runtime was **not using** the persisted build parameters:
+
+```rust
+// BEFORE: Ignored EmbeddingSpec build params
+fn get_or_create_index(&self, embedding: EmbeddingCode) -> Option<hnsw::Index> {
+    // Uses self.hnsw_config (from Processor constructor), NOT EmbeddingSpec
+    let config = self.hnsw_config.clone();  // BUG: ignores persisted params
+    hnsw::Index::with_storage_type(embedding, distance, storage_type, config, ...)
+}
+
+fn get_or_create_encoder(&self, embedding: EmbeddingCode) -> Option<Arc<RaBitQ>> {
+    // Uses self.rabitq_config, NOT EmbeddingSpec
+    RaBitQ::from_config(dim, &self.rabitq_config)  // BUG: ignores persisted params
+}
+```
+
+**Impact:** SpecHash could match while index/encoder was built with different parameters, causing silent config drift.
+
+### Solution: Read EmbeddingSpec from Storage
+
+#### 5.7a: HNSW Index Uses EmbeddingSpec
+
+Updated `get_or_create_index()` to read persisted build params:
+
+```rust
+fn get_or_create_index(&self, embedding: EmbeddingCode) -> Option<hnsw::Index> {
+    // Read EmbeddingSpec from RocksDB
+    let spec = self.get_embedding_spec(embedding)?;
+
+    // Build HNSW config using EmbeddingSpec params (not self.hnsw_config)
+    let m = spec.hnsw_m as usize;
+    let config = hnsw::Config {
+        enabled: self.hnsw_config.enabled,  // Runtime control
+        dim,
+        m,
+        m_max: 2 * m,
+        m_max_0: 2 * m,
+        ef_construction: spec.hnsw_ef_construction as usize,
+        m_l: 1.0 / (m as f32).ln(),
+        max_level: self.hnsw_config.max_level,      // Runtime control
+        batch_threshold: self.hnsw_config.batch_threshold,  // Runtime control
+    };
+
+    hnsw::Index::with_storage_type(embedding, distance, storage_type, config, ...)
+}
+```
+
+#### 5.7b: RaBitQ Encoder Uses EmbeddingSpec
+
+Updated `get_or_create_encoder()` to read persisted build params:
+
+```rust
+fn get_or_create_encoder(&self, embedding: EmbeddingCode) -> Option<Arc<RaBitQ>> {
+    // Read EmbeddingSpec from RocksDB
+    let spec = self.get_embedding_spec(embedding)?;
+
+    // Create encoder using EmbeddingSpec params (not self.rabitq_config)
+    RaBitQ::new(dim, spec.rabitq_bits, spec.rabitq_seed)
+}
+```
+
+#### 5.7c: EmbeddingBuilder API for Build Params
+
+Added builder methods for configuring build params at registration time:
+
+```rust
+let embedding = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
+    .with_hnsw_m(32)              // Custom M (default: 16)
+    .with_hnsw_ef_construction(400) // Custom ef_construction (default: 200)
+    .with_rabitq_bits(2)           // Custom bits (default: 1)
+    .with_rabitq_seed(12345)       // Custom seed (default: 42)
+    .register(&registry)?;
+```
+
+These values are persisted to `EmbeddingSpecs` CF and used for all subsequent index/encoder creation.
+
+#### 5.7d: storage_type Validation in Search
+
+Added explicit storage_type validation in `search_with_config()`:
+
+```rust
+if config_embedding.storage_type() != spec.storage_type() {
+    return Err(anyhow::anyhow!(
+        "SearchConfig embedding storage_type mismatch: config has {:?}, registry has {:?}",
+        config_embedding.storage_type(),
+        spec.storage_type()
+    ));
+}
+```
+
+### SpecHash Timing: Strict Behavior
+
+The SpecHash is stored on **first insert** and validated on all subsequent operations:
+
+**On Insert:**
+1. First insert → compute SpecHash, store in `GraphMeta::SpecHash`
+2. Subsequent inserts → compute SpecHash, compare to stored, error on mismatch
+
+**On Search:**
+1. Compute SpecHash from current `EmbeddingSpec`
+2. Compare to stored `GraphMeta::SpecHash`
+3. Error on mismatch: "Rebuild required"
+4. Warn on missing: "Legacy index without SpecHash"
+
+**Implications:**
+- Build params are **immutable after first insert**
+- Changing `hnsw_m`, `rabitq_bits`, etc. after data exists requires rebuild
+- This prevents "partial drift" where some vectors use old params and some use new
+
+**Example Error:**
+```
+EmbeddingSpec changed since index build (hash 12345678 != 87654321). Rebuild required.
+```
+
+### Runtime vs Build Params
+
+| Parameter | Source | Can Change After Build? |
+|-----------|--------|-------------------------|
+| `hnsw_m` | EmbeddingSpec | **No** - SpecHash |
+| `hnsw_ef_construction` | EmbeddingSpec | **No** - SpecHash |
+| `rabitq_bits` | EmbeddingSpec | **No** - SpecHash |
+| `rabitq_seed` | EmbeddingSpec | **No** - SpecHash |
+| `enabled` | Processor config | Yes - runtime toggle |
+| `max_level` | Processor config | Yes - runtime override |
+| `batch_threshold` | Processor config | Yes - runtime tuning |
+| `ef_search` | SearchConfig | Yes - query-time param |
+
+### Tests
+
+Added tests in `processor.rs`:
+- `test_spec_hash_stored_on_first_insert` - verifies hash storage
+- `test_spec_hash_validated_on_subsequent_insert` - verifies drift detection
+- `test_search_validates_spec_hash` - verifies search validation
+
+Added tests in `embedding.rs`:
+- `test_embedding_builder_with_build_params` - verifies builder API
+- `test_embedding_builder_invalid_rabitq_bits` - verifies validation
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |

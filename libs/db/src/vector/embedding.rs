@@ -257,6 +257,9 @@ impl fmt::Display for Embedding {
 ///
 /// ```ignore
 /// let embedding = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
+///     .with_hnsw_m(32)
+///     .with_hnsw_ef_construction(400)
+///     .with_rabitq_bits(2)
 ///     .with_embedder(Arc::new(my_embedder))
 ///     .register(&registry)?;
 /// ```
@@ -265,16 +268,41 @@ pub struct EmbeddingBuilder {
     pub(crate) dim: u32,
     pub(crate) distance: Distance,
     pub(crate) embedder: Option<Arc<dyn Embedder>>,
+
+    // Build Parameters (Phase 5.7c)
+    /// HNSW M parameter: number of bidirectional links per node.
+    /// Default: 16
+    pub(crate) hnsw_m: u16,
+    /// HNSW ef_construction: search beam width during index build.
+    /// Default: 200
+    pub(crate) hnsw_ef_construction: u16,
+    /// RaBitQ bits per dimension (1, 2, or 4).
+    /// Default: 1
+    pub(crate) rabitq_bits: u8,
+    /// RaBitQ rotation matrix seed.
+    /// Default: 42
+    pub(crate) rabitq_seed: u64,
 }
 
 impl EmbeddingBuilder {
-    /// Create a new builder for an embedding space.
+    /// Create a new builder for an embedding space with default build params.
+    ///
+    /// Default build params:
+    /// - hnsw_m: 16
+    /// - hnsw_ef_construction: 200
+    /// - rabitq_bits: 1
+    /// - rabitq_seed: 42
     pub fn new(model: impl Into<String>, dim: u32, distance: Distance) -> Self {
         Self {
             model: model.into(),
             dim,
             distance,
             embedder: None,
+            // Default build params matching schema.rs defaults
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
         }
     }
 
@@ -283,6 +311,57 @@ impl EmbeddingBuilder {
         self.embedder = Some(embedder);
         self
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // Build Parameters (Phase 5.7c)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Set HNSW M parameter (number of bidirectional links per node).
+    ///
+    /// Higher M = better recall, more memory, slower insert.
+    /// Recommended: 8-64, Default: 16
+    pub fn with_hnsw_m(mut self, m: u16) -> Self {
+        self.hnsw_m = m;
+        self
+    }
+
+    /// Set HNSW ef_construction (search beam width during index build).
+    ///
+    /// Higher ef_construction = better graph quality, slower build.
+    /// Recommended: >= 2*M, Default: 200
+    pub fn with_hnsw_ef_construction(mut self, ef_construction: u16) -> Self {
+        self.hnsw_ef_construction = ef_construction;
+        self
+    }
+
+    /// Set RaBitQ bits per dimension (1, 2, or 4).
+    ///
+    /// - 1-bit: 32x compression, lowest recall without rerank
+    /// - 2-bit: 16x compression, medium recall
+    /// - 4-bit: 8x compression, highest recall
+    ///
+    /// Default: 1
+    pub fn with_rabitq_bits(mut self, bits: u8) -> Self {
+        assert!(
+            bits == 1 || bits == 2 || bits == 4,
+            "rabitq_bits must be 1, 2, or 4"
+        );
+        self.rabitq_bits = bits;
+        self
+    }
+
+    /// Set RaBitQ rotation matrix seed for deterministic encoding.
+    ///
+    /// Same seed = same rotation matrix = reproducible binary codes.
+    /// Default: 42
+    pub fn with_rabitq_seed(mut self, seed: u64) -> Self {
+        self.rabitq_seed = seed;
+        self
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Accessors
+    // ─────────────────────────────────────────────────────────────
 
     /// Model identifier.
     pub fn model(&self) -> &str {
@@ -298,6 +377,26 @@ impl EmbeddingBuilder {
     pub fn distance(&self) -> Distance {
         self.distance
     }
+
+    /// HNSW M parameter.
+    pub fn hnsw_m(&self) -> u16 {
+        self.hnsw_m
+    }
+
+    /// HNSW ef_construction.
+    pub fn hnsw_ef_construction(&self) -> u16 {
+        self.hnsw_ef_construction
+    }
+
+    /// RaBitQ bits per dimension.
+    pub fn rabitq_bits(&self) -> u8 {
+        self.rabitq_bits
+    }
+
+    /// RaBitQ rotation seed.
+    pub fn rabitq_seed(&self) -> u64 {
+        self.rabitq_seed
+    }
 }
 
 impl fmt::Debug for EmbeddingBuilder {
@@ -307,6 +406,10 @@ impl fmt::Debug for EmbeddingBuilder {
             .field("dim", &self.dim)
             .field("distance", &self.distance)
             .field("has_embedder", &self.embedder.is_some())
+            .field("hnsw_m", &self.hnsw_m)
+            .field("hnsw_ef_construction", &self.hnsw_ef_construction)
+            .field("rabitq_bits", &self.rabitq_bits)
+            .field("rabitq_seed", &self.rabitq_seed)
             .finish()
     }
 }
@@ -371,6 +474,33 @@ mod tests {
         assert_eq!(builder.model(), "qwen3");
         assert_eq!(builder.dim(), 1024);
         assert_eq!(builder.distance(), Distance::DotProduct);
+
+        // Default build params
+        assert_eq!(builder.hnsw_m(), 16);
+        assert_eq!(builder.hnsw_ef_construction(), 200);
+        assert_eq!(builder.rabitq_bits(), 1);
+        assert_eq!(builder.rabitq_seed(), 42);
+    }
+
+    #[test]
+    fn test_embedding_builder_with_build_params() {
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
+            .with_hnsw_m(32)
+            .with_hnsw_ef_construction(400)
+            .with_rabitq_bits(2)
+            .with_rabitq_seed(12345);
+
+        assert_eq!(builder.hnsw_m(), 32);
+        assert_eq!(builder.hnsw_ef_construction(), 400);
+        assert_eq!(builder.rabitq_bits(), 2);
+        assert_eq!(builder.rabitq_seed(), 12345);
+    }
+
+    #[test]
+    #[should_panic(expected = "rabitq_bits must be 1, 2, or 4")]
+    fn test_embedding_builder_invalid_rabitq_bits() {
+        EmbeddingBuilder::new("test", 128, Distance::Cosine)
+            .with_rabitq_bits(3); // Invalid - only 1, 2, 4 allowed
     }
 
     #[test]
