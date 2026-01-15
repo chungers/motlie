@@ -21,11 +21,18 @@
 //!                                  │ Storage  │
 //!                                  └──────────┘
 //! ```
+//!
+//! # SearchKNN Support
+//!
+//! For queries that need HNSW search (SearchKNN), use `spawn_consumers_with_processor`
+//! which provides access to the Processor for index operations. This bundles
+//! Storage + Processor together, eliminating ad-hoc plumbing at call sites.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use super::processor::Processor;
 use super::query::Query;
 use super::Storage;
 
@@ -191,6 +198,104 @@ pub fn spawn_consumers(
         .map(|_| {
             let consumer = Consumer::new(receiver.clone(), config.clone(), storage.clone());
             spawn_consumer(consumer)
+        })
+        .collect()
+}
+
+// ============================================================================
+// ProcessorConsumer - Consumer with Processor for SearchKNN support
+// ============================================================================
+
+/// Consumer that processes vector queries with Processor access.
+///
+/// Unlike the basic `Consumer`, this variant holds a `Processor` reference
+/// enabling SearchKNN queries to perform HNSW index operations.
+///
+/// Use this when your query workload includes SearchKNN.
+pub struct ProcessorConsumer {
+    receiver: flume::Receiver<Query>,
+    config: ReaderConfig,
+    processor: Arc<Processor>,
+}
+
+impl ProcessorConsumer {
+    /// Create a new ProcessorConsumer.
+    pub fn new(
+        receiver: flume::Receiver<Query>,
+        config: ReaderConfig,
+        processor: Arc<Processor>,
+    ) -> Self {
+        Self {
+            receiver,
+            config,
+            processor,
+        }
+    }
+
+    /// Process queries continuously until the channel is closed.
+    #[tracing::instrument(skip(self), name = "vector_query_consumer_with_processor")]
+    pub async fn run(self) -> Result<()> {
+        tracing::info!(config = ?self.config, "Starting vector query consumer (with Processor)");
+
+        loop {
+            match self.receiver.recv_async().await {
+                Ok(query) => {
+                    self.process_query(query).await;
+                }
+                Err(_) => {
+                    tracing::info!("Vector query consumer shutting down - channel closed");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Process a single query.
+    #[tracing::instrument(skip(self), fields(query_type = %query))]
+    async fn process_query(&self, query: Query) {
+        tracing::debug!(query = %query, "Processing vector query");
+        query.process(self.processor.storage()).await;
+    }
+
+    /// Get the processor reference (for SearchKNN dispatch setup).
+    pub fn processor(&self) -> &Arc<Processor> {
+        &self.processor
+    }
+}
+
+/// Spawn a Processor-backed query consumer as a tokio task.
+pub fn spawn_consumer_with_processor(
+    consumer: ProcessorConsumer,
+) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move { consumer.run().await })
+}
+
+/// Spawn multiple Processor-backed query consumers for parallel processing.
+///
+/// This is the recommended way to set up vector query handling when
+/// your workload includes SearchKNN queries.
+///
+/// # Arguments
+///
+/// * `receiver` - The flume receiver to clone for each consumer
+/// * `config` - Configuration for each consumer
+/// * `processor` - Shared processor reference (includes Storage access)
+/// * `count` - Number of consumers to spawn
+///
+/// # Returns
+///
+/// Vector of JoinHandles for all spawned consumers
+pub fn spawn_consumers_with_processor(
+    receiver: flume::Receiver<Query>,
+    config: ReaderConfig,
+    processor: Arc<Processor>,
+    count: usize,
+) -> Vec<tokio::task::JoinHandle<Result<()>>> {
+    (0..count)
+        .map(|_| {
+            let consumer =
+                ProcessorConsumer::new(receiver.clone(), config.clone(), processor.clone());
+            spawn_consumer_with_processor(consumer)
         })
         .collect()
 }

@@ -52,13 +52,22 @@ impl DeleteResult {
 }
 
 // ============================================================================
-// delete_vector_in_txn
+// ops::delete::vector
 // ============================================================================
 
 /// Delete a vector within an existing transaction.
 ///
 /// This is the shared implementation used by both `Processor::delete_vector()`
 /// and `MutationExecutor for DeleteVector`.
+///
+/// # Usage
+///
+/// ```rust,ignore
+/// use crate::vector::ops;
+///
+/// let result = ops::delete::vector(&txn, &txn_db, processor, embedding, id)?;
+/// txn.commit()?;
+/// ```
 ///
 /// # Behavior
 ///
@@ -82,7 +91,7 @@ impl DeleteResult {
 ///
 /// # Returns
 /// `DeleteResult` indicating whether deletion occurred and if it was soft.
-pub fn delete_vector_in_txn(
+pub fn vector(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     processor: &Processor,
