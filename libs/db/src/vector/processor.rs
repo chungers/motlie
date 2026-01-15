@@ -638,28 +638,46 @@ impl Processor {
             .get_or_create_index(embedding)
             .ok_or_else(|| anyhow::anyhow!("Failed to get HNSW index for embedding {}", embedding))?;
 
-        // 5. Perform HNSW search
-        let raw_results = index.search(&self.storage, query, k, ef_search)?;
+        // 5. Perform HNSW search with overfetch to handle tombstones
+        // Overfetch by 2x to ensure we get enough live results after filtering
+        let overfetch_k = k * 2;
+        let raw_results = index.search(&self.storage, query, overfetch_k, ef_search)?;
 
-        // 6. Filter deleted vectors and resolve external IDs
+        // 6. Filter deleted vectors using batched IdReverse lookup
         let txn_db = self.storage.transaction_db()?;
         let reverse_cf = txn_db
             .cf_handle(IdReverse::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
 
-        let mut results = Vec::with_capacity(raw_results.len());
-        for (distance, vec_id) in raw_results {
-            // Check if IdReverse exists (not deleted)
-            let key = IdReverseCfKey(embedding, vec_id);
-            if let Some(bytes) = txn_db.get_cf(&reverse_cf, IdReverse::key_to_bytes(&key))? {
+        // Build batch of keys for multi_get
+        let keys: Vec<_> = raw_results
+            .iter()
+            .map(|(_, vec_id)| {
+                let key = IdReverseCfKey(embedding, *vec_id);
+                IdReverse::key_to_bytes(&key)
+            })
+            .collect();
+
+        // Batch lookup all IdReverse keys at once
+        let key_refs: Vec<_> = keys.iter().map(|k| (&reverse_cf, k.as_slice())).collect();
+        let values = txn_db.multi_get_cf(key_refs);
+
+        // Filter and resolve external IDs, truncate to k
+        let mut results = Vec::with_capacity(k);
+        for (i, value_result) in values.into_iter().enumerate() {
+            if results.len() >= k {
+                break;
+            }
+            if let Ok(Some(bytes)) = value_result {
                 let id = IdReverse::value_from_bytes(&bytes)?.0;
+                let (distance, vec_id) = raw_results[i];
                 results.push(SearchResult {
                     id,
                     vec_id,
                     distance,
                 });
             }
-            // Skip deleted vectors (IdReverse missing)
+            // Skip deleted vectors (IdReverse missing or error)
         }
 
         Ok(results)

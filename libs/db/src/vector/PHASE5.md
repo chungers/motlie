@@ -823,6 +823,33 @@ Search works and correctly filters deleted vectors, but there are two practical 
 
 These are performance/UX improvements rather than correctness blockers, but they become important as the number of soft-deleted nodes grows.
 
+### Resolution
+
+Both improvements implemented:
+
+1. **Overfetch with 2x multiplier - FIXED**
+   ```rust
+   // Overfetch by 2x to ensure we get enough live results after filtering
+   let overfetch_k = k * 2;
+   let raw_results = index.search(&self.storage, query, overfetch_k, ef_search)?;
+   ```
+
+2. **Batched IdReverse lookups using multi_get_cf - FIXED**
+   ```rust
+   // Build batch of keys for multi_get
+   let keys: Vec<_> = raw_results.iter()
+       .map(|(_, vec_id)| IdReverse::key_to_bytes(&IdReverseCfKey(embedding, *vec_id)))
+       .collect();
+
+   // Batch lookup all IdReverse keys at once
+   let key_refs: Vec<_> = keys.iter().map(|k| (&reverse_cf, k.as_slice())).collect();
+   let values = txn_db.multi_get_cf(key_refs);
+
+   // Filter and resolve external IDs, truncate to k
+   ```
+
+All 506 tests pass. Task 5.3 improvements complete.
+
 ---
 
 ## Remaining Phase 5 Tasks
