@@ -342,12 +342,14 @@ impl Processor {
         let txn = txn_db.transaction();
 
         // 4. Check if external ID already exists (avoid duplicates)
+        // Use txn.get_for_update_cf() to acquire a lock on the key, preventing
+        // concurrent inserts of the same external ID from racing.
         let forward_cf = txn_db
             .cf_handle(IdForward::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
         let forward_key = IdForwardCfKey(embedding, id);
-        if txn_db
-            .get_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))?
+        if txn
+            .get_for_update_cf(&forward_cf, IdForward::key_to_bytes(&forward_key), true)?
             .is_some()
         {
             return Err(anyhow::anyhow!(
