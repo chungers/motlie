@@ -1487,6 +1487,31 @@ Added tests in `embedding.rs`:
 
 ---
 
+## CODEX Review: Task 5.7 Assessment
+
+**Overall:** This change closes the main correctness gap I flagged: runtime HNSW/RaBitQ construction now uses persisted `EmbeddingSpec` parameters, and `search_with_config()` validates `storage_type`. Good alignment with the register → build → search workflow and SpecHash drift detection.
+
+**Remaining issues / improvements**
+
+1) **HNSW M validation (correctness).**  
+   `get_or_create_index()` computes `m_l = 1.0 / ln(m)`. If `hnsw_m <= 1`, `ln(m)` is `0` or `-inf`, yielding `inf`/`-0` and likely unstable layer assignment.  
+   - **Fix:** validate `hnsw_m >= 2` at registration (prefer `Result`), or clamp/guard before computing `m_l`.  
+   - Suggest using `hnsw::Config::is_valid()` plus a dedicated error for `m <= 1`.
+
+2) **Builder validation uses `assert!` (API behavior).**  
+   `EmbeddingBuilder::with_rabitq_bits()` panics on invalid bits. That’s consistent with `RaBitQ::new()` but is surprising for a public API; prefer returning `Result<Self>` or a `try_with_*` variant.  
+   - If keeping panics, document it clearly in API.md and RABITQ.md.
+
+3) **SpecHash timing is strict (documented).**  
+   The new doc section confirms SpecHash is set on first insert even if `build_index=false`. That prevents tuning build params after inserting raw vectors.  
+   - This is acceptable if intended; just ensure API docs explicitly call it out (users may expect to tune HNSW/RaBitQ before first build).
+
+**Quality assessment**
+
+This is a strong improvement: persisted build params now drive runtime behavior, closing a correctness hole and aligning the API with the declared workflow. Once HNSW M validation is enforced (and builder panics are either documented or converted to `Result`), the design is sound.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
