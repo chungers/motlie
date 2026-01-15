@@ -116,6 +116,9 @@ impl IdAllocator {
     /// Unlike `allocate()`, this writes to IdAlloc CF within the
     /// provided transaction for atomic commit with other writes.
     ///
+    /// Persists both `next_id` and the free bitmap to ensure crash
+    /// recovery correctness when reusing freed IDs.
+    ///
     /// # Arguments
     /// * `txn` - Transaction to write within
     /// * `txn_db` - TransactionDB for CF handle lookup
@@ -129,13 +132,22 @@ impl IdAllocator {
         txn_db: &TransactionDB,
         embedding: EmbeddingCode,
     ) -> Result<VecId> {
-        let id = self.allocate(); // Get ID from in-memory state
-
-        // Persist next_id within transaction
         let cf = txn_db
             .cf_handle(IdAlloc::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdAlloc::CF_NAME))?;
 
+        // Try to reuse a freed ID first
+        let (id, reused) = {
+            let mut free = self.free_ids.lock().unwrap();
+            if let Some(freed_id) = free.iter().next() {
+                free.remove(freed_id);
+                (freed_id, true)
+            } else {
+                (self.next_id.fetch_add(1, Ordering::Relaxed), false)
+            }
+        };
+
+        // Persist next_id within transaction
         let next_key = IdAllocCfKey::next_id(embedding);
         let next_val = IdAllocCfValue(IdAllocField::NextId(self.next_id.load(Ordering::SeqCst)));
         txn.put_cf(
@@ -143,6 +155,21 @@ impl IdAllocator {
             IdAlloc::key_to_bytes(&next_key),
             IdAlloc::value_to_bytes(&next_val),
         )?;
+
+        // Persist free bitmap when reusing a freed ID
+        // This ensures the bitmap is updated atomically with the allocation
+        if reused {
+            let bitmap_key = IdAllocCfKey::free_bitmap(embedding);
+            let free = self.free_ids.lock().unwrap();
+            let mut bitmap_bytes = Vec::new();
+            free.serialize_into(&mut bitmap_bytes)?;
+            let bitmap_val = IdAllocCfValue(IdAllocField::FreeBitmap(bitmap_bytes));
+            txn.put_cf(
+                &cf,
+                IdAlloc::key_to_bytes(&bitmap_key),
+                IdAlloc::value_to_bytes(&bitmap_val),
+            )?;
+        }
 
         Ok(id)
     }

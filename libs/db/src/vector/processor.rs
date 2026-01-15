@@ -341,18 +341,30 @@ impl Processor {
             .context("Failed to get transaction DB")?;
         let txn = txn_db.transaction();
 
-        // 4. Allocate internal ID (transactionally persisted)
+        // 4. Check if external ID already exists (avoid duplicates)
+        let forward_cf = txn_db
+            .cf_handle(IdForward::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
+        let forward_key = IdForwardCfKey(embedding, id);
+        if txn_db
+            .get_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))?
+            .is_some()
+        {
+            return Err(anyhow::anyhow!(
+                "External ID {} already exists in embedding space {}",
+                id,
+                embedding
+            ));
+        }
+
+        // 5. Allocate internal ID (transactionally persisted)
         let vec_id = {
             let allocator = self.get_or_create_allocator(embedding);
             allocator.allocate_in_txn(&txn, &txn_db, embedding)?
         };
 
-        // 5. Store Id -> VecId mapping (IdForward)
-        let forward_key = IdForwardCfKey(embedding, id);
+        // 6. Store Id -> VecId mapping (IdForward)
         let forward_value = IdForwardCfValue(vec_id);
-        let forward_cf = txn_db
-            .cf_handle(IdForward::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
         txn.put_cf(
             &forward_cf,
             IdForward::key_to_bytes(&forward_key),
@@ -593,6 +605,46 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("Unknown embedding"),
             "Error should mention unknown embedding"
+        );
+    }
+
+    #[test]
+    fn test_insert_vector_duplicate_id() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage, registry);
+
+        // Insert first vector
+        let vector: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
+        let id = crate::Id::new();
+        processor
+            .insert_vector(embedding_code, id, &vector, false)
+            .expect("First insert should succeed");
+
+        // Try to insert with same external ID
+        let vector2: Vec<f32> = (0..64).map(|i| (i + 1) as f32 / 64.0).collect();
+        let result = processor.insert_vector(embedding_code, id, &vector2, false);
+
+        assert!(result.is_err(), "Should fail on duplicate ID");
+        assert!(
+            result.unwrap_err().to_string().contains("already exists"),
+            "Error should mention ID already exists"
         );
     }
 }
