@@ -8,6 +8,7 @@
 //! The Processor follows the same pattern as `graph::mutation::Processor`:
 //! - Holds shared storage and registry references
 //! - Manages per-embedding ID allocators (lazily created)
+//! - Manages per-embedding HNSW indices (lazily created)
 //! - Provides helper methods for common operations
 //!
 //! # Thread Safety
@@ -16,13 +17,16 @@
 //! - Storage is Arc-wrapped for shared ownership
 //! - Registry is Arc-wrapped for shared lookups
 //! - IdAllocators use DashMap for lock-free concurrent access
+//! - HNSW indices use DashMap for lock-free concurrent access
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use dashmap::DashMap;
 
+use super::cache::NavigationCache;
 use super::config::RaBitQConfig;
+use super::hnsw;
 use super::id::IdAllocator;
 use super::rabitq::RaBitQ;
 use super::registry::EmbeddingRegistry;
@@ -63,12 +67,23 @@ pub struct Processor {
     rabitq_encoders: DashMap<EmbeddingCode, Arc<RaBitQ>>,
     /// RaBitQ configuration (shared across all embeddings)
     rabitq_config: RaBitQConfig,
+    /// Per-embedding HNSW indices (lazily created)
+    hnsw_indices: DashMap<EmbeddingCode, hnsw::Index>,
+    /// Shared navigation cache for all HNSW indices
+    nav_cache: Arc<NavigationCache>,
+    /// HNSW configuration (shared across all embeddings)
+    hnsw_config: hnsw::Config,
 }
 
 impl Processor {
     /// Create a new Processor with the given storage and registry.
     pub fn new(storage: Arc<Storage>, registry: Arc<EmbeddingRegistry>) -> Self {
-        Self::with_rabitq_config(storage, registry, RaBitQConfig::default())
+        Self::with_config(
+            storage,
+            registry,
+            RaBitQConfig::default(),
+            hnsw::Config::default(),
+        )
     }
 
     /// Create a Processor with custom RaBitQ configuration.
@@ -77,12 +92,25 @@ impl Processor {
         registry: Arc<EmbeddingRegistry>,
         rabitq_config: RaBitQConfig,
     ) -> Self {
+        Self::with_config(storage, registry, rabitq_config, hnsw::Config::default())
+    }
+
+    /// Create a Processor with custom RaBitQ and HNSW configurations.
+    pub fn with_config(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        rabitq_config: RaBitQConfig,
+        hnsw_config: hnsw::Config,
+    ) -> Self {
         Self {
             storage,
             registry,
             id_allocators: DashMap::new(),
             rabitq_encoders: DashMap::new(),
             rabitq_config,
+            hnsw_indices: DashMap::new(),
+            nav_cache: Arc::new(NavigationCache::new()),
+            hnsw_config,
         }
     }
 
@@ -196,6 +224,53 @@ impl Processor {
     /// Get the number of cached RaBitQ encoders.
     pub fn encoder_count(&self) -> usize {
         self.rabitq_encoders.len()
+    }
+
+    // ========================================================================
+    // HNSW Index Management
+    // ========================================================================
+
+    /// Get or create an HNSW index for the given embedding space.
+    ///
+    /// Returns None if the embedding is not found in the registry.
+    /// Indices are cached per embedding space for efficiency.
+    pub fn get_or_create_index(&self, embedding: EmbeddingCode) -> Option<hnsw::Index> {
+        // Check cache first
+        if let Some(index) = self.hnsw_indices.get(&embedding) {
+            return Some(index.clone());
+        }
+
+        // Look up embedding to get distance metric and storage type
+        let emb = self.registry.get_by_code(embedding)?;
+        let distance = emb.distance();
+        let storage_type = emb.storage_type();
+
+        // Create index with shared navigation cache
+        let index = hnsw::Index::with_storage_type(
+            embedding,
+            distance,
+            storage_type,
+            self.hnsw_config.clone(),
+            Arc::clone(&self.nav_cache),
+        );
+
+        self.hnsw_indices.insert(embedding, index.clone());
+        Some(index)
+    }
+
+    /// Get the shared navigation cache.
+    pub fn nav_cache(&self) -> &Arc<NavigationCache> {
+        &self.nav_cache
+    }
+
+    /// Get the HNSW configuration.
+    pub fn hnsw_config(&self) -> &hnsw::Config {
+        &self.hnsw_config
+    }
+
+    /// Get the number of cached HNSW indices.
+    pub fn index_count(&self) -> usize {
+        self.hnsw_indices.len()
     }
 }
 

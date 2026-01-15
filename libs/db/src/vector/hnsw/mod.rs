@@ -62,6 +62,7 @@ pub use insert::{insert_in_txn, CacheUpdate};
 /// HNSW index for a single embedding space.
 ///
 /// Provides insert and search operations backed by RocksDB storage.
+#[derive(Clone)]
 pub struct Index {
     /// The embedding space code this index manages
     embedding: EmbeddingCode,
