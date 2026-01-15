@@ -612,6 +612,24 @@ HNSW graph edges are NOT cleaned up on delete. This is standard HNSW behavior:
 
 ---
 
+## CODEX Review (Task 5.2)
+
+The transactional delete logic is clean, but there are two correctness risks if HNSW indexing is enabled:
+
+1) **VecId reuse while HNSW edges still reference the old node.**
+   - `delete_vector()` frees the VecId back to the allocator, but HNSW edges are left intact.
+   - If the VecId is reused, existing edges now point to a *different* vector, corrupting graph semantics and search results.
+   - **Suggested fix:** do not reuse VecIds for indexed embeddings until edges are cleaned; alternatively, add a tombstone flag and keep IDs reserved.
+
+2) **Entry point / navigation can point to deleted nodes.**
+   - `GraphMeta` entry point is not updated on delete, and vector data is removed.
+   - Search starts from the entry point and calls `distance()`, which will error if the vector data is missing.
+   - **Suggested fix:** keep vector data for deleted nodes (tombstone) or update search to skip missing vectors and repair entry points.
+
+If deletes are intended only for non-indexed embeddings, document that constraint explicitly. Otherwise, the above needs addressing before Task 5.2 can be considered safe for indexed usage.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
