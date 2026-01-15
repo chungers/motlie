@@ -245,6 +245,7 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  └── Files: rabitq.rs, search_config.rs, parallel.rs, navigation.rs        │
 │                                                                              │
 │  Phase 5: Internal Mutation/Query API [NOT STARTED]                          │
+│  ├── 5.0 HNSW Transaction Refactoring (prerequisite for atomicity)         │
 │  ├── 5.1-5.7 Processor methods, Storage search, dispatch logic             │
 │  ├── 5.8 Migrate examples/laion_benchmark + integration tests              │
 │  ├── 5.9-5.11 Concurrency stress tests, metrics infra, benchmarks          │
@@ -6313,6 +6314,74 @@ Processor methods that their consumers invoke.
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Task 5.0: HNSW Transaction Refactoring (Prerequisite)
+
+**Status:** 🔲 Not Started
+**Severity:** 🔴 HIGH - Required for online serving atomicity
+
+**Problem:** The current `hnsw::insert()` path uses raw `txn_db.put_cf()` and `txn_db.merge_cf()`
+calls instead of transactional writes. This means graph updates are NOT atomic:
+
+```rust
+// CURRENT (hnsw/insert.rs) - NON-ATOMIC
+txn_db.put_cf(&cf, key, value)?;  // Raw put, not transactional
+
+// REQUIRED - ATOMIC
+txn.put_cf(&cf, key, value)?;     // Transaction-scoped put
+```
+
+**Impact for online serving:**
+- A crash during insert could leave the graph in inconsistent state
+- Entry point, max level, VecMeta, and edges can be partially written
+- Orphaned nodes or missing edges could corrupt search results
+
+**Files requiring changes:**
+
+| File | Current | Required |
+|------|---------|----------|
+| `hnsw/insert.rs` | `txn_db.put_cf()` | Accept `&Transaction`, use `txn.put_cf()` |
+| `hnsw/graph.rs` | `txn_db.merge_cf()` | Accept `&Transaction`, use `txn.merge_cf()` |
+
+**Refactoring approach:**
+
+```rust
+// hnsw/insert.rs - BEFORE
+pub fn insert(index: &Index, storage: &Storage, vec_id: VecId, vector: &[f32]) -> Result<()> {
+    let txn_db = storage.transaction_db()?;
+    // ... uses txn_db.put_cf() directly
+}
+
+// hnsw/insert.rs - AFTER
+pub fn insert(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    vec_id: VecId,
+    vector: &[f32],
+) -> Result<()> {
+    // ... uses txn.put_cf() for atomic writes
+}
+
+// graph.rs - connect_neighbors() similarly updated
+pub fn connect_neighbors(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    vec_id: VecId,
+    neighbors: &[(f32, VecId)],
+    layer: HnswLayer,
+) -> Result<()> {
+    // ... uses txn.merge_cf() for atomic edge writes
+}
+```
+
+**Testing:**
+- Verify existing HNSW tests still pass after refactoring
+- Add crash-recovery test: insert + simulated crash → verify consistent state
+- Stress test: concurrent inserts with transactions
+
+---
 
 ### Task 5.1: Processor::insert_vector()
 
