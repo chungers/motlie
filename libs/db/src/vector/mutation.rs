@@ -266,22 +266,23 @@ impl From<InsertVectorBatch> for Mutation {
 
 /// Update HNSW graph edges for a node.
 ///
-/// Internal mutation used during HNSW graph construction and maintenance.
+/// **Internal mutation** - used during HNSW graph construction and maintenance.
+/// Not exposed in public API; graph repair requires full rebuild.
 #[derive(Debug, Clone)]
-pub struct UpdateEdges {
+pub(crate) struct UpdateEdges {
     /// Embedding space
-    pub embedding: EmbeddingCode,
+    pub(crate) embedding: EmbeddingCode,
     /// Vector ID
-    pub vec_id: VecId,
+    pub(crate) vec_id: VecId,
     /// Layer to update
-    pub layer: HnswLayer,
+    pub(crate) layer: HnswLayer,
     /// Operation: add or replace neighbors
-    pub operation: EdgeOperation,
+    pub(crate) operation: EdgeOperation,
 }
 
 /// Edge update operation type.
 #[derive(Debug, Clone)]
-pub enum EdgeOperation {
+pub(crate) enum EdgeOperation {
     /// Add neighbors (merge with existing)
     Add(Vec<VecId>),
     /// Replace all neighbors at this layer
@@ -300,18 +301,19 @@ impl From<UpdateEdges> for Mutation {
 
 /// Update graph-level metadata.
 ///
-/// Internal mutation for updating HNSW graph state.
+/// **Internal mutation** - used during HNSW graph state updates.
+/// Not exposed in public API; graph repair requires full rebuild.
 #[derive(Debug, Clone)]
-pub struct UpdateGraphMeta {
+pub(crate) struct UpdateGraphMeta {
     /// Embedding space
-    pub embedding: EmbeddingCode,
+    pub(crate) embedding: EmbeddingCode,
     /// Field to update
-    pub update: GraphMetaUpdate,
+    pub(crate) update: GraphMetaUpdate,
 }
 
 /// Graph metadata update type.
 #[derive(Debug, Clone)]
-pub enum GraphMetaUpdate {
+pub(crate) enum GraphMetaUpdate {
     /// Set the entry point for the HNSW graph
     EntryPoint(VecId),
     /// Set the maximum level in the graph
