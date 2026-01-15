@@ -505,6 +505,16 @@ All 499 tests pass. Task 5.1 is now complete from a correctness perspective.
 
 ---
 
+## CODEX Verification (Post-fix)
+
+- ✅ IdAllocator reuse now persists the free bitmap inside `allocate_in_txn()`, addressing crash-reuse duplication risk.
+- ✅ `insert_vector()` rejects duplicate external IDs and includes a regression test.
+- ⚠️ **Remaining improvement:** the duplicate-ID check uses `txn_db.get_cf()` outside the transaction. This can race under concurrent inserts of the same external ID. Prefer `txn.get_cf()` (or `get_for_update`) so the read participates in the same transaction/locking semantics as the write to `IdForward`.
+
+No other correctness issues found in the Task 5.1 implementation.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
