@@ -18,13 +18,12 @@ use crate::rocksdb::MutationCodec;
 use crate::Id;
 
 use super::distance::Distance;
-use super::hnsw::CacheUpdate;
 use super::processor::Processor;
 use super::schema::{
     EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecCfValue, EmbeddingSpecs,
     HnswLayer, VecId,
 };
-use super::writer::MutationExecutor;
+use super::writer::{MutationCacheUpdate, MutationExecutor};
 
 // ============================================================================
 // Mutation Enum
@@ -370,14 +369,14 @@ impl Mutation {
     /// This is the main dispatch method that routes to the appropriate
     /// `MutationExecutor` implementation based on the mutation variant.
     ///
-    /// Returns an optional `CacheUpdate` if HNSW indexing was performed.
+    /// Returns an optional `MutationCacheUpdate` for cache updates.
     /// The cache update should be applied AFTER transaction commit.
     pub fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<CacheUpdate>> {
+    ) -> Result<Option<MutationCacheUpdate>> {
         match self {
             Mutation::AddEmbeddingSpec(op) => op.execute(txn, txn_db, processor),
             Mutation::InsertVector(op) => op.execute(txn, txn_db, processor),
@@ -400,7 +399,7 @@ impl MutationExecutor for AddEmbeddingSpec {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<CacheUpdate>> {
+    ) -> Result<Option<MutationCacheUpdate>> {
         // Delegate to shared ops helper (also updates in-memory registry)
         super::ops::add_embedding_spec_in_txn(txn, txn_db, processor, self)?;
         Ok(None)
@@ -413,7 +412,7 @@ impl MutationExecutor for InsertVector {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<CacheUpdate>> {
+    ) -> Result<Option<MutationCacheUpdate>> {
         // Delegate to shared ops helper (includes all validation)
         let result = super::ops::insert_vector_in_txn(
             txn,
@@ -425,12 +424,13 @@ impl MutationExecutor for InsertVector {
             self.immediate_index,
         )?;
 
-        // Return nav_cache_update for Consumer to apply after commit
-        // Note: code_cache_update is also captured in result but Consumer
-        // needs to apply it separately via InsertResult::apply_cache_updates()
-        // For now, we lose the code_cache_update in the mutation path.
-        // TODO: Return a richer CacheUpdate that includes both nav and code updates
-        Ok(result.nav_cache_update)
+        // Return combined cache update for both nav and code caches
+        Ok(MutationCacheUpdate::from_insert(
+            self.embedding,
+            result.vec_id,
+            result.nav_cache_update,
+            result.code_cache_update,
+        ))
     }
 }
 
@@ -440,7 +440,7 @@ impl MutationExecutor for DeleteVector {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<CacheUpdate>> {
+    ) -> Result<Option<MutationCacheUpdate>> {
         // Delegate to shared ops helper (handles soft-delete when HNSW enabled)
         let result =
             super::ops::delete_vector_in_txn(txn, txn_db, processor, self.embedding, self.id)?;
@@ -463,7 +463,7 @@ impl MutationExecutor for InsertVectorBatch {
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<CacheUpdate>> {
+    ) -> Result<Option<MutationCacheUpdate>> {
         // Delegate to shared ops helper (includes batch validation)
         let result = super::ops::insert_batch_in_txn(
             txn,
@@ -474,13 +474,14 @@ impl MutationExecutor for InsertVectorBatch {
             self.immediate_index,
         )?;
 
-        // Note: nav_cache_updates and code_cache_updates are available in result
-        // but CacheUpdate enum currently only supports single navigation updates.
-        // For now, the Consumer applies batch cache updates after commit.
-        // TODO: Extend CacheUpdate to support batch updates
+        // Note: Consumer expands batches into individual InsertVector mutations,
+        // so cache updates are collected per-vector there. This execute() is only
+        // called when InsertVectorBatch is executed directly (not through Consumer).
+        // In that case, cache updates are lost - caller should use Processor::insert_batch()
+        // which applies cache updates directly.
         tracing::debug!(
             count = result.vec_ids.len(),
-            "InsertVectorBatch: inserted vectors"
+            "InsertVectorBatch: inserted vectors (cache updates not returned)"
         );
 
         Ok(None)
@@ -493,7 +494,7 @@ impl MutationExecutor for UpdateEdges {
         _txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         _txn_db: &rocksdb::TransactionDB,
         _processor: &Processor,
-    ) -> Result<Option<CacheUpdate>> {
+    ) -> Result<Option<MutationCacheUpdate>> {
         // Direct edge updates are handled internally by HNSW insert
         tracing::debug!("UpdateEdges handled internally by HNSW insert");
         Ok(None)
@@ -506,7 +507,7 @@ impl MutationExecutor for UpdateGraphMeta {
         _txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         _txn_db: &rocksdb::TransactionDB,
         _processor: &Processor,
-    ) -> Result<Option<CacheUpdate>> {
+    ) -> Result<Option<MutationCacheUpdate>> {
         // Graph metadata updates are handled internally by HNSW insert
         tracing::debug!("UpdateGraphMeta handled internally by HNSW insert");
         Ok(None)

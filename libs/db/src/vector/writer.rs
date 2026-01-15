@@ -33,6 +33,94 @@ use tokio::sync::mpsc;
 use super::hnsw::CacheUpdate;
 use super::mutation::{FlushMarker, Mutation};
 use super::processor::Processor;
+use super::schema::{AdcCorrection, EmbeddingCode, VecId};
+
+// ============================================================================
+// MutationCacheUpdate
+// ============================================================================
+
+/// Combined cache update for mutation execution.
+///
+/// Mutations can produce updates for both the navigation cache (HNSW) and
+/// the binary code cache (RaBitQ). This enum allows returning both types
+/// from a single mutation execution.
+#[derive(Debug)]
+pub enum MutationCacheUpdate {
+    /// Navigation cache update only (HNSW layer info)
+    Nav(CacheUpdate),
+    /// Binary code cache update only
+    Code {
+        embedding: EmbeddingCode,
+        vec_id: VecId,
+        code: Vec<u8>,
+        correction: AdcCorrection,
+    },
+    /// Both navigation and code cache updates
+    Both {
+        nav: CacheUpdate,
+        embedding: EmbeddingCode,
+        vec_id: VecId,
+        code: Vec<u8>,
+        correction: AdcCorrection,
+    },
+}
+
+impl MutationCacheUpdate {
+    /// Create from an InsertResult's cache updates.
+    pub fn from_insert(
+        embedding: EmbeddingCode,
+        vec_id: VecId,
+        nav: Option<CacheUpdate>,
+        code: Option<(Vec<u8>, AdcCorrection)>,
+    ) -> Option<Self> {
+        match (nav, code) {
+            (Some(nav), Some((code, correction))) => Some(Self::Both {
+                nav,
+                embedding,
+                vec_id,
+                code,
+                correction,
+            }),
+            (Some(nav), None) => Some(Self::Nav(nav)),
+            (None, Some((code, correction))) => Some(Self::Code {
+                embedding,
+                vec_id,
+                code,
+                correction,
+            }),
+            (None, None) => None,
+        }
+    }
+
+    /// Apply the cache update to the processor caches.
+    pub fn apply(
+        self,
+        nav_cache: &super::cache::NavigationCache,
+        code_cache: &super::cache::BinaryCodeCache,
+    ) {
+        match self {
+            Self::Nav(update) => update.apply(nav_cache),
+            Self::Code {
+                embedding,
+                vec_id,
+                code,
+                correction,
+            } => {
+                code_cache.put(embedding, vec_id, code, correction);
+            }
+            Self::Both {
+                nav,
+                embedding,
+                vec_id,
+                code,
+                correction,
+            } => {
+                nav.apply(nav_cache);
+                code_cache.put(embedding, vec_id, code, correction);
+            }
+        }
+    }
+}
 
 // ============================================================================
 // MutationExecutor Trait
@@ -49,14 +137,14 @@ use super::processor::Processor;
 pub trait MutationExecutor: Send + Sync {
     /// Execute this mutation directly against a RocksDB transaction.
     ///
-    /// Returns an optional CacheUpdate if HNSW indexing was performed.
-    /// The CacheUpdate should be applied AFTER transaction commit.
+    /// Returns an optional MutationCacheUpdate if caching is needed.
+    /// The cache update should be applied AFTER transaction commit.
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         processor: &Processor,
-    ) -> Result<Option<CacheUpdate>>;
+    ) -> Result<Option<MutationCacheUpdate>>;
 }
 
 // ============================================================================
@@ -316,17 +404,17 @@ impl Consumer {
     /// Execute mutations against storage.
     ///
     /// All mutations are executed within a single transaction for atomicity.
-    /// Cache updates (HNSW navigation) are deferred until after commit.
+    /// Cache updates (navigation + binary code) are deferred until after commit.
     async fn execute_mutations(&self, mutations: &[Mutation]) -> Result<()> {
         let txn_db = self.processor.storage().transaction_db()?;
         let txn = txn_db.transaction();
 
         // Collect cache updates to apply after commit
-        let mut cache_updates: Vec<CacheUpdate> = Vec::new();
+        let mut cache_updates: Vec<MutationCacheUpdate> = Vec::new();
 
         for mutation in mutations {
             // Expand batch mutations into individual operations
-            // This ensures we collect CacheUpdates from each vector
+            // This ensures we collect cache updates from each vector
             if let Mutation::InsertVectorBatch(batch) = mutation {
                 for (id, vector) in &batch.vectors {
                     let single = super::mutation::InsertVector {
@@ -352,7 +440,7 @@ impl Consumer {
         // Apply cache updates ONLY after successful commit
         // This ensures cache never contains uncommitted state
         for update in cache_updates {
-            update.apply(self.processor.nav_cache());
+            update.apply(self.processor.nav_cache(), self.processor.code_cache());
         }
 
         Ok(())
@@ -363,14 +451,14 @@ impl Consumer {
     /// Delegates to `Mutation::execute()` which dispatches to the appropriate
     /// `MutationExecutor` implementation.
     ///
-    /// Returns an optional CacheUpdate if HNSW indexing was performed.
-    /// The CacheUpdate should be applied AFTER transaction commit.
+    /// Returns an optional MutationCacheUpdate for caching.
+    /// The cache update should be applied AFTER transaction commit.
     fn execute_single(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         mutation: &Mutation,
-    ) -> Result<Option<CacheUpdate>> {
+    ) -> Result<Option<MutationCacheUpdate>> {
         mutation.execute(txn, txn_db, &self.processor)
     }
 }

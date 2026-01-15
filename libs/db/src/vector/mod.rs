@@ -117,7 +117,7 @@ pub use mutation::{
 };
 pub use writer::{
     create_writer, spawn_consumer as spawn_mutation_consumer, Consumer as MutationConsumer,
-    MutationExecutor, MutationProcessor, Writer, WriterConfig,
+    MutationCacheUpdate, MutationExecutor, MutationProcessor, Writer, WriterConfig,
 };
 
 // Query types and infrastructure (following graph::query pattern)
