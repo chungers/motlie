@@ -6385,6 +6385,27 @@ pub fn connect_neighbors(
 - Ensure *all* vector insert side effects share the same RocksDB transaction: vector bytes, binary codes, VecMeta, GraphMeta, edge updates, and any allocator state persisted in `IdAlloc`. Partial transactional coverage can still leave torn state.
 - Defer navigation cache updates until *after* the transaction commits (or make cache refresh resilient) to avoid caching uncommitted graph state.
 
+**Assessment:** Both concerns are valid and will be addressed:
+
+1. **All side effects in transaction** - Implementation approach:
+   - `IdAllocator::allocate()` will write to IdAlloc CF within the passed transaction
+   - All CF writes (Vectors, BinaryCodes, IdForward, IdReverse, VecMeta, GraphMeta, Edges) use same `&Transaction`
+   - Single `txn.commit()` at end ensures atomicity
+
+2. **Navigation cache timing** - Implementation approach:
+   ```rust
+   // WRONG: Update cache before commit
+   nav_cache.update(...);
+   txn.commit()?;
+
+   // CORRECT: Update cache after successful commit
+   txn.commit()?;
+   nav_cache.update(...);  // Only on success
+   ```
+   - Cache updates moved to after `txn.commit()` succeeds
+   - On transaction failure, cache remains unchanged (consistent with storage)
+   - Alternative: make cache "eventually consistent" via periodic refresh from storage
+
 ---
 
 ### Task 5.1: Processor::insert_vector()
