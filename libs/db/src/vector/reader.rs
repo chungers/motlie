@@ -375,6 +375,43 @@ impl SearchReader {
             .context("SearchKNN query failed")
     }
 
+    /// Perform search with full configuration control.
+    ///
+    /// Unlike `search_knn()` which always uses exact HNSW search, this method
+    /// respects the `SearchConfig` strategy selection (Exact vs RaBitQ).
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Search configuration including strategy, k, ef, rerank_factor
+    /// * `query` - Query vector (must match embedding dimension in config)
+    ///
+    /// # Returns
+    ///
+    /// Vector of `SearchResult` structs, sorted by distance (ascending).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // RaBitQ search (auto-selected for Cosine embeddings)
+    /// let config = SearchConfig::new(embedding.clone(), 10)
+    ///     .with_ef(100)
+    ///     .with_rerank_factor(10);
+    /// let results = search_reader.search_with_config(&config, &query)?;
+    ///
+    /// // Exact search (force exact even for Cosine)
+    /// let config = SearchConfig::new(embedding.clone(), 10)
+    ///     .exact()
+    ///     .with_ef(100);
+    /// let results = search_reader.search_with_config(&config, &query)?;
+    /// ```
+    pub fn search_with_config(
+        &self,
+        config: &super::search::SearchConfig,
+        query: &[f32],
+    ) -> Result<Vec<SearchResult>> {
+        self.processor.search_with_config(config, query)
+    }
+
     /// Get the underlying reader for other query types.
     pub fn reader(&self) -> &Reader {
         &self.reader
