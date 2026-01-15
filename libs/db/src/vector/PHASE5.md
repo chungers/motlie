@@ -1056,6 +1056,144 @@ This keeps the search API consistent with how the index was built while allowing
 
 ---
 
+## Proposed: Build Config Persistence Design
+
+### Problem
+
+Current implementation has global HNSW/RaBitQ configs in `Processor`. If configs change between index build and search, behavior is undefined.
+
+### Design Principle
+
+| Store | Purpose | Contents |
+|-------|---------|----------|
+| **EmbeddingSpec** | HOW to build/search | All configuration for the embedding space |
+| **GraphMeta** | Runtime state | Graph state + drift detection hash |
+
+EmbeddingSpec is the single source of truth for build configuration. GraphMeta only stores a hash to detect if the spec changed after build.
+
+### Schema Changes
+
+#### EmbeddingSpec (Extended)
+
+```rust
+// libs/db/src/vector/schema.rs
+
+pub struct EmbeddingSpec {
+    // Existing fields
+    pub model: String,
+    pub dim: u32,
+    pub distance: Distance,
+    pub storage_type: VectorElementType,
+
+    // NEW: HNSW build parameters
+    pub hnsw_m: u16,              // M parameter (default: 16)
+    pub hnsw_ef_construction: u16, // ef_construction (default: 200)
+
+    // NEW: RaBitQ parameters
+    pub rabitq_bits: u8,          // bits_per_dim (default: 1)
+    pub rabitq_seed: u64,         // rotation_seed (default: 42)
+}
+```
+
+#### GraphMeta (Add SpecHash)
+
+```rust
+// libs/db/src/vector/schema.rs
+
+pub enum GraphMetaField {
+    // Existing
+    EntryPoint(VecId),
+    MaxLevel(u8),
+    Count(u32),
+    Config(Vec<u8>),  // deprecated, use EmbeddingSpec
+
+    // NEW: Hash of EmbeddingSpec at build time
+    SpecHash(u64),
+}
+```
+
+### Workflow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Register Embedding                                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   EmbeddingBuilder::new("model", 768, Cosine)              │
+│       .with_hnsw_m(16)                                      │
+│       .with_hnsw_ef_construction(200)                       │
+│       .with_rabitq_bits(1)                                  │
+│       .with_rabitq_seed(42)                                 │
+│   → Persists complete EmbeddingSpec to EmbeddingSpecs CF    │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 2. First Insert (Index Build Start)                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   processor.insert_vector(embedding, id, vector, true)      │
+│       → Compute spec_hash = hash(EmbeddingSpec)             │
+│       → Store GraphMeta::SpecHash(spec_hash)                │
+│       → Build index using EmbeddingSpec params              │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Search (Drift Detection)                                 │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   processor.search_with_config(config, query)               │
+│       → Load stored_hash from GraphMeta::SpecHash           │
+│       → Compute current_hash = hash(registry EmbeddingSpec) │
+│       → If stored_hash != current_hash:                     │
+│           ERROR: "Spec changed since build - rebuild index" │
+│       → Else: proceed with search                           │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Hash Computation
+
+```rust
+fn compute_spec_hash(spec: &EmbeddingSpec) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+
+    let mut hasher = DefaultHasher::new();
+    spec.dim.hash(&mut hasher);
+    spec.distance.hash(&mut hasher);
+    spec.storage_type.hash(&mut hasher);
+    spec.hnsw_m.hash(&mut hasher);
+    spec.hnsw_ef_construction.hash(&mut hasher);
+    spec.rabitq_bits.hash(&mut hasher);
+    spec.rabitq_seed.hash(&mut hasher);
+    hasher.finish()
+}
+```
+
+### Migration Path
+
+1. **Backward compatibility:** Existing EmbeddingSpecs without new fields use defaults
+2. **No GraphMeta::SpecHash:** Skip drift check (legacy indexes)
+3. **Future:** Require SpecHash for all new indexes
+
+### Cache Warmup (Separate Concern)
+
+BinaryCodeCache warmup is orthogonal to config persistence:
+
+| Option | Implementation |
+|--------|----------------|
+| Lazy load | `ensure_cache_warmed(embedding)` before RaBitQ search |
+| Startup prewarm | Iterate BinaryCodes CF on `Processor::new()` |
+| Background | Spawn async task after startup |
+
+Recommend: Lazy load with metrics for Phase 5, prewarm for Phase 6.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
