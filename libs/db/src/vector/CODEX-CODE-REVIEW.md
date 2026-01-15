@@ -102,3 +102,127 @@ Findings are ordered by severity and prioritized for correctness, then performan
 ## Overall Assessment
 
 The vector subsystem is well-structured and thoughtfully documented, with clear separation between HNSW, quantization, caches, and public APIs. The RaBitQ + ADC implementation appears solid and matches the stated roadmap/benchmarks. The biggest correctness risks are around storage-type handling and stateful initialization (layer assignment after restart), both fixable with localized changes. Performance is competitive for an embedded database, and the abstractions are mostly idiomatic and maintainable. Overall quality is strong, with a few medium/high issues to address before production hardening (Phase 8).
+
+---
+
+## Claude Opus 4.5 Assessment (January 14, 2026)
+
+### Response Summary
+
+| Finding | CODEX Severity | Claude Assessment | Action |
+|---------|---------------|-------------------|--------|
+| #1 Storage type mismatch | HIGH | ✅ **AGREE** | Fix in Phase 4.5.1 (blocking) |
+| #2 Layer assignment cold cache | HIGH | ✅ **AGREE** | Fix in Phase 4.5.2 (blocking) |
+| #3 Empty index error | MEDIUM | ⚠️ **PARTIALLY AGREE** | Fix in Phase 4.5.4 (non-blocking) |
+| #4 MAX-distance for missing codes | MEDIUM | ✅ **AGREE, ELEVATE** | Fix in Phase 4.5.3 (blocking) |
+| #5 Cache size overcount | LOW | ✅ **AGREE** | Fix in Phase 4.5.5 (non-blocking) |
+
+### Finding #1: Storage Type Mismatch
+
+**CODEX:** HIGH - `writer.rs:343` always writes F32 regardless of `VectorElementType`.
+
+**Claude Assessment:** ✅ **AGREE - Critical correctness bug.**
+
+The code path in question always uses `Vectors::value_to_bytes(&vec_value)` which serializes as F32.
+If an embedding is registered with `VectorElementType::F16`, this causes:
+1. Data written as F32 (512 bytes for 128D)
+2. Read path interprets as F16 (256 bytes for 128D)
+3. Buffer truncation or garbage values
+
+**Verification:** Confirmed by reading `writer.rs` - no lookup of embedding spec storage type occurs.
+
+**Priority:** 🔴 Must fix before Phase 5 mutation API to prevent data corruption at scale.
+
+### Finding #2: Layer Assignment Cold Cache
+
+**CODEX:** HIGH - `insert.rs:33` falls back to layer 0 when nav_cache is empty.
+
+**Claude Assessment:** ✅ **AGREE - Subtle but real correctness issue.**
+
+After DB restart, `nav_cache` is empty. The code:
+```rust
+let nav_info = nav_cache.get(&index_key).cloned().unwrap_or_default();
+```
+Returns `NavigationLayerInfo::default()` which has `max_layer: 0`, causing all post-restart
+inserts to get layer 0 until the cache is warmed by reading GraphMeta.
+
+This breaks HNSW's exponential layer distribution property, degrading recall for indices
+built across restarts.
+
+**Verification:** Confirmed by reading `insert.rs` - no fallback to `get_or_init_navigation`.
+
+**Priority:** 🔴 Must fix before Phase 5 - the mutation API will exacerbate this with frequent restarts.
+
+### Finding #3: Empty Index Search Error
+
+**CODEX:** MEDIUM - Search errors when GraphMeta is missing (empty index).
+
+**Claude Assessment:** ⚠️ **PARTIALLY AGREE - Edge case, lower priority.**
+
+While technically a usability issue, in practice:
+- Empty indices are rare in production (users index data before querying)
+- The error message is clear ("GraphMeta not found")
+- Callers can wrap with try/catch and return empty results
+
+However, CODEX is correct that returning `Ok(vec![])` is more ergonomic and matches
+user expectations for "search found nothing."
+
+**Priority:** 🟡 Nice to have, not blocking Phase 5.
+
+### Finding #4: MAX-Distance for Missing Codes
+
+**CODEX:** MEDIUM - `search.rs:327` uses `f32::MAX` for missing binary codes.
+
+**Claude Assessment:** ✅ **AGREE - Elevated to HIGH.**
+
+This is more serious than MEDIUM because:
+1. Partially populated caches occur during incremental indexing (Phase 5's main use case)
+2. `f32::MAX` candidates pollute the beam, displacing valid results
+3. With `ef_search=100` and 50% cache miss rate, 50 MAX-distance entries dominate beam
+4. This causes early termination or severely degraded recall
+
+The fix is straightforward: either skip uncached candidates or fall back to exact distance.
+
+**Priority:** 🔴 Elevated to HIGH - directly blocks Phase 5 incremental indexing correctness.
+
+### Finding #5: Cache Size Overcount
+
+**CODEX:** LOW - `binary_codes.rs:78` doesn't subtract old entry size on overwrite.
+
+**Claude Assessment:** ✅ **AGREE - Minor cosmetic issue.**
+
+The `cache_bytes` counter is only used for `stats()` reporting. Overwrites are rare
+(same vec_id updated), and even when they occur, the size drift is bounded by
+`(overwrite_count * code_size)`.
+
+**Priority:** 🟢 Low - fix opportunistically, not blocking.
+
+### Performance Notes Response
+
+**CODEX Note 1:** HNSW neighbor selection uses "closest M" not diversity heuristic.
+
+**Claude Response:** Acknowledged. The diversity heuristic improves recall ~2-5% at cost of
+insert complexity. Current benchmarks show 87-89% recall which meets requirements.
+Consider for Phase 8 production hardening if recall targets increase.
+
+**CODEX Note 2:** Cosine distance recomputes norms per comparison.
+
+**Claude Response:** Acknowledged. For normalized vectors (RaBitQ requirement), we could
+use dot-product-only distance. However:
+- Current cosine impl handles unnormalized input gracefully
+- Norm computation is ~2% of total search time (profiled)
+- Premature optimization risk vs. maintaining flexibility
+
+Recommend: Document that pre-normalized vectors skip norm computation, but keep current impl.
+
+### Conclusion
+
+CODEX review is thorough and accurate. Three findings (1, 2, 4) are blocking for Phase 5 and
+have been added to ROADMAP.md as Phase 4.5. Two findings (3, 5) are valid but non-blocking.
+Performance notes are acknowledged but not actionable for Phase 5.
+
+**Next Steps:**
+1. Implement Phase 4.5 tasks (5 fixes)
+2. Run full test suite + benchmarks to verify no regression
+3. Update this document with resolution commits
+4. Proceed to Phase 5: Internal Mutation/Query API

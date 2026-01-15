@@ -1,9 +1,9 @@
 # Vector Search Implementation Roadmap
 
 **Author:** David Chung + Claude
-**Date:** January 2, 2026 (Updated: January 10, 2026)
+**Date:** January 2, 2026 (Updated: January 14, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Phase 4 Complete, Phase 5-8 Remaining
+**Status:** Phase 4 Complete, Phase 4.5 (CODEX Pre-Phase 5 Fixes) In Progress, Phase 5-8 Remaining
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
@@ -73,6 +73,7 @@ dedicated vector databases or custom storage engines.
 | [Phase 2](#phase-2-hnsw2-core--navigation-layer--core-complete) | HNSW2 Core + Navigation Layer | ✅ Complete |
 | [Phase 3](#phase-3-batch-operations--deferred-items) | Batch Operations + Deferred Items | ✅ Complete |
 | [Phase 4](#phase-4-rabitq-compression) | RaBitQ Compression + Optimization | ✅ Complete |
+| [Phase 4.5](#phase-45-codex-pre-phase-5-critical-fixes) | CODEX Pre-Phase 5 Critical Fixes | 🔄 In Progress |
 | [Phase 5](#phase-5-internal-mutationquery-api) | Internal Mutation/Query API | 🔲 Not Started |
 | [Phase 6](#phase-6-mpscmpmc-public-api) | MPSC/MPMC Public API | 🔲 Not Started |
 | [Phase 7](#phase-7-async-graph-updater) | Async Graph Updater | 🔲 Not Started |
@@ -102,6 +103,18 @@ dedicated vector databases or custom storage engines.
 | [Task 4.22](#task-422-large-scale-benchmarks-500k-1m) | Large-Scale Benchmarks (500K, 1M) | ✅ Complete | `4d73bf8` |
 | [Task 4.23](#task-423-multi-dataset-benchmark-infrastructure) | Multi-Dataset Benchmark Infrastructure | ✅ Complete | - |
 | [Task 4.24](#task-424-adc-hnsw-integration) | ADC HNSW Integration (Replace Hamming) | ✅ Complete | `ec0fc00` |
+
+### Phase 4.5 Tasks (Pre-Phase 5 Critical Fixes)
+
+Based on CODEX code review (January 2026). See [CODEX-CODE-REVIEW.md](./CODEX-CODE-REVIEW.md) for details.
+
+| Task | Description | Severity | Status |
+|------|-------------|----------|--------|
+| [Task 4.5.1](#task-451-storage-type-mismatch-fix) | Fix storage-type mismatch in write path | 🔴 HIGH | 🔲 Not Started |
+| [Task 4.5.2](#task-452-layer-assignment-cold-cache-fix) | Fix HNSW layer assignment on cold cache | 🔴 HIGH | 🔲 Not Started |
+| [Task 4.5.3](#task-453-adc-missing-code-handling) | Handle missing codes in ADC search (avoid MAX-distance) | 🔴 HIGH | 🔲 Not Started |
+| [Task 4.5.4](#task-454-empty-index-search-handling) | Return empty results for empty index search | 🟡 MEDIUM | 🔲 Not Started |
+| [Task 4.5.5](#task-455-binarycodecache-size-accounting) | Fix BinaryCodeCache size accounting on overwrite | 🟢 LOW | 🔲 Not Started |
 
 ### Other Sections
 
@@ -6087,6 +6100,190 @@ fn test_data1_compliance_no_training() {
 
 ---
 
+## Phase 4.5: CODEX Pre-Phase 5 Critical Fixes
+
+**Goal:** Address critical correctness issues identified by CODEX code review before starting Phase 5 mutation API.
+
+**Source:** [CODEX-CODE-REVIEW.md](./CODEX-CODE-REVIEW.md) - External code review by Codex (January 2026).
+
+**Rationale:** Phase 5 introduces online mutation APIs. Fixing these issues now prevents them from being
+amplified by the mutation path. The top 3 are HIGH severity and directly impact correctness.
+
+### Overview: Issue Severity Matrix
+
+| ID | Issue | Severity | Impact | Blocker for Phase 5? |
+|----|-------|----------|--------|----------------------|
+| 4.5.1 | Storage type mismatch | 🔴 HIGH | F16 vectors corrupted on read | **Yes** - writes use F32 always |
+| 4.5.2 | Layer assignment cold cache | 🔴 HIGH | Skewed layer distribution | **Yes** - affects insert correctness |
+| 4.5.3 | Missing ADC codes → MAX dist | 🔴 HIGH | Beam pollution, poor recall | **Yes** - affects search correctness |
+| 4.5.4 | Empty index errors | 🟡 MEDIUM | Unexpected errors | No - edge case |
+| 4.5.5 | Cache size overcount | 🟢 LOW | Inaccurate stats | No - cosmetic |
+
+### Task 4.5.1: Storage-Type Mismatch Fix
+
+**CODEX Finding #1 (HIGH):** `writer.rs:343` writes vectors via `Vectors::value_to_bytes`, which always
+serializes as F32, even though `EmbeddingSpec` supports F16.
+
+**Impact:** Embeddings registered with `VectorElementType::F16` will be persisted as F32 but later
+read as F16, corrupting values or truncating buffers.
+
+**Fix Implementation:**
+
+```rust
+// libs/db/src/vector/writer.rs - BEFORE
+let bytes = Vectors::value_to_bytes(&vec_value);
+
+// libs/db/src/vector/writer.rs - AFTER
+let storage_type = self.registry.get(op.embedding)
+    .ok_or_else(|| anyhow!("Unknown embedding: {}", op.embedding))?
+    .storage_type;
+let bytes = Vectors::value_to_bytes_typed(&op.vector, storage_type);
+```
+
+**Files to modify:**
+- `libs/db/src/vector/writer.rs`: Lookup embedding spec, use `value_to_bytes_typed`
+- `libs/db/src/vector/schema.rs`: Ensure `value_from_bytes_typed` exists (or add)
+- `libs/db/src/vector/hnsw/graph.rs`: Ensure reads use the same storage type
+
+**Testing:**
+- Unit test: Insert F16 vector, read back, verify numeric error within F16 bounds
+- Integration: HNSW index with F16 returns stable neighbors vs F32
+
+### Task 4.5.2: Layer Assignment Cold Cache Fix
+
+**CODEX Finding #2 (HIGH):** `insert.rs:33` assigns `node_layer` from `nav_cache.get(...)` and falls
+back to `0` without loading GraphMeta.
+
+**Impact:** First insert after restart (cold cache) always gets layer 0, skewing exponential layer
+distribution and reducing recall.
+
+**Fix Implementation:**
+
+```rust
+// libs/db/src/vector/hnsw/insert.rs - BEFORE
+let nav_info = nav_cache.get(&index_key).cloned().unwrap_or_default();
+let node_layer = nav_info.random_layer(&mut rng);
+
+// libs/db/src/vector/hnsw/insert.rs - AFTER
+let nav_info = get_or_init_navigation(index, storage)?;  // Loads from GraphMeta if cache empty
+let node_layer = nav_info.random_layer(&mut rng);
+// Update cache for subsequent inserts
+nav_cache.insert(index_key.clone(), nav_info.clone());
+```
+
+**Files to modify:**
+- `libs/db/src/vector/hnsw/insert.rs`: Call `get_or_init_navigation` before layer assignment
+
+**Testing:**
+- Restart test: Build index, drop cache, insert vector, verify layer > 0 with non-trivial probability
+- Distribution test: Insert N nodes across restarts, verify exponential layer histogram
+
+### Task 4.5.3: ADC Missing Code Handling
+
+**CODEX Finding #4 (MEDIUM→HIGH):** `search.rs:327` uses `f32::MAX` when `code_cache` misses,
+polluting beam with sentinel distances.
+
+**Impact:** Partially populated caches cause early termination or poor recall due to MAX-distance
+candidates displacing real ones.
+
+**Claude Assessment:** Elevated to HIGH because this directly affects search quality during
+incremental indexing or cache warmup.
+
+**Fix Implementation:**
+
+```rust
+// libs/db/src/vector/hnsw/search.rs - BEFORE
+let dist = match code_cache.get(vec_id) {
+    Some(code) => rabitq.adc_distance(query_code, code),
+    None => f32::MAX,  // BAD: pollutes beam
+};
+candidates.push((dist, vec_id));
+
+// libs/db/src/vector/hnsw/search.rs - AFTER
+if let Some(code) = code_cache.get(vec_id) {
+    let dist = rabitq.adc_distance(query_code, code);
+    candidates.push((dist, vec_id));
+} else {
+    // Option A: Skip candidate entirely (lose potential good result)
+    // Option B: Fall back to exact distance (slower but correct)
+    let vector = storage.get_vector(vec_id)?;
+    let dist = distance.compute(&query, &vector);
+    candidates.push((dist, vec_id));
+}
+```
+
+**Recommendation:** Option B (fallback to exact) maintains correctness at cost of occasional
+exact computation. For production, ensure code cache is fully populated before search.
+
+**Files to modify:**
+- `libs/db/src/vector/hnsw/search.rs`: Replace MAX sentinel with skip or exact fallback
+
+**Testing:**
+- Unit test: Search with 50% populated cache, verify recall >= 90%
+- Integration: Compare recall with full cache vs partial cache
+
+### Task 4.5.4: Empty Index Search Handling
+
+**CODEX Finding #3 (MEDIUM):** `search.rs:36` errors when GraphMeta is missing for an empty index.
+
+**Impact:** Valid "empty index" state returns error instead of `Ok(Vec::new())`.
+
+**Fix Implementation:**
+
+```rust
+// libs/db/src/vector/hnsw/search.rs - BEFORE
+let nav_info = load_navigation(index, storage)?;  // Errors on missing GraphMeta
+
+// libs/db/src/vector/hnsw/search.rs - AFTER
+let nav_info = match load_navigation(index, storage) {
+    Ok(info) => info,
+    Err(_) => return Ok(vec![]),  // Empty index → empty results
+};
+```
+
+**Files to modify:**
+- `libs/db/src/vector/hnsw/search.rs`: Handle missing GraphMeta gracefully
+
+**Testing:**
+- Unit test: Search on freshly created empty index returns `Ok([])`
+
+### Task 4.5.5: BinaryCodeCache Size Accounting
+
+**CODEX Finding #5 (LOW):** `binary_codes.rs:78` increments `cache_bytes` without subtracting
+previous entry size on overwrite.
+
+**Impact:** `stats()` becomes inaccurate after updates, misleading memory monitoring.
+
+**Fix Implementation:**
+
+```rust
+// libs/db/src/vector/cache/binary_codes.rs - BEFORE
+self.cache_bytes += code.len();
+self.codes.insert(vec_id, code);
+
+// libs/db/src/vector/cache/binary_codes.rs - AFTER
+if let Some(old_code) = self.codes.get(&vec_id) {
+    self.cache_bytes -= old_code.len();
+}
+self.cache_bytes += code.len();
+self.codes.insert(vec_id, code);
+```
+
+**Files to modify:**
+- `libs/db/src/vector/cache/binary_codes.rs`: Subtract old entry size on overwrite
+
+**Testing:**
+- Unit test: Overwrite same vec_id twice, verify `stats().bytes` is accurate
+
+### Phase 4.5 Completion Criteria
+
+- [ ] All 5 tasks implemented with unit tests
+- [ ] Existing benchmark recall unchanged or improved
+- [ ] No regressions in `cargo test --lib` (vector module)
+- [ ] CODEX-CODE-REVIEW.md updated with resolution status
+
+---
+
 ## Phase 5: Internal Mutation/Query API
 
 **Goal:** Complete the internal API for vector storage operations (insert, delete, search, embedding management).
@@ -8146,6 +8343,12 @@ cargo run -p motlie_core --example simd_check
 | 2026-01-09 | **a146d02** Parallel threshold tuning (Task 4.20): DEFAULT_PARALLEL_RERANK_THRESHOLD=800, rerank_adaptive, documentation | Claude Opus 4.5 |
 | 2026-01-09 | **Phase 4 COMPLETE**: All 20 tasks finished, 433 unit tests passing | Claude Opus 4.5 |
 | 2026-01-09 | Updated ROADMAP: Phase Overview tree view, API Surface Summary, moved VectorStorage to Appendix | Claude Opus 4.5 |
+| 2026-01-14 | Created comprehensive `bins/bench_vector/README.md` documentation | Claude Opus 4.5 |
+| 2026-01-14 | Removed deprecated `examples/laion_benchmark` (replaced by bench_vector) | Claude Opus 4.5 |
+| 2026-01-14 | Updated all docs/code: Hamming → ADC terminology (symmetric Hamming no longer used) | Claude Opus 4.5 |
+| 2026-01-14 | Added random dataset support to `bench_vector index` command | Claude Opus 4.5 |
+| 2026-01-14 | Synced with CODEX code review (abc8e8d, 3cbf71c) | Claude Opus 4.5 |
+| 2026-01-14 | **Added Phase 4.5**: Pre-Phase 5 critical fixes based on CODEX review (5 tasks) | Claude Opus 4.5 |
 
 ---
 
