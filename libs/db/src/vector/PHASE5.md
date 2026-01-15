@@ -2166,6 +2166,15 @@ Processor-backed reader/consumer is still missing. Recommend adding a `spawn_que
 
 ---
 
+**New Feedback (public API ergonomics):**
+
+- Public APIs should accept `&Embedding` instead of `EmbeddingCode` to avoid forcing users to call `.code()` everywhere.  
+  - **Option A (simple):** add `*_with_embedding(&Embedding, ...)` overloads and keep internal `EmbeddingCode` versions for ops.  
+  - **Option B (flexible):** add `EmbeddingHandle` trait implemented by `Embedding` and `EmbeddingCode` and accept `impl EmbeddingHandle`.  
+  - This keeps `Embedding` as the primary public handle while preserving internal code paths.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
