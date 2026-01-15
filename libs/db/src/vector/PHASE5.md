@@ -886,6 +886,19 @@ All 524 tests pass after fixes.
 
 ---
 
+## Task 5.3: CODEX Review - Fix Verification
+
+**Status:** ✅ Verified
+
+Both issues I flagged are resolved and the fixes align with the rest of the codebase:
+
+- **BinaryCodes CF consistency** now matches `insert_vector()` (hard-fail if encoder exists but CF missing).
+- **Spec hash read** uses `txn.get_cf()` for transaction snapshot consistency.
+
+No additional issues found in this pass.
+
+---
+
 ## Task 5.4a: Processor::search() (COMPLETE)
 
 ### Overview
