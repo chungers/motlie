@@ -3,7 +3,7 @@
 **Author:** David Chung + Claude
 **Date:** January 2, 2026 (Updated: January 14, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Phase 4 Complete, Phase 4.5 Complete (5/5), Phase 5-8 Remaining
+**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 In Progress (Task 5.0 Complete), Phase 6-8 Remaining
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
@@ -74,7 +74,7 @@ dedicated vector databases or custom storage engines.
 | [Phase 3](#phase-3-batch-operations--deferred-items) | Batch Operations + Deferred Items | ✅ Complete |
 | [Phase 4](#phase-4-rabitq-compression) | RaBitQ Compression + Optimization | ✅ Complete |
 | [Phase 4.5](#phase-45-codex-pre-phase-5-critical-fixes) | CODEX Pre-Phase 5 Critical Fixes | ✅ Complete |
-| [Phase 5](#phase-5-internal-mutationquery-api) | Internal Mutation/Query API | 🔲 Not Started |
+| [Phase 5](#phase-5-internal-mutationquery-api) | Internal Mutation/Query API | 🚧 In Progress |
 | [Phase 6](#phase-6-mpscmpmc-public-api) | MPSC/MPMC Public API | 🔲 Not Started |
 | [Phase 7](#phase-7-async-graph-updater) | Async Graph Updater | 🔲 Not Started |
 | [Phase 8](#phase-8-production-hardening) | Production Hardening | 🔲 Not Started |
@@ -6317,7 +6317,7 @@ Processor methods that their consumers invoke.
 
 ### Task 5.0: HNSW Transaction Refactoring (Prerequisite)
 
-**Status:** 🔲 Not Started
+**Status:** ✅ Complete (`f672a2f`, `1524679`)
 **Severity:** 🔴 HIGH - Required for online serving atomicity
 
 **Problem:** The current `hnsw::insert()` path uses raw `txn_db.put_cf()` and `txn_db.merge_cf()`
@@ -6405,6 +6405,24 @@ pub fn connect_neighbors(
    - Cache updates moved to after `txn.commit()` succeeds
    - On transaction failure, cache remains unchanged (consistent with storage)
    - Alternative: make cache "eventually consistent" via periodic refresh from storage
+
+**Implementation (January 2026):**
+
+Completed in 6 subtasks:
+- **5.0.1**: Added `IdAllocator::allocate_in_txn()` and `free_in_txn()` for transactional ID allocation
+- **5.0.2**: Refactored `hnsw/insert.rs` with `insert_in_txn()` API returning `CacheUpdate`
+- **5.0.3**: Added `connect_neighbors_in_txn()` to `hnsw/graph.rs`
+- **5.0.4**: `CacheUpdate::apply()` deferred until after `txn.commit()` succeeds
+- **5.0.5**: Updated `writer.rs` to use transactional HNSW insert with collected cache updates
+- **5.0.6**: Added 8 crash recovery tests in `crash_recovery_tests.rs`
+
+Key files changed:
+- `id.rs`: Transaction-aware allocation with `allocate_in_txn()`, `free_in_txn()`
+- `hnsw/insert.rs`: `insert_in_txn()` returns `CacheUpdate`, applied after commit
+- `hnsw/graph.rs`: `connect_neighbors_in_txn()` uses `txn.merge_cf()`
+- `hnsw/mod.rs`: Export new APIs, `Index` derives `Clone`
+- `processor.rs`: Added `get_or_create_index()`, `nav_cache()`, `hnsw_config()`
+- `writer.rs`: Collect `CacheUpdate`s, apply after commit
 
 ---
 
