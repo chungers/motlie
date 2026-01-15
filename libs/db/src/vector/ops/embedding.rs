@@ -6,6 +6,7 @@
 use anyhow::Result;
 
 use crate::rocksdb::{ColumnFamily, MutationCodec};
+use crate::vector::embedding::EmbeddingBuilder;
 use crate::vector::mutation::AddEmbeddingSpec;
 use crate::vector::processor::Processor;
 use crate::vector::schema::EmbeddingSpecs;
@@ -20,7 +21,7 @@ use crate::vector::schema::EmbeddingSpecs;
 /// `MutationExecutor for AddEmbeddingSpec`.
 ///
 /// # What it does
-/// 1. Validates build parameters (hnsw_m, ef_construction, rabitq_bits)
+/// 1. Validates build parameters via EmbeddingBuilder (single source of truth)
 /// 2. Writes the EmbeddingSpec to RocksDB (transactional)
 /// 3. Updates the in-memory EmbeddingRegistry
 ///
@@ -51,8 +52,14 @@ pub fn add_embedding_spec_in_txn(
     processor: &Processor,
     spec: &AddEmbeddingSpec,
 ) -> Result<()> {
-    // 1. Validate build parameters (same rules as EmbeddingBuilder::validate())
-    spec.validate()?;
+    // 1. Validate build parameters using EmbeddingBuilder (single source of truth)
+    //    This avoids duplicating validation logic in AddEmbeddingSpec.
+    EmbeddingBuilder::new(&spec.model, spec.dim, spec.distance)
+        .with_hnsw_m(spec.hnsw_m)
+        .with_hnsw_ef_construction(spec.hnsw_ef_construction)
+        .with_rabitq_bits(spec.rabitq_bits)
+        .with_rabitq_seed(spec.rabitq_seed)
+        .validate()?;
 
     // 2. Serialize and write to RocksDB
     let (key_bytes, value_bytes) = spec.to_cf_bytes()?;
