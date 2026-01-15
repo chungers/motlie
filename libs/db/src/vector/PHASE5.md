@@ -655,6 +655,13 @@ All 502 tests pass.
 
 ---
 
+## CODEX Verification (Post-soft-delete)
+
+- ✅ Soft delete behavior addresses both VecId reuse corruption and entry-point distance errors for HNSW-enabled embeddings.
+- ⚠️ **Remaining improvement:** deleted nodes can still appear in search results because the graph is unchanged and no tombstone filter exists. Consider adding a deleted-flag check (e.g., IdReverse existence or a VecMeta flag) during search/rerank to exclude deleted vectors from results.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
