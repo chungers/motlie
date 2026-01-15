@@ -474,17 +474,18 @@ impl MutationExecutor for InsertVectorBatch {
             self.immediate_index,
         )?;
 
-        // Note: Consumer expands batches into individual InsertVector mutations,
-        // so cache updates are collected per-vector there. This execute() is only
-        // called when InsertVectorBatch is executed directly (not through Consumer).
-        // In that case, cache updates are lost - caller should use Processor::insert_batch()
-        // which applies cache updates directly.
         tracing::debug!(
             count = result.vec_ids.len(),
-            "InsertVectorBatch: inserted vectors (cache updates not returned)"
+            "InsertVectorBatch: inserted vectors"
         );
 
-        Ok(None)
+        // Return combined batch cache update
+        Ok(MutationCacheUpdate::from_batch(
+            self.embedding,
+            &result.vec_ids,
+            result.nav_cache_updates,
+            result.code_cache_updates,
+        ))
     }
 }
 

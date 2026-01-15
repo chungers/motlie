@@ -63,6 +63,8 @@ pub enum MutationCacheUpdate {
         code: Vec<u8>,
         correction: AdcCorrection,
     },
+    /// Batch of cache updates (for InsertVectorBatch)
+    Batch(Vec<MutationCacheUpdate>),
 }
 
 impl MutationCacheUpdate {
@@ -92,6 +94,64 @@ impl MutationCacheUpdate {
         }
     }
 
+    /// Create from an InsertBatchResult's cache updates.
+    ///
+    /// Collects all nav and code cache updates from the batch result into
+    /// a single `Batch` variant for efficient application.
+    pub fn from_batch(
+        embedding: EmbeddingCode,
+        vec_ids: &[VecId],
+        nav_updates: Vec<CacheUpdate>,
+        code_updates: Vec<(VecId, Vec<u8>, AdcCorrection)>,
+    ) -> Option<Self> {
+        let mut updates = Vec::new();
+
+        // Add nav-only updates for vectors that have nav but no code
+        for nav in nav_updates {
+            // Find matching code update by vec_id
+            let vec_id = nav.vec_id;
+            if let Some(pos) = code_updates.iter().position(|(id, _, _)| *id == vec_id) {
+                let (_, code, correction) = code_updates[pos].clone();
+                updates.push(Self::Both {
+                    nav,
+                    embedding,
+                    vec_id,
+                    code,
+                    correction,
+                });
+            } else {
+                updates.push(Self::Nav(nav));
+            }
+        }
+
+        // Add code-only updates for vectors without nav updates
+        let nav_vec_ids: std::collections::HashSet<_> =
+            updates.iter().filter_map(|u| match u {
+                Self::Nav(n) => Some(n.vec_id),
+                Self::Both { vec_id, .. } => Some(*vec_id),
+                _ => None,
+            }).collect();
+
+        for (vec_id, code, correction) in code_updates {
+            if !nav_vec_ids.contains(&vec_id) {
+                updates.push(Self::Code {
+                    embedding,
+                    vec_id,
+                    code,
+                    correction,
+                });
+            }
+        }
+
+        if updates.is_empty() {
+            None
+        } else if updates.len() == 1 {
+            Some(updates.remove(0))
+        } else {
+            Some(Self::Batch(updates))
+        }
+    }
+
     /// Apply the cache update to the processor caches.
     pub fn apply(
         self,
@@ -117,6 +177,11 @@ impl MutationCacheUpdate {
             } => {
                 nav.apply(nav_cache);
                 code_cache.put(embedding, vec_id, code, correction);
+            }
+            Self::Batch(updates) => {
+                for update in updates {
+                    update.apply(nav_cache, code_cache);
+                }
             }
         }
     }
