@@ -579,6 +579,256 @@ impl Processor {
         Ok(vec_id)
     }
 
+    /// Batch insert multiple vectors into an embedding space.
+    ///
+    /// More efficient than individual `insert_vector()` calls:
+    /// - Single transaction for all vectors (atomic commit)
+    /// - Spec hash validated once per batch
+    /// - Batched RocksDB writes
+    /// - HNSW graph built after all vectors stored (better connectivity)
+    ///
+    /// # Arguments
+    /// * `embedding` - The embedding space code
+    /// * `vectors` - Slice of (external_id, vector_data) pairs
+    /// * `build_index` - Whether to build HNSW graph connections
+    ///
+    /// # Returns
+    /// A vector of allocated VecIds in the same order as input.
+    ///
+    /// # Errors
+    /// - Unknown embedding code
+    /// - Dimension mismatch for any vector
+    /// - Duplicate external IDs (within batch or against existing)
+    /// - Storage errors
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let vectors: Vec<(Id, Vec<f32>)> = data.iter()
+    ///     .map(|v| (Id::new(), v.clone()))
+    ///     .collect();
+    ///
+    /// let vec_ids = processor.insert_batch(
+    ///     embedding_code,
+    ///     &vectors,
+    ///     true,  // build HNSW index
+    /// )?;
+    /// ```
+    pub fn insert_batch(
+        &self,
+        embedding: EmbeddingCode,
+        vectors: &[(Id, Vec<f32>)],
+        build_index: bool,
+    ) -> Result<Vec<VecId>> {
+        // Fast path: empty input
+        if vectors.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // 1. Validate embedding exists and get spec
+        let spec = self
+            .registry
+            .get_by_code(embedding)
+            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding))?;
+
+        let expected_dim = spec.dim() as usize;
+        let storage_type = spec.storage_type();
+
+        // 2. Validate all dimensions upfront (fail fast)
+        for (i, (id, vector)) in vectors.iter().enumerate() {
+            if vector.len() != expected_dim {
+                return Err(anyhow::anyhow!(
+                    "Dimension mismatch for vector {} (id {}): expected {}, got {}",
+                    i,
+                    id,
+                    expected_dim,
+                    vector.len()
+                ));
+            }
+        }
+
+        // 3. Check for duplicate IDs within the batch
+        {
+            use std::collections::HashSet;
+            let mut seen: HashSet<Id> = HashSet::with_capacity(vectors.len());
+            for (id, _) in vectors {
+                if !seen.insert(*id) {
+                    return Err(anyhow::anyhow!(
+                        "Duplicate external ID {} in batch",
+                        id
+                    ));
+                }
+            }
+        }
+
+        // 4. Begin transaction
+        let txn_db = self
+            .storage
+            .transaction_db()
+            .context("Failed to get transaction DB")?;
+        let txn = txn_db.transaction();
+
+        // 5. Get column family handles
+        let forward_cf = txn_db
+            .cf_handle(IdForward::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
+        let reverse_cf = txn_db
+            .cf_handle(IdReverse::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+        let vectors_cf = txn_db
+            .cf_handle(Vectors::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+        let codes_cf = txn_db.cf_handle(BinaryCodes::CF_NAME);
+        let specs_cf = txn_db
+            .cf_handle(EmbeddingSpecs::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
+        let graph_meta_cf = txn_db
+            .cf_handle(GraphMeta::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
+
+        // 6. Check for existing external IDs (acquire locks to prevent races)
+        for (id, _) in vectors {
+            let forward_key = IdForwardCfKey(embedding, *id);
+            if txn
+                .get_for_update_cf(&forward_cf, IdForward::key_to_bytes(&forward_key), true)?
+                .is_some()
+            {
+                return Err(anyhow::anyhow!(
+                    "External ID {} already exists in embedding space {}",
+                    id,
+                    embedding
+                ));
+            }
+        }
+
+        // 7. Validate/store spec hash (drift detection) - once per batch
+        {
+            let spec_key = EmbeddingSpecCfKey(embedding);
+            let spec_bytes = txn_db
+                .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
+                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
+            let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
+
+            let current_hash = embedding_spec.compute_spec_hash();
+            let hash_key = GraphMetaCfKey::spec_hash(embedding);
+            let hash_key_bytes = GraphMeta::key_to_bytes(&hash_key);
+
+            if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, &hash_key_bytes)? {
+                // Validate against stored hash
+                let stored_value = GraphMeta::value_from_bytes(&hash_key, &stored_bytes)?;
+                if let GraphMetaField::SpecHash(stored_hash) = stored_value.0 {
+                    if stored_hash != current_hash {
+                        return Err(anyhow::anyhow!(
+                            "EmbeddingSpec changed since index build (hash {} != {}). Rebuild required.",
+                            current_hash,
+                            stored_hash
+                        ));
+                    }
+                }
+            } else {
+                // First insert in this embedding space: store the hash
+                let hash_value = GraphMetaCfValue(GraphMetaField::SpecHash(current_hash));
+                txn.put_cf(
+                    &graph_meta_cf,
+                    hash_key_bytes,
+                    GraphMeta::value_to_bytes(&hash_value),
+                )?;
+            }
+        }
+
+        // 8. Get RaBitQ encoder if enabled
+        let encoder = self.get_or_create_encoder(embedding);
+
+        // 9. Allocate IDs and store all vectors
+        let mut vec_ids = Vec::with_capacity(vectors.len());
+        let mut code_cache_updates = Vec::with_capacity(vectors.len());
+
+        for (id, vector) in vectors {
+            // Allocate internal ID
+            let vec_id = {
+                let allocator = self.get_or_create_allocator(embedding);
+                allocator.allocate_in_txn(&txn, &txn_db, embedding)?
+            };
+            vec_ids.push(vec_id);
+
+            // Store Id -> VecId mapping (IdForward)
+            let forward_key = IdForwardCfKey(embedding, *id);
+            let forward_value = IdForwardCfValue(vec_id);
+            txn.put_cf(
+                &forward_cf,
+                IdForward::key_to_bytes(&forward_key),
+                IdForward::value_to_bytes(&forward_value),
+            )?;
+
+            // Store VecId -> Id mapping (IdReverse)
+            let reverse_key = IdReverseCfKey(embedding, vec_id);
+            let reverse_value = IdReverseCfValue(*id);
+            txn.put_cf(
+                &reverse_cf,
+                IdReverse::key_to_bytes(&reverse_key),
+                IdReverse::value_to_bytes(&reverse_value),
+            )?;
+
+            // Store vector data
+            let vec_key = VectorCfKey(embedding, vec_id);
+            txn.put_cf(
+                &vectors_cf,
+                Vectors::key_to_bytes(&vec_key),
+                Vectors::value_to_bytes_typed(vector, storage_type),
+            )?;
+
+            // Store binary code with ADC correction (if RaBitQ enabled)
+            if let Some(ref enc) = encoder {
+                if let Some(ref cf) = codes_cf {
+                    let (code, correction) = enc.encode_with_correction(vector);
+                    let code_key = BinaryCodeCfKey(embedding, vec_id);
+                    let code_value = BinaryCodeCfValue {
+                        code: code.clone(),
+                        correction,
+                    };
+                    txn.put_cf(
+                        cf,
+                        BinaryCodes::key_to_bytes(&code_key),
+                        BinaryCodes::value_to_bytes(&code_value),
+                    )?;
+                    code_cache_updates.push((vec_id, code, correction));
+                }
+            }
+        }
+
+        // 10. Build HNSW index (if requested) - after all vectors are stored
+        // This allows better graph connectivity as all vectors are visible
+        let mut nav_cache_updates = Vec::new();
+        if build_index {
+            if let Some(index) = self.get_or_create_index(embedding) {
+                for (i, vec_id) in vec_ids.iter().enumerate() {
+                    let vector = &vectors[i].1;
+                    let update = insert_in_txn(
+                        &index,
+                        &txn,
+                        &txn_db,
+                        &self.storage,
+                        *vec_id,
+                        vector,
+                    )?;
+                    nav_cache_updates.push(update);
+                }
+            }
+        }
+
+        // 11. Commit transaction
+        txn.commit().context("Failed to commit batch transaction")?;
+
+        // 12. Apply cache updates AFTER successful commit
+        for update in nav_cache_updates {
+            update.apply(&self.nav_cache);
+        }
+        for (vec_id, code, correction) in code_cache_updates {
+            self.code_cache.put(embedding, vec_id, code, correction);
+        }
+
+        Ok(vec_ids)
+    }
+
     /// Delete a vector from an embedding space.
     ///
     /// This method performs cleanup atomically, with behavior depending on
@@ -1913,6 +2163,364 @@ mod tests {
             err.contains("EmbeddingSpec changed") || err.contains("Rebuild required"),
             "Error should mention spec change: {}",
             err
+        );
+    }
+
+    // =========================================================================
+    // Batch Insert Tests
+    // =========================================================================
+
+    #[test]
+    fn test_insert_batch_basic() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        // Register embedding
+        let txn_db = storage.transaction_db().expect("txn_db");
+        let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
+        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage.clone(), registry);
+
+        // Prepare batch of vectors
+        let vectors: Vec<(Id, Vec<f32>)> = (0..10)
+            .map(|i| {
+                let id = crate::Id::new();
+                let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
+                (id, vector)
+            })
+            .collect();
+
+        // Insert batch without index
+        let vec_ids = processor
+            .insert_batch(embedding_code, &vectors, false)
+            .expect("batch insert should succeed");
+
+        // Verify results
+        assert_eq!(vec_ids.len(), 10, "Should return 10 VecIds");
+        for (i, vec_id) in vec_ids.iter().enumerate() {
+            assert_eq!(*vec_id, i as VecId, "VecIds should be sequential");
+        }
+
+        // Verify allocator state
+        {
+            let allocator = processor.get_or_create_allocator(embedding_code);
+            assert_eq!(allocator.next_id(), 10, "Allocator should be at 10");
+        }
+    }
+
+    #[test]
+    fn test_insert_batch_with_index() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        // Register embedding
+        let txn_db = storage.transaction_db().expect("txn_db");
+        let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
+        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding_code = embedding.code();
+
+        // Create processor with HNSW enabled
+        let mut hnsw_config = hnsw::Config::default();
+        hnsw_config.enabled = true;
+        hnsw_config.dim = 64;
+        let processor = Processor::with_config(
+            storage.clone(),
+            registry,
+            RaBitQConfig::default(),
+            hnsw_config,
+        );
+
+        // Prepare batch of vectors
+        let vectors: Vec<(Id, Vec<f32>)> = (0..20)
+            .map(|i| {
+                let id = crate::Id::new();
+                let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
+                (id, vector)
+            })
+            .collect();
+
+        // Insert batch with index building
+        let vec_ids = processor
+            .insert_batch(embedding_code, &vectors, true)
+            .expect("batch insert with index should succeed");
+
+        assert_eq!(vec_ids.len(), 20, "Should return 20 VecIds");
+
+        // Verify search works
+        let query: Vec<f32> = (0..64).map(|j| j as f32 / 1000.0).collect();
+        let results = processor
+            .search(embedding_code, &query, 5, 100)
+            .expect("search should succeed");
+
+        assert!(!results.is_empty(), "Should have search results");
+        assert!(results.len() <= 5, "Should return at most k results");
+
+        // Verify results are sorted by distance and distances are reasonable
+        for (i, result) in results.iter().enumerate() {
+            if i > 0 {
+                assert!(
+                    result.distance >= results[i - 1].distance,
+                    "Results should be sorted by distance"
+                );
+            }
+        }
+
+        // The first result should be among the inserted vectors
+        let inserted_ids: std::collections::HashSet<_> = vectors.iter().map(|(id, _)| *id).collect();
+        assert!(
+            inserted_ids.contains(&results[0].id),
+            "First result should be one of our inserted vectors"
+        );
+    }
+
+    #[test]
+    fn test_insert_batch_empty() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        let txn_db = storage.transaction_db().expect("txn_db");
+        let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
+        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage, registry);
+
+        // Empty batch should return empty vec
+        let vec_ids = processor
+            .insert_batch(embedding_code, &[], false)
+            .expect("empty batch should succeed");
+
+        assert!(vec_ids.is_empty(), "Empty input should return empty output");
+    }
+
+    #[test]
+    fn test_insert_batch_dimension_mismatch() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        let txn_db = storage.transaction_db().expect("txn_db");
+        let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
+        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage, registry);
+
+        // Create batch with one wrong dimension
+        let vectors: Vec<(Id, Vec<f32>)> = vec![
+            (crate::Id::new(), vec![0.0; 64]),  // Correct
+            (crate::Id::new(), vec![0.0; 128]), // Wrong dimension
+            (crate::Id::new(), vec![0.0; 64]),  // Correct
+        ];
+
+        let result = processor.insert_batch(embedding_code, &vectors, false);
+        assert!(result.is_err(), "Should fail on dimension mismatch");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Dimension mismatch"),
+            "Error should mention dimension mismatch: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_insert_batch_duplicate_in_batch() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        let txn_db = storage.transaction_db().expect("txn_db");
+        let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
+        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage, registry);
+
+        // Create batch with duplicate ID
+        let duplicate_id = crate::Id::new();
+        let vectors: Vec<(Id, Vec<f32>)> = vec![
+            (crate::Id::new(), vec![0.0; 64]),
+            (duplicate_id, vec![0.0; 64]),
+            (duplicate_id, vec![0.0; 64]), // Duplicate!
+        ];
+
+        let result = processor.insert_batch(embedding_code, &vectors, false);
+        assert!(result.is_err(), "Should fail on duplicate ID in batch");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Duplicate external ID"),
+            "Error should mention duplicate: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_insert_batch_duplicate_existing() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        let txn_db = storage.transaction_db().expect("txn_db");
+        let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
+        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage, registry);
+
+        // Insert a vector first
+        let existing_id = crate::Id::new();
+        let vector: Vec<f32> = vec![0.0; 64];
+        processor
+            .insert_vector(embedding_code, existing_id, &vector, false)
+            .expect("initial insert");
+
+        // Try batch with that existing ID
+        let vectors: Vec<(Id, Vec<f32>)> = vec![
+            (crate::Id::new(), vec![0.0; 64]),
+            (existing_id, vec![0.0; 64]), // Already exists!
+        ];
+
+        let result = processor.insert_batch(embedding_code, &vectors, false);
+        assert!(result.is_err(), "Should fail on existing ID");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("already exists"),
+            "Error should mention already exists: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_insert_batch_unknown_embedding() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        let processor = Processor::new(storage, registry);
+
+        let vectors: Vec<(Id, Vec<f32>)> = vec![(crate::Id::new(), vec![0.0; 64])];
+
+        let result = processor.insert_batch(999, &vectors, false);
+        assert!(result.is_err(), "Should fail on unknown embedding");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Unknown embedding"),
+            "Error should mention unknown embedding: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_insert_batch_atomicity() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("storage init");
+        let storage = Arc::new(storage);
+        let registry = Arc::new(EmbeddingRegistry::new());
+
+        let txn_db = storage.transaction_db().expect("txn_db");
+        let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
+        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding_code = embedding.code();
+
+        let processor = Processor::new(storage.clone(), registry);
+
+        // Insert a vector first
+        let existing_id = crate::Id::new();
+        processor
+            .insert_vector(embedding_code, existing_id, &vec![0.0; 64], false)
+            .expect("initial insert");
+
+        // Try batch where the LAST vector will fail (duplicate)
+        // The first vectors should NOT be committed due to atomicity
+        let new_id1 = crate::Id::new();
+        let new_id2 = crate::Id::new();
+        let vectors: Vec<(Id, Vec<f32>)> = vec![
+            (new_id1, vec![1.0; 64]),
+            (new_id2, vec![2.0; 64]),
+            (existing_id, vec![3.0; 64]), // Will fail!
+        ];
+
+        let result = processor.insert_batch(embedding_code, &vectors, false);
+        assert!(result.is_err(), "Batch should fail");
+
+        // Verify new_id1 and new_id2 were NOT inserted (atomicity)
+        let forward_cf = txn_db
+            .cf_handle(IdForward::CF_NAME)
+            .expect("CF should exist");
+
+        let key1 = IdForwardCfKey(embedding_code, new_id1);
+        let result1 = txn_db
+            .get_cf(&forward_cf, IdForward::key_to_bytes(&key1))
+            .expect("read");
+        assert!(
+            result1.is_none(),
+            "new_id1 should NOT exist due to atomicity"
+        );
+
+        let key2 = IdForwardCfKey(embedding_code, new_id2);
+        let result2 = txn_db
+            .get_cf(&forward_cf, IdForward::key_to_bytes(&key2))
+            .expect("read");
+        assert!(
+            result2.is_none(),
+            "new_id2 should NOT exist due to atomicity"
         );
     }
 }
