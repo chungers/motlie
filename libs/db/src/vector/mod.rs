@@ -102,7 +102,7 @@ pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
 pub use hnsw::ConfigWarning;
 pub use id::IdAllocator;
-pub use processor::Processor;
+pub use processor::{Processor, SearchResult};
 pub use quantization::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
