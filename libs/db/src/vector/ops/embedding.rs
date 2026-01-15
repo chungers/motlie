@@ -8,7 +8,7 @@ use anyhow::Result;
 use crate::rocksdb::{ColumnFamily, MutationCodec};
 use crate::vector::mutation::AddEmbeddingSpec;
 use crate::vector::processor::Processor;
-use crate::vector::schema::{EmbeddingSpecs, VectorElementType};
+use crate::vector::schema::EmbeddingSpecs;
 
 // ============================================================================
 // add_embedding_spec_in_txn
@@ -60,7 +60,7 @@ pub fn add_embedding_spec_in_txn(
         &spec.model,
         spec.dim,
         spec.distance,
-        VectorElementType::default(), // F32 for backward compat
+        spec.storage_type,
     );
 
     Ok(())
