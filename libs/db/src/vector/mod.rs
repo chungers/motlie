@@ -127,11 +127,12 @@ pub use query::{
     QueryWithTimeout, ResolveIds, SearchKNN,
 };
 pub use reader::{
-    create_reader, spawn_consumer as spawn_query_consumer,
+    create_reader, create_search_reader, spawn_consumer as spawn_query_consumer,
     spawn_consumer_with_processor as spawn_query_consumer_with_processor,
     spawn_consumers as spawn_query_consumers,
     spawn_consumers_with_processor as spawn_query_consumers_with_processor,
     Consumer as QueryConsumer, ProcessorConsumer as ProcessorQueryConsumer, Reader, ReaderConfig,
+    SearchReader,
 };
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder

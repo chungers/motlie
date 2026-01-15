@@ -29,11 +29,13 @@
 //! Storage + Processor together, eliminating ad-hoc plumbing at call sites.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use super::processor::Processor;
-use super::query::Query;
+use super::processor::{Processor, SearchResult};
+use super::query::{Query, SearchKNN, SearchKNNDispatch};
+use super::schema::EmbeddingCode;
 use super::Storage;
 
 // ============================================================================
@@ -298,6 +300,120 @@ pub fn spawn_consumers_with_processor(
             spawn_consumer_with_processor(consumer)
         })
         .collect()
+}
+
+// ============================================================================
+// SearchReader - High-level API for SearchKNN
+// ============================================================================
+
+/// High-level reader for SearchKNN queries.
+///
+/// `SearchReader` bundles a `Reader` with an `Arc<Processor>`, providing
+/// a simple API for HNSW nearest neighbor search without ad-hoc processor
+/// plumbing at call sites.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Setup
+/// let (reader, receiver) = create_reader(ReaderConfig::default());
+/// let search_reader = SearchReader::new(reader, processor);
+///
+/// // Spawn consumers
+/// spawn_consumers_with_processor(receiver, config, processor, 4);
+///
+/// // Simple search API - no dispatch construction needed
+/// let results = search_reader
+///     .search_knn(embedding, query_vec, 10, 100, Duration::from_secs(5))
+///     .await?;
+/// ```
+#[derive(Clone)]
+pub struct SearchReader {
+    reader: Reader,
+    processor: Arc<Processor>,
+}
+
+impl SearchReader {
+    /// Create a new SearchReader.
+    pub fn new(reader: Reader, processor: Arc<Processor>) -> Self {
+        Self { reader, processor }
+    }
+
+    /// Perform K-nearest neighbor search.
+    ///
+    /// This is the ergonomic API for SearchKNN - no dispatch construction needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `embedding` - Embedding space code
+    /// * `query` - Query vector
+    /// * `k` - Number of results to return
+    /// * `ef` - Search expansion factor (higher = more accurate, slower)
+    /// * `timeout` - Query timeout
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(distance, external_id)` pairs, sorted by distance (ascending).
+    pub async fn search_knn(
+        &self,
+        embedding: EmbeddingCode,
+        query: Vec<f32>,
+        k: usize,
+        ef: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>> {
+        let params = SearchKNN::new(embedding, query, k).with_ef(ef);
+        let (dispatch, rx) = SearchKNNDispatch::new(params, timeout, self.processor.clone());
+
+        self.reader
+            .send_query(Query::SearchKNN(dispatch))
+            .await
+            .context("Failed to send SearchKNN query")?;
+
+        rx.await
+            .context("SearchKNN query was cancelled")?
+            .context("SearchKNN query failed")
+    }
+
+    /// Get the underlying reader for other query types.
+    pub fn reader(&self) -> &Reader {
+        &self.reader
+    }
+
+    /// Get the processor for direct operations.
+    pub fn processor(&self) -> &Arc<Processor> {
+        &self.processor
+    }
+
+    /// Check if the reader is still active.
+    pub fn is_closed(&self) -> bool {
+        self.reader.is_closed()
+    }
+}
+
+impl std::fmt::Debug for SearchReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchReader")
+            .field("reader", &self.reader)
+            .field("processor", &"<Arc<Processor>>")
+            .finish()
+    }
+}
+
+/// Create a SearchReader along with a reader and receiver.
+///
+/// Convenience function that creates all components needed for SearchKNN.
+///
+/// # Returns
+///
+/// Tuple of (SearchReader, flume::Receiver<Query>) - spawn consumers with the receiver.
+pub fn create_search_reader(
+    config: ReaderConfig,
+    processor: Arc<Processor>,
+) -> (SearchReader, flume::Receiver<Query>) {
+    let (reader, receiver) = create_reader(config);
+    let search_reader = SearchReader::new(reader, processor);
+    (search_reader, receiver)
 }
 
 // ============================================================================
