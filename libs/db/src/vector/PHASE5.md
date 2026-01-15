@@ -1,8 +1,8 @@
 # Phase 5: Internal Mutation/Query API
 
-**Status:** In Progress (Tasks 5.0-5.3 Complete)
+**Status:** In Progress (Tasks 5.0-5.5 Complete)
 **Date:** January 14, 2026
-**Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`, `c29dceb`, `6ee252b`, `0cbd597`
+**Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`, `c29dceb`, `6ee252b`, `0cbd597`, `dc4c3f9`
 
 ---
 
@@ -922,6 +922,68 @@ pub use processor::{Processor, SearchResult};
 
 ---
 
+## Task 5.5: Search Strategy Dispatch (COMPLETE)
+
+### Overview
+
+Task 5.5 implements strategy-based search dispatch via `Processor::search_with_config()`.
+
+### Implementation
+
+```rust
+impl Processor {
+    /// Search using a SearchConfig for strategy-based dispatch.
+    pub fn search_with_config(
+        &self,
+        config: &SearchConfig,
+        query: &[f32],
+    ) -> Result<Vec<SearchResult>> {
+        // Dispatch based on strategy
+        match config.strategy() {
+            SearchStrategy::Exact => {
+                // Standard HNSW search with exact distance
+                index.search(...)
+            }
+            SearchStrategy::RaBitQ { use_cache } => {
+                if use_cache {
+                    // Two-phase search with cached binary codes
+                    index.search_with_rabitq_cached(...)
+                } else {
+                    // Fallback to exact (uncached RaBitQ defeats purpose)
+                    index.search(...)
+                }
+            }
+        }
+    }
+}
+```
+
+### Changes Made
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Added `BinaryCodeCache` field, `code_cache()` getter, `search_with_config()` method |
+| `processor.rs` | Updated `insert_vector()` to populate code_cache after commit |
+| `processor.rs` | Added 2 tests: `test_search_with_config_exact`, `test_search_with_config_rabitq` |
+
+### Strategy Selection
+
+| Distance Metric | Auto-Selected Strategy |
+|-----------------|------------------------|
+| Cosine | RaBitQ (ADC approximates angular distance) |
+| L2 | Exact (ADC not compatible) |
+| DotProduct | Exact (ADC not compatible) |
+
+### Code Cache Integration
+
+Binary codes are now:
+1. Persisted to `BinaryCodes` CF in RocksDB (for durability)
+2. Cached in `BinaryCodeCache` (for fast RaBitQ search)
+
+Both updates happen after transaction commit to maintain consistency.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
@@ -930,7 +992,7 @@ pub use processor::{Processor, SearchResult};
 | 5.2 | Processor::delete_vector() | **Complete** |
 | 5.3 | Processor::search() | **Complete** |
 | 5.4 | Storage layer search methods | **Complete** (via Processor) |
-| 5.5 | Dispatch logic for search strategies | Pending |
+| 5.5 | Dispatch logic for search strategies | **Complete** |
 | 5.6 | Migration utilities | Pending |
 | 5.7 | Stress tests | Pending |
 | 5.8 | Search metrics | Pending |

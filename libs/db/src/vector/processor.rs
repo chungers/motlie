@@ -24,7 +24,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 
-use super::cache::NavigationCache;
+use super::cache::{BinaryCodeCache, NavigationCache};
 use super::config::RaBitQConfig;
 use super::hnsw::{self, insert_in_txn};
 use super::id::IdAllocator;
@@ -34,6 +34,7 @@ use super::schema::{
     BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, IdForward, IdForwardCfKey,
     IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue, VecId, VectorCfKey, Vectors,
 };
+use super::search::{SearchConfig, SearchStrategy};
 use super::Storage;
 use crate::rocksdb::ColumnFamily;
 use crate::Id;
@@ -95,6 +96,8 @@ pub struct Processor {
     nav_cache: Arc<NavigationCache>,
     /// HNSW configuration (shared across all embeddings)
     hnsw_config: hnsw::Config,
+    /// Shared binary code cache for RaBitQ search
+    code_cache: Arc<BinaryCodeCache>,
 }
 
 impl Processor {
@@ -133,6 +136,7 @@ impl Processor {
             hnsw_indices: DashMap::new(),
             nav_cache: Arc::new(NavigationCache::new()),
             hnsw_config,
+            code_cache: Arc::new(BinaryCodeCache::new()),
         }
     }
 
@@ -285,6 +289,11 @@ impl Processor {
         &self.nav_cache
     }
 
+    /// Get the shared binary code cache.
+    pub fn code_cache(&self) -> &Arc<BinaryCodeCache> {
+        &self.code_cache
+    }
+
     /// Get the HNSW configuration.
     pub fn hnsw_config(&self) -> &hnsw::Config {
         &self.hnsw_config
@@ -414,10 +423,14 @@ impl Processor {
         )?;
 
         // 8. Store binary code with ADC correction (if RaBitQ enabled)
-        if let Some(encoder) = self.get_or_create_encoder(embedding) {
+        // Also prepare for cache update after commit
+        let code_cache_update = if let Some(encoder) = self.get_or_create_encoder(embedding) {
             let (code, correction) = encoder.encode_with_correction(vector);
             let code_key = BinaryCodeCfKey(embedding, vec_id);
-            let code_value = BinaryCodeCfValue { code, correction };
+            let code_value = BinaryCodeCfValue {
+                code: code.clone(),
+                correction,
+            };
             let codes_cf = txn_db
                 .cf_handle(BinaryCodes::CF_NAME)
                 .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
@@ -426,10 +439,13 @@ impl Processor {
                 BinaryCodes::key_to_bytes(&code_key),
                 BinaryCodes::value_to_bytes(&code_value),
             )?;
-        }
+            Some((code, correction))
+        } else {
+            None
+        };
 
         // 9. Build HNSW index (if requested)
-        let cache_update = if build_index {
+        let nav_cache_update = if build_index {
             if let Some(index) = self.get_or_create_index(embedding) {
                 Some(insert_in_txn(
                     &index,
@@ -449,9 +465,12 @@ impl Processor {
         // 10. Commit transaction
         txn.commit().context("Failed to commit transaction")?;
 
-        // 11. Apply cache update AFTER successful commit
-        if let Some(update) = cache_update {
+        // 11. Apply cache updates AFTER successful commit
+        if let Some(update) = nav_cache_update {
             update.apply(&self.nav_cache);
+        }
+        if let Some((code, correction)) = code_cache_update {
+            self.code_cache.put(embedding, vec_id, code, correction);
         }
 
         Ok(vec_id)
@@ -661,7 +680,7 @@ impl Processor {
             .collect();
 
         // Batch lookup all IdReverse keys at once
-        let key_refs: Vec<_> = keys.iter().map(|k| (&reverse_cf, k.as_slice())).collect();
+        let key_refs: Vec<_> = keys.iter().map(|k: &Vec<u8>| (&reverse_cf, k.as_slice())).collect();
         let values = txn_db.multi_get_cf(key_refs);
 
         // Filter and resolve external IDs, truncate to k
@@ -680,6 +699,131 @@ impl Processor {
                 });
             }
             // Skip deleted vectors (IdReverse missing or error)
+        }
+
+        Ok(results)
+    }
+
+    /// Search using a SearchConfig for strategy-based dispatch.
+    ///
+    /// This method dispatches to different search strategies based on the
+    /// configuration:
+    /// - `SearchStrategy::Exact` - Standard HNSW search with exact distance
+    /// - `SearchStrategy::RaBitQ` - Two-phase search with Hamming pre-filter
+    ///
+    /// # Arguments
+    /// * `config` - Search configuration with embedding, k, ef, and strategy
+    /// * `query` - Query vector (must match embedding dimension)
+    ///
+    /// # Returns
+    /// Up to k nearest neighbors as `SearchResult` structs, sorted by distance.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let config = SearchConfig::new(embedding.clone(), 10)
+    ///     .with_ef(150)
+    ///     .with_rerank_factor(4);
+    /// let results = processor.search_with_config(&config, &query)?;
+    /// ```
+    pub fn search_with_config(
+        &self,
+        config: &SearchConfig,
+        query: &[f32],
+    ) -> Result<Vec<SearchResult>> {
+        let embedding_code = config.embedding().code();
+
+        // 1. Validate embedding exists
+        let spec = self
+            .registry
+            .get_by_code(embedding_code)
+            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding_code))?;
+
+        // 2. Validate dimension
+        if query.len() != spec.dim() as usize {
+            return Err(anyhow::anyhow!(
+                "Dimension mismatch: expected {}, got {}",
+                spec.dim(),
+                query.len()
+            ));
+        }
+
+        // 3. Check HNSW is enabled
+        if !self.hnsw_config.enabled {
+            return Err(anyhow::anyhow!(
+                "HNSW indexing is disabled - search not available"
+            ));
+        }
+
+        // 4. Get HNSW index
+        let index = self
+            .get_or_create_index(embedding_code)
+            .ok_or_else(|| anyhow::anyhow!("Failed to get HNSW index"))?;
+
+        // 5. Dispatch based on strategy
+        let k = config.k();
+        let ef = config.ef();
+        let overfetch_k = k * 2;
+        let effective_ef = ef.max(overfetch_k);
+
+        let raw_results = match config.strategy() {
+            SearchStrategy::Exact => {
+                // Standard HNSW search with exact distance
+                index.search(&self.storage, query, overfetch_k, effective_ef)?
+            }
+            SearchStrategy::RaBitQ { use_cache } => {
+                if use_cache {
+                    // Two-phase search with cached binary codes
+                    let encoder = self
+                        .get_or_create_encoder(embedding_code)
+                        .ok_or_else(|| anyhow::anyhow!("RaBitQ encoder not available"))?;
+                    index.search_with_rabitq_cached(
+                        &self.storage,
+                        query,
+                        &encoder,
+                        &self.code_cache,
+                        overfetch_k,
+                        effective_ef,
+                        config.rerank_factor(),
+                    )?
+                } else {
+                    // RaBitQ without cache - fall back to exact for now
+                    // (uncached RaBitQ would need to read from RocksDB, defeating the purpose)
+                    index.search(&self.storage, query, overfetch_k, effective_ef)?
+                }
+            }
+        };
+
+        // 6. Filter deleted vectors using batched IdReverse lookup
+        let txn_db = self.storage.transaction_db()?;
+        let reverse_cf = txn_db
+            .cf_handle(IdReverse::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+
+        let keys: Vec<_> = raw_results
+            .iter()
+            .map(|(_, vec_id)| {
+                let key = IdReverseCfKey(embedding_code, *vec_id);
+                IdReverse::key_to_bytes(&key)
+            })
+            .collect();
+
+        let key_refs: Vec<_> = keys.iter().map(|k: &Vec<u8>| (&reverse_cf, k.as_slice())).collect();
+        let values = txn_db.multi_get_cf(key_refs);
+
+        let mut results = Vec::with_capacity(k);
+        for (i, value_result) in values.into_iter().enumerate() {
+            if results.len() >= k {
+                break;
+            }
+            if let Ok(Some(bytes)) = value_result {
+                let id = IdReverse::value_from_bytes(&bytes)?.0;
+                let (distance, vec_id) = raw_results[i];
+                results.push(SearchResult {
+                    id,
+                    vec_id,
+                    distance,
+                });
+            }
         }
 
         Ok(results)
@@ -1253,5 +1397,152 @@ mod tests {
             result.unwrap_err().to_string().contains("HNSW indexing is disabled"),
             "Error should mention HNSW disabled"
         );
+    }
+
+    #[test]
+    fn test_search_with_config_exact() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        // Use L2 distance - will get Exact strategy (not RaBitQ)
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        // Create processor with HNSW enabled
+        let mut hnsw_config = hnsw::Config::default();
+        hnsw_config.enabled = true;
+        hnsw_config.dim = 64;
+        let processor = Processor::with_config(
+            storage,
+            registry,
+            RaBitQConfig::default(),
+            hnsw_config,
+        );
+
+        // Insert several vectors
+        let mut inserted_ids = Vec::new();
+        for i in 0..10 {
+            let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
+            let id = crate::Id::new();
+            processor
+                .insert_vector(embedding_code, id, &vector, true)
+                .expect("Insert should succeed");
+            inserted_ids.push(id);
+        }
+
+        // Create SearchConfig with Exact strategy
+        let config = SearchConfig::new(embedding.clone(), 5)
+            .with_ef(100);
+
+        // Verify strategy is Exact for L2 distance
+        assert!(config.strategy().is_exact(), "L2 should use Exact strategy");
+
+        // Search using config
+        let query: Vec<f32> = (0..64).map(|j| j as f32 / 1000.0).collect();
+        let results = processor
+            .search_with_config(&config, &query)
+            .expect("Search should succeed");
+
+        // Should return at most k results
+        assert!(!results.is_empty(), "Should have results");
+        assert!(results.len() <= 5, "Should return at most k results");
+
+        // First result should be closest to query
+        let first = &results[0];
+        assert_eq!(first.id, inserted_ids[0], "First inserted vector should be closest");
+
+        // Results should be sorted by distance
+        for (i, result) in results.iter().enumerate() {
+            if i > 0 {
+                assert!(
+                    result.distance >= results[i - 1].distance,
+                    "Results should be sorted by distance"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_search_with_config_rabitq() {
+        use tempfile::TempDir;
+
+        use crate::vector::embedding::EmbeddingBuilder;
+        use crate::vector::Distance;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        // Use Cosine distance - will get RaBitQ strategy
+        let builder = EmbeddingBuilder::new("test-model", 64, Distance::Cosine);
+        let embedding = registry
+            .register(builder, &txn_db)
+            .expect("Failed to register");
+        let embedding_code = embedding.code();
+
+        // Create processor with HNSW enabled
+        let mut hnsw_config = hnsw::Config::default();
+        hnsw_config.enabled = true;
+        hnsw_config.dim = 64;
+        let processor = Processor::with_config(
+            storage,
+            registry,
+            RaBitQConfig::default(),
+            hnsw_config,
+        );
+
+        // Insert several vectors
+        let mut inserted_ids = Vec::new();
+        for i in 0..10 {
+            let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
+            let id = crate::Id::new();
+            processor
+                .insert_vector(embedding_code, id, &vector, true)
+                .expect("Insert should succeed");
+            inserted_ids.push(id);
+        }
+
+        // Create SearchConfig - will auto-select RaBitQ for Cosine
+        let config = SearchConfig::new(embedding.clone(), 5)
+            .with_ef(100)
+            .with_rerank_factor(4);
+
+        // Verify strategy is RaBitQ for Cosine distance
+        assert!(config.strategy().is_rabitq(), "Cosine should use RaBitQ strategy");
+
+        // Search using config
+        let query: Vec<f32> = (0..64).map(|j| j as f32 / 1000.0).collect();
+        let results = processor
+            .search_with_config(&config, &query)
+            .expect("Search should succeed");
+
+        // Should return at most k results
+        assert!(!results.is_empty(), "Should have results");
+        assert!(results.len() <= 5, "Should return at most k results");
+
+        // Results should be sorted by distance
+        for (i, result) in results.iter().enumerate() {
+            if i > 0 {
+                assert!(
+                    result.distance >= results[i - 1].distance,
+                    "Results should be sorted by distance"
+                );
+            }
+        }
     }
 }
