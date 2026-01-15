@@ -26,16 +26,17 @@ use dashmap::DashMap;
 
 use super::cache::{BinaryCodeCache, NavigationCache};
 use super::config::RaBitQConfig;
-use super::hnsw::{self, insert_in_txn};
+use super::hnsw;
 use super::id::IdAllocator;
 use super::rabitq::RaBitQ;
 use super::registry::EmbeddingRegistry;
 use super::schema::{
-    BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpec,
-    EmbeddingSpecCfKey, EmbeddingSpecs, GraphMeta, GraphMetaCfKey, GraphMetaCfValue,
-    GraphMetaField, IdForward, IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey,
-    IdReverseCfValue, VecId, VectorCfKey, Vectors,
+    EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, GraphMeta, GraphMetaCfKey,
+    GraphMetaField, IdReverse, IdReverseCfKey, VecId,
 };
+// These types are only used in tests
+#[cfg(test)]
+use super::schema::{GraphMetaCfValue, IdForward, IdForwardCfKey};
 use super::search::{SearchConfig, SearchStrategy};
 use super::Storage;
 use crate::rocksdb::{ColumnFamily, ColumnFamilySerde};
@@ -397,184 +398,32 @@ impl Processor {
         vector: &[f32],
         build_index: bool,
     ) -> Result<VecId> {
-        // 1. Validate embedding exists and get spec
-        let spec = self
-            .registry
-            .get_by_code(embedding)
-            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding))?;
-
-        // 2. Validate dimension
-        if vector.len() != spec.dim() as usize {
-            return Err(anyhow::anyhow!(
-                "Dimension mismatch: expected {}, got {}",
-                spec.dim(),
-                vector.len()
-            ));
-        }
-
-        let storage_type = spec.storage_type();
-
-        // 3. Begin transaction
+        // Begin transaction
         let txn_db = self
             .storage
             .transaction_db()
             .context("Failed to get transaction DB")?;
         let txn = txn_db.transaction();
 
-        // 4. Check if external ID already exists (avoid duplicates)
-        // Use txn.get_for_update_cf() to acquire a lock on the key, preventing
-        // concurrent inserts of the same external ID from racing.
-        let forward_cf = txn_db
-            .cf_handle(IdForward::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
-        let forward_key = IdForwardCfKey(embedding, id);
-        if txn
-            .get_for_update_cf(&forward_cf, IdForward::key_to_bytes(&forward_key), true)?
-            .is_some()
-        {
-            return Err(anyhow::anyhow!(
-                "External ID {} already exists in embedding space {}",
-                id,
-                embedding
-            ));
-        }
-
-        // 5. Allocate internal ID (transactionally persisted)
-        let vec_id = {
-            let allocator = self.get_or_create_allocator(embedding);
-            allocator.allocate_in_txn(&txn, &txn_db, embedding)?
-        };
-
-        // 6. Store Id -> VecId mapping (IdForward)
-        let forward_value = IdForwardCfValue(vec_id);
-        txn.put_cf(
-            &forward_cf,
-            IdForward::key_to_bytes(&forward_key),
-            IdForward::value_to_bytes(&forward_value),
+        // Delegate to shared ops helper (all validation happens there)
+        let result = super::ops::insert_vector_in_txn(
+            &txn,
+            &txn_db,
+            self,
+            embedding,
+            id,
+            vector,
+            build_index,
         )?;
 
-        // 6. Store VecId -> Id mapping (IdReverse)
-        let reverse_key = IdReverseCfKey(embedding, vec_id);
-        let reverse_value = IdReverseCfValue(id);
-        let reverse_cf = txn_db
-            .cf_handle(IdReverse::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-        txn.put_cf(
-            &reverse_cf,
-            IdReverse::key_to_bytes(&reverse_key),
-            IdReverse::value_to_bytes(&reverse_value),
-        )?;
+        // Save vec_id before applying cache updates (which consumes result)
+        let vec_id = result.vec_id;
 
-        // 7. Store vector data
-        let vec_key = VectorCfKey(embedding, vec_id);
-        let vectors_cf = txn_db
-            .cf_handle(Vectors::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-        txn.put_cf(
-            &vectors_cf,
-            Vectors::key_to_bytes(&vec_key),
-            Vectors::value_to_bytes_typed(vector, storage_type),
-        )?;
-
-        // 8. Store binary code with ADC correction (if RaBitQ enabled)
-        // Also prepare for cache update after commit
-        let code_cache_update = if let Some(encoder) = self.get_or_create_encoder(embedding) {
-            let (code, correction) = encoder.encode_with_correction(vector);
-            let code_key = BinaryCodeCfKey(embedding, vec_id);
-            let code_value = BinaryCodeCfValue {
-                code: code.clone(),
-                correction,
-            };
-            let codes_cf = txn_db
-                .cf_handle(BinaryCodes::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
-            txn.put_cf(
-                &codes_cf,
-                BinaryCodes::key_to_bytes(&code_key),
-                BinaryCodes::value_to_bytes(&code_value),
-            )?;
-            Some((code, correction))
-        } else {
-            None
-        };
-
-        // 8b. Validate/store spec hash (drift detection)
-        // First insert stores the hash; subsequent inserts validate against it
-        {
-            use super::schema::{EmbeddingSpecCfKey, EmbeddingSpecs};
-            use crate::rocksdb::ColumnFamilySerde;
-
-            // Get EmbeddingSpec from storage (has build params)
-            let specs_cf = txn_db
-                .cf_handle(EmbeddingSpecs::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
-            let spec_key = EmbeddingSpecCfKey(embedding);
-            let spec_bytes = txn_db
-                .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
-                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
-            let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
-
-            // Compute current hash
-            let current_hash = embedding_spec.compute_spec_hash();
-
-            // Check if spec_hash already exists
-            let graph_meta_cf = txn_db
-                .cf_handle(GraphMeta::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
-            let hash_key = GraphMetaCfKey::spec_hash(embedding);
-            let hash_key_bytes = GraphMeta::key_to_bytes(&hash_key);
-
-            if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, &hash_key_bytes)? {
-                // Validate against stored hash
-                let stored_value = GraphMeta::value_from_bytes(&hash_key, &stored_bytes)?;
-                if let GraphMetaField::SpecHash(stored_hash) = stored_value.0 {
-                    if stored_hash != current_hash {
-                        return Err(anyhow::anyhow!(
-                            "EmbeddingSpec changed since index build (hash {} != {}). Rebuild required.",
-                            current_hash,
-                            stored_hash
-                        ));
-                    }
-                }
-            } else {
-                // First insert: store the hash
-                let hash_value = GraphMetaCfValue(GraphMetaField::SpecHash(current_hash));
-                txn.put_cf(
-                    &graph_meta_cf,
-                    hash_key_bytes,
-                    GraphMeta::value_to_bytes(&hash_value),
-                )?;
-            }
-        }
-
-        // 9. Build HNSW index (if requested)
-        let nav_cache_update = if build_index {
-            if let Some(index) = self.get_or_create_index(embedding) {
-                Some(insert_in_txn(
-                    &index,
-                    &txn,
-                    &txn_db,
-                    &self.storage,
-                    vec_id,
-                    vector,
-                )?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // 10. Commit transaction
+        // Commit transaction
         txn.commit().context("Failed to commit transaction")?;
 
-        // 11. Apply cache updates AFTER successful commit
-        if let Some(update) = nav_cache_update {
-            update.apply(&self.nav_cache);
-        }
-        if let Some((code, correction)) = code_cache_update {
-            self.code_cache.put(embedding, vec_id, code, correction);
-        }
+        // Apply cache updates AFTER successful commit
+        result.apply_cache_updates(embedding, &self.nav_cache, &self.code_cache);
 
         Ok(vec_id)
     }
@@ -624,209 +473,29 @@ impl Processor {
             return Ok(vec![]);
         }
 
-        // 1. Validate embedding exists and get spec
-        let spec = self
-            .registry
-            .get_by_code(embedding)
-            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding))?;
-
-        let expected_dim = spec.dim() as usize;
-        let storage_type = spec.storage_type();
-
-        // 2. Validate all dimensions upfront (fail fast)
-        for (i, (id, vector)) in vectors.iter().enumerate() {
-            if vector.len() != expected_dim {
-                return Err(anyhow::anyhow!(
-                    "Dimension mismatch for vector {} (id {}): expected {}, got {}",
-                    i,
-                    id,
-                    expected_dim,
-                    vector.len()
-                ));
-            }
-        }
-
-        // 3. Check for duplicate IDs within the batch
-        {
-            use std::collections::HashSet;
-            let mut seen: HashSet<Id> = HashSet::with_capacity(vectors.len());
-            for (id, _) in vectors {
-                if !seen.insert(*id) {
-                    return Err(anyhow::anyhow!(
-                        "Duplicate external ID {} in batch",
-                        id
-                    ));
-                }
-            }
-        }
-
-        // 4. Begin transaction
+        // Begin transaction
         let txn_db = self
             .storage
             .transaction_db()
             .context("Failed to get transaction DB")?;
         let txn = txn_db.transaction();
 
-        // 5. Get column family handles
-        let forward_cf = txn_db
-            .cf_handle(IdForward::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
-        let reverse_cf = txn_db
-            .cf_handle(IdReverse::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-        let vectors_cf = txn_db
-            .cf_handle(Vectors::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-        let specs_cf = txn_db
-            .cf_handle(EmbeddingSpecs::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
-        let graph_meta_cf = txn_db
-            .cf_handle(GraphMeta::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
+        // Delegate to shared ops helper (all validation happens there)
+        let result = super::ops::insert_batch_in_txn(
+            &txn,
+            &txn_db,
+            self,
+            embedding,
+            vectors,
+            build_index,
+        )?;
 
-        // 6. Check for existing external IDs (acquire locks to prevent races)
-        for (id, _) in vectors {
-            let forward_key = IdForwardCfKey(embedding, *id);
-            if txn
-                .get_for_update_cf(&forward_cf, IdForward::key_to_bytes(&forward_key), true)?
-                .is_some()
-            {
-                return Err(anyhow::anyhow!(
-                    "External ID {} already exists in embedding space {}",
-                    id,
-                    embedding
-                ));
-            }
-        }
-
-        // 7. Validate/store spec hash (drift detection) - once per batch
-        // Use txn.get_cf() for snapshot consistency within the transaction
-        {
-            let spec_key = EmbeddingSpecCfKey(embedding);
-            let spec_bytes = txn
-                .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
-                .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
-            let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
-
-            let current_hash = embedding_spec.compute_spec_hash();
-            let hash_key = GraphMetaCfKey::spec_hash(embedding);
-            let hash_key_bytes = GraphMeta::key_to_bytes(&hash_key);
-
-            if let Some(stored_bytes) = txn.get_cf(&graph_meta_cf, &hash_key_bytes)? {
-                // Validate against stored hash
-                let stored_value = GraphMeta::value_from_bytes(&hash_key, &stored_bytes)?;
-                if let GraphMetaField::SpecHash(stored_hash) = stored_value.0 {
-                    if stored_hash != current_hash {
-                        return Err(anyhow::anyhow!(
-                            "EmbeddingSpec changed since index build (hash {} != {}). Rebuild required.",
-                            current_hash,
-                            stored_hash
-                        ));
-                    }
-                }
-            } else {
-                // First insert in this embedding space: store the hash
-                let hash_value = GraphMetaCfValue(GraphMetaField::SpecHash(current_hash));
-                txn.put_cf(
-                    &graph_meta_cf,
-                    hash_key_bytes,
-                    GraphMeta::value_to_bytes(&hash_value),
-                )?;
-            }
-        }
-
-        // 8. Get RaBitQ encoder if enabled
-        let encoder = self.get_or_create_encoder(embedding);
-
-        // 9. Allocate IDs and store all vectors
-        let mut vec_ids = Vec::with_capacity(vectors.len());
-        let mut code_cache_updates = Vec::with_capacity(vectors.len());
-
-        for (id, vector) in vectors {
-            // Allocate internal ID
-            let vec_id = {
-                let allocator = self.get_or_create_allocator(embedding);
-                allocator.allocate_in_txn(&txn, &txn_db, embedding)?
-            };
-            vec_ids.push(vec_id);
-
-            // Store Id -> VecId mapping (IdForward)
-            let forward_key = IdForwardCfKey(embedding, *id);
-            let forward_value = IdForwardCfValue(vec_id);
-            txn.put_cf(
-                &forward_cf,
-                IdForward::key_to_bytes(&forward_key),
-                IdForward::value_to_bytes(&forward_value),
-            )?;
-
-            // Store VecId -> Id mapping (IdReverse)
-            let reverse_key = IdReverseCfKey(embedding, vec_id);
-            let reverse_value = IdReverseCfValue(*id);
-            txn.put_cf(
-                &reverse_cf,
-                IdReverse::key_to_bytes(&reverse_key),
-                IdReverse::value_to_bytes(&reverse_value),
-            )?;
-
-            // Store vector data
-            let vec_key = VectorCfKey(embedding, vec_id);
-            txn.put_cf(
-                &vectors_cf,
-                Vectors::key_to_bytes(&vec_key),
-                Vectors::value_to_bytes_typed(vector, storage_type),
-            )?;
-
-            // Store binary code with ADC correction (if RaBitQ enabled)
-            // Consistent with insert_vector(): fail if encoder exists but CF missing
-            if let Some(ref enc) = encoder {
-                let codes_cf = txn_db
-                    .cf_handle(BinaryCodes::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
-                let (code, correction) = enc.encode_with_correction(vector);
-                let code_key = BinaryCodeCfKey(embedding, vec_id);
-                let code_value = BinaryCodeCfValue {
-                    code: code.clone(),
-                    correction,
-                };
-                txn.put_cf(
-                    &codes_cf,
-                    BinaryCodes::key_to_bytes(&code_key),
-                    BinaryCodes::value_to_bytes(&code_value),
-                )?;
-                code_cache_updates.push((vec_id, code, correction));
-            }
-        }
-
-        // 10. Build HNSW index (if requested) - after all vectors are stored
-        // This allows better graph connectivity as all vectors are visible
-        let mut nav_cache_updates = Vec::new();
-        if build_index {
-            if let Some(index) = self.get_or_create_index(embedding) {
-                for (i, vec_id) in vec_ids.iter().enumerate() {
-                    let vector = &vectors[i].1;
-                    let update = insert_in_txn(
-                        &index,
-                        &txn,
-                        &txn_db,
-                        &self.storage,
-                        *vec_id,
-                        vector,
-                    )?;
-                    nav_cache_updates.push(update);
-                }
-            }
-        }
-
-        // 11. Commit transaction
+        // Commit transaction
         txn.commit().context("Failed to commit batch transaction")?;
 
-        // 12. Apply cache updates AFTER successful commit
-        for update in nav_cache_updates {
-            update.apply(&self.nav_cache);
-        }
-        for (vec_id, code, correction) in code_cache_updates {
-            self.code_cache.put(embedding, vec_id, code, correction);
-        }
+        // Apply cache updates AFTER successful commit
+        let vec_ids = result.vec_ids.clone();
+        result.apply_cache_updates(embedding, &self.nav_cache, &self.code_cache);
 
         Ok(vec_ids)
     }
@@ -875,77 +544,21 @@ impl Processor {
         embedding: EmbeddingCode,
         id: Id,
     ) -> Result<Option<VecId>> {
-        // 1. Begin transaction
+        // Begin transaction
         let txn_db = self
             .storage
             .transaction_db()
             .context("Failed to get transaction DB")?;
         let txn = txn_db.transaction();
 
-        // 2. Look up VecId from external Id (with lock to prevent races)
-        let forward_cf = txn_db
-            .cf_handle(IdForward::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
-        let forward_key = IdForwardCfKey(embedding, id);
+        // Delegate to shared ops helper (soft-delete logic happens there)
+        let result = super::ops::delete_vector_in_txn(&txn, &txn_db, self, embedding, id)?;
 
-        let vec_id = match txn.get_for_update_cf(
-            &forward_cf,
-            IdForward::key_to_bytes(&forward_key),
-            true,
-        )? {
-            Some(bytes) => IdForward::value_from_bytes(&bytes)?.0,
-            None => return Ok(None), // Already deleted or never existed
-        };
-
-        // 3. Delete IdForward mapping
-        txn.delete_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))?;
-
-        // 4. Delete IdReverse mapping
-        let reverse_key = IdReverseCfKey(embedding, vec_id);
-        let reverse_cf = txn_db
-            .cf_handle(IdReverse::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
-        txn.delete_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))?;
-
-        // Check if HNSW indexing is enabled - affects cleanup strategy
-        let hnsw_enabled = self.hnsw_config.enabled;
-
-        // 5. Delete vector data (only if HNSW disabled)
-        // If HNSW is enabled, keep vector data for distance calculations
-        // during search traversal (entry point or neighbor edges may reference it)
-        let vec_key = VectorCfKey(embedding, vec_id);
-        let vectors_cf = txn_db
-            .cf_handle(Vectors::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-        if !hnsw_enabled {
-            txn.delete_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?;
-        }
-
-        // 6. Delete binary code (only if RaBitQ enabled AND HNSW disabled)
-        if self.rabitq_enabled() && !hnsw_enabled {
-            let code_key = BinaryCodeCfKey(embedding, vec_id);
-            let codes_cf = txn_db
-                .cf_handle(BinaryCodes::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
-            txn.delete_cf(&codes_cf, BinaryCodes::key_to_bytes(&code_key))?;
-        }
-
-        // 7. Return VecId to free list (only if HNSW disabled)
-        // If HNSW is enabled, we cannot reuse the VecId because existing
-        // HNSW edges still reference it. Reuse would corrupt graph semantics.
-        if !hnsw_enabled {
-            let allocator = self.get_or_create_allocator(embedding);
-            allocator.free_in_txn(&txn, &txn_db, embedding, vec_id)?;
-        }
-
-        // 8. Commit transaction
+        // Commit transaction
         txn.commit().context("Failed to commit delete transaction")?;
 
-        // Note: When HNSW is enabled, this is a "soft delete" - ID mappings
-        // are removed but vector data is kept and VecId is not reused.
-        // Full cleanup requires index rebuild or compaction (future work).
-
-        Ok(Some(vec_id))
+        // Return the vec_id if deletion occurred
+        Ok(result.vec_id())
     }
 
     /// Search for nearest neighbors in an embedding space.

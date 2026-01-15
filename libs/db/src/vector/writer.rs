@@ -30,7 +30,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use super::hnsw::{insert_in_txn, CacheUpdate};
+use super::hnsw::CacheUpdate;
 use super::mutation::{FlushMarker, Mutation};
 use super::processor::Processor;
 
