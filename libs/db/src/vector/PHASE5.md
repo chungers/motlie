@@ -1937,6 +1937,13 @@ No further issues found in this pass.
 
 ---
 
+**Additional Feedback (public API clarity):**
+
+- `UpdateEdges` and `UpdateGraphMeta` are public mutation variants but are currently no-ops (log + return). For external users, this is confusing and implies repair capabilities that don’t exist.
+- **Recommendation:** remove or hide these variants from the public `Mutation` API until there is a validated repair workflow. Document that **repair = rebuild** to avoid partial graph drift/corruption.
+
+---
+
 **API Direction (agreed): Transaction-only public surface**
 
 - **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
