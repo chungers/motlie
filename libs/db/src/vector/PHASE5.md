@@ -1970,6 +1970,12 @@ Even as `pub(crate)`, these variants are still no-ops and can be accidentally us
 
 ---
 
+**Update (validation unified):**
+
+- **Resolved:** `add_embedding_spec_in_txn()` now validates via `EmbeddingBuilder::validate()` for a single source of truth.
+
+---
+
 **API Direction (agreed): Transaction-only public surface**
 
 - **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
@@ -2143,6 +2149,12 @@ Processor-backed reader/consumer is still missing. Recommend adding a `spawn_que
 - **SearchKNN is the only public search API; it must enforce SpecHash drift checks.**  
   `SearchKNN` dispatch calls `Processor::search()` which does not validate SpecHash (only `search_with_config()` does). This allows searching against a stale index without error.  
   - **Fix:** either add SpecHash validation to `Processor::search()` or route `SearchKNN` to `search_with_config()` with a derived `SearchConfig` from the registry spec.
+
+---
+
+**Update (SpecHash enforced in search):**
+
+- **Resolved:** `Processor::search()` now validates SpecHash against stored graph metadata, closing the drift gap for public SearchKNN.
 
 ---
 
