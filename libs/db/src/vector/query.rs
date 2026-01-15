@@ -23,7 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::oneshot;
 
 use super::embedding::Embedding;
@@ -627,7 +627,8 @@ impl SearchKNN {
 /// Unlike point lookups that only need Storage, SearchKNN requires a Processor
 /// for HNSW index access. The dispatch wraps the query along with a reference
 /// to the processor.
-pub struct SearchKNNDispatch {
+/// Internal dispatch wrapper - users should use `SearchKNN::run()` instead.
+pub(crate) struct SearchKNNDispatch {
     pub(crate) params: SearchKNN,
     pub(crate) timeout: Duration,
     pub(crate) result_tx: oneshot::Sender<Result<Vec<SearchResult>>>,
@@ -676,6 +677,45 @@ impl QueryProcessor for SearchKNNDispatch {
         // Use processor directly instead of storage
         let result = self.params.execute_with_processor(&self.processor);
         self.send_result(result);
+    }
+}
+
+// ============================================================================
+// Runnable Implementation for SearchKNN
+// ============================================================================
+
+/// Runnable implementation for SearchKNN with SearchReader.
+///
+/// This allows the ergonomic pattern:
+/// ```rust,ignore
+/// let results = SearchKNN::new(&embedding, query, 10)
+///     .with_ef(100)
+///     .run(&search_reader, timeout)
+///     .await?;
+/// ```
+#[async_trait::async_trait]
+impl crate::reader::Runnable<super::reader::SearchReader> for SearchKNN {
+    type Output = Vec<SearchResult>;
+
+    async fn run(
+        self,
+        reader: &super::reader::SearchReader,
+        timeout: Duration,
+    ) -> Result<Self::Output> {
+        let (dispatch, rx) =
+            SearchKNNDispatch::new(self, timeout, reader.processor().clone());
+
+        reader
+            .reader()
+            .send_query(Query::SearchKNN(dispatch))
+            .await
+            .context("Failed to send SearchKNN query")?;
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("SearchKNN query channel closed")),
+            Err(_) => Err(anyhow::anyhow!("SearchKNN query timeout after {:?}", timeout)),
+        }
     }
 }
 
