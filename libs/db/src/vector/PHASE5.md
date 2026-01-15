@@ -456,6 +456,53 @@ Overall, the implementation is solid: validation is up-front, all writes are wit
 
 Once these are addressed, Task 5.1 will be complete from a correctness perspective.
 
+### Resolution (Commit `6ee252b`)
+
+Both issues have been fixed:
+
+1. **IdAllocator free bitmap persistence - FIXED**
+
+   Refactored `allocate_in_txn()` to handle allocation and persistence atomically:
+   ```rust
+   // BEFORE: Only persisted next_id
+   let id = self.allocate();  // May remove from bitmap
+   // Persist only next_id...
+
+   // AFTER: Inline allocation + conditional bitmap persistence
+   let (id, reused) = {
+       let mut free = self.free_ids.lock().unwrap();
+       if let Some(freed_id) = free.iter().next() {
+           free.remove(freed_id);
+           (freed_id, true)
+       } else {
+           (self.next_id.fetch_add(1, Ordering::Relaxed), false)
+       }
+   };
+   // Persist next_id...
+   if reused {
+       // Also persist free bitmap
+   }
+   ```
+
+2. **Duplicate external ID check - FIXED**
+
+   Added check before ID allocation in `insert_vector()`:
+   ```rust
+   // Check if external ID already exists (avoid duplicates)
+   let forward_cf = txn_db.cf_handle(IdForward::CF_NAME)?;
+   let forward_key = IdForwardCfKey(embedding, id);
+   if txn_db.get_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))?.is_some() {
+       return Err(anyhow::anyhow!(
+           "External ID {} already exists in embedding space {}",
+           id, embedding
+       ));
+   }
+   ```
+
+   Added test `test_insert_vector_duplicate_id` to verify the behavior.
+
+All 499 tests pass. Task 5.1 is now complete from a correctness perspective.
+
 ---
 
 ## Remaining Phase 5 Tasks
