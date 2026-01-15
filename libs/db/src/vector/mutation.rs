@@ -103,6 +103,45 @@ pub struct AddEmbeddingSpec {
     pub rabitq_seed: u64,
 }
 
+impl AddEmbeddingSpec {
+    /// Validate build parameters.
+    ///
+    /// Ensures:
+    /// - `hnsw_m >= 2`: Required for valid `m_l = 1/ln(m)` computation
+    /// - `hnsw_ef_construction >= 1`: Required for valid HNSW config
+    /// - `rabitq_bits ∈ {1, 2, 4}`: Only supported quantization levels
+    ///
+    /// This validation mirrors `EmbeddingBuilder::validate()` to ensure
+    /// consistency between the builder API and mutation path.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        // HNSW M must be >= 2 for valid m_l computation
+        if self.hnsw_m < 2 {
+            return Err(anyhow::anyhow!(
+                "hnsw_m must be >= 2 (got {}). Values <= 1 cause invalid layer assignment (m_l = 1/ln(m)).",
+                self.hnsw_m
+            ));
+        }
+
+        // HNSW ef_construction must be >= 1
+        if self.hnsw_ef_construction < 1 {
+            return Err(anyhow::anyhow!(
+                "hnsw_ef_construction must be >= 1 (got {})",
+                self.hnsw_ef_construction
+            ));
+        }
+
+        // RaBitQ only supports 1, 2, or 4 bits per dimension
+        if self.rabitq_bits != 1 && self.rabitq_bits != 2 && self.rabitq_bits != 4 {
+            return Err(anyhow::anyhow!(
+                "rabitq_bits must be 1, 2, or 4 (got {})",
+                self.rabitq_bits
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 impl From<AddEmbeddingSpec> for Mutation {
     fn from(op: AddEmbeddingSpec) -> Self {
         Mutation::AddEmbeddingSpec(op)
