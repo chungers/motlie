@@ -738,28 +738,46 @@ impl Processor {
             .get_by_code(embedding_code)
             .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding_code))?;
 
-        // 2. Validate dimension
+        // 2. Validate SearchConfig embedding matches registry spec
+        // This prevents stale or forged configs from being used
+        let config_embedding = config.embedding();
+        if config_embedding.dim() != spec.dim() {
+            return Err(anyhow::anyhow!(
+                "SearchConfig embedding dimension mismatch: config has {}, registry has {}",
+                config_embedding.dim(),
+                spec.dim()
+            ));
+        }
+        if config_embedding.distance() != spec.distance() {
+            return Err(anyhow::anyhow!(
+                "SearchConfig embedding distance mismatch: config has {:?}, registry has {:?}",
+                config_embedding.distance(),
+                spec.distance()
+            ));
+        }
+
+        // 3. Validate query dimension
         if query.len() != spec.dim() as usize {
             return Err(anyhow::anyhow!(
-                "Dimension mismatch: expected {}, got {}",
+                "Query dimension mismatch: expected {}, got {}",
                 spec.dim(),
                 query.len()
             ));
         }
 
-        // 3. Check HNSW is enabled
+        // 4. Check HNSW is enabled
         if !self.hnsw_config.enabled {
             return Err(anyhow::anyhow!(
                 "HNSW indexing is disabled - search not available"
             ));
         }
 
-        // 4. Get HNSW index
+        // 5. Get HNSW index
         let index = self
             .get_or_create_index(embedding_code)
             .ok_or_else(|| anyhow::anyhow!("Failed to get HNSW index"))?;
 
-        // 5. Dispatch based on strategy
+        // 6. Dispatch based on strategy
         let k = config.k();
         let ef = config.ef();
         let overfetch_k = k * 2;
@@ -793,7 +811,7 @@ impl Processor {
             }
         };
 
-        // 6. Filter deleted vectors using batched IdReverse lookup
+        // 7. Filter deleted vectors using batched IdReverse lookup
         let txn_db = self.storage.transaction_db()?;
         let reverse_cf = txn_db
             .cf_handle(IdReverse::CF_NAME)
