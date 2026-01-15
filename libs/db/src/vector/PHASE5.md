@@ -1956,6 +1956,12 @@ Even as `pub(crate)`, these variants are still no-ops and can be accidentally us
 
 ---
 
+**Update (no-op mutations removed):**
+
+- **Resolved:** `UpdateEdges`/`UpdateGraphMeta` and related enums removed from `Mutation`. Public and internal mutation surfaces now align with “repair = rebuild,” reducing confusion and eliminating dead paths.
+
+---
+
 **API Direction (agreed): Transaction-only public surface**
 
 - **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
