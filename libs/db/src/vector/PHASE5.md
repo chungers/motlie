@@ -1270,6 +1270,77 @@ Implementation will proceed with schema changes to EmbeddingSpec and GraphMeta.
 
 ---
 
+## CODEX Review: Workflow Consistency and Config Drift (post-75930c9)
+
+This pass checks the workflow: **register embedding → build index (insert) → search** and whether build/search parameters remain consistent.
+
+**What looks good now**
+
+- **Spec hash drift detection is in place.** `EmbeddingSpec::compute_spec_hash()` includes model + build params, stored on first insert, validated on later inserts and searches. This is the right guardrail for spec changes once data exists.
+- **SearchConfig validation is stronger.** `search_with_config()` now validates embedding code + dimension + distance against registry, and checks `SpecHash` vs `EmbeddingSpecs` in RocksDB. This addresses stale/forged configs and post-build drift.
+
+**Gaps: build parameters are persisted but not actually used**
+
+Right now, the build/search runtime still uses **global configs**, not the persisted `EmbeddingSpec` fields:
+
+- `Processor::get_or_create_index()` builds HNSW with `self.hnsw_config` only. It ignores `EmbeddingSpec.hnsw_m` and `EmbeddingSpec.hnsw_ef_construction`.
+- `Processor::get_or_create_encoder()` builds RaBitQ with `self.rabitq_config` only. It ignores `EmbeddingSpec.rabitq_bits` and `EmbeddingSpec.rabitq_seed`.
+
+That means the **SpecHash can match while the index/encoder is built with different parameters** (i.e., config drift can still happen, just not *spec* drift). This is the core correctness issue for the workflow: the persisted spec is not yet the source of truth for build/search behavior.
+
+**Implications**
+
+- A cluster-wide config change (HNSW/RaBitQ) silently changes behavior while SpecHash remains valid.
+- Search may run with a `SearchStrategy` consistent with the embedding but inconsistent with the actual index or binary codes on disk.
+- Future migrations or rebuilds cannot be reliably compared to stored `SpecHash` if the runtime ignores it.
+
+**Proposed fix (Phase 5 follow-up)**
+
+1) **Use EmbeddingSpec to build HNSW and RaBitQ.**
+   - When creating HNSW `Config`, override `m` and `ef_construction` from `EmbeddingSpec`.
+   - When creating RaBitQ encoder, construct from `EmbeddingSpec.rabitq_bits` + `rabitq_seed` (and make `rabitq_config.enabled` gating explicit).
+
+2) **Add API surface to set build params at registration time.**
+   - `EmbeddingBuilder` should accept `hnsw_m`, `hnsw_ef_construction`, `rabitq_bits`, `rabitq_seed`.
+   - `EmbeddingRegistry::register()` should persist those values instead of hard-coded defaults (currently `16/200/1/42`).
+   - Without this, **SpecHash locks in defaults** on first insert and users cannot tune before building index.
+
+3) **SpecHash timing: consider storing on first index build, not first insert.**
+   - Today: SpecHash is set on first insert even if `build_index=false`.
+   - Consequence: users cannot adjust build params after inserting raw vectors but before building HNSW.
+   - Option A (strict): keep current behavior (spec immutable once data exists). If so, document it.
+   - Option B (flex): set SpecHash only when HNSW is built the first time; allow spec tweaks before the first build.
+
+4) **Validate storage_type too.**
+   - `search_with_config()` checks dim + distance but not `storage_type`.
+   - If `Embedding` in SearchConfig differs (e.g., stale cache), we should reject to avoid searching with the wrong representation.
+
+**API design suggestion (search constrains to build spec)**
+
+Phase 1 (safe, no surprises):
+```rust
+// New constructor that pulls spec from registry and derives strategy.
+let config = SearchConfig::from_registry(&registry, embedding_code, k)
+    .with_ef(200)
+    .with_rerank_factor(4);
+// Strategy is auto-selected and cannot be overridden here.
+```
+
+Phase 2 (allow overrides with validation):
+```rust
+let config = SearchConfig::from_registry(&registry, embedding_code, k)
+    .prefer_exact() // Allowed, but validated against EmbeddingSpec + SpecHash
+    .with_ef(200);
+```
+
+This keeps **SearchStrategy constrained by how the index was built**, while still allowing safe tuning.
+
+**Bottom line**
+
+Task 5.6 added the necessary **persisted spec + drift detection**, but **the runtime still ignores the spec** for index/encoder construction. This is the next correctness gap to close before the workflow can be considered fully consistent.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
