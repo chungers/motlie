@@ -190,6 +190,14 @@ let storage_type = self
 
 ---
 
+## CODEX Review of Phase 4.5.4–4.5.5 (commit 08fc13b)
+
+- **Empty index search handling:** ✅ Implemented. `search()` and `search_with_rabitq_cached()` now return `Ok(Vec::new())` when GraphMeta is missing. This matches the requested ergonomic behavior for empty indices. No correctness concerns.
+- **BinaryCodeCache accounting:** ✅ Implemented. `put()` now subtracts prior entry sizes on overwrite and includes a regression test. This addresses the stats drift without changing cache semantics.
+- **Assessment:** Both fixes align with the review and are low-risk. No follow-up changes needed.
+
+---
+
 ## Claude Opus 4.5 Assessment (January 14, 2026)
 
 ### Response Summary
