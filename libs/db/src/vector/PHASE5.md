@@ -1902,6 +1902,20 @@ Consider refactoring mutation execution to call shared internal helpers that inc
 
 ---
 
+**Update (post ops/ refactor):**
+
+The shared ops helpers now centralize validation and soft-delete behavior (good), but two issues remain:
+
+1) **Registry update uses wrong storage_type (correctness).**  
+   `add_embedding_spec_in_txn()` registers embeddings with `VectorElementType::default()` instead of `spec.storage_type`. This can cause **F16 embeddings to be treated as F32** by the registry, leading to incorrect serialization and search behavior.  
+   - Fix: pass `spec.storage_type` into `register_from_db`.
+
+2) **BinaryCodeCache still not updated in mutation path (performance).**  
+   `InsertVector`/`InsertVectorBatch` mutation executors discard `code_cache_update` from ops results. Writer applies only `CacheUpdate` (nav cache).  
+   - Fix: extend the cache update type or add a post-commit hook to apply `code_cache_update(s)` when mutations run through `Writer`.
+
+---
+
 **API Direction (agreed): Transaction-only public surface**
 
 - **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
@@ -2062,6 +2076,11 @@ All 520 tests pass after implementing Tasks 5.6 and 5.7.
 **Recommendation**
 
 Document how callers should obtain/hold a `Processor` for SearchKNN (or add a dedicated `SearchReader` that bundles Storage + Processor).
+
+---
+
+**Update (post ops/ refactor):**  
+Processor-backed reader/consumer is still missing. Recommend adding a `spawn_query_consumer_with_processor(...)` or a `SearchReader` wrapper so SearchKNN doesn’t require ad-hoc Processor plumbing at call sites.
 
 ---
 
