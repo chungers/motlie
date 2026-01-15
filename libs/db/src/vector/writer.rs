@@ -310,13 +310,17 @@ impl Consumer {
             }
 
             Mutation::InsertVector(op) => {
-                // 0. Look up embedding spec to get storage type
+                // 0. Look up embedding spec to get storage type (hard-fail if not registered)
+                // This prevents silent data corruption from storage type mismatch
                 let storage_type = self
                     .processor
                     .registry()
                     .get_by_code(op.embedding)
-                    .map(|emb| emb.storage_type())
-                    .unwrap_or_default(); // F32 fallback for unknown embeddings
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "Embedding {} not registered; cannot determine storage type",
+                        op.embedding
+                    ))?
+                    .storage_type();
 
                 // 1. Allocate vec_id
                 let vec_id = {

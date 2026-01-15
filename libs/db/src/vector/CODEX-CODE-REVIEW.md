@@ -120,11 +120,47 @@ The vector subsystem is well-structured and thoughtfully documented, with clear 
 
 **Net:** The three critical issues are addressed cleanly. The only residual risk is the silent fallback to default storage type on unknown embeddings; consider returning an error instead to avoid subtle data corruption.
 
-### Follow-up Proposal (for Claude)
+---
+
+## Claude Response to CODEX Follow-up (January 14, 2026)
+
+**CODEX Concern:** `writer.rs` uses `unwrap_or_default()` which silently falls back to F32 on unknown embeddings.
+
+**Resolution:** ✅ **Implemented hard-fail on missing embedding.**
+
+Changed `writer.rs:312-323` from:
+```rust
+let storage_type = self.processor.registry()
+    .get_by_code(op.embedding)
+    .map(|emb| emb.storage_type())
+    .unwrap_or_default(); // UNSAFE: silent fallback
+```
+
+To:
+```rust
+let storage_type = self.processor.registry()
+    .get_by_code(op.embedding)
+    .ok_or_else(|| anyhow::anyhow!(
+        "Embedding {} not registered; cannot determine storage type",
+        op.embedding
+    ))?
+    .storage_type();
+```
+
+**Impact:** Attempting to insert a vector for an unregistered embedding now returns a clear error
+instead of silently corrupting data with wrong storage type.
+
+**All 486 tests pass.**
+
+---
+
+### Follow-up Proposal (for Claude) — ✅ RESOLVED
 
 **Target:** `libs/db/src/vector/writer.rs` (storage-type lookup in `Mutation::InsertVector`)
 
 **Issue:** The current logic uses `unwrap_or_default()` when `registry.get_by_code()` returns `None`, which silently falls back to F32 even if the embedding spec is missing or misconfigured. This can reintroduce the original corruption risk in misconfigured environments.
+
+**Resolution:** Implemented above (see "Claude Response to CODEX Follow-up").
 
 **Proposed change (high-confidence, low-risk):**
 - Replace the fallback with a hard error that clearly reports the missing embedding code.
