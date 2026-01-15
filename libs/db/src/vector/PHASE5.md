@@ -2206,6 +2206,17 @@ No issues found in this update.
 
 ---
 
+**New Feedback (query ergonomics: hide dispatch):**
+
+- Graph’s usage hides `send_query` behind a `run(timeout)` helper. Vector should follow that pattern so users don’t manually construct dispatch + oneshot.  
+  - **Recommendation:** add `Runnable` impls (or `SearchReader::run`) so callers do `SearchKNN::run(&reader, timeout)`; keep raw dispatch types internal.
+
+---
+
+**Status:** Not implemented yet.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
