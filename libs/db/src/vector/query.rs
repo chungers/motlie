@@ -26,11 +26,13 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
+use super::embedding::Embedding;
 use super::processor::{Processor, SearchResult};
 use super::schema::{
     EmbeddingCode, IdForward, IdForwardCfKey, IdReverse, IdReverseCfKey, VecId, VectorCfKey,
     Vectors,
 };
+use super::search::SearchConfig;
 use super::Storage;
 use crate::rocksdb::ColumnFamily;
 use crate::Id;
@@ -92,8 +94,11 @@ impl std::fmt::Display for Query {
             ),
             Query::SearchKNN(q) => write!(
                 f,
-                "SearchKNN: embedding={}, k={}, ef={}",
-                q.params.embedding, q.params.k, q.params.ef
+                "SearchKNN: embedding={}, k={}, ef={}, exact={}",
+                q.params.embedding.code(),
+                q.params.k,
+                q.params.ef,
+                q.params.exact
             ),
         }
     }
@@ -516,49 +521,104 @@ impl QueryProcessor for ResolveIdsDispatch {
 /// This query performs approximate nearest neighbor search using the HNSW
 /// graph index. Requires a Processor instance for execution.
 ///
+/// # Strategy Selection
+///
+/// By default, the search strategy is auto-selected based on the embedding's
+/// distance metric:
+/// - Cosine → RaBitQ (ADC approximates angular distance)
+/// - L2/DotProduct → Exact
+///
+/// Use `.exact()` to force exact distance computation regardless of metric.
+///
 /// # Example
 ///
 /// ```rust,ignore
-/// let query = SearchKNN::new(embedding_code, query_vector, 10)
-///     .with_ef(100);
-/// let results = query.execute_with_processor(&processor).await?;
+/// // Auto-select strategy based on distance metric
+/// let results = SearchKNN::new(&embedding, query_vector, 10)
+///     .with_ef(100)
+///     .execute_with_processor(&processor)?;
+///
+/// // Force exact search (bypass RaBitQ)
+/// let results = SearchKNN::new(&embedding, query_vector, 10)
+///     .exact()
+///     .execute_with_processor(&processor)?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct SearchKNN {
-    /// Embedding space code
-    pub embedding: EmbeddingCode,
+    /// Embedding space specification (owned, cloned from reference)
+    pub embedding: Embedding,
     /// Query vector
     pub query: Vec<f32>,
     /// Number of results to return
     pub k: usize,
     /// Search expansion factor (higher = more accurate, slower)
     pub ef: usize,
+    /// Force exact distance computation (bypass RaBitQ even for Cosine)
+    pub exact: bool,
+    /// Re-rank factor for RaBitQ mode (ignored when exact=true)
+    pub rerank_factor: usize,
 }
 
 impl SearchKNN {
     /// Create a new SearchKNN query.
-    pub fn new(embedding: EmbeddingCode, query: Vec<f32>, k: usize) -> Self {
+    ///
+    /// Takes a reference to Embedding and clones it internally.
+    /// This ensures the caller retains their reference while SearchKNN
+    /// owns its copy (required for channel dispatch).
+    pub fn new(embedding: &Embedding, query: Vec<f32>, k: usize) -> Self {
         Self {
-            embedding,
+            embedding: embedding.clone(),
             query,
             k,
-            ef: 100, // Default ef
+            ef: 100,           // sensible default
+            exact: false,      // auto-select strategy
+            rerank_factor: 10, // 10x re-ranking for ~90% recall
         }
     }
 
     /// Set the search expansion factor.
+    ///
+    /// Higher ef = better recall but slower search. Typical values: 50-200.
     pub fn with_ef(mut self, ef: usize) -> Self {
         self.ef = ef;
         self
     }
 
+    /// Force exact distance computation.
+    ///
+    /// When set, bypasses RaBitQ approximation even for Cosine distance.
+    /// Use this when maximum accuracy is required at the cost of speed.
+    pub fn exact(mut self) -> Self {
+        self.exact = true;
+        self
+    }
+
+    /// Set the re-rank factor for RaBitQ mode.
+    ///
+    /// Number of candidates to re-rank = k * rerank_factor.
+    /// Higher factor = better recall but more I/O. Typical values: 4-20.
+    /// Ignored when `exact=true`.
+    pub fn with_rerank_factor(mut self, factor: usize) -> Self {
+        self.rerank_factor = factor;
+        self
+    }
+
     /// Execute with a Processor (for direct execution without channel).
+    ///
+    /// Strategy selection:
+    /// - If `exact=true`: Uses `processor.search()` with exact distances
+    /// - If `exact=false`: Constructs `SearchConfig` for auto-strategy selection
     pub fn execute_with_processor(&self, processor: &Processor) -> Result<Vec<SearchResult>> {
-        let embedding = processor
-            .registry()
-            .get_by_code(self.embedding)
-            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", self.embedding))?;
-        processor.search(&embedding, &self.query, self.k, self.ef)
+        if self.exact {
+            // Exact search - always use precise distance computation
+            processor.search(&self.embedding, &self.query, self.k, self.ef)
+        } else {
+            // Auto-select strategy via SearchConfig
+            let config = SearchConfig::new(self.embedding.clone(), self.k)
+                .with_ef(self.ef)
+                .with_rerank_factor(self.rerank_factor);
+            processor.search_with_config(&config, &self.query)
+        }
     }
 }
 

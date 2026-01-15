@@ -117,8 +117,12 @@ pub use mutation::{
     AddEmbeddingSpec, DeleteVector, FlushMarker, InsertVector, InsertVectorBatch, Mutation,
 };
 pub use writer::{
-    create_writer, spawn_consumer as spawn_mutation_consumer, Consumer as MutationConsumer,
-    MutationCacheUpdate, MutationExecutor, MutationProcessor, Writer, WriterConfig,
+    create_writer,
+    spawn_consumer as spawn_mutation_consumer,
+    spawn_mutation_consumer_with_storage,
+    spawn_mutation_consumer_with_storage_autoreg,
+    Consumer as MutationConsumer, MutationCacheUpdate, MutationExecutor, MutationProcessor, Writer,
+    WriterConfig,
 };
 
 // Query types and infrastructure (following graph::query pattern)
@@ -127,10 +131,13 @@ pub use query::{
     QueryWithTimeout, ResolveIds, SearchKNN,
 };
 pub use reader::{
-    create_reader, create_search_reader, spawn_consumer as spawn_query_consumer,
+    create_reader, create_search_reader,
+    spawn_consumer as spawn_query_consumer,
     spawn_consumer_with_processor as spawn_query_consumer_with_processor,
     spawn_consumers as spawn_query_consumers,
     spawn_consumers_with_processor as spawn_query_consumers_with_processor,
+    spawn_query_consumers_with_storage,
+    spawn_query_consumers_with_storage_autoreg,
     Consumer as QueryConsumer, ProcessorConsumer as ProcessorQueryConsumer, Reader, ReaderConfig,
     SearchReader,
 };

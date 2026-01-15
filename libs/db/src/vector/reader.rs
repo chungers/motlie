@@ -302,6 +302,47 @@ pub fn spawn_consumers_with_processor(
         .collect()
 }
 
+/// Spawn multiple Processor-backed query consumers with storage and registry.
+///
+/// This is the recommended way to set up query handling - it constructs
+/// the internal Processor automatically, hiding the implementation detail.
+///
+/// # Arguments
+///
+/// * `receiver` - The flume receiver from `create_reader()` or `create_search_reader()`
+/// * `config` - Reader configuration
+/// * `storage` - Vector storage instance
+/// * `registry` - Embedding registry (typically from `storage.cache().clone()`)
+/// * `count` - Number of consumers to spawn
+///
+/// # Returns
+///
+/// Vector of JoinHandles for all spawned consumers.
+pub fn spawn_query_consumers_with_storage(
+    receiver: flume::Receiver<Query>,
+    config: ReaderConfig,
+    storage: Arc<super::Storage>,
+    registry: Arc<super::registry::EmbeddingRegistry>,
+    count: usize,
+) -> Vec<tokio::task::JoinHandle<Result<()>>> {
+    let processor = Arc::new(Processor::new(storage, registry));
+    spawn_consumers_with_processor(receiver, config, processor, count)
+}
+
+/// Spawn multiple query consumers with storage and auto-created registry.
+///
+/// Convenience function for quick setup - creates the embedding registry
+/// from storage automatically.
+pub fn spawn_query_consumers_with_storage_autoreg(
+    receiver: flume::Receiver<Query>,
+    config: ReaderConfig,
+    storage: Arc<super::Storage>,
+    count: usize,
+) -> Vec<tokio::task::JoinHandle<Result<()>>> {
+    let registry = storage.cache().clone();
+    spawn_query_consumers_with_storage(receiver, config, storage, registry, count)
+}
+
 // ============================================================================
 // SearchReader - High-level API for SearchKNN
 // ============================================================================
@@ -339,9 +380,13 @@ impl SearchReader {
         Self { reader, processor }
     }
 
-    /// Perform K-nearest neighbor search.
+    /// Perform K-nearest neighbor search with auto-strategy selection.
     ///
-    /// This is the ergonomic API for SearchKNN - no dispatch construction needed.
+    /// Strategy is auto-selected based on embedding's distance metric:
+    /// - Cosine → RaBitQ (fast approximate search with re-ranking)
+    /// - L2/DotProduct → Exact
+    ///
+    /// Use `search_knn_exact()` to force exact distance computation.
     ///
     /// # Arguments
     ///
@@ -362,7 +407,7 @@ impl SearchReader {
         ef: usize,
         timeout: Duration,
     ) -> Result<Vec<SearchResult>> {
-        let params = SearchKNN::new(embedding.code(), query, k).with_ef(ef);
+        let params = SearchKNN::new(embedding, query, k).with_ef(ef);
         let (dispatch, rx) = SearchKNNDispatch::new(params, timeout, self.processor.clone());
 
         self.reader
@@ -375,41 +420,41 @@ impl SearchReader {
             .context("SearchKNN query failed")
     }
 
-    /// Perform search with full configuration control.
+    /// Perform K-nearest neighbor search with exact distance computation.
     ///
-    /// Unlike `search_knn()` which always uses exact HNSW search, this method
-    /// respects the `SearchConfig` strategy selection (Exact vs RaBitQ).
+    /// Forces exact distance computation regardless of embedding's distance metric.
+    /// Use this when maximum accuracy is required at the cost of speed.
     ///
     /// # Arguments
     ///
-    /// * `config` - Search configuration including strategy, k, ef, rerank_factor
-    /// * `query` - Query vector (must match embedding dimension in config)
+    /// * `embedding` - Embedding space reference
+    /// * `query` - Query vector
+    /// * `k` - Number of results to return
+    /// * `ef` - Search expansion factor (higher = more accurate, slower)
+    /// * `timeout` - Query timeout
     ///
     /// # Returns
     ///
     /// Vector of `SearchResult` structs, sorted by distance (ascending).
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// // RaBitQ search (auto-selected for Cosine embeddings)
-    /// let config = SearchConfig::new(embedding.clone(), 10)
-    ///     .with_ef(100)
-    ///     .with_rerank_factor(10);
-    /// let results = search_reader.search_with_config(&config, &query)?;
-    ///
-    /// // Exact search (force exact even for Cosine)
-    /// let config = SearchConfig::new(embedding.clone(), 10)
-    ///     .exact()
-    ///     .with_ef(100);
-    /// let results = search_reader.search_with_config(&config, &query)?;
-    /// ```
-    pub fn search_with_config(
+    pub async fn search_knn_exact(
         &self,
-        config: &super::search::SearchConfig,
-        query: &[f32],
+        embedding: &Embedding,
+        query: Vec<f32>,
+        k: usize,
+        ef: usize,
+        timeout: Duration,
     ) -> Result<Vec<SearchResult>> {
-        self.processor.search_with_config(config, query)
+        let params = SearchKNN::new(embedding, query, k).with_ef(ef).exact();
+        let (dispatch, rx) = SearchKNNDispatch::new(params, timeout, self.processor.clone());
+
+        self.reader
+            .send_query(Query::SearchKNN(dispatch))
+            .await
+            .context("Failed to send SearchKNN query")?;
+
+        rx.await
+            .context("SearchKNN query was cancelled")?
+            .context("SearchKNN query failed")
     }
 
     /// Get the underlying reader for other query types.
