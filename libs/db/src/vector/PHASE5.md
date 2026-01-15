@@ -2197,6 +2197,15 @@ Processor-backed reader/consumer is still missing. Recommend adding a `spawn_que
 
 ---
 
+**Update (SearchKNN strategy + storage-based consumers):**
+
+- **Resolved:** `SearchKNN` now owns `Embedding` and supports auto strategy selection with `.exact()` override; `SearchReader::search_knn()` auto-selects RaBitQ for cosine and `search_knn_exact()` forces exact.  
+- **Resolved:** storage-based mutation and query consumer helpers were added; processor-exposing mutation consumer is now `pub(crate)`.
+
+No issues found in this update.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
