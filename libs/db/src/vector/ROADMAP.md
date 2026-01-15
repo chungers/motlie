@@ -1,9 +1,9 @@
 # Vector Search Implementation Roadmap
 
 **Author:** David Chung + Claude
-**Date:** January 2, 2026 (Updated: January 14, 2026)
+**Date:** January 2, 2026 (Updated: January 15, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 In Progress (Task 5.0 Complete), Phase 6-8 Remaining
+**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 In Progress (Tasks 5.0-5.7 Complete), Phase 6-8 Remaining
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
@@ -1286,7 +1286,7 @@ This is the hot path during search. The `IdReverse` CF is implemented with:
 
 ### Phase 1 Validation & Tests
 
-**Status:** ✅ COMPLETE (2026-01-04) - Unit tests in `id.rs`, `api.rs`, `query.rs`, `mutation.rs`, `writer.rs`, `reader.rs`
+**Status:** ✅ COMPLETE (2026-01-04) - Unit tests in `id.rs`, `query.rs`, `mutation.rs`, `writer.rs`, `reader.rs`
 
 ```rust
 // libs/db/src/vector/tests/id_tests.rs
@@ -1642,14 +1642,13 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 > **Note:** The vector module uses a simpler pattern than the `Runnable` trait shown in the original design:
 > - Queries implement `QueryExecutor` trait directly (see [`query.rs`](query.rs))
 > - Mutations are sent via `Writer::send()` / `Writer::send_sync()` (see [`writer.rs`](writer.rs))
-> - Convenience API functions in [`api.rs`](api.rs) wrap common operations
+> - `Processor` provides the primary API for all operations (see [`processor.rs`](processor.rs))
 
 #### Module Structure
 
 ```
 libs/db/src/vector/
 ├── mod.rs              # Module exports
-├── api.rs              # Generic API functions (convenience layer)
 ├── config.rs           # Configuration types
 ├── distance.rs         # Distance metrics
 ├── embedding.rs        # Embedding type
@@ -1668,22 +1667,20 @@ libs/db/src/vector/
 └── async_updater.rs    # Background graph maintenance (Phase 5)
 ```
 
-#### Convenience API (`vector/api.rs`)
+#### Primary API (`Processor`)
 
-**Status:** 🔄 PARTIAL (2026-01-04) - Phase 1 functions implemented, Phase 2 `search` pending HNSW
+**Status:** ✅ COMPLETE - All core operations implemented via `Processor`
 
-**Implementation:** [`api.rs`](api.rs) - Simplified interface for common operations:
+**Implementation:** [`processor.rs`](processor.rs) - Transactional API for all operations:
 
-**Phase 1 (Implemented):**
-- `insert(writer, embedding, id, vector)` - Insert vector with default async indexing
-- `insert_immediate(writer, embedding, id, vector)` - Insert with immediate indexing
-- `get_vector(storage, embedding, id)` - Get vector by external ID
-- `get_internal_id(storage, embedding, id)` - Get VecId for external ID
-- `get_external_id(storage, embedding, vec_id)` - Get external ID for VecId
-- `delete(writer, embedding, id)` - Delete vector by external ID
+- `Processor::insert_vector(embedding, id, vector, build_index)` - Insert with transactions
+- `Processor::insert_batch(embedding, vectors, build_index)` - Batch insert
+- `Processor::delete_vector(embedding, id)` - Delete with soft-delete for HNSW
+- `Processor::search(embedding, query, k, ef_search)` - K-nearest neighbor search
+- `Processor::search_with_config(config, query)` - Search with strategy dispatch
 
-**Phase 2 (Pending HNSW):**
-- `search(reader, embedding, query, k)` - K-nearest neighbor search
+> **Note:** The `api.rs` convenience layer was removed in Phase 5 as `Processor` provides
+> complete functionality with proper transactional guarantees.
 
 #### Implementation Priority
 
@@ -1695,43 +1692,32 @@ libs/db/src/vector/
 | `processor.rs` - Processor struct | 1 | High | IdAllocator |
 | `writer.rs` - Writer/Consumer | 1 | Medium | Processor |
 | `reader.rs` - Reader/Consumer | 1 | Medium | Processor |
-| `api.rs` - Convenience functions | 1 | Low | Writer/Reader |
 | `query.rs` - SearchKNN | 2 | High | HNSW impl |
 | `hnsw.rs` - HNSW algorithm | 2 | High | Processor |
 
 #### Test Strategy
 
 ```rust
-// tests/test_vector_api.rs
+// Example: Using Processor directly (recommended)
 
-#[tokio::test]
-async fn test_insert_and_get_vector() {
+#[test]
+fn test_insert_and_search() {
     let tmp = TempDir::new().unwrap();
-    let (processor, writer, reader) = setup_vector_infra(tmp.path()).await;
+    let processor = setup_processor(tmp.path());
 
     // Register embedding space
-    let embedding = processor.registry.register(
+    let embedding = processor.registry().register(
         EmbeddingBuilder::new("test", 128, Distance::Cosine)
     )?;
 
     // Insert vector
     let id = Id::new();
     let vector = vec![1.0f32; 128];
-    api::insert(&writer, embedding.code(), id, vector.clone()).await?;
+    processor.insert_vector(embedding.code(), id, &vector, true)?;
 
-    // Retrieve vector
-    let retrieved = api::get_vector(&reader, embedding.code(), id).await?;
-    assert_eq!(retrieved, Some(vector));
-}
-
-#[tokio::test]
-async fn test_writer_flush_semantics() {
-    // Test that flush waits for commit
-}
-
-#[tokio::test]
-async fn test_reader_mpmc_load_balancing() {
-    // Test that multiple consumers handle queries
+    // Search
+    let results = processor.search(embedding.code(), &vector, 10, 100)?;
+    assert!(!results.is_empty());
 }
 ```
 

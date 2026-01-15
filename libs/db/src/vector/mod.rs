@@ -21,12 +21,11 @@
 //! - `subsystem.rs` - Storage subsystem configuration
 //!
 //! ### IO Operations (flat)
-//! - `api.rs` - High-level API
-//! - `mutation.rs` - Write operations
-//! - `query.rs` - Read operations
-//! - `reader.rs` - Reader implementation
-//! - `writer.rs` - Writer implementation
-//! - `processor.rs` - Query processor
+//! - `mutation.rs` - Write operations (Mutation enum, MutationExecutor trait)
+//! - `query.rs` - Read operations (Query enum, QueryExecutor trait)
+//! - `reader.rs` - Reader implementation (channel-based query dispatch)
+//! - `writer.rs` - Writer implementation (channel-based mutation dispatch)
+//! - `processor.rs` - Core operations (insert, delete, search with transactions)
 //!
 //! ### Nested Modules
 //! - `hnsw/` - HNSW index implementation
@@ -42,7 +41,6 @@
 //! - `REQUIREMENTS.md` - Functional and architectural requirements
 
 // Flat modules - Core types
-pub mod api;
 pub mod config;
 pub mod distance;
 pub mod embedding;
@@ -110,6 +108,26 @@ pub use schema::{
     VecId, VectorCfKey, VectorCfValue, VectorElementType, Vectors, ALL_COLUMN_FAMILIES,
 };
 pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
+
+// Mutation types and infrastructure (following graph::mutation pattern)
+pub use mutation::{
+    AddEmbeddingSpec, DeleteVector, EdgeOperation, FlushMarker, GraphMetaUpdate, InsertVector,
+    InsertVectorBatch, Mutation, UpdateEdges, UpdateGraphMeta,
+};
+pub use writer::{
+    create_writer, spawn_consumer as spawn_mutation_consumer, Consumer as MutationConsumer,
+    MutationExecutor, MutationProcessor, Writer, WriterConfig,
+};
+
+// Query types and infrastructure (following graph::query pattern)
+pub use query::{
+    GetExternalId, GetInternalId, GetVector, Query, QueryExecutor, QueryProcessor,
+    QueryWithTimeout, ResolveIds, SearchKNN,
+};
+pub use reader::{
+    create_reader, spawn_consumer as spawn_query_consumer, spawn_consumers as spawn_query_consumers,
+    Consumer as QueryConsumer, Reader, ReaderConfig,
+};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{EmbeddingRegistryConfig, Subsystem, VectorBlockCacheConfig};

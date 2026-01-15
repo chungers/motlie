@@ -1,7 +1,7 @@
 # Phase 5: Internal Mutation/Query API
 
-**Status:** In Progress (Tasks 5.0-5.5 Complete; 5.6-5.11 Pending)
-**Date:** January 14, 2026
+**Status:** In Progress (Tasks 5.0-5.7.1 Complete; 5.8-5.11 Pending)
+**Date:** January 15, 2026
 **Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`, `c29dceb`, `6ee252b`, `0cbd597`, `dc4c3f9`
 
 ## Task Numbering Alignment with ROADMAP.md
@@ -14,8 +14,9 @@
 | 5.3 | Processor::insert_batch() | ✅ Complete |
 | 5.4 | Storage/Processor Search | ✅ Complete (5.4a-5.4g) |
 | 5.5 | Processor::add_embedding_spec() | ✅ Complete (via registry) |
-| 5.6 | Mutation Dispatch | 🔲 Not Started |
-| 5.7 | Query Dispatch | 🔲 Not Started |
+| 5.6 | Mutation Dispatch | ✅ Complete |
+| 5.7 | Query Dispatch | ✅ Complete |
+| 5.7.1 | Remove Redundant api.rs | ✅ Complete |
 | 5.8 | Migrate Examples/Integration Tests | 🔲 Not Started |
 | 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
 | 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |
@@ -1758,30 +1759,278 @@ See `registry.rs` for implementation.
 
 ---
 
-## Task 5.6: Mutation Dispatch (NOT STARTED)
+## Task 5.6: Mutation Dispatch (COMPLETE)
 
-**Status:** 🔲 Not Started
+**Status:** ✅ Complete
+**Date:** January 15, 2026
 
-Per ROADMAP.md, this task connects `Mutation` enum to `Processor` methods:
-- `Mutation::AddEmbeddingSpec` → `processor.add_embedding_spec()`
-- `Mutation::InsertVector` → `processor.insert_vector()`
-- `Mutation::DeleteVector` → `processor.delete_vector()`
-- etc.
+### Overview
 
-See ROADMAP.md Task 5.6 for full specification.
+Task 5.6 implements the mutation dispatch pattern following the established `graph::mutation` module design. Each mutation type implements the `MutationExecutor` trait to define HOW to write to RocksDB.
+
+### Design Pattern (Following graph::mutation)
+
+The vector module follows the same dispatch pattern as `graph::mutation`:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    graph::mutation Pattern                   │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. MutationExecutor trait - defines execute(&self, txn)   │
+│  2. Mutation::execute() - dispatches to appropriate impl   │
+│  3. Consumer processes batches atomically                  │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### MutationExecutor Trait
+
+Added to `writer.rs`:
+
+```rust
+/// Trait for mutations to execute themselves directly against storage.
+///
+/// This trait defines HOW to write the mutation to the database.
+/// Each mutation type knows how to execute its own database write operations.
+pub trait MutationExecutor: Send + Sync {
+    /// Execute this mutation directly against a RocksDB transaction.
+    ///
+    /// Returns an optional CacheUpdate if HNSW indexing was performed.
+    /// The CacheUpdate should be applied AFTER transaction commit.
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<Option<CacheUpdate>>;
+}
+```
+
+### Mutation::execute() Dispatch
+
+Added to `mutation.rs`:
+
+```rust
+impl Mutation {
+    /// Execute this mutation against the processor.
+    pub fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<Option<CacheUpdate>> {
+        match self {
+            Mutation::AddEmbeddingSpec(op) => op.execute(txn, txn_db, processor),
+            Mutation::InsertVector(op) => op.execute(txn, txn_db, processor),
+            Mutation::DeleteVector(op) => op.execute(txn, txn_db, processor),
+            Mutation::InsertVectorBatch(op) => op.execute(txn, txn_db, processor),
+            Mutation::UpdateEdges(op) => op.execute(txn, txn_db, processor),
+            Mutation::UpdateGraphMeta(op) => op.execute(txn, txn_db, processor),
+            Mutation::Flush(_) => Ok(None),
+        }
+    }
+}
+```
+
+### MutationExecutor Implementations
+
+Each mutation type implements `MutationExecutor`:
+
+| Mutation Type | Implementation |
+|---------------|----------------|
+| `InsertVector` | Full implementation with ID allocation, storage, binary codes, HNSW indexing |
+| `DeleteVector` | ID lookup, soft/hard delete based on HNSW enabled |
+| `AddEmbeddingSpec` | Spec validation and persistence |
+| `InsertVectorBatch` | Batch expansion into individual InsertVector operations |
+| `UpdateEdges` | HNSW edge merge operations |
+| `UpdateGraphMeta` | Entry point and max level updates |
+
+### Consumer Integration
+
+Updated `Consumer::execute_single()` to delegate to `Mutation::execute()`:
+
+```rust
+fn execute_single(
+    &self,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    mutation: &Mutation,
+) -> Result<Option<CacheUpdate>> {
+    mutation.execute(txn, txn_db, &self.processor)
+}
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `writer.rs` | Added `MutationExecutor` and `MutationProcessor` traits |
+| `mutation.rs` | Added `Mutation::execute()` dispatch, `MutationExecutor` impls for all types |
+| `mod.rs` | Added mutation type exports following graph pattern |
 
 ---
 
-## Task 5.7: Query Dispatch (NOT STARTED)
+## Task 5.7: Query Dispatch (COMPLETE)
 
-**Status:** 🔲 Not Started
+**Status:** ✅ Complete
+**Date:** January 15, 2026
 
-Per ROADMAP.md, this task connects `Query` enum to `Storage` methods:
-- `Query::SearchKNN` → `storage.search()`
-- `Query::GetVector` → `storage.get_vector()`
-- etc.
+### Overview
 
-See ROADMAP.md Task 5.7 for full specification.
+Task 5.7 implements the query dispatch pattern following the established `graph::query` module design. The key addition is `SearchKNN` for HNSW nearest neighbor search.
+
+### Design Pattern (Following graph::query)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    graph::query Pattern                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. Query params struct - SearchKNN, GetVector, etc.        │
+│  2. Dispatch wrapper - SearchKNNDispatch (adds timeout, tx) │
+│  3. QueryProcessor trait - process_and_send(self, storage)  │
+│  4. Query::process() - dispatches to appropriate impl       │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### SearchKNN Query Type
+
+Added to `query.rs`:
+
+```rust
+/// Search for k nearest neighbors in an embedding space.
+#[derive(Debug, Clone)]
+pub struct SearchKNN {
+    /// Embedding space code
+    pub embedding: EmbeddingCode,
+    /// Query vector
+    pub query: Vec<f32>,
+    /// Number of results to return
+    pub k: usize,
+    /// Search expansion factor (higher = more accurate, slower)
+    pub ef: usize,
+}
+
+impl SearchKNN {
+    pub fn new(embedding: EmbeddingCode, query: Vec<f32>, k: usize) -> Self;
+    pub fn with_ef(mut self, ef: usize) -> Self;
+    pub fn execute_with_processor(&self, processor: &Processor) -> Result<Vec<SearchResult>>;
+}
+```
+
+### SearchKNNDispatch Wrapper
+
+Unlike point lookups that only need Storage, SearchKNN requires a Processor for HNSW index access:
+
+```rust
+pub struct SearchKNNDispatch {
+    pub(crate) params: SearchKNN,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<SearchResult>>>,
+    pub(crate) processor: Arc<Processor>,
+}
+
+impl SearchKNNDispatch {
+    pub fn new(
+        params: SearchKNN,
+        timeout: Duration,
+        processor: Arc<Processor>,
+    ) -> (Self, oneshot::Receiver<Result<Vec<SearchResult>>>);
+}
+
+#[async_trait::async_trait]
+impl QueryProcessor for SearchKNNDispatch {
+    async fn process_and_send(self, _storage: &Storage) {
+        // Use processor directly instead of storage
+        let result = self.params.execute_with_processor(&self.processor);
+        self.send_result(result);
+    }
+}
+```
+
+### Query Dispatch
+
+Updated `Query::process()` to include SearchKNN:
+
+```rust
+impl Query {
+    pub async fn process(self, storage: &Storage) {
+        match self {
+            Query::GetVector(dispatch) => dispatch.process_and_send(storage).await,
+            Query::GetInternalId(dispatch) => dispatch.process_and_send(storage).await,
+            Query::GetExternalId(dispatch) => dispatch.process_and_send(storage).await,
+            Query::ResolveIds(dispatch) => dispatch.process_and_send(storage).await,
+            Query::SearchKNN(dispatch) => dispatch.process_and_send(storage).await,
+        }
+    }
+}
+```
+
+### Module Exports
+
+Updated `mod.rs` following the graph module pattern:
+
+```rust
+// Mutation types and infrastructure (following graph::mutation pattern)
+pub use mutation::{
+    AddEmbeddingSpec, DeleteVector, EdgeOperation, FlushMarker, GraphMetaUpdate, InsertVector,
+    InsertVectorBatch, Mutation, UpdateEdges, UpdateGraphMeta,
+};
+pub use writer::{
+    create_writer, spawn_consumer as spawn_mutation_consumer, Consumer as MutationConsumer,
+    MutationExecutor, MutationProcessor, Writer, WriterConfig,
+};
+
+// Query types and infrastructure (following graph::query pattern)
+pub use query::{
+    GetExternalId, GetInternalId, GetVector, Query, QueryExecutor, QueryProcessor,
+    QueryWithTimeout, ResolveIds, SearchKNN,
+};
+pub use reader::{
+    create_reader, spawn_consumer as spawn_query_consumer, spawn_consumers as spawn_query_consumers,
+    Consumer as QueryConsumer, Reader, ReaderConfig,
+};
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `query.rs` | Added `SearchKNN`, `SearchKNNDispatch`, updated `Query::process()` |
+| `mod.rs` | Added mutation/query type exports following graph pattern |
+
+### Tests
+
+All 520 tests pass after implementing Tasks 5.6 and 5.7.
+
+---
+
+## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
+
+**Status:** ✅ Complete
+**Date:** January 15, 2026
+
+### Overview
+
+Removed the redundant `api.rs` convenience layer. The `Processor` now provides all operations with proper transactional guarantees, making `api.rs` unnecessary.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `api.rs` | **Deleted** |
+| `mod.rs` | Removed `pub mod api;`, updated module documentation |
+| `ROADMAP.md` | Updated references to reflect Processor as primary API |
+
+### Rationale
+
+- `api.rs` functions were never used in the codebase
+- `Processor` provides complete functionality with transactions
+- Removes dead code and simplifies the module
+
+All 520 tests pass after removal.
 
 ---
 
@@ -1795,8 +2044,9 @@ See ROADMAP.md Task 5.7 for full specification.
 | 5.3 | Processor::insert_batch() | ✅ **Complete** |
 | 5.4 | Processor::search() + Storage layer | ✅ **Complete** (5.4a-5.4g) |
 | 5.5 | Processor::add_embedding_spec() | ✅ **Complete** (via registry) |
-| 5.6 | Mutation Dispatch | 🔲 Not Started |
-| 5.7 | Query Dispatch | 🔲 Not Started |
+| 5.6 | Mutation Dispatch | ✅ **Complete** |
+| 5.7 | Query Dispatch | ✅ **Complete** |
+| 5.7.1 | Remove Redundant api.rs | ✅ **Complete** |
 | 5.8 | Migrate Examples/Integration Tests | 🔲 Not Started |
 | 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
 | 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |

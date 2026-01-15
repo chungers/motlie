@@ -4,28 +4,29 @@
 //! for vector storage operations. Following the pattern from `graph::query`,
 //! queries are grouped in an enum for type-safe dispatch.
 //!
-//! # Phase 1 Queries (Point Lookups)
+//! # Point Lookups
 //!
 //! - `GetVector` - Retrieve vector by external ID
 //! - `GetInternalId` - Resolve external ID to internal vec_id
 //! - `GetExternalId` - Resolve internal vec_id to external ID
 //! - `ResolveIds` - Batch resolve vec_ids to external IDs
 //!
-//! # Phase 2 Queries (Search - requires HNSW)
+//! # Search Operations
 //!
-//! - `SearchKNN` - K-nearest neighbor search
-//! - `SearchKNNFiltered` - Filtered KNN search
+//! - `SearchKNN` - K-nearest neighbor search via HNSW
 //!
-//! # Phase 3+ Queries (Graph Introspection)
+//! # Graph Introspection (Future)
 //!
 //! - `GetGraphMeta` - HNSW graph metadata
 //! - `GetNeighbors` - Get HNSW neighbors at a layer
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::oneshot;
 
+use super::processor::{Processor, SearchResult};
 use super::schema::{
     EmbeddingCode, IdForward, IdForwardCfKey, IdReverse, IdReverseCfKey, VecId, VectorCfKey,
     Vectors,
@@ -45,7 +46,7 @@ use crate::Id;
 #[derive(Debug)]
 pub enum Query {
     // ─────────────────────────────────────────────────────────────
-    // Point Lookups (Phase 1)
+    // Point Lookups
     // ─────────────────────────────────────────────────────────────
     /// Get vector by external ID
     GetVector(GetVectorDispatch),
@@ -57,13 +58,13 @@ pub enum Query {
     ResolveIds(ResolveIdsDispatch),
 
     // ─────────────────────────────────────────────────────────────
-    // Search Operations (Phase 2 - requires HNSW)
+    // Search Operations
     // ─────────────────────────────────────────────────────────────
-    // SearchKNN(SearchKNNDispatch),
-    // SearchKNNFiltered(SearchKNNFilteredDispatch),
+    /// K-nearest neighbor search via HNSW
+    SearchKNN(SearchKNNDispatch),
 
     // ─────────────────────────────────────────────────────────────
-    // Graph Introspection (Phase 3+)
+    // Graph Introspection (Future)
     // ─────────────────────────────────────────────────────────────
     // GetGraphMeta(GetGraphMetaDispatch),
     // GetNeighbors(GetNeighborsDispatch),
@@ -88,6 +89,11 @@ impl std::fmt::Display for Query {
                 "ResolveIds: embedding={}, count={}",
                 q.params.embedding,
                 q.params.vec_ids.len()
+            ),
+            Query::SearchKNN(q) => write!(
+                f,
+                "SearchKNN: embedding={}, k={}, ef={}",
+                q.params.embedding, q.params.k, q.params.ef
             ),
         }
     }
@@ -502,6 +508,114 @@ impl QueryProcessor for ResolveIdsDispatch {
 }
 
 // ============================================================================
+// SearchKNN - K-nearest neighbor search via HNSW
+// ============================================================================
+
+/// K-nearest neighbor search via HNSW index.
+///
+/// This query performs approximate nearest neighbor search using the HNSW
+/// graph index. Requires a Processor instance for execution.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let query = SearchKNN::new(embedding_code, query_vector, 10)
+///     .with_ef(100);
+/// let results = query.execute_with_processor(&processor).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct SearchKNN {
+    /// Embedding space code
+    pub embedding: EmbeddingCode,
+    /// Query vector
+    pub query: Vec<f32>,
+    /// Number of results to return
+    pub k: usize,
+    /// Search expansion factor (higher = more accurate, slower)
+    pub ef: usize,
+}
+
+impl SearchKNN {
+    /// Create a new SearchKNN query.
+    pub fn new(embedding: EmbeddingCode, query: Vec<f32>, k: usize) -> Self {
+        Self {
+            embedding,
+            query,
+            k,
+            ef: 100, // Default ef
+        }
+    }
+
+    /// Set the search expansion factor.
+    pub fn with_ef(mut self, ef: usize) -> Self {
+        self.ef = ef;
+        self
+    }
+
+    /// Execute with a Processor (for direct execution without channel).
+    pub fn execute_with_processor(&self, processor: &Processor) -> Result<Vec<SearchResult>> {
+        processor.search(self.embedding, &self.query, self.k, self.ef)
+    }
+}
+
+/// Dispatch wrapper with oneshot channel for SearchKNN.
+///
+/// Unlike point lookups that only need Storage, SearchKNN requires a Processor
+/// for HNSW index access. The dispatch wraps the query along with a reference
+/// to the processor.
+pub struct SearchKNNDispatch {
+    pub(crate) params: SearchKNN,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<SearchResult>>>,
+    pub(crate) processor: Arc<Processor>,
+}
+
+impl std::fmt::Debug for SearchKNNDispatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchKNNDispatch")
+            .field("params", &self.params)
+            .field("timeout", &self.timeout)
+            .field("result_tx", &"<oneshot::Sender>")
+            .field("processor", &"<Arc<Processor>>")
+            .finish()
+    }
+}
+
+impl SearchKNNDispatch {
+    /// Create a new dispatch wrapper.
+    pub fn new(
+        params: SearchKNN,
+        timeout: Duration,
+        processor: Arc<Processor>,
+    ) -> (Self, oneshot::Receiver<Result<Vec<SearchResult>>>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            Self {
+                params,
+                timeout,
+                result_tx: tx,
+                processor,
+            },
+            rx,
+        )
+    }
+
+    /// Send the result back to the caller.
+    pub fn send_result(self, result: Result<Vec<SearchResult>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryProcessor for SearchKNNDispatch {
+    async fn process_and_send(self, _storage: &Storage) {
+        // Use processor directly instead of storage
+        let result = self.params.execute_with_processor(&self.processor);
+        self.send_result(result);
+    }
+}
+
+// ============================================================================
 // Query Dispatch
 // ============================================================================
 
@@ -513,6 +627,7 @@ impl Query {
             Query::GetInternalId(dispatch) => dispatch.process_and_send(storage).await,
             Query::GetExternalId(dispatch) => dispatch.process_and_send(storage).await,
             Query::ResolveIds(dispatch) => dispatch.process_and_send(storage).await,
+            Query::SearchKNN(dispatch) => dispatch.process_and_send(storage).await,
         }
     }
 }
