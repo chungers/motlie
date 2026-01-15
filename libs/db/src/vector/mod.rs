@@ -111,9 +111,10 @@ pub use schema::{
 pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
 
 // Mutation types and infrastructure (following graph::mutation pattern)
+// Note: UpdateEdges, UpdateGraphMeta, EdgeOperation, GraphMetaUpdate are internal-only
+// Graph repair requires full rebuild - no partial repair API exposed
 pub use mutation::{
-    AddEmbeddingSpec, DeleteVector, EdgeOperation, FlushMarker, GraphMetaUpdate, InsertVector,
-    InsertVectorBatch, Mutation, UpdateEdges, UpdateGraphMeta,
+    AddEmbeddingSpec, DeleteVector, FlushMarker, InsertVector, InsertVectorBatch, Mutation,
 };
 pub use writer::{
     create_writer, spawn_consumer as spawn_mutation_consumer, Consumer as MutationConsumer,
