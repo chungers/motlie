@@ -305,6 +305,35 @@ cargo test -p motlie-db --lib
 
 If these are addressed, Task 5.0 aligns with the CODEX concerns raised earlier.
 
+### Resolution (Commit `0cbd597`)
+
+Both issues have been fixed:
+
+1. **IdAllocator transactional persistence - FIXED**
+   ```rust
+   // BEFORE (writer.rs)
+   let vec_id = allocator.allocate();
+   allocator.free(vec_id);
+
+   // AFTER (writer.rs)
+   let vec_id = allocator.allocate_in_txn(txn, txn_db, op.embedding)?;
+   allocator.free_in_txn(txn, txn_db, op.embedding, vec_id)?;
+   ```
+
+2. **Layer counts for all nodes - FIXED**
+   ```rust
+   // BEFORE (CacheUpdate::apply)
+   info.increment_layer_count(self.node_layer);
+
+   // AFTER (CacheUpdate::apply)
+   // Increment for ALL layers from 0 to node_layer
+   for layer in 0..=self.node_layer {
+       info.increment_layer_count(layer);
+   }
+   ```
+
+All 495 tests pass. Task 5.0 is now fully complete.
+
 ---
 
 ## Remaining Phase 5 Tasks
