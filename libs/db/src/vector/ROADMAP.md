@@ -6381,6 +6381,10 @@ pub fn connect_neighbors(
 - Add crash-recovery test: insert + simulated crash → verify consistent state
 - Stress test: concurrent inserts with transactions
 
+**CODEX concerns to address during Task 5.0:**
+- Ensure *all* vector insert side effects share the same RocksDB transaction: vector bytes, binary codes, VecMeta, GraphMeta, edge updates, and any allocator state persisted in `IdAlloc`. Partial transactional coverage can still leave torn state.
+- Defer navigation cache updates until *after* the transaction commits (or make cache refresh resilient) to avoid caching uncommitted graph state.
+
 ---
 
 ### Task 5.1: Processor::insert_vector()
