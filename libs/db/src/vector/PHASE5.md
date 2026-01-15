@@ -1194,6 +1194,26 @@ Recommend: Lazy load with metrics for Phase 5, prewarm for Phase 6.
 
 ---
 
+## CODEX Review (Build Config Persistence Plan)
+
+I agree with the overall plan: EmbeddingSpec as source of truth, GraphMeta holding a spec hash for drift detection. A few improvements to make it robust:
+
+1) **Hash must include model + distance + storage_type + HNSW + RaBitQ.**
+   - The proposed hash includes dim/distance/storage and HNSW/RaBitQ; also include `model` to avoid mismatches when two models share dim/distance.
+
+2) **SpecHash should be written exactly once (first index build).**
+   - Enforce “first insert sets spec_hash, subsequent inserts must match.” This prevents partial drift if a user updates EmbeddingSpec mid-build.
+
+3) **SearchConfig should be validated against registry spec and stored hash.**
+   - On search, compare config.embedding() to registry spec *and* compare registry spec hash to GraphMeta::SpecHash. Reject on mismatch to force rebuild.
+
+4) **Migration path should include a warning when no SpecHash exists.**
+   - Legacy indexes without SpecHash should log a warning (or metric) that drift checks are skipped.
+
+These are minor tweaks; the plan is sound.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
