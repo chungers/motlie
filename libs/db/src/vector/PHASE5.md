@@ -336,6 +336,16 @@ All 495 tests pass. Task 5.0 is now fully complete.
 
 ---
 
+## CODEX Verification (Post-update)
+
+- ✅ `writer.rs` now uses `allocate_in_txn()` and `free_in_txn()` so IdAlloc state is transactionally persisted alongside vector writes.
+- ✅ `CacheUpdate::apply` now increments layer counts for all layers `0..=node_layer`, preserving `layer_counts[0]`/`total_nodes()` correctness even for the first node.
+- ✅ Changes align with the CODEX concerns raised in the previous review; Task 5.0 looks complete from a correctness standpoint.
+
+No additional follow-up items at this time.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
