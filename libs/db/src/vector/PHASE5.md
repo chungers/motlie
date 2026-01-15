@@ -1,8 +1,8 @@
 # Phase 5: Internal Mutation/Query API
 
-**Status:** In Progress (Task 5.0 Complete)
+**Status:** In Progress (Tasks 5.0-5.3 Complete)
 **Date:** January 14, 2026
-**Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`
+**Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`, `c29dceb`, `6ee252b`, `0cbd597`
 
 ---
 
@@ -660,6 +660,153 @@ All 502 tests pass.
 - ✅ Soft delete behavior addresses both VecId reuse corruption and entry-point distance errors for HNSW-enabled embeddings.
 - ⚠️ **Remaining improvement:** deleted nodes can still appear in search results because the graph is unchanged and no tombstone filter exists. Consider adding a deleted-flag check (e.g., IdReverse existence or a VecMeta flag) during search/rerank to exclude deleted vectors from results.
 
+### Design Note: Deleted Node Filtering (for Task 5.3)
+
+**Problem:** Soft-deleted vectors remain in the HNSW graph and will appear in raw search results.
+
+**Solution:** Filter deleted vectors during result processing in `Processor::search()`:
+
+```rust
+// After HNSW search returns raw VecId results:
+// 1. Batch lookup IdReverse for all result VecIds
+// 2. Filter out results where IdReverse is missing (deleted)
+// 3. Return only live vectors with their external Ids
+
+fn filter_deleted_results(
+    results: Vec<(f32, VecId)>,
+    embedding: EmbeddingCode,
+    txn_db: &TransactionDB,
+) -> Result<Vec<(f32, VecId, Id)>> {
+    let reverse_cf = txn_db.cf_handle(IdReverse::CF_NAME)?;
+
+    results.into_iter()
+        .filter_map(|(dist, vec_id)| {
+            // Check if IdReverse exists (not deleted)
+            let key = IdReverseCfKey(embedding, vec_id);
+            match txn_db.get_cf(&reverse_cf, IdReverse::key_to_bytes(&key)) {
+                Ok(Some(bytes)) => {
+                    let id = IdReverse::value_from_bytes(&bytes).ok()?.0;
+                    Some(Ok((dist, vec_id, id)))
+                }
+                Ok(None) => None, // Deleted - skip
+                Err(e) => Some(Err(e.into())),
+            }
+        })
+        .collect()
+}
+```
+
+This approach:
+- Uses IdReverse as implicit tombstone (deleted = missing)
+- Avoids extra storage for tombstone flags
+- Batch-friendly with MultiGet optimization potential
+
+---
+
+## Task 5.3: Processor::search() (COMPLETE)
+
+### Overview
+
+Task 5.3 implements the unified search API that:
+1. Performs HNSW approximate nearest neighbor search
+2. Filters out soft-deleted vectors
+3. Returns external IDs with distances
+
+### API Signature
+
+```rust
+/// Search result with external ID and distance.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    /// External ID (ULID)
+    pub id: Id,
+    /// Internal vector ID
+    pub vec_id: VecId,
+    /// Distance to query vector
+    pub distance: f32,
+}
+
+impl Processor {
+    /// Search for nearest neighbors in an embedding space.
+    ///
+    /// # Arguments
+    /// * `embedding` - Embedding space code
+    /// * `query` - Query vector (must match embedding dimension)
+    /// * `k` - Number of results to return
+    /// * `ef_search` - Search beam width (higher = better recall, slower)
+    ///
+    /// # Returns
+    /// Up to k nearest neighbors, sorted by distance (ascending).
+    /// Soft-deleted vectors are automatically filtered out.
+    pub fn search(
+        &self,
+        embedding: EmbeddingCode,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+    ) -> Result<Vec<SearchResult>>;
+}
+```
+
+### Implementation Details
+
+#### Search Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       search()                               │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. Validate embedding exists in registry                   │
+│  2. Validate query dimension matches spec                   │
+│  3. Check HNSW is enabled (error if disabled)              │
+│                                                             │
+│  4. Get or create HNSW index for embedding                  │
+│                                                             │
+│  5. HNSW search: index.search(query, k, ef_search)         │
+│     └── Returns raw Vec<(distance, VecId)>                 │
+│                                                             │
+│  6. Filter deleted vectors:                                 │
+│     For each (distance, vec_id):                           │
+│       └── Check IdReverse exists (not deleted)             │
+│       └── If missing → skip (soft-deleted)                 │
+│       └── If present → include in results with external Id │
+│                                                             │
+│  7. Return Vec<SearchResult>                               │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Key Features
+
+1. **Validation First**: Embedding existence, dimension, and HNSW enabled checked before search
+2. **Tombstone Filtering**: Uses IdReverse existence as implicit tombstone check
+3. **External ID Resolution**: Returns external Ids (not internal VecIds) for client use
+4. **Sorted Results**: Results are sorted by distance ascending (from HNSW)
+
+#### Error Cases
+
+| Error | Condition |
+|-------|-----------|
+| Unknown embedding | Embedding code not in registry |
+| Dimension mismatch | Query dimension != embedding spec dimension |
+| HNSW disabled | `hnsw_config.enabled = false` |
+
+### Tests
+
+| Test | Purpose |
+|------|---------|
+| `test_search_basic` | Insert vectors, search, verify results sorted by distance |
+| `test_search_filters_deleted` | Insert and delete vectors, verify deleted are filtered |
+| `test_search_dimension_mismatch` | Verify error for wrong query dimension |
+| `test_search_hnsw_disabled` | Verify error when HNSW is disabled |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Added `SearchResult` struct, `search()` method (~60 lines), 4 tests |
+
 ---
 
 ## Remaining Phase 5 Tasks
@@ -668,7 +815,7 @@ All 502 tests pass.
 |------|-------------|--------|
 | 5.1 | Processor::insert_vector() | **Complete** |
 | 5.2 | Processor::delete_vector() | **Complete** |
-| 5.3 | Processor::search() | Pending |
+| 5.3 | Processor::search() | **Complete** |
 | 5.4 | Storage layer search methods | Pending |
 | 5.5 | Dispatch logic for search strategies | Pending |
 | 5.6 | Migration utilities | Pending |
