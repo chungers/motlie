@@ -628,6 +628,31 @@ The transactional delete logic is clean, but there are two correctness risks if 
 
 If deletes are intended only for non-indexed embeddings, document that constraint explicitly. Otherwise, the above needs addressing before Task 5.2 can be considered safe for indexed usage.
 
+### Resolution
+
+Both issues addressed by implementing **soft delete** when HNSW is enabled:
+
+1. **VecId reuse prevention - FIXED**
+   - Added `enabled` field to `hnsw::Config` (default: `true`)
+   - When HNSW is enabled, `delete_vector()` does NOT free the VecId
+   - This prevents graph corruption from VecId reuse
+
+2. **Vector data preservation - FIXED**
+   - When HNSW is enabled, vector data is kept (not deleted)
+   - Entry point and edges can still compute distances
+   - Only ID mappings (IdForward, IdReverse) are removed
+
+**Behavior summary:**
+
+| HNSW Enabled | ID Mappings | Vector Data | VecId | Binary Codes |
+|--------------|-------------|-------------|-------|--------------|
+| `false`      | Deleted     | Deleted     | Freed | Deleted      |
+| `true`       | Deleted     | **Kept**    | **Reserved** | Kept    |
+
+Updated docstring documents this "soft delete" behavior. Full cleanup requires index rebuild (future work).
+
+All 502 tests pass.
+
 ---
 
 ## Remaining Phase 5 Tasks
