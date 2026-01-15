@@ -213,11 +213,11 @@ impl EmbeddingRegistry {
             dim: builder.dim,
             distance: builder.distance,
             storage_type: super::schema::VectorElementType::default(), // F32 for backward compat
-            // Build parameters with defaults (can be customized via EmbeddingBuilder in future)
-            hnsw_m: 16,
-            hnsw_ef_construction: 200,
-            rabitq_bits: 1,
-            rabitq_seed: 42,
+            // Build parameters from EmbeddingBuilder (Phase 5.7c)
+            hnsw_m: builder.hnsw_m,
+            hnsw_ef_construction: builder.hnsw_ef_construction,
+            rabitq_bits: builder.rabitq_bits,
+            rabitq_seed: builder.rabitq_seed,
         };
         let (key_bytes, value_bytes) = add_op.to_cf_bytes()?;
 

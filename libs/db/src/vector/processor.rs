@@ -31,13 +31,14 @@ use super::id::IdAllocator;
 use super::rabitq::RaBitQ;
 use super::registry::EmbeddingRegistry;
 use super::schema::{
-    BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, GraphMeta, GraphMetaCfKey,
-    GraphMetaCfValue, GraphMetaField, IdForward, IdForwardCfKey, IdForwardCfValue, IdReverse,
-    IdReverseCfKey, IdReverseCfValue, VecId, VectorCfKey, Vectors,
+    BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpec,
+    EmbeddingSpecCfKey, EmbeddingSpecs, GraphMeta, GraphMetaCfKey, GraphMetaCfValue,
+    GraphMetaField, IdForward, IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey,
+    IdReverseCfValue, VecId, VectorCfKey, Vectors,
 };
 use super::search::{SearchConfig, SearchStrategy};
 use super::Storage;
-use crate::rocksdb::ColumnFamily;
+use crate::rocksdb::{ColumnFamily, ColumnFamilySerde};
 use crate::Id;
 
 // ============================================================================
@@ -208,6 +209,25 @@ impl Processor {
     }
 
     // ========================================================================
+    // EmbeddingSpec Lookup (for build params)
+    // ========================================================================
+
+    /// Read EmbeddingSpec from RocksDB storage.
+    ///
+    /// Used to retrieve persisted build parameters (hnsw_m, hnsw_ef_construction,
+    /// rabitq_bits, rabitq_seed) for building HNSW indices and RaBitQ encoders.
+    fn get_embedding_spec(&self, embedding: EmbeddingCode) -> Option<EmbeddingSpec> {
+        let txn_db = self.storage.transaction_db().ok()?;
+        let specs_cf = txn_db.cf_handle(EmbeddingSpecs::CF_NAME)?;
+        let spec_key = EmbeddingSpecCfKey(embedding);
+        let spec_bytes = txn_db
+            .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))
+            .ok()??;
+        let spec = EmbeddingSpecs::value_from_bytes(&spec_bytes).ok()?.0;
+        Some(spec)
+    }
+
+    // ========================================================================
     // RaBitQ Encoder Management
     // ========================================================================
 
@@ -216,6 +236,10 @@ impl Processor {
     /// Returns None if:
     /// - RaBitQ is disabled in config
     /// - Embedding is not found in registry (can't determine dimension)
+    /// - EmbeddingSpec not found in storage (can't determine build params)
+    ///
+    /// **IMPORTANT:** Uses persisted EmbeddingSpec build parameters (rabitq_bits, rabitq_seed)
+    /// rather than self.rabitq_config. This ensures consistency with stored SpecHash.
     ///
     /// Encoders are cached per embedding space for efficiency.
     pub fn get_or_create_encoder(&self, embedding: EmbeddingCode) -> Option<Arc<RaBitQ>> {
@@ -232,8 +256,12 @@ impl Processor {
         let emb = self.registry.get_by_code(embedding)?;
         let dim = emb.dim() as usize;
 
-        // Create and cache encoder
-        let encoder = Arc::new(RaBitQ::from_config(dim, &self.rabitq_config));
+        // Read persisted EmbeddingSpec to get build params
+        let spec = self.get_embedding_spec(embedding)?;
+
+        // Create encoder using EmbeddingSpec params (not self.rabitq_config)
+        // This ensures the encoder matches the stored SpecHash
+        let encoder = Arc::new(RaBitQ::new(dim, spec.rabitq_bits, spec.rabitq_seed));
         self.rabitq_encoders.insert(embedding, encoder.clone());
         Some(encoder)
     }
@@ -259,7 +287,13 @@ impl Processor {
 
     /// Get or create an HNSW index for the given embedding space.
     ///
-    /// Returns None if the embedding is not found in the registry.
+    /// Returns None if:
+    /// - Embedding is not found in registry
+    /// - EmbeddingSpec not found in storage (can't determine build params)
+    ///
+    /// **IMPORTANT:** Uses persisted EmbeddingSpec build parameters (hnsw_m, hnsw_ef_construction)
+    /// rather than self.hnsw_config. This ensures consistency with stored SpecHash.
+    ///
     /// Indices are cached per embedding space for efficiency.
     pub fn get_or_create_index(&self, embedding: EmbeddingCode) -> Option<hnsw::Index> {
         // Check cache first
@@ -271,13 +305,32 @@ impl Processor {
         let emb = self.registry.get_by_code(embedding)?;
         let distance = emb.distance();
         let storage_type = emb.storage_type();
+        let dim = emb.dim() as usize;
+
+        // Read persisted EmbeddingSpec to get build params
+        let spec = self.get_embedding_spec(embedding)?;
+
+        // Build HNSW config using EmbeddingSpec params (not self.hnsw_config)
+        // This ensures the index matches the stored SpecHash
+        let m = spec.hnsw_m as usize;
+        let config = hnsw::Config {
+            enabled: self.hnsw_config.enabled,
+            dim,
+            m,
+            m_max: 2 * m,
+            m_max_0: 2 * m,
+            ef_construction: spec.hnsw_ef_construction as usize,
+            m_l: 1.0 / (m as f32).ln(),
+            max_level: self.hnsw_config.max_level,
+            batch_threshold: self.hnsw_config.batch_threshold,
+        };
 
         // Create index with shared navigation cache
         let index = hnsw::Index::with_storage_type(
             embedding,
             distance,
             storage_type,
-            self.hnsw_config.clone(),
+            config,
             Arc::clone(&self.nav_cache),
         );
 
@@ -803,6 +856,14 @@ impl Processor {
                 "SearchConfig embedding distance mismatch: config has {:?}, registry has {:?}",
                 config_embedding.distance(),
                 spec.distance()
+            ));
+        }
+        // 2a. Validate storage_type (redundant with SpecHash, but explicit for clarity)
+        if config_embedding.storage_type() != spec.storage_type() {
+            return Err(anyhow::anyhow!(
+                "SearchConfig embedding storage_type mismatch: config has {:?}, registry has {:?}",
+                config_embedding.storage_type(),
+                spec.storage_type()
             ));
         }
 
