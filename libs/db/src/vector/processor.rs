@@ -640,8 +640,10 @@ impl Processor {
 
         // 5. Perform HNSW search with overfetch to handle tombstones
         // Overfetch by 2x to ensure we get enough live results after filtering
+        // Ensure ef_search >= overfetch_k so HNSW can return enough candidates
         let overfetch_k = k * 2;
-        let raw_results = index.search(&self.storage, query, overfetch_k, ef_search)?;
+        let effective_ef = ef_search.max(overfetch_k);
+        let raw_results = index.search(&self.storage, query, overfetch_k, effective_ef)?;
 
         // 6. Filter deleted vectors using batched IdReverse lookup
         let txn_db = self.storage.transaction_db()?;
