@@ -356,10 +356,10 @@ impl Consumer {
                     ))?
                     .storage_type();
 
-                // 1. Allocate vec_id
+                // 1. Allocate vec_id (transactionally persisted to IdAlloc CF)
                 let vec_id = {
                     let allocator = self.processor.get_or_create_allocator(op.embedding);
-                    allocator.allocate()
+                    allocator.allocate_in_txn(txn, txn_db, op.embedding)?
                 };
 
                 // 2. Store Id -> VecId mapping (IdForward)
@@ -467,10 +467,10 @@ impl Consumer {
                     txn.delete_cf(&codes_cf, BinaryCodes::key_to_bytes(&code_key))?;
                 }
 
-                // 6. Return vec_id to free list
+                // 6. Return vec_id to free list (transactionally persisted to IdAlloc CF)
                 {
                     let allocator = self.processor.get_or_create_allocator(op.embedding);
-                    allocator.free(vec_id);
+                    allocator.free_in_txn(txn, txn_db, op.embedding, vec_id)?;
                 }
 
                 // TODO: HNSW edge cleanup (mark node as deleted, don't remove edges)

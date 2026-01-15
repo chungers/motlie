@@ -55,10 +55,17 @@ impl CacheUpdate {
     ///
     /// **IMPORTANT**: Only call this after `txn.commit()` succeeds.
     /// Calling before commit risks caching uncommitted state.
+    ///
+    /// In HNSW, every node exists at ALL layers from 0 up to its `node_layer`.
+    /// This method increments layer_counts for all layers the node exists at,
+    /// ensuring `total_nodes()` (which uses `layer_counts[0]`) is correct.
     pub fn apply(self, nav_cache: &NavigationCache) {
         nav_cache.update(self.embedding, self.m, |info| {
             info.maybe_update_entry(self.vec_id, self.node_layer);
-            info.increment_layer_count(self.node_layer);
+            // Increment layer counts for all layers this node exists at (0 to node_layer)
+            for layer in 0..=self.node_layer {
+                info.increment_layer_count(layer);
+            }
         });
     }
 }
