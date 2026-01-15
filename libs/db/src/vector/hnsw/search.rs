@@ -33,11 +33,15 @@ pub fn search(
     k: usize,
     ef: usize,
 ) -> Result<Vec<(f32, VecId)>> {
-    let nav_info = index
-        .nav_cache()
-        .get(index.embedding())
-        .or_else(|| load_navigation(index, storage).ok())
-        .ok_or_else(|| anyhow::anyhow!("No navigation info for embedding {}", index.embedding()))?;
+    // Get navigation info from cache or storage
+    // For empty index (no GraphMeta), return empty results instead of error
+    let nav_info = match index.nav_cache().get(index.embedding()) {
+        Some(info) => info,
+        None => match load_navigation(index, storage) {
+            Ok(info) => info,
+            Err(_) => return Ok(Vec::new()), // Empty index → empty results
+        },
+    };
 
     if nav_info.is_empty() {
         return Ok(Vec::new());
@@ -231,11 +235,15 @@ pub fn search_with_rabitq_cached(
     ef: usize,
     rerank_factor: usize,
 ) -> Result<Vec<(f32, VecId)>> {
-    let nav_info = index
-        .nav_cache()
-        .get(index.embedding())
-        .or_else(|| load_navigation(index, storage).ok())
-        .ok_or_else(|| anyhow::anyhow!("No navigation info for embedding {}", index.embedding()))?;
+    // Get navigation info from cache or storage
+    // For empty index (no GraphMeta), return empty results instead of error
+    let nav_info = match index.nav_cache().get(index.embedding()) {
+        Some(info) => info,
+        None => match load_navigation(index, storage) {
+            Ok(info) => info,
+            Err(_) => return Ok(Vec::new()), // Empty index → empty results
+        },
+    };
 
     if nav_info.is_empty() {
         return Ok(Vec::new());

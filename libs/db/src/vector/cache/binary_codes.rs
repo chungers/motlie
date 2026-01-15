@@ -76,6 +76,9 @@ impl BinaryCodeCache {
     }
 
     /// Insert a binary code with ADC correction into the cache.
+    ///
+    /// If an entry already exists for this (embedding, vec_id), it is replaced
+    /// and the cache_bytes counter is adjusted accordingly.
     pub fn put(
         &self,
         embedding: EmbeddingCode,
@@ -84,11 +87,22 @@ impl BinaryCodeCache {
         correction: AdcCorrection,
     ) {
         if let Ok(mut cache) = self.codes.write() {
-            let code_len = code.len();
+            let new_code_len = code.len();
+            let key = (embedding, vec_id);
+
+            // Subtract old entry size if replacing (fixes overcount bug)
+            if let Some(old_entry) = cache.get(&key) {
+                if let Ok(mut bytes) = self.cache_bytes.write() {
+                    let old_size = old_entry.code.len() + 8; // +8 for AdcCorrection
+                    *bytes = bytes.saturating_sub(old_size);
+                }
+            }
+
+            // Insert new entry and add its size
             let entry = Arc::new(BinaryCodeEntry { code, correction });
-            cache.insert((embedding, vec_id), entry);
+            cache.insert(key, entry);
             if let Ok(mut bytes) = self.cache_bytes.write() {
-                *bytes += code_len + 8; // +8 for AdcCorrection (2×f32)
+                *bytes += new_code_len + 8; // +8 for AdcCorrection (2×f32)
             }
         }
     }
@@ -294,5 +308,29 @@ mod tests {
         assert!(Arc::ptr_eq(&entry1, &entry2));
         // Strong count should be 3 (cache + entry1 + entry2)
         assert_eq!(Arc::strong_count(&entry1), 3);
+    }
+
+    #[test]
+    fn test_overwrite_updates_stats_correctly() {
+        // Regression test for CODEX Finding #5: cache_bytes overcounted on overwrite
+        let cache = BinaryCodeCache::new();
+
+        // Insert initial entry: 4 bytes code + 8 bytes correction = 12 bytes
+        cache.put(1, 100, vec![0x01, 0x02, 0x03, 0x04], default_correction());
+        let (count, bytes) = cache.stats();
+        assert_eq!(count, 1);
+        assert_eq!(bytes, 12);
+
+        // Overwrite with smaller entry: 2 bytes code + 8 bytes correction = 10 bytes
+        cache.put(1, 100, vec![0xAA, 0xBB], default_correction());
+        let (count, bytes) = cache.stats();
+        assert_eq!(count, 1); // Still 1 entry
+        assert_eq!(bytes, 10); // Should be 10, not 22 (12 + 10)
+
+        // Overwrite with larger entry: 8 bytes code + 8 bytes correction = 16 bytes
+        cache.put(1, 100, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08], default_correction());
+        let (count, bytes) = cache.stats();
+        assert_eq!(count, 1); // Still 1 entry
+        assert_eq!(bytes, 16); // Should be 16, not 26 (10 + 16)
     }
 }
