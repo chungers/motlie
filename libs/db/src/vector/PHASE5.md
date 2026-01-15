@@ -984,6 +984,48 @@ Both updates happen after transaction commit to maintain consistency.
 
 ---
 
+## CODEX Review (API Consistency + Workflow)
+
+Given the intended workflow (register embedding → build index → search), there are a few consistency checks and design improvements to consider so search is constrained by how the index was built:
+
+1) **Validate SearchConfig vs registered embedding spec.**
+   - `search_with_config()` uses `config.embedding().code()` but does not verify that the `SearchConfig`'s embedding (distance/dim/storage type) matches the registry spec for that code.
+   - **Suggestion:** compare the registry spec to `config.embedding()` and error on mismatch to avoid stale or forged configs.
+
+2) **Persist per-embedding HNSW/RaBitQ parameters.**
+   - HNSW config (M, ef_construction, etc.) and RaBitQ config (bits_per_dim, rotation_seed) are global in `Processor`, but indexes are built per embedding.
+   - If these configs change between build and search, the search config may no longer reflect how the index was built.
+   - **Suggestion:** persist HNSW config (and RaBitQ params) in GraphMeta/EmbeddingSpec, and have `get_or_create_index()` use the persisted values. Then validate SearchConfig against those persisted params.
+
+3) **RaBitQ cache lifecycle and fallback behavior.**
+   - `BinaryCodeCache` is in-memory only and not warmed from `BinaryCodes` on restart.
+   - `search_with_config()` will still work (falls back to exact distance on cache miss) but performance can degrade silently.
+   - **Suggestion:** either prewarm the cache from `BinaryCodes` on startup, or detect low cache coverage and fall back to Exact with a warning/metric.
+
+4) **Explicit behavior for RaBitQ without cache.**
+   - `SearchStrategy::RaBitQ { use_cache: false }` currently falls back to Exact.
+   - **Suggestion:** either document this clearly or return an error to avoid surprising behavior.
+
+These are not correctness blockers today, but they tighten the guarantee that search reflects the registered embedding and built index parameters.
+
+---
+
+### Agreement Summary (Workflow Consistency)
+
+We are aligned on the following approach for embedding → build → search consistency:
+
+1) **Phase 1 (no overrides):** Do not allow `prefer_exact` / strategy override to avoid surprises. SearchStrategy is derived strictly from the registered embedding + persisted build config.
+
+2) **Phase 2 (validated overrides):** Allow `prefer_exact` only after build-affecting configs are persisted and drift checks are implemented. Overrides must be validated against stored spec/graph metadata.
+
+3) **Persist build config:** Store HNSW + RaBitQ build parameters (bits_per_dim, rotation_seed, etc.) so SearchStrategy construction and validation use the same source of truth as index build.
+
+4) **Drift mitigation:** Store `spec_hash` in GraphMeta at build time. On search, compare registry spec hash to graph spec hash and error/warn on mismatch (require rebuild).
+
+This keeps the search API consistent with how the index was built while allowing explicit, validated overrides later.
+
+---
+
 ## Remaining Phase 5 Tasks
 
 | Task | Description | Status |
