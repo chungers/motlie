@@ -2158,6 +2158,14 @@ Processor-backed reader/consumer is still missing. Recommend adding a `spawn_que
 
 ---
 
+**Update (Processor-backed consumers added):**
+
+- `ProcessorConsumer` and `spawn_*_with_processor` were added to support SearchKNN ergonomics.  
+- **Note:** `Query::process()` still only receives `Storage`, so SearchKNN still requires a `Processor` at query construction time (`SearchKNNDispatch` holds it). The new consumer does not automatically inject a processor into queries.  
+  - If the goal is to fully remove ad-hoc processor plumbing, consider adding a `SearchReader` helper or a `Reader::search_knn(...)` API that uses the stored processor to build dispatch objects.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
