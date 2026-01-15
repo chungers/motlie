@@ -1024,6 +1024,36 @@ We are aligned on the following approach for embedding → build → search cons
 
 This keeps the search API consistent with how the index was built while allowing explicit, validated overrides later.
 
+### Resolution
+
+**Alignment: AGREE with all points.** Implemented immediate fix for #1:
+
+1. **SearchConfig vs registry validation - FIXED**
+   ```rust
+   // 2. Validate SearchConfig embedding matches registry spec
+   let config_embedding = config.embedding();
+   if config_embedding.dim() != spec.dim() {
+       return Err(anyhow!("SearchConfig embedding dimension mismatch..."));
+   }
+   if config_embedding.distance() != spec.distance() {
+       return Err(anyhow!("SearchConfig embedding distance mismatch..."));
+   }
+   ```
+
+2. **Persist per-embedding configs** - Agree. Deferred to future phase (requires GraphMeta schema changes).
+
+3. **Cache warmup** - Agree. Currently undocumented gap. Options:
+   - Prewarm from BinaryCodes on startup
+   - Detect low cache coverage and warn/fallback
+   - For now: document behavior
+
+4. **RaBitQ fallback documentation** - Agree. `use_cache: false` falls back to Exact (documented in code comment).
+
+**Phase 2 workflow consistency** - Aligned with proposed approach:
+- No overrides in Phase 1 (current)
+- Validated overrides after config persistence (future)
+- Drift mitigation via spec_hash (future)
+
 ---
 
 ## Remaining Phase 5 Tasks
