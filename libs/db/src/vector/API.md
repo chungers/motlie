@@ -112,6 +112,47 @@ let by_model = registry.find_by_model("openai");
 | `dim` | Vector dimensionality (128, 512, 768, 1536, etc.) |
 | `distance` | Distance metric (Cosine, L2, DotProduct) |
 
+**Build Parameters (optional):**
+
+These parameters are persisted with the embedding spec and control how the index is built:
+
+```rust
+let builder = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
+    .with_hnsw_m(32)              // HNSW connections per node (default: 16, min: 2)
+    .with_hnsw_ef_construction(400) // Build-time beam width (default: 200)
+    .with_rabitq_bits(2)          // Binary quantization bits (default: 1, valid: 1, 2, 4)
+    .with_rabitq_seed(12345);     // RNG seed for rotation matrix (default: 42)
+
+let embedding = registry.register(builder, db)?;
+```
+
+| Parameter | Default | Valid Range | Description |
+|-----------|---------|-------------|-------------|
+| `hnsw_m` | 16 | >= 2 | HNSW connections per node. Higher = better recall, more memory |
+| `hnsw_ef_construction` | 200 | > 0 | Build-time beam width. Higher = better graph quality |
+| `rabitq_bits` | 1 | 1, 2, 4 | Bits per dimension. Higher = better recall, larger codes |
+| `rabitq_seed` | 42 | any u64 | Seed for rotation matrix. Same seed = reproducible codes |
+
+**⚠️ Important: SpecHash Timing**
+
+Build parameters are **immutable after the first vector insert**. When the first vector is inserted into an embedding space, a `SpecHash` is computed and stored. All subsequent inserts and searches validate against this hash.
+
+- **Changing parameters after data exists requires rebuilding the index**
+- Parameters should be set at registration time, before inserting any vectors
+- This ensures consistency: all vectors in an index use the same build parameters
+
+```rust
+// ✅ CORRECT: Set parameters before inserting vectors
+let builder = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
+    .with_hnsw_m(32);
+let embedding = registry.register(builder, db)?;
+processor.insert_vector(...)?;  // SpecHash set here
+
+// ❌ ERROR: Cannot change parameters after data exists
+// Attempting to register with different params and insert will fail:
+// "EmbeddingSpec changed since index build. Rebuild required."
+```
+
 ### HNSW Configuration
 
 HNSW (Hierarchical Navigable Small World) is a graph-based ANN algorithm. Key parameters:

@@ -183,7 +183,16 @@ impl EmbeddingRegistry {
     /// Register a new embedding space.
     ///
     /// Idempotent: returns existing embedding if spec already registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if build parameters are invalid:
+    /// - `hnsw_m < 2`: Invalid for `m_l = 1/ln(m)` computation
+    /// - `rabitq_bits ∉ {1, 2, 4}`: Unsupported quantization level
     pub fn register(&self, builder: EmbeddingBuilder, db: &TransactionDB) -> Result<Embedding> {
+        // Validate build parameters before registration
+        builder.validate()?;
+
         let spec_key = (builder.model.clone(), builder.dim, builder.distance);
 
         // Fast path: already registered

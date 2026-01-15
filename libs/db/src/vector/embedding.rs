@@ -320,6 +320,8 @@ impl EmbeddingBuilder {
     ///
     /// Higher M = better recall, more memory, slower insert.
     /// Recommended: 8-64, Default: 16
+    ///
+    /// **Constraint:** M must be >= 2 (validated at registration).
     pub fn with_hnsw_m(mut self, m: u16) -> Self {
         self.hnsw_m = m;
         self
@@ -341,11 +343,9 @@ impl EmbeddingBuilder {
     /// - 4-bit: 8x compression, highest recall
     ///
     /// Default: 1
+    ///
+    /// **Constraint:** Must be 1, 2, or 4 (validated at registration).
     pub fn with_rabitq_bits(mut self, bits: u8) -> Self {
-        assert!(
-            bits == 1 || bits == 2 || bits == 4,
-            "rabitq_bits must be 1, 2, or 4"
-        );
         self.rabitq_bits = bits;
         self
     }
@@ -396,6 +396,49 @@ impl EmbeddingBuilder {
     /// RaBitQ rotation seed.
     pub fn rabitq_seed(&self) -> u64 {
         self.rabitq_seed
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Validation (called at registration)
+    // ─────────────────────────────────────────────────────────────
+
+    /// Validate build parameters before registration.
+    ///
+    /// Called by `EmbeddingRegistry::register()` to ensure parameters are valid
+    /// before persisting to storage. Returns an error if validation fails.
+    ///
+    /// # Validation Rules
+    ///
+    /// - `hnsw_m >= 2`: Required for valid `m_l = 1/ln(m)` computation
+    /// - `rabitq_bits ∈ {1, 2, 4}`: Only supported quantization levels
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
+    ///     .with_hnsw_m(1); // Invalid!
+    ///
+    /// assert!(builder.validate().is_err());
+    /// ```
+    pub fn validate(&self) -> Result<()> {
+        // HNSW M must be >= 2 for valid m_l computation
+        // m_l = 1.0 / ln(m), so m=1 gives ln(1)=0 → division by zero
+        if self.hnsw_m < 2 {
+            return Err(anyhow::anyhow!(
+                "hnsw_m must be >= 2 (got {}). Values <= 1 cause invalid layer assignment (m_l = 1/ln(m)).",
+                self.hnsw_m
+            ));
+        }
+
+        // RaBitQ only supports 1, 2, or 4 bits per dimension
+        if self.rabitq_bits != 1 && self.rabitq_bits != 2 && self.rabitq_bits != 4 {
+            return Err(anyhow::anyhow!(
+                "rabitq_bits must be 1, 2, or 4 (got {})",
+                self.rabitq_bits
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -497,10 +540,48 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "rabitq_bits must be 1, 2, or 4")]
-    fn test_embedding_builder_invalid_rabitq_bits() {
-        EmbeddingBuilder::new("test", 128, Distance::Cosine)
+    fn test_embedding_builder_validate_invalid_rabitq_bits() {
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
             .with_rabitq_bits(3); // Invalid - only 1, 2, 4 allowed
+
+        let result = builder.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("rabitq_bits must be 1, 2, or 4"));
+    }
+
+    #[test]
+    fn test_embedding_builder_validate_invalid_hnsw_m() {
+        // hnsw_m = 0 is invalid
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
+            .with_hnsw_m(0);
+        let result = builder.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("hnsw_m must be >= 2"));
+
+        // hnsw_m = 1 is also invalid (ln(1) = 0)
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
+            .with_hnsw_m(1);
+        let result = builder.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("hnsw_m must be >= 2"));
+
+        // hnsw_m = 2 is valid (minimum)
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
+            .with_hnsw_m(2);
+        assert!(builder.validate().is_ok());
+    }
+
+    #[test]
+    fn test_embedding_builder_validate_success() {
+        // Default builder should pass validation
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine);
+        assert!(builder.validate().is_ok());
+
+        // Custom valid params should also pass
+        let builder = EmbeddingBuilder::new("test", 128, Distance::Cosine)
+            .with_hnsw_m(32)
+            .with_rabitq_bits(4);
+        assert!(builder.validate().is_ok());
     }
 
     #[test]
