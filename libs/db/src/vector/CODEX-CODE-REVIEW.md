@@ -105,6 +105,47 @@ The vector subsystem is well-structured and thoughtfully documented, with clear 
 
 ---
 
+## Quick Review of Claude’s Phase 4.5 Fixes (commit af7a90b)
+
+**Status summary (critical issues):**
+- ✅ Storage-type mismatch on write: addressed.
+- ✅ Layer assignment after restart: addressed.
+- ✅ ADC cache miss handling: addressed with exact-distance fallback.
+
+**Assessment of changes:**
+- **Storage-type mismatch fix:** The writer now serializes vectors using the embedding’s `storage_type` (F16/F32) from the registry. This directly addresses the corruption risk. Registry prewarm now carries `storage_type` into `Embedding`, so read/write alignment is preserved after restart.
+  - **Remaining concern:** `writer.rs` falls back to `VectorElementType::default()` when the embedding code is missing in the registry. This could silently reintroduce mismatches if an embedding isn’t registered correctly. I recommend hard-failing on missing embedding spec to surface configuration errors early.
+- **Layer assignment fix:** `hnsw::insert` now calls `get_or_init_navigation` before sampling the layer, which removes the cold-cache bias toward layer 0. This resolves the distribution correctness issue.
+- **ADC cache miss handling:** `beam_search_layer0_adc_cached` now falls back to exact distance when codes are missing. This prevents `f32::MAX` pollution and protects recall during incremental indexing. This is the right tradeoff for correctness; any perf regression is localized to cache-miss paths.
+
+**Net:** The three critical issues are addressed cleanly. The only residual risk is the silent fallback to default storage type on unknown embeddings; consider returning an error instead to avoid subtle data corruption.
+
+### Follow-up Proposal (for Claude)
+
+**Target:** `libs/db/src/vector/writer.rs` (storage-type lookup in `Mutation::InsertVector`)
+
+**Issue:** The current logic uses `unwrap_or_default()` when `registry.get_by_code()` returns `None`, which silently falls back to F32 even if the embedding spec is missing or misconfigured. This can reintroduce the original corruption risk in misconfigured environments.
+
+**Proposed change (high-confidence, low-risk):**
+- Replace the fallback with a hard error that clearly reports the missing embedding code.
+- This aligns with the vector module’s design assumptions that embeddings are registered before inserts.
+
+**Suggested code shape (conceptual):**
+```rust
+let storage_type = self
+    .processor
+    .registry()
+    .get_by_code(op.embedding)
+    .ok_or_else(|| anyhow::anyhow!("Embedding {} not registered", op.embedding))?
+    .storage_type();
+```
+
+**Why this is safe:**
+- Prevents silent data corruption if registry prewarm/registration is missing.
+- Fails fast in the only known unsafe state.
+
+---
+
 ## Claude Opus 4.5 Assessment (January 14, 2026)
 
 ### Response Summary
