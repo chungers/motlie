@@ -231,13 +231,15 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     for (i, vector) in vectors_to_add.iter().enumerate() {
         let vec_id = (existing_count + i) as VecId;
 
-        // Store vector in Vectors CF
+        // Store vector and insert into HNSW index atomically
         let key = VectorCfKey(embedding_code, vec_id);
         let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
-        txn_db.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
 
-        // Insert into HNSW index
-        index.insert(&storage, vec_id, vector)?;
+        let txn = txn_db.transaction();
+        txn.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
+        let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, vector)?;
+        txn.commit()?;
+        cache_update.apply(index.nav_cache());
 
         if (i + 1) % 10000 == 0 || i + 1 == total {
             let elapsed = start.elapsed().as_secs_f64();
@@ -572,8 +574,13 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
         let vec_id = i as VecId;
         let key = VectorCfKey(embedding_code, vec_id);
         let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
-        txn_db.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
-        index.insert(&storage, vec_id, vector)?;
+
+        // Use transaction for atomic vector storage + HNSW insert
+        let txn = txn_db.transaction();
+        txn.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
+        let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, vector)?;
+        txn.commit()?;
+        cache_update.apply(index.nav_cache());
 
         if (i + 1) % 10000 == 0 {
             println!("  {}/{} vectors", i + 1, db_vectors.len());

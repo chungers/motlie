@@ -504,10 +504,13 @@ async fn run_phase2_benchmark(
                 generate_random_vector(bench_metadata.dim, &mut rng)
             };
 
+            // Use transaction for atomic vector storage + HNSW insert
+            let txn = txn_db.transaction();
+
             // Store vector in Vectors CF
             let key = VectorCfKey(embedding_code, vec_id);
             let value = VectorCfValue(vector.clone());
-            txn_db.put_cf(
+            txn.put_cf(
                 &vectors_cf,
                 Vectors::key_to_bytes(&key),
                 Vectors::value_to_bytes(&value),
@@ -521,7 +524,7 @@ async fn run_phase2_benchmark(
                 // Store in RocksDB
                 let bc_key = BinaryCodeCfKey(embedding_code, vec_id);
                 let bc_value = BinaryCodeCfValue { code: code.clone(), correction };
-                txn_db.put_cf(
+                txn.put_cf(
                     cf,
                     BinaryCodes::key_to_bytes(&bc_key),
                     BinaryCodes::value_to_bytes(&bc_value),
@@ -535,8 +538,10 @@ async fn run_phase2_benchmark(
 
             vec_id_to_index.insert(vec_id, i);
 
-            // Insert into HNSW index
-            index.insert(&storage, vec_id, &vector)?;
+            // Insert into HNSW index and commit transaction
+            let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, &vector)?;
+            txn.commit()?;
+            cache_update.apply(index.nav_cache());
 
             // Progress and checkpointing
             let vectors_indexed = i - starting_vectors + 1;
