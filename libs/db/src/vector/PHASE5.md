@@ -2256,6 +2256,13 @@ No issues found in this update.
 
 ---
 
+**New Feedback (embedding registry queries):**
+
+- Public `vector::query` API has no way to list/find embeddings. Users must hold the `EmbeddingRegistry` directly.  
+  - **Recommendation:** add query types like `ListEmbeddings` / `FindEmbeddings` (by model/dim/distance) so registry introspection is available through the reader pipeline when desired.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
