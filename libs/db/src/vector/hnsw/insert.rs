@@ -229,6 +229,121 @@ pub fn insert_in_txn(
     })
 }
 
+/// Insert a vector into the HNSW index during batch insert.
+///
+/// This variant uses transaction-aware reads to support batch inserts where
+/// vectors may not be committed yet. It reads uncommitted vector data from
+/// the same transaction.
+///
+/// # Arguments
+/// * `index` - The HNSW index
+/// * `txn` - The active transaction (for reading uncommitted vectors)
+/// * `txn_db` - The transaction DB (for CF handles)
+/// * `storage` - Storage for edge reads (edges are committed incrementally)
+/// * `vec_id` - The vector ID to insert
+/// * `vector` - The vector data
+///
+/// # Returns
+/// A `CacheUpdate` that should be applied immediately for subsequent inserts
+/// to see the updated navigation state.
+pub fn insert_in_txn_for_batch(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    storage: &Storage,
+    vec_id: VecId,
+    vector: &[f32],
+) -> Result<CacheUpdate> {
+    // 1. Get or initialize navigation state FIRST
+    let nav_info = get_or_init_navigation(index, storage)?;
+
+    // 2. Assign random layer using proper exponential distribution
+    let mut rng = rand::thread_rng();
+    let node_layer = nav_info.random_layer(&mut rng);
+
+    // 3. Store node metadata (using transaction)
+    store_vec_meta_in_txn(index, txn, txn_db, vec_id, node_layer)?;
+
+    // 4. Handle empty graph case
+    if nav_info.is_empty() {
+        // Persist entry point within transaction
+        update_entry_point_in_txn(index, txn, txn_db, vec_id, node_layer)?;
+
+        return Ok(CacheUpdate {
+            embedding: index.embedding(),
+            vec_id,
+            node_layer,
+            is_new_entry_point: true,
+            m: index.config().m,
+        });
+    }
+
+    // 5. Greedy descent to find entry point at target layer
+    // Use transaction-aware distance for uncommitted vectors
+    let entry_point = nav_info.entry_point().unwrap();
+    let max_layer = nav_info.max_layer;
+
+    let mut current = entry_point;
+    let mut current_dist = super::graph::distance_in_txn(index, txn, txn_db, vector, current)?;
+
+    // Descend from max_layer to node_layer + 1 (greedy, single candidate)
+    for layer in (node_layer + 1..=max_layer).rev() {
+        (current, current_dist) = super::graph::greedy_search_layer_in_txn(
+            index, txn, txn_db, storage, vector, current, current_dist, layer,
+        )?;
+    }
+
+    // 6. At each layer from node_layer down to 0: find neighbors and connect
+    for layer in (0..=node_layer).rev() {
+        // Search for neighbors using transaction-aware reads
+        let neighbors = super::graph::search_layer_in_txn(
+            index,
+            txn,
+            txn_db,
+            storage,
+            vector,
+            current,
+            index.config().ef_construction,
+            layer,
+        )?;
+
+        // Select M neighbors (simple heuristic: take closest)
+        let m = if layer == 0 {
+            index.config().m * 2
+        } else {
+            index.config().m
+        };
+        let selected: Vec<_> = neighbors.into_iter().take(m as usize).collect();
+
+        // Connect bidirectionally (using transaction)
+        connect_neighbors_in_txn(index, txn, txn_db, vec_id, &selected, layer)?;
+
+        // Update current for next layer
+        if let Some(&(dist, id)) = selected.first() {
+            current = id;
+            current_dist = dist;
+        }
+    }
+
+    // Suppress unused variable warning
+    let _ = current_dist;
+
+    // 7. Update entry point if needed (using transaction)
+    let is_new_entry_point = node_layer > max_layer;
+    if is_new_entry_point {
+        update_entry_point_in_txn(index, txn, txn_db, vec_id, node_layer)?;
+    }
+
+    // Return cache update - caller should apply immediately for batch
+    Ok(CacheUpdate {
+        embedding: index.embedding(),
+        vec_id,
+        node_layer,
+        is_new_entry_point,
+        m: index.config().m,
+    })
+}
+
 // ============================================================================
 // Transaction-aware helper functions
 // ============================================================================

@@ -429,12 +429,21 @@ pub fn batch(
     }
 
     // 9. Build HNSW index (if requested) - after all vectors are stored
+    //
+    // IMPORTANT: We use insert_in_txn_for_batch which:
+    // 1. Uses transaction-aware reads to access uncommitted vector data
+    // 2. Applies cache updates incrementally so subsequent inserts see the entry point
+    //
+    // If the transaction fails after we've applied some cache updates, the nav_cache
+    // becomes stale. However, on next access, get_or_init_navigation() will reload
+    // from storage and correct itself.
     let mut nav_cache_updates = Vec::new();
     if build_index {
         if let Some(index) = processor.get_or_create_index(embedding) {
             for (i, vec_id) in vec_ids.iter().enumerate() {
                 let vector = &vectors[i].1;
-                let update = hnsw::insert_in_txn(
+                // Use batch-specific insert that reads uncommitted vectors from transaction
+                let update = hnsw::insert_in_txn_for_batch(
                     &index,
                     txn,
                     txn_db,
@@ -442,6 +451,8 @@ pub fn batch(
                     *vec_id,
                     vector,
                 )?;
+                // Apply cache update immediately so subsequent inserts see the entry point
+                update.clone().apply(index.nav_cache());
                 nav_cache_updates.push(update);
             }
         }

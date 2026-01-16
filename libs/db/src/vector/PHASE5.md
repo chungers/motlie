@@ -1,6 +1,6 @@
 # Phase 5: Internal Mutation/Query API
 
-**Status:** In Progress (Tasks 5.0-5.8.1 Complete; 5.9-5.11 Pending)
+**Status:** In Progress (Tasks 5.0-5.8.x Complete; 5.9-5.11 Pending)
 **Date:** January 15, 2026
 **Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`, `c29dceb`, `6ee252b`, `0cbd597`, `dc4c3f9`
 
@@ -19,6 +19,7 @@
 | 5.7.1 | Remove Redundant api.rs | ✅ Complete |
 | 5.8 | Migrate Examples/Integration Tests | ✅ Complete |
 | 5.8.1 | Make Processor pub(crate) + Runnable Migration | ✅ Complete |
+| 5.8.x | Fix insert_batch() HNSW nav-cache updates | ✅ Complete |
 | 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
 | 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |
 | 5.11 | Concurrent Benchmark Baseline | 🔲 Not Started |
@@ -2591,6 +2592,81 @@ All tests pass with excellent recall:
 
 ---
 
+## Task 5.8.x: Fix insert_batch() HNSW Nav-Cache Updates (COMPLETE)
+
+### Problem Statement
+
+CODEX review identified a bug in `insert_batch()` when building HNSW index:
+
+1. **Nav-cache not updated between batch inserts**: The navigation cache was only updated after all vectors were inserted, but subsequent vectors in the batch need to see the entry point from earlier inserts.
+
+2. **Transaction visibility issue**: `get_vector()` in `hnsw/graph.rs` uses `txn_db.get_cf()` which only reads committed data. During batch insert, vectors are stored in an uncommitted transaction, so later vectors in the batch can't read earlier vectors for distance computation.
+
+### Root Cause
+
+```rust
+// BEFORE: All nav-cache updates applied after the loop
+let mut nav_cache_updates = Vec::new();
+for (i, vec_id) in vec_ids.iter().enumerate() {
+    let update = hnsw::insert_in_txn(...)?;  // Can't read uncommitted vectors!
+    nav_cache_updates.push(update);           // Entry point not visible to next insert
+}
+// Updates applied here - too late for batch neighbors to find entry point
+```
+
+### Solution
+
+Two-part fix:
+
+1. **Transaction-aware HNSW insert functions** in `hnsw/graph.rs`:
+   - `get_vector_in_txn()` - reads from uncommitted transaction
+   - `distance_in_txn()` - computes distance using transaction reads
+   - `greedy_search_layer_in_txn()` - greedy descent with transaction visibility
+   - `search_layer_in_txn()` - layer search with transaction visibility
+
+2. **Batch-specific insert function** in `hnsw/insert.rs`:
+   - `insert_in_txn_for_batch()` - uses transaction-aware search functions
+   - Applies cache updates incrementally so subsequent inserts see entry point
+
+```rust
+// AFTER: Transaction-aware insert with incremental cache updates
+let mut nav_cache_updates = Vec::new();
+for (i, vec_id) in vec_ids.iter().enumerate() {
+    let update = hnsw::insert_in_txn_for_batch(
+        &index, txn, txn_db, storage, *vec_id, vector
+    )?;
+    // Apply cache update immediately so next insert sees entry point
+    update.clone().apply(index.nav_cache());
+    nav_cache_updates.push(update);
+}
+```
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `hnsw/graph.rs` | Added `distance_in_txn()`, `get_vector_in_txn()`, `greedy_search_layer_in_txn()`, `search_layer_in_txn()` |
+| `hnsw/insert.rs` | Added `insert_in_txn_for_batch()` |
+| `hnsw/mod.rs` | Exported `insert_in_txn_for_batch` |
+| `ops/insert.rs` | Updated batch loop to use `insert_in_txn_for_batch()` with incremental cache updates |
+
+### Key Insight
+
+The difference between `txn.get_cf()` and `txn_db.get_cf()`:
+
+- `txn_db.get_cf()` - reads only committed data (default read)
+- `txn.get_cf()` - reads uncommitted data from the transaction's write batch
+
+For batch insert, vectors are in the uncommitted transaction, so HNSW neighbor search must use `txn.get_cf()` to see them.
+
+### Test Results
+
+All tests pass including the critical batch insert test:
+- `test_insert_batch_with_index` - ✅ Pass
+- `test_vector_batch_insert_workflow` - ✅ Pass
+
+---
+
 ## Remaining Phase 5 Tasks (Aligned with ROADMAP.md)
 
 | Task | Description | Status |
@@ -2606,6 +2682,7 @@ All tests pass with excellent recall:
 | 5.7.1 | Remove Redundant api.rs | ✅ **Complete** |
 | 5.7.2 | Subsystem Managed Lifecycle | ✅ **Complete** |
 | 5.8 | Migrate Examples/Integration Tests | ✅ **Complete** |
+| 5.8.x | Fix insert_batch() HNSW nav-cache updates | ✅ **Complete** |
 | 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
 | 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |
 | 5.11 | Concurrent Benchmark Baseline | 🔲 Not Started |

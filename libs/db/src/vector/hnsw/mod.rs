@@ -53,7 +53,7 @@ use crate::vector::Storage;
 
 // Re-export for public API
 pub use graph::{connect_neighbors_in_txn, cosine_distance, dot_product_distance, l2_distance};
-pub use insert::{insert_in_txn, CacheUpdate};
+pub use insert::{insert_in_txn, insert_in_txn_for_batch, CacheUpdate};
 
 // ============================================================================
 // HNSW Index

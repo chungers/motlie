@@ -244,6 +244,42 @@ fn get_vector(index: &Index, storage: &Storage, vec_id: VecId) -> Result<Vec<f32
     Vectors::value_from_bytes_typed(&bytes, index.storage_type())
 }
 
+/// Compute distance using transaction for uncommitted reads.
+///
+/// Used during batch insert where vectors may not be committed yet.
+pub fn distance_in_txn(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    query: &[f32],
+    vec_id: VecId,
+) -> Result<f32> {
+    let vector = get_vector_in_txn(index, txn, txn_db, vec_id)?;
+    Ok(compute_distance_metric(index.distance_metric(), query, &vector))
+}
+
+/// Load a vector from transaction (can read uncommitted data).
+///
+/// Used during batch insert where vectors may not be committed yet.
+fn get_vector_in_txn(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    vec_id: VecId,
+) -> Result<Vec<f32>> {
+    let cf = txn_db
+        .cf_handle(Vectors::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+
+    let key = Vectors::key_to_bytes(&VectorCfKey(index.embedding(), vec_id));
+    // Use txn.get_cf() to read uncommitted data from the transaction
+    let bytes = txn
+        .get_cf(&cf, &key)?
+        .ok_or_else(|| anyhow::anyhow!("Vector {} not found", vec_id))?;
+
+    Vectors::value_from_bytes_typed(&bytes, index.storage_type())
+}
+
 // ============================================================================
 // Layer Search Operations
 // ============================================================================
@@ -331,6 +367,135 @@ pub fn search_layer(
     // Use beam search
     let results = super::search::beam_search(index, storage, query, entry, ef, layer, use_cache)?;
     Ok(results)
+}
+
+// ============================================================================
+// Transaction-Aware Layer Search (for batch insert)
+// ============================================================================
+
+/// Greedy search at a single layer using transaction for uncommitted reads.
+///
+/// Used during batch insert where vectors may not be committed yet.
+pub fn greedy_search_layer_in_txn(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    storage: &Storage,
+    query: &[f32],
+    entry: VecId,
+    entry_dist: f32,
+    layer: HnswLayer,
+) -> Result<(VecId, f32)> {
+    let mut current = entry;
+    let mut current_dist = entry_dist;
+
+    loop {
+        // use_cache: false for index build
+        let neighbors = get_neighbors(index, storage, current, layer, false)?;
+        if neighbors.is_empty() {
+            break;
+        }
+
+        let mut improved = false;
+        for neighbor in neighbors.iter() {
+            let dist = distance_in_txn(index, txn, txn_db, query, neighbor)?;
+            if dist < current_dist {
+                current = neighbor;
+                current_dist = dist;
+                improved = true;
+            }
+        }
+
+        if !improved {
+            break;
+        }
+    }
+
+    Ok((current, current_dist))
+}
+
+/// Search at a single layer with ef candidates using transaction.
+///
+/// Used during batch insert where vectors may not be committed yet.
+/// This is a simplified version that doesn't use beam search for speed
+/// during index build - it uses a simple greedy expansion instead.
+pub fn search_layer_in_txn(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    storage: &Storage,
+    query: &[f32],
+    entry: VecId,
+    ef: usize,
+    layer: HnswLayer,
+) -> Result<Vec<(f32, VecId)>> {
+    use std::collections::{BinaryHeap, HashSet};
+
+    // For single-node graph, just return the entry
+    let neighbors = get_neighbors(index, storage, entry, layer, false)?;
+    if neighbors.is_empty() {
+        let dist = distance_in_txn(index, txn, txn_db, query, entry)?;
+        return Ok(vec![(dist, entry)]);
+    }
+
+    // Simple greedy search with ef candidates
+    let entry_dist = distance_in_txn(index, txn, txn_db, query, entry)?;
+    let mut visited = HashSet::new();
+    visited.insert(entry);
+
+    // Min-heap for candidates (closest first)
+    let mut candidates: BinaryHeap<std::cmp::Reverse<(ordered_float::OrderedFloat<f32>, VecId)>> =
+        BinaryHeap::new();
+    candidates.push(std::cmp::Reverse((ordered_float::OrderedFloat(entry_dist), entry)));
+
+    // Max-heap for results (furthest first for easy pruning)
+    let mut results: BinaryHeap<(ordered_float::OrderedFloat<f32>, VecId)> = BinaryHeap::new();
+    results.push((ordered_float::OrderedFloat(entry_dist), entry));
+
+    while let Some(std::cmp::Reverse((dist, current))) = candidates.pop() {
+        // Stop if current candidate is further than worst result
+        if results.len() >= ef {
+            if let Some(&(worst_dist, _)) = results.peek() {
+                if dist > worst_dist {
+                    break;
+                }
+            }
+        }
+
+        // Explore neighbors
+        let neighbors = get_neighbors(index, storage, current, layer, false)?;
+        for neighbor in neighbors.iter() {
+            if visited.insert(neighbor) {
+                let neighbor_dist = distance_in_txn(index, txn, txn_db, query, neighbor)?;
+
+                // Add to results if better than worst
+                let should_add = if results.len() < ef {
+                    true
+                } else if let Some(&(worst_dist, _)) = results.peek() {
+                    ordered_float::OrderedFloat(neighbor_dist) < worst_dist
+                } else {
+                    true
+                };
+
+                if should_add {
+                    candidates.push(std::cmp::Reverse((
+                        ordered_float::OrderedFloat(neighbor_dist),
+                        neighbor,
+                    )));
+                    results.push((ordered_float::OrderedFloat(neighbor_dist), neighbor));
+                    if results.len() > ef {
+                        results.pop(); // Remove worst
+                    }
+                }
+            }
+        }
+    }
+
+    // Convert to sorted vec
+    let mut result_vec: Vec<(f32, VecId)> =
+        results.into_iter().map(|(d, id)| (d.0, id)).collect();
+    result_vec.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    Ok(result_vec)
 }
 
 // ============================================================================
