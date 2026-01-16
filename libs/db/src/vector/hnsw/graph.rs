@@ -31,7 +31,7 @@ use crate::vector::Storage;
 ///
 /// for vector in vectors {
 ///     // Insert using the cache
-///     let update = insert_in_txn_for_batch_with_cache(
+///     let update = insert_for_batch(
 ///         index, txn, txn_db, storage, vec_id, vector, &mut batch_cache
 ///     )?;
 ///     update.apply(nav_cache);
