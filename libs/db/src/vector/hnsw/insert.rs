@@ -77,40 +77,6 @@ impl CacheUpdate {
 // Transaction-aware insert API
 // ============================================================================
 
-/// Insert a vector into the HNSW index (legacy API).
-///
-/// This is the legacy API that creates its own transaction internally.
-/// For production use with atomic commits, use `insert_in_txn()` instead.
-///
-/// # Arguments
-/// * `index` - The HNSW index
-/// * `storage` - RocksDB storage handle
-/// * `vec_id` - Internal vector ID (already allocated)
-/// * `vector` - The vector data (already stored in Vectors CF)
-///
-/// # Algorithm
-/// 1. Assign random layer using HNSW distribution
-/// 2. Get or initialize navigation info
-/// 3. If graph is empty, just set as entry point
-/// 4. Otherwise: greedy descent from entry point to target layer
-/// 5. At each layer from target down to 0: find and connect neighbors
-/// 6. Update entry point if this node has higher layer
-pub fn insert(index: &Index, storage: &Storage, vec_id: VecId, vector: &[f32]) -> Result<()> {
-    let txn_db = storage.transaction_db()?;
-    let txn = txn_db.transaction();
-
-    // Use the transactional insert
-    let cache_update = insert_in_txn(index, &txn, &txn_db, storage, vec_id, vector)?;
-
-    // Commit the transaction
-    txn.commit()?;
-
-    // Apply cache update AFTER successful commit
-    cache_update.apply(index.nav_cache());
-
-    Ok(())
-}
-
 /// Insert a vector into the HNSW index within a transaction.
 ///
 /// This is the recommended API for production use. It accepts a transaction

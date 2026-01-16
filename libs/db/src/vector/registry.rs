@@ -180,10 +180,12 @@ impl EmbeddingRegistry {
     // Registration
     // ─────────────────────────────────────────────────────────────
 
-    /// Register a new embedding space.
+    /// Register a new embedding space (standalone transaction).
     ///
     /// Idempotent: returns existing embedding if spec already registered.
     /// Build parameters are only validated for NEW registrations.
+    ///
+    /// For atomic registration with other writes, use `register_in_txn()`.
     ///
     /// # Errors
     ///
@@ -192,6 +194,38 @@ impl EmbeddingRegistry {
     /// - `hnsw_ef_construction < 1`: Invalid HNSW config
     /// - `rabitq_bits ∉ {1, 2, 4}`: Unsupported quantization level
     pub fn register(&self, builder: EmbeddingBuilder, db: &TransactionDB) -> Result<Embedding> {
+        let txn = db.transaction();
+        let embedding = self.register_in_txn(builder, &txn, db)?;
+        txn.commit()?;
+        Ok(embedding)
+    }
+
+    /// Register a new embedding space within an existing transaction.
+    ///
+    /// Idempotent: returns existing embedding if spec already registered.
+    /// Build parameters are only validated for NEW registrations.
+    ///
+    /// # Arguments
+    /// * `builder` - Embedding specification builder
+    /// * `txn` - Active transaction to write within
+    /// * `db` - TransactionDB for CF handle lookup
+    ///
+    /// # Returns
+    /// The registered `Embedding`. Caller must call `txn.commit()` to persist.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let txn = db.transaction();
+    /// let embedding = registry.register_in_txn(builder, &txn, &db)?;
+    /// // ... other writes to txn ...
+    /// txn.commit()?;
+    /// ```
+    pub fn register_in_txn(
+        &self,
+        builder: EmbeddingBuilder,
+        txn: &rocksdb::Transaction<'_, TransactionDB>,
+        db: &TransactionDB,
+    ) -> Result<Embedding> {
         let spec_key = (builder.model.clone(), builder.dim, builder.distance);
 
         // Fast path: already registered (idempotent - no validation needed)
@@ -215,7 +249,7 @@ impl EmbeddingRegistry {
         // Allocate new code and persist
         let code = self.next_code.fetch_add(1, Ordering::SeqCst);
 
-        // Persist to RocksDB using a transaction for atomicity
+        // Get CF handle for embedding specs
         let cf = db
             .cf_handle(EmbeddingSpecs::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
@@ -234,10 +268,8 @@ impl EmbeddingRegistry {
         };
         let (key_bytes, value_bytes) = add_op.to_cf_bytes()?;
 
-        // Use transaction for atomic write
-        let txn = db.transaction();
+        // Write to transaction (caller commits)
         txn.put_cf(&cf, key_bytes, value_bytes)?;
-        txn.commit()?;
 
         // Create embedding
         let embedding = Embedding::new(
