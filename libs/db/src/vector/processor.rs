@@ -191,20 +191,6 @@ impl Processor {
         self.id_allocators.contains_key(&embedding)
     }
 
-    /// Persist all ID allocators to storage.
-    ///
-    /// Should be called periodically or on shutdown to ensure
-    /// crash recovery works correctly.
-    pub fn persist_allocators(&self) -> Result<()> {
-        let db = self.storage.transaction_db()?;
-        for entry in self.id_allocators.iter() {
-            let embedding = *entry.key();
-            let allocator = entry.value();
-            allocator.persist(&db, embedding)?;
-        }
-        Ok(())
-    }
-
     /// Get the number of registered embedding spaces with allocators.
     pub fn allocator_count(&self) -> usize {
         self.id_allocators.len()

@@ -212,14 +212,15 @@ impl IdAllocator {
         Ok(())
     }
 
-    /// Persist allocator state to RocksDB.
+    /// Persist allocator state to RocksDB (non-transactional, for tests only).
     ///
-    /// Stores both `next_id` and `free_ids` bitmap to the IdAlloc CF.
-    /// Should be called periodically or on shutdown.
+    /// **WARNING:** This uses non-transactional writes (`db.put_cf()`).
+    /// For production code, use `allocate_in_txn()` and `free_in_txn()`
+    /// which persist state atomically within a transaction.
     ///
-    /// Note: For transactional writes, use `allocate_in_txn()` and
-    /// `free_in_txn()` instead.
-    pub fn persist(&self, db: &TransactionDB, embedding: EmbeddingCode) -> Result<()> {
+    /// This method is kept for crash recovery tests that need to simulate
+    /// persistence outside of normal transaction flows.
+    pub(crate) fn persist(&self, db: &TransactionDB, embedding: EmbeddingCode) -> Result<()> {
         let cf = db
             .cf_handle(IdAlloc::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdAlloc::CF_NAME))?;
