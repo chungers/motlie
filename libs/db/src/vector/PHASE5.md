@@ -2243,6 +2243,12 @@ No issues found in this update.
 
 ---
 
+**Update (delete API hidden):**
+
+- **Resolved:** `Processor::delete_vector` is now `pub(crate)` and integration tests use `DeleteVector::run(&writer)` to demonstrate the public mutation API pattern.
+
+---
+
 **New Feedback (point-lookup query ergonomics):**
 
 - Only `SearchKNN` has `Runnable` today. Point-lookups (GetVector/GetInternalId/GetExternalId/ResolveIds) still require dispatch or `QueryWithTimeout` plumbing.  
