@@ -14,7 +14,7 @@
 //! Runnable traits:
 //! - `InsertVector::run(&writer)` for inserts
 //! - `SearchKNN::run(&search_reader, timeout)` for searches
-//! - `DeleteVector::run(&writer)` for deletes
+//! - `DeleteVector::run(&writer)` for soft-deletes (tombstone when HNSW enabled)
 //!
 //! This enables making Processor `pub(crate)`.
 

@@ -2479,7 +2479,7 @@ During migration, discovered that `Processor::insert_batch()` has a bug where th
 Make `Processor` internal (`pub(crate)`) by migrating all integration tests to use only public Runnable traits:
 - `InsertVector::run(&writer)` for inserts
 - `SearchKNN::run(&search_reader, timeout)` for searches
-- `DeleteVector::run(&writer)` for deletes
+- `DeleteVector::run(&writer)` for soft-deletes (tombstone when HNSW enabled)
 
 This enforces proper encapsulation - external code uses the async Writer/Reader pattern, not direct Processor access.
 
