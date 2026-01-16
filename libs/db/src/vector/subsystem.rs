@@ -11,9 +11,11 @@ use crate::rocksdb::{prewarm_cf, BlockCacheConfig, ColumnFamily, ColumnFamilyCon
 use crate::SubsystemProvider;
 use motlie_core::telemetry::SubsystemInfo;
 
+use super::processor::Processor;
+use super::reader::{create_search_reader, ReaderConfig, SearchReader, spawn_consumers_with_processor};
 use super::registry::EmbeddingRegistry;
 use super::schema::{self, ALL_COLUMN_FAMILIES, EmbeddingSpecs};
-use super::writer::Writer;
+use super::writer::{create_writer, spawn_consumer, Consumer, Writer, WriterConfig};
 
 // ============================================================================
 // Vector Subsystem
@@ -101,6 +103,100 @@ impl Subsystem {
     /// Call this if the writer/consumers are shut down independently.
     pub fn clear_writer(&self) {
         *self.writer.write().expect("writer lock poisoned") = None;
+    }
+
+    /// Start the vector subsystem with managed lifecycle.
+    ///
+    /// This is the recommended way to use the vector subsystem. It:
+    /// 1. Creates Writer + SearchReader with internal wiring
+    /// 2. Spawns mutation consumer (1 worker)
+    /// 3. Spawns query consumers (configurable workers)
+    /// 4. Registers Writer for automatic shutdown flush
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Vector storage instance
+    /// * `writer_config` - Configuration for mutation writer
+    /// * `reader_config` - Configuration for query reader
+    /// * `num_query_workers` - Number of parallel query workers
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (Writer, SearchReader) for sending mutations and queries.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use motlie_db::vector::{Subsystem, WriterConfig, ReaderConfig};
+    /// use motlie_db::storage_builder::StorageBuilder;
+    ///
+    /// // Create subsystem and build storage
+    /// let subsystem = Arc::new(Subsystem::new());
+    /// let registry = subsystem.cache().clone();
+    ///
+    /// let storage = StorageBuilder::new(path)
+    ///     .with_rocksdb(subsystem.clone())
+    ///     .build()?;
+    ///
+    /// // Start with managed lifecycle
+    /// let (writer, search_reader) = subsystem.start(
+    ///     storage.vector_storage().clone(),
+    ///     WriterConfig::default(),
+    ///     ReaderConfig::default(),
+    ///     4,  // 4 query workers
+    /// );
+    ///
+    /// // Use writer and search_reader...
+    /// InsertVector::new(&embedding, id, vec).run(&writer).await?;
+    /// let results = search_reader.search_knn(&embedding, query, 10, 100, timeout).await?;
+    ///
+    /// // Shutdown automatically flushes pending mutations
+    /// storage.shutdown()?;
+    /// ```
+    ///
+    /// # Lifecycle
+    ///
+    /// When `on_shutdown()` is called (typically via `storage.shutdown()`),
+    /// the subsystem will automatically flush any pending mutations before
+    /// returning. This ensures data durability without manual flush calls.
+    ///
+    /// # Alternative: Manual Lifecycle
+    ///
+    /// If you need more control, use the raw components directly:
+    /// ```rust,ignore
+    /// let (writer, receiver) = create_writer(config);
+    /// let processor = Arc::new(Processor::new(storage, registry));
+    /// spawn_mutation_consumer_with_storage(...);
+    /// // You are responsible for calling writer.flush() before shutdown
+    /// ```
+    pub fn start(
+        &self,
+        storage: Arc<super::Storage>,
+        writer_config: WriterConfig,
+        reader_config: ReaderConfig,
+        num_query_workers: usize,
+    ) -> (Writer, SearchReader) {
+        // Create processor (shared by mutation consumer and query consumers)
+        let processor = Arc::new(Processor::new(storage, self.cache.clone()));
+
+        // Create and spawn mutation consumer
+        let (writer, mutation_receiver) = create_writer(writer_config.clone());
+        let mutation_consumer = Consumer::new(mutation_receiver, writer_config, processor.clone());
+        let _mutation_handle = spawn_consumer(mutation_consumer);
+
+        // Create and spawn query consumers
+        let (search_reader, query_receiver) = create_search_reader(reader_config.clone(), processor.clone());
+        let _query_handles = spawn_consumers_with_processor(
+            query_receiver,
+            reader_config,
+            processor,
+            num_query_workers,
+        );
+
+        // Register writer for shutdown flush
+        self.set_writer(writer.clone());
+
+        (writer, search_reader)
     }
 
     /// Internal method to build CF descriptors.

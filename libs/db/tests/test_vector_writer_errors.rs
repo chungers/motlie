@@ -24,8 +24,14 @@ async fn test_insert_unknown_embedding_fails() {
     let consumer = Consumer::new(receiver, WriterConfig::default(), processor);
     let handle = tokio::spawn(async move { consumer.run().await });
 
-    let embedding_code = 42;
-    let mutation = InsertVector::new(embedding_code, Id::new(), vec![1.0, 2.0, 3.0]);
+    // Construct InsertVector directly with invalid embedding code to test error handling
+    // (Normal usage goes through InsertVector::new(&embedding, ...) which ensures validity)
+    let mutation = InsertVector {
+        embedding: 42, // Unknown embedding code
+        id: Id::new(),
+        vector: vec![1.0, 2.0, 3.0],
+        immediate_index: false,
+    };
     writer
         .send(vec![Mutation::InsertVector(mutation)])
         .await

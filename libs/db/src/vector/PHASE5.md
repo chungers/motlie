@@ -2270,6 +2270,67 @@ All 520 tests pass after removal.
 
 ---
 
+## Task 5.7.2: Subsystem Managed Lifecycle (COMPLETE)
+
+**Status:** ✅ Complete
+**Date:** January 15, 2026
+
+### Overview
+
+Added `Subsystem::start()` method to both vector and graph subsystems for managed lifecycle. This provides a batteries-included setup that wires Writer, Reader, and consumers together with automatic shutdown flush.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `vector/subsystem.rs` | Added `start()` method, `set_writer()`, `clear_writer()`, shutdown flush in `on_shutdown()` |
+| `graph/subsystem.rs` | Added `start()` method, `set_writer()`, `clear_writer()`, shutdown flush in `on_shutdown()` |
+| `vector/processor.rs` | Added doc note to `delete_vector` recommending mutation API |
+
+### Design
+
+**Managed Lifecycle (via `start()`):**
+```rust
+// Subsystem owns Writer lifecycle, automatic shutdown flush
+let (writer, reader) = subsystem.start(
+    storage,
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,  // query workers
+);
+
+// Use writer and reader...
+InsertVector::new(&embedding, id, vec).run(&writer).await?;
+SearchKNN::new(&embedding, query, 10).run(&reader, timeout).await?;
+
+// Shutdown automatically flushes pending mutations
+storage.shutdown()?;
+```
+
+**Manual Lifecycle (for advanced users):**
+```rust
+// User manages their own Writer and flush
+let (writer, receiver) = create_writer(config);
+let processor = Arc::new(Processor::new(storage, registry));
+spawn_mutation_consumer_with_storage(...);
+
+// User responsible for calling writer.flush() before shutdown
+```
+
+### Rationale
+
+- `RwLock<Option<Writer>>` pattern silently hides missing initialization
+- `start()` provides safe default that ensures flush on shutdown
+- Users who need manual control can still create components directly
+- Aligns with graph's existing mutation-first public API
+
+### Public API Guidance
+
+- `Processor::delete_vector` remains `pub` for testing but docs recommend `DeleteVector::run(&writer)`
+- Public users are steered to `DeleteVector::run(&writer)` for consistent async semantics
+
+---
+
 ## Remaining Phase 5 Tasks (Aligned with ROADMAP.md)
 
 | Task | Description | Status |
@@ -2283,6 +2344,7 @@ All 520 tests pass after removal.
 | 5.6 | Mutation Dispatch | ✅ **Complete** |
 | 5.7 | Query Dispatch | ✅ **Complete** |
 | 5.7.1 | Remove Redundant api.rs | ✅ **Complete** |
+| 5.7.2 | Subsystem Managed Lifecycle | ✅ **Complete** |
 | 5.8 | Migrate Examples/Integration Tests | 🔲 Not Started |
 | 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
 | 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |

@@ -539,10 +539,15 @@ impl Processor {
     ///
     /// # Example
     /// ```rust,ignore
-    /// match processor.delete_vector(embedding_code, id)? {
+    /// match processor.delete_vector(&embedding, id)? {
     ///     Some(vec_id) => println!("Deleted vector with internal ID {}", vec_id),
     ///     None => println!("Vector did not exist"),
     /// }
+    /// ```
+    ///
+    /// **Note:** For async workloads, prefer using the mutation API:
+    /// ```rust,ignore
+    /// DeleteVector::new(&embedding, id).run(&writer).await?;
     /// ```
     pub fn delete_vector(
         &self,
