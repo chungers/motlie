@@ -18,6 +18,7 @@ use crate::rocksdb::MutationCodec;
 use crate::Id;
 
 use super::distance::Distance;
+use super::embedding::Embedding;
 use super::processor::Processor;
 use super::schema::{
     EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecCfValue, EmbeddingSpecs,
@@ -158,9 +159,14 @@ pub struct InsertVector {
 
 impl InsertVector {
     /// Create a new InsertVector mutation.
-    pub fn new(embedding: EmbeddingCode, id: Id, vector: Vec<f32>) -> Self {
+    ///
+    /// # Arguments
+    /// * `embedding` - Reference to embedding space (code extracted internally)
+    /// * `id` - External document ID
+    /// * `vector` - Vector data (must match embedding dimension)
+    pub fn new(embedding: &Embedding, id: Id, vector: Vec<f32>) -> Self {
         Self {
-            embedding,
+            embedding: embedding.code(),
             id,
             vector,
             immediate_index: false,
@@ -203,8 +209,15 @@ pub struct DeleteVector {
 
 impl DeleteVector {
     /// Create a new DeleteVector mutation.
-    pub fn new(embedding: EmbeddingCode, id: Id) -> Self {
-        Self { embedding, id }
+    ///
+    /// # Arguments
+    /// * `embedding` - Reference to embedding space (code extracted internally)
+    /// * `id` - External document ID to delete
+    pub fn new(embedding: &Embedding, id: Id) -> Self {
+        Self {
+            embedding: embedding.code(),
+            id,
+        }
     }
 }
 
@@ -234,9 +247,13 @@ pub struct InsertVectorBatch {
 
 impl InsertVectorBatch {
     /// Create a new batch insert mutation.
-    pub fn new(embedding: EmbeddingCode, vectors: Vec<(Id, Vec<f32>)>) -> Self {
+    ///
+    /// # Arguments
+    /// * `embedding` - Reference to embedding space (code extracted internally)
+    /// * `vectors` - Batch of (id, vector) pairs
+    pub fn new(embedding: &Embedding, vectors: Vec<(Id, Vec<f32>)>) -> Self {
         Self {
-            embedding,
+            embedding: embedding.code(),
             vectors,
             immediate_index: false,
         }
@@ -415,16 +432,131 @@ impl MutationExecutor for InsertVectorBatch {
 }
 
 // ============================================================================
+// Runnable Implementations
+// ============================================================================
+
+/// Trait for mutations to execute themselves against a Writer.
+///
+/// This enables the ergonomic pattern:
+/// ```rust,ignore
+/// InsertVector::new(embedding, id, vec).run(&writer).await?;
+/// ```
+///
+/// Note: This sends the mutation asynchronously without waiting for commit.
+/// Use `Writer::flush()` after `run()` if you need confirmation, or use
+/// `Writer::send_sync()` directly for send-and-wait semantics.
+#[async_trait::async_trait]
+pub trait Runnable {
+    /// Execute this mutation against the writer.
+    async fn run(self, writer: &super::writer::Writer) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+impl Runnable for InsertVector {
+    async fn run(self, writer: &super::writer::Writer) -> Result<()> {
+        writer.send(vec![Mutation::InsertVector(self)]).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for InsertVectorBatch {
+    async fn run(self, writer: &super::writer::Writer) -> Result<()> {
+        writer.send(vec![Mutation::InsertVectorBatch(self)]).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for DeleteVector {
+    async fn run(self, writer: &super::writer::Writer) -> Result<()> {
+        writer.send(vec![Mutation::DeleteVector(self)]).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for AddEmbeddingSpec {
+    async fn run(self, writer: &super::writer::Writer) -> Result<()> {
+        writer.send(vec![Mutation::AddEmbeddingSpec(self)]).await
+    }
+}
+
+// ============================================================================
+// MutationBatch - Batch helper for multiple mutations
+// ============================================================================
+
+/// Batch of mutations for efficient bulk operations.
+///
+/// Enables the pattern:
+/// ```rust,ignore
+/// MutationBatch::new()
+///     .push(InsertVector::new(...))
+///     .push(InsertVector::new(...))
+///     .run(&writer)
+///     .await?;
+/// ```
+#[derive(Debug, Default)]
+pub struct MutationBatch(pub Vec<Mutation>);
+
+impl MutationBatch {
+    /// Create a new empty batch.
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Create a batch with pre-allocated capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+
+    /// Add a mutation to the batch.
+    pub fn push<M: Into<Mutation>>(mut self, mutation: M) -> Self {
+        self.0.push(mutation.into());
+        self
+    }
+
+    /// Get the number of mutations in the batch.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Check if the batch is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Consume the batch and return the underlying mutations.
+    pub fn into_inner(self) -> Vec<Mutation> {
+        self.0
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for MutationBatch {
+    async fn run(self, writer: &super::writer::Writer) -> Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        writer.send(self.0).await
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vector::schema::VectorElementType;
+
+    /// Create a test embedding for unit tests.
+    fn test_embedding(code: EmbeddingCode) -> Embedding {
+        Embedding::new(code, "test", 128, Distance::Cosine, VectorElementType::F32, None)
+    }
 
     #[test]
     fn test_insert_vector_builder() {
-        let mutation = InsertVector::new(1, Id::new(), vec![1.0, 2.0, 3.0]);
+        let embedding = test_embedding(1);
+        let mutation = InsertVector::new(&embedding, Id::new(), vec![1.0, 2.0, 3.0]);
         assert_eq!(mutation.embedding, 1);
         assert!(!mutation.immediate_index);
 
@@ -434,19 +566,21 @@ mod tests {
 
     #[test]
     fn test_delete_vector() {
+        let embedding = test_embedding(42);
         let id = Id::new();
-        let mutation = DeleteVector::new(42, id);
+        let mutation = DeleteVector::new(&embedding, id);
         assert_eq!(mutation.embedding, 42);
         assert_eq!(mutation.id, id);
     }
 
     #[test]
     fn test_insert_batch() {
+        let embedding = test_embedding(1);
         let vectors = vec![
             (Id::new(), vec![1.0, 2.0]),
             (Id::new(), vec![3.0, 4.0]),
         ];
-        let mutation = InsertVectorBatch::new(1, vectors.clone());
+        let mutation = InsertVectorBatch::new(&embedding, vectors.clone());
         assert_eq!(mutation.embedding, 1);
         assert_eq!(mutation.vectors.len(), 2);
         assert!(!mutation.immediate_index);
@@ -454,13 +588,14 @@ mod tests {
 
     #[test]
     fn test_mutation_from_conversions() {
-        let insert = InsertVector::new(1, Id::new(), vec![1.0]);
+        let embedding = test_embedding(1);
+        let insert = InsertVector::new(&embedding, Id::new(), vec![1.0]);
         let _: Mutation = insert.into();
 
-        let delete = DeleteVector::new(1, Id::new());
+        let delete = DeleteVector::new(&embedding, Id::new());
         let _: Mutation = delete.into();
 
-        let batch = InsertVectorBatch::new(1, vec![(Id::new(), vec![1.0])]);
+        let batch = InsertVectorBatch::new(&embedding, vec![(Id::new(), vec![1.0])]);
         let _: Mutation = batch.into();
     }
 

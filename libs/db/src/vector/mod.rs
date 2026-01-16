@@ -115,6 +115,7 @@ pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD
 // Graph repair requires full rebuild - no partial repair API exposed
 pub use mutation::{
     AddEmbeddingSpec, DeleteVector, FlushMarker, InsertVector, InsertVectorBatch, Mutation,
+    MutationBatch, Runnable as MutationRunnable,
 };
 pub use writer::{
     create_writer,
@@ -126,6 +127,7 @@ pub use writer::{
 };
 
 // Query types and infrastructure (following graph::query pattern)
+// Runnable<R> is the query trait (with timeout + Output), MutationRunnable is for mutations
 pub use crate::reader::Runnable;
 pub use query::{
     GetExternalId, GetInternalId, GetVector, Query, QueryExecutor, QueryProcessor,

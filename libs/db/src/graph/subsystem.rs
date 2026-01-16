@@ -2,7 +2,7 @@
 //!
 //! Defines the graph subsystem implementing the unified SubsystemProvider pattern.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use rocksdb::{Cache, ColumnFamilyDescriptor, TransactionDB};
@@ -13,6 +13,7 @@ use motlie_core::telemetry::SubsystemInfo;
 
 use super::name_hash::{NameCache, NameHash};
 use super::schema::{self, ALL_COLUMN_FAMILIES};
+use super::writer::Writer;
 use super::{ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde};
 
 // ============================================================================
@@ -44,6 +45,9 @@ pub struct Subsystem {
     cache: Arc<NameCache>,
     /// Pre-warm configuration.
     prewarm_config: NameCacheConfig,
+    /// Optional writer for graceful shutdown flush.
+    /// Registered via `set_writer()` after storage initialization.
+    writer: RwLock<Option<Writer>>,
 }
 
 impl Subsystem {
@@ -52,6 +56,7 @@ impl Subsystem {
         Self {
             cache: Arc::new(NameCache::new()),
             prewarm_config: NameCacheConfig::default(),
+            writer: RwLock::new(None),
         }
     }
 
@@ -69,6 +74,34 @@ impl Subsystem {
     /// Get the pre-warm configuration.
     pub fn prewarm_config(&self) -> &NameCacheConfig {
         &self.prewarm_config
+    }
+
+    /// Register a writer for graceful shutdown flush.
+    ///
+    /// When `on_shutdown()` is called, the subsystem will attempt to flush
+    /// any pending mutations through this writer before returning.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let subsystem = Subsystem::new();
+    /// let storage = StorageBuilder::new(path)
+    ///     .with_rocksdb(Box::new(subsystem))
+    ///     .build()?;
+    ///
+    /// let (writer, receiver) = create_writer(WriterConfig::default());
+    /// subsystem.set_writer(writer.clone());
+    /// // spawn consumers...
+    /// ```
+    pub fn set_writer(&self, writer: Writer) {
+        *self.writer.write().expect("writer lock poisoned") = Some(writer);
+    }
+
+    /// Clear the registered writer.
+    ///
+    /// Call this if the writer/consumers are shut down independently.
+    pub fn clear_writer(&self) {
+        *self.writer.write().expect("writer lock poisoned") = None;
     }
 
     /// Internal method to prewarm the name cache.
@@ -192,6 +225,37 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
 
     fn on_shutdown(&self) -> Result<()> {
         tracing::info!(subsystem = "graph", "Shutting down");
+
+        // Best-effort flush of pending mutations
+        if let Some(writer) = self.writer.read().expect("writer lock poisoned").as_ref() {
+            if !writer.is_closed() {
+                tracing::debug!(subsystem = "graph", "Flushing pending mutations");
+
+                // Use block_on since on_shutdown is sync.
+                // This is safe because we're just draining an MPSC channel
+                // and waiting for the consumer to commit a RocksDB transaction.
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => {
+                        if let Err(e) = handle.block_on(writer.flush()) {
+                            tracing::warn!(
+                                subsystem = "graph",
+                                error = %e,
+                                "Failed to flush pending mutations on shutdown (best effort)"
+                            );
+                        } else {
+                            tracing::debug!(subsystem = "graph", "Flushed pending mutations");
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            subsystem = "graph",
+                            "No tokio runtime available for shutdown flush (best effort)"
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 }
