@@ -2665,6 +2665,10 @@ All tests pass including the critical batch insert test:
 - `test_insert_batch_with_index` - ✅ Pass
 - `test_vector_batch_insert_workflow` - ✅ Pass
 
+### Review Note
+
+The fix correctly addresses vector visibility (transaction reads) and incremental nav-cache entry-point updates. One remaining correctness concern: `search_layer_in_txn()` still reads neighbors via `get_neighbors()` which uses `txn_db.get_cf()` (committed reads). Edges written earlier in the same batch are in the transaction (via `txn.merge_cf`) and are not visible to these reads. That means later inserts do not see edges from earlier inserts, and batch graph structure can diverge from sequential insert behavior (typically a star around the original entry). Consider adding `get_neighbors_in_txn()` (reading from `txn.get_cf()`), or staging edge updates in a batch-local cache so neighbor search sees newly added edges.
+
 ---
 
 ## Remaining Phase 5 Tasks (Aligned with ROADMAP.md)
