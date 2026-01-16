@@ -14,8 +14,9 @@ use std::time::Duration;
 
 use motlie_db::vector::benchmark::LAION_EMBEDDING_DIM;
 use motlie_db::vector::{
-    Distance, EmbeddingBuilder, Processor, RaBitQConfig, SearchConfig, Storage,
-    hnsw,
+    create_writer, spawn_mutation_consumer_with_storage, DeleteVector, Distance,
+    EmbeddingBuilder, MutationRunnable, Processor, RaBitQConfig, SearchConfig, Storage,
+    WriterConfig, hnsw,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -74,8 +75,8 @@ fn compute_recall(ground_truth: &[usize], results: &[usize]) -> f32 {
     found as f32 / ground_truth.len() as f32
 }
 
-#[test]
-fn test_vector_workflow_with_laion_clip_style_data() {
+#[tokio::test]
+async fn test_vector_workflow_with_laion_clip_style_data() {
     // =========================================================================
     // Setup: Create storage with HNSW and RaBitQ enabled
     // =========================================================================
@@ -235,22 +236,34 @@ fn test_vector_workflow_with_laion_clip_style_data() {
     // =========================================================================
     // Step 6: Delete some vectors and verify they don't appear in results
     // =========================================================================
-    println!("\n=== Step 6: Deleting vectors and verifying ===");
+    println!("\n=== Step 6: Deleting vectors via mutation API ===");
 
-    // Delete first 100 vectors
+    // Set up writer for delete mutations
+    let (writer, receiver) = create_writer(WriterConfig::default());
+    let _consumer_handle = spawn_mutation_consumer_with_storage(
+        receiver,
+        WriterConfig::default(),
+        storage.clone(),
+        registry.clone(),
+    );
+
+    // Delete first 100 vectors using DeleteVector::run(&writer)
     let delete_count = 100;
     let deleted_ids: Vec<Id> = external_ids[..delete_count].to_vec();
 
     for (i, &id) in deleted_ids.iter().enumerate() {
-        let result = processor
-            .delete_vector(&embedding, id)
+        DeleteVector::new(&embedding, id)
+            .run(&writer)
+            .await
             .expect("delete vector");
-        assert!(result.is_some(), "Delete should return vec_id");
 
         if (i + 1) % 50 == 0 {
             println!("  Deleted {}/{} vectors", i + 1, delete_count);
         }
     }
+
+    // Flush to ensure all deletes are committed
+    writer.flush().await.expect("flush writer");
     println!("  Deleted {} vectors", delete_count);
 
     // Search again and verify deleted vectors don't appear

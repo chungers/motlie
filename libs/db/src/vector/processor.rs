@@ -545,11 +545,7 @@ impl Processor {
     /// }
     /// ```
     ///
-    /// **Note:** For async workloads, prefer using the mutation API:
-    /// ```rust,ignore
-    /// DeleteVector::new(&embedding, id).run(&writer).await?;
-    /// ```
-    pub fn delete_vector(
+    pub(crate) fn delete_vector(
         &self,
         embedding: &Embedding,
         id: Id,
