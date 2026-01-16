@@ -1,13 +1,14 @@
 # Vector Search Implementation Roadmap
 
 **Author:** David Chung + Claude
-**Date:** January 2, 2026 (Updated: January 15, 2026)
+**Date:** January 2, 2026 (Updated: January 16, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 In Progress (Tasks 5.0-5.8.1 Complete), Phase 6-8 Remaining
+**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 Complete (Tasks 5.0-5.11), Phase 6-8 Remaining
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
 - [`BENCHMARK.md`](./BENCHMARK.md) - Performance results and configuration reference
+- [`CONCURRENT.md`](./CONCURRENT.md) - Concurrent operations (Tasks 5.9-5.11)
 
 ---
 
@@ -6976,7 +6977,15 @@ if args.raw_mode {
 - Benchmark results within 10% of direct Index performance
 - No functionality regression
 
-### Task 5.9: Multi-Threaded Stress Tests
+---
+
+**Note:** Tasks 5.9-5.11 (Concurrent Operations) are documented in detail in [CONCURRENT.md](./CONCURRENT.md).
+
+---
+
+### Task 5.9: Multi-Threaded Stress Tests ✅
+
+**Status:** Complete ([CONCURRENT.md](./CONCURRENT.md))
 
 **Goal:** Validate concurrent access patterns under load.
 
@@ -7053,7 +7062,9 @@ mod concurrent_tests {
 }
 ```
 
-### Task 5.10: Metrics Collection Infrastructure
+### Task 5.10: Metrics Collection Infrastructure ✅
+
+**Status:** Complete ([CONCURRENT.md](./CONCURRENT.md))
 
 **Goal:** Add metrics collection for concurrent operation analysis.
 
@@ -7128,7 +7139,9 @@ pub struct MetricsSummary {
 }
 ```
 
-### Task 5.11: Concurrent Benchmark Baseline
+### Task 5.11: Concurrent Benchmark Baseline ✅
+
+**Status:** Complete ([CONCURRENT.md](./CONCURRENT.md))
 
 **Goal:** Establish baseline metrics for concurrent operations.
 

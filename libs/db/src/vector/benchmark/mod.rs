@@ -47,6 +47,7 @@
 //! let ground_truth = subset.compute_ground_truth_topk(10);
 //! ```
 
+pub mod concurrent;
 pub mod dataset;
 pub mod metadata;
 pub mod metrics;
@@ -98,3 +99,8 @@ pub use runner::{
 
 // Re-exports for public API - Metadata (incremental builds)
 pub use metadata::{BenchmarkMetadata, GroundTruthCache};
+
+// Re-exports for public API - Concurrent benchmarks
+pub use concurrent::{
+    BenchConfig, BenchResult, ConcurrentBenchmark, ConcurrentMetrics, MetricsSummary,
+};

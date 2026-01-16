@@ -1,6 +1,6 @@
 # Phase 5: Internal Mutation/Query API
 
-**Status:** In Progress (Tasks 5.0-5.8.x Complete; 5.9-5.11 Pending)
+**Status:** ✅ Complete (All Tasks 5.0-5.11)
 **Date:** January 15, 2026
 **Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`, `c29dceb`, `6ee252b`, `0cbd597`, `dc4c3f9`
 
@@ -21,9 +21,9 @@
 | 5.8.1 | Make Processor pub(crate) + Runnable Migration | ✅ Complete |
 | 5.8.x | Fix insert_batch() HNSW nav-cache updates | ✅ Complete |
 | 5.8.y | Remove non-transactional writes (production) | ✅ Complete |
-| 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
-| 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |
-| 5.11 | Concurrent Benchmark Baseline | 🔲 Not Started |
+| 5.9 | Multi-Threaded Stress Tests | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
+| 5.10 | Metrics Collection Infrastructure | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
+| 5.11 | Concurrent Benchmark Baseline | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
 
 ---
 
@@ -2750,14 +2750,15 @@ BatchEdgeCache closes the remaining correctness gap: edges from earlier inserts 
 | 5.8 | Migrate Examples/Integration Tests | ✅ **Complete** |
 | 5.8.x | Fix insert_batch() HNSW nav-cache updates | ✅ **Complete** |
 | 5.8.y | Remove non-transactional writes (production) | ✅ **Complete** |
-| 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
-| 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |
-| 5.11 | Concurrent Benchmark Baseline | 🔲 Not Started |
+| 5.9 | Multi-Threaded Stress Tests | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
+| 5.10 | Metrics Collection Infrastructure | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
+| 5.11 | Concurrent Benchmark Baseline | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
 
 ---
 
 ## References
 
 - [ROADMAP.md](./ROADMAP.md) - Full implementation roadmap
+- [CONCURRENT.md](./CONCURRENT.md) - Tasks 5.9-5.11: Concurrent operations
 - [API.md](./API.md) - Public API reference
 - [BENCHMARK.md](./BENCHMARK.md) - Performance results
