@@ -2292,7 +2292,8 @@ Added `Subsystem::start()` method to both vector and graph subsystems for manage
 |------|--------|
 | `vector/subsystem.rs` | Added `start()` method, `set_writer()`, `clear_writer()`, shutdown flush in `on_shutdown()` |
 | `graph/subsystem.rs` | Added `start()` method, `set_writer()`, `clear_writer()`, shutdown flush in `on_shutdown()` |
-| `vector/processor.rs` | Added doc note to `delete_vector` recommending mutation API |
+| `vector/processor.rs` | Changed `delete_vector` to `pub(crate)` |
+| `tests/test_vector_workflow_integration.rs` | Updated to use `DeleteVector::run(&writer)` |
 
 ### Design
 
@@ -2331,10 +2332,11 @@ spawn_mutation_consumer_with_storage(...);
 - Users who need manual control can still create components directly
 - Aligns with graph's existing mutation-first public API
 
-### Public API Guidance
+### Public API Visibility
 
-- `Processor::delete_vector` remains `pub` for testing but docs recommend `DeleteVector::run(&writer)`
-- Public users are steered to `DeleteVector::run(&writer)` for consistent async semantics
+- `Processor::delete_vector` is `pub(crate)` (internal only)
+- Public users must use `DeleteVector::run(&writer)` for consistent async semantics
+- Integration tests updated to demonstrate the public API pattern
 
 ---
 
