@@ -383,3 +383,22 @@ pub enum OpType {
 - [PHASE5.md](./PHASE5.md) - Phase 5 task tracking
 - [ROADMAP.md](./ROADMAP.md) - Full implementation roadmap
 - [API.md](./API.md) - Public API reference
+
+---
+
+## CODEX Review Notes (Post-sync)
+
+### Correctness / Reliability
+
+- **Concurrent tests allow a 10% error rate** in `test_vector_concurrent.rs`; this can mask real failures. If errors are expected only during the “empty index” window, consider gating searches until at least one insert commits or assert that errors are limited to the empty-graph condition.
+- **Bench/test vec_id derivation** (e.g., `(thread_id << 24) | i`) assumes small `vectors_per_writer`; consider documenting the bound or guarding against overflow if larger configs are used.
+- **Search-before-index-ready behavior** isn’t explicitly documented in these tests; if errors are expected when entry point is missing, call that out in the test comments to avoid false positives.
+
+### Performance / Measurement Quality
+
+- **Per-vector transactions** in concurrent benchmarks are realistic for correctness but can cap throughput; consider an optional batch mode to measure contention without the overhead of one txn per insert.
+- **Histogram buckets** are coarse by design; note in results interpretation that p50/p99 are bucket upper bounds, not exact values.
+
+### Design / Documentation
+
+- Consider adding a brief “When to use concurrent benchmarks vs integration tests” note to clarify intended usage and to avoid conflating correctness tests with performance baselines.
