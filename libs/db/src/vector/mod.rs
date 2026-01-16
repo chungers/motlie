@@ -130,8 +130,8 @@ pub use writer::{
 // Runnable<R> is the query trait (with timeout + Output), MutationRunnable is for mutations
 pub use crate::reader::Runnable;
 pub use query::{
-    GetExternalId, GetInternalId, GetVector, Query, QueryExecutor, QueryProcessor,
-    QueryWithTimeout, ResolveIds, SearchKNN,
+    FindEmbeddings, GetExternalId, GetInternalId, GetVector, ListEmbeddings, Query,
+    QueryExecutor, QueryProcessor, QueryWithTimeout, ResolveIds, SearchKNN,
 };
 pub use reader::{
     create_reader, create_search_reader,
