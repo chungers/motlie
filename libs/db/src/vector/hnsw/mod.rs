@@ -390,20 +390,21 @@ mod tests {
         intersection as f64 / ground_truth.len() as f64
     }
 
-    /// Helper: Store vectors in RocksDB Vectors CF
+    /// Helper: Store vectors in RocksDB Vectors CF (using transaction)
     fn store_vectors(storage: &Storage, embedding: EmbeddingCode, vectors: &[Vec<f32>]) {
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let cf = txn_db
             .cf_handle(Vectors::CF_NAME)
             .expect("Vectors CF not found");
 
+        let txn = txn_db.transaction();
         for (i, vector) in vectors.iter().enumerate() {
             let key = Vectors::key_to_bytes(&VectorCfKey(embedding, i as VecId));
             let value = Vectors::value_to_bytes(&VectorCfValue(vector.clone()));
-            txn_db
-                .put_cf(&cf, key, value)
+            txn.put_cf(&cf, key, value)
                 .expect("Failed to store vector");
         }
+        txn.commit().expect("Failed to commit vectors");
     }
 
     /// Helper: Build HNSW index with vectors

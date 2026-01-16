@@ -406,7 +406,7 @@ pub fn build_hnsw_index(
         nav_cache,
     );
 
-    // Store vectors in RocksDB
+    // Store vectors in RocksDB using transaction
     let txn_db = storage.transaction_db()?;
     let vectors_cf = txn_db
         .cf_handle(Vectors::CF_NAME)
@@ -414,15 +414,21 @@ pub fn build_hnsw_index(
 
     let start = Instant::now();
 
+    // Batch store all vectors first (in a single transaction for atomicity)
+    {
+        let txn = txn_db.transaction();
+        for (i, vector) in vectors.iter().enumerate() {
+            let vec_id = i as VecId;
+            let key = VectorCfKey(embedding_code, vec_id);
+            let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
+            txn.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
+        }
+        txn.commit()?;
+    }
+
+    // Build HNSW index (each insert uses its own transaction internally)
     for (i, vector) in vectors.iter().enumerate() {
         let vec_id = i as VecId;
-
-        // Store vector in Vectors CF
-        let key = VectorCfKey(embedding_code, vec_id);
-        let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
-        txn_db.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
-
-        // Insert into HNSW index
         index.insert(storage, vec_id, vector)?;
 
         if (i + 1) % 10000 == 0 {
