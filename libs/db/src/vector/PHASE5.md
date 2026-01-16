@@ -2702,6 +2702,22 @@ for vector in vectors {
 
 This ensures later inserts in a batch see edges from earlier inserts, producing the same graph structure as sequential single-insert operations.
 
+### Review Note (CODEX)
+
+BatchEdgeCache closes the remaining correctness gap: edges from earlier inserts are now visible during batch search/greedy descent despite pending merge ops. The batch insert path now sees both uncommitted vectors and in-transaction edges, so batch connectivity should match sequential inserts. The fix is well-scoped and aligns with the earlier review note.
+
+### Follow-up Task (5.8.y): Remove Non-Transactional Writes
+
+**Context:** See `libs/db/src/vector/CODEX2.md` for the full transaction-only migration plan and impacted files.
+
+**Dangerous non-transactional write paths to eliminate:**
+- `libs/db/src/vector/registry.rs` - `EmbeddingRegistry::register()` uses `db.put_cf(...)`.
+- `libs/db/src/vector/id.rs` - `IdAllocator::persist()` uses `db.put_cf(...)`.
+- `libs/db/src/vector/hnsw/graph.rs` - `connect_neighbors()` uses `txn_db.merge_cf(...)` (legacy API).
+- Test/bench helpers still write via `txn_db.put_cf(...)` (`libs/db/src/vector/hnsw/mod.rs` tests, `libs/db/src/vector/benchmark/runner.rs`, `libs/db/src/vector/crash_recovery_tests.rs`).
+
+**Goal:** Make all RocksDB writes transactional, then remove/rename non-transactional APIs to drop `_in_txn` suffixes cleanly.
+
 ---
 
 ## Remaining Phase 5 Tasks (Aligned with ROADMAP.md)
