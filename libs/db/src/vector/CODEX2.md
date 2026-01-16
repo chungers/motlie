@@ -108,12 +108,12 @@ Once **all** writes are transactional and non-transactional APIs are removed or 
 
 Until the non-transactional code paths are removed or isolated, renaming `_in_txn` functions would be misleading because both transactional and non-transactional variants would coexist. The rename should be a follow-on cleanup after all writes are transaction-only.
 
-## Rename Readiness Assessment (Post-01192dc)
+## Rename Readiness Assessment (Post-fde2498)
 
-**Not ready to drop `_in_txn` yet.** Recent changes made test/bench writes transactional, and removed legacy edge writes, but two API surface issues remain:
+**Nearly ready to drop `_in_txn`.** Recent changes removed the legacy `hnsw::insert()` API and added `EmbeddingRegistry::register_in_txn()`, so the two earlier blockers are cleared. Remaining non-transactional writes are now limited to a **test-only** path:
 
-1) **Dual insert APIs:** `hnsw::insert()` still exists and creates its own transaction, while `insert_in_txn()` is the externally managed transaction version. Renaming would be ambiguous unless the internal-transaction helper is removed or renamed (e.g., `insert_with_auto_txn()`).
+1) **`IdAllocator::persist()` remains non-transactional**
+   - **Scope:** `pub(crate)` and used only by crash recovery tests.
+   - **Impact:** Does not affect public APIs, but should stay isolated to tests.
 
-2) **Embedding registration not externally transactional:** `EmbeddingRegistry::register()` now uses an internal transaction but cannot participate in a caller transaction. To cleanly drop `_in_txn`, expose a `register_in_txn()` (or route through `ops::embedding::spec()`), then deprecate the standalone path.
-
-**Remaining safe exception:** `IdAllocator::persist()` is `pub(crate)` and test-only; it should stay isolated, but does not block renaming if all public APIs are transaction-only.
+**Conclusion:** It is now reasonable to proceed with renaming `_in_txn` APIs, as long as `IdAllocator::persist()` remains test-only and we avoid exposing non-transactional write helpers in production code.
