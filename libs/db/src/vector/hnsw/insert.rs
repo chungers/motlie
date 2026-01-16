@@ -17,7 +17,10 @@
 
 use anyhow::Result;
 
-use super::graph::{connect_neighbors_in_txn, greedy_search_layer, search_layer};
+use super::graph::{
+    connect_neighbors_in_txn, greedy_search_layer, greedy_search_layer_with_batch_cache,
+    search_layer, search_layer_with_batch_cache, BatchEdgeCache,
+};
 use super::Index;
 use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 use crate::vector::cache::{NavigationCache, NavigationLayerInfo};
@@ -231,17 +234,22 @@ pub fn insert_in_txn(
 
 /// Insert a vector into the HNSW index during batch insert.
 ///
-/// This variant uses transaction-aware reads to support batch inserts where
-/// vectors may not be committed yet. It reads uncommitted vector data from
-/// the same transaction.
+/// This variant uses transaction-aware reads AND batch edge cache to support
+/// batch inserts where both vectors and edges may not be committed yet.
+///
+/// RocksDB's `Transaction::get()` does NOT include pending merge operands,
+/// so edges written via `txn.merge_cf()` earlier in the batch are not visible
+/// to later inserts. The `batch_cache` tracks these edges so that later inserts
+/// can see them, ensuring proper graph connectivity.
 ///
 /// # Arguments
 /// * `index` - The HNSW index
 /// * `txn` - The active transaction (for reading uncommitted vectors)
 /// * `txn_db` - The transaction DB (for CF handles)
-/// * `storage` - Storage for edge reads (edges are committed incrementally)
+/// * `storage` - Storage for committed data reads
 /// * `vec_id` - The vector ID to insert
 /// * `vector` - The vector data
+/// * `batch_cache` - Cache of edges added during this batch (mutated by this call)
 ///
 /// # Returns
 /// A `CacheUpdate` that should be applied immediately for subsequent inserts
@@ -253,6 +261,7 @@ pub fn insert_in_txn_for_batch(
     storage: &Storage,
     vec_id: VecId,
     vector: &[f32],
+    batch_cache: &mut BatchEdgeCache,
 ) -> Result<CacheUpdate> {
     // 1. Get or initialize navigation state FIRST
     let nav_info = get_or_init_navigation(index, storage)?;
@@ -280,6 +289,7 @@ pub fn insert_in_txn_for_batch(
 
     // 5. Greedy descent to find entry point at target layer
     // Use transaction-aware distance for uncommitted vectors
+    // Use batch cache for edge visibility
     let entry_point = nav_info.entry_point().unwrap();
     let max_layer = nav_info.max_layer;
 
@@ -287,16 +297,17 @@ pub fn insert_in_txn_for_batch(
     let mut current_dist = super::graph::distance_in_txn(index, txn, txn_db, vector, current)?;
 
     // Descend from max_layer to node_layer + 1 (greedy, single candidate)
+    // Use batch-cache-aware search to see edges from earlier batch inserts
     for layer in (node_layer + 1..=max_layer).rev() {
-        (current, current_dist) = super::graph::greedy_search_layer_in_txn(
-            index, txn, txn_db, storage, vector, current, current_dist, layer,
+        (current, current_dist) = greedy_search_layer_with_batch_cache(
+            index, txn, txn_db, storage, vector, current, current_dist, layer, batch_cache,
         )?;
     }
 
     // 6. At each layer from node_layer down to 0: find neighbors and connect
     for layer in (0..=node_layer).rev() {
-        // Search for neighbors using transaction-aware reads
-        let neighbors = super::graph::search_layer_in_txn(
+        // Search for neighbors using batch-cache-aware reads
+        let neighbors = search_layer_with_batch_cache(
             index,
             txn,
             txn_db,
@@ -305,6 +316,7 @@ pub fn insert_in_txn_for_batch(
             current,
             index.config().ef_construction,
             layer,
+            batch_cache,
         )?;
 
         // Select M neighbors (simple heuristic: take closest)
@@ -317,6 +329,10 @@ pub fn insert_in_txn_for_batch(
 
         // Connect bidirectionally (using transaction)
         connect_neighbors_in_txn(index, txn, txn_db, vec_id, &selected, layer)?;
+
+        // Record edges in batch cache for later inserts to see
+        let neighbor_ids: Vec<VecId> = selected.iter().map(|(_, id)| *id).collect();
+        batch_cache.add_edges(vec_id, layer, &neighbor_ids);
 
         // Update current for next layer
         if let Some(&(dist, id)) = selected.first() {

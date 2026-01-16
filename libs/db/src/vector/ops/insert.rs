@@ -430,9 +430,11 @@ pub fn batch(
 
     // 9. Build HNSW index (if requested) - after all vectors are stored
     //
-    // IMPORTANT: We use insert_in_txn_for_batch which:
+    // IMPORTANT: We use insert_in_txn_for_batch with BatchEdgeCache which:
     // 1. Uses transaction-aware reads to access uncommitted vector data
-    // 2. Applies cache updates incrementally so subsequent inserts see the entry point
+    // 2. Uses batch edge cache to see edges from earlier inserts in the same batch
+    //    (RocksDB transactions don't expose pending merge operands to reads)
+    // 3. Applies cache updates incrementally so subsequent inserts see the entry point
     //
     // If the transaction fails after we've applied some cache updates, the nav_cache
     // becomes stale. However, on next access, get_or_init_navigation() will reload
@@ -440,9 +442,12 @@ pub fn batch(
     let mut nav_cache_updates = Vec::new();
     if build_index {
         if let Some(index) = processor.get_or_create_index(embedding) {
+            // Create batch edge cache to track edges added during this batch
+            let mut batch_edge_cache = hnsw::BatchEdgeCache::new();
+
             for (i, vec_id) in vec_ids.iter().enumerate() {
                 let vector = &vectors[i].1;
-                // Use batch-specific insert that reads uncommitted vectors from transaction
+                // Use batch-specific insert with edge cache for proper graph connectivity
                 let update = hnsw::insert_in_txn_for_batch(
                     &index,
                     txn,
@@ -450,6 +455,7 @@ pub fn batch(
                     processor.storage(),
                     *vec_id,
                     vector,
+                    &mut batch_edge_cache,
                 )?;
                 // Apply cache update immediately so subsequent inserts see the entry point
                 update.clone().apply(index.nav_cache());
