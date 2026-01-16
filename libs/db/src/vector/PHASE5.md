@@ -2243,6 +2243,13 @@ No issues found in this update.
 
 ---
 
+**New Feedback (point-lookup query ergonomics):**
+
+- Only `SearchKNN` has `Runnable` today. Point-lookups (GetVector/GetInternalId/GetExternalId/ResolveIds) still require dispatch or `QueryWithTimeout` plumbing.  
+  - **Recommendation:** add `Runnable<Reader>` impls for point-lookups to fully hide `send_query` across the public API, matching graph’s query ergonomics.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
@@ -2328,6 +2335,10 @@ spawn_mutation_consumer_with_storage(...);
 
 - `Processor::delete_vector` remains `pub` for testing but docs recommend `DeleteVector::run(&writer)`
 - Public users are steered to `DeleteVector::run(&writer)` for consistent async semantics
+
+---
+
+**Review Note:** Start-managed lifecycle wiring looks correct. Writer is registered for shutdown flush and consumers are spawned with a shared Processor. No correctness issues found in this addition.
 
 ---
 
