@@ -1,25 +1,36 @@
 //! Integration tests for vector benchmark infrastructure.
 //!
 //! Tests the complete search pipeline at 1K scale for both datasets:
-//! - SIFT: L2 distance, exact HNSW search, NavigationCache
-//! - LAION-CLIP: Cosine distance, RaBitQ + BinaryCodeCache + NavigationCache + parallel rerank
+//! - SIFT: L2 distance, exact HNSW search
+//! - LAION-CLIP: Cosine distance, RaBitQ + BinaryCodeCache + parallel rerank
 //!
 //! These tests use synthetic data to avoid requiring external dataset downloads.
+//!
+//! ## Migration Note (Task 5.9)
+//!
+//! These tests have been migrated from Processor API to use only public
+//! Runnable traits (mutation::Runnable and query::Runnable):
+//! - `InsertVector::run(&writer)` for inserts
+//! - `SearchKNN::run(&search_reader, timeout)` for searches
+//! - External IDs used for recall computation (not vec_ids)
+//!
+//! This enables making Processor `pub(crate)`.
 
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 
 use motlie_db::vector::benchmark::{
-    compute_recall, SiftSubset, LaionSubset, SIFT_EMBEDDING_DIM, LAION_EMBEDDING_DIM,
+    compute_recall, LaionSubset, SiftSubset, LAION_EMBEDDING_DIM, SIFT_EMBEDDING_DIM,
 };
-use motlie_db::vector::{
-    hnsw, BinaryCodeCache, Distance, NavigationCache, Storage, VecId,
-    VectorElementType,
-};
-use motlie_db::vector::quantization::RaBitQ;
 use motlie_db::vector::search::rerank_adaptive;
-use motlie_db::vector::schema::Vectors;
-use motlie_db::rocksdb::ColumnFamily;
+use motlie_db::vector::{
+    create_search_reader_with_storage, create_writer,
+    spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
+    Distance, EmbeddingBuilder, InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN,
+    Storage, VecId, WriterConfig,
+};
+use motlie_db::Id;
 
 /// Helper: Generate synthetic SIFT-like data (128D, L2 distance)
 fn generate_sift_subset(num_vectors: usize, num_queries: usize) -> SiftSubset {
@@ -103,78 +114,30 @@ fn generate_laion_subset(num_vectors: usize, num_queries: usize) -> LaionSubset 
     }
 }
 
-/// Build HNSW index with NavigationCache
-fn build_index_with_navigation(
-    storage: &Storage,
-    vectors: &[Vec<f32>],
-    distance: Distance,
-    storage_type: VectorElementType,
-    m: usize,
-    ef_construction: usize,
-) -> anyhow::Result<(hnsw::Index, Arc<NavigationCache>)> {
-    let dim = vectors.first().map(|v| v.len()).unwrap_or(128);
-    let nav_cache = Arc::new(NavigationCache::new());
-    let embedding_code = 1;
-
-    let config = hnsw::Config {
-        dim,
-        m,
-        m_max: m * 2,
-        m_max_0: m * 2,
-        ef_construction,
-        ..Default::default()
-    };
-
-    let index = hnsw::Index::with_storage_type(
-        embedding_code,
-        distance,
-        storage_type,
-        config,
-        nav_cache.clone(),
-    );
-
-    // Store vectors and build index
-    let txn_db = storage.transaction_db()?;
-    let vectors_cf = txn_db
-        .cf_handle(Vectors::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-
-    use motlie_db::vector::schema::VectorCfKey;
-
-    for (i, vector) in vectors.iter().enumerate() {
-        let vec_id = i as VecId;
-
-        // Store vector in Vectors CF
-        let key = VectorCfKey(embedding_code, vec_id);
-        let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
-        txn_db.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
-
-        // Insert into HNSW index
-        index.insert(storage, vec_id, vector)?;
-    }
-
-    Ok((index, nav_cache))
-}
-
-/// SIFT Integration Test: L2 Distance + Exact HNSW + NavigationCache
+/// SIFT Integration Test: L2 Distance + Exact HNSW
 ///
 /// Validates:
 /// - SIFT dataset support in benchmark crate
 /// - L2 (Euclidean) distance metric
-/// - HNSW index build and search
-/// - NavigationCache for layer traversal
+/// - Runnable API for insert and search
 /// - Recall@10 computation
-#[test]
-fn test_sift_l2_hnsw_with_navigation_cache() -> anyhow::Result<()> {
+///
+/// Migrated from Processor API to Runnable traits (Task 5.9).
+#[tokio::test]
+async fn test_sift_l2_hnsw_with_runnable() -> anyhow::Result<()> {
     let temp_dir = TempDir::new()?;
     let db_path = temp_dir.path().join("sift_test_db");
 
     // Generate synthetic SIFT data (1K vectors, 100 queries)
     let subset = generate_sift_subset(1000, 100);
 
-    println!("=== SIFT L2 + HNSW + NavigationCache Test ===");
-    println!("Vectors: {}, Queries: {}, Dim: {}",
-             subset.num_vectors(), subset.num_queries(), subset.dim);
+    println!("=== SIFT L2 + HNSW + Runnable API Test ===");
+    println!(
+        "Vectors: {}, Queries: {}, Dim: {}",
+        subset.num_vectors(),
+        subset.num_queries(),
+        subset.dim
+    );
 
     // Compute ground truth using L2 distance
     let ground_truth = subset.compute_ground_truth_topk_with_distance(10, Distance::L2);
@@ -182,28 +145,70 @@ fn test_sift_l2_hnsw_with_navigation_cache() -> anyhow::Result<()> {
     // Initialize storage
     let mut storage = Storage::readwrite(&db_path);
     storage.ready()?;
+    let storage = Arc::new(storage);
 
-    // Build HNSW index with L2 distance
-    let (index, _nav_cache) = build_index_with_navigation(
-        &storage,
-        &subset.db_vectors,
-        Distance::L2,
-        VectorElementType::F32,
-        16,  // M
-        100, // ef_construction
-    )?;
+    // Register embedding
+    let registry = storage.cache().clone();
+    let txn_db = storage.transaction_db()?;
+    let builder = EmbeddingBuilder::new("sift-test", SIFT_EMBEDDING_DIM as u32, Distance::L2)
+        .with_hnsw_m(16)
+        .with_hnsw_ef_construction(100);
+    let embedding = registry.register(builder, &txn_db)?;
 
-    println!("Index built successfully");
+    // Create writer and spawn mutation consumer
+    let (writer, writer_rx) = create_writer(WriterConfig::default());
+    let _writer_handle = spawn_mutation_consumer_with_storage_autoreg(
+        writer_rx,
+        WriterConfig::default(),
+        storage.clone(),
+    );
 
-    // Run searches
-    let ef_search = 50;
+    // Create search reader and spawn query consumers
+    let (search_reader, reader_rx) =
+        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+    let _reader_handles = spawn_query_consumers_with_storage_autoreg(
+        reader_rx,
+        ReaderConfig::default(),
+        storage.clone(),
+        2,
+    );
+
+    // Insert vectors using InsertVector::run()
+    println!("Inserting {} vectors via Runnable API...", subset.db_vectors.len());
+    let mut external_ids: Vec<Id> = Vec::with_capacity(subset.db_vectors.len());
+    for (i, vector) in subset.db_vectors.iter().enumerate() {
+        let id = Id::new();
+        external_ids.push(id);
+        InsertVector::new(&embedding, id, vector.clone())
+            .immediate()
+            .run(&writer)
+            .await?;
+        if (i + 1) % 200 == 0 {
+            println!("  Inserted {}/{}", i + 1, subset.db_vectors.len());
+        }
+    }
+    // Flush to ensure all inserts are committed
+    writer.flush().await?;
+    println!("  Inserted all {} vectors", subset.db_vectors.len());
+
+    // Run searches using SearchKNN::run()
     let k = 10;
+    let timeout = Duration::from_secs(10);
     let mut search_results: Vec<Vec<usize>> = Vec::new();
 
     for query in &subset.queries {
-        let results = index.search(&storage, query, ef_search, k)?;
-        let result_ids: Vec<usize> = results.iter().map(|(_, id)| *id as usize).collect();
-        search_results.push(result_ids);
+        let results = SearchKNN::new(&embedding, query.clone(), k)
+            .with_ef(50)
+            .exact()
+            .run(&search_reader, timeout)
+            .await?;
+
+        // Map external IDs back to original indices for recall computation
+        let result_indices: Vec<usize> = results
+            .iter()
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .collect();
+        search_results.push(result_indices);
     }
 
     // Compute recall
@@ -212,31 +217,40 @@ fn test_sift_l2_hnsw_with_navigation_cache() -> anyhow::Result<()> {
     println!("Recall@{}: {:.2}%", k, recall * 100.0);
 
     // SIFT with L2 should achieve high recall at 1K scale
-    assert!(recall >= 0.80, "Expected recall >= 80%, got {:.2}%", recall * 100.0);
+    assert!(
+        recall >= 0.80,
+        "Expected recall >= 80%, got {:.2}%",
+        recall * 100.0
+    );
 
-    println!("✓ SIFT L2 + NavigationCache test passed");
+    println!("✓ SIFT L2 + Runnable API test passed");
 
     Ok(())
 }
 
-/// LAION-CLIP Integration Test: Cosine + Exact HNSW + NavigationCache (NO RaBitQ)
+/// LAION-CLIP Integration Test: Cosine + Exact HNSW (NO RaBitQ)
 ///
 /// Validates:
 /// - LAION-CLIP dataset works with standard exact HNSW search
 /// - Cosine distance metric for both index build and search
-/// - NavigationCache for layer traversal
-/// - No RaBitQ, no BinaryCodeCache, no reranking - just exact distance
-#[test]
-fn test_laion_clip_cosine_exact_hnsw() -> anyhow::Result<()> {
+/// - No RaBitQ, no reranking - just exact distance via SearchKNN::exact()
+///
+/// Migrated from Processor API to Runnable traits (Task 5.9).
+#[tokio::test]
+async fn test_laion_clip_cosine_exact_hnsw_with_runnable() -> anyhow::Result<()> {
     let temp_dir = TempDir::new()?;
     let db_path = temp_dir.path().join("laion_exact_test_db");
 
     // Generate synthetic LAION-CLIP data (1K vectors, 100 queries)
     let subset = generate_laion_subset(1000, 100);
 
-    println!("=== LAION-CLIP Cosine + Exact HNSW + NavigationCache Test ===");
-    println!("Vectors: {}, Queries: {}, Dim: {}",
-             subset.num_vectors(), subset.num_queries(), subset.dim);
+    println!("=== LAION-CLIP Cosine + Exact HNSW + Runnable API Test ===");
+    println!(
+        "Vectors: {}, Queries: {}, Dim: {}",
+        subset.num_vectors(),
+        subset.num_queries(),
+        subset.dim
+    );
 
     // Compute ground truth using Cosine distance
     let ground_truth = subset.compute_ground_truth_topk_with_distance(10, Distance::Cosine);
@@ -244,31 +258,73 @@ fn test_laion_clip_cosine_exact_hnsw() -> anyhow::Result<()> {
     // Initialize storage
     let mut storage = Storage::readwrite(&db_path);
     storage.ready()?;
+    let storage = Arc::new(storage);
 
-    // Build HNSW index with Cosine distance
-    // Note: 512D requires higher M and ef_construction than 128D for good recall
-    let (index, _nav_cache) = build_index_with_navigation(
-        &storage,
-        &subset.db_vectors,
-        Distance::Cosine,
-        VectorElementType::F16, // Use F16 like real LAION-CLIP
-        32,  // M - higher for 512D
-        200, // ef_construction - higher for 512D
-    )?;
+    // Register embedding with higher M and ef_construction for 512D
+    let registry = storage.cache().clone();
+    let txn_db = storage.transaction_db()?;
+    let builder =
+        EmbeddingBuilder::new("laion-clip-test", LAION_EMBEDDING_DIM as u32, Distance::Cosine)
+            .with_hnsw_m(32)
+            .with_hnsw_ef_construction(200);
+    let embedding = registry.register(builder, &txn_db)?;
 
-    println!("Index built successfully");
+    // Create writer and spawn mutation consumer
+    let (writer, writer_rx) = create_writer(WriterConfig::default());
+    let _writer_handle = spawn_mutation_consumer_with_storage_autoreg(
+        writer_rx,
+        WriterConfig::default(),
+        storage.clone(),
+    );
 
-    // Run exact HNSW searches (no RaBitQ, no caching, no reranking)
-    // Note: 512D requires higher ef_search than 128D SIFT for good recall
-    let ef_search = 100;
+    // Create search reader and spawn query consumers
+    let (search_reader, reader_rx) =
+        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+    let _reader_handles = spawn_query_consumers_with_storage_autoreg(
+        reader_rx,
+        ReaderConfig::default(),
+        storage.clone(),
+        2,
+    );
+
+    // Insert vectors using InsertVector::run()
+    println!(
+        "Inserting {} vectors via Runnable API...",
+        subset.db_vectors.len()
+    );
+    let mut external_ids: Vec<Id> = Vec::with_capacity(subset.db_vectors.len());
+    for (i, vector) in subset.db_vectors.iter().enumerate() {
+        let id = Id::new();
+        external_ids.push(id);
+        InsertVector::new(&embedding, id, vector.clone())
+            .immediate()
+            .run(&writer)
+            .await?;
+        if (i + 1) % 200 == 0 {
+            println!("  Inserted {}/{}", i + 1, subset.db_vectors.len());
+        }
+    }
+    writer.flush().await?;
+    println!("  Inserted all {} vectors", subset.db_vectors.len());
+
+    // Run exact HNSW searches using SearchKNN::exact()
     let k = 10;
+    let timeout = Duration::from_secs(10);
     let mut search_results: Vec<Vec<usize>> = Vec::new();
 
     for query in &subset.queries {
-        // Use standard search() - exact Cosine distance
-        let results = index.search(&storage, query, ef_search, k)?;
-        let result_ids: Vec<usize> = results.iter().map(|(_, id)| *id as usize).collect();
-        search_results.push(result_ids);
+        let results = SearchKNN::new(&embedding, query.clone(), k)
+            .with_ef(100)
+            .exact()
+            .run(&search_reader, timeout)
+            .await?;
+
+        // Map external IDs back to original indices
+        let result_indices: Vec<usize> = results
+            .iter()
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .collect();
+        search_results.push(result_indices);
     }
 
     // Compute recall
@@ -277,35 +333,42 @@ fn test_laion_clip_cosine_exact_hnsw() -> anyhow::Result<()> {
     println!("Recall@{}: {:.2}%", k, recall * 100.0);
 
     // LAION-CLIP with exact Cosine HNSW should achieve high recall at 1K scale
-    // (similar to SIFT with L2)
-    assert!(recall >= 0.80, "Expected recall >= 80%, got {:.2}%", recall * 100.0);
+    assert!(
+        recall >= 0.80,
+        "Expected recall >= 80%, got {:.2}%",
+        recall * 100.0
+    );
 
-    println!("✓ LAION-CLIP Cosine + Exact HNSW test passed");
+    println!("✓ LAION-CLIP Cosine + Exact HNSW + Runnable API test passed");
 
     Ok(())
 }
 
-/// LAION-CLIP Integration Test: Cosine + RaBitQ + BinaryCodeCache + NavigationCache
+/// LAION-CLIP Integration Test: Cosine + RaBitQ + BinaryCodeCache
 ///
 /// Validates:
 /// - LAION-CLIP dataset support in benchmark crate
-/// - Cosine distance metric
-/// - RaBitQ binary quantization
-/// - BinaryCodeCache for ADC distance computation
-/// - NavigationCache for layer traversal
-/// - Adaptive parallel reranking
+/// - Cosine distance metric with RaBitQ acceleration
+/// - Automatic BinaryCodeCache population via InsertVector
+/// - SearchKNN with auto-strategy (RaBitQ for Cosine)
 /// - Two-phase search: ADC navigation + exact rerank
-#[test]
-fn test_laion_clip_cosine_rabitq_with_caches() -> anyhow::Result<()> {
+///
+/// Migrated from Processor API to Runnable traits (Task 5.9).
+#[tokio::test]
+async fn test_laion_clip_cosine_rabitq_with_runnable() -> anyhow::Result<()> {
     let temp_dir = TempDir::new()?;
     let db_path = temp_dir.path().join("laion_test_db");
 
     // Generate synthetic LAION-CLIP data (1K vectors, 100 queries)
     let subset = generate_laion_subset(1000, 100);
 
-    println!("=== LAION-CLIP Cosine + RaBitQ + Caches Test ===");
-    println!("Vectors: {}, Queries: {}, Dim: {}",
-             subset.num_vectors(), subset.num_queries(), subset.dim);
+    println!("=== LAION-CLIP Cosine + RaBitQ + Runnable API Test ===");
+    println!(
+        "Vectors: {}, Queries: {}, Dim: {}",
+        subset.num_vectors(),
+        subset.num_queries(),
+        subset.dim
+    );
 
     // Compute ground truth using Cosine distance
     let ground_truth = subset.compute_ground_truth_topk_with_distance(10, Distance::Cosine);
@@ -313,53 +376,78 @@ fn test_laion_clip_cosine_rabitq_with_caches() -> anyhow::Result<()> {
     // Initialize storage
     let mut storage = Storage::readwrite(&db_path);
     storage.ready()?;
+    let storage = Arc::new(storage);
 
-    // Build HNSW index with Cosine distance
-    let (index, _nav_cache) = build_index_with_navigation(
-        &storage,
-        &subset.db_vectors,
+    // Register embedding
+    let registry = storage.cache().clone();
+    let txn_db = storage.transaction_db()?;
+    let builder = EmbeddingBuilder::new(
+        "laion-clip-rabitq-test",
+        LAION_EMBEDDING_DIM as u32,
         Distance::Cosine,
-        VectorElementType::F16, // Use F16 like real LAION-CLIP
-        16,  // M
-        100, // ef_construction
-    )?;
+    )
+    .with_hnsw_m(16)
+    .with_hnsw_ef_construction(100);
+    let embedding = registry.register(builder, &txn_db)?;
 
-    println!("HNSW index built");
+    // Create writer and spawn mutation consumer
+    let (writer, writer_rx) = create_writer(WriterConfig::default());
+    let _writer_handle = spawn_mutation_consumer_with_storage_autoreg(
+        writer_rx,
+        WriterConfig::default(),
+        storage.clone(),
+    );
 
-    // Initialize RaBitQ encoder
-    let rabitq = RaBitQ::new(LAION_EMBEDDING_DIM, 1, 42);
+    // Create search reader and spawn query consumers
+    let (search_reader, reader_rx) =
+        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+    let _reader_handles = spawn_query_consumers_with_storage_autoreg(
+        reader_rx,
+        ReaderConfig::default(),
+        storage.clone(),
+        2,
+    );
 
-    // Build BinaryCodeCache
-    let binary_cache = BinaryCodeCache::new();
-    let embedding_code = 1;
-
+    // Insert vectors (BinaryCodeCache populated automatically)
+    println!(
+        "Inserting {} vectors via Runnable API...",
+        subset.db_vectors.len()
+    );
+    let mut external_ids: Vec<Id> = Vec::with_capacity(subset.db_vectors.len());
     for (i, vector) in subset.db_vectors.iter().enumerate() {
-        let vec_id = i as VecId;
-        let (code, correction) = rabitq.encode_with_correction(vector);
-        binary_cache.put(embedding_code, vec_id, code, correction);
+        let id = Id::new();
+        external_ids.push(id);
+        InsertVector::new(&embedding, id, vector.clone())
+            .immediate()
+            .run(&writer)
+            .await?;
+        if (i + 1) % 200 == 0 {
+            println!("  Inserted {}/{}", i + 1, subset.db_vectors.len());
+        }
     }
+    writer.flush().await?;
+    println!("  Inserted all {} vectors + BinaryCodeCache populated", subset.db_vectors.len());
 
-    println!("RaBitQ encoding complete, BinaryCodeCache populated with {} entries",
-             subset.db_vectors.len());
-
-    // Run two-phase RaBitQ search
-    let ef_search = 50;
+    // Run two-phase RaBitQ search using SearchKNN (auto-selects RaBitQ for Cosine)
     let k = 10;
-    let rerank_factor = 4; // Re-rank 40 candidates for top-10
+    let rerank_factor = 4;
+    let timeout = Duration::from_secs(10);
     let mut search_results: Vec<Vec<usize>> = Vec::new();
 
     for query in &subset.queries {
-        let results = index.search_with_rabitq_cached(
-            &storage,
-            query,
-            &rabitq,
-            &binary_cache,
-            k,
-            ef_search,
-            rerank_factor,
-        )?;
-        let result_ids: Vec<usize> = results.iter().map(|(_, id)| *id as usize).collect();
-        search_results.push(result_ids);
+        // SearchKNN without .exact() auto-selects RaBitQ for Cosine
+        let results = SearchKNN::new(&embedding, query.clone(), k)
+            .with_ef(50)
+            .with_rerank_factor(rerank_factor)
+            .run(&search_reader, timeout)
+            .await?;
+
+        // Map external IDs back to original indices
+        let result_indices: Vec<usize> = results
+            .iter()
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .collect();
+        search_results.push(result_indices);
     }
 
     // Compute recall
@@ -372,9 +460,13 @@ fn test_laion_clip_cosine_rabitq_with_caches() -> anyhow::Result<()> {
     // - At production scale (100K+), recall improves with proper tuning
     // - This test validates the pipeline works end-to-end
     // - Threshold of 40% ensures the search is working (not random ~10%)
-    assert!(recall >= 0.40, "Expected recall >= 40%, got {:.2}%", recall * 100.0);
+    assert!(
+        recall >= 0.40,
+        "Expected recall >= 40%, got {:.2}%",
+        recall * 100.0
+    );
 
-    println!("✓ LAION-CLIP Cosine + RaBitQ + BinaryCodeCache + NavigationCache test passed");
+    println!("✓ LAION-CLIP Cosine + RaBitQ + Runnable API test passed");
 
     Ok(())
 }
@@ -407,12 +499,12 @@ fn test_sift_subset_ground_truth_l2() {
 fn test_laion_subset_ground_truth_cosine() {
     let subset = LaionSubset {
         db_vectors: vec![
-            vec![1.0, 0.0, 0.0],  // Normalized
+            vec![1.0, 0.0, 0.0], // Normalized
             vec![0.0, 1.0, 0.0],
             vec![0.0, 0.0, 1.0],
-            vec![0.707, 0.707, 0.0],  // 45 degrees in xy plane
+            vec![0.707, 0.707, 0.0], // 45 degrees in xy plane
         ],
-        queries: vec![vec![1.0, 0.0, 0.0]],  // Same as first vector
+        queries: vec![vec![1.0, 0.0, 0.0]], // Same as first vector
         ground_truth: vec![0],
         dim: 3,
     };
@@ -447,12 +539,7 @@ fn test_adaptive_parallel_rerank_threshold() {
 
     // Test with large candidate set (above threshold - uses parallel)
     let candidates: Vec<VecId> = (0..5000).collect();
-    let results = rerank_adaptive(
-        &candidates,
-        |id| Some(id as f32),
-        10,
-        DEFAULT_PARALLEL_RERANK_THRESHOLD,
-    );
+    let results = rerank_adaptive(&candidates, |id| Some(id as f32), 10, DEFAULT_PARALLEL_RERANK_THRESHOLD);
 
     assert_eq!(results.len(), 10);
     assert_eq!(results[0].1, 0);

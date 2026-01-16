@@ -1,10 +1,18 @@
 //! Integration tests for vector writer error handling.
+//!
+//! ## Migration Note (Task 5.9)
+//!
+//! This test has been migrated to use only public APIs:
+//! - `spawn_mutation_consumer_with_storage_autoreg` instead of direct Consumer creation
+//!
+//! This enables making Processor `pub(crate)`.
 
 use std::sync::Arc;
 
 use motlie_db::vector;
 use motlie_db::vector::mutation::{InsertVector, Mutation};
-use motlie_db::vector::writer::{create_writer, Consumer, WriterConfig};
+use motlie_db::vector::writer::{create_writer, WriterConfig};
+use motlie_db::vector::spawn_mutation_consumer_with_storage_autoreg;
 use motlie_db::Id;
 use tempfile::TempDir;
 
@@ -17,12 +25,14 @@ async fn test_insert_unknown_embedding_fails() {
     storage.ready().expect("storage ready");
     let storage = Arc::new(storage);
 
-    let registry = storage.cache().clone();
-    let processor = Arc::new(vector::Processor::new(storage, registry));
-
     let (writer, receiver) = create_writer(WriterConfig::default());
-    let consumer = Consumer::new(receiver, WriterConfig::default(), processor);
-    let handle = tokio::spawn(async move { consumer.run().await });
+
+    // Use public API to spawn consumer instead of directly creating Consumer with Processor
+    let handle = spawn_mutation_consumer_with_storage_autoreg(
+        receiver,
+        WriterConfig::default(),
+        storage.clone(),
+    );
 
     // Construct InsertVector directly with invalid embedding code to test error handling
     // (Normal usage goes through InsertVector::new(&embedding, ...) which ensures validity)
