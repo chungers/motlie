@@ -2272,8 +2272,26 @@ let ids = ResolveIds::new(embedding.code(), vec_ids).run(&reader, timeout).await
 
 **New Feedback (embedding registry queries):**
 
-- Public `vector::query` API has no way to list/find embeddings. Users must hold the `EmbeddingRegistry` directly.  
+- Public `vector::query` API has no way to list/find embeddings. Users must hold the `EmbeddingRegistry` directly.
   - **Recommendation:** add query types like `ListEmbeddings` / `FindEmbeddings` (by model/dim/distance) so registry introspection is available through the reader pipeline when desired.
+
+---
+
+**Update (embedding registry queries added):**
+
+- **Resolved:** Added `ListEmbeddings` and `FindEmbeddings` query types with `Runnable<Reader>` implementations. Registry introspection is now available through the reader pipeline.
+
+```rust
+// List all registered embeddings
+let embeddings = ListEmbeddings::new().run(&reader, timeout).await?;
+
+// Find embeddings by filter criteria
+let embeddings = FindEmbeddings::new(
+    EmbeddingFilter::default()
+        .model("clip-vit-b32")
+        .distance(Distance::Cosine)
+).run(&reader, timeout).await?;
+```
 
 ---
 

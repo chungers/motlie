@@ -60,6 +60,14 @@ pub enum Query {
     ResolveIds(ResolveIdsDispatch),
 
     // ─────────────────────────────────────────────────────────────
+    // Registry Queries
+    // ─────────────────────────────────────────────────────────────
+    /// List all registered embeddings
+    ListEmbeddings(ListEmbeddingsDispatch),
+    /// Find embeddings by filter criteria
+    FindEmbeddings(FindEmbeddingsDispatch),
+
+    // ─────────────────────────────────────────────────────────────
     // Search Operations
     // ─────────────────────────────────────────────────────────────
     /// K-nearest neighbor search via HNSW
@@ -91,6 +99,14 @@ impl std::fmt::Display for Query {
                 "ResolveIds: embedding={}, count={}",
                 q.params.embedding,
                 q.params.vec_ids.len()
+            ),
+            Query::ListEmbeddings(_) => write!(f, "ListEmbeddings"),
+            Query::FindEmbeddings(q) => write!(
+                f,
+                "FindEmbeddings: model={:?}, dim={:?}, distance={:?}",
+                q.params.filter.model,
+                q.params.filter.dim,
+                q.params.filter.distance
             ),
             Query::SearchKNN(q) => write!(
                 f,
@@ -513,6 +529,152 @@ impl QueryProcessor for ResolveIdsDispatch {
 }
 
 // ============================================================================
+// ListEmbeddings - List all registered embeddings
+// ============================================================================
+
+/// List all registered embedding spaces.
+///
+/// Returns a list of all `Embedding` objects that have been registered
+/// in the embedding registry.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let embeddings = ListEmbeddings::new()
+///     .run(&reader, timeout)
+///     .await?;
+/// for emb in embeddings {
+///     println!("{}: {}D {:?}", emb.model(), emb.dim(), emb.distance());
+/// }
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ListEmbeddings;
+
+impl ListEmbeddings {
+    /// Create a new ListEmbeddings query.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Dispatch wrapper with oneshot channel for ListEmbeddings.
+#[derive(Debug)]
+pub(crate) struct ListEmbeddingsDispatch {
+    pub(crate) params: ListEmbeddings,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<Embedding>>>,
+}
+
+impl ListEmbeddingsDispatch {
+    /// Send the result back to the caller.
+    pub fn send_result(self, result: Result<Vec<Embedding>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryExecutor for ListEmbeddings {
+    type Output = Vec<Embedding>;
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        Ok(storage.cache().list_all())
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryProcessor for ListEmbeddingsDispatch {
+    async fn process_and_send(self, storage: &Storage) {
+        let result = self.params.result(storage).await;
+        self.send_result(result);
+    }
+}
+
+// ============================================================================
+// FindEmbeddings - Find embeddings by filter criteria
+// ============================================================================
+
+/// Find embedding spaces matching filter criteria.
+///
+/// Searches the embedding registry for embeddings matching the specified
+/// filter (model name, dimensionality, and/or distance metric).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use motlie_db::vector::{FindEmbeddings, EmbeddingFilter, Distance};
+///
+/// // Find all Cosine embeddings
+/// let embeddings = FindEmbeddings::new(
+///     EmbeddingFilter::default().distance(Distance::Cosine)
+/// ).run(&reader, timeout).await?;
+///
+/// // Find by model name
+/// let embeddings = FindEmbeddings::new(
+///     EmbeddingFilter::default().model("clip-vit-b32")
+/// ).run(&reader, timeout).await?;
+///
+/// // Find by multiple criteria
+/// let embeddings = FindEmbeddings::new(
+///     EmbeddingFilter::default()
+///         .model("clip-vit-b32")
+///         .dim(512)
+///         .distance(Distance::Cosine)
+/// ).run(&reader, timeout).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct FindEmbeddings {
+    /// Filter criteria
+    pub filter: super::registry::EmbeddingFilter,
+}
+
+impl FindEmbeddings {
+    /// Create a new FindEmbeddings query with the given filter.
+    pub fn new(filter: super::registry::EmbeddingFilter) -> Self {
+        Self { filter }
+    }
+}
+
+/// Dispatch wrapper with oneshot channel for FindEmbeddings.
+#[derive(Debug)]
+pub(crate) struct FindEmbeddingsDispatch {
+    pub(crate) params: FindEmbeddings,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<Embedding>>>,
+}
+
+impl FindEmbeddingsDispatch {
+    /// Send the result back to the caller.
+    pub fn send_result(self, result: Result<Vec<Embedding>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryExecutor for FindEmbeddings {
+    type Output = Vec<Embedding>;
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        Ok(storage.cache().find(&self.filter))
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_secs(5)
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryProcessor for FindEmbeddingsDispatch {
+    async fn process_and_send(self, storage: &Storage) {
+        let result = self.params.result(storage).await;
+        self.send_result(result);
+    }
+}
+
+// ============================================================================
 // SearchKNN - K-nearest neighbor search via HNSW
 // ============================================================================
 
@@ -871,6 +1033,80 @@ impl crate::reader::Runnable<super::reader::Reader> for ResolveIds {
     }
 }
 
+/// Runnable implementation for ListEmbeddings.
+///
+/// # Example
+/// ```rust,ignore
+/// let embeddings = ListEmbeddings::new()
+///     .run(&reader, timeout)
+///     .await?;
+/// ```
+#[async_trait::async_trait]
+impl crate::reader::Runnable<super::reader::Reader> for ListEmbeddings {
+    type Output = Vec<Embedding>;
+
+    async fn run(
+        self,
+        reader: &super::reader::Reader,
+        timeout: Duration,
+    ) -> Result<Self::Output> {
+        let (tx, rx) = oneshot::channel();
+        let dispatch = ListEmbeddingsDispatch {
+            params: self,
+            timeout,
+            result_tx: tx,
+        };
+
+        reader
+            .send_query(Query::ListEmbeddings(dispatch))
+            .await
+            .context("Failed to send ListEmbeddings query")?;
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("ListEmbeddings query channel closed")),
+            Err(_) => Err(anyhow::anyhow!("ListEmbeddings query timeout after {:?}", timeout)),
+        }
+    }
+}
+
+/// Runnable implementation for FindEmbeddings.
+///
+/// # Example
+/// ```rust,ignore
+/// let embeddings = FindEmbeddings::new(
+///     EmbeddingFilter::default().distance(Distance::Cosine)
+/// ).run(&reader, timeout).await?;
+/// ```
+#[async_trait::async_trait]
+impl crate::reader::Runnable<super::reader::Reader> for FindEmbeddings {
+    type Output = Vec<Embedding>;
+
+    async fn run(
+        self,
+        reader: &super::reader::Reader,
+        timeout: Duration,
+    ) -> Result<Self::Output> {
+        let (tx, rx) = oneshot::channel();
+        let dispatch = FindEmbeddingsDispatch {
+            params: self,
+            timeout,
+            result_tx: tx,
+        };
+
+        reader
+            .send_query(Query::FindEmbeddings(dispatch))
+            .await
+            .context("Failed to send FindEmbeddings query")?;
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("FindEmbeddings query channel closed")),
+            Err(_) => Err(anyhow::anyhow!("FindEmbeddings query timeout after {:?}", timeout)),
+        }
+    }
+}
+
 // ============================================================================
 // Query Dispatch
 // ============================================================================
@@ -883,6 +1119,8 @@ impl Query {
             Query::GetInternalId(dispatch) => dispatch.process_and_send(storage).await,
             Query::GetExternalId(dispatch) => dispatch.process_and_send(storage).await,
             Query::ResolveIds(dispatch) => dispatch.process_and_send(storage).await,
+            Query::ListEmbeddings(dispatch) => dispatch.process_and_send(storage).await,
+            Query::FindEmbeddings(dispatch) => dispatch.process_and_send(storage).await,
             Query::SearchKNN(dispatch) => dispatch.process_and_send(storage).await,
         }
     }
