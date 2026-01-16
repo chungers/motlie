@@ -12,9 +12,10 @@ use crate::SubsystemProvider;
 use motlie_core::telemetry::SubsystemInfo;
 
 use super::name_hash::{NameCache, NameHash};
+use super::reader::{create_query_reader, spawn_consumer as spawn_query_consumer, Consumer as QueryConsumer, ReaderConfig, Reader};
 use super::schema::{self, ALL_COLUMN_FAMILIES};
-use super::writer::Writer;
-use super::{ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde};
+use super::writer::{create_mutation_writer, spawn_consumer as spawn_mutation_consumer, Consumer as MutationConsumer, WriterConfig, Writer};
+use super::{ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde, Graph, Storage};
 
 // ============================================================================
 // Graph Subsystem
@@ -102,6 +103,98 @@ impl Subsystem {
     /// Call this if the writer/consumers are shut down independently.
     pub fn clear_writer(&self) {
         *self.writer.write().expect("writer lock poisoned") = None;
+    }
+
+    /// Start the graph subsystem with managed lifecycle.
+    ///
+    /// This is the recommended way to use the graph subsystem. It:
+    /// 1. Creates Writer + Reader with internal wiring
+    /// 2. Spawns mutation consumer (1 worker)
+    /// 3. Spawns query consumers (configurable workers)
+    /// 4. Registers Writer for automatic shutdown flush
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Graph storage instance
+    /// * `writer_config` - Configuration for mutation writer
+    /// * `reader_config` - Configuration for query reader
+    /// * `num_query_workers` - Number of parallel query workers
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (Writer, Reader) for sending mutations and queries.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use motlie_db::graph::{Subsystem, WriterConfig, ReaderConfig};
+    /// use motlie_db::storage_builder::StorageBuilder;
+    ///
+    /// // Create subsystem and build storage
+    /// let subsystem = Arc::new(Subsystem::new());
+    /// let name_cache = subsystem.cache().clone();
+    ///
+    /// let storage = StorageBuilder::new(path)
+    ///     .with_rocksdb(subsystem.clone())
+    ///     .build()?;
+    ///
+    /// // Start with managed lifecycle
+    /// let (writer, reader) = subsystem.start(
+    ///     storage.graph_storage().clone(),
+    ///     WriterConfig::default(),
+    ///     ReaderConfig::default(),
+    ///     4,  // 4 query workers
+    /// );
+    ///
+    /// // Use writer and reader...
+    /// AddNode { ... }.run(&writer).await?;
+    /// let result = GetNode { ... }.run(&reader, timeout).await?;
+    ///
+    /// // Shutdown automatically flushes pending mutations
+    /// storage.shutdown()?;
+    /// ```
+    ///
+    /// # Lifecycle
+    ///
+    /// When `on_shutdown()` is called (typically via `storage.shutdown()`),
+    /// the subsystem will automatically flush any pending mutations before
+    /// returning. This ensures data durability without manual flush calls.
+    ///
+    /// # Alternative: Manual Lifecycle
+    ///
+    /// If you need more control, use the raw components directly:
+    /// ```rust,ignore
+    /// let (writer, receiver) = create_mutation_writer(config);
+    /// let graph = Arc::new(Graph::new(storage));
+    /// spawn_mutation_consumer(...);
+    /// // You are responsible for calling writer.flush() before shutdown
+    /// ```
+    pub fn start(
+        &self,
+        storage: Arc<Storage>,
+        writer_config: WriterConfig,
+        reader_config: ReaderConfig,
+        num_query_workers: usize,
+    ) -> (Writer, Reader) {
+        // Create graph processor - Graph is Clone (holds Arc<Storage>)
+        let graph = Graph::new(storage);
+
+        // Create and spawn mutation consumer
+        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
+        let mutation_consumer = MutationConsumer::new(mutation_receiver, writer_config, graph.clone());
+        let _mutation_handle = spawn_mutation_consumer(mutation_consumer);
+
+        // Create and spawn query consumers
+        let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        for _ in 0..num_query_workers {
+            let consumer = QueryConsumer::new(query_receiver.clone(), reader_config.clone(), graph.clone());
+            let _query_handle = spawn_query_consumer(consumer);
+        }
+
+        // Register writer for shutdown flush
+        self.set_writer(writer.clone());
+
+        (writer, reader)
     }
 
     /// Internal method to prewarm the name cache.
