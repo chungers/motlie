@@ -2295,6 +2295,10 @@ let embeddings = FindEmbeddings::new(
 
 ---
 
+**Review Note:** Implementation matches the requested ergonomics; no correctness issues found in this pass.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
