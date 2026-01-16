@@ -2665,9 +2665,42 @@ All tests pass including the critical batch insert test:
 - `test_insert_batch_with_index` - ✅ Pass
 - `test_vector_batch_insert_workflow` - ✅ Pass
 
-### Review Note
+### Review Note (CODEX)
 
 The fix correctly addresses vector visibility (transaction reads) and incremental nav-cache entry-point updates. One remaining correctness concern: `search_layer_in_txn()` still reads neighbors via `get_neighbors()` which uses `txn_db.get_cf()` (committed reads). Edges written earlier in the same batch are in the transaction (via `txn.merge_cf`) and are not visible to these reads. That means later inserts do not see edges from earlier inserts, and batch graph structure can diverge from sequential insert behavior (typically a star around the original entry). Consider adding `get_neighbors_in_txn()` (reading from `txn.get_cf()`), or staging edge updates in a batch-local cache so neighbor search sees newly added edges.
+
+### Resolution: BatchEdgeCache
+
+Implemented `BatchEdgeCache` to track edges added during batch insert:
+
+```rust
+/// In-memory cache for edges added during a batch transaction.
+///
+/// RocksDB's `Transaction::get()` does NOT include pending merge operands,
+/// so edges written via `txn.merge_cf()` are not visible to reads within
+/// the same transaction.
+pub struct BatchEdgeCache {
+    /// Forward and reverse edges: (vec_id, layer) -> neighbors
+    edges: HashMap<(VecId, HnswLayer), RoaringBitmap>,
+}
+```
+
+**Key functions added:**
+- `get_neighbors_with_batch_cache()` - merges DB edges with cached edges
+- `greedy_search_layer_with_batch_cache()` - greedy descent with cache support
+- `search_layer_with_batch_cache()` - ef-search with cache support
+
+**Usage in batch insert:**
+```rust
+let mut batch_edge_cache = BatchEdgeCache::new();
+for vector in vectors {
+    let update = insert_in_txn_for_batch(..., &mut batch_edge_cache)?;
+    // Edges are recorded in batch_cache for subsequent inserts to see
+    update.apply(nav_cache);
+}
+```
+
+This ensures later inserts in a batch see edges from earlier inserts, producing the same graph structure as sequential single-insert operations.
 
 ---
 

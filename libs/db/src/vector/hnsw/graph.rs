@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use roaring::RoaringBitmap;
+use std::collections::HashMap;
 
 use super::Index;
 use crate::rocksdb::ColumnFamily;
@@ -11,6 +12,79 @@ use crate::vector::schema::{
     BinaryCodeCfKey, BinaryCodes, EdgeCfKey, Edges, HnswLayer, VecId, VectorCfKey, Vectors,
 };
 use crate::vector::Storage;
+
+// ============================================================================
+// Batch Edge Cache
+// ============================================================================
+
+/// In-memory cache for edges added during a batch transaction.
+///
+/// RocksDB's `Transaction::get()` does NOT include pending merge operands,
+/// so edges written via `txn.merge_cf()` are not visible to reads within
+/// the same transaction. This cache tracks edges added during batch insert
+/// so that later inserts in the same batch can see edges from earlier inserts.
+///
+/// # Usage
+///
+/// ```ignore
+/// let mut batch_cache = BatchEdgeCache::new();
+///
+/// for vector in vectors {
+///     // Insert using the cache
+///     let update = insert_in_txn_for_batch_with_cache(
+///         index, txn, txn_db, storage, vec_id, vector, &mut batch_cache
+///     )?;
+///     update.apply(nav_cache);
+/// }
+/// ```
+#[derive(Default)]
+pub struct BatchEdgeCache {
+    /// Forward and reverse edges: (vec_id, layer) -> neighbors
+    edges: HashMap<(VecId, HnswLayer), RoaringBitmap>,
+}
+
+impl BatchEdgeCache {
+    /// Create a new empty batch edge cache.
+    pub fn new() -> Self {
+        Self {
+            edges: HashMap::new(),
+        }
+    }
+
+    /// Record edges added for a node at a layer (both directions).
+    ///
+    /// This records both forward edges (vec_id -> neighbors) and reverse edges
+    /// (each neighbor -> vec_id) since HNSW connections are bidirectional.
+    pub fn add_edges(&mut self, vec_id: VecId, layer: HnswLayer, neighbors: &[VecId]) {
+        // Add forward edges
+        let entry = self
+            .edges
+            .entry((vec_id, layer))
+            .or_insert_with(RoaringBitmap::new);
+        for &neighbor in neighbors {
+            entry.insert(neighbor);
+        }
+
+        // Add reverse edges (bidirectional graph)
+        for &neighbor in neighbors {
+            let rev_entry = self
+                .edges
+                .entry((neighbor, layer))
+                .or_insert_with(RoaringBitmap::new);
+            rev_entry.insert(vec_id);
+        }
+    }
+
+    /// Get cached edges for a node at a layer (if any).
+    pub fn get_edges(&self, vec_id: VecId, layer: HnswLayer) -> Option<&RoaringBitmap> {
+        self.edges.get(&(vec_id, layer))
+    }
+
+    /// Clear the cache (call after batch commit).
+    pub fn clear(&mut self) {
+        self.edges.clear();
+    }
+}
 
 // ============================================================================
 // Distance Functions
@@ -119,6 +193,36 @@ fn get_neighbors_uncached(
         }
         None => Ok(RoaringBitmap::new()),
     }
+}
+
+/// Get neighbors with batch edge cache support.
+///
+/// This function merges edges from RocksDB with edges from the batch cache.
+/// Used during batch insert where edges written via `txn.merge_cf()` are not
+/// visible to reads within the same transaction.
+///
+/// # Arguments
+/// * `index` - The HNSW index
+/// * `storage` - Storage for committed edge reads
+/// * `vec_id` - The vector ID to get neighbors for
+/// * `layer` - The HNSW layer
+/// * `batch_cache` - Cache of edges added during the current batch
+pub fn get_neighbors_with_batch_cache(
+    index: &Index,
+    storage: &Storage,
+    vec_id: VecId,
+    layer: HnswLayer,
+    batch_cache: &BatchEdgeCache,
+) -> Result<RoaringBitmap> {
+    // Get committed edges from DB (uncached - build path)
+    let mut neighbors = get_neighbors_uncached(index, storage, vec_id, layer)?;
+
+    // Merge with cached edges from current batch
+    if let Some(cached) = batch_cache.get_edges(vec_id, layer) {
+        neighbors |= cached;
+    }
+
+    Ok(neighbors)
 }
 
 /// Get the number of neighbors (degree) for a node at a specific layer.
@@ -464,6 +568,139 @@ pub fn search_layer_in_txn(
 
         // Explore neighbors
         let neighbors = get_neighbors(index, storage, current, layer, false)?;
+        for neighbor in neighbors.iter() {
+            if visited.insert(neighbor) {
+                let neighbor_dist = distance_in_txn(index, txn, txn_db, query, neighbor)?;
+
+                // Add to results if better than worst
+                let should_add = if results.len() < ef {
+                    true
+                } else if let Some(&(worst_dist, _)) = results.peek() {
+                    ordered_float::OrderedFloat(neighbor_dist) < worst_dist
+                } else {
+                    true
+                };
+
+                if should_add {
+                    candidates.push(std::cmp::Reverse((
+                        ordered_float::OrderedFloat(neighbor_dist),
+                        neighbor,
+                    )));
+                    results.push((ordered_float::OrderedFloat(neighbor_dist), neighbor));
+                    if results.len() > ef {
+                        results.pop(); // Remove worst
+                    }
+                }
+            }
+        }
+    }
+
+    // Convert to sorted vec
+    let mut result_vec: Vec<(f32, VecId)> =
+        results.into_iter().map(|(d, id)| (d.0, id)).collect();
+    result_vec.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    Ok(result_vec)
+}
+
+// ============================================================================
+// Batch-Cache-Aware Layer Search (for batch insert with edge visibility)
+// ============================================================================
+
+/// Greedy search at a single layer using transaction reads and batch edge cache.
+///
+/// This version merges edges from the batch cache so that later inserts in a
+/// batch can see edges created by earlier inserts (which are not visible via
+/// `txn.get_cf()` since they are pending merge operations).
+pub fn greedy_search_layer_with_batch_cache(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    storage: &Storage,
+    query: &[f32],
+    entry: VecId,
+    entry_dist: f32,
+    layer: HnswLayer,
+    batch_cache: &BatchEdgeCache,
+) -> Result<(VecId, f32)> {
+    let mut current = entry;
+    let mut current_dist = entry_dist;
+
+    loop {
+        // Use batch-cache-aware neighbor lookup
+        let neighbors = get_neighbors_with_batch_cache(index, storage, current, layer, batch_cache)?;
+        if neighbors.is_empty() {
+            break;
+        }
+
+        let mut improved = false;
+        for neighbor in neighbors.iter() {
+            let dist = distance_in_txn(index, txn, txn_db, query, neighbor)?;
+            if dist < current_dist {
+                current = neighbor;
+                current_dist = dist;
+                improved = true;
+            }
+        }
+
+        if !improved {
+            break;
+        }
+    }
+
+    Ok((current, current_dist))
+}
+
+/// Search at a single layer with ef candidates using transaction and batch edge cache.
+///
+/// This version merges edges from the batch cache so that later inserts in a
+/// batch can see edges created by earlier inserts (which are not visible via
+/// `txn.get_cf()` since they are pending merge operations).
+pub fn search_layer_with_batch_cache(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    storage: &Storage,
+    query: &[f32],
+    entry: VecId,
+    ef: usize,
+    layer: HnswLayer,
+    batch_cache: &BatchEdgeCache,
+) -> Result<Vec<(f32, VecId)>> {
+    use std::collections::{BinaryHeap, HashSet};
+
+    // For single-node graph, just return the entry
+    let neighbors = get_neighbors_with_batch_cache(index, storage, entry, layer, batch_cache)?;
+    if neighbors.is_empty() {
+        let dist = distance_in_txn(index, txn, txn_db, query, entry)?;
+        return Ok(vec![(dist, entry)]);
+    }
+
+    // Simple greedy search with ef candidates
+    let entry_dist = distance_in_txn(index, txn, txn_db, query, entry)?;
+    let mut visited = HashSet::new();
+    visited.insert(entry);
+
+    // Min-heap for candidates (closest first)
+    let mut candidates: BinaryHeap<std::cmp::Reverse<(ordered_float::OrderedFloat<f32>, VecId)>> =
+        BinaryHeap::new();
+    candidates.push(std::cmp::Reverse((ordered_float::OrderedFloat(entry_dist), entry)));
+
+    // Max-heap for results (furthest first for easy pruning)
+    let mut results: BinaryHeap<(ordered_float::OrderedFloat<f32>, VecId)> = BinaryHeap::new();
+    results.push((ordered_float::OrderedFloat(entry_dist), entry));
+
+    while let Some(std::cmp::Reverse((dist, current))) = candidates.pop() {
+        // Stop if current candidate is further than worst result
+        if results.len() >= ef {
+            if let Some(&(worst_dist, _)) = results.peek() {
+                if dist > worst_dist {
+                    break;
+                }
+            }
+        }
+
+        // Explore neighbors using batch-cache-aware lookup
+        let neighbors = get_neighbors_with_batch_cache(index, storage, current, layer, batch_cache)?;
         for neighbor in neighbors.iter() {
             if visited.insert(neighbor) {
                 let neighbor_dist = distance_in_txn(index, txn, txn_db, query, neighbor)?;
