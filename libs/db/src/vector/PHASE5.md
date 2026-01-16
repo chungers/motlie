@@ -2230,6 +2230,12 @@ No issues found in this update.
 
 ---
 
+**Update (mutation run() ergonomics added):**
+
+- **Resolved:** `MutationRunnable` trait added with `run(&writer)` for `InsertVector`, `InsertVectorBatch`, `DeleteVector`, and `AddEmbeddingSpec`, plus `MutationBatch` helper. This now hides `writer.send(...)` and matches graph’s mutation ergonomics.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
