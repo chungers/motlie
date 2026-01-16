@@ -2251,8 +2251,22 @@ No issues found in this update.
 
 **New Feedback (point-lookup query ergonomics):**
 
-- Only `SearchKNN` has `Runnable` today. Point-lookups (GetVector/GetInternalId/GetExternalId/ResolveIds) still require dispatch or `QueryWithTimeout` plumbing.  
-  - **Recommendation:** add `Runnable<Reader>` impls for point-lookups to fully hide `send_query` across the public API, matching graph’s query ergonomics.
+- Only `SearchKNN` has `Runnable` today. Point-lookups (GetVector/GetInternalId/GetExternalId/ResolveIds) still require dispatch or `QueryWithTimeout` plumbing.
+  - **Recommendation:** add `Runnable<Reader>` impls for point-lookups to fully hide `send_query` across the public API, matching graph's query ergonomics.
+
+---
+
+**Update (point-lookup Runnable impls added):**
+
+- **Resolved:** Added `Runnable<Reader>` implementations for `GetVector`, `GetInternalId`, `GetExternalId`, and `ResolveIds`. Point lookups now support the ergonomic `.run(&reader, timeout)` pattern, fully hiding dispatch/channel plumbing.
+
+```rust
+// Example usage
+let vector = GetVector::new(embedding.code(), id).run(&reader, timeout).await?;
+let vec_id = GetInternalId::new(embedding.code(), id).run(&reader, timeout).await?;
+let external_id = GetExternalId::new(embedding.code(), vec_id).run(&reader, timeout).await?;
+let ids = ResolveIds::new(embedding.code(), vec_ids).run(&reader, timeout).await?;
+```
 
 ---
 

@@ -720,6 +720,158 @@ impl crate::reader::Runnable<super::reader::SearchReader> for SearchKNN {
 }
 
 // ============================================================================
+// Runnable Implementations for Point Lookups
+// ============================================================================
+
+/// Runnable implementation for GetVector.
+///
+/// # Example
+/// ```rust,ignore
+/// let vector = GetVector::new(embedding.code(), id)
+///     .run(&reader, timeout)
+///     .await?;
+/// ```
+#[async_trait::async_trait]
+impl crate::reader::Runnable<super::reader::Reader> for GetVector {
+    type Output = Option<Vec<f32>>;
+
+    async fn run(
+        self,
+        reader: &super::reader::Reader,
+        timeout: Duration,
+    ) -> Result<Self::Output> {
+        let (tx, rx) = oneshot::channel();
+        let dispatch = GetVectorDispatch {
+            params: self,
+            timeout,
+            result_tx: tx,
+        };
+
+        reader
+            .send_query(Query::GetVector(dispatch))
+            .await
+            .context("Failed to send GetVector query")?;
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("GetVector query channel closed")),
+            Err(_) => Err(anyhow::anyhow!("GetVector query timeout after {:?}", timeout)),
+        }
+    }
+}
+
+/// Runnable implementation for GetInternalId.
+///
+/// # Example
+/// ```rust,ignore
+/// let vec_id = GetInternalId::new(embedding.code(), external_id)
+///     .run(&reader, timeout)
+///     .await?;
+/// ```
+#[async_trait::async_trait]
+impl crate::reader::Runnable<super::reader::Reader> for GetInternalId {
+    type Output = Option<VecId>;
+
+    async fn run(
+        self,
+        reader: &super::reader::Reader,
+        timeout: Duration,
+    ) -> Result<Self::Output> {
+        let (tx, rx) = oneshot::channel();
+        let dispatch = GetInternalIdDispatch {
+            params: self,
+            timeout,
+            result_tx: tx,
+        };
+
+        reader
+            .send_query(Query::GetInternalId(dispatch))
+            .await
+            .context("Failed to send GetInternalId query")?;
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("GetInternalId query channel closed")),
+            Err(_) => Err(anyhow::anyhow!("GetInternalId query timeout after {:?}", timeout)),
+        }
+    }
+}
+
+/// Runnable implementation for GetExternalId.
+///
+/// # Example
+/// ```rust,ignore
+/// let external_id = GetExternalId::new(embedding.code(), vec_id)
+///     .run(&reader, timeout)
+///     .await?;
+/// ```
+#[async_trait::async_trait]
+impl crate::reader::Runnable<super::reader::Reader> for GetExternalId {
+    type Output = Option<Id>;
+
+    async fn run(
+        self,
+        reader: &super::reader::Reader,
+        timeout: Duration,
+    ) -> Result<Self::Output> {
+        let (tx, rx) = oneshot::channel();
+        let dispatch = GetExternalIdDispatch {
+            params: self,
+            timeout,
+            result_tx: tx,
+        };
+
+        reader
+            .send_query(Query::GetExternalId(dispatch))
+            .await
+            .context("Failed to send GetExternalId query")?;
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("GetExternalId query channel closed")),
+            Err(_) => Err(anyhow::anyhow!("GetExternalId query timeout after {:?}", timeout)),
+        }
+    }
+}
+
+/// Runnable implementation for ResolveIds.
+///
+/// # Example
+/// ```rust,ignore
+/// let external_ids = ResolveIds::new(embedding.code(), vec_ids)
+///     .run(&reader, timeout)
+///     .await?;
+/// ```
+#[async_trait::async_trait]
+impl crate::reader::Runnable<super::reader::Reader> for ResolveIds {
+    type Output = Vec<Option<Id>>;
+
+    async fn run(
+        self,
+        reader: &super::reader::Reader,
+        timeout: Duration,
+    ) -> Result<Self::Output> {
+        let (tx, rx) = oneshot::channel();
+        let dispatch = ResolveIdsDispatch {
+            params: self,
+            timeout,
+            result_tx: tx,
+        };
+
+        reader
+            .send_query(Query::ResolveIds(dispatch))
+            .await
+            .context("Failed to send ResolveIds query")?;
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(anyhow::anyhow!("ResolveIds query channel closed")),
+            Err(_) => Err(anyhow::anyhow!("ResolveIds query timeout after {:?}", timeout)),
+        }
+    }
+}
+
+// ============================================================================
 // Query Dispatch
 // ============================================================================
 
