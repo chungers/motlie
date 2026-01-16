@@ -2468,6 +2468,18 @@ During migration, discovered that `Processor::insert_batch()` has a bug where th
 
 - `libs/db/tests/test_vector_benchmark_integration.rs` - Complete migration
 
+### Review Note
+
+Migration is correctly scoped to the public Processor path (registry + insert + search). The new flow exercises transactional inserts and HNSW build as intended. No additional correctness regressions found beyond the already documented `insert_batch()` nav-cache bug.
+
+### Follow-up Task (5.8.x)
+
+**5.8.x: Fix insert_batch() HNSW nav-cache updates**
+- **Problem:** In `ops::insert::batch`, cache updates from `hnsw::insert_in_txn()` are only applied after the transaction commits. During the batch, the `nav_cache` stays empty, so every insert thinks it’s the first node and builds no edges.
+- **Impact:** All vectors except the first get empty HNSW edges when `build_index=true`, degrading recall.
+- **Fix options:** Apply cache updates incrementally inside the batch loop, or maintain a temporary in-memory nav state for the batch and merge it post-commit.
+- **Workaround:** Use `insert_vector()` in a loop for now when HNSW indexing is required.
+
 ---
 
 ## Task 5.8.1: Make Processor `pub(crate)` + Runnable Migration (COMPLETE)
