@@ -240,43 +240,6 @@ pub fn get_neighbor_count(
     Ok(neighbors.len())
 }
 
-/// Connect a node to its neighbors bidirectionally using merge operators (legacy API).
-///
-/// This is the legacy API that uses raw DB operations. For transactional
-/// writes, use `connect_neighbors_in_txn()` instead.
-pub fn connect_neighbors(
-    index: &Index,
-    txn_db: &rocksdb::TransactionDB,
-    vec_id: VecId,
-    neighbors: &[(f32, VecId)],
-    layer: HnswLayer,
-) -> Result<()> {
-    let cf = txn_db
-        .cf_handle(Edges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Edges CF not found"))?;
-
-    // Add forward edges (vec_id -> neighbors)
-    let neighbor_ids: Vec<u32> = neighbors.iter().map(|(_, id)| *id).collect();
-    let forward_key = Edges::key_to_bytes(&EdgeCfKey(index.embedding(), vec_id, layer));
-    let forward_op = EdgeOp::AddBatch(neighbor_ids.clone());
-    txn_db.merge_cf(&cf, forward_key, forward_op.to_bytes())?;
-
-    // Add reverse edges (each neighbor -> vec_id)
-    for &neighbor_id in &neighbor_ids {
-        let reverse_key = Edges::key_to_bytes(&EdgeCfKey(index.embedding(), neighbor_id, layer));
-        let reverse_op = EdgeOp::Add(vec_id);
-        txn_db.merge_cf(&cf, reverse_key, reverse_op.to_bytes())?;
-    }
-
-    // Note: No cache invalidation needed - index build uses uncached paths,
-    // and the cache is only populated during search operations.
-
-    // TODO: Prune if degree exceeds M_max
-    // This will be added when we implement degree-based pruning
-
-    Ok(())
-}
-
 /// Connect a node to its neighbors bidirectionally within a transaction.
 ///
 /// This is the recommended API for production use. All edge writes are

@@ -215,7 +215,7 @@ impl EmbeddingRegistry {
         // Allocate new code and persist
         let code = self.next_code.fetch_add(1, Ordering::SeqCst);
 
-        // Persist to RocksDB using ColumnFamilyRecord trait
+        // Persist to RocksDB using a transaction for atomicity
         let cf = db
             .cf_handle(EmbeddingSpecs::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
@@ -234,7 +234,10 @@ impl EmbeddingRegistry {
         };
         let (key_bytes, value_bytes) = add_op.to_cf_bytes()?;
 
-        db.put_cf(&cf, key_bytes, value_bytes)?;
+        // Use transaction for atomic write
+        let txn = db.transaction();
+        txn.put_cf(&cf, key_bytes, value_bytes)?;
+        txn.commit()?;
 
         // Create embedding
         let embedding = Embedding::new(
