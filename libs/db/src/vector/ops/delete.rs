@@ -151,7 +151,7 @@ pub fn vector(
     // HNSW edges still reference it. Reuse would corrupt graph semantics.
     if !hnsw_enabled {
         let allocator = processor.get_or_create_allocator(embedding);
-        allocator.free_in_txn(txn, txn_db, embedding, vec_id)?;
+        allocator.free(txn, txn_db, embedding, vec_id)?;
     }
 
     Ok(DeleteResult::Deleted {

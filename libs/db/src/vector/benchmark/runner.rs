@@ -430,7 +430,7 @@ pub fn build_hnsw_index(
     for (i, vector) in vectors.iter().enumerate() {
         let vec_id = i as VecId;
         let txn = txn_db.transaction();
-        let cache_update = hnsw::insert_in_txn(&index, &txn, &txn_db, storage, vec_id, vector)?;
+        let cache_update = hnsw::insert(&index, &txn, &txn_db, storage, vec_id, vector)?;
         txn.commit()?;
         cache_update.apply(index.nav_cache());
 

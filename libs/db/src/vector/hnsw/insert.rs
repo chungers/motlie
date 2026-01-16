@@ -1,16 +1,17 @@
 //! HNSW insert algorithm implementation.
 //!
 //! This module provides two insert APIs:
-//! - `insert()` - Legacy API that creates its own transaction (for tests/benchmarks)
-//! - `insert_in_txn()` - Transaction-aware API that accepts a transaction and returns
+//! - `insert()` - Transaction-aware API that accepts a transaction and returns
 //!   a `CacheUpdate` to apply after commit (for production use)
+//! - `insert_for_batch()` - Batch-aware variant that uses `BatchEdgeCache` for
+//!   visibility of uncommitted edges during batch inserts
 //!
 //! # Transaction Safety
 //!
-//! For atomic inserts, use `insert_in_txn()` within a transaction scope:
+//! For atomic inserts, use `insert()` within a transaction scope:
 //! ```rust,ignore
 //! let txn = txn_db.transaction();
-//! let cache_update = insert_in_txn(&index, &txn, &txn_db, vec_id, &vector)?;
+//! let cache_update = insert(&index, &txn, &txn_db, vec_id, &vector)?;
 //! txn.commit()?;
 //! cache_update.apply(&nav_cache, config.m);  // Only after successful commit
 //! ```
@@ -18,7 +19,7 @@
 use anyhow::Result;
 
 use super::graph::{
-    connect_neighbors_in_txn, greedy_search_layer, greedy_search_layer_with_batch_cache,
+    connect_neighbors, greedy_search_layer, greedy_search_layer_with_batch_cache,
     search_layer, search_layer_with_batch_cache, BatchEdgeCache,
 };
 use super::Index;
@@ -97,11 +98,11 @@ impl CacheUpdate {
 /// # Example
 /// ```rust,ignore
 /// let txn = txn_db.transaction();
-/// let cache_update = insert_in_txn(&index, &txn, &txn_db, &storage, vec_id, &vector)?;
+/// let cache_update = insert(&index, &txn, &txn_db, &storage, vec_id, &vector)?;
 /// txn.commit()?;
 /// cache_update.apply(index.nav_cache());
 /// ```
-pub fn insert_in_txn(
+pub fn insert(
     index: &Index,
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
@@ -118,12 +119,12 @@ pub fn insert_in_txn(
     let node_layer = nav_info.random_layer(&mut rng);
 
     // 3. Store node metadata (using transaction)
-    store_vec_meta_in_txn(index, txn, txn_db, vec_id, node_layer)?;
+    store_vec_meta(index, txn, txn_db, vec_id, node_layer)?;
 
     // 4. Handle empty graph case
     if nav_info.is_empty() {
         // Persist entry point within transaction
-        update_entry_point_in_txn(index, txn, txn_db, vec_id, node_layer)?;
+        update_entry_point(index, txn, txn_db, vec_id, node_layer)?;
 
         return Ok(CacheUpdate {
             embedding: index.embedding(),
@@ -170,7 +171,7 @@ pub fn insert_in_txn(
         let selected: Vec<_> = neighbors.into_iter().take(m as usize).collect();
 
         // Connect bidirectionally (using transaction)
-        connect_neighbors_in_txn(index, txn, txn_db, vec_id, &selected, layer)?;
+        connect_neighbors(index, txn, txn_db, vec_id, &selected, layer)?;
 
         // Update current for next layer
         if let Some(&(dist, id)) = selected.first() {
@@ -185,7 +186,7 @@ pub fn insert_in_txn(
     // 7. Update entry point if needed (using transaction)
     let is_new_entry_point = node_layer > max_layer;
     if is_new_entry_point {
-        update_entry_point_in_txn(index, txn, txn_db, vec_id, node_layer)?;
+        update_entry_point(index, txn, txn_db, vec_id, node_layer)?;
     }
 
     // Return cache update to apply AFTER commit
@@ -220,7 +221,7 @@ pub fn insert_in_txn(
 /// # Returns
 /// A `CacheUpdate` that should be applied immediately for subsequent inserts
 /// to see the updated navigation state.
-pub fn insert_in_txn_for_batch(
+pub fn insert_for_batch(
     index: &Index,
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
@@ -237,12 +238,12 @@ pub fn insert_in_txn_for_batch(
     let node_layer = nav_info.random_layer(&mut rng);
 
     // 3. Store node metadata (using transaction)
-    store_vec_meta_in_txn(index, txn, txn_db, vec_id, node_layer)?;
+    store_vec_meta(index, txn, txn_db, vec_id, node_layer)?;
 
     // 4. Handle empty graph case
     if nav_info.is_empty() {
         // Persist entry point within transaction
-        update_entry_point_in_txn(index, txn, txn_db, vec_id, node_layer)?;
+        update_entry_point(index, txn, txn_db, vec_id, node_layer)?;
 
         return Ok(CacheUpdate {
             embedding: index.embedding(),
@@ -294,7 +295,7 @@ pub fn insert_in_txn_for_batch(
         let selected: Vec<_> = neighbors.into_iter().take(m as usize).collect();
 
         // Connect bidirectionally (using transaction)
-        connect_neighbors_in_txn(index, txn, txn_db, vec_id, &selected, layer)?;
+        connect_neighbors(index, txn, txn_db, vec_id, &selected, layer)?;
 
         // Record edges in batch cache for later inserts to see
         let neighbor_ids: Vec<VecId> = selected.iter().map(|(_, id)| *id).collect();
@@ -313,7 +314,7 @@ pub fn insert_in_txn_for_batch(
     // 7. Update entry point if needed (using transaction)
     let is_new_entry_point = node_layer > max_layer;
     if is_new_entry_point {
-        update_entry_point_in_txn(index, txn, txn_db, vec_id, node_layer)?;
+        update_entry_point(index, txn, txn_db, vec_id, node_layer)?;
     }
 
     // Return cache update - caller should apply immediately for batch
@@ -331,7 +332,7 @@ pub fn insert_in_txn_for_batch(
 // ============================================================================
 
 /// Store vector metadata (layer assignment) within a transaction.
-fn store_vec_meta_in_txn(
+fn store_vec_meta(
     index: &Index,
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
@@ -362,7 +363,7 @@ fn store_vec_meta_in_txn(
 }
 
 /// Update the global entry point within a transaction.
-fn update_entry_point_in_txn(
+fn update_entry_point(
     index: &Index,
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,

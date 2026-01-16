@@ -23,7 +23,7 @@ mod tests {
 
     use crate::rocksdb::ColumnFamily;
     use crate::vector::cache::NavigationCache;
-    use crate::vector::hnsw::{self, insert_in_txn};
+    use crate::vector::hnsw::{self, insert};
     use crate::vector::id::IdAllocator;
     use crate::vector::schema::{
         EmbeddingCode, GraphMeta, GraphMetaCfKey, GraphMetaField, IdForward, IdForwardCfKey,
@@ -177,10 +177,10 @@ mod tests {
             let allocator = IdAllocator::new();
 
             // Allocate 10 IDs
-            allocated_ids = (0..10).map(|_| allocator.allocate()).collect();
+            allocated_ids = (0..10).map(|_| allocator.allocate_local()).collect();
 
             // Free ID 5
-            allocator.free(5);
+            allocator.free_local(5);
 
             // Persist state
             allocator.persist(&txn_db, embedding).expect("Failed to persist");
@@ -200,11 +200,11 @@ mod tests {
             assert_eq!(recovered.free_count(), 1, "free_count should be recovered");
 
             // Next allocation should reuse freed ID 5
-            let next_id = recovered.allocate();
+            let next_id = recovered.allocate_local();
             assert_eq!(next_id, 5, "Should reuse freed ID");
 
             // After that, should allocate fresh
-            let fresh_id = recovered.allocate();
+            let fresh_id = recovered.allocate_local();
             assert_eq!(fresh_id, 10, "Should allocate fresh ID after reusing freed");
         }
     }
@@ -226,7 +226,7 @@ mod tests {
             // Allocate 5 IDs in transaction
             for _ in 0..5 {
                 allocator
-                    .allocate_in_txn(&txn, &txn_db, embedding)
+                    .allocate(&txn, &txn_db, embedding)
                     .expect("Failed to allocate in txn");
             }
 
@@ -291,7 +291,7 @@ mod tests {
             for (i, vector) in vectors.iter().enumerate() {
                 let txn = txn_db.transaction();
                 let cache_update =
-                    insert_in_txn(&index, &txn, &txn_db, &storage, i as VecId, vector)
+                    insert(&index, &txn, &txn_db, &storage, i as VecId, vector)
                         .expect("Failed to insert");
                 txn.commit().expect("Failed to commit");
                 cache_update.apply(index.nav_cache());
@@ -363,7 +363,7 @@ mod tests {
             let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache.clone());
 
             let txn = txn_db.transaction();
-            let cache_update = insert_in_txn(&index, &txn, &txn_db, &storage, 0, &vector)
+            let cache_update = insert(&index, &txn, &txn_db, &storage, 0, &vector)
                 .expect("Failed to insert");
             txn.commit().expect("Failed to commit");
             cache_update.apply(index.nav_cache());
@@ -456,7 +456,7 @@ mod tests {
             for (i, vector) in vectors.iter().enumerate() {
                 let txn = txn_db.transaction();
                 let cache_update =
-                    insert_in_txn(&index, &txn, &txn_db, &storage, i as VecId, vector)
+                    insert(&index, &txn, &txn_db, &storage, i as VecId, vector)
                         .expect("Failed to insert");
                 txn.commit().expect("Failed to commit");
                 cache_update.apply(index.nav_cache());
@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_transaction_insert_with_recovery() {
-        // Test using insert_in_txn directly with recovery
+        // Test using insert directly with recovery
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let embedding: EmbeddingCode = 1;
         let dim = 64;
@@ -525,7 +525,7 @@ mod tests {
 
             let txn = txn_db.transaction();
             let cache_update =
-                insert_in_txn(&index, &txn, &txn_db, &storage, 0, &vector).expect("Insert failed");
+                insert(&index, &txn, &txn_db, &storage, 0, &vector).expect("Insert failed");
 
             // Commit
             txn.commit().expect("Commit failed");

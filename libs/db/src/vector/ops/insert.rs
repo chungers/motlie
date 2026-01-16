@@ -170,7 +170,7 @@ pub fn vector(
     // 4. Allocate internal ID
     let vec_id = {
         let allocator = processor.get_or_create_allocator(embedding);
-        allocator.allocate_in_txn(txn, txn_db, embedding)?
+        allocator.allocate(txn, txn_db, embedding)?
     };
 
     // 5. Store Id -> VecId mapping (IdForward)
@@ -231,7 +231,7 @@ pub fn vector(
     // 10. Build HNSW index (if requested)
     let nav_cache_update = if build_index {
         if let Some(index) = processor.get_or_create_index(embedding) {
-            Some(hnsw::insert_in_txn(
+            Some(hnsw::insert(
                 &index,
                 txn,
                 txn_db,
@@ -378,7 +378,7 @@ pub fn batch(
         // Allocate internal ID
         let vec_id = {
             let allocator = processor.get_or_create_allocator(embedding);
-            allocator.allocate_in_txn(txn, txn_db, embedding)?
+            allocator.allocate(txn, txn_db, embedding)?
         };
         vec_ids.push(vec_id);
 
@@ -430,7 +430,7 @@ pub fn batch(
 
     // 9. Build HNSW index (if requested) - after all vectors are stored
     //
-    // IMPORTANT: We use insert_in_txn_for_batch with BatchEdgeCache which:
+    // IMPORTANT: We use insert_for_batch with BatchEdgeCache which:
     // 1. Uses transaction-aware reads to access uncommitted vector data
     // 2. Uses batch edge cache to see edges from earlier inserts in the same batch
     //    (RocksDB transactions don't expose pending merge operands to reads)
@@ -448,7 +448,7 @@ pub fn batch(
             for (i, vec_id) in vec_ids.iter().enumerate() {
                 let vector = &vectors[i].1;
                 // Use batch-specific insert with edge cache for proper graph connectivity
-                let update = hnsw::insert_in_txn_for_batch(
+                let update = hnsw::insert_for_batch(
                     &index,
                     txn,
                     txn_db,

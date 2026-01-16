@@ -81,7 +81,7 @@ pub struct SearchResult {
 ///
 /// // Get or create an ID allocator for an embedding space
 /// let allocator = processor.get_or_create_allocator(embedding_code);
-/// let vec_id = allocator.allocate();
+/// let vec_id = allocator.allocate_local();
 /// ```
 pub struct Processor {
     /// Vector storage (RocksDB via generic Storage<Subsystem>)
@@ -937,8 +937,8 @@ mod tests {
         // Allocate some IDs
         {
             let mut allocator = allocators.get_mut(&1).unwrap();
-            let id1 = allocator.allocate();
-            let id2 = allocator.allocate();
+            let id1 = allocator.allocate_local();
+            let id2 = allocator.allocate_local();
             assert_eq!(id1, 0);
             assert_eq!(id2, 1);
         }
