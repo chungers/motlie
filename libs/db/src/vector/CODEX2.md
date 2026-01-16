@@ -24,9 +24,8 @@ Most production write paths already use `txn.put_cf` / `txn.merge_cf` via `ops::
 
 2) **`IdAllocator::persist()`**
    - **File:** `libs/db/src/vector/id.rs`
-   - **Write:** `db.put_cf(...)` (non-transactional)
-   - **Impact:** Persisting allocator state is not atomic with other mutations.
-   - **Migration:** Replace with transaction-backed persistence, or make this method internal-only and call `allocate_in_txn()` / `free_in_txn()` exclusively.
+   - **Status:** Now uses an internal transaction (`txn.put_cf(...)`), and `persist_in_txn()` is available for existing transactions.
+   - **Impact:** No longer a non-transactional write path; still `pub(crate)` and test-oriented.
 
 3) **Legacy HNSW Edge Writes**
    - **File:** `libs/db/src/vector/hnsw/graph.rs`
@@ -35,22 +34,9 @@ Most production write paths already use `txn.put_cf` / `txn.merge_cf` via `ops::
 
 ### Test / Benchmark Helpers (still need cleanup for consistency)
 
-4) **HNSW test helpers**
-   - **File:** `libs/db/src/vector/hnsw/mod.rs` (tests)
-   - **Write:** `store_vectors()` uses `txn_db.put_cf(...)`
-   - **Impact:** Tests exercise non-transactional writes.
-   - **Migration:** Wrap in a transaction or use existing `ops::insert` helpers.
-
-5) **Benchmark runner**
-   - **File:** `libs/db/src/vector/benchmark/runner.rs`
-   - **Write:** `txn_db.put_cf(...)`
-   - **Impact:** Benchmarks bypass transactional paths.
-   - **Migration:** Use transactional insert helpers or explicit transaction per batch.
-
-6) **Crash recovery tests**
-   - **File:** `libs/db/src/vector/crash_recovery_tests.rs`
-   - **Write:** Mixed direct `txn_db.put_cf(...)` for setup.
-   - **Impact:** Acceptable for low-level tests but should be marked as legacy or moved behind explicit transactions for parity.
+4) **HNSW test helpers / benchmarks / crash recovery**
+   - **Status:** These helpers now use `txn.put_cf(...)` within transactions for setup.
+   - **Impact:** No remaining non-transactional write paths in tests/bench.
 
 ## `_in_txn` Functions: Candidates for Rename (after cleanup)
 
@@ -108,12 +94,8 @@ Once **all** writes are transactional and non-transactional APIs are removed or 
 
 Until the non-transactional code paths are removed or isolated, renaming `_in_txn` functions would be misleading because both transactional and non-transactional variants would coexist. The rename should be a follow-on cleanup after all writes are transaction-only.
 
-## Rename Readiness Assessment (Post-fde2498)
+## Rename Readiness Assessment (Post-d551c1a)
 
-**Nearly ready to drop `_in_txn`.** Recent changes removed the legacy `hnsw::insert()` API and added `EmbeddingRegistry::register_in_txn()`, so the two earlier blockers are cleared. Remaining non-transactional writes are now limited to a **test-only** path:
+**Ready to drop `_in_txn`.** All write paths in production and test/bench helpers now use transactions. `EmbeddingRegistry::register_in_txn()` exists, legacy `hnsw::insert()` is removed, and `IdAllocator::persist()` now uses an internal transaction (with `persist_in_txn()` for callers with an existing transaction).
 
-1) **`IdAllocator::persist()` remains non-transactional**
-   - **Scope:** `pub(crate)` and used only by crash recovery tests.
-   - **Impact:** Does not affect public APIs, but should stay isolated to tests.
-
-**Conclusion:** It is now reasonable to proceed with renaming `_in_txn` APIs, as long as `IdAllocator::persist()` remains test-only and we avoid exposing non-transactional write helpers in production code.
+**Conclusion:** Proceed with renaming `_in_txn` APIs. Keep batch-cache-aware helper suffixes (e.g., `*_with_batch_cache`) to avoid ambiguity.
