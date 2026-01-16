@@ -2626,8 +2626,8 @@ for (i, vec_id) in vec_ids.iter().enumerate() {
 Two-part fix:
 
 1. **Transaction-aware HNSW graph functions** in `hnsw/graph.rs`:
-   - `get_vector_in_txn()` - reads from uncommitted transaction
-   - `distance_in_txn()` - computes distance using transaction reads
+   - `get_vector_in_txn()` - reads from uncommitted transaction (internal helper name retained)
+   - `distance_in_txn()` - computes distance using transaction reads (internal helper name retained)
    - `greedy_search_layer_with_batch_cache()` - greedy descent with batch cache visibility
    - `search_layer_with_batch_cache()` - layer search with batch cache visibility
 
@@ -2729,7 +2729,7 @@ BatchEdgeCache closes the remaining correctness gap: edges from earlier inserts 
 
 **All writes are now transactional.** `_in_txn` rename completed; CODEX2 checklist retired.
 
-**Review Note (CODEX):** Rename looks mechanically consistent across ops, tests, and benchmarks. Remaining cleanup is documentation-only (several historical references to `_in_txn` in ROADMAP/PHASE5 and some inline comments/examples).
+**Review Note (CODEX):** Rename looks mechanically consistent across ops, tests, and benchmarks. Remaining cleanup is documentation-only (a few internal helper names still use `_in_txn` in HNSW graph code).
 
 ---
 
