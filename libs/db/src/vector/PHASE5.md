@@ -2695,7 +2695,7 @@ pub struct BatchEdgeCache {
 ```rust
 let mut batch_edge_cache = BatchEdgeCache::new();
 for vector in vectors {
-    let update = insert_in_txn_for_batch(..., &mut batch_edge_cache)?;
+    let update = insert_for_batch(..., &mut batch_edge_cache)?;
     // Edges are recorded in batch_cache for subsequent inserts to see
     update.apply(nav_cache);
 }
@@ -2709,12 +2709,10 @@ BatchEdgeCache closes the remaining correctness gap: edges from earlier inserts 
 
 ### Task 5.8.y: Remove Non-Transactional Writes (COMPLETE)
 
-**Context:** See `libs/db/src/vector/CODEX2.md` for the full transaction-only migration plan.
-
 **Production code paths fixed:**
 - ✅ `EmbeddingRegistry::register()` - Now uses `txn.put_cf()` with commit
-- ✅ `IdAllocator::persist()` - Made `pub(crate)` for tests only; production uses `allocate_in_txn()`/`free_in_txn()`
-- ✅ `connect_neighbors()` - Removed (dead code); only `connect_neighbors_in_txn()` remains
+- ✅ `IdAllocator::persist()` - Test-only; production uses `allocate()`/`free()` with transactions
+- ✅ `connect_neighbors()` - Transactional variant only (legacy non-txn path removed)
 - ✅ `Processor::persist_allocators()` - Removed (dead code)
 
 **Test/bench helpers also migrated:**
@@ -2722,7 +2720,9 @@ BatchEdgeCache closes the remaining correctness gap: edges from earlier inserts 
 - ✅ `benchmark/runner.rs` - vector storage now batched in transaction
 - ✅ `crash_recovery_tests.rs` - all vector stores now use transactions
 
-**All writes are now transactional.** Next step: Rename `_in_txn` APIs to drop the suffix.
+**All writes are now transactional.** `_in_txn` rename completed; CODEX2 checklist retired.
+
+**Review Note (CODEX):** Rename looks mechanically consistent across ops, tests, and benchmarks. Remaining cleanup is documentation-only (several historical references to `_in_txn` in ROADMAP/PHASE5 and some inline comments/examples).
 
 ---
 
