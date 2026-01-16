@@ -289,9 +289,12 @@ mod tests {
             let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache.clone());
 
             for (i, vector) in vectors.iter().enumerate() {
-                index
-                    .insert(&storage, i as VecId, vector)
-                    .expect("Failed to insert");
+                let txn = txn_db.transaction();
+                let cache_update =
+                    insert_in_txn(&index, &txn, &txn_db, &storage, i as VecId, vector)
+                        .expect("Failed to insert");
+                txn.commit().expect("Failed to commit");
+                cache_update.apply(index.nav_cache());
             }
 
             // Verify navigation info is populated
@@ -359,7 +362,11 @@ mod tests {
             let config = hnsw::Config::for_dim(64);
             let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache.clone());
 
-            index.insert(&storage, 0, &vector).expect("Failed to insert");
+            let txn = txn_db.transaction();
+            let cache_update = insert_in_txn(&index, &txn, &txn_db, &storage, 0, &vector)
+                .expect("Failed to insert");
+            txn.commit().expect("Failed to commit");
+            cache_update.apply(index.nav_cache());
 
             expected_entry_point = nav_cache
                 .get(embedding)
@@ -447,9 +454,12 @@ mod tests {
             let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache);
 
             for (i, vector) in vectors.iter().enumerate() {
-                index
-                    .insert(&storage, i as VecId, vector)
-                    .expect("Failed to insert");
+                let txn = txn_db.transaction();
+                let cache_update =
+                    insert_in_txn(&index, &txn, &txn_db, &storage, i as VecId, vector)
+                        .expect("Failed to insert");
+                txn.commit().expect("Failed to commit");
+                cache_update.apply(index.nav_cache());
             }
         }
 

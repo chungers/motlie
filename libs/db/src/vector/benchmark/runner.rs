@@ -426,10 +426,13 @@ pub fn build_hnsw_index(
         txn.commit()?;
     }
 
-    // Build HNSW index (each insert uses its own transaction internally)
+    // Build HNSW index (each insert in its own transaction)
     for (i, vector) in vectors.iter().enumerate() {
         let vec_id = i as VecId;
-        index.insert(storage, vec_id, vector)?;
+        let txn = txn_db.transaction();
+        let cache_update = hnsw::insert_in_txn(&index, &txn, &txn_db, storage, vec_id, vector)?;
+        txn.commit()?;
+        cache_update.apply(index.nav_cache());
 
         if (i + 1) % 10000 == 0 {
             println!("  Inserted {}/{} vectors", i + 1, vectors.len());

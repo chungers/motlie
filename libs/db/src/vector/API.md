@@ -234,10 +234,14 @@ let index = hnsw::Index::with_storage_type(
     nav_cache.clone(),
 );
 
-// Insert vectors
+// Insert vectors (using transaction)
+let txn_db = storage.transaction_db()?;
 for (id, vector) in vectors.iter().enumerate() {
     let vec_id = id as u32;
-    index.insert(&storage, vec_id, vector)?;
+    let txn = txn_db.transaction();
+    let cache_update = hnsw::insert_in_txn(&index, &txn, &txn_db, &storage, vec_id, vector)?;
+    txn.commit()?;
+    cache_update.apply(index.nav_cache());
 }
 ```
 
@@ -569,12 +573,16 @@ let index = hnsw::Index::with_storage_type(
 let rabitq = RaBitQ::new(512, 1, 42);  // 1-bit quantization
 let binary_cache = BinaryCodeCache::new();
 
-// 5. Insert vectors and build binary cache
+// 5. Insert vectors and build binary cache (using transaction)
+let txn_db = storage.transaction_db()?;
 for (i, vector) in base_vectors.iter().enumerate() {
     let vec_id = i as u32;
 
-    // Insert into HNSW
-    index.insert(&storage, vec_id, vector)?;
+    // Insert into HNSW (transactional)
+    let txn = txn_db.transaction();
+    let cache_update = hnsw::insert_in_txn(&index, &txn, &txn_db, &storage, vec_id, vector)?;
+    txn.commit()?;
+    cache_update.apply(index.nav_cache());
 
     // Encode and cache binary code
     let code = rabitq.encode(vector);

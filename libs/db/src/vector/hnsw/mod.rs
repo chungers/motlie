@@ -151,28 +151,6 @@ impl Index {
     }
 
     // =========================================================================
-    // Insert (delegated to insert.rs)
-    // =========================================================================
-
-    /// Insert a vector into the HNSW index.
-    ///
-    /// # Arguments
-    /// * `storage` - RocksDB storage handle
-    /// * `vec_id` - Internal vector ID (already allocated)
-    /// * `vector` - The vector data (already stored in Vectors CF)
-    ///
-    /// # Algorithm
-    /// 1. Assign random layer using HNSW distribution
-    /// 2. Get or initialize navigation info
-    /// 3. If graph is empty, just set as entry point
-    /// 4. Otherwise: greedy descent from entry point to target layer
-    /// 5. At each layer from target down to 0: find and connect neighbors
-    /// 6. Update entry point if this node has higher layer
-    pub fn insert(&self, storage: &Storage, vec_id: VecId, vector: &[f32]) -> Result<()> {
-        insert::insert(self, storage, vec_id, vector)
-    }
-
-    // =========================================================================
     // Search (delegated to search.rs)
     // =========================================================================
 
@@ -422,10 +400,13 @@ mod tests {
         let nav_cache = Arc::new(NavigationCache::new());
         let index = Index::new(embedding, distance, config.clone(), nav_cache);
 
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         for (i, vector) in vectors.iter().enumerate() {
-            index
-                .insert(storage, i as VecId, vector)
+            let txn = txn_db.transaction();
+            let cache_update = insert_in_txn(&index, &txn, &txn_db, storage, i as VecId, vector)
                 .expect("Insert failed");
+            txn.commit().expect("Commit failed");
+            cache_update.apply(index.nav_cache());
         }
 
         index
