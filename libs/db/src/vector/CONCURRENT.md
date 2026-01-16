@@ -131,6 +131,97 @@ Implemented:
 
 ---
 
+## Multi-Tenancy Verification
+
+**Status:** ✅ Verified (January 16, 2026)
+
+Multiple embedding indexes coexist safely in:
+- **Same RocksDB database** (same directory path)
+- **Same `Storage` instance** (single `Arc<Storage>`)
+- **Same MPSC mutation/query interfaces** (single writer, single reader)
+
+### Architecture Review
+
+All components are correctly scoped by `EmbeddingCode`:
+
+| Component | Key Structure | Multi-Tenant? |
+|-----------|---------------|---------------|
+| **Schema (all CFs)** | `(EmbeddingCode, ...)` prefix | ✅ |
+| **NavigationCache** | `HashMap<EmbeddingCode, NavInfo>` + `(EmbeddingCode, VecId, Layer)` | ✅ |
+| **BinaryCodeCache** | `HashMap<(EmbeddingCode, VecId), Entry>` | ✅ |
+| **HNSW Index** | Each Index stores `embedding: EmbeddingCode` | ✅ |
+| **RaBitQ Encoders** | `DashMap<EmbeddingCode, Arc<RaBitQ>>` | ✅ |
+| **IdAllocators** | `DashMap<EmbeddingCode, IdAllocator>` | ✅ |
+
+### Schema Key Prefixing
+
+All column families use `EmbeddingCode` (8-byte big-endian) as the first key component:
+
+```
+Vectors CF:     (embedding_code, vec_id)           → vector data
+Edges CF:       (embedding_code, vec_id, layer)    → HNSW neighbors
+BinaryCodes CF: (embedding_code, vec_id)           → RaBitQ codes
+VecMeta CF:     (embedding_code, vec_id)           → layer assignment
+GraphMeta CF:   (embedding_code, field)            → entry points, max_layer
+IdForward CF:   (embedding_code, ulid)             → ULID → VecId
+IdReverse CF:   (embedding_code, vec_id)           → VecId → ULID
+IdAlloc CF:     (embedding_code, field)            → next_id, free bitmap
+```
+
+Prefix extractors ensure efficient scans within each embedding's keyspace.
+
+### Processor State Isolation
+
+```rust
+pub struct Processor {
+    storage: Arc<Storage>,                              // Shared
+    registry: Arc<EmbeddingRegistry>,                   // Shared
+    id_allocators: DashMap<EmbeddingCode, IdAllocator>, // Per-embedding
+    rabitq_encoders: DashMap<EmbeddingCode, Arc<RaBitQ>>, // Per-embedding
+    hnsw_indices: DashMap<EmbeddingCode, hnsw::Index>,  // Per-embedding
+    nav_cache: Arc<NavigationCache>,                    // Shared (embedding-keyed)
+    code_cache: Arc<BinaryCodeCache>,                   // Shared (embedding-keyed)
+}
+```
+
+### Integration Test Certification
+
+**File:** `libs/db/tests/test_vector_multi_embedding.rs`
+
+**Test:** `test_multi_embedding_non_interference`
+
+Validates multi-tenancy with:
+- **Single `TempDir`** → one RocksDB directory
+- **Single `Storage`** → `Storage::readwrite(temp_dir.path())`
+- **Single `Arc<Storage>`** → shared across all embeddings
+- **Single writer channel** → all inserts through same MPSC
+- **Single reader channel** → all queries through same MPSC
+- **Three embeddings:**
+  - LAION (512D, Cosine) - RaBitQ path
+  - SIFT (128D, L2) - Exact path
+  - BERT (768D, Cosine) - RaBitQ path
+
+**Assertions:**
+- [x] Each embedding gets unique code
+- [x] LAION searches return ONLY LAION vectors
+- [x] SIFT searches return ONLY SIFT vectors
+- [x] BERT searches return ONLY BERT vectors
+- [x] No cross-contamination between embeddings
+- [x] Different dimensions coexist (128D, 512D, 768D)
+- [x] Different distance metrics coexist (Cosine, L2)
+
+### Additional Multi-Embedding Tests
+
+| Test | Description | Status |
+|------|-------------|--------|
+| `test_cosine_2bit_rabitq` | Single embedding, exact + RaBitQ paths | ✅ |
+| `test_cosine_4bit_rabitq` | Single embedding, exact + RaBitQ paths | ✅ |
+| `test_multi_embedding_non_interference` | 3 embeddings, isolation verified | ✅ |
+| `test_embedding_registration_idempotent` | Re-register returns same code | ✅ |
+| `test_exact_vs_rabitq_search_paths` | Both search paths work | ✅ |
+
+---
+
 ## Progress Log
 
 ### January 16, 2026
@@ -141,6 +232,8 @@ Implemented:
 - [x] Task 5.9: Implemented stress tests in `test_vector_concurrent.rs`
 - [x] All unit tests passing
 - [x] Exported types via `benchmark/mod.rs`
+- [x] Multi-tenancy architecture review completed
+- [x] Multi-embedding integration tests added (`test_vector_multi_embedding.rs`)
 
 ---
 
@@ -149,6 +242,7 @@ Implemented:
 | File | Purpose | Status |
 |------|---------|--------|
 | `libs/db/tests/test_vector_concurrent.rs` | Stress tests (5.9) | ✅ |
+| `libs/db/tests/test_vector_multi_embedding.rs` | Multi-tenancy certification | ✅ |
 | `libs/db/src/vector/benchmark/concurrent.rs` | Metrics + Benchmarks (5.10, 5.11) | ✅ |
 | `libs/db/src/vector/benchmark/mod.rs` | Export new types | ✅ |
 
