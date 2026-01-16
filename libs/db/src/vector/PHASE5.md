@@ -2236,6 +2236,13 @@ No issues found in this update.
 
 ---
 
+**New Feedback (public API surface: delete):**
+
+- Keep `Processor::delete_vector` **internal-only** (pub(crate)) for now, and steer public users to `DeleteVector::run(&writer)` for deletes.  
+  - Rationale: consistent mutation pipeline, uniform async semantics, and aligned with graph’s mutation-first public API.
+
+---
+
 ## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
 
 **Status:** ✅ Complete
