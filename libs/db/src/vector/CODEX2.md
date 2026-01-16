@@ -10,6 +10,7 @@ Most production write paths already use `txn.put_cf` / `txn.merge_cf` via `ops::
 
 - **Batch insert edge visibility** is now handled via `BatchEdgeCache` (`libs/db/src/vector/hnsw/graph.rs`, `libs/db/src/vector/hnsw/insert.rs`, `libs/db/src/vector/ops/insert.rs`).
 - This addresses pending-merge visibility during batch inserts, but **does not change** the transactional migration requirements below.
+- **Production non-transactional writes reduced:** `EmbeddingRegistry::register()` now uses a transaction, `connect_neighbors()` was removed, and `Processor::persist_allocators()` was deleted. `IdAllocator::persist()` remains for tests only.
 
 ## Non-Transactional Writes That Must Be Eliminated
 
@@ -17,9 +18,9 @@ Most production write paths already use `txn.put_cf` / `txn.merge_cf` via `ops::
 
 1) **`EmbeddingRegistry::register()`**
    - **File:** `libs/db/src/vector/registry.rs`
-   - **Write:** `db.put_cf(...)` (non-transactional)
-   - **Impact:** Registration is not atomic with other writes; no shared transaction context.
-   - **Migration:** Route through a transaction-backed path (e.g., `ops::embedding::spec()` or a new `register_in_txn()`), and update callers accordingly.
+   - **Write:** Uses an internal `db.transaction()` + `txn.put_cf(...)` (transactional but isolated).
+   - **Impact:** Still not shareable with an outer transaction; registration cannot be grouped atomically with other writes.
+   - **Migration:** Allow callers to provide a transaction (e.g., `register_in_txn()` or route through `ops::embedding::spec()`), then deprecate the standalone path.
 
 2) **`IdAllocator::persist()`**
    - **File:** `libs/db/src/vector/id.rs`
@@ -29,9 +30,8 @@ Most production write paths already use `txn.put_cf` / `txn.merge_cf` via `ops::
 
 3) **Legacy HNSW Edge Writes**
    - **File:** `libs/db/src/vector/hnsw/graph.rs`
-   - **Write:** `connect_neighbors()` uses `txn_db.merge_cf(...)` (non-transactional)
-   - **Impact:** Leaves a legacy non-transactional API in the core graph module.
-   - **Migration:** Remove or restrict to tests (rename to `connect_neighbors_legacy` and keep `pub(crate)`), so only transactional edge writes are used.
+   - **Status:** `connect_neighbors()` removed; only `connect_neighbors_in_txn()` remains.
+   - **Follow-up:** Keep this file transactional-only; avoid reintroducing non-transactional edge APIs.
 
 ### Test / Benchmark Helpers (still need cleanup for consistency)
 
@@ -107,3 +107,13 @@ Once **all** writes are transactional and non-transactional APIs are removed or 
 ## Notes
 
 Until the non-transactional code paths are removed or isolated, renaming `_in_txn` functions would be misleading because both transactional and non-transactional variants would coexist. The rename should be a follow-on cleanup after all writes are transaction-only.
+
+## Rename Readiness Assessment (Post-01192dc)
+
+**Not ready to drop `_in_txn` yet.** Recent changes made test/bench writes transactional, and removed legacy edge writes, but two API surface issues remain:
+
+1) **Dual insert APIs:** `hnsw::insert()` still exists and creates its own transaction, while `insert_in_txn()` is the externally managed transaction version. Renaming would be ambiguous unless the internal-transaction helper is removed or renamed (e.g., `insert_with_auto_txn()`).
+
+2) **Embedding registration not externally transactional:** `EmbeddingRegistry::register()` now uses an internal transaction but cannot participate in a caller transaction. To cleanly drop `_in_txn`, expose a `register_in_txn()` (or route through `ops::embedding::spec()`), then deprecate the standalone path.
+
+**Remaining safe exception:** `IdAllocator::persist()` is `pub(crate)` and test-only; it should stay isolated, but does not block renaming if all public APIs are transaction-only.
