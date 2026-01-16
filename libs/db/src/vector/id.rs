@@ -212,15 +212,32 @@ impl IdAllocator {
         Ok(())
     }
 
-    /// Persist allocator state to RocksDB (non-transactional, for tests only).
+    /// Persist allocator state to RocksDB (standalone transaction, for tests only).
     ///
-    /// **WARNING:** This uses non-transactional writes (`db.put_cf()`).
     /// For production code, use `allocate_in_txn()` and `free_in_txn()`
     /// which persist state atomically within a transaction.
     ///
     /// This method is kept for crash recovery tests that need to simulate
     /// persistence outside of normal transaction flows.
     pub(crate) fn persist(&self, db: &TransactionDB, embedding: EmbeddingCode) -> Result<()> {
+        let txn = db.transaction();
+        self.persist_in_txn(&txn, db, embedding)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Persist allocator state within an existing transaction.
+    ///
+    /// # Arguments
+    /// * `txn` - Active transaction to write within
+    /// * `db` - TransactionDB for CF handle lookup
+    /// * `embedding` - Embedding code to persist state for
+    pub(crate) fn persist_in_txn(
+        &self,
+        txn: &rocksdb::Transaction<'_, TransactionDB>,
+        db: &TransactionDB,
+        embedding: EmbeddingCode,
+    ) -> Result<()> {
         let cf = db
             .cf_handle(IdAlloc::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdAlloc::CF_NAME))?;
@@ -228,7 +245,7 @@ impl IdAllocator {
         // Persist next_id
         let next_key = IdAllocCfKey::next_id(embedding);
         let next_val = IdAllocCfValue(IdAllocField::NextId(self.next_id.load(Ordering::SeqCst)));
-        db.put_cf(
+        txn.put_cf(
             &cf,
             IdAlloc::key_to_bytes(&next_key),
             IdAlloc::value_to_bytes(&next_val),
@@ -240,7 +257,7 @@ impl IdAllocator {
         let mut bitmap_bytes = Vec::new();
         free.serialize_into(&mut bitmap_bytes)?;
         let bitmap_val = IdAllocCfValue(IdAllocField::FreeBitmap(bitmap_bytes));
-        db.put_cf(
+        txn.put_cf(
             &cf,
             IdAlloc::key_to_bytes(&bitmap_key),
             IdAlloc::value_to_bytes(&bitmap_val),
