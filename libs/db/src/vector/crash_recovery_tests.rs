@@ -266,20 +266,22 @@ mod tests {
         {
             let storage = create_test_storage(temp_dir.path());
 
-            // First store vectors in Vectors CF
+            // First store vectors in Vectors CF (using transaction)
             let txn_db = storage.transaction_db().expect("Failed to get txn_db");
             let cf = txn_db
                 .cf_handle(Vectors::CF_NAME)
                 .expect("Vectors CF not found");
 
+            let txn = txn_db.transaction();
             for (i, vector) in vectors.iter().enumerate() {
                 let key = Vectors::key_to_bytes(&VectorCfKey(embedding, i as VecId));
                 let value = Vectors::value_to_bytes_typed(
                     vector,
                     crate::vector::schema::VectorElementType::F32,
                 );
-                txn_db.put_cf(&cf, key, value).expect("Failed to store vector");
+                txn.put_cf(&cf, key, value).expect("Failed to store vector");
             }
+            txn.commit().expect("Failed to commit vectors");
 
             // Now build HNSW index
             let nav_cache = Arc::new(NavigationCache::new());
@@ -338,7 +340,7 @@ mod tests {
             let storage = create_test_storage(temp_dir.path());
             let txn_db = storage.transaction_db().expect("Failed to get txn_db");
 
-            // Store a vector
+            // Store a vector (using transaction)
             let cf = txn_db
                 .cf_handle(Vectors::CF_NAME)
                 .expect("Vectors CF not found");
@@ -348,7 +350,9 @@ mod tests {
                 &vector,
                 crate::vector::schema::VectorElementType::F32,
             );
-            txn_db.put_cf(&cf, key, value).expect("Failed to store");
+            let txn = txn_db.transaction();
+            txn.put_cf(&cf, key, value).expect("Failed to store");
+            txn.commit().expect("Failed to commit");
 
             // Build HNSW index
             let nav_cache = Arc::new(NavigationCache::new());
@@ -415,20 +419,22 @@ mod tests {
         {
             let storage = create_test_storage(temp_dir.path());
 
-            // Store vectors
+            // Store vectors (using transaction)
             let txn_db = storage.transaction_db().expect("Failed to get txn_db");
             let cf = txn_db
                 .cf_handle(Vectors::CF_NAME)
                 .expect("Vectors CF not found");
 
+            let txn = txn_db.transaction();
             for (i, vector) in vectors.iter().enumerate() {
                 let key = Vectors::key_to_bytes(&VectorCfKey(embedding, i as VecId));
                 let value = Vectors::value_to_bytes_typed(
                     vector,
                     crate::vector::schema::VectorElementType::F32,
                 );
-                txn_db.put_cf(&cf, key, value).expect("Failed to store");
+                txn.put_cf(&cf, key, value).expect("Failed to store");
             }
+            txn.commit().expect("Failed to commit vectors");
 
             // Build HNSW
             let nav_cache = Arc::new(NavigationCache::new());
@@ -487,7 +493,7 @@ mod tests {
             let storage = create_test_storage(temp_dir.path());
             let txn_db = storage.transaction_db().expect("Failed to get txn_db");
 
-            // First store the vector
+            // First store the vector (using transaction)
             let cf = txn_db
                 .cf_handle(Vectors::CF_NAME)
                 .expect("Vectors CF not found");
@@ -496,7 +502,11 @@ mod tests {
                 &vector,
                 crate::vector::schema::VectorElementType::F32,
             );
-            txn_db.put_cf(&cf, key, value).expect("Failed to store");
+            {
+                let txn = txn_db.transaction();
+                txn.put_cf(&cf, key, value).expect("Failed to store");
+                txn.commit().expect("Failed to commit vector");
+            }
 
             // Now insert into HNSW using transaction API
             let nav_cache = Arc::new(NavigationCache::new());

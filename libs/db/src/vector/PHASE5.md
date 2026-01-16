@@ -2717,10 +2717,12 @@ BatchEdgeCache closes the remaining correctness gap: edges from earlier inserts 
 - ✅ `connect_neighbors()` - Removed (dead code); only `connect_neighbors_in_txn()` remains
 - ✅ `Processor::persist_allocators()` - Removed (dead code)
 
-**Remaining (low priority - test/bench helpers):**
-- Test/bench helpers still write via `txn_db.put_cf()` (`libs/db/src/vector/hnsw/mod.rs` tests, `libs/db/src/vector/benchmark/runner.rs`, `libs/db/src/vector/crash_recovery_tests.rs`).
+**Test/bench helpers also migrated:**
+- ✅ `hnsw/mod.rs` tests - `store_vectors()` now uses transaction
+- ✅ `benchmark/runner.rs` - vector storage now batched in transaction
+- ✅ `crash_recovery_tests.rs` - all vector stores now use transactions
 
-**Next step (deferred):** Once test helpers are migrated, rename `_in_txn` APIs to drop the suffix.
+**All writes are now transactional.** Next step: Rename `_in_txn` APIs to drop the suffix.
 
 ---
 
