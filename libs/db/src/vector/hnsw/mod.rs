@@ -53,9 +53,9 @@ use crate::vector::Storage;
 
 // Re-export for public API
 pub use graph::{
-    connect_neighbors_in_txn, cosine_distance, dot_product_distance, l2_distance, BatchEdgeCache,
+    connect_neighbors, cosine_distance, dot_product_distance, l2_distance, BatchEdgeCache,
 };
-pub use insert::{insert_in_txn, insert_in_txn_for_batch, CacheUpdate};
+pub use insert::{insert, insert_for_batch, CacheUpdate};
 
 // ============================================================================
 // HNSW Index
@@ -403,7 +403,7 @@ mod tests {
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         for (i, vector) in vectors.iter().enumerate() {
             let txn = txn_db.transaction();
-            let cache_update = insert_in_txn(&index, &txn, &txn_db, storage, i as VecId, vector)
+            let cache_update = insert(&index, &txn, &txn_db, storage, i as VecId, vector)
                 .expect("Insert failed");
             txn.commit().expect("Commit failed");
             cache_update.apply(index.nav_cache());

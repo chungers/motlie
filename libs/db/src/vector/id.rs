@@ -73,13 +73,18 @@ impl IdAllocator {
 
     /// Allocate a new u32 ID.
     ///
+    /// Allocate an ID in memory only (no persistence).
+    ///
     /// First tries to reuse a freed ID from the free list.
     /// If no freed IDs are available, allocates a fresh ID.
+    ///
+    /// **Note:** This does not persist to RocksDB. Use `allocate()` for
+    /// transactional allocation with persistence.
     ///
     /// # Returns
     ///
     /// A unique u32 ID within this allocator's scope.
-    pub fn allocate(&self) -> VecId {
+    pub fn allocate_local(&self) -> VecId {
         // First try to reuse a freed ID
         {
             let mut free = self.free_ids.lock().unwrap();
@@ -93,11 +98,14 @@ impl IdAllocator {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Return an ID to the free list for reuse.
+    /// Return an ID to the free list in memory only (no persistence).
     ///
     /// The ID will be available for future allocations.
     /// Does not validate that the ID was previously allocated.
-    pub fn free(&self, id: VecId) {
+    ///
+    /// **Note:** This does not persist to RocksDB. Use `free()` for
+    /// transactional free with persistence.
+    pub fn free_local(&self, id: VecId) {
         self.free_ids.lock().unwrap().insert(id);
     }
 
@@ -126,7 +134,7 @@ impl IdAllocator {
     ///
     /// # Returns
     /// The allocated VecId (persisted atomically with transaction)
-    pub fn allocate_in_txn(
+    pub fn allocate(
         &self,
         txn: &rocksdb::Transaction<'_, TransactionDB>,
         txn_db: &TransactionDB,
@@ -184,14 +192,14 @@ impl IdAllocator {
     /// * `txn_db` - TransactionDB for CF handle lookup
     /// * `embedding` - Embedding space code
     /// * `id` - The VecId to free
-    pub fn free_in_txn(
+    pub fn free(
         &self,
         txn: &rocksdb::Transaction<'_, TransactionDB>,
         txn_db: &TransactionDB,
         embedding: EmbeddingCode,
         id: VecId,
     ) -> Result<()> {
-        self.free(id); // Update in-memory state
+        self.free_local(id); // Update in-memory state
 
         // Persist free bitmap within transaction
         let cf = txn_db
@@ -328,7 +336,7 @@ mod tests {
         let mut ids = Vec::new();
 
         for _ in 0..1000 {
-            ids.push(allocator.allocate());
+            ids.push(allocator.allocate_local());
         }
 
         // All IDs should be unique
@@ -345,19 +353,19 @@ mod tests {
     fn test_id_reuse() {
         let allocator = IdAllocator::new();
 
-        let id1 = allocator.allocate(); // 0
-        let id2 = allocator.allocate(); // 1
-        let _id3 = allocator.allocate(); // 2
+        let id1 = allocator.allocate_local(); // 0
+        let id2 = allocator.allocate_local(); // 1
+        let _id3 = allocator.allocate_local(); // 2
 
         assert_eq!(id1, 0);
         assert_eq!(id2, 1);
 
-        allocator.free(id2); // Free ID 1
+        allocator.free_local(id2); // Free ID 1
 
-        let id4 = allocator.allocate(); // Should reuse 1
+        let id4 = allocator.allocate_local(); // Should reuse 1
         assert_eq!(id4, 1);
 
-        let id5 = allocator.allocate(); // Should be 3 (next fresh)
+        let id5 = allocator.allocate_local(); // Should be 3 (next fresh)
         assert_eq!(id5, 3);
     }
 
@@ -366,23 +374,23 @@ mod tests {
         let allocator = IdAllocator::new();
 
         // Allocate 10 IDs
-        let ids: Vec<_> = (0..10).map(|_| allocator.allocate()).collect();
+        let ids: Vec<_> = (0..10).map(|_| allocator.allocate_local()).collect();
         assert_eq!(allocator.next_id(), 10);
 
         // Free IDs 2, 5, 7
-        allocator.free(ids[2]);
-        allocator.free(ids[5]);
-        allocator.free(ids[7]);
+        allocator.free_local(ids[2]);
+        allocator.free_local(ids[5]);
+        allocator.free_local(ids[7]);
         assert_eq!(allocator.free_count(), 3);
 
         // Next allocations should reuse freed IDs (order depends on bitmap iteration)
-        let reused: HashSet<_> = (0..3).map(|_| allocator.allocate()).collect();
+        let reused: HashSet<_> = (0..3).map(|_| allocator.allocate_local()).collect();
         assert!(reused.contains(&2));
         assert!(reused.contains(&5));
         assert!(reused.contains(&7));
 
         // Now should allocate fresh
-        let fresh = allocator.allocate();
+        let fresh = allocator.allocate_local();
         assert_eq!(fresh, 10);
     }
 
@@ -396,7 +404,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let mut ids = Vec::new();
                 for _ in 0..100 {
-                    ids.push(alloc.allocate());
+                    ids.push(alloc.allocate_local());
                 }
                 ids
             }));
@@ -419,7 +427,7 @@ mod tests {
         for _ in 0..10000 {
             if live_ids.is_empty() || rng.gen_bool(0.7) {
                 // Allocate
-                let id = allocator.allocate();
+                let id = allocator.allocate_local();
                 assert!(
                     !live_ids.contains(&id),
                     "Duplicate ID allocated: {}",
@@ -430,7 +438,7 @@ mod tests {
                 // Free random live ID
                 let id = *live_ids.iter().next().unwrap();
                 live_ids.remove(&id);
-                allocator.free(id);
+                allocator.free_local(id);
             }
         }
     }
@@ -442,11 +450,11 @@ mod tests {
         assert_eq!(allocator.next_id(), 0);
         assert_eq!(allocator.free_count(), 0);
 
-        allocator.allocate();
-        allocator.allocate();
+        allocator.allocate_local();
+        allocator.allocate_local();
         assert_eq!(allocator.next_id(), 2);
 
-        allocator.free(0);
+        allocator.free_local(0);
         assert_eq!(allocator.free_count(), 1);
     }
 
@@ -462,14 +470,14 @@ mod tests {
         assert_eq!(allocator.free_count(), 2);
 
         // Should reuse freed IDs first
-        let id1 = allocator.allocate();
-        let id2 = allocator.allocate();
+        let id1 = allocator.allocate_local();
+        let id2 = allocator.allocate_local();
         assert!(id1 == 5 || id1 == 10);
         assert!(id2 == 5 || id2 == 10);
         assert_ne!(id1, id2);
 
         // Now should allocate fresh
-        let id3 = allocator.allocate();
+        let id3 = allocator.allocate_local();
         assert_eq!(id3, 100);
     }
 }

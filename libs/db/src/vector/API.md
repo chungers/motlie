@@ -239,7 +239,7 @@ let txn_db = storage.transaction_db()?;
 for (id, vector) in vectors.iter().enumerate() {
     let vec_id = id as u32;
     let txn = txn_db.transaction();
-    let cache_update = hnsw::insert_in_txn(&index, &txn, &txn_db, &storage, vec_id, vector)?;
+    let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, vector)?;
     txn.commit()?;
     cache_update.apply(index.nav_cache());
 }
@@ -580,7 +580,7 @@ for (i, vector) in base_vectors.iter().enumerate() {
 
     // Insert into HNSW (transactional)
     let txn = txn_db.transaction();
-    let cache_update = hnsw::insert_in_txn(&index, &txn, &txn_db, &storage, vec_id, vector)?;
+    let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, vector)?;
     txn.commit()?;
     cache_update.apply(index.nav_cache());
 

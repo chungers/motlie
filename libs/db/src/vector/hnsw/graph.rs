@@ -252,7 +252,7 @@ pub fn get_neighbor_count(
 /// * `vec_id` - Vector ID to connect
 /// * `neighbors` - Neighbor (distance, vec_id) pairs
 /// * `layer` - HNSW layer for these edges
-pub fn connect_neighbors_in_txn(
+pub fn connect_neighbors(
     index: &Index,
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,

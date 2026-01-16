@@ -18,7 +18,7 @@ use motlie_db::vector::{
     hnsw, BinaryCodeCache, Distance, NavigationCache, Storage, VecId,
     VectorElementType,
 };
-use motlie_db::vector::hnsw::insert_in_txn;
+use motlie_db::vector::hnsw::insert;
 use motlie_db::rocksdb::ColumnFamily;
 
 /// Generate synthetic LAION-CLIP-like data (512D, Cosine distance, normalized)
@@ -112,7 +112,7 @@ fn build_index_with_navigation(
         // Use transaction for atomic vector storage + HNSW insert
         let txn = txn_db.transaction();
         txn.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
-        let cache_update = insert_in_txn(&index, &txn, &txn_db, storage, vec_id, vector)?;
+        let cache_update = insert(&index, &txn, &txn_db, storage, vec_id, vector)?;
         txn.commit()?;
         cache_update.apply(index.nav_cache());
     }
