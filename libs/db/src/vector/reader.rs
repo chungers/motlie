@@ -498,6 +498,39 @@ pub fn create_search_reader(
     (search_reader, receiver)
 }
 
+/// Create a SearchReader from Storage (auto-creates Processor internally).
+///
+/// This convenience function creates a SearchReader without requiring direct
+/// Processor access, enabling `Processor` to be `pub(crate)`.
+///
+/// # Returns
+///
+/// Tuple of (SearchReader, flume::Receiver<Query>) - spawn consumers with the receiver.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let storage = Arc::new(Storage::readwrite(path));
+/// let (search_reader, receiver) = create_search_reader_with_storage(
+///     ReaderConfig::default(),
+///     storage.clone(),
+/// );
+/// spawn_query_consumers_with_storage_autoreg(receiver, config, storage, 2);
+///
+/// // Use SearchKNN::run() for searches
+/// let results = SearchKNN::new(&embedding, query, 10)
+///     .run(&search_reader, timeout)
+///     .await?;
+/// ```
+pub fn create_search_reader_with_storage(
+    config: ReaderConfig,
+    storage: Arc<super::Storage>,
+) -> (SearchReader, flume::Receiver<Query>) {
+    let registry = storage.cache().clone();
+    let processor = Arc::new(Processor::new(storage, registry));
+    create_search_reader(config, processor)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

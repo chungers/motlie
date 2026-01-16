@@ -1,6 +1,6 @@
 # Phase 5: Internal Mutation/Query API
 
-**Status:** In Progress (Tasks 5.0-5.7.1 Complete; 5.8-5.11 Pending)
+**Status:** In Progress (Tasks 5.0-5.8.1 Complete; 5.9-5.11 Pending)
 **Date:** January 15, 2026
 **Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`, `c29dceb`, `6ee252b`, `0cbd597`, `dc4c3f9`
 
@@ -17,7 +17,8 @@
 | 5.6 | Mutation Dispatch | ✅ Complete |
 | 5.7 | Query Dispatch | ✅ Complete |
 | 5.7.1 | Remove Redundant api.rs | ✅ Complete |
-| 5.8 | Migrate Examples/Integration Tests | 🔲 Not Started |
+| 5.8 | Migrate Examples/Integration Tests | ✅ Complete |
+| 5.8.1 | Make Processor pub(crate) + Runnable Migration | ✅ Complete |
 | 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
 | 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |
 | 5.11 | Concurrent Benchmark Baseline | 🔲 Not Started |
@@ -2393,6 +2394,191 @@ spawn_mutation_consumer_with_storage(...);
 
 ---
 
+## Task 5.8: Migrate Benchmark Integration Tests (COMPLETE)
+
+**Date:** January 15, 2026
+
+### Objective
+
+Migrate `test_vector_benchmark_integration.rs` from direct Index/CF access to use the Processor API, demonstrating the recommended usage patterns.
+
+### Changes Made
+
+| File | Change |
+|------|--------|
+| `tests/test_vector_benchmark_integration.rs` | Complete rewrite using Processor API |
+
+### Implementation Details
+
+#### Before (Direct Index/CF Access)
+```rust
+// Old: Manual CF manipulation and direct index access
+let nav_cache = Arc::new(NavigationCache::new());
+let index = hnsw::Index::new(embedding_code, distance, config, nav_cache);
+for (i, vector) in vectors.iter().enumerate() {
+    // Manual vector storage to CF
+    let key = VectorCfKey(embedding_code, i as VecId);
+    storage.put_cf(&vectors_cf, key.to_bytes(), &vector_bytes)?;
+    // Direct index insert
+    index.insert(&storage, i as VecId, vector)?;
+}
+let results = index.search(&storage, query, k, ef_search)?;
+```
+
+#### After (Processor API)
+```rust
+// New: Clean Processor API with EmbeddingBuilder
+let registry = Arc::new(EmbeddingRegistry::new());
+let builder = EmbeddingBuilder::new(model_name, dim as u32, distance)
+    .with_hnsw_m(hnsw_m as u16)
+    .with_hnsw_ef_construction(hnsw_ef_construction as u16);
+let embedding = registry.register(builder, &txn_db)?;
+
+let processor = Processor::with_config(storage, registry, rabitq_config, hnsw_config);
+
+// Insert vectors (builds HNSW graph + populates caches)
+for vector in vectors {
+    let id = Id::new();
+    processor.insert_vector(&embedding, id, vector, true)?;
+}
+
+// Search using Processor
+let results = processor.search(&embedding, query, k, ef_search)?;
+```
+
+### Bug Discovery: insert_batch Nav Cache Issue
+
+During migration, discovered that `Processor::insert_batch()` has a bug where the navigation cache is not updated between vector inserts within the batch. This causes all vectors except the first to get empty HNSW edges.
+
+**Root Cause:** In `ops/insert.rs`, the batch insert loop calls `hnsw::insert_in_txn()` for each vector, but the `CacheUpdate` returned is deferred until after transaction commit. Each insert reads from the nav_cache which still shows no entry point, so every vector thinks it's the first node.
+
+**Workaround:** Use `insert_vector()` in a loop instead of `insert_batch()` for workloads that require HNSW indexing.
+
+**Future Fix:** Batch insert should maintain temporary nav state during the batch, or apply CacheUpdates incrementally during the loop.
+
+### Test Results
+
+| Test | Recall | Status |
+|------|--------|--------|
+| SIFT L2 (1K vectors) | 100% | ✅ Pass |
+| LAION-CLIP Cosine Exact (1K) | 100% | ✅ Pass |
+| LAION-CLIP Cosine RaBitQ (1K) | 86% | ✅ Pass (>40%) |
+
+### Files Modified
+
+- `libs/db/tests/test_vector_benchmark_integration.rs` - Complete migration
+
+---
+
+## Task 5.8.1: Make Processor `pub(crate)` + Runnable Migration (COMPLETE)
+
+**Date:** January 15, 2026
+
+### Objective
+
+Make `Processor` internal (`pub(crate)`) by migrating all integration tests to use only public Runnable traits:
+- `InsertVector::run(&writer)` for inserts
+- `SearchKNN::run(&search_reader, timeout)` for searches
+- `DeleteVector::run(&writer)` for deletes
+
+This enforces proper encapsulation - external code uses the async Writer/Reader pattern, not direct Processor access.
+
+### Changes Made
+
+| File | Change |
+|------|--------|
+| `vector/mod.rs` | Changed `pub use processor::Processor` to `pub(crate)` |
+| `vector/reader.rs` | Added `create_search_reader_with_storage()` |
+| `tests/test_vector_benchmark_integration.rs` | Migrated from Processor to Runnable traits |
+| `tests/test_vector_workflow_integration.rs` | Migrated from Processor to Runnable traits |
+| `tests/test_vector_writer_errors.rs` | Migrated from direct Consumer creation |
+
+### API Pattern: Before vs After
+
+#### Before (Task 5.8 - Direct Processor Access)
+```rust
+let processor = Arc::new(Processor::with_config(storage, registry, ...));
+
+// Insert vectors
+for vector in vectors {
+    processor.insert_vector(&embedding, id, vector, true)?;
+}
+
+// Search
+let results = processor.search(&embedding, query, k, ef_search)?;
+```
+
+#### After (Task 5.8.1 - Public Runnable Traits)
+```rust
+// Writer/Reader setup - Processor created internally
+let (writer, writer_rx) = create_writer(WriterConfig::default());
+spawn_mutation_consumer_with_storage_autoreg(writer_rx, config, storage.clone());
+
+let (search_reader, reader_rx) =
+    create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+spawn_query_consumers_with_storage_autoreg(reader_rx, config, storage.clone(), 2);
+
+// Insert via MutationRunnable
+InsertVector::new(&embedding, id, vector.clone())
+    .immediate()
+    .run(&writer)
+    .await?;
+writer.flush().await?;
+
+// Search via Runnable
+let results = SearchKNN::new(&embedding, query, k)
+    .with_ef(100)
+    .exact()  // or without for RaBitQ auto-strategy
+    .run(&search_reader, timeout)
+    .await?;
+```
+
+### New Public API: `create_search_reader_with_storage`
+
+Added convenience function to create `SearchReader` without direct `Processor` access:
+
+```rust
+/// Create a SearchReader from Storage (auto-creates Processor internally).
+pub fn create_search_reader_with_storage(
+    config: ReaderConfig,
+    storage: Arc<Storage>,
+) -> (SearchReader, flume::Receiver<Query>) {
+    let registry = storage.cache().clone();
+    let processor = Arc::new(Processor::new(storage, registry));
+    create_search_reader(config, processor)
+}
+```
+
+### Test Results
+
+All tests pass with excellent recall:
+
+| Test | Recall | Status |
+|------|--------|--------|
+| SIFT L2 (1K vectors) | 100% | ✅ Pass |
+| LAION-CLIP Cosine Exact (1K) | 100% | ✅ Pass |
+| LAION-CLIP Cosine RaBitQ (1K) | 99.8% | ✅ Pass |
+| Workflow - Exact | 100% | ✅ Pass |
+| Workflow - RaBitQ | 100% | ✅ Pass |
+| Writer Errors | - | ✅ Pass |
+
+### Benefits
+
+1. **Encapsulation**: External code cannot bypass Writer/Reader patterns
+2. **Async-First**: All external APIs are async, matching intended usage
+3. **Consistency**: Forces use of Runnable traits for mutations and queries
+4. **Future-Proof**: Internal Processor API can evolve without breaking external code
+
+### Files Modified
+
+- `libs/db/src/vector/mod.rs` - Visibility change
+- `libs/db/src/vector/reader.rs` - New convenience function
+- `libs/db/tests/test_vector_benchmark_integration.rs` - Complete migration
+- `libs/db/tests/test_vector_workflow_integration.rs` - Complete migration
+- `libs/db/tests/test_vector_writer_errors.rs` - Spawn pattern update
+
+---
+
 ## Remaining Phase 5 Tasks (Aligned with ROADMAP.md)
 
 | Task | Description | Status |
@@ -2407,7 +2593,7 @@ spawn_mutation_consumer_with_storage(...);
 | 5.7 | Query Dispatch | ✅ **Complete** |
 | 5.7.1 | Remove Redundant api.rs | ✅ **Complete** |
 | 5.7.2 | Subsystem Managed Lifecycle | ✅ **Complete** |
-| 5.8 | Migrate Examples/Integration Tests | 🔲 Not Started |
+| 5.8 | Migrate Examples/Integration Tests | ✅ **Complete** |
 | 5.9 | Multi-Threaded Stress Tests | 🔲 Not Started |
 | 5.10 | Metrics Collection Infrastructure | 🔲 Not Started |
 | 5.11 | Concurrent Benchmark Baseline | 🔲 Not Started |

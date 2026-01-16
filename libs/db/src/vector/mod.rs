@@ -101,7 +101,8 @@ pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
 pub use hnsw::ConfigWarning;
 pub use id::IdAllocator;
-pub use processor::{Processor, SearchResult};
+pub use processor::SearchResult;
+pub(crate) use processor::Processor;
 pub use quantization::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
@@ -134,7 +135,7 @@ pub use query::{
     QueryExecutor, QueryProcessor, QueryWithTimeout, ResolveIds, SearchKNN,
 };
 pub use reader::{
-    create_reader, create_search_reader,
+    create_reader, create_search_reader, create_search_reader_with_storage,
     spawn_consumer as spawn_query_consumer,
     spawn_consumer_with_processor as spawn_query_consumer_with_processor,
     spawn_consumers as spawn_query_consumers,
