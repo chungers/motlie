@@ -60,7 +60,7 @@ Added transaction-aware allocation methods to `id.rs`:
 ```rust
 impl IdAllocator {
     /// Allocate ID and persist state within transaction
-    pub fn allocate_in_txn(
+    pub fn allocate(
         &self,
         txn: &rocksdb::Transaction<'_, TransactionDB>,
         txn_db: &TransactionDB,
@@ -68,13 +68,19 @@ impl IdAllocator {
     ) -> Result<VecId>;
 
     /// Free ID and persist bitmap within transaction
-    pub fn free_in_txn(
+    pub fn free(
         &self,
         txn: &rocksdb::Transaction<'_, TransactionDB>,
         txn_db: &TransactionDB,
         embedding: EmbeddingCode,
         id: VecId,
     ) -> Result<()>;
+
+    /// In-memory only allocation (for tests)
+    pub fn allocate_local(&self) -> VecId;
+
+    /// In-memory only free (for tests)
+    pub fn free_local(&self, id: VecId);
 }
 ```
 
@@ -97,8 +103,8 @@ impl CacheUpdate {
     pub fn apply(self, nav_cache: &NavigationCache);
 }
 
-/// Transaction-aware insert (recommended for production)
-pub fn insert_in_txn(
+/// Transaction-aware insert (the standard API)
+pub fn insert(
     index: &Index,
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
@@ -110,10 +116,10 @@ pub fn insert_in_txn(
 
 #### 5.0.3: Graph Edge Connections
 
-Added `connect_neighbors_in_txn()` to `hnsw/graph.rs`:
+Added `connect_neighbors()` to `hnsw/graph.rs`:
 
 ```rust
-pub fn connect_neighbors_in_txn(
+pub fn connect_neighbors(
     index: &Index,
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
@@ -182,7 +188,7 @@ Added comprehensive tests in `crash_recovery_tests.rs`:
 | `test_hnsw_navigation_cold_cache_recovery` | Verify search works with cold cache |
 | `test_hnsw_entry_point_persists` | Verify entry point persistence |
 | `test_full_crash_recovery_scenario` | End-to-end crash recovery |
-| `test_transaction_insert_with_recovery` | Verify insert_in_txn with recovery |
+| `test_transaction_insert_with_recovery` | Verify insert with recovery |
 
 ---
 
@@ -190,9 +196,9 @@ Added comprehensive tests in `crash_recovery_tests.rs`:
 
 | File | Changes |
 |------|---------|
-| `id.rs` | Added `allocate_in_txn()`, `free_in_txn()` |
-| `hnsw/insert.rs` | Added `CacheUpdate`, `insert_in_txn()`, transaction helpers |
-| `hnsw/graph.rs` | Added `connect_neighbors_in_txn()` |
+| `id.rs` | Added `allocate()`, `free()` (transactional); `allocate_local()`, `free_local()` (in-memory) |
+| `hnsw/insert.rs` | Added `CacheUpdate`, `insert()`, transaction helpers |
+| `hnsw/graph.rs` | Added `connect_neighbors()` |
 | `hnsw/mod.rs` | Export new APIs, `Index` derives `Clone` |
 | `processor.rs` | Added `get_or_create_index()`, `nav_cache()`, `hnsw_config()`, `index_count()` |
 | `writer.rs` | Collect and apply `CacheUpdate`s after commit |
@@ -288,7 +294,7 @@ Two concerns raised by CODEX during Phase 5 planning:
 **Concern:** Avoid caching uncommitted graph state.
 
 **Solution:** `CacheUpdate` pattern:
-- `insert_in_txn()` returns `CacheUpdate` instead of updating cache directly
+- `insert()` returns `CacheUpdate` instead of updating cache directly
 - Cache updates collected during mutation processing
 - Applied only after `txn.commit()` succeeds
 - On transaction failure, cache remains unchanged
@@ -314,12 +320,12 @@ cargo test -p motlie-db --lib
 **Assessment:** Overall direction is sound: HNSW writes are transaction-scoped, cache updates are deferred until commit, and crash recovery tests are comprehensive. Two correctness gaps remain that should be addressed before declaring Task 5.0 fully complete:
 
 1) **IdAllocator transactional persistence not wired into the write path.**
-   - The code introduces `allocate_in_txn()` / `free_in_txn()`, but `writer.rs` still calls `allocator.allocate()` and `allocator.free()` outside the transaction.
+   - The code introduces transactional `allocate()` / `free()`, but `writer.rs` still calls the in-memory-only versions.
    - This means IdAlloc CF may lag behind committed inserts/deletes, and a crash could re-use IDs that were already committed (collision risk).
-   - **Action:** Use `allocate_in_txn()` and `free_in_txn()` inside `execute_single()` so allocator state is persisted in the same transaction as vector writes.
+   - **Action:** Use `allocate()` and `free()` (transactional) inside `execute_single()` so allocator state is persisted in the same transaction as vector writes.
 
 2) **Layer count update behavior changed for the empty-graph case.**
-   - `insert_in_txn()` returns a `CacheUpdate` that increments `layer_counts[node_layer]`.
+   - `insert()` returns a `CacheUpdate` that increments `layer_counts[node_layer]`.
    - In the prior empty-graph path, the cache incremented layer 0 unconditionally, ensuring `layer_counts[0]` equals total nodes even when `node_layer > 0`.
    - If `node_layer` is ever > 0 on the first insert, `layer_counts[0]` may remain 0 (affecting `total_nodes()` and diagnostics).
    - **Action:** Consider incrementing layer 0 for the first node (or updating `CacheUpdate::apply` logic for the empty-graph path).
@@ -333,12 +339,12 @@ Both issues have been fixed:
 1. **IdAllocator transactional persistence - FIXED**
    ```rust
    // BEFORE (writer.rs)
-   let vec_id = allocator.allocate();
-   allocator.free(vec_id);
+   let vec_id = allocator.allocate_local();
+   allocator.free_local(vec_id);
 
    // AFTER (writer.rs)
-   let vec_id = allocator.allocate_in_txn(txn, txn_db, op.embedding)?;
-   allocator.free_in_txn(txn, txn_db, op.embedding, vec_id)?;
+   let vec_id = allocator.allocate(txn, txn_db, op.embedding)?;
+   allocator.free(txn, txn_db, op.embedding, vec_id)?;
    ```
 
 2. **Layer counts for all nodes - FIXED**
@@ -359,7 +365,7 @@ All 495 tests pass. Task 5.0 is now fully complete.
 
 ## CODEX Verification (Post-update)
 
-- ✅ `writer.rs` now uses `allocate_in_txn()` and `free_in_txn()` so IdAlloc state is transactionally persisted alongside vector writes.
+- ✅ `writer.rs` now uses transactional `allocate()` and `free()` so IdAlloc state is transactionally persisted alongside vector writes.
 - ✅ `CacheUpdate::apply` now increments layer counts for all layers `0..=node_layer`, preserving `layer_counts[0]`/`total_nodes()` correctness even for the first node.
 - ✅ Changes align with the CODEX concerns raised in the previous review; Task 5.0 looks complete from a correctness standpoint.
 
@@ -419,7 +425,7 @@ impl Processor {
 │                                                             │
 │  3. txn = txn_db.transaction()                              │
 │                                                             │
-│  4. vec_id = allocator.allocate_in_txn()                   │
+│  4. vec_id = allocator.allocate()                          │
 │                                                             │
 │  5. IdForward: txn.put_cf(id → vec_id)                     │
 │  6. IdReverse: txn.put_cf(vec_id → id)                     │
@@ -429,7 +435,7 @@ impl Processor {
 │     └── txn.put_cf(vec_id → binary_code)                   │
 │                                                             │
 │  9. HNSW (if build_index && hnsw_config.enabled):          │
-│     └── insert_in_txn() → CacheUpdate                      │
+│     └── insert() → CacheUpdate                             │
 │                                                             │
 │  10. txn.commit() ─────────────────── ATOMIC BOUNDARY ───  │
 │                                                             │
@@ -466,9 +472,9 @@ impl Processor {
 Overall, the implementation is solid: validation is up-front, all writes are within a single transaction, and cache updates are deferred. Two correctness gaps remain to address before relying on this API in production:
 
 1) **Transactional IdAllocator persistence is incomplete for reused IDs.**
-   - `allocate_in_txn()` persists `next_id` but does not persist the updated free bitmap after popping an ID from `free_ids`.
-   - Crash scenario: if a reused ID is allocated and the process dies before any future `free_in_txn()` write, `IdAlloc` recovery will still include that ID in the free bitmap, allowing duplicate allocation.
-   - **Suggested fix:** persist the free bitmap inside `allocate_in_txn()` whenever allocation consumes a freed ID (or persist the bitmap unconditionally).
+   - `allocate()` persists `next_id` but does not persist the updated free bitmap after popping an ID from `free_ids`.
+   - Crash scenario: if a reused ID is allocated and the process dies before any future `free()` write, `IdAlloc` recovery will still include that ID in the free bitmap, allowing duplicate allocation.
+   - **Suggested fix:** persist the free bitmap inside `allocate()` whenever allocation consumes a freed ID (or persist the bitmap unconditionally).
 
 2) **Duplicate external IDs are not checked.**
    - `insert_vector()` writes IdForward/IdReverse without checking if the external `Id` already exists.
@@ -483,7 +489,7 @@ Both issues have been fixed:
 
 1. **IdAllocator free bitmap persistence - FIXED**
 
-   Refactored `allocate_in_txn()` to handle allocation and persistence atomically:
+   Refactored `allocate()` to handle allocation and persistence atomically:
    ```rust
    // BEFORE: Only persisted next_id
    let id = self.allocate();  // May remove from bitmap
@@ -528,7 +534,7 @@ All 499 tests pass. Task 5.1 is now complete from a correctness perspective.
 
 ## CODEX Verification (Post-fix)
 
-- ✅ IdAllocator reuse now persists the free bitmap inside `allocate_in_txn()`, addressing crash-reuse duplication risk.
+- ✅ IdAllocator reuse now persists the free bitmap inside `allocate()`, addressing crash-reuse duplication risk.
 - ✅ `insert_vector()` rejects duplicate external IDs and includes a regression test.
 - ⚠️ **Remaining improvement:** the duplicate-ID check uses `txn_db.get_cf()` outside the transaction. This can race under concurrent inserts of the same external ID. Prefer `txn.get_cf()` (or `get_for_update`) so the read participates in the same transaction/locking semantics as the write to `IdForward`.
 
@@ -597,7 +603,7 @@ impl Processor {
 │  4. txn.delete_cf(IdReverse, vec_id)                       │
 │  5. txn.delete_cf(Vectors, vec_id)                         │
 │  6. txn.delete_cf(BinaryCodes, vec_id) ── if RaBitQ ──    │
-│  7. allocator.free_in_txn(vec_id)                          │
+│  7. allocator.free(vec_id)                                 │
 │                                                             │
 │  8. txn.commit() ─────────────────── ATOMIC BOUNDARY ───   │
 │                                                             │
@@ -767,14 +773,14 @@ impl Processor {
 │  6. Validate/store spec hash (once per batch)              │
 │                                                             │
 │  7. For each vector:                                        │
-│     ├── vec_id = allocator.allocate_in_txn()              │
+│     ├── vec_id = allocator.allocate()                     │
 │     ├── IdForward: txn.put_cf(id → vec_id)                │
 │     ├── IdReverse: txn.put_cf(vec_id → id)                │
 │     ├── Vectors: txn.put_cf(vec_id → vector_bytes)        │
 │     └── BinaryCodes: txn.put_cf() (if RaBitQ)             │
 │                                                             │
 │  8. Build HNSW index (if build_index):                     │
-│     └── For each vec_id: insert_in_txn() → CacheUpdate    │
+│     └── For each vec_id: insert() → CacheUpdate           │
 │                                                             │
 │  9. txn.commit() ─────────────────── ATOMIC BOUNDARY ───   │
 │                                                             │
@@ -1909,8 +1915,8 @@ Consider refactoring mutation execution to call shared internal helpers that inc
 
 The shared ops helpers now centralize validation and soft-delete behavior (good), but two issues remain:
 
-1) **Registry update uses wrong storage_type (correctness).**  
-   `add_embedding_spec_in_txn()` registers embeddings with `VectorElementType::default()` instead of `spec.storage_type`. This can cause **F16 embeddings to be treated as F32** by the registry, leading to incorrect serialization and search behavior.  
+1) **Registry update uses wrong storage_type (correctness).**
+   `add_embedding_spec()` registers embeddings with `VectorElementType::default()` instead of `spec.storage_type`. This can cause **F16 embeddings to be treated as F32** by the registry, leading to incorrect serialization and search behavior.
    - Fix: pass `spec.storage_type` into `register_from_db`.
 
 2) **BinaryCodeCache still not updated in mutation path (performance).**  
@@ -1975,7 +1981,7 @@ Even as `pub(crate)`, these variants are still no-ops and can be accidentally us
 
 **Update (validation unified):**
 
-- **Resolved:** `add_embedding_spec_in_txn()` now validates via `EmbeddingBuilder::validate()` for a single source of truth.
+- **Resolved:** `add_embedding_spec()` now validates via `EmbeddingBuilder::validate()` for a single source of truth.
 
 ---
 
@@ -1983,7 +1989,7 @@ Even as `pub(crate)`, these variants are still no-ops and can be accidentally us
 
 - **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
 - **Internal helpers can stay txn-aware** for composition (batching, mutation dispatch). Keep them `pub(crate)` only.
-- **Naming cleanup:** remove `_in_txn` suffixes by scoping helpers under a module like `ops::insert_vector`, `ops::delete_vector`, `ops::insert_batch`.
+- **Naming cleanup:** ✅ COMPLETED - `_in_txn` suffixes removed; transactional APIs are now the default (e.g., `insert()`, `allocate()`, `connect_neighbors()`).
 - This avoids exposing “non-transactional” APIs externally while still enabling internal reuse in mutation/consumer paths.
 
 ---
@@ -2452,7 +2458,7 @@ let results = processor.search(&embedding, query, k, ef_search)?;
 
 During migration, discovered that `Processor::insert_batch()` has a bug where the navigation cache is not updated between vector inserts within the batch. This causes all vectors except the first to get empty HNSW edges.
 
-**Root Cause:** In `ops/insert.rs`, the batch insert loop calls `hnsw::insert_in_txn()` for each vector, but the `CacheUpdate` returned is deferred until after transaction commit. Each insert reads from the nav_cache which still shows no entry point, so every vector thinks it's the first node.
+**Root Cause:** In `ops/insert.rs`, the batch insert loop calls `hnsw::insert()` for each vector, but the `CacheUpdate` returned is deferred until after transaction commit. Each insert reads from the nav_cache which still shows no entry point, so every vector thinks it's the first node.
 
 **Workaround:** Use `insert_vector()` in a loop instead of `insert_batch()` for workloads that require HNSW indexing.
 
@@ -2477,7 +2483,7 @@ Migration is correctly scoped to the public Processor path (registry + insert + 
 ### Follow-up Task (5.8.x)
 
 **5.8.x: Fix insert_batch() HNSW nav-cache updates**
-- **Problem:** In `ops::insert::batch`, cache updates from `hnsw::insert_in_txn()` are only applied after the transaction commits. During the batch, the `nav_cache` stays empty, so every insert thinks it’s the first node and builds no edges.
+- **Problem:** In `ops::insert::batch`, cache updates from `hnsw::insert()` are only applied after the transaction commits. During the batch, the `nav_cache` stays empty, so every insert thinks it's the first node and builds no edges.
 - **Impact:** All vectors except the first get empty HNSW edges when `build_index=true`, degrading recall.
 - **Fix options:** Apply cache updates incrementally inside the batch loop, or maintain a temporary in-memory nav state for the batch and merge it post-commit.
 - **Workaround:** Use `insert_vector()` in a loop for now when HNSW indexing is required.
@@ -2609,8 +2615,8 @@ CODEX review identified a bug in `insert_batch()` when building HNSW index:
 // BEFORE: All nav-cache updates applied after the loop
 let mut nav_cache_updates = Vec::new();
 for (i, vec_id) in vec_ids.iter().enumerate() {
-    let update = hnsw::insert_in_txn(...)?;  // Can't read uncommitted vectors!
-    nav_cache_updates.push(update);           // Entry point not visible to next insert
+    let update = hnsw::insert(...)?;  // Can't read uncommitted vectors!
+    nav_cache_updates.push(update);    // Entry point not visible to next insert
 }
 // Updates applied here - too late for batch neighbors to find entry point
 ```
@@ -2619,22 +2625,23 @@ for (i, vec_id) in vec_ids.iter().enumerate() {
 
 Two-part fix:
 
-1. **Transaction-aware HNSW insert functions** in `hnsw/graph.rs`:
+1. **Transaction-aware HNSW graph functions** in `hnsw/graph.rs`:
    - `get_vector_in_txn()` - reads from uncommitted transaction
    - `distance_in_txn()` - computes distance using transaction reads
-   - `greedy_search_layer_in_txn()` - greedy descent with transaction visibility
-   - `search_layer_in_txn()` - layer search with transaction visibility
+   - `greedy_search_layer_with_batch_cache()` - greedy descent with batch cache visibility
+   - `search_layer_with_batch_cache()` - layer search with batch cache visibility
 
 2. **Batch-specific insert function** in `hnsw/insert.rs`:
-   - `insert_in_txn_for_batch()` - uses transaction-aware search functions
+   - `insert_for_batch()` - uses batch-cache-aware search functions
    - Applies cache updates incrementally so subsequent inserts see entry point
 
 ```rust
-// AFTER: Transaction-aware insert with incremental cache updates
+// AFTER: Batch-aware insert with incremental cache updates
 let mut nav_cache_updates = Vec::new();
+let mut batch_cache = BatchEdgeCache::new();
 for (i, vec_id) in vec_ids.iter().enumerate() {
-    let update = hnsw::insert_in_txn_for_batch(
-        &index, txn, txn_db, storage, *vec_id, vector
+    let update = hnsw::insert_for_batch(
+        &index, txn, txn_db, storage, *vec_id, vector, &mut batch_cache
     )?;
     // Apply cache update immediately so next insert sees entry point
     update.clone().apply(index.nav_cache());
@@ -2646,10 +2653,10 @@ for (i, vec_id) in vec_ids.iter().enumerate() {
 
 | File | Change |
 |------|--------|
-| `hnsw/graph.rs` | Added `distance_in_txn()`, `get_vector_in_txn()`, `greedy_search_layer_in_txn()`, `search_layer_in_txn()` |
-| `hnsw/insert.rs` | Added `insert_in_txn_for_batch()` |
-| `hnsw/mod.rs` | Exported `insert_in_txn_for_batch` |
-| `ops/insert.rs` | Updated batch loop to use `insert_in_txn_for_batch()` with incremental cache updates |
+| `hnsw/graph.rs` | Added `distance_in_txn()`, `get_vector_in_txn()`, `greedy_search_layer_with_batch_cache()`, `search_layer_with_batch_cache()`, `BatchEdgeCache` |
+| `hnsw/insert.rs` | Added `insert_for_batch()` |
+| `hnsw/mod.rs` | Exported `insert_for_batch`, `BatchEdgeCache` |
+| `ops/insert.rs` | Updated batch loop to use `insert_for_batch()` with incremental cache updates |
 
 ### Key Insight
 
@@ -2668,7 +2675,7 @@ All tests pass including the critical batch insert test:
 
 ### Review Note (CODEX)
 
-The fix correctly addresses vector visibility (transaction reads) and incremental nav-cache entry-point updates. One remaining correctness concern: `search_layer_in_txn()` still reads neighbors via `get_neighbors()` which uses `txn_db.get_cf()` (committed reads). Edges written earlier in the same batch are in the transaction (via `txn.merge_cf`) and are not visible to these reads. That means later inserts do not see edges from earlier inserts, and batch graph structure can diverge from sequential insert behavior (typically a star around the original entry). Consider adding `get_neighbors_in_txn()` (reading from `txn.get_cf()`), or staging edge updates in a batch-local cache so neighbor search sees newly added edges.
+The fix correctly addresses vector visibility (transaction reads) and incremental nav-cache entry-point updates. One remaining correctness concern: `search_layer_with_batch_cache()` still reads neighbors via `get_neighbors()` which uses `txn_db.get_cf()` (committed reads). Edges written earlier in the same batch are in the transaction (via `txn.merge_cf`) and are not visible to these reads. That means later inserts do not see edges from earlier inserts, and batch graph structure can diverge from sequential insert behavior (typically a star around the original entry). **Resolution:** `BatchEdgeCache` was implemented to stage edge updates so neighbor search sees newly added edges.
 
 ### Resolution: BatchEdgeCache
 

@@ -6395,17 +6395,17 @@ pub fn connect_neighbors(
 **Implementation (January 2026):**
 
 Completed in 6 subtasks:
-- **5.0.1**: Added `IdAllocator::allocate_in_txn()` and `free_in_txn()` for transactional ID allocation
-- **5.0.2**: Refactored `hnsw/insert.rs` with `insert_in_txn()` API returning `CacheUpdate`
-- **5.0.3**: Added `connect_neighbors_in_txn()` to `hnsw/graph.rs`
+- **5.0.1**: Added `IdAllocator::allocate()` and `free()` for transactional ID allocation
+- **5.0.2**: Refactored `hnsw/insert.rs` with `insert()` API returning `CacheUpdate`
+- **5.0.3**: Added `connect_neighbors()` to `hnsw/graph.rs`
 - **5.0.4**: `CacheUpdate::apply()` deferred until after `txn.commit()` succeeds
 - **5.0.5**: Updated `writer.rs` to use transactional HNSW insert with collected cache updates
 - **5.0.6**: Added 8 crash recovery tests in `crash_recovery_tests.rs`
 
 Key files changed:
-- `id.rs`: Transaction-aware allocation with `allocate_in_txn()`, `free_in_txn()`
-- `hnsw/insert.rs`: `insert_in_txn()` returns `CacheUpdate`, applied after commit
-- `hnsw/graph.rs`: `connect_neighbors_in_txn()` uses `txn.merge_cf()`
+- `id.rs`: Transaction-aware allocation with `allocate()`, `free()` (in-memory: `allocate_local()`, `free_local()`)
+- `hnsw/insert.rs`: `insert()` returns `CacheUpdate`, applied after commit
+- `hnsw/graph.rs`: `connect_neighbors()` uses `txn.merge_cf()`
 - `hnsw/mod.rs`: Export new APIs, `Index` derives `Clone`
 - `processor.rs`: Added `get_or_create_index()`, `nav_cache()`, `hnsw_config()`
 - `writer.rs`: Collect `CacheUpdate`s, apply after commit
