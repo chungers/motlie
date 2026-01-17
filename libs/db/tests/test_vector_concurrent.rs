@@ -14,10 +14,10 @@
 //! | `test_multi_embedding_concurrent_access` | Multi-index concurrent r/w | 3 indices, 6 writers, 6 readers |
 //! | `test_cache_isolation_under_load` | Cache isolation validation | 2 indices, 2 writers, 2 readers |
 //! | `benchmark_quick_validation` | Quick benchmark for CI (feature: smoke-test) | 2 writers, 2 readers |
-//! | `benchmark_baseline_balanced` | Legacy quick baseline (feature: smoke-test, ignored) | 4 writers, 4 readers |
-//! | `benchmark_baseline_read_heavy` | Legacy quick baseline (feature: smoke-test, ignored) | 1 writer, 8 readers |
-//! | `benchmark_baseline_write_heavy` | Legacy quick baseline (feature: smoke-test, ignored) | 8 writers, 1 reader |
-//! | `benchmark_baseline_stress` | Legacy quick baseline (feature: smoke-test, ignored) | 16 writers, 16 readers |
+//! | `baseline_full_balanced` | Full baseline (ignored) | 2 writers, 2 readers |
+//! | `baseline_full_read_heavy` | Full baseline (ignored) | 1 writer, 4 readers |
+//! | `baseline_full_write_heavy` | Full baseline (ignored) | 4 writers, 1 reader |
+//! | `baseline_full_stress` | Full baseline (ignored) | 8 writers, 8 readers |
 //!
 //! ## Validation Criteria
 //!
@@ -1005,31 +1005,6 @@ fn test_cache_isolation_under_load() {
 // - Search producers send to SearchReader (MPMC) → query worker pool
 //
 
-/// Runs the concurrent benchmark with "balanced" preset and captures baseline numbers.
-///
-/// This test is marked #[ignore] because it takes longer to run (30s).
-/// Run with: `cargo test -p motlie-db --features smoke-test --test test_vector_concurrent benchmark_baseline -- --ignored --nocapture`
-/// Prefer `baseline_full` for captured baselines and CSV artifacts.
-#[cfg(feature = "smoke-test")]
-#[tokio::test]
-#[ignore]
-async fn benchmark_baseline_balanced() {
-    let (_temp_dir, storage) = create_test_storage();
-    let storage = Arc::new(storage);
-
-    // Use balanced preset: 4 insert producers, 4 search producers, 4 query workers
-    let config = BenchConfig::balanced();
-    let metrics = Arc::new(ConcurrentMetrics::new());
-    let bench = ConcurrentBenchmark::new(config, metrics);
-
-    println!("\n=== Concurrent Benchmark: Balanced (4 producers, 4 workers, 30s) ===\n");
-
-    let result = bench.run(storage, TEST_EMBEDDING).await.expect("benchmark run");
-
-    println!("{}", result);
-    println!("\n=== End Benchmark ===\n");
-}
-
 /// Quick benchmark with smaller config for CI validation.
 #[cfg(feature = "smoke-test")]
 #[tokio::test]
@@ -1061,68 +1036,6 @@ async fn benchmark_quick_validation() {
     assert!(result.search_throughput > 0.0, "Should have non-zero search throughput");
 }
 
-/// Read-heavy baseline: 1 insert producer, 8 search producers, 4 query workers
-/// Simulates CDN/cache access patterns.
-#[cfg(feature = "smoke-test")]
-#[tokio::test]
-#[ignore]
-async fn benchmark_baseline_read_heavy() {
-    let (_temp_dir, storage) = create_test_storage();
-    let storage = Arc::new(storage);
-
-    let config = BenchConfig::read_heavy();
-    let metrics = Arc::new(ConcurrentMetrics::new());
-    let bench = ConcurrentBenchmark::new(config, metrics);
-
-    println!("\n=== Concurrent Benchmark: Read-Heavy (1 insert, 8 search, 30s) ===\n");
-
-    let result = bench.run(storage, TEST_EMBEDDING).await.expect("benchmark run");
-
-    println!("{}", result);
-    println!("\n=== End Benchmark ===\n");
-}
-
-/// Write-heavy baseline: 4 insert producers, 1 search producer, 1 query worker
-/// Simulates batch ingestion workloads.
-#[cfg(feature = "smoke-test")]
-#[tokio::test]
-#[ignore]
-async fn benchmark_baseline_write_heavy() {
-    let (_temp_dir, storage) = create_test_storage();
-    let storage = Arc::new(storage);
-
-    let config = BenchConfig::write_heavy();
-    let metrics = Arc::new(ConcurrentMetrics::new());
-    let bench = ConcurrentBenchmark::new(config, metrics);
-
-    println!("\n=== Concurrent Benchmark: Write-Heavy (4 insert, 1 search, 30s) ===\n");
-
-    let result = bench.run(storage, TEST_EMBEDDING).await.expect("benchmark run");
-
-    println!("{}", result);
-    println!("\n=== End Benchmark ===\n");
-}
-
-/// Stress baseline: 8 insert producers, 8 search producers, 8 query workers
-/// Maximum concurrency to find bottlenecks.
-#[cfg(feature = "smoke-test")]
-#[tokio::test]
-#[ignore]
-async fn benchmark_baseline_stress() {
-    let (_temp_dir, storage) = create_test_storage();
-    let storage = Arc::new(storage);
-
-    let config = BenchConfig::stress();
-    let metrics = Arc::new(ConcurrentMetrics::new());
-    let bench = ConcurrentBenchmark::new(config, metrics);
-
-    println!("\n=== Concurrent Benchmark: Stress (8 producers, 8 workers, 60s) ===\n");
-
-    let result = bench.run(storage, TEST_EMBEDDING).await.expect("benchmark run");
-
-    println!("{}", result);
-    println!("\n=== End Benchmark ===\n");
-}
 
 // ============================================================================
 // Multi-Embedding Baseline Benchmarks (Meeting Minimum Requirements)
