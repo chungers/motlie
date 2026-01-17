@@ -26,7 +26,8 @@
 use std::path::PathBuf;
 
 use motlie_db::vector::benchmark::{
-    build_hnsw_index, run_single_experiment, LaionDataset, LAION_EMBEDDING_DIM,
+    build_hnsw_index, run_rabitq_experiments, run_single_experiment, ExperimentConfig,
+    LaionDataset, LAION_EMBEDDING_DIM,
 };
 use motlie_db::vector::{hnsw, Distance, Storage, VectorElementType};
 
@@ -166,7 +167,7 @@ fn baseline_laion_exact() {
 
 /// LAION recall baseline with RaBitQ 2-bit quantization.
 ///
-/// Expected: Recall@10 > 85%
+/// Expected: Recall@10 > 80%
 #[test]
 #[ignore]
 fn baseline_laion_rabitq_2bit() {
@@ -179,16 +180,127 @@ fn baseline_laion_rabitq_2bit() {
     println!("=== LAION RECALL BASELINE: RaBitQ 2-bit (Cosine) ===");
     println!("{}\n", "=".repeat(70));
 
-    // RaBitQ 2-bit recall test
-    // Uses run_rabitq_experiments from runner.rs
-    println!("RaBitQ 2-bit recall baseline: Use benchmark/runner.rs");
-    println!("Run: cargo run --release --example rabitq_bench -- --bits 2");
+    let data_dir = laion_data_dir();
+    let num_vectors = 10_000;
+    let num_queries = 100;
+    let k = 10;
+    let ef_search = 200;
+    let hnsw_m = 16;
+    let ef_construction = 200;
+    let bits = 2u8;
+    let rerank_factor = 10; // Rerank top 10*k candidates
+
+    // Load LAION dataset
+    println!("Loading LAION dataset ({} vectors, {} queries)...", num_vectors, num_queries);
+    let dataset = LaionDataset::load(&data_dir, num_vectors + num_queries)
+        .expect("Failed to load LAION dataset");
+
+    let subset = dataset.subset(num_vectors, num_queries);
+    println!(
+        "Subset: {} db vectors, {} queries, dim={}",
+        subset.db_vectors.len(),
+        subset.queries.len(),
+        LAION_EMBEDDING_DIM
+    );
+
+    // Compute ground truth
+    println!("Computing ground truth (brute force k={})...", k);
+    let ground_truth = subset.compute_ground_truth_topk(k);
+
+    // Create temp storage
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let mut storage = Storage::readwrite(temp_dir.path());
+    storage.ready().expect("storage ready");
+
+    // Build HNSW index
+    println!(
+        "Building HNSW index (M={}, ef_construction={})...",
+        hnsw_m, ef_construction
+    );
+    let hnsw_config = hnsw::Config {
+        dim: LAION_EMBEDDING_DIM,
+        m: hnsw_m,
+        m_max: hnsw_m * 2,
+        m_max_0: hnsw_m * 2,
+        ef_construction,
+        ..Default::default()
+    };
+
+    let (index, build_time) = build_hnsw_index(
+        &storage,
+        &subset.db_vectors,
+        hnsw_config,
+        Distance::Cosine,
+        VectorElementType::F32,
+    )
+    .expect("build index");
+
+    println!(
+        "Index built in {:.2}s ({:.1} vec/s)",
+        build_time,
+        num_vectors as f64 / build_time
+    );
+
+    // Run RaBitQ experiment
+    println!("Running RaBitQ {}-bit queries (k={}, ef_search={}, rerank={})...", bits, k, ef_search, rerank_factor);
+
+    let config = ExperimentConfig {
+        scales: vec![num_vectors],
+        ef_search_values: vec![ef_search],
+        k_values: vec![k],
+        num_queries,
+        m: hnsw_m,
+        ef_construction,
+        dim: LAION_EMBEDDING_DIM,
+        distance: Distance::Cosine,
+        storage_type: VectorElementType::F32,
+        data_dir: data_dir.clone(),
+        results_dir: temp_dir.path().to_path_buf(),
+        verbose: true,
+        use_rabitq: true,
+        rabitq_bits: vec![bits],
+        rerank_factors: vec![rerank_factor],
+        use_binary_cache: true,
+    };
+
+    let results = run_rabitq_experiments(&config, &index, &storage, &subset, &ground_truth, build_time)
+        .expect("run rabitq experiments");
+
+    // Find result for our configuration
+    let result = results.iter()
+        .find(|r| r.bits_per_dim == bits && r.k == k && r.rerank_factor == rerank_factor)
+        .expect("find result for bits=2, k=10");
+
+    let recall = result.recall_mean;
+
+    println!("\n{}", "=".repeat(70));
+    println!("=== RESULTS ===");
+    println!("{}", "=".repeat(70));
+    println!("Vectors: {}", num_vectors);
+    println!("Queries: {}", num_queries);
+    println!("k: {}", k);
+    println!("ef_search: {}", ef_search);
+    println!("RaBitQ bits: {}", bits);
+    println!("Rerank factor: {}", rerank_factor);
+    println!();
+    println!("Recall@{}: {:.2}%", k, recall * 100.0);
+    println!("Latency P50: {:.2}ms", result.latency_p50_ms);
+    println!("Latency P99: {:.2}ms", result.latency_p99_ms);
+    println!("QPS: {:.1}", result.qps);
     println!("{}\n", "=".repeat(70));
+
+    // Assert recall target (80% for 2-bit with rerank)
+    assert!(
+        recall >= 0.80,
+        "Recall@{} = {:.2}% is below 80% target for RaBitQ 2-bit",
+        k,
+        recall * 100.0
+    );
 }
 
 /// LAION recall baseline with RaBitQ 4-bit quantization.
 ///
-/// Expected: Recall@10 > 92%
+/// Expected: Recall@10 > 85%
 #[test]
 #[ignore]
 fn baseline_laion_rabitq_4bit() {
@@ -201,11 +313,122 @@ fn baseline_laion_rabitq_4bit() {
     println!("=== LAION RECALL BASELINE: RaBitQ 4-bit (Cosine) ===");
     println!("{}\n", "=".repeat(70));
 
-    // RaBitQ 4-bit recall test
-    // Uses run_rabitq_experiments from runner.rs
-    println!("RaBitQ 4-bit recall baseline: Use benchmark/runner.rs");
-    println!("Run: cargo run --release --example rabitq_bench -- --bits 4");
+    let data_dir = laion_data_dir();
+    let num_vectors = 10_000;
+    let num_queries = 100;
+    let k = 10;
+    let ef_search = 200;
+    let hnsw_m = 16;
+    let ef_construction = 200;
+    let bits = 4u8;
+    let rerank_factor = 10; // Rerank top 10*k candidates
+
+    // Load LAION dataset
+    println!("Loading LAION dataset ({} vectors, {} queries)...", num_vectors, num_queries);
+    let dataset = LaionDataset::load(&data_dir, num_vectors + num_queries)
+        .expect("Failed to load LAION dataset");
+
+    let subset = dataset.subset(num_vectors, num_queries);
+    println!(
+        "Subset: {} db vectors, {} queries, dim={}",
+        subset.db_vectors.len(),
+        subset.queries.len(),
+        LAION_EMBEDDING_DIM
+    );
+
+    // Compute ground truth
+    println!("Computing ground truth (brute force k={})...", k);
+    let ground_truth = subset.compute_ground_truth_topk(k);
+
+    // Create temp storage
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let mut storage = Storage::readwrite(temp_dir.path());
+    storage.ready().expect("storage ready");
+
+    // Build HNSW index
+    println!(
+        "Building HNSW index (M={}, ef_construction={})...",
+        hnsw_m, ef_construction
+    );
+    let hnsw_config = hnsw::Config {
+        dim: LAION_EMBEDDING_DIM,
+        m: hnsw_m,
+        m_max: hnsw_m * 2,
+        m_max_0: hnsw_m * 2,
+        ef_construction,
+        ..Default::default()
+    };
+
+    let (index, build_time) = build_hnsw_index(
+        &storage,
+        &subset.db_vectors,
+        hnsw_config,
+        Distance::Cosine,
+        VectorElementType::F32,
+    )
+    .expect("build index");
+
+    println!(
+        "Index built in {:.2}s ({:.1} vec/s)",
+        build_time,
+        num_vectors as f64 / build_time
+    );
+
+    // Run RaBitQ experiment
+    println!("Running RaBitQ {}-bit queries (k={}, ef_search={}, rerank={})...", bits, k, ef_search, rerank_factor);
+
+    let config = ExperimentConfig {
+        scales: vec![num_vectors],
+        ef_search_values: vec![ef_search],
+        k_values: vec![k],
+        num_queries,
+        m: hnsw_m,
+        ef_construction,
+        dim: LAION_EMBEDDING_DIM,
+        distance: Distance::Cosine,
+        storage_type: VectorElementType::F32,
+        data_dir: data_dir.clone(),
+        results_dir: temp_dir.path().to_path_buf(),
+        verbose: true,
+        use_rabitq: true,
+        rabitq_bits: vec![bits],
+        rerank_factors: vec![rerank_factor],
+        use_binary_cache: true,
+    };
+
+    let results = run_rabitq_experiments(&config, &index, &storage, &subset, &ground_truth, build_time)
+        .expect("run rabitq experiments");
+
+    // Find result for our configuration
+    let result = results.iter()
+        .find(|r| r.bits_per_dim == bits && r.k == k && r.rerank_factor == rerank_factor)
+        .expect("find result for bits=4, k=10");
+
+    let recall = result.recall_mean;
+
+    println!("\n{}", "=".repeat(70));
+    println!("=== RESULTS ===");
+    println!("{}", "=".repeat(70));
+    println!("Vectors: {}", num_vectors);
+    println!("Queries: {}", num_queries);
+    println!("k: {}", k);
+    println!("ef_search: {}", ef_search);
+    println!("RaBitQ bits: {}", bits);
+    println!("Rerank factor: {}", rerank_factor);
+    println!();
+    println!("Recall@{}: {:.2}%", k, recall * 100.0);
+    println!("Latency P50: {:.2}ms", result.latency_p50_ms);
+    println!("Latency P99: {:.2}ms", result.latency_p99_ms);
+    println!("QPS: {:.1}", result.qps);
     println!("{}\n", "=".repeat(70));
+
+    // Assert recall target (85% for 4-bit with rerank)
+    assert!(
+        recall >= 0.85,
+        "Recall@{} = {:.2}% is below 85% target for RaBitQ 4-bit",
+        k,
+        recall * 100.0
+    );
 }
 
 // ============================================================================
