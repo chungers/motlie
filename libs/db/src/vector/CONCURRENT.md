@@ -1,6 +1,6 @@
 # Phase 5.9-5.11: Concurrent Operations
 
-**Status:** ✅ Complete
+**Status:** ✅ Complete (CODEX: implementation present; baseline numbers not captured in-repo yet)
 **Date:** January 16, 2026
 **Tasks:** 5.9 (Stress Tests), 5.10 (Metrics), 5.11 (Benchmarks)
 
@@ -29,6 +29,8 @@ This document tracks the implementation of concurrent operation testing and benc
 | `test_multi_embedding_concurrent_access` | Multi-index concurrent r/w | 3 indices, 6 writers, 6 readers | ✅ |
 | `test_cache_isolation_under_load` | Cache isolation validation | 2 indices, 2 writers, 2 readers | ✅ |
 
+CODEX: Verified all listed tests exist in `libs/db/tests/test_vector_concurrent.rs` and use `insert_vector_atomic()` (single-transaction insert + HNSW).
+
 ### Implementation
 
 **File:** `libs/db/tests/test_vector_concurrent.rs`
@@ -37,6 +39,8 @@ All tests verify:
 1. No thread panics (thread safety)
 2. Data integrity maintained (inserted vectors searchable)
 3. Operations complete successfully under concurrent load
+
+CODEX: Verified assertions for panics/insert/search exist; data integrity checks are present in `test_concurrent_batch_insert`, `test_writer_contention`, and multi-embedding tests.
 
 ### Validation Criteria
 
@@ -74,6 +78,8 @@ Implemented `ConcurrentMetrics` with:
 - Methods: `record_insert()`, `record_search()`, `record_delete()`, `record_error()`
 - Percentile calculations: `insert_percentile()`, `search_percentile()`
 - Summary generation: `summary() -> MetricsSummary`
+
+CODEX: Verified `ConcurrentMetrics`/histogram implementation in `libs/db/src/vector/benchmark/concurrent.rs`.
 
 ### Histogram Bucket Design
 
@@ -125,6 +131,8 @@ Implemented:
 
 **Exports:** All types exported via `motlie_db::vector::benchmark::*`
 
+CODEX: Verified `ConcurrentBenchmark`, `BenchConfig`, `BenchResult` and exports in `libs/db/src/vector/benchmark/mod.rs`.
+
 ### Expected Baseline (Target)
 
 | Scenario | Insert/s | Search/s | Insert P99 | Search P99 |
@@ -135,6 +143,8 @@ Implemented:
 | Stress | 500 | 500 | <100ms | <50ms |
 
 *Note: Targets based on 100K vectors, 128D, M=16, ef=100*
+
+CODEX: Targets are aspirational; no benchmark output committed in-repo yet. Recommend capturing one baseline run and linking results.
 
 ---
 
@@ -196,6 +206,8 @@ pub struct Processor {
 **File:** `libs/db/tests/test_vector_multi_embedding.rs`
 
 **Test:** `test_multi_embedding_non_interference`
+
+CODEX: Verified test file exists and validates isolation across embeddings; does not cover concurrent access (addressed by new concurrent tests above).
 
 Validates multi-tenancy with:
 - **Single `TempDir`** → one RocksDB directory
