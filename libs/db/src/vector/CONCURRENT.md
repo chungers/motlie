@@ -1,6 +1,7 @@
 # Phase 5.9-5.11: Concurrent Operations
 
 **Status:** ✅ Complete (CODEX: implementation present; baseline numbers not captured in-repo yet)
+CODEX: Verified tests/bench code exists; performance baselines remain unrecorded.
 **Date:** January 16, 2026
 **Tasks:** 5.9 (Stress Tests), 5.10 (Metrics), 5.11 (Benchmarks)
 
@@ -30,6 +31,7 @@ This document tracks the implementation of concurrent operation testing and benc
 | `test_cache_isolation_under_load` | Cache isolation validation | 2 indices, 2 writers, 2 readers | ✅ |
 
 CODEX: Verified all listed tests exist in `libs/db/tests/test_vector_concurrent.rs` and use `insert_vector_atomic()` (single-transaction insert + HNSW).
+CODEX: Thread config counts match test code; cache isolation test validates vec_id embedding prefixes.
 
 ### Implementation
 
@@ -41,12 +43,14 @@ All tests verify:
 3. Operations complete successfully under concurrent load
 
 CODEX: Verified assertions for panics/insert/search exist; data integrity checks are present in `test_concurrent_batch_insert`, `test_writer_contention`, and multi-embedding tests.
+CODEX: Some tests allow errors (10% or low success rates); still acceptable for stress but not strict correctness.
 
 ### Validation Criteria
 
 - [x] No panics under any thread configuration
 - [x] No data corruption (inserted vectors retrievable)
 - [x] Search results consistent (no phantom results)
+CODEX: “No phantom results” is partially validated via embedding-specific result checks; there is no global corruption scan.
 
 ---
 
@@ -80,6 +84,7 @@ Implemented `ConcurrentMetrics` with:
 - Summary generation: `summary() -> MetricsSummary`
 
 CODEX: Verified `ConcurrentMetrics`/histogram implementation in `libs/db/src/vector/benchmark/concurrent.rs`.
+CODEX: Bucket interpretation note matches implementation (upper-bound reporting).
 
 ### Histogram Bucket Design
 
@@ -132,6 +137,7 @@ Implemented:
 **Exports:** All types exported via `motlie_db::vector::benchmark::*`
 
 CODEX: Verified `ConcurrentBenchmark`, `BenchConfig`, `BenchResult` and exports in `libs/db/src/vector/benchmark/mod.rs`.
+CODEX: Benchmark uses per-vector transactions; no batch mode implemented.
 
 ### Expected Baseline (Target)
 
@@ -224,6 +230,7 @@ pub struct Processor {
 **Test:** `test_multi_embedding_non_interference`
 
 CODEX: Verified test file exists and validates isolation across embeddings; does not cover concurrent access (addressed by new concurrent tests above).
+CODEX: Multi-embedding concurrency is covered in `test_vector_concurrent.rs` but not in this integration test file.
 
 Validates multi-tenancy with:
 - **Single `TempDir`** → one RocksDB directory
@@ -280,6 +287,7 @@ Validates multi-tenancy with:
 | `libs/db/tests/test_vector_multi_embedding.rs` | Multi-tenancy certification | ✅ |
 | `libs/db/src/vector/benchmark/concurrent.rs` | Metrics + Benchmarks (5.10, 5.11) | ✅ |
 | `libs/db/src/vector/benchmark/mod.rs` | Export new types | ✅ |
+CODEX: File list matches new files in repo; `test_vector_multi_embedding.rs` added earlier still present.
 
 ---
 
@@ -410,6 +418,7 @@ pub enum OpType {
 | Vector runner + concurrent scenarios | ⏳ Pending | Low |
 | Graph concurrent benchmarks | ⏳ Pending | Low |
 | Unified metrics trait | ⏳ Future | Low |
+CODEX: Consider elevating “Vector runner + concurrent scenarios” to Medium if baseline regression tracking becomes a priority.
 
 ---
 
@@ -446,6 +455,7 @@ The 10% error threshold in stress tests accounts for expected transient conditio
 These are documented in `test_vector_concurrent.rs` module-level comments. In production:
 - Gate searches until index reports ready, or
 - Handle "empty index" errors gracefully in application code
+CODEX: Verified module comments describe empty-index and conflict errors; tests still allow 10% error budget.
 
 ### vec_id Generation Bounds
 
@@ -454,6 +464,7 @@ Test configurations use bounded vec_id generation:
 - Atomic counter → max 2^32 vectors total
 
 These bounds are documented in test file headers. Increase thread_id shift if larger configs needed.
+CODEX: Verified MAX_VECTORS_PER_THREAD guard and embed-shift usage in tests.
 
 ### Benchmark Transaction Modes
 
@@ -467,6 +478,7 @@ let config = BenchConfig::balanced()
 ```
 
 This is not yet implemented but noted for future enhancement.
+CODEX: Benchmarks currently run per-vector transactions; no batch mode helper exists in code.
 
 ---
 
