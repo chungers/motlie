@@ -13,6 +13,8 @@
 //! | `test_writer_contention` | Atomic writers same embedding | 8 writers |
 //! | `test_multi_embedding_concurrent_access` | Multi-index concurrent r/w | 3 indices, 6 writers, 6 readers |
 //! | `test_cache_isolation_under_load` | Cache isolation validation | 2 indices, 2 writers, 2 readers |
+//! | `benchmark_quick_validation` | Quick benchmark for CI | 2 writers, 2 readers |
+//! | `benchmark_baseline_balanced` | Full baseline benchmark (ignored) | 4 writers, 4 readers |
 //!
 //! ## Validation Criteria
 //!
@@ -52,7 +54,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use motlie_db::rocksdb::ColumnFamily;
-use motlie_db::vector::benchmark::ConcurrentMetrics;
+use motlie_db::vector::benchmark::{BenchConfig, ConcurrentBenchmark, ConcurrentMetrics};
 use motlie_db::vector::hnsw::{self, Config as HnswConfig};
 use motlie_db::vector::schema::{EmbeddingCode, VectorCfKey, VectorCfValue, Vectors};
 use motlie_db::vector::{cache::NavigationCache, Distance, Storage};
@@ -987,4 +989,62 @@ fn test_cache_isolation_under_load() {
         "Cache isolation violated! Found {} cross-contaminated results",
         total_cross_contamination
     );
+}
+
+// ============================================================================
+// Benchmark: Baseline Concurrent Performance (Task 5.11)
+// ============================================================================
+
+/// Runs the concurrent benchmark with "balanced" preset and captures baseline numbers.
+///
+/// This test is marked #[ignore] because it takes longer to run (30s).
+/// Run with: `cargo test -p motlie-db --test test_vector_concurrent benchmark_baseline -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn benchmark_baseline_balanced() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    // Use balanced preset: 4 writers, 4 readers, 30s duration
+    let config = BenchConfig::balanced();
+    let metrics = Arc::new(ConcurrentMetrics::new());
+    let bench = ConcurrentBenchmark::new(config, metrics);
+
+    println!("\n=== Concurrent Benchmark: Balanced (4w/4r, 30s) ===\n");
+
+    let result = bench.run(storage, TEST_EMBEDDING).expect("benchmark run");
+
+    println!("{}", result);
+    println!("\n=== End Benchmark ===\n");
+
+    // No assertions - this is for capturing baseline numbers
+}
+
+/// Quick benchmark with smaller config for CI validation.
+#[test]
+fn benchmark_quick_validation() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    // Quick config: 2 writers, 2 readers, 5s duration
+    let config = BenchConfig {
+        writer_threads: 2,
+        reader_threads: 2,
+        duration: Duration::from_secs(5),
+        vectors_per_writer: 500,
+        vector_dim: DIM,
+        ..Default::default()
+    };
+    let metrics = Arc::new(ConcurrentMetrics::new());
+    let bench = ConcurrentBenchmark::new(config, metrics);
+
+    println!("\n=== Quick Benchmark Validation (2w/2r, 5s) ===\n");
+
+    let result = bench.run(storage, TEST_EMBEDDING).expect("benchmark run");
+
+    println!("{}", result);
+
+    // Basic validation: should complete without errors
+    assert!(result.insert_throughput > 0.0, "Should have non-zero insert throughput");
+    assert!(result.search_throughput > 0.0, "Should have non-zero search throughput");
 }
