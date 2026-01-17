@@ -14,7 +14,10 @@
 //! | `test_multi_embedding_concurrent_access` | Multi-index concurrent r/w | 3 indices, 6 writers, 6 readers |
 //! | `test_cache_isolation_under_load` | Cache isolation validation | 2 indices, 2 writers, 2 readers |
 //! | `benchmark_quick_validation` | Quick benchmark for CI | 2 writers, 2 readers |
-//! | `benchmark_baseline_balanced` | Full baseline benchmark (ignored) | 4 writers, 4 readers |
+//! | `benchmark_baseline_balanced` | Balanced workload (ignored) | 4 writers, 4 readers |
+//! | `benchmark_baseline_read_heavy` | Read-heavy workload (ignored) | 1 writer, 8 readers |
+//! | `benchmark_baseline_write_heavy` | Write-heavy workload (ignored) | 8 writers, 1 reader |
+//! | `benchmark_baseline_stress` | Stress test (ignored) | 16 writers, 16 readers |
 //!
 //! ## Validation Criteria
 //!
@@ -1047,4 +1050,64 @@ fn benchmark_quick_validation() {
     // Basic validation: should complete without errors
     assert!(result.insert_throughput > 0.0, "Should have non-zero insert throughput");
     assert!(result.search_throughput > 0.0, "Should have non-zero search throughput");
+}
+
+/// Read-heavy baseline: 1 writer, 8 readers, 30s
+/// Simulates CDN/cache access patterns.
+#[test]
+#[ignore]
+fn benchmark_baseline_read_heavy() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    let config = BenchConfig::read_heavy();
+    let metrics = Arc::new(ConcurrentMetrics::new());
+    let bench = ConcurrentBenchmark::new(config, metrics);
+
+    println!("\n=== Concurrent Benchmark: Read-Heavy (1w/8r, 30s) ===\n");
+
+    let result = bench.run(storage, TEST_EMBEDDING).expect("benchmark run");
+
+    println!("{}", result);
+    println!("\n=== End Benchmark ===\n");
+}
+
+/// Write-heavy baseline: 8 writers, 1 reader, 30s
+/// Simulates batch ingestion workloads.
+#[test]
+#[ignore]
+fn benchmark_baseline_write_heavy() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    let config = BenchConfig::write_heavy();
+    let metrics = Arc::new(ConcurrentMetrics::new());
+    let bench = ConcurrentBenchmark::new(config, metrics);
+
+    println!("\n=== Concurrent Benchmark: Write-Heavy (8w/1r, 30s) ===\n");
+
+    let result = bench.run(storage, TEST_EMBEDDING).expect("benchmark run");
+
+    println!("{}", result);
+    println!("\n=== End Benchmark ===\n");
+}
+
+/// Stress baseline: 16 writers, 16 readers, 60s
+/// Maximum concurrency to find bottlenecks.
+#[test]
+#[ignore]
+fn benchmark_baseline_stress() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    let config = BenchConfig::stress();
+    let metrics = Arc::new(ConcurrentMetrics::new());
+    let bench = ConcurrentBenchmark::new(config, metrics);
+
+    println!("\n=== Concurrent Benchmark: Stress (16w/16r, 60s) ===\n");
+
+    let result = bench.run(storage, TEST_EMBEDDING).expect("benchmark run");
+
+    println!("{}", result);
+    println!("\n=== End Benchmark ===\n");
 }
