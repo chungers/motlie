@@ -35,11 +35,10 @@ All baseline benchmarks MUST report the following metrics:
 | **Recall@10** | Fraction of true top-10 found | >90% for production |
 | **Recall@100** | Fraction of true top-100 found | >95% for production |
 
-**IMPORTANT:** Recall measurement is **mandatory** for baseline benchmarks.
-Benchmarks without recall are considered incomplete.
-CODEX: `ConcurrentBenchmark::run()` currently sets `recall_at_k=None` and does not compute recall; baseline runs are therefore incomplete until recall is wired in.
-CODEX: `baseline_laion_exact()` does compute recall via `run_single_experiment()`, but the benchmark still uses direct HNSW helpers (not channel-based). That's OK, but call it out as "quality-only path" so readers don't assume channel architecture here.
-RESPONSE: Acknowledged. **Quality baselines use direct HNSW path** (not channel architecture) for recall measurement. Throughput baselines use channel architecture. This separation is intentional - see "Two Benchmark Paths" below.
+**IMPORTANT:** Recall measurement is **mandatory** for quality baselines.
+Throughput baselines may omit recall, but must be labeled throughput-only.
+CODEX: `bench_vector sweep --assert-recall` is now the quality baseline path; `ConcurrentBenchmark::run()` remains throughput-only.
+CODEX: Quality baselines are now CLI-driven (`bench_vector sweep`) and not via `test_vector_baseline.rs`; doc updated in “Two Benchmark Paths”.
 
 ### Latency Metrics
 
@@ -94,8 +93,7 @@ Full-precision distance computation at all HNSW layers.
 ```rust
 SearchMode::Exact
 ```
-CODEX: SearchMode is defined, but `ConcurrentBenchmark::run()` does not branch on `search_mode`; searches always use `SearchKNN` defaults.
-RESPONSE: Acknowledged. `SearchMode` is defined for documentation and future extension. Quality baselines use `test_vector_baseline.rs` which builds indexes with different strategies via `build_hnsw_index()` and measures recall directly.
+CODEX: SearchMode applies to CLI sweeps; `ConcurrentBenchmark` throughput path does not branch on it.
 
 - **Distance metrics**: L2, Cosine, DotProduct
 - **Recall**: ~100% (limited only by HNSW approximation)
@@ -109,8 +107,7 @@ Binary quantization for fast filtering + exact rerank of top candidates.
 SearchMode::RaBitQ { bits: 2 }  // 2-bit quantization
 SearchMode::RaBitQ { bits: 4 }  // 4-bit quantization
 ```
-CODEX: RaBitQ modes are not currently exercised by `ConcurrentBenchmark`; no SearchConfig/strategy selection is applied.
-RESPONSE: Acknowledged. RaBitQ quality measurement uses `test_vector_baseline.rs` with `baseline_laion_rabitq_2bit` and `baseline_laion_rabitq_4bit` tests (stub tests pointing to `rabitq_bench` example). Full integration pending RaBitQ search implementation.
+CODEX: RaBitQ quality measurement is now covered by `bench_vector sweep --rabitq`; `test_vector_baseline.rs` no longer measures recall.
 
 - **Distance metric**: Cosine only (ADC approximates angular distance)
 - **Recall**: Depends on bits and rerank factor
@@ -138,8 +135,7 @@ let subset = dataset.subset(num_vectors, num_queries);
 // Compute ground truth (brute-force exact)
 let ground_truth = subset.compute_ground_truth_topk(k);
 ```
-CODEX: LAION dataset loading and ground truth are not invoked in `ConcurrentBenchmark::run()`; insert workload uses random vectors regardless of dataset.
-RESPONSE: By design. LAION loading and ground truth are used in `test_vector_baseline.rs::baseline_laion_exact()` via `LaionDataset::load()` and `subset.compute_ground_truth_topk()`. See lines 76-91 of test_vector_baseline.rs.
+CODEX: LAION dataset loading/ground truth is handled by `bench_vector sweep`; concurrent benchmark remains random-vector throughput.
 
 ### Phase 2: Index Construction
 
@@ -154,8 +150,7 @@ let config = BenchConfig::balanced()
 let bench = ConcurrentBenchmark::new(config);
 let result = bench.run(storage, embedding_code).await?;
 ```
-CODEX: `ConcurrentBenchmark::new` accepts `BenchConfig` but ignores `dataset`/`search_mode` in the workload path; recall is not computed.
-RESPONSE: Acknowledged. These fields are for documentation and future extension. Current architecture separates concerns: `ConcurrentBenchmark` for throughput (random vectors, channel stress), `test_vector_baseline.rs` for quality (LAION, recall measurement).
+CODEX: `ConcurrentBenchmark` remains throughput-only; quality baselines live in the CLI.
 
 ### Phase 3: Search Quality Measurement
 
@@ -248,12 +243,12 @@ BenchConfig {
 | Test | Dataset | Search Mode | Distance | Recall Required |
 |------|---------|-------------|----------|-----------------|
 | `bench_vector sweep --assert-recall 0.80` | LAION | Exact (HNSW) | Cosine | Yes (>80%, typically 83%) |
-| `bench_vector sweep --rabitq --bits 2` | LAION | RaBitQ-2bit | Cosine | Yes (>80%, achieves 100%) |
-| `bench_vector sweep --rabitq --bits 4` | LAION | RaBitQ-4bit | Cosine | Yes (>80%, achieves 100%) |
+| `bench_vector sweep --rabitq --bits 2` | LAION | RaBitQ-2bit | Cosine | Yes (>80%, measured 100% on current run) |
+| `bench_vector sweep --rabitq --bits 4` | LAION | RaBitQ-4bit | Cosine | Yes (>80%, measured 100% on current run) |
 | `baseline_concurrent_balanced` | Random | Exact | L2 | No (throughput only) |
 | `baseline_concurrent_stress` | Random | Exact | L2 | No (throughput only) |
 
-**Note:** Quality baselines now use `bench_vector` CLI with `--assert-recall` flag for CI integration.
+**Note:** Quality baselines use `bench_vector` CLI with `--assert-recall` flag for CI integration.
 
 ### Running the Full Suite
 
@@ -291,9 +286,7 @@ cargo run --release --bin bench_vector -- sweep \
 
 #### Deprecated: Test-based Benchmarks
 
-> **⚠️ DEPRECATED:** The test functions in `test_vector_baseline.rs` duplicate functionality
-> now available in `bench_vector`. Use the CLI approach above for new benchmarks.
-> Test functions retained for backwards compatibility.
+> **⚠️ DEPRECATED:** `tests/test_vector_baseline.rs` now contains only smoke tests; use the CLI approach above for quality baselines.
 
 ```bash
 # LAION quality baselines (requires LAION data)
@@ -423,7 +416,7 @@ SIMD: NEON (aarch64)
 - **Read-heavy achieves highest throughput**: Fewer inserts = more resources for queries
 CODEX: These baseline numbers are not reproducible from code alone; no run logs or scripts included. Treat as provisional until a run artifact is linked.
 CODEX: Repro command exists; still missing run artifact or raw log capture in-repo. If baselines are used for regression, capture the logs or a CSV snapshot.
-RESPONSE: Acknowledged. For CI regression tracking, logs should be captured to `benchmarks/logs/` or exported as CSV. Current results are manual runs documented inline.
+CODEX: No log artifacts are checked into repo; consider saving `bench_vector sweep` CSV output alongside this doc for reproducibility.
 
 ### Quality Baseline (LAION)
 
@@ -583,3 +576,10 @@ careful design to avoid measuring concurrency effects on recall accuracy.
 
 - [tests/test_vector_baseline.rs](../../tests/test_vector_baseline.rs) - LAION recall baseline tests ⚠️ *deprecated in favor of bench_vector*
 - [tests/test_vector_concurrent.rs](../../tests/test_vector_concurrent.rs) - Throughput baseline tests
+
+---
+
+## CODEX Additional Feedback (Post-update)
+
+- `test_vector_baseline.rs` is now smoke-only; update any references that imply it provides recall baselines.
+- Throughput baselines are reproducible via `baseline_full_*` tests, but no raw logs/CSV are committed; add artifacts if these numbers are meant for regression gates.
