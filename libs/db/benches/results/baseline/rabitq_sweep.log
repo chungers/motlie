@@ -1,4 +1,5 @@
    Compiling motlie-core v0.1.0 (/home/dchung/projects/github.com/chungers/motlie/feature-vector/libs/core)
+   Compiling motlie v0.1.0 (/home/dchung/projects/github.com/chungers/motlie/feature-vector)
 warning: motlie-core@0.1.0: SIMD: Targeting NEON for aarch64 Linux
 warning: function `euclidean_squared` is never used
  --> libs/core/src/distance/scalar.rs:8:8
@@ -462,8 +463,7 @@ warning: associated function `from_gray_code` is never used
 
    Compiling motlie-mcp v0.1.0 (/home/dchung/projects/github.com/chungers/motlie/feature-vector/libs/mcp)
 warning: `motlie-db` (lib) generated 43 warnings (run `cargo fix --lib -p motlie-db` to apply 6 suggestions)
-   Compiling motlie v0.1.0 (/home/dchung/projects/github.com/chungers/motlie/feature-vector)
-    Finished `release` profile [optimized] target(s) in 8.97s
+    Finished `release` profile [optimized] target(s) in 8.64s
      Running `target/release/bench_vector sweep --dataset laion --data-dir /home/dchung/data/laion --num-vectors 10000 --num-queries 100 --rabitq --bits 2,4 --rerank 10 --ef 200 --k 10 --results-dir libs/db/benches/results/baseline --assert-recall 0.80`
 === Parameter Sweep ===
 Dataset: laion
@@ -482,29 +482,29 @@ Loading embeddings from "/home/dchung/data/laion/text_emb_0.npy"...
   Loaded 10000 vectors (512D)
 Loaded 10000 db vectors, 100 queries, dim=512
 Computing ground truth (k=10)...
-Database: "/tmp/bench_vector_3252799"
-[2m2026-01-17T20:32:26.043454Z[0m [32m INFO[0m [1mready[0m[1m{[0m[3msubsystem[0m[2m=[0m"vector" [3mpath[0m[2m=[0m"/tmp/bench_vector_3252799"[1m}[0m[2m:[0m [2mmotlie_db::rocksdb::storage[0m[2m:[0m [vector] Created block cache [3msubsystem[0m[2m=[0m"vector" [3mcache_mb[0m[2m=[0m256
-[2m2026-01-17T20:32:26.218950Z[0m [32m INFO[0m [1mready[0m[1m{[0m[3msubsystem[0m[2m=[0m"vector" [3mpath[0m[2m=[0m"/tmp/bench_vector_3252799"[1m}[0m[2m:[0m [2mmotlie_db::rocksdb::storage[0m[2m:[0m [vector] Pre-warmed cache [3msubsystem[0m[2m=[0m"vector" [3mloaded[0m[2m=[0m0
-[2m2026-01-17T20:32:26.218967Z[0m [32m INFO[0m [1mready[0m[1m{[0m[3msubsystem[0m[2m=[0m"vector" [3mpath[0m[2m=[0m"/tmp/bench_vector_3252799"[1m}[0m[2m:[0m [2mmotlie_db::rocksdb::storage[0m[2m:[0m [vector] Ready [3msubsystem[0m[2m=[0m"vector"
+Database: "/tmp/bench_vector_3256495"
+[2m2026-01-17T21:16:38.938710Z[0m [32m INFO[0m [1mready[0m[1m{[0m[3msubsystem[0m[2m=[0m"vector" [3mpath[0m[2m=[0m"/tmp/bench_vector_3256495"[1m}[0m[2m:[0m [2mmotlie_db::rocksdb::storage[0m[2m:[0m [vector] Created block cache [3msubsystem[0m[2m=[0m"vector" [3mcache_mb[0m[2m=[0m256
+[2m2026-01-17T21:16:39.105615Z[0m [32m INFO[0m [1mready[0m[1m{[0m[3msubsystem[0m[2m=[0m"vector" [3mpath[0m[2m=[0m"/tmp/bench_vector_3256495"[1m}[0m[2m:[0m [2mmotlie_db::rocksdb::storage[0m[2m:[0m [vector] Pre-warmed cache [3msubsystem[0m[2m=[0m"vector" [3mloaded[0m[2m=[0m0
+[2m2026-01-17T21:16:39.105629Z[0m [32m INFO[0m [1mready[0m[1m{[0m[3msubsystem[0m[2m=[0m"vector" [3mpath[0m[2m=[0m"/tmp/bench_vector_3256495"[1m}[0m[2m:[0m [2mmotlie_db::rocksdb::storage[0m[2m:[0m [vector] Ready [3msubsystem[0m[2m=[0m"vector"
 
 Building HNSW index (M=16, ef_construction=200)...
   10000/10000 vectors
-Index built in 89.62s (111.6 vec/s)
+Index built in 87.74s (114.0 vec/s)
 
 === RaBitQ Parameter Sweep (SIMD) ===
 
 --- 2 bits/dim (SIMD) ---
-Encoded 10000 vectors in 1.13s (1.36 MB)
+Encoded 10000 vectors in 1.12s (1.36 MB)
 ef       rerank   k        Recall     QPS        P50(ms)    P99(ms)   
 ----------------------------------------------------------------
-200      10       10       100.0     % 214.5      4.14       9.93      
+200      10       10       100.0     % 220.2      4.04       9.42      
 
 --- 4 bits/dim (SIMD) ---
 Encoded 10000 vectors in 1.12s (2.64 MB)
 ef       rerank   k        Recall     QPS        P50(ms)    P99(ms)   
 ----------------------------------------------------------------
-200      10       10       100.0     % 233.3      4.18       6.08      
-RaBitQ results saved to: "libs/db/benches/results/baseline/rabitq_results.csv"
+200      10       10       100.0     % 241.5      4.03       5.74      
+RaBitQ results saved to: "libs/db/benches/results/baseline/rabitq_sweep.csv"
 
 Results saved to "libs/db/benches/results/baseline/rabitq_sweep.csv"
 
