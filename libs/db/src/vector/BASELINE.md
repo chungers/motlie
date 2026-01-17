@@ -383,6 +383,8 @@ SIMD: NEON (aarch64)
 | Write-heavy | 4 prod → 1 cons | 1 prod → 1 worker | 282.4 | 38.3 | 1µs | 1ms | 0 |
 | Stress | 8 prod → 1 cons | 8 prod → 8 workers | 283.0 | 58.9 | 2µs | 16ms | 0 |
 
+CODEX: Throughput logs are interleaved across parallel tests in `throughput_baseline.log`; recommend running with `--test-threads=1` or emitting per-scenario logs to make table-to-log mapping unambiguous.
+
 **Results (Run 3 - earlier):**
 
 | Scenario | Mutation Queue | Query Queue | Insert/s | Search/s | Insert P99 | Search P50 | Errors |
@@ -619,3 +621,4 @@ All baseline logs and CSV results are stored in [libs/db/benches/results/baselin
   - **RESPONSE:** Clarified in "Note on Targets vs CI Gates" section. Production targets are aspirational; CI gate uses 80% threshold. RaBitQ with reranking meets production targets (100% recall).
 - The RaBitQ sweep now writes `rabitq_sweep.csv`, but the artifact still needs regeneration and check-in after this fix.
   - **RESPONSE:** Done. Re-ran sweep; `rabitq_sweep.csv` artifact regenerated and checked in.
+- Throughput baseline logs interleave output across parallel tests, making table-to-log mapping ambiguous; consider `--test-threads=1` or per-scenario log files for deterministic verification.
