@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -740,10 +740,9 @@ pub fn run_rabitq_experiments(
 /// Save RaBitQ results to CSV file.
 pub fn save_rabitq_results_csv(
     results: &[RabitqExperimentResult],
-    results_dir: &PathBuf,
+    csv_path: &Path,
 ) -> Result<()> {
-    let csv_path = results_dir.join("rabitq_results.csv");
-    let mut file = File::create(&csv_path)?;
+    let mut file = File::create(csv_path)?;
 
     // Header
     writeln!(file, "{}", RabitqExperimentResult::csv_header())?;

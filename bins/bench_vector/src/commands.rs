@@ -953,7 +953,7 @@ fn run_rabitq_sweep(
 
     // Save results
     let csv_path = results_dir.join("rabitq_sweep.csv");
-    save_rabitq_results_csv(&all_results, results_dir)?;
+    save_rabitq_results_csv(&all_results, &csv_path)?;
     println!("\nResults saved to {:?}", csv_path);
 
     // Show Pareto frontier if requested

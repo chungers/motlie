@@ -450,7 +450,7 @@ SIMD: NEON (aarch64)
 | RaBitQ-4bit | 200 | **100.0%** | 4.18ms | 6.08ms | 233 | With rerank=10 refinement |
 
 CODEX: Verified the recall/latency/QPS values against `libs/db/benches/results/baseline/hnsw_sweep.log` and `libs/db/benches/results/baseline/rabitq_sweep.log`.
-CODEX: `rabitq_sweep.log` reports saving `rabitq_sweep.csv`, but it is not checked in; either add it or drop the reference from the log in future runs.
+CODEX: Fixed the RaBitQ CSV path so `rabitq_sweep.csv` is actually written; re-run and check in the CSV artifact.
 
 **Run commands:**
 ```bash
@@ -603,6 +603,7 @@ All baseline logs and CSV results are stored in [libs/db/benches/results/baselin
 - `hnsw_sweep.log` - HNSW quality baseline run log
 - `rabitq_sweep.log` - RaBitQ quality baseline run log
 - `rabitq_results.csv` - RaBitQ results in CSV format
+- `rabitq_sweep.csv` - RaBitQ sweep results (after regenerating with fixed path)
 - `throughput_baseline.log` - Concurrent throughput baseline run log
 
 ---
@@ -610,4 +611,4 @@ All baseline logs and CSV results are stored in [libs/db/benches/results/baselin
 ## CODEX Feedback (January 2026)
 
 - The production recall targets (>90% @10, >95% @100) are higher than the current HNSW baseline (83.5% @10); clarify if targets are aspirational or adjust thresholds for current CI gates.
-- `rabitq_sweep.log` claims a `rabitq_sweep.csv` output, but the CSV is not checked in under `libs/db/benches/results/baseline/`; either add the CSV or remove the claim from future logs.
+- The RaBitQ sweep now writes `rabitq_sweep.csv`, but the artifact still needs regeneration and check-in after this fix.
