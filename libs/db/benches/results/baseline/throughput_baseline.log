@@ -1,0 +1,772 @@
+   Compiling motlie-core v0.1.0 (/home/dchung/projects/github.com/chungers/motlie/feature-vector/libs/core)
+warning: motlie-core@0.1.0: SIMD: Targeting NEON for aarch64 Linux
+warning: function `euclidean_squared` is never used
+ --> libs/core/src/distance/scalar.rs:8:8
+  |
+8 | pub fn euclidean_squared(a: &[f32], b: &[f32]) -> f32 {
+  |        ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cosine` is never used
+  --> libs/core/src/distance/scalar.rs:20:8
+   |
+20 | pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+   |        ^^^^^^
+
+warning: function `dot` is never used
+  --> libs/core/src/distance/scalar.rs:43:8
+   |
+43 | pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+   |        ^^^
+
+warning: function `hamming_distance` is never used
+  --> libs/core/src/distance/scalar.rs:52:8
+   |
+52 | pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: function `from_gray_code` is never used
+  --> libs/core/src/distance/quantized/scalar.rs:11:4
+   |
+11 | fn from_gray_code(gray: u8) -> u8 {
+   |    ^^^^^^^^^^^^^^
+
+warning: function `dot_1bit` is never used
+  --> libs/core/src/distance/quantized/scalar.rs:39:8
+   |
+39 | pub fn dot_1bit(query: &[f32], code: &[u8]) -> f32 {
+   |        ^^^^^^^^
+
+warning: function `dot_2bit_lookup` is never used
+  --> libs/core/src/distance/quantized/scalar.rs:68:8
+   |
+68 | pub fn dot_2bit_lookup(query: &[f32], code: &[u8], values: &[f32; 4]) -> f32 {
+   |        ^^^^^^^^^^^^^^^
+
+warning: function `dot_4bit_linear` is never used
+   --> libs/core/src/distance/quantized/scalar.rs:102:8
+    |
+102 | pub fn dot_4bit_linear(query: &[f32], code: &[u8], scale: f32, offset: f32) -> f32 {
+    |        ^^^^^^^^^^^^^^^
+
+   Compiling motlie-db v0.1.0 (/home/dchung/projects/github.com/chungers/motlie/feature-vector/libs/db)
+warning: `motlie-core` (lib) generated 8 warnings
+warning: unused imports: `LaionDataset` and `LaionSubset`
+  --> libs/db/src/vector/benchmark/concurrent.rs:53:41
+   |
+53 | use crate::vector::benchmark::dataset::{LaionDataset, LaionSubset, LAION_EMBEDDING_DIM};
+   |                                         ^^^^^^^^^^^^  ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::vector::benchmark::metrics::compute_recall`
+  --> libs/db/src/vector/benchmark/concurrent.rs:54:5
+   |
+54 | use crate::vector::benchmark::metrics::compute_recall;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `processor::Processor`
+   --> libs/db/src/vector/mod.rs:105:16
+    |
+105 | pub(crate) use processor::Processor;
+    |                ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TEXT`
+ --> libs/db/src/fulltext/schema.rs:7:13
+  |
+7 |     STRING, TEXT,
+  |             ^^^^
+
+warning: unused variable: `config`
+   --> libs/db/src/graph/reader.rs:530:13
+    |
+530 |         let config = config.clone();
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `vec_ids`
+   --> libs/db/src/vector/writer.rs:103:9
+    |
+103 |         vec_ids: &[VecId],
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_vec_ids`
+
+warning: type `GetVectorDispatch` is more private than the item `vector::query::Query::GetVector::0`
+   --> libs/db/src/vector/query.rs:54:15
+    |
+ 54 |     GetVector(GetVectorDispatch),
+    |               ^^^^^^^^^^^^^^^^^ field `vector::query::Query::GetVector::0` is reachable at visibility `pub`
+    |
+note: but type `GetVectorDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:224:1
+    |
+224 | pub(crate) struct GetVectorDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `GetInternalIdDispatch` is more private than the item `vector::query::Query::GetInternalId::0`
+   --> libs/db/src/vector/query.rs:56:19
+    |
+ 56 |     GetInternalId(GetInternalIdDispatch),
+    |                   ^^^^^^^^^^^^^^^^^^^^^ field `vector::query::Query::GetInternalId::0` is reachable at visibility `pub`
+    |
+note: but type `GetInternalIdDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:323:1
+    |
+323 | pub(crate) struct GetInternalIdDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `GetExternalIdDispatch` is more private than the item `vector::query::Query::GetExternalId::0`
+   --> libs/db/src/vector/query.rs:58:19
+    |
+ 58 |     GetExternalId(GetExternalIdDispatch),
+    |                   ^^^^^^^^^^^^^^^^^^^^^ field `vector::query::Query::GetExternalId::0` is reachable at visibility `pub`
+    |
+note: but type `GetExternalIdDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:393:1
+    |
+393 | pub(crate) struct GetExternalIdDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `ResolveIdsDispatch` is more private than the item `vector::query::Query::ResolveIds::0`
+   --> libs/db/src/vector/query.rs:60:16
+    |
+ 60 |     ResolveIds(ResolveIdsDispatch),
+    |                ^^^^^^^^^^^^^^^^^^ field `vector::query::Query::ResolveIds::0` is reachable at visibility `pub`
+    |
+note: but type `ResolveIdsDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:463:1
+    |
+463 | pub(crate) struct ResolveIdsDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `ListEmbeddingsDispatch` is more private than the item `vector::query::Query::ListEmbeddings::0`
+   --> libs/db/src/vector/query.rs:66:20
+    |
+ 66 |     ListEmbeddings(ListEmbeddingsDispatch),
+    |                    ^^^^^^^^^^^^^^^^^^^^^^ field `vector::query::Query::ListEmbeddings::0` is reachable at visibility `pub`
+    |
+note: but type `ListEmbeddingsDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:562:1
+    |
+562 | pub(crate) struct ListEmbeddingsDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `FindEmbeddingsDispatch` is more private than the item `vector::query::Query::FindEmbeddings::0`
+   --> libs/db/src/vector/query.rs:68:20
+    |
+ 68 |     FindEmbeddings(FindEmbeddingsDispatch),
+    |                    ^^^^^^^^^^^^^^^^^^^^^^ field `vector::query::Query::FindEmbeddings::0` is reachable at visibility `pub`
+    |
+note: but type `FindEmbeddingsDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:643:1
+    |
+643 | pub(crate) struct FindEmbeddingsDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `SearchKNNDispatch` is more private than the item `vector::query::Query::SearchKNN::0`
+   --> libs/db/src/vector/query.rs:74:15
+    |
+ 74 |     SearchKNN(SearchKNNDispatch),
+    |               ^^^^^^^^^^^^^^^^^ field `vector::query::Query::SearchKNN::0` is reachable at visibility `pub`
+    |
+note: but type `SearchKNNDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:793:1
+    |
+793 | pub(crate) struct SearchKNNDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `BlockCacheConfig` is never used
+  --> libs/db/src/graph/schema.rs:56:6
+   |
+56 | type BlockCacheConfig = GraphBlockCacheConfig;
+   |      ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `format_bytes` is never used
+   --> libs/db/src/vector/mod.rs:161:4
+    |
+161 | fn format_bytes(bytes: usize) -> String {
+    |    ^^^^^^^^^^^^
+
+warning: function `dimension_mismatch` is never used
+  --> libs/db/src/vector/error.rs:11:8
+   |
+11 | pub fn dimension_mismatch(expected: u32, got: usize) -> anyhow::Error {
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `unknown_embedding` is never used
+  --> libs/db/src/vector/error.rs:20:8
+   |
+20 | pub fn unknown_embedding(code: u64) -> anyhow::Error {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `embedding_not_registered` is never used
+  --> libs/db/src/vector/error.rs:30:8
+   |
+30 | pub fn embedding_not_registered(model: &str, dim: u32, distance: &str) -> anyhow::Error {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `persist` and `persist_in_txn` are never used
+   --> libs/db/src/vector/id.rs:230:19
+    |
+ 55 | impl IdAllocator {
+    | ---------------- methods in this implementation
+...
+230 |     pub(crate) fn persist(&self, db: &TransactionDB, embedding: EmbeddingCode) -> Result<()> {
+    |                   ^^^^^^^
+...
+243 |     pub(crate) fn persist_in_txn(
+    |                   ^^^^^^^^^^^^^^
+
+warning: method `delete_vector` is never used
+   --> libs/db/src/vector/processor.rs:534:19
+    |
+107 | impl Processor {
+    | -------------- method in this implementation
+...
+534 |     pub(crate) fn delete_vector(
+    |                   ^^^^^^^^^^^^^
+
+warning: field `timeout` is never read
+   --> libs/db/src/vector/query.rs:226:16
+    |
+224 | pub(crate) struct GetVectorDispatch {
+    |                   ----------------- field in this struct
+225 |     pub(crate) params: GetVector,
+226 |     pub(crate) timeout: Duration,
+    |                ^^^^^^^
+    |
+    = note: `GetVectorDispatch` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `timeout` is never read
+   --> libs/db/src/vector/query.rs:325:16
+    |
+323 | pub(crate) struct GetInternalIdDispatch {
+    |                   --------------------- field in this struct
+324 |     pub(crate) params: GetInternalId,
+325 |     pub(crate) timeout: Duration,
+    |                ^^^^^^^
+    |
+    = note: `GetInternalIdDispatch` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `timeout` is never read
+   --> libs/db/src/vector/query.rs:395:16
+    |
+393 | pub(crate) struct GetExternalIdDispatch {
+    |                   --------------------- field in this struct
+394 |     pub(crate) params: GetExternalId,
+395 |     pub(crate) timeout: Duration,
+    |                ^^^^^^^
+    |
+    = note: `GetExternalIdDispatch` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `timeout` is never read
+   --> libs/db/src/vector/query.rs:465:16
+    |
+463 | pub(crate) struct ResolveIdsDispatch {
+    |                   ------------------ field in this struct
+464 |     pub(crate) params: ResolveIds,
+465 |     pub(crate) timeout: Duration,
+    |                ^^^^^^^
+    |
+    = note: `ResolveIdsDispatch` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `timeout` is never read
+   --> libs/db/src/vector/query.rs:564:16
+    |
+562 | pub(crate) struct ListEmbeddingsDispatch {
+    |                   ---------------------- field in this struct
+563 |     pub(crate) params: ListEmbeddings,
+564 |     pub(crate) timeout: Duration,
+    |                ^^^^^^^
+    |
+    = note: `ListEmbeddingsDispatch` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `timeout` is never read
+   --> libs/db/src/vector/query.rs:645:16
+    |
+643 | pub(crate) struct FindEmbeddingsDispatch {
+    |                   ---------------------- field in this struct
+644 |     pub(crate) params: FindEmbeddings,
+645 |     pub(crate) timeout: Duration,
+    |                ^^^^^^^
+    |
+    = note: `FindEmbeddingsDispatch` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: struct `EdgeCfValue` is never constructed
+   --> libs/db/src/vector/schema.rs:484:19
+    |
+484 | pub(crate) struct EdgeCfValue(pub(crate) RoaringBitmapBytes);
+    |                   ^^^^^^^^^^^
+
+warning: associated functions `key_from_bytes`, `value_to_bytes`, and `value_from_bytes` are never used
+   --> libs/db/src/vector/schema.rs:527:12
+    |
+518 | impl Edges {
+    | ---------- associated functions in this implementation
+...
+527 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<EdgeCfKey> {
+    |            ^^^^^^^^^^^^^^
+...
+538 |     pub fn value_to_bytes(value: &EdgeCfValue) -> Vec<u8> {
+    |            ^^^^^^^^^^^^^^
+...
+543 |     pub fn value_from_bytes(bytes: &[u8]) -> Result<EdgeCfValue> {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: variants `Count` and `Config` are never constructed
+   --> libs/db/src/vector/schema.rs:745:5
+    |
+739 | pub(crate) enum GraphMetaField {
+    |                 -------------- variants in this enum
+...
+745 |     Count(u32),
+    |     ^^^^^
+746 |     /// Serialized HNSW configuration (deprecated - use EmbeddingSpec)
+747 |     Config(Vec<u8>),
+    |     ^^^^^^
+    |
+    = note: `GraphMetaField` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated functions `count` and `config` are never used
+   --> libs/db/src/vector/schema.rs:782:12
+    |
+770 | impl GraphMetaCfKey {
+    | ------------------- associated functions in this implementation
+...
+782 |     pub fn count(embedding_code: EmbeddingCode) -> Self {
+    |            ^^^^^
+...
+787 |     pub fn config(embedding_code: EmbeddingCode) -> Self {
+    |            ^^^^^^
+
+warning: associated function `key_from_bytes` is never used
+   --> libs/db/src/vector/schema.rs:828:12
+    |
+820 | impl GraphMeta {
+    | -------------- associated function in this implementation
+...
+828 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<GraphMetaCfKey> {
+    |            ^^^^^^^^^^^^^^
+
+warning: associated function `key_from_bytes` is never used
+   --> libs/db/src/vector/schema.rs:939:12
+    |
+931 | impl IdForward {
+    | -------------- associated function in this implementation
+...
+939 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<IdForwardCfKey> {
+    |            ^^^^^^^^^^^^^^
+
+warning: associated function `key_from_bytes` is never used
+    --> libs/db/src/vector/schema.rs:1012:12
+     |
+1004 | impl IdReverse {
+     | -------------- associated function in this implementation
+...
+1012 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<IdReverseCfKey> {
+     |            ^^^^^^^^^^^^^^
+
+warning: associated function `key_from_bytes` is never used
+    --> libs/db/src/vector/schema.rs:1120:12
+     |
+1112 | impl IdAlloc {
+     | ------------ associated function in this implementation
+...
+1120 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<IdAllocCfKey> {
+     |            ^^^^^^^^^^^^^^
+
+warning: struct `PendingCfKey` is never constructed
+    --> libs/db/src/vector/schema.rs:1173:19
+     |
+1173 | pub(crate) struct PendingCfKey(
+     |                   ^^^^^^^^^^^^
+
+warning: struct `PendingCfValue` is never constructed
+    --> libs/db/src/vector/schema.rs:1181:19
+     |
+1181 | pub(crate) struct PendingCfValue(pub(crate) ());
+     |                   ^^^^^^^^^^^^^^
+
+warning: associated functions `key_to_bytes`, `key_from_bytes`, `value_to_bytes`, and `value_from_bytes` are never used
+    --> libs/db/src/vector/schema.rs:1203:12
+     |
+1202 | impl Pending {
+     | ------------ associated functions in this implementation
+1203 |     pub fn key_to_bytes(key: &PendingCfKey) -> Vec<u8> {
+     |            ^^^^^^^^^^^^
+...
+1211 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<PendingCfKey> {
+     |            ^^^^^^^^^^^^^^
+...
+1224 |     pub fn value_to_bytes(_value: &PendingCfValue) -> Vec<u8> {
+     |            ^^^^^^^^^^^^^^
+...
+1228 |     pub fn value_from_bytes(_bytes: &[u8]) -> Result<PendingCfValue> {
+     |            ^^^^^^^^^^^^^^^^
+
+warning: function `spawn_mutation_consumer_with_processor` is never used
+   --> libs/db/src/vector/writer.rs:601:15
+    |
+601 | pub(crate) fn spawn_mutation_consumer_with_processor(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `SearchResultCollector` is never constructed
+   --> libs/db/src/vector/benchmark/concurrent.rs:136:8
+    |
+136 | struct SearchResultCollector {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `record`, and `into_results` are never used
+   --> libs/db/src/vector/benchmark/concurrent.rs:142:8
+    |
+141 | impl SearchResultCollector {
+    | -------------------------- associated items in this implementation
+142 |     fn new() -> Self {
+    |        ^^^
+...
+149 |     fn record(&self, query_idx: usize, neighbor_indices: Vec<usize>) {
+    |        ^^^^^^
+...
+155 |     fn into_results(self, num_queries: usize) -> Vec<Vec<usize>> {
+    |        ^^^^^^^^^^^^
+
+warning: function `compute_ground_truth_batch` is never used
+    --> libs/db/src/vector/benchmark/dataset.rs:1282:4
+     |
+1282 | fn compute_ground_truth_batch(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `ground_truth_full` is never read
+  --> libs/db/src/vector/benchmark/sift.rs:46:5
+   |
+39 | pub struct SiftDataset {
+   |            ----------- field in this struct
+...
+46 |     ground_truth_full: Vec<Vec<i32>>,
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `SiftDataset` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated function `from_gray_code` is never used
+   --> libs/db/src/vector/quantization/rabitq.rs:388:14
+    |
+ 68 | impl RaBitQ {
+    | ----------- associated function in this implementation
+...
+388 |     const fn from_gray_code(gray: u8) -> u8 {
+    |              ^^^^^^^^^^^^^^
+
+warning: `motlie-db` (lib) generated 43 warnings (run `cargo fix --lib -p motlie-db` to apply 6 suggestions)
+    Finished `release` profile [optimized] target(s) in 7.96s
+     Running tests/test_vector_concurrent.rs (target/release/deps/test_vector_concurrent-14348b9ba5a9e25b)
+
+running 4 tests
+
+======================================================================
+=== FULL BASELINE: Write-Heavy (2 embeddings, 10k vectors each) ===
+======================================================================
+
+--- Embedding A ---
+
+
+======================================================================
+=== FULL BASELINE: Read-Heavy (2 embeddings, 10k vectors each) ===
+======================================================================
+
+--- Embedding A ---
+
+
+======================================================================
+=== FULL BASELINE: Stress (2 embeddings, 10k vectors each, 60s) ===
+======================================================================
+
+--- Embedding A ---
+
+
+======================================================================
+=== FULL BASELINE: Balanced (2 embeddings, 10k vectors each, 30s) ===
+=== Architecture: MPSC writes, MPMC reads (production path) ===
+======================================================================
+
+--- Embedding A ---
+
+=== Concurrent Benchmark Results ===
+Configuration:
+  Insert Producers: 1 (MPSC → 1 consumer)
+  Search Producers: 4
+  Query Workers: 4 (MPMC pool)
+  Search Mode: Exact
+  Distance: L2
+  Duration: 30.191344998s
+Throughput:
+  Inserts: 199.3 ops/sec
+  Searches: 44.3 ops/sec
+=== Concurrent Metrics Summary ===
+Operations:
+  Inserts: 6017
+  Searches: 1336
+  Deletes: 0
+  Errors: 0
+Insert Latency:
+  Avg: 5.015137ms
+  P50: 1µs
+  P95: 1µs
+  P99: 1µs
+Search Latency:
+  Avg: 90.361145ms
+  P50: 4.096ms
+  P95: 524.288ms
+  P99: 524.288ms
+
+
+
+--- Embedding B ---
+
+test baseline_full_balanced has been running for over 60 seconds
+test baseline_full_read_heavy has been running for over 60 seconds
+test baseline_full_stress has been running for over 60 seconds
+test baseline_full_write_heavy has been running for over 60 seconds
+=== Concurrent Benchmark Results ===
+Configuration:
+  Insert Producers: 1 (MPSC → 1 consumer)
+  Search Producers: 4
+  Query Workers: 4 (MPMC pool)
+  Search Mode: Exact
+  Distance: L2
+  Duration: 30.067237024s
+Throughput:
+  Inserts: 195.9 ops/sec
+  Searches: 43.5 ops/sec
+=== Concurrent Metrics Summary ===
+Operations:
+  Inserts: 5889
+  Searches: 1308
+  Deletes: 0
+  Errors: 0
+Insert Latency:
+  Avg: 5.103128ms
+  P50: 1µs
+  P95: 1µs
+  P99: 1µs
+Search Latency:
+  Avg: 91.916589ms
+  P50: 4.096ms
+  P95: 524.288ms
+  P99: 524.288ms
+
+
+
+=== Combined: Insert 395.2/s, Search 87.8/s ===
+
+test baseline_full_read_heavy ... ok
+=== Concurrent Benchmark Results ===
+Configuration:
+  Insert Producers: 8 (MPSC → 1 consumer)
+  Search Producers: 8
+  Query Workers: 8 (MPMC pool)
+  Search Mode: Exact
+  Distance: L2
+  Duration: 71.557235694s
+Throughput:
+  Inserts: 139.7 ops/sec
+  Searches: 28.8 ops/sec
+=== Concurrent Metrics Summary ===
+Operations:
+  Inserts: 10000
+  Searches: 2064
+  Deletes: 0
+  Errors: 0
+Insert Latency:
+  Avg: 1.41062ms
+  P50: 1µs
+  P95: 1µs
+  P99: 2µs
+Search Latency:
+  Avg: 237.813486ms
+  P50: 16.384ms
+  P95: 524.288ms
+  P99: 524.288ms
+
+
+
+--- Embedding B ---
+
+=== Concurrent Benchmark Results ===
+Configuration:
+  Insert Producers: 4 (MPSC → 1 consumer)
+  Search Producers: 1
+  Query Workers: 1 (MPMC pool)
+  Search Mode: Exact
+  Distance: L2
+  Duration: 71.590286542s
+Throughput:
+  Inserts: 139.7 ops/sec
+  Searches: 18.7 ops/sec
+=== Concurrent Metrics Summary ===
+Operations:
+  Inserts: 10000
+  Searches: 1340
+  Deletes: 0
+  Errors: 0
+Insert Latency:
+  Avg: 2.510969ms
+  P50: 1µs
+  P95: 1µs
+  P99: 2µs
+Search Latency:
+  Avg: 22.475178ms
+  P50: 1.024ms
+  P95: 4.096ms
+  P99: 524.288ms
+
+
+
+--- Embedding B ---
+
+=== Concurrent Benchmark Results ===
+Configuration:
+  Insert Producers: 2 (MPSC → 1 consumer)
+  Search Producers: 2
+  Query Workers: 2 (MPMC pool)
+  Search Mode: Exact
+  Distance: L2
+  Duration: 72.819555747s
+Throughput:
+  Inserts: 137.3 ops/sec
+  Searches: 18.8 ops/sec
+=== Concurrent Metrics Summary ===
+Operations:
+  Inserts: 10000
+  Searches: 1370
+  Deletes: 0
+  Errors: 0
+Insert Latency:
+  Avg: 4.425762ms
+  P50: 1µs
+  P95: 1µs
+  P99: 1µs
+Search Latency:
+  Avg: 45.3779ms
+  P50: 2.048ms
+  P95: 524.288ms
+  P99: 524.288ms
+
+
+
+--- Embedding B ---
+
+=== Concurrent Benchmark Results ===
+Configuration:
+  Insert Producers: 8 (MPSC → 1 consumer)
+  Search Producers: 8
+  Query Workers: 8 (MPMC pool)
+  Search Mode: Exact
+  Distance: L2
+  Duration: 69.802854209s
+Throughput:
+  Inserts: 143.3 ops/sec
+  Searches: 30.0 ops/sec
+=== Concurrent Metrics Summary ===
+Operations:
+  Inserts: 10000
+  Searches: 2096
+  Deletes: 0
+  Errors: 0
+Insert Latency:
+  Avg: 1.477474ms
+  P50: 1µs
+  P95: 1µs
+  P99: 1µs
+Search Latency:
+  Avg: 231.381532ms
+  P50: 8.192ms
+  P95: 524.288ms
+  P99: 524.288ms
+
+
+
+=== Combined: Insert 283.0/s, Search 58.9/s ===
+
+test baseline_full_stress ... ok
+=== Concurrent Benchmark Results ===
+Configuration:
+  Insert Producers: 4 (MPSC → 1 consumer)
+  Search Producers: 1
+  Query Workers: 1 (MPMC pool)
+  Search Mode: Exact
+  Distance: L2
+  Duration: 70.090130821s
+Throughput:
+  Inserts: 142.7 ops/sec
+  Searches: 19.5 ops/sec
+=== Concurrent Metrics Summary ===
+Operations:
+  Inserts: 10000
+  Searches: 1370
+  Deletes: 0
+  Errors: 0
+Insert Latency:
+  Avg: 2.405689ms
+  P50: 1µs
+  P95: 1µs
+  P99: 1µs
+Search Latency:
+  Avg: 21.941992ms
+  P50: 1.024ms
+  P95: 2.048ms
+  P99: 524.288ms
+
+
+
+=== Combined: Insert 282.4/s, Search 38.3/s ===
+
+test baseline_full_write_heavy ... ok
+=== Concurrent Benchmark Results ===
+Configuration:
+  Insert Producers: 2 (MPSC → 1 consumer)
+  Search Producers: 2
+  Query Workers: 2 (MPMC pool)
+  Search Mode: Exact
+  Distance: L2
+  Duration: 70.247643608s
+Throughput:
+  Inserts: 142.4 ops/sec
+  Searches: 19.5 ops/sec
+=== Concurrent Metrics Summary ===
+Operations:
+  Inserts: 10000
+  Searches: 1370
+  Deletes: 0
+  Errors: 0
+Insert Latency:
+  Avg: 4.329963ms
+  P50: 1µs
+  P95: 1µs
+  P99: 1µs
+Search Latency:
+  Avg: 43.977412ms
+  P50: 2.048ms
+  P95: 524.288ms
+  P99: 524.288ms
+
+
+
+======================================================================
+=== AGGREGATE SUMMARY ===
+======================================================================
+Embeddings: 2
+Total vectors: 10000 (A) + 10000 (B)
+Combined insert throughput: 279.7 ops/sec
+Combined search throughput: 38.3 ops/sec
+Avg insert P99: 1µs
+Avg search P99: 524.288ms
+======================================================================
+
+test baseline_full_balanced ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 143.34s
+

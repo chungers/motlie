@@ -370,7 +370,16 @@ SIMD: NEON (aarch64)
 - HNSW: M=16, ef_construction=100, ef_search=50
 - 2 embeddings, 10k vectors each
 
-**Results (Run 3 - January 17, 2026):**
+**Results (Run 4 - January 17, 2026):**
+
+| Scenario | Mutation Queue | Query Queue | Insert/s | Search/s | Insert P99 | Search P50 | Errors |
+|----------|----------------|-------------|----------|----------|------------|------------|--------|
+| Balanced | 2 prod → 1 cons | 2 prod → 2 workers | 395.2 | 87.8 | 1µs | 4ms | 0 |
+| Read-heavy | 1 prod → 1 cons | 4 prod → 4 workers | 279.7 | 38.3 | 1µs | 2ms | 0 |
+| Write-heavy | 4 prod → 1 cons | 1 prod → 1 worker | 282.4 | 38.3 | 1µs | 1ms | 0 |
+| Stress | 8 prod → 1 cons | 8 prod → 8 workers | 283.0 | 58.9 | 2µs | 16ms | 0 |
+
+**Results (Run 3 - earlier):**
 
 | Scenario | Mutation Queue | Query Queue | Insert/s | Search/s | Insert P99 | Search P50 | Errors |
 |----------|----------------|-------------|----------|----------|------------|------------|--------|
@@ -414,9 +423,8 @@ SIMD: NEON (aarch64)
 - **More query workers improves search throughput**: Stress (8W) = 107/s vs Balanced (2W) = 52/s
 - **Search P50 improves with fewer concurrent searches**: Write-heavy (1S) = 256µs vs Stress (8S) = 16ms
 - **Read-heavy achieves highest throughput**: Fewer inserts = more resources for queries
-CODEX: These baseline numbers are not reproducible from code alone; no run logs or scripts included. Treat as provisional until a run artifact is linked.
-CODEX: Repro command exists; still missing run artifact or raw log capture in-repo. If baselines are used for regression, capture the logs or a CSV snapshot.
-CODEX: No log artifacts are checked into repo; consider saving `bench_vector sweep` CSV output alongside this doc for reproducibility.
+
+**Artifacts:** [libs/db/benches/results/baseline/throughput_baseline.log](../../benches/results/baseline/throughput_baseline.log)
 
 ### Quality Baseline (LAION)
 
@@ -435,26 +443,34 @@ CODEX: No log artifacts are checked into repo; consider saving `bench_vector swe
 
 | Search Mode | ef_search | Recall@10 | Latency P50 | Latency P99 | QPS | Notes |
 |-------------|-----------|-----------|-------------|-------------|-----|-------|
-| Exact (HNSW) | 100 | **83.1%** | 1.96ms | 4.59ms | 464 | HNSW approximation only |
-| Exact (HNSW) | 200 | **83.1%** | 1.88ms | 4.26ms | 490 | Higher ef, same recall |
-| RaBitQ-2bit | 200 | **100.0%** | 4.21ms | 11.53ms | 212 | With rerank=10 refinement |
-| RaBitQ-4bit | 200 | **100.0%** | 4.00ms | 5.50ms | 242 | With rerank=10 refinement |
+| Exact (HNSW) | 100 | **83.5%** | 2.05ms | 5.12ms | 440 | HNSW approximation only |
+| Exact (HNSW) | 200 | **83.5%** | 1.95ms | 5.77ms | 459 | Higher ef, same recall |
+| RaBitQ-2bit | 200 | **100.0%** | 4.14ms | 9.93ms | 215 | With rerank=10 refinement |
+| RaBitQ-4bit | 200 | **100.0%** | 4.18ms | 6.08ms | 233 | With rerank=10 refinement |
 
 **Run commands:**
 ```bash
-# HNSW quality baseline
+# HNSW quality baseline (results saved to libs/db/benches/results/baseline/)
 cargo run --release --bin bench_vector -- sweep \
     --dataset laion --data-dir ~/data/laion \
     --num-vectors 10000 --num-queries 100 \
-    --ef 100,200 --k 10 --assert-recall 0.80
+    --ef 100,200 --k 10 \
+    --results-dir libs/db/benches/results/baseline \
+    --assert-recall 0.80
 
 # RaBitQ quality baseline
 cargo run --release --bin bench_vector -- sweep \
     --dataset laion --data-dir ~/data/laion \
     --num-vectors 10000 --num-queries 100 \
     --rabitq --bits 2,4 --rerank 10 --ef 200 --k 10 \
+    --results-dir libs/db/benches/results/baseline \
     --assert-recall 0.80
 ```
+
+**Artifacts:**
+- [libs/db/benches/results/baseline/hnsw_sweep.log](../../benches/results/baseline/hnsw_sweep.log)
+- [libs/db/benches/results/baseline/rabitq_sweep.log](../../benches/results/baseline/rabitq_sweep.log)
+- [libs/db/benches/results/baseline/rabitq_results.csv](../../benches/results/baseline/rabitq_results.csv)
 
 **Observations:**
 - **RaBitQ with reranking achieves 100% recall** on this dataset
@@ -577,9 +593,10 @@ careful design to avoid measuring concurrency effects on recall accuracy.
 - [tests/test_vector_baseline.rs](../../tests/test_vector_baseline.rs) - LAION recall baseline tests ⚠️ *deprecated in favor of bench_vector*
 - [tests/test_vector_concurrent.rs](../../tests/test_vector_concurrent.rs) - Throughput baseline tests
 
----
+### Baseline Artifacts
 
-## CODEX Additional Feedback (Post-update)
-
-- `test_vector_baseline.rs` is now smoke-only; update any references that imply it provides recall baselines.
-- Throughput baselines are reproducible via `baseline_full_*` tests, but no raw logs/CSV are committed; add artifacts if these numbers are meant for regression gates.
+All baseline logs and CSV results are stored in [libs/db/benches/results/baseline/](../../benches/results/baseline/):
+- `hnsw_sweep.log` - HNSW quality baseline run log
+- `rabitq_sweep.log` - RaBitQ quality baseline run log
+- `rabitq_results.csv` - RaBitQ results in CSV format
+- `throughput_baseline.log` - Concurrent throughput baseline run log
