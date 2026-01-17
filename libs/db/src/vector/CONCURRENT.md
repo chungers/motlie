@@ -30,10 +30,10 @@ This document tracks the implementation of concurrent operation testing and benc
 | `test_multi_embedding_concurrent_access` | Multi-index concurrent r/w | 3 indices, 6 writers, 6 readers | ✅ |
 | `test_cache_isolation_under_load` | Cache isolation validation | 2 indices, 2 writers, 2 readers | ✅ |
 | `benchmark_quick_validation` | Quick benchmark for CI (feature: smoke-test) | 2 writers, 2 readers | ✅ |
-| `benchmark_baseline_balanced` | Legacy quick baseline (feature: smoke-test, ignored) | 4 writers, 4 readers | ✅ |
-| `benchmark_baseline_read_heavy` | Legacy quick baseline (feature: smoke-test, ignored) | 1 writer, 8 readers | ✅ |
-| `benchmark_baseline_write_heavy` | Legacy quick baseline (feature: smoke-test, ignored) | 8 writers, 1 reader | ✅ |
-| `benchmark_baseline_stress` | Legacy quick baseline (feature: smoke-test, ignored) | 16 writers, 16 readers | ✅ |
+| `baseline_full_balanced` | Full baseline (ignored) | 2 writers, 2 readers | ✅ |
+| `baseline_full_read_heavy` | Full baseline (ignored) | 1 writer, 4 readers | ✅ |
+| `baseline_full_write_heavy` | Full baseline (ignored) | 4 writers, 1 reader | ✅ |
+| `baseline_full_stress` | Full baseline (ignored) | 8 writers, 8 readers | ✅ |
 
 CODEX: Verified all listed tests exist in `libs/db/tests/test_vector_concurrent.rs` and use `insert_vector_atomic()` (single-transaction insert + HNSW).
 CODEX: Thread config counts match test code; cache isolation test validates vec_id embedding prefixes.
