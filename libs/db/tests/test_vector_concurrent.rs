@@ -57,7 +57,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use motlie_db::rocksdb::ColumnFamily;
-use motlie_db::vector::benchmark::{BenchConfig, ConcurrentBenchmark, ConcurrentMetrics};
+use motlie_db::vector::benchmark::{
+    save_benchmark_results_csv, BenchConfig, BenchResult, ConcurrentBenchmark, ConcurrentMetrics,
+};
 use motlie_db::vector::hnsw::{self, Config as HnswConfig};
 use motlie_db::vector::schema::{EmbeddingCode, VectorCfKey, VectorCfValue, Vectors};
 use motlie_db::vector::{cache::NavigationCache, Distance, Storage};
@@ -1134,6 +1136,36 @@ async fn benchmark_baseline_stress() {
 const EMBEDDING_BASELINE_A: EmbeddingCode = 100;
 const EMBEDDING_BASELINE_B: EmbeddingCode = 200;
 
+/// Default path for baseline CSV output.
+/// Can be overridden with BASELINE_CSV_DIR environment variable.
+/// Note: Tests run from the workspace root, not libs/db/.
+fn baseline_csv_dir() -> std::path::PathBuf {
+    std::env::var("BASELINE_CSV_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("benches/results/baseline"))
+}
+
+/// Save a single scenario result to CSV.
+fn save_scenario_csv(scenario: &str, result_a: &BenchResult, result_b: &BenchResult) {
+    let csv_dir = baseline_csv_dir();
+    if let Err(e) = std::fs::create_dir_all(&csv_dir) {
+        eprintln!("Warning: Could not create CSV dir {:?}: {}", csv_dir, e);
+        return;
+    }
+
+    let csv_path = csv_dir.join(format!("throughput_{}.csv", scenario));
+    let results = vec![
+        (format!("{}_embedding_a", scenario), result_a.clone()),
+        (format!("{}_embedding_b", scenario), result_b.clone()),
+    ];
+
+    if let Err(e) = save_benchmark_results_csv(&results, &csv_path) {
+        eprintln!("Warning: Could not save CSV to {:?}: {}", csv_path, e);
+    } else {
+        println!("Saved results to {:?}", csv_path);
+    }
+}
+
 /// Full baseline benchmark meeting all minimum requirements.
 /// - 2 embeddings (L2 distance, separate registrations)
 /// - 10,000 vectors per embedding (20,000 total)
@@ -1195,6 +1227,9 @@ async fn baseline_full_balanced() {
     println!("Avg search P99: {:?}",
              (result_a.metrics.search_p99 + result_b.metrics.search_p99) / 2);
     println!("{}\n", "=".repeat(70));
+
+    // Save CSV
+    save_scenario_csv("balanced", &result_a, &result_b);
 }
 
 /// Full baseline: Read-heavy workload
@@ -1239,6 +1274,9 @@ async fn baseline_full_read_heavy() {
     println!("\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
              result_a.insert_throughput + result_b.insert_throughput,
              result_a.search_throughput + result_b.search_throughput);
+
+    // Save CSV
+    save_scenario_csv("read_heavy", &result_a, &result_b);
 }
 
 /// Full baseline: Write-heavy workload
@@ -1283,6 +1321,9 @@ async fn baseline_full_write_heavy() {
     println!("\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
              result_a.insert_throughput + result_b.insert_throughput,
              result_a.search_throughput + result_b.search_throughput);
+
+    // Save CSV
+    save_scenario_csv("write_heavy", &result_a, &result_b);
 }
 
 /// Full baseline: Stress test
@@ -1328,4 +1369,7 @@ async fn baseline_full_stress() {
     println!("\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
              result_a.insert_throughput + result_b.insert_throughput,
              result_a.search_throughput + result_b.search_throughput);
+
+    // Save CSV
+    save_scenario_csv("stress", &result_a, &result_b);
 }
