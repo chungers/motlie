@@ -461,24 +461,10 @@ warning: associated function `from_gray_code` is never used
     |              ^^^^^^^^^^^^^^
 
 warning: `motlie-db` (lib) generated 43 warnings (run `cargo fix --lib -p motlie-db` to apply 6 suggestions)
-    Finished `release` profile [optimized] target(s) in 7.96s
+    Finished `release` profile [optimized] target(s) in 7.91s
      Running tests/test_vector_concurrent.rs (target/release/deps/test_vector_concurrent-14348b9ba5a9e25b)
 
 running 4 tests
-
-======================================================================
-=== FULL BASELINE: Write-Heavy (2 embeddings, 10k vectors each) ===
-======================================================================
-
---- Embedding A ---
-
-
-======================================================================
-=== FULL BASELINE: Read-Heavy (2 embeddings, 10k vectors each) ===
-======================================================================
-
---- Embedding A ---
-
 
 ======================================================================
 === FULL BASELINE: Stress (2 embeddings, 10k vectors each, 60s) ===
@@ -494,6 +480,20 @@ running 4 tests
 
 --- Embedding A ---
 
+
+======================================================================
+=== FULL BASELINE: Write-Heavy (2 embeddings, 10k vectors each) ===
+======================================================================
+
+--- Embedding A ---
+
+
+======================================================================
+=== FULL BASELINE: Read-Heavy (2 embeddings, 10k vectors each) ===
+======================================================================
+
+--- Embedding A ---
+
 === Concurrent Benchmark Results ===
 Configuration:
   Insert Producers: 1 (MPSC → 1 consumer)
@@ -501,23 +501,23 @@ Configuration:
   Query Workers: 4 (MPMC pool)
   Search Mode: Exact
   Distance: L2
-  Duration: 30.191344998s
+  Duration: 30.502876162s
 Throughput:
-  Inserts: 199.3 ops/sec
-  Searches: 44.3 ops/sec
+  Inserts: 201.5 ops/sec
+  Searches: 44.8 ops/sec
 === Concurrent Metrics Summary ===
 Operations:
-  Inserts: 6017
-  Searches: 1336
+  Inserts: 6145
+  Searches: 1368
   Deletes: 0
   Errors: 0
 Insert Latency:
-  Avg: 5.015137ms
+  Avg: 4.961347ms
   P50: 1µs
   P95: 1µs
   P99: 1µs
 Search Latency:
-  Avg: 90.361145ms
+  Avg: 89.158266ms
   P50: 4.096ms
   P95: 524.288ms
   P99: 524.288ms
@@ -537,32 +537,65 @@ Configuration:
   Query Workers: 4 (MPMC pool)
   Search Mode: Exact
   Distance: L2
-  Duration: 30.067237024s
+  Duration: 30.463569638s
 Throughput:
-  Inserts: 195.9 ops/sec
-  Searches: 43.5 ops/sec
+  Inserts: 197.5 ops/sec
+  Searches: 43.9 ops/sec
 === Concurrent Metrics Summary ===
 Operations:
-  Inserts: 5889
-  Searches: 1308
+  Inserts: 6017
+  Searches: 1336
   Deletes: 0
   Errors: 0
 Insert Latency:
-  Avg: 5.103128ms
+  Avg: 5.060304ms
   P50: 1µs
   P95: 1µs
   P99: 1µs
 Search Latency:
-  Avg: 91.916589ms
+  Avg: 91.174939ms
   P50: 4.096ms
   P95: 524.288ms
   P99: 524.288ms
 
 
 
-=== Combined: Insert 395.2/s, Search 87.8/s ===
+=== Combined: Insert 399.0/s, Search 88.7/s ===
 
+Saved results to "benches/results/baseline/throughput_read_heavy.csv"
 test baseline_full_read_heavy ... ok
+=== Concurrent Benchmark Results ===
+Configuration:
+  Insert Producers: 4 (MPSC → 1 consumer)
+  Search Producers: 1
+  Query Workers: 1 (MPMC pool)
+  Search Mode: Exact
+  Distance: L2
+  Duration: 71.019323122s
+Throughput:
+  Inserts: 140.8 ops/sec
+  Searches: 19.3 ops/sec
+=== Concurrent Metrics Summary ===
+Operations:
+  Inserts: 10000
+  Searches: 1370
+  Deletes: 0
+  Errors: 0
+Insert Latency:
+  Avg: 2.415941ms
+  P50: 1µs
+  P95: 1µs
+  P99: 2µs
+Search Latency:
+  Avg: 22.174982ms
+  P50: 512µs
+  P95: 2.048ms
+  P99: 524.288ms
+
+
+
+--- Embedding B ---
+
 === Concurrent Benchmark Results ===
 Configuration:
   Insert Producers: 8 (MPSC → 1 consumer)
@@ -570,23 +603,23 @@ Configuration:
   Query Workers: 8 (MPMC pool)
   Search Mode: Exact
   Distance: L2
-  Duration: 71.557235694s
+  Duration: 71.932321425s
 Throughput:
-  Inserts: 139.7 ops/sec
-  Searches: 28.8 ops/sec
+  Inserts: 139.0 ops/sec
+  Searches: 28.2 ops/sec
 === Concurrent Metrics Summary ===
 Operations:
   Inserts: 10000
-  Searches: 2064
+  Searches: 2032
   Deletes: 0
   Errors: 0
 Insert Latency:
-  Avg: 1.41062ms
+  Avg: 1.394216ms
   P50: 1µs
   P95: 1µs
   P99: 2µs
 Search Latency:
-  Avg: 237.813486ms
+  Avg: 237.792411ms
   P50: 16.384ms
   P95: 524.288ms
   P99: 524.288ms
@@ -597,15 +630,15 @@ Search Latency:
 
 === Concurrent Benchmark Results ===
 Configuration:
-  Insert Producers: 4 (MPSC → 1 consumer)
-  Search Producers: 1
-  Query Workers: 1 (MPMC pool)
+  Insert Producers: 2 (MPSC → 1 consumer)
+  Search Producers: 2
+  Query Workers: 2 (MPMC pool)
   Search Mode: Exact
   Distance: L2
-  Duration: 71.590286542s
+  Duration: 72.351736456s
 Throughput:
-  Inserts: 139.7 ops/sec
-  Searches: 18.7 ops/sec
+  Inserts: 138.2 ops/sec
+  Searches: 18.5 ops/sec
 === Concurrent Metrics Summary ===
 Operations:
   Inserts: 10000
@@ -613,45 +646,13 @@ Operations:
   Deletes: 0
   Errors: 0
 Insert Latency:
-  Avg: 2.510969ms
+  Avg: 4.465961ms
   P50: 1µs
   P95: 1µs
-  P99: 2µs
+  P99: 1µs
 Search Latency:
-  Avg: 22.475178ms
+  Avg: 44.798299ms
   P50: 1.024ms
-  P95: 4.096ms
-  P99: 524.288ms
-
-
-
---- Embedding B ---
-
-=== Concurrent Benchmark Results ===
-Configuration:
-  Insert Producers: 2 (MPSC → 1 consumer)
-  Search Producers: 2
-  Query Workers: 2 (MPMC pool)
-  Search Mode: Exact
-  Distance: L2
-  Duration: 72.819555747s
-Throughput:
-  Inserts: 137.3 ops/sec
-  Searches: 18.8 ops/sec
-=== Concurrent Metrics Summary ===
-Operations:
-  Inserts: 10000
-  Searches: 1370
-  Deletes: 0
-  Errors: 0
-Insert Latency:
-  Avg: 4.425762ms
-  P50: 1µs
-  P95: 1µs
-  P99: 1µs
-Search Latency:
-  Avg: 45.3779ms
-  P50: 2.048ms
   P95: 524.288ms
   P99: 524.288ms
 
@@ -659,39 +660,6 @@ Search Latency:
 
 --- Embedding B ---
 
-=== Concurrent Benchmark Results ===
-Configuration:
-  Insert Producers: 8 (MPSC → 1 consumer)
-  Search Producers: 8
-  Query Workers: 8 (MPMC pool)
-  Search Mode: Exact
-  Distance: L2
-  Duration: 69.802854209s
-Throughput:
-  Inserts: 143.3 ops/sec
-  Searches: 30.0 ops/sec
-=== Concurrent Metrics Summary ===
-Operations:
-  Inserts: 10000
-  Searches: 2096
-  Deletes: 0
-  Errors: 0
-Insert Latency:
-  Avg: 1.477474ms
-  P50: 1µs
-  P95: 1µs
-  P99: 1µs
-Search Latency:
-  Avg: 231.381532ms
-  P50: 8.192ms
-  P95: 524.288ms
-  P99: 524.288ms
-
-
-
-=== Combined: Insert 283.0/s, Search 58.9/s ===
-
-test baseline_full_stress ... ok
 === Concurrent Benchmark Results ===
 Configuration:
   Insert Producers: 4 (MPSC → 1 consumer)
@@ -699,31 +667,32 @@ Configuration:
   Query Workers: 1 (MPMC pool)
   Search Mode: Exact
   Distance: L2
-  Duration: 70.090130821s
+  Duration: 71.064838388s
 Throughput:
-  Inserts: 142.7 ops/sec
-  Searches: 19.5 ops/sec
+  Inserts: 140.7 ops/sec
+  Searches: 19.0 ops/sec
 === Concurrent Metrics Summary ===
 Operations:
   Inserts: 10000
-  Searches: 1370
+  Searches: 1350
   Deletes: 0
   Errors: 0
 Insert Latency:
-  Avg: 2.405689ms
+  Avg: 2.598358ms
   P50: 1µs
   P95: 1µs
   P99: 1µs
 Search Latency:
-  Avg: 21.941992ms
-  P50: 1.024ms
+  Avg: 22.222022ms
+  P50: 512µs
   P95: 2.048ms
   P99: 524.288ms
 
 
 
-=== Combined: Insert 282.4/s, Search 38.3/s ===
+=== Combined: Insert 281.5/s, Search 38.3/s ===
 
+Saved results to "benches/results/baseline/throughput_write_heavy.csv"
 test baseline_full_write_heavy ... ok
 === Concurrent Benchmark Results ===
 Configuration:
@@ -732,10 +701,10 @@ Configuration:
   Query Workers: 2 (MPMC pool)
   Search Mode: Exact
   Distance: L2
-  Duration: 70.247643608s
+  Duration: 70.73283844s
 Throughput:
-  Inserts: 142.4 ops/sec
-  Searches: 19.5 ops/sec
+  Inserts: 141.4 ops/sec
+  Searches: 19.4 ops/sec
 === Concurrent Metrics Summary ===
 Operations:
   Inserts: 10000
@@ -743,13 +712,13 @@ Operations:
   Deletes: 0
   Errors: 0
 Insert Latency:
-  Avg: 4.329963ms
+  Avg: 4.367625ms
   P50: 1µs
   P95: 1µs
   P99: 1µs
 Search Latency:
-  Avg: 43.977412ms
-  P50: 2.048ms
+  Avg: 44.542191ms
+  P50: 1.024ms
   P95: 524.288ms
   P99: 524.288ms
 
@@ -760,13 +729,48 @@ Search Latency:
 ======================================================================
 Embeddings: 2
 Total vectors: 10000 (A) + 10000 (B)
-Combined insert throughput: 279.7 ops/sec
-Combined search throughput: 38.3 ops/sec
+Combined insert throughput: 279.6 ops/sec
+Combined search throughput: 37.9 ops/sec
 Avg insert P99: 1µs
 Avg search P99: 524.288ms
 ======================================================================
 
+Saved results to "benches/results/baseline/throughput_balanced.csv"
 test baseline_full_balanced ... ok
+=== Concurrent Benchmark Results ===
+Configuration:
+  Insert Producers: 8 (MPSC → 1 consumer)
+  Search Producers: 8
+  Query Workers: 8 (MPMC pool)
+  Search Mode: Exact
+  Distance: L2
+  Duration: 71.635871942s
+Throughput:
+  Inserts: 139.6 ops/sec
+  Searches: 28.8 ops/sec
+=== Concurrent Metrics Summary ===
+Operations:
+  Inserts: 10000
+  Searches: 2064
+  Deletes: 0
+  Errors: 0
+Insert Latency:
+  Avg: 1.473158ms
+  P50: 1µs
+  P95: 1µs
+  P99: 1µs
+Search Latency:
+  Avg: 236.896ms
+  P50: 8.192ms
+  P95: 524.288ms
+  P99: 524.288ms
 
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 143.34s
+
+
+=== Combined: Insert 278.6/s, Search 57.1/s ===
+
+Saved results to "benches/results/baseline/throughput_stress.csv"
+test baseline_full_stress ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 143.83s
 

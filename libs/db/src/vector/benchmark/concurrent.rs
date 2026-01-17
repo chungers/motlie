@@ -680,6 +680,48 @@ impl BenchResult {
             None => "N/A".to_string(),
         }
     }
+
+    /// CSV header for benchmark results.
+    pub fn csv_header() -> &'static str {
+        "scenario,insert_producers,search_producers,query_workers,duration_s,insert_count,search_count,error_count,insert_throughput,search_throughput,insert_p50_us,insert_p99_us,search_p50_us,search_p99_us"
+    }
+
+    /// Convert result to CSV row.
+    pub fn to_csv_row(&self, scenario: &str) -> String {
+        format!(
+            "{},{},{},{},{:.2},{},{},{},{:.1},{:.1},{},{},{},{}",
+            scenario,
+            self.config.insert_producers,
+            self.config.search_producers,
+            self.config.query_workers,
+            self.duration.as_secs_f64(),
+            self.metrics.insert_count,
+            self.metrics.search_count,
+            self.metrics.error_count,
+            self.insert_throughput,
+            self.search_throughput,
+            self.metrics.insert_p50.as_micros(),
+            self.metrics.insert_p99.as_micros(),
+            self.metrics.search_p50.as_micros(),
+            self.metrics.search_p99.as_micros(),
+        )
+    }
+}
+
+/// Save multiple benchmark results to a CSV file.
+pub fn save_benchmark_results_csv(
+    results: &[(String, BenchResult)],
+    csv_path: &std::path::Path,
+) -> Result<()> {
+    use std::fs::File;
+    use std::io::Write;
+
+    let mut file = File::create(csv_path)?;
+    writeln!(file, "{}", BenchResult::csv_header())?;
+    for (scenario, result) in results {
+        writeln!(file, "{}", result.to_csv_row(scenario))?;
+    }
+    Ok(())
 }
 
 impl fmt::Display for BenchResult {

@@ -384,7 +384,7 @@ SIMD: NEON (aarch64)
 | Stress | 8 prod → 1 cons | 8 prod → 8 workers | 283.0 | 58.9 | 2µs | 16ms | 0 |
 
 CODEX: Throughput logs are interleaved across parallel tests in `throughput_baseline.log`; recommend running with `--test-threads=1` or emitting per-scenario logs to make table-to-log mapping unambiguous.
-RESPONSE: Acknowledged. For deterministic log capture, run with `--test-threads=1`. The "AGGREGATE SUMMARY" sections at end of each test provide clear per-scenario totals. Future improvement: add per-scenario CSV export to `ConcurrentBenchmark`.
+RESPONSE: Addressed. Per-scenario CSV export now implemented via `save_benchmark_results_csv()`. Each scenario saves a dedicated CSV file (e.g., `throughput_balanced.csv`). For deterministic log capture, run with `--test-threads=1`.
 
 **Results (Run 3 - earlier):**
 
@@ -431,7 +431,12 @@ RESPONSE: Acknowledged. For deterministic log capture, run with `--test-threads=
 - **Search P50 improves with fewer concurrent searches**: Write-heavy (1S) = 256µs vs Stress (8S) = 16ms
 - **Read-heavy achieves highest throughput**: Fewer inserts = more resources for queries
 
-**Artifacts:** [libs/db/benches/results/baseline/throughput_baseline.log](../../benches/results/baseline/throughput_baseline.log)
+**Artifacts:**
+- [libs/db/benches/results/baseline/throughput_baseline.log](../../benches/results/baseline/throughput_baseline.log)
+- [libs/db/benches/results/baseline/throughput_balanced.csv](../../benches/results/baseline/throughput_balanced.csv)
+- [libs/db/benches/results/baseline/throughput_read_heavy.csv](../../benches/results/baseline/throughput_read_heavy.csv)
+- [libs/db/benches/results/baseline/throughput_write_heavy.csv](../../benches/results/baseline/throughput_write_heavy.csv)
+- [libs/db/benches/results/baseline/throughput_stress.csv](../../benches/results/baseline/throughput_stress.csv)
 
 ### Quality Baseline (LAION)
 
@@ -611,8 +616,12 @@ All baseline logs and CSV results are stored in [libs/db/benches/results/baselin
 - `hnsw_sweep.log` - HNSW quality baseline run log
 - `rabitq_sweep.log` - RaBitQ quality baseline run log
 - `rabitq_results.csv` - RaBitQ results in CSV format
-- `rabitq_sweep.csv` - RaBitQ sweep results (after regenerating with fixed path)
+- `rabitq_sweep.csv` - RaBitQ sweep results
 - `throughput_baseline.log` - Concurrent throughput baseline run log
+- `throughput_balanced.csv` - Balanced scenario throughput results
+- `throughput_read_heavy.csv` - Read-heavy scenario throughput results
+- `throughput_write_heavy.csv` - Write-heavy scenario throughput results
+- `throughput_stress.csv` - Stress scenario throughput results
 
 ---
 
@@ -623,4 +632,4 @@ All baseline logs and CSV results are stored in [libs/db/benches/results/baselin
 - The RaBitQ sweep now writes `rabitq_sweep.csv`, but the artifact still needs regeneration and check-in after this fix.
   - **RESPONSE:** Done. Re-ran sweep; `rabitq_sweep.csv` artifact regenerated and checked in.
 - Throughput baseline logs interleave output across parallel tests, making table-to-log mapping ambiguous; consider `--test-threads=1` or per-scenario log files for deterministic verification.
-  - **RESPONSE:** Acknowledged. Use `--test-threads=1` for deterministic capture. Each test prints "AGGREGATE SUMMARY" with clear totals. Future: add per-scenario CSV export.
+  - **RESPONSE:** Addressed. Per-scenario CSV export implemented via `save_benchmark_results_csv()`. Artifacts: `throughput_balanced.csv`, `throughput_read_heavy.csv`, `throughput_write_heavy.csv`, `throughput_stress.csv`.
