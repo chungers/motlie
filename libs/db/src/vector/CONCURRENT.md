@@ -456,5 +456,6 @@ This is not yet implemented but noted for future enhancement.
 ### Coverage Gaps / Additional Tests
 
 - **Multi-index concurrency under shared `Storage`:** existing `test_vector_multi_embedding.rs` validates isolation, but not concurrent reads/writes across embeddings. Add a test that spawns writers/readers across multiple embeddings concurrently and asserts no cross-contamination.
+- **Cache isolation under load:** caches are keyed by `EmbeddingCode`, but there is no stress test that validates cache correctness under concurrent multi-embedding access. Add a test that performs concurrent inserts/searches across 2–3 embeddings and asserts result IDs belong only to the queried embedding (no cross-contamination).
 - **Concurrent deletes vs searches:** there is no stress test that interleaves deletes with searches; add one to validate tombstone filtering under contention.
 - **Mixed search strategies:** concurrent RaBitQ + exact search over the same embedding (or multiple embeddings) to validate cache correctness under load.
