@@ -2756,6 +2756,30 @@ BatchEdgeCache closes the remaining correctness gap: edges from earlier inserts 
 
 ---
 
+## Phase 6 Status: MPSC/MPMC Public API ✅ Complete
+
+**Date:** January 16, 2026
+
+Phase 6 evaluated and found to be **already implemented** during Phase 5 development. The channel-based infrastructure was built as part of the Writer/Reader implementation.
+
+| Task | Description | Status | Implementation |
+|------|-------------|--------|----------------|
+| 6.1 | MutationExecutor Trait | ✅ | `mutation.rs` - transactional, sync |
+| 6.2 | Mutation Consumer | ✅ | `writer.rs` - MPSC with flush semantics |
+| 6.3 | Query Consumer (MPMC) | ✅ | `reader.rs` - flume-based pool |
+| 6.4 | Reader Handle | ✅ | `reader.rs` - SearchReader with Runnable |
+| 6.5 | Runnable + Runtime | ✅ | `subsystem.rs` - Subsystem::start() pattern |
+| 6.6 | Phase 6 Tests | ✅ | `test_vector_channel.rs` - 6 tests |
+
+**Key Design Decision:** The explicit `Runnable` trait with `start()`/`stop()`/`is_running()` was NOT implemented. Instead, we use the **unified pattern** already established by graph:: and fulltext:::
+- `Subsystem::start()` returns `(Writer, SearchReader)` handles
+- `SubsystemProvider::on_shutdown()` provides graceful shutdown
+- `Writer::is_closed()` / `SearchReader::is_closed()` provide health checks
+
+See [ROADMAP.md#phase-6](./ROADMAP.md#phase-6-mpscmpmc-public-api) for full details.
+
+---
+
 ## References
 
 - [ROADMAP.md](./ROADMAP.md) - Full implementation roadmap

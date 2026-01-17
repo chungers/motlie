@@ -3,7 +3,7 @@
 **Author:** David Chung + Claude
 **Date:** January 2, 2026 (Updated: January 16, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 Complete (Tasks 5.0-5.11), Phase 6-8 Remaining
+**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 Complete (Tasks 5.0-5.11), Phase 6 Complete, Phase 7-8 Remaining
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
@@ -75,8 +75,8 @@ dedicated vector databases or custom storage engines.
 | [Phase 3](#phase-3-batch-operations--deferred-items) | Batch Operations + Deferred Items | ✅ Complete |
 | [Phase 4](#phase-4-rabitq-compression) | RaBitQ Compression + Optimization | ✅ Complete |
 | [Phase 4.5](#phase-45-codex-pre-phase-5-critical-fixes) | CODEX Pre-Phase 5 Critical Fixes | ✅ Complete |
-| [Phase 5](#phase-5-internal-mutationquery-api) | Internal Mutation/Query API | 🚧 In Progress |
-| [Phase 6](#phase-6-mpscmpmc-public-api) | MPSC/MPMC Public API | 🔲 Not Started |
+| [Phase 5](#phase-5-internal-mutationquery-api) | Internal Mutation/Query API | ✅ Complete |
+| [Phase 6](#phase-6-mpscmpmc-public-api) | MPSC/MPMC Public API | ✅ Complete |
 | [Phase 7](#phase-7-async-graph-updater) | Async Graph Updater | 🔲 Not Started |
 | [Phase 8](#phase-8-production-hardening) | Production Hardening | 🔲 Not Started |
 
@@ -7256,6 +7256,8 @@ fn reader_workload(storage: Arc<Storage>, metrics: Arc<BenchMetrics>, duration: 
 
 ## Phase 6: MPSC/MPMC Public API
 
+**Status:** ✅ Complete (January 16, 2026)
+
 **Goal:** Wrap the internal APIs (Phase 5) with channel-based infrastructure matching graph:: and fulltext:: patterns.
 
 **Motivation:** The MPSC/MPMC patterns provide:
@@ -7290,7 +7292,29 @@ fn reader_workload(storage: Arc<Storage>, metrics: Arc<BenchMetrics>, duration: 
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Task 6.1: MutationExecutor Trait
+### Task 6.1: MutationExecutor Trait ✅
+
+**Status:** Complete
+
+**Implementation:** `libs/db/src/vector/mutation.rs`
+
+The trait is synchronous (not async as originally spec'd) to work directly with RocksDB transactions:
+
+```rust
+pub trait MutationExecutor: Send + Sync {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<Option<MutationCacheUpdate>>;
+}
+```
+
+This design exceeds the spec by supporting transactional writes with cache updates.
+
+<details>
+<summary>Original spec (for reference)</summary>
 
 Define the trait that connects mutation types to the internal API:
 
@@ -7347,7 +7371,22 @@ impl MutationExecutor for AddEmbeddingSpec {
 }
 ```
 
-### Task 6.2: Mutation Consumer
+</details>
+
+### Task 6.2: Mutation Consumer ✅
+
+**Status:** Complete
+
+**Implementation:** `libs/db/src/vector/writer.rs`
+
+Implemented with:
+- `Writer` handle with `send()`, `send_sync()`, `flush()`, `is_closed()`
+- `Consumer` with MPSC receiver and Processor
+- `spawn_mutation_consumer_with_storage_autoreg()` for auto-registration
+- FlushMarker with oneshot for blocking flush semantics
+
+<details>
+<summary>Original spec (for reference)</summary>
 
 Implement mutation consumer following graph::writer pattern:
 
@@ -7400,7 +7439,22 @@ pub fn spawn_mutation_consumer(
 }
 ```
 
-### Task 6.3: Query Consumer (MPMC Pool)
+</details>
+
+### Task 6.3: Query Consumer (MPMC Pool) ✅
+
+**Status:** Complete
+
+**Implementation:** `libs/db/src/vector/reader.rs`
+
+Implemented with:
+- `ProcessorConsumer` with flume MPMC receiver
+- `spawn_consumers_with_processor()` spawns N workers sharing processor
+- `spawn_query_consumers_with_storage_autoreg()` for auto-registration
+- Workers compete to receive queries from shared channel
+
+<details>
+<summary>Original spec (for reference)</summary>
 
 Implement MPMC query pool following graph::reader pattern:
 
@@ -7449,7 +7503,22 @@ pub fn spawn_query_consumer_pool(
 }
 ```
 
-### Task 6.4: Reader Handle
+</details>
+
+### Task 6.4: Reader Handle ✅
+
+**Status:** Complete
+
+**Implementation:** `libs/db/src/vector/reader.rs`
+
+Implemented with:
+- `Reader` for basic queries (GetVector, GetInternalId, etc.)
+- `SearchReader` for search queries with embedded Processor (for SearchKNN)
+- `Runnable` trait pattern: `SearchKNN::run(&search_reader, timeout)`
+- `is_closed()` for health checks
+
+<details>
+<summary>Original spec (for reference)</summary>
 
 Implement Reader handle for sending queries:
 
@@ -7504,7 +7573,42 @@ impl Reader {
 }
 ```
 
-### Task 6.5: Runnable Trait
+</details>
+
+### Task 6.5: Runnable Trait + Runtime ✅
+
+**Status:** Complete (design differs from spec)
+
+**Implementation:** `libs/db/src/vector/subsystem.rs`
+
+The explicit `Runnable` trait with `start()`/`stop()`/`is_running()` was NOT implemented.
+Instead, we follow the **unified pattern already used by graph:: and fulltext::**:
+
+```rust
+impl Subsystem {
+    pub fn start(
+        &self,
+        storage: Arc<Storage>,
+        writer_config: WriterConfig,
+        reader_config: ReaderConfig,
+        num_query_workers: usize,
+    ) -> (Writer, SearchReader) { ... }
+}
+
+impl SubsystemProvider<TransactionDB> for Subsystem {
+    fn on_ready(&self, db: &TransactionDB) { /* prewarm */ }
+    fn on_shutdown(&self) { /* flush writer */ }
+}
+```
+
+**Rationale:**
+- `Subsystem::start()` provides startup (returns handles)
+- `SubsystemProvider::on_shutdown()` provides graceful shutdown
+- `Writer::is_closed()` / `SearchReader::is_closed()` provide health checks
+- This pattern is already used by graph:: and fulltext::, providing unified lifecycle
+
+<details>
+<summary>Original spec (for reference)</summary>
 
 Implement Runnable trait for lifecycle management:
 
@@ -7593,7 +7697,29 @@ impl Runnable for Runtime {
 }
 ```
 
-### Task 6.6: Phase 6 Tests
+</details>
+
+### Task 6.6: Phase 6 Tests ✅
+
+**Status:** Complete
+
+**Implementation:** `libs/db/tests/test_vector_channel.rs`
+
+Channel integration tests added:
+
+| Test | Description | Status |
+|------|-------------|--------|
+| `test_mutation_via_writer_consumer` | End-to-end insert via Writer → Consumer → Storage | ✅ |
+| `test_query_via_reader_pool` | Search via SearchReader → ProcessorConsumer pool | ✅ |
+| `test_concurrent_queries_mpmc` | 100 concurrent searches via MPMC channel | ✅ |
+| `test_subsystem_start_lifecycle` | Subsystem::start() returns working handles | ✅ |
+| `test_writer_flush_semantics` | Flush guarantees visibility | ✅ |
+| `test_channel_close_propagation` | Writer/Reader detect channel close | ✅ |
+
+All 6 tests pass.
+
+<details>
+<summary>Original spec (for reference)</summary>
 
 ```rust
 // libs/db/src/vector/tests/channel_tests.rs
@@ -7686,25 +7812,27 @@ mod channel_tests {
 }
 ```
 
+</details>
+
 ### Effort Breakdown
 
-| Task | Description | Effort |
-|------|-------------|--------|
-| 6.1 | MutationExecutor trait | 0.5 day |
-| 6.2 | Mutation Consumer | 0.5 day |
-| 6.3 | Query Consumer (MPMC pool) | 1 day |
-| 6.4 | Reader handle | 0.5 day |
-| 6.5 | Runnable trait + Runtime | 1 day |
-| 6.6 | Tests | 0.5 day |
-| **Total** | | **4 days** |
+| Task | Description | Effort | Status |
+|------|-------------|--------|--------|
+| 6.1 | MutationExecutor trait | 0.5 day | ✅ |
+| 6.2 | Mutation Consumer | 0.5 day | ✅ |
+| 6.3 | Query Consumer (MPMC pool) | 1 day | ✅ |
+| 6.4 | Reader handle | 0.5 day | ✅ |
+| 6.5 | Runnable trait + Runtime | 1 day | ✅ (Subsystem pattern) |
+| 6.6 | Tests | 0.5 day | ✅ |
+| **Total** | | **4 days** | **Complete** |
 
 **Acceptance Criteria:**
-- [ ] Mutations execute via channel consumer
-- [ ] Queries use MPMC pool with configurable workers
-- [ ] Writer.flush() blocks until mutations processed
-- [ ] Reader.search() returns results via oneshot
-- [ ] Runtime start/stop lifecycle works correctly
-- [ ] Concurrent query tests pass
+- [x] Mutations execute via channel consumer
+- [x] Queries use MPMC pool with configurable workers
+- [x] Writer.flush() blocks until mutations processed
+- [x] Reader.search() returns results via oneshot
+- [x] Subsystem::start() lifecycle works correctly (replaces Runtime)
+- [x] Concurrent query tests pass (100 concurrent, 100% success)
 
 ---
 
