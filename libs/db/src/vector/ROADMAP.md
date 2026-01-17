@@ -7141,9 +7141,15 @@ pub struct MetricsSummary {
 
 ### Task 5.11: Concurrent Benchmark Baseline ✅
 
-**Status:** Complete ([CONCURRENT.md](./CONCURRENT.md))
+**Status:** Complete ([CONCURRENT.md](./CONCURRENT.md), [BASELINE.md](./BASELINE.md))
 
 **Goal:** Establish baseline metrics for concurrent operations.
+
+**Baseline Requirements:** See [BASELINE.md](./BASELINE.md) for:
+- Minimum 10,000 vectors per embedding
+- Minimum 2 embedding spaces
+- Full environment documentation template
+- Regression tracking strategy
 
 **Location:** `libs/db/src/vector/benchmark/` subcrate
 

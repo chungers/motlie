@@ -15,6 +15,17 @@ This document defines a comprehensive baseline benchmark suite for the vector su
 3. **Document expected performance** for capacity planning
 4. **Validate concurrent correctness** under load
 
+### Minimum Requirements
+
+All baseline benchmarks MUST meet these minimum requirements:
+
+| Requirement | Minimum | Rationale |
+|-------------|---------|-----------|
+| **Vector count** | 10,000 per embedding | Realistic index size for HNSW graph structure |
+| **Embedding spaces** | 2 | Validate multi-tenancy under load |
+| **Duration** | 30 seconds | Statistical significance |
+| **Environment docs** | Complete | Reproducibility |
+
 ---
 
 ## Benchmark Scenarios
@@ -171,32 +182,70 @@ BenchConfig::stress()  // 16 writers, 16 readers
 
 ## Environment Requirements
 
-### Hardware Baseline
+### Hardware Documentation Template
 
-Document the reference hardware for reproducible results:
-
-```
-CPU: [Document specific CPU]
-Cores: [N cores / N threads]
-RAM: [N GB]
-Storage: [SSD type, IOPS]
-OS: [Linux version]
-```
-
-### Software Configuration
+Every recorded baseline MUST document the complete hardware environment:
 
 ```
-Rust: 1.XX.X
-RocksDB: X.X.X
-Build: release (--release)
+=== Hardware Environment ===
+Machine Type: [Physical / VM / Cloud instance type]
+CPU Model: [Full model name from /proc/cpuinfo or lscpu]
+CPU Architecture: [x86_64 / aarch64 / etc.]
+Physical Cores: [N]
+Logical Cores: [N threads]
+CPU Frequency: [Base / Boost GHz]
+L1/L2/L3 Cache: [Sizes]
+RAM Total: [N GB]
+RAM Type: [DDR4/DDR5, Speed]
+Storage Type: [NVMe SSD / SATA SSD / HDD]
+Storage Model: [Model name if available]
+Storage IOPS: [Advertised or measured]
+```
+
+### Software Configuration Template
+
+```
+=== Software Environment ===
+OS: [Distribution and version]
+Kernel: [uname -r output]
+Rust Version: [rustc --version]
+Cargo Version: [cargo --version]
+LLVM Version: [if relevant]
+RocksDB Version: [from Cargo.lock]
+Build Profile: release
+Build Flags: [Any custom RUSTFLAGS]
+SIMD: [Enabled features: AVX2/NEON/etc.]
+```
+
+### Capture Environment Script
+
+```bash
+#!/bin/bash
+echo "=== Hardware Environment ==="
+echo "Machine Type: $(hostnamectl | grep 'Chassis' | cut -d: -f2 | xargs)"
+echo "CPU Model: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs)"
+echo "CPU Architecture: $(uname -m)"
+echo "Physical Cores: $(lscpu | grep '^CPU(s):' | cut -d: -f2 | xargs)"
+echo "CPU Frequency: $(lscpu | grep 'MHz' | head -1 | cut -d: -f2 | xargs) MHz"
+echo "RAM Total: $(free -h | grep Mem | awk '{print $2}')"
+echo "Storage: $(df -h . | tail -1 | awk '{print $1}')"
+
+echo ""
+echo "=== Software Environment ==="
+echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')"
+echo "Kernel: $(uname -r)"
+echo "Rust: $(rustc --version)"
+echo "Cargo: $(cargo --version)"
 ```
 
 ### Pre-run Checklist
 
-- [ ] System idle (no background load)
+- [ ] Environment documented using template above
+- [ ] System idle (no background load >5% CPU)
 - [ ] Fresh storage directory (no pre-existing data)
 - [ ] Release build (`cargo build --release`)
-- [ ] Warmup run discarded (first run may be cold)
+- [ ] Warmup run completed and discarded
+- [ ] Multiple runs averaged (minimum 3 for variance)
 
 ---
 
@@ -305,33 +354,76 @@ benchmark:
 
 ## Recorded Baselines
 
-### Baseline v1 (January 16, 2026)
+### Baseline Template
+
+Each recorded baseline must include:
+
+1. **Environment** - Full hardware/software documentation (see templates above)
+2. **Configuration** - Exact benchmark parameters used
+3. **Results** - All metrics with statistical context
+4. **Validation** - Confirmation of minimum requirements met
+
+### Baseline v1 (Pending)
+
+**Status:** Not yet recorded - requires full benchmark run
+
+**Minimum Requirements Checklist:**
+- [ ] 10,000+ vectors per embedding
+- [ ] 2+ embedding spaces
+- [ ] 30+ second duration per scenario
+- [ ] Environment fully documented
+- [ ] Release build
 
 **Environment:**
-- Hardware: [TBD - document when running full suite]
-- Rust: [version]
-- Build: release
+```
+=== Hardware Environment ===
+Machine Type: [TBD]
+CPU Model: [TBD]
+CPU Architecture: [TBD]
+Physical Cores: [TBD]
+Logical Cores: [TBD]
+CPU Frequency: [TBD]
+RAM Total: [TBD]
+Storage Type: [TBD]
 
-**Quick Validation (2w/2r, 5s, 64D):**
+=== Software Environment ===
+OS: [TBD]
+Kernel: [TBD]
+Rust Version: [TBD]
+RocksDB Version: [TBD]
+Build Profile: release
+SIMD: [TBD]
+```
+
+**Configuration:**
+```
+Embeddings: 2 (embedding_a: 128D L2, embedding_b: 128D Cosine)
+Vectors per embedding: 10,000
+Duration: 30s per scenario
+HNSW: M=16, ef_construction=100, ef_search=50
+```
+
+**Results:** [TBD - run benchmark suite]
+
+| Scenario | Embeddings | Vectors | Insert/s | Search/s | Insert P99 | Search P99 | Errors |
+|----------|------------|---------|----------|----------|------------|------------|--------|
+| Read-heavy | 2 | 20,000 | - | - | - | - | - |
+| Write-heavy | 2 | 20,000 | - | - | - | - | - |
+| Balanced | 2 | 20,000 | - | - | - | - | - |
+| Stress | 2 | 20,000 | - | - | - | - | - |
+
+### Historical Quick Validation (Reference Only)
+
+*Note: This quick validation does NOT meet minimum requirements (insufficient scale/embeddings). Retained for reference only.*
+
+**Config:** 2 writers, 2 readers, 5s, 64D, 1 embedding, ~500 vectors
 
 | Metric | Value |
 |--------|-------|
 | Insert throughput | 77.6 ops/sec |
 | Search throughput | 37,409 ops/sec |
-| Insert P50 | 16ms |
 | Insert P99 | 33ms |
-| Search P50 | 32µs |
 | Search P99 | 32µs |
-| Errors | 4 |
-
-**Full Suite:** [TBD - run and record]
-
-| Scenario | Insert/s | Search/s | Insert P99 | Search P99 | Errors |
-|----------|----------|----------|------------|------------|--------|
-| Read-heavy | - | - | - | - | - |
-| Write-heavy | - | - | - | - | - |
-| Balanced | - | - | - | - | - |
-| Stress | - | - | - | - | - |
 
 ---
 
@@ -349,16 +441,16 @@ BenchConfig::balanced()
 **Priority:** Low
 **Rationale:** Production often batches; current approach may understate throughput.
 
-### Multi-Embedding Benchmarks
+### Extended Multi-Embedding Benchmarks
 
-Measure performance with multiple concurrent embeddings:
+Current baseline requires 2 embeddings. Future enhancement to test more:
 
 ```rust
-BenchConfig::multi_embedding(3)  // 3 embeddings, balanced load each
+BenchConfig::multi_embedding(5)  // 5 embeddings, balanced load each
 ```
 
 **Priority:** Medium
-**Rationale:** Production deployments often have multiple embedding models.
+**Rationale:** Some production deployments have many embedding models (5-10+).
 
 ### Recall Under Load
 
@@ -380,4 +472,5 @@ BenchResult {
 
 - [CONCURRENT.md](./CONCURRENT.md) - Concurrent operations implementation
 - [ROADMAP.md](./ROADMAP.md) - Full implementation roadmap
+- [PHASE5.md](./PHASE5.md) - Phase 5 task tracking
 - [benchmark/concurrent.rs](./benchmark/concurrent.rs) - Benchmark implementation

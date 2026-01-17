@@ -23,7 +23,7 @@
 | 5.8.y | Remove non-transactional writes (production) | ✅ Complete |
 | 5.9 | Multi-Threaded Stress Tests | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
 | 5.10 | Metrics Collection Infrastructure | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
-| 5.11 | Concurrent Benchmark Baseline | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
+| 5.11 | Concurrent Benchmark Baseline | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md), [BASELINE.md](./BASELINE.md)) |
 
 ---
 
@@ -2752,7 +2752,7 @@ BatchEdgeCache closes the remaining correctness gap: edges from earlier inserts 
 | 5.8.y | Remove non-transactional writes (production) | ✅ **Complete** |
 | 5.9 | Multi-Threaded Stress Tests | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
 | 5.10 | Metrics Collection Infrastructure | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
-| 5.11 | Concurrent Benchmark Baseline | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
+| 5.11 | Concurrent Benchmark Baseline | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md), [BASELINE.md](./BASELINE.md)) |
 
 ---
 
@@ -2784,5 +2784,6 @@ See [ROADMAP.md#phase-6](./ROADMAP.md#phase-6-mpscmpmc-public-api) for full deta
 
 - [ROADMAP.md](./ROADMAP.md) - Full implementation roadmap
 - [CONCURRENT.md](./CONCURRENT.md) - Tasks 5.9-5.11: Concurrent operations
+- [BASELINE.md](./BASELINE.md) - Baseline benchmark requirements and recorded results
 - [API.md](./API.md) - Public API reference
 - [BENCHMARK.md](./BENCHMARK.md) - Performance results
