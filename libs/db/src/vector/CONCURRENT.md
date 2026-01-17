@@ -144,7 +144,23 @@ CODEX: Verified `ConcurrentBenchmark`, `BenchConfig`, `BenchResult` and exports 
 
 *Note: Targets based on 100K vectors, 128D, M=16, ef=100*
 
-CODEX: Targets are aspirational; no benchmark output committed in-repo yet. Recommend capturing one baseline run and linking results.
+### Baseline Results (January 16, 2026)
+
+Quick validation benchmark (2 writers, 2 readers, 5s, 64D vectors):
+
+| Metric | Value |
+|--------|-------|
+| Insert throughput | 77.6 ops/sec |
+| Search throughput | 37,409 ops/sec |
+| Insert P50 | 16ms |
+| Insert P99 | 33ms |
+| Search P50 | 32µs |
+| Search P99 | 32µs |
+
+Run full benchmark with:
+```bash
+cargo test -p motlie-db --test test_vector_concurrent benchmark_baseline -- --ignored --nocapture
+```
 
 ---
 
