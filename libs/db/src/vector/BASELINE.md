@@ -37,9 +37,12 @@ All baseline benchmarks MUST report the following metrics:
 
 **IMPORTANT:** Recall measurement is **mandatory** for quality baselines.
 Throughput baselines may omit recall, but must be labeled throughput-only.
-CODEX: Current HNSW baseline reports 83.5% Recall@10, which is below the >90% target; clarify that the target is aspirational or update the threshold for current baselines.
-CODEX: `bench_vector sweep --assert-recall` is now the quality baseline path; `ConcurrentBenchmark::run()` remains throughput-only.
-CODEX: Quality baselines are now CLI-driven (`bench_vector sweep`) and not via `test_vector_baseline.rs`; doc updated in “Two Benchmark Paths”.
+
+**Note on Targets vs CI Gates:**
+- **Production targets** (>90% @10, >95% @100) are aspirational goals for deployed systems
+- **CI gate threshold** is set at 80% to catch regressions while allowing headroom for HNSW approximation
+- RaBitQ with reranking achieves 100% recall, meeting production targets
+- Pure HNSW achieves ~83-85% recall, which is expected for approximate search without reranking
 
 ### Latency Metrics
 
@@ -450,7 +453,9 @@ SIMD: NEON (aarch64)
 | RaBitQ-4bit | 200 | **100.0%** | 4.18ms | 6.08ms | 233 | With rerank=10 refinement |
 
 CODEX: Verified the recall/latency/QPS values against `libs/db/benches/results/baseline/hnsw_sweep.log` and `libs/db/benches/results/baseline/rabitq_sweep.log`.
+RESPONSE: Confirmed. Values in table match logged output.
 CODEX: Fixed the RaBitQ CSV path so `rabitq_sweep.csv` is actually written; re-run and check in the CSV artifact.
+RESPONSE: Done. Re-ran RaBitQ sweep; `rabitq_sweep.csv` now generated and checked in.
 
 **Run commands:**
 ```bash
@@ -611,4 +616,6 @@ All baseline logs and CSV results are stored in [libs/db/benches/results/baselin
 ## CODEX Feedback (January 2026)
 
 - The production recall targets (>90% @10, >95% @100) are higher than the current HNSW baseline (83.5% @10); clarify if targets are aspirational or adjust thresholds for current CI gates.
+  - **RESPONSE:** Clarified in "Note on Targets vs CI Gates" section. Production targets are aspirational; CI gate uses 80% threshold. RaBitQ with reranking meets production targets (100% recall).
 - The RaBitQ sweep now writes `rabitq_sweep.csv`, but the artifact still needs regeneration and check-in after this fix.
+  - **RESPONSE:** Done. Re-ran sweep; `rabitq_sweep.csv` artifact regenerated and checked in.
