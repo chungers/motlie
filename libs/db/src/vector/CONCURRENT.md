@@ -161,17 +161,6 @@ Full throughput baselines and per-scenario CSV artifacts are recorded in:
 - [BASELINE.md](./BASELINE.md) (Run 5 table + artifacts)
 - `libs/db/benches/results/baseline/throughput_*.csv`
 
-Quick validation benchmark (2 writers, 2 readers, 5s, 64D vectors):
-
-| Metric | Value |
-|--------|-------|
-| Insert throughput | 77.6 ops/sec |
-| Search throughput | 37,409 ops/sec |
-| Insert P50 | 16ms |
-| Insert P99 | 33ms |
-| Search P50 | 32µs |
-| Search P99 | 32µs |
-
 Run full benchmark with:
 ```bash
 cargo test -p motlie-db --test test_vector_concurrent baseline_full -- --ignored --nocapture
