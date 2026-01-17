@@ -1,15 +1,18 @@
 //! Multi-threaded stress tests for vector subsystem (Task 5.9).
 //!
 //! These tests validate concurrent access patterns without data corruption or panics.
+//! All inserts use atomic transactions (vector data + HNSW graph in single commit).
 //!
 //! ## Test Categories
 //!
 //! | Test | Description | Thread Config |
 //! |------|-------------|---------------|
-//! | `test_concurrent_insert_search` | Insert while searching | 2 inserters, 2 searchers |
-//! | `test_concurrent_batch_insert` | Parallel batch inserts | 4 batch inserters |
-//! | `test_high_thread_count_stress` | Maximum concurrency | 8 writers, 8 readers |
-//! | `test_writer_contention` | Multiple writers same embedding | 8 writers |
+//! | `test_concurrent_insert_search` | Atomic insert while searching | 2 inserters, 2 searchers |
+//! | `test_concurrent_batch_insert` | Atomic parallel batch inserts | 4 batch inserters |
+//! | `test_high_thread_count_stress` | Atomic maximum concurrency | 8 writers, 8 readers |
+//! | `test_writer_contention` | Atomic writers same embedding | 8 writers |
+//! | `test_multi_embedding_concurrent_access` | Multi-index concurrent r/w | 3 indices, 6 writers, 6 readers |
+//! | `test_cache_isolation_under_load` | Cache isolation validation | 2 indices, 2 writers, 2 readers |
 //!
 //! ## Validation Criteria
 //!
@@ -58,6 +61,9 @@ use tempfile::TempDir;
 
 const DIM: usize = 64;
 const TEST_EMBEDDING: EmbeddingCode = 1;
+/// Maximum vec_id value to prevent overflow in thread-partitioned ID generation.
+/// With `(thread_id << 16) | i`, this allows 65,536 vectors per thread.
+const MAX_VECTORS_PER_THREAD: u32 = 65_536;
 
 /// Helper: Create test storage
 fn create_test_storage() -> (TempDir, Storage) {
@@ -73,16 +79,39 @@ fn random_vector(dim: usize) -> Vec<f32> {
     (0..dim).map(|_| rng.gen::<f32>()).collect()
 }
 
-/// Helper: Store vector in RocksDB
-fn store_vector(storage: &Storage, embedding: EmbeddingCode, vec_id: u32, vector: &[f32]) -> bool {
+/// Atomic insert result - indicates whether insert succeeded or failed with reason.
+#[derive(Debug)]
+enum InsertResult {
+    /// Insert succeeded, cache update should be applied
+    Success(hnsw::CacheUpdate),
+    /// Transaction commit failed (RocksDB conflict)
+    CommitFailed,
+    /// HNSW insert failed
+    HnswFailed,
+}
+
+/// Helper: Atomic vector + HNSW insert in a single transaction.
+///
+/// This mirrors production semantics where vector data and HNSW graph
+/// are updated atomically - either both succeed or neither does.
+/// No orphaned vectors are possible.
+fn insert_vector_atomic(
+    storage: &Storage,
+    index: &hnsw::Index,
+    embedding: EmbeddingCode,
+    vec_id: u32,
+    vector: &[f32],
+) -> InsertResult {
     let Ok(txn_db) = storage.transaction_db() else {
-        return false;
+        return InsertResult::CommitFailed;
     };
     let Some(cf) = txn_db.cf_handle(Vectors::CF_NAME) else {
-        return false;
+        return InsertResult::CommitFailed;
     };
 
     let txn = txn_db.transaction();
+
+    // Step 1: Write vector data to Vectors CF
     let key = VectorCfKey(embedding, vec_id);
     let value = VectorCfValue(vector.to_vec());
     if txn
@@ -93,9 +122,21 @@ fn store_vector(storage: &Storage, embedding: EmbeddingCode, vec_id: u32, vector
         )
         .is_err()
     {
-        return false;
+        return InsertResult::CommitFailed;
     }
-    txn.commit().is_ok()
+
+    // Step 2: Insert into HNSW graph (same transaction)
+    let cache_update = match hnsw::insert(index, &txn, &txn_db, storage, vec_id, vector) {
+        Ok(update) => update,
+        Err(_) => return InsertResult::HnswFailed,
+    };
+
+    // Step 3: Commit both operations atomically
+    if txn.commit().is_ok() {
+        InsertResult::Success(cache_update)
+    } else {
+        InsertResult::CommitFailed
+    }
 }
 
 /// Test: Concurrent insert and search operations.
@@ -139,7 +180,6 @@ fn test_concurrent_insert_search() {
         let counter = Arc::clone(&insert_counter);
 
         handles.push(thread::spawn(move || {
-            let txn_db = storage.transaction_db().expect("txn_db");
             let mut local_count = 0u32;
 
             while !stop.load(Ordering::Relaxed) && local_count < 500 {
@@ -148,24 +188,16 @@ fn test_concurrent_insert_search() {
 
                 let start = Instant::now();
 
-                // Store and insert
-                if store_vector(&storage, TEST_EMBEDDING, vec_id, &vector) {
-                    let txn = txn_db.transaction();
-                    if let Ok(cache_update) =
-                        hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, &vector)
-                    {
-                        if txn.commit().is_ok() {
-                            cache_update.apply(index.nav_cache());
-                            metrics.record_insert(start.elapsed());
-                            local_count += 1;
-                        } else {
-                            metrics.record_error();
-                        }
-                    } else {
+                // Atomic insert: vector + HNSW in single transaction
+                match insert_vector_atomic(&storage, &index, TEST_EMBEDDING, vec_id, &vector) {
+                    InsertResult::Success(cache_update) => {
+                        cache_update.apply(index.nav_cache());
+                        metrics.record_insert(start.elapsed());
+                        local_count += 1;
+                    }
+                    InsertResult::CommitFailed | InsertResult::HnswFailed => {
                         metrics.record_error();
                     }
-                } else {
-                    metrics.record_error();
                 }
             }
 
@@ -292,26 +324,29 @@ fn test_concurrent_batch_insert() {
         let metrics = Arc::clone(&metrics);
 
         handles.push(thread::spawn(move || {
-            let txn_db = storage.transaction_db().expect("txn_db");
             let mut success_count = 0;
 
             for i in 0..vectors_per_thread {
                 // Use thread_id to generate unique vec_ids
+                // Guard: ensure i doesn't exceed MAX_VECTORS_PER_THREAD
+                assert!(
+                    (i as u32) < MAX_VECTORS_PER_THREAD,
+                    "vectors_per_thread exceeds MAX_VECTORS_PER_THREAD"
+                );
                 let vec_id = ((thread_id as u32) << 16) | (i as u32);
                 let vector = random_vector(DIM);
 
                 let start = Instant::now();
 
-                if store_vector(&storage, TEST_EMBEDDING, vec_id, &vector) {
-                    let txn = txn_db.transaction();
-                    if let Ok(cache_update) =
-                        hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, &vector)
-                    {
-                        if txn.commit().is_ok() {
-                            cache_update.apply(index.nav_cache());
-                            metrics.record_insert(start.elapsed());
-                            success_count += 1;
-                        }
+                // Atomic insert: vector + HNSW in single transaction
+                match insert_vector_atomic(&storage, &index, TEST_EMBEDDING, vec_id, &vector) {
+                    InsertResult::Success(cache_update) => {
+                        cache_update.apply(index.nav_cache());
+                        metrics.record_insert(start.elapsed());
+                        success_count += 1;
+                    }
+                    InsertResult::CommitFailed | InsertResult::HnswFailed => {
+                        // Expected under contention
                     }
                 }
             }
@@ -404,30 +439,21 @@ fn test_high_thread_count_stress() {
         let counter = Arc::clone(&insert_counter);
 
         handles.push(thread::spawn(move || {
-            let txn_db = storage.transaction_db().expect("txn_db");
-
             while !stop.load(Ordering::Relaxed) {
                 let vec_id = counter.fetch_add(1, Ordering::Relaxed);
                 let vector = random_vector(DIM);
 
                 let start = Instant::now();
 
-                if store_vector(&storage, TEST_EMBEDDING, vec_id, &vector) {
-                    let txn = txn_db.transaction();
-                    if let Ok(cache_update) =
-                        hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, &vector)
-                    {
-                        if txn.commit().is_ok() {
-                            cache_update.apply(index.nav_cache());
-                            metrics.record_insert(start.elapsed());
-                        } else {
-                            metrics.record_error();
-                        }
-                    } else {
+                // Atomic insert: vector + HNSW in single transaction
+                match insert_vector_atomic(&storage, &index, TEST_EMBEDDING, vec_id, &vector) {
+                    InsertResult::Success(cache_update) => {
+                        cache_update.apply(index.nav_cache());
+                        metrics.record_insert(start.elapsed());
+                    }
+                    InsertResult::CommitFailed | InsertResult::HnswFailed => {
                         metrics.record_error();
                     }
-                } else {
-                    metrics.record_error();
                 }
             }
 
@@ -544,7 +570,6 @@ fn test_writer_contention() {
         let counter = Arc::clone(&insert_counter);
 
         handles.push(thread::spawn(move || {
-            let txn_db = storage.transaction_db().expect("txn_db");
             let mut success = 0;
             let mut failures = 0;
 
@@ -555,27 +580,17 @@ fn test_writer_contention() {
 
                 let start = Instant::now();
 
-                if store_vector(&storage, TEST_EMBEDDING, vec_id, &vector) {
-                    let txn = txn_db.transaction();
-                    match hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, &vector) {
-                        Ok(cache_update) => {
-                            if txn.commit().is_ok() {
-                                cache_update.apply(index.nav_cache());
-                                metrics.record_insert(start.elapsed());
-                                success += 1;
-                            } else {
-                                metrics.record_error();
-                                failures += 1;
-                            }
-                        }
-                        Err(_) => {
-                            metrics.record_error();
-                            failures += 1;
-                        }
+                // Atomic insert: vector + HNSW in single transaction
+                match insert_vector_atomic(&storage, &index, TEST_EMBEDDING, vec_id, &vector) {
+                    InsertResult::Success(cache_update) => {
+                        cache_update.apply(index.nav_cache());
+                        metrics.record_insert(start.elapsed());
+                        success += 1;
                     }
-                } else {
-                    metrics.record_error();
-                    failures += 1;
+                    InsertResult::CommitFailed | InsertResult::HnswFailed => {
+                        metrics.record_error();
+                        failures += 1;
+                    }
                 }
             }
 
@@ -621,4 +636,355 @@ fn test_writer_contention() {
     let query = random_vector(DIM);
     let results = index.search(&storage, &query, 10, 100).expect("Search failed");
     println!("Search returned {} results", results.len());
+}
+
+// ============================================================================
+// Multi-Embedding Concurrent Tests (CODEX Coverage Gaps)
+// ============================================================================
+
+const EMBEDDING_A: EmbeddingCode = 100;
+const EMBEDDING_B: EmbeddingCode = 200;
+const EMBEDDING_C: EmbeddingCode = 300;
+
+/// Test: Multi-embedding concurrent writes and reads.
+///
+/// Validates that concurrent operations across multiple embeddings in the
+/// same Storage don't interfere with each other. This tests:
+/// 1. Concurrent writers to different embeddings
+/// 2. Concurrent readers from different embeddings
+/// 3. No cross-contamination between embeddings
+#[test]
+fn test_multi_embedding_concurrent_access() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    let metrics = Arc::new(ConcurrentMetrics::new());
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    // Track inserted vec_ids per embedding for validation
+    let inserted_a = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let inserted_b = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let inserted_c = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    // Create separate HNSW indices for each embedding (shared nav_cache)
+    let nav_cache = Arc::new(NavigationCache::new());
+    let hnsw_config = HnswConfig {
+        dim: DIM,
+        m: 16,
+        m_max: 32,
+        m_max_0: 32,
+        ef_construction: 100,
+        ..Default::default()
+    };
+
+    let index_a = Arc::new(hnsw::Index::new(
+        EMBEDDING_A,
+        Distance::L2,
+        hnsw_config.clone(),
+        Arc::clone(&nav_cache),
+    ));
+    let index_b = Arc::new(hnsw::Index::new(
+        EMBEDDING_B,
+        Distance::Cosine,
+        hnsw_config.clone(),
+        Arc::clone(&nav_cache),
+    ));
+    let index_c = Arc::new(hnsw::Index::new(
+        EMBEDDING_C,
+        Distance::L2,
+        hnsw_config,
+        Arc::clone(&nav_cache),
+    ));
+
+    let mut handles: Vec<thread::JoinHandle<()>> = Vec::new();
+
+    // Spawn writers for each embedding (2 writers each)
+    for (embedding, index, inserted) in [
+        (EMBEDDING_A, Arc::clone(&index_a), Arc::clone(&inserted_a)),
+        (EMBEDDING_B, Arc::clone(&index_b), Arc::clone(&inserted_b)),
+        (EMBEDDING_C, Arc::clone(&index_c), Arc::clone(&inserted_c)),
+    ] {
+        for _writer_id in 0..2 {
+            let storage = Arc::clone(&storage);
+            let index = Arc::clone(&index);
+            let metrics = Arc::clone(&metrics);
+            let stop = Arc::clone(&stop_flag);
+            let inserted = Arc::clone(&inserted);
+            let counter = Arc::new(AtomicU32::new(0));
+
+            handles.push(thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let local_count = counter.fetch_add(1, Ordering::Relaxed);
+                    if local_count >= 100 {
+                        break;
+                    }
+                    // Unique vec_id: (embedding << 8) | count
+                    let vec_id = ((embedding as u32) << 8) | local_count;
+                    let vector = random_vector(DIM);
+
+                    let start = Instant::now();
+
+                    match insert_vector_atomic(&storage, &index, embedding, vec_id, &vector) {
+                        InsertResult::Success(cache_update) => {
+                            cache_update.apply(index.nav_cache());
+                            metrics.record_insert(start.elapsed());
+                            inserted.lock().unwrap().push(vec_id);
+                        }
+                        InsertResult::CommitFailed | InsertResult::HnswFailed => {
+                            metrics.record_error();
+                        }
+                    }
+                }
+            }));
+        }
+    }
+
+    // Spawn readers for each embedding (2 readers each)
+    for (_embedding, index) in [
+        (EMBEDDING_A, Arc::clone(&index_a)),
+        (EMBEDDING_B, Arc::clone(&index_b)),
+        (EMBEDDING_C, Arc::clone(&index_c)),
+    ] {
+        for _reader_id in 0..2 {
+            let storage = Arc::clone(&storage);
+            let index = Arc::clone(&index);
+            let metrics = Arc::clone(&metrics);
+            let stop = Arc::clone(&stop_flag);
+
+            handles.push(thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let query = random_vector(DIM);
+
+                    let start = Instant::now();
+                    let result = index.search(&storage, &query, 10, 50);
+
+                    match result {
+                        Ok(_results) => {
+                            metrics.record_search(start.elapsed());
+                        }
+                        Err(_) => {
+                            // Expected before first insert commits
+                            metrics.record_error();
+                        }
+                    }
+                }
+            }));
+        }
+    }
+
+    // Let test run for 5 seconds
+    thread::sleep(Duration::from_secs(5));
+    stop_flag.store(true, Ordering::Relaxed);
+
+    // Wait for threads and check for panics
+    let mut panic_count = 0;
+    for handle in handles {
+        if handle.join().is_err() {
+            panic_count += 1;
+        }
+    }
+
+    let summary = metrics.summary();
+    println!("\n=== test_multi_embedding_concurrent_access Results ===");
+    println!("{}", summary);
+    println!(
+        "Inserted per embedding: A={}, B={}, C={}",
+        inserted_a.lock().unwrap().len(),
+        inserted_b.lock().unwrap().len(),
+        inserted_c.lock().unwrap().len()
+    );
+
+    // Validation
+    assert_eq!(panic_count, 0, "No threads should have panicked");
+    assert!(summary.insert_count > 0, "Should have completed inserts");
+    assert!(summary.search_count > 0, "Should have completed searches");
+
+    // Verify no cross-contamination: search each index and check results
+    for (embedding, index, inserted) in [
+        (EMBEDDING_A, &index_a, &inserted_a),
+        (EMBEDDING_B, &index_b, &inserted_b),
+        (EMBEDDING_C, &index_c, &inserted_c),
+    ] {
+        let query = random_vector(DIM);
+        if let Ok(results) = index.search(&storage, &query, 10, 100) {
+            let inserted_set: std::collections::HashSet<_> =
+                inserted.lock().unwrap().iter().cloned().collect();
+
+            for (_dist, vec_id) in &results {
+                assert!(
+                    inserted_set.contains(vec_id),
+                    "Embedding {} search returned vec_id {} not in its insert set (cross-contamination!)",
+                    embedding,
+                    vec_id
+                );
+            }
+            println!(
+                "Embedding {}: {} search results, all valid",
+                embedding,
+                results.len()
+            );
+        }
+    }
+}
+
+/// Test: Cache isolation under concurrent multi-embedding load.
+///
+/// Validates that NavigationCache and BinaryCodeCache return correct data
+/// under concurrent multi-embedding access. This specifically tests the
+/// cache keying by EmbeddingCode.
+#[test]
+fn test_cache_isolation_under_load() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    let metrics = Arc::new(ConcurrentMetrics::new());
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    // Shared caches (keyed by EmbeddingCode)
+    let nav_cache = Arc::new(NavigationCache::new());
+
+    let hnsw_config = HnswConfig {
+        dim: DIM,
+        m: 16,
+        m_max: 32,
+        m_max_0: 32,
+        ef_construction: 100,
+        ..Default::default()
+    };
+
+    // Create indices sharing the same cache
+    let index_a = Arc::new(hnsw::Index::new(
+        EMBEDDING_A,
+        Distance::L2,
+        hnsw_config.clone(),
+        Arc::clone(&nav_cache),
+    ));
+    let index_b = Arc::new(hnsw::Index::new(
+        EMBEDDING_B,
+        Distance::Cosine,
+        hnsw_config,
+        Arc::clone(&nav_cache),
+    ));
+
+    // Track what we inserted to each embedding
+    let vec_ids_a = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+    let vec_ids_b = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+
+    let mut handles = Vec::new();
+
+    // Pre-populate with some vectors
+    for i in 0..50 {
+        let vec_id_a = ((EMBEDDING_A as u32) << 16) | i;
+        let vec_id_b = ((EMBEDDING_B as u32) << 16) | i;
+
+        if let InsertResult::Success(cache_update) =
+            insert_vector_atomic(&storage, &index_a, EMBEDDING_A, vec_id_a, &random_vector(DIM))
+        {
+            cache_update.apply(index_a.nav_cache());
+            vec_ids_a.lock().unwrap().insert(vec_id_a);
+        }
+
+        if let InsertResult::Success(cache_update) =
+            insert_vector_atomic(&storage, &index_b, EMBEDDING_B, vec_id_b, &random_vector(DIM))
+        {
+            cache_update.apply(index_b.nav_cache());
+            vec_ids_b.lock().unwrap().insert(vec_id_b);
+        }
+    }
+
+    // Global cross-contamination counter
+    let cross_contamination = Arc::new(AtomicU32::new(0));
+
+    // Spawn concurrent inserters + searchers for both embeddings
+    for (embedding, index, vec_ids) in [
+        (EMBEDDING_A, Arc::clone(&index_a), Arc::clone(&vec_ids_a)),
+        (EMBEDDING_B, Arc::clone(&index_b), Arc::clone(&vec_ids_b)),
+    ] {
+        // Clone for writer and reader threads
+        let storage_w = Arc::clone(&storage);
+        let storage_r = Arc::clone(&storage);
+        let index_w = Arc::clone(&index);
+        let index_r = Arc::clone(&index);
+        let metrics_w = Arc::clone(&metrics);
+        let metrics_r = Arc::clone(&metrics);
+        let stop_w = Arc::clone(&stop_flag);
+        let stop_r = Arc::clone(&stop_flag);
+        let vec_ids_w = Arc::clone(&vec_ids);
+        let cross_contamination_r = Arc::clone(&cross_contamination);
+        let counter = Arc::new(AtomicU32::new(100)); // Start after pre-populated
+
+        // Writer thread
+        handles.push(thread::spawn(move || {
+            while !stop_w.load(Ordering::Relaxed) {
+                let i = counter.fetch_add(1, Ordering::Relaxed);
+                if i > 300 {
+                    break;
+                }
+                let vec_id = ((embedding as u32) << 16) | i;
+                let vector = random_vector(DIM);
+
+                let start = Instant::now();
+                match insert_vector_atomic(&storage_w, &index_w, embedding, vec_id, &vector) {
+                    InsertResult::Success(cache_update) => {
+                        cache_update.apply(index_w.nav_cache());
+                        metrics_w.record_insert(start.elapsed());
+                        vec_ids_w.lock().unwrap().insert(vec_id);
+                    }
+                    _ => metrics_w.record_error(),
+                }
+            }
+        }));
+
+        // Reader thread - validates cache correctness
+        handles.push(thread::spawn(move || {
+            let mut search_count = 0u64;
+
+            while !stop_r.load(Ordering::Relaxed) && search_count < 500 {
+                let query = random_vector(DIM);
+
+                let start = Instant::now();
+                if let Ok(results) = index_r.search(&storage_r, &query, 10, 50) {
+                    metrics_r.record_search(start.elapsed());
+                    search_count += 1;
+
+                    // Check for cross-contamination: vec_id should have this embedding's code
+                    for (_dist, vec_id) in &results {
+                        // Extract embedding from vec_id (stored in upper 16 bits)
+                        let result_embedding = (vec_id >> 16) as EmbeddingCode;
+                        if result_embedding != embedding {
+                            cross_contamination_r.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }));
+    }
+
+    // Let test run
+    thread::sleep(Duration::from_secs(5));
+    stop_flag.store(true, Ordering::Relaxed);
+
+    // Wait for threads
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    let total_cross_contamination = cross_contamination.load(Ordering::Relaxed);
+
+    let summary = metrics.summary();
+    println!("\n=== test_cache_isolation_under_load Results ===");
+    println!("{}", summary);
+    println!(
+        "Vec IDs: A={}, B={}",
+        vec_ids_a.lock().unwrap().len(),
+        vec_ids_b.lock().unwrap().len()
+    );
+    println!("Cross-contamination count: {}", total_cross_contamination);
+
+    // Validation: NO cross-contamination allowed
+    assert_eq!(
+        total_cross_contamination, 0,
+        "Cache isolation violated! Found {} cross-contaminated results",
+        total_cross_contamination
+    );
 }
