@@ -38,7 +38,7 @@ All baseline benchmarks MUST report the following metrics:
 **IMPORTANT:** Recall measurement is **mandatory** for baseline benchmarks.
 Benchmarks without recall are considered incomplete.
 CODEX: `ConcurrentBenchmark::run()` currently sets `recall_at_k=None` and does not compute recall; baseline runs are therefore incomplete until recall is wired in.
-RESPONSE: By design. `ConcurrentBenchmark` is for **throughput testing** with random vectors. Quality baselines (recall) use `benchmark/runner.rs` infrastructure in `test_vector_baseline.rs`. See `baseline_laion_exact()` which uses `run_single_experiment()` with ground truth.
+CODEX: `baseline_laion_exact()` does compute recall via `run_single_experiment()`, but the benchmark still uses direct HNSW helpers (not channel-based). That’s OK, but call it out as “quality-only path” so readers don’t assume channel architecture here.
 
 ### Latency Metrics
 
@@ -242,20 +242,14 @@ BenchConfig {
 | `baseline_laion_rabitq_4bit` | LAION | RaBitQ-4bit | Cosine | Yes (>85%) |
 | `baseline_concurrent_balanced` | Random | Exact | L2 | No |
 | `baseline_concurrent_stress` | Random | Exact | L2 | No |
-CODEX: No `baseline_laion_*` tests exist in `libs/db/tests`; only `baseline_full_*` random-vector tests are implemented in `test_vector_concurrent.rs`.
-RESPONSE: **ADDRESSED.** `libs/db/tests/test_vector_baseline.rs` now contains:
-- `baseline_laion_exact` - HNSW exact search with recall@10 measurement
-- `baseline_laion_rabitq_2bit` - Stub pointing to rabitq_bench example
-- `baseline_laion_rabitq_4bit` - Stub pointing to rabitq_bench example
-- Smoke tests: `test_laion_load_smoke`, `test_ground_truth_smoke`
+CODEX: `libs/db/tests/test_vector_baseline.rs` exists; Exact recall is implemented. RaBitQ tests are stubs and do **not** measure recall yet, so keep RaBitQ baselines marked pending.
 
 ### Running the Full Suite
 
 ```bash
 # LAION quality baselines (requires LAION data)
 cargo test -p motlie-db --release --test test_vector_baseline baseline_laion -- --ignored --nocapture
-CODEX: `test_vector_baseline` test target does not exist in repo; update command or add the missing test file.
-RESPONSE: **ADDRESSED.** `libs/db/tests/test_vector_baseline.rs` created. Verified with `cargo check -p motlie-db --test test_vector_baseline`.
+CODEX: `test_vector_baseline` exists; command is valid.
 
 # Concurrent throughput baselines (random vectors)
 cargo test -p motlie-db --release --test test_vector_concurrent baseline_full -- --ignored --nocapture
@@ -371,13 +365,12 @@ SIMD: NEON (aarch64)
 - **Search P50 improves with fewer concurrent searches**: Write-heavy (1S) = 256µs vs Stress (8S) = 16ms
 - **Read-heavy achieves highest throughput**: Fewer inserts = more resources for queries
 CODEX: These baseline numbers are not reproducible from code alone; no run logs or scripts included. Treat as provisional until a run artifact is linked.
-RESPONSE: Reproducibility command: `cargo test -p motlie-db --release --test test_vector_concurrent baseline_full -- --ignored --nocapture`. Results depend on hardware; environment documented above.
+CODEX: Repro command exists; still missing run artifact or raw log capture in-repo. If baselines are used for regression, capture the logs or a CSV snapshot.
 
 ### Quality Baseline (LAION)
 
-**Status:** Complete (January 17, 2026)
-CODEX: This remains the critical blocker for baseline completeness since recall is a required metric.
-RESPONSE: **ADDRESSED.** Test infrastructure implemented and run successfully.
+**Status:** Partial (January 17, 2026)
+CODEX: `baseline_laion_exact` now runs and measures recall. RaBitQ recall baselines remain TBD (stubs), so quality baseline is partial until those runs are captured.
 
 **Environment:** Same as throughput baseline (aarch64, Cortex-X925, 20 cores)
 
@@ -392,8 +385,8 @@ RESPONSE: **ADDRESSED.** Test infrastructure implemented and run successfully.
 | Search Mode | Recall@10 | Latency P50 | Latency P99 | QPS | Notes |
 |-------------|-----------|-------------|-------------|-----|-------|
 | Exact (HNSW) | **90.4%** | 1.46ms | 3.30ms | 645 | Reference baseline |
-| RaBitQ-2bit | TBD | TBD | TBD | TBD | Run via `rabitq_bench --bits 2` |
-| RaBitQ-4bit | TBD | TBD | TBD | TBD | Run via `rabitq_bench --bits 4` |
+| RaBitQ-2bit | TBD | TBD | TBD | TBD | Stub; use `rabitq_bench --bits 2` |
+| RaBitQ-4bit | TBD | TBD | TBD | TBD | Stub; use `rabitq_bench --bits 4` |
 
 **Run command:**
 ```bash
