@@ -94,7 +94,7 @@ dedicated vector databases or custom storage engines.
 | [Task 4.12](#task-412-api-cleanup-phase-2---remove-deprecated-code) | API Cleanup: Remove Dead Code | ✅ Complete | `5f2dac0` |
 | [Task 4.13](#task-413-api-cleanup-phase-3---embedding-driven-searchconfig-api) | API Cleanup: SearchConfig API | ✅ Complete | `5f2dac0` |
 | [Task 4.14](#task-414-api-cleanup-phase-4---configuration-validation) | API Cleanup: Config Validation | ✅ Complete | `5f2dac0` |
-| [Task 4.15](#task-415-phase-5-integration-planning) | Phase 5 Integration Planning | 🔲 Not Started | - |
+| [Task 4.15](#task-415-phase-5-integration-planning) | Phase 5 Integration Planning | 🔲 Deferred to Phase 7 | - |
 | [Task 4.16](#task-416-hnsw-distance-metric-bug-fix) | HNSW Distance Metric Bug Fix | ✅ Complete | `0535e6a` |
 | [Task 4.17](#task-417-batch_distances-metric-bug-fix) | batch_distances Metric Bug Fix | ✅ Complete | `d5899f3` |
 | [Task 4.18](#task-418-vectorstoragetype-multi-float-support) | VectorElementType (f16/f32) | ✅ Complete | `c90f15c` |
@@ -1181,7 +1181,7 @@ Both `graph::schema` and `vector::schema` modules follow the same patterns:
 
 ## Phase 1: ID Management
 
-> **⚠️ TRAIT HIERARCHY NOTE (2026-01-04):** The code examples in this phase and later phases use the deprecated `ColumnFamilyRecord` trait. The actual implementation should use the current trait hierarchy from `rocksdb::cf_traits`:
+> **Historical note (2026-01-04):** Some early code examples used the deprecated `ColumnFamilyRecord` trait. The actual implementation uses the current trait hierarchy from `rocksdb::cf_traits`:
 >
 > | Trait | Purpose | Use For |
 > |-------|---------|---------|
@@ -1634,9 +1634,8 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 - `storage()` - Access underlying storage
 - `get_or_create_allocator(embedding)` - Get/create IdAllocator for embedding space (recovers from DB or creates new)
 
-**Phase 2 placeholders:**
-- `hnsw_search()` - HNSW nearest neighbor search
-- `index_vector()` - Add vector to HNSW graph
+**Phase 2 (Implemented):**
+- `hnsw_search()` and `index_vector()` are implemented in the HNSW/processor paths; placeholders removed.
 
 #### Runnable Trait Integration
 
@@ -1665,7 +1664,7 @@ libs/db/src/vector/
 ├── writer.rs           # Writer, Consumer, MPSC infrastructure
 ├── hnsw.rs             # HNSW algorithm (Phase 2)
 ├── rabitq.rs           # RaBitQ quantization (Phase 4)
-└── async_updater.rs    # Background graph maintenance (Phase 5)
+└── async_updater.rs    # Background graph maintenance (Phase 7)
 ```
 
 #### Primary API (`Processor`)
@@ -4806,9 +4805,9 @@ impl RaBitQ {
 
 #### Task 4.15: Phase 5 Integration Planning
 
-**Status:** 🔲 Not Started
+**Status:** 🔲 Deferred to Phase 7
 
-**Goal:** Ensure API cleanup is compatible with Phase 5 (Async Graph Updater).
+**Goal:** Ensure API cleanup is compatible with Phase 7 (Async Graph Updater).
 
 **Analysis Summary:**
 
@@ -4846,8 +4845,8 @@ pub fn insert_async(&self, embedding: &Embedding, vector: &[f32]) -> Result<Id> 
 }
 ```
 
-**Acceptance Criteria:**
-- [ ] Document Phase 5 compatibility in SearchStrategy
+**Acceptance Criteria (Phase 7):**
+- [ ] Document Phase 7 compatibility in SearchStrategy
 - [ ] Ensure BinaryCodeCache integrates with async insert
 - [ ] Test quantized search on pending vectors
 - [ ] Benchmark async insert + quantized search latency
@@ -5539,7 +5538,7 @@ LAION-CLIP RaBitQ Pipeline:
 **Priority:** HIGH
 **Goal:** Replace symmetric Hamming distance with ADC (Asymmetric Distance Computation) in HNSW navigation to achieve >90% recall with RaBitQ.
 
-##### Problem Statement
+##### Problem Statement (Historical)
 
 Current RaBitQ implementation uses symmetric Hamming distance during HNSW beam search, which is fundamentally flawed for multi-bit quantization:
 
@@ -8377,7 +8376,7 @@ Session 5: Phase 4 (RaBitQ)
 ├── Add Hamming distance with popcount
 └── Validate: 10x memory reduction, recall ≥ 95%
 
-Session 6: Phase 5 (Async Updater)
+Session 6: Phase 7 (Async Updater)
 ├── Implement two-phase insert
 ├── Add background graph refinement
 ├── Implement crash recovery
