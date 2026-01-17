@@ -38,7 +38,8 @@ All baseline benchmarks MUST report the following metrics:
 **IMPORTANT:** Recall measurement is **mandatory** for baseline benchmarks.
 Benchmarks without recall are considered incomplete.
 CODEX: `ConcurrentBenchmark::run()` currently sets `recall_at_k=None` and does not compute recall; baseline runs are therefore incomplete until recall is wired in.
-CODEX: `baseline_laion_exact()` does compute recall via `run_single_experiment()`, but the benchmark still uses direct HNSW helpers (not channel-based). That’s OK, but call it out as “quality-only path” so readers don’t assume channel architecture here.
+CODEX: `baseline_laion_exact()` does compute recall via `run_single_experiment()`, but the benchmark still uses direct HNSW helpers (not channel-based). That's OK, but call it out as "quality-only path" so readers don't assume channel architecture here.
+RESPONSE: Acknowledged. **Quality baselines use direct HNSW path** (not channel architecture) for recall measurement. Throughput baselines use channel architecture. This separation is intentional - see "Two Benchmark Paths" below.
 
 ### Latency Metrics
 
@@ -72,6 +73,15 @@ Benchmarks use the **production channel infrastructure**:
 - **Reads**: Multiple producer tasks send queries through an MPMC channel.
   A **configurable pool** of query workers processes searches in parallel.
 CODEX: Verified in `libs/db/src/vector/benchmark/concurrent.rs` (Writer/Reader channels used).
+
+### Two Benchmark Paths
+
+| Path | Purpose | Architecture | Recall? | Test File |
+|------|---------|--------------|---------|-----------|
+| **Throughput** | Measure ops/sec under concurrent load | Channel-based (MPSC/MPMC) | No | `test_vector_concurrent.rs` |
+| **Quality** | Measure recall@k accuracy | Direct HNSW helpers | Yes | `test_vector_baseline.rs` |
+
+The quality path bypasses channels to isolate recall measurement from concurrency effects.
 
 ---
 
@@ -243,6 +253,7 @@ BenchConfig {
 | `baseline_concurrent_balanced` | Random | Exact | L2 | No |
 | `baseline_concurrent_stress` | Random | Exact | L2 | No |
 CODEX: `libs/db/tests/test_vector_baseline.rs` exists; Exact recall is implemented. RaBitQ tests are stubs and do **not** measure recall yet, so keep RaBitQ baselines marked pending.
+RESPONSE: Acknowledged. RaBitQ baselines remain **pending** until `rabitq_bench` example is run and results captured.
 
 ### Running the Full Suite
 
@@ -366,11 +377,13 @@ SIMD: NEON (aarch64)
 - **Read-heavy achieves highest throughput**: Fewer inserts = more resources for queries
 CODEX: These baseline numbers are not reproducible from code alone; no run logs or scripts included. Treat as provisional until a run artifact is linked.
 CODEX: Repro command exists; still missing run artifact or raw log capture in-repo. If baselines are used for regression, capture the logs or a CSV snapshot.
+RESPONSE: Acknowledged. For CI regression tracking, logs should be captured to `benchmarks/logs/` or exported as CSV. Current results are manual runs documented inline.
 
 ### Quality Baseline (LAION)
 
-**Status:** Partial (January 17, 2026)
+**Status:** Partial (January 17, 2026) - Exact complete, RaBitQ pending
 CODEX: `baseline_laion_exact` now runs and measures recall. RaBitQ recall baselines remain TBD (stubs), so quality baseline is partial until those runs are captured.
+RESPONSE: Acknowledged. Exact baseline complete (90.4% recall). RaBitQ baselines require running `cargo run --release --example rabitq_bench` with LAION data.
 
 **Environment:** Same as throughput baseline (aarch64, Cortex-X925, 20 cores)
 
