@@ -151,6 +151,28 @@ bench_vector sweep --dataset laion --num-vectors 100000 --rabitq --show-pareto
 |--------|---------|-------------|
 | `--results-dir` | `./results` | CSV output directory |
 | `--show-pareto` | false | Display Pareto-optimal configurations |
+| `--assert-recall` | none | Minimum recall threshold (exit code 1 if below) |
+
+**CI Integration:**
+
+The `--assert-recall` flag enables automated quality gates:
+
+```bash
+# Fail CI if minimum recall drops below 80%
+bench_vector sweep --dataset laion --rabitq --assert-recall 0.80
+
+# Example output when assertion passes:
+# === Recall Assertion ===
+# Minimum recall observed: 92.3%
+# Required threshold: 80.0%
+# ✓ Recall assertion PASSED
+
+# Example output when assertion fails (exit code 1):
+# === Recall Assertion ===
+# Minimum recall observed: 75.2%
+# Required threshold: 80.0%
+# Error: Recall assertion FAILED: 75.2% < 80.0% threshold
+```
 
 **Example - Full RaBitQ Sweep:**
 
@@ -384,8 +406,64 @@ If `check-distribution` reports invalid variance:
 
 Both indicate potential issues that will degrade RaBitQ recall.
 
+## CI/CD Integration
+
+### GitHub Actions Example
+
+```yaml
+name: Vector Recall Regression
+
+on:
+  pull_request:
+    paths:
+      - 'libs/db/src/vector/**'
+
+jobs:
+  recall-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Download LAION dataset
+        run: |
+          cargo run --release --bin bench_vector -- \
+            download --dataset laion --data-dir ./data
+
+      - name: Run RaBitQ recall baseline
+        run: |
+          cargo run --release --bin bench_vector -- sweep \
+            --dataset laion \
+            --data-dir ./data \
+            --num-vectors 10000 \
+            --rabitq \
+            --bits 2,4 \
+            --rerank 10 \
+            --assert-recall 0.80
+
+      - name: Run HNSW recall baseline
+        run: |
+          cargo run --release --bin bench_vector -- sweep \
+            --dataset laion \
+            --data-dir ./data \
+            --num-vectors 10000 \
+            --ef 100,200 \
+            --assert-recall 0.85
+```
+
+### Exit Codes
+
+| Exit Code | Meaning |
+|-----------|---------|
+| 0 | Success - all recall values meet threshold |
+| 1 | Failure - minimum recall below `--assert-recall` threshold |
+| 2 | Error - invalid arguments or missing dataset |
+
 ## See Also
 
+- `libs/db/src/vector/BASELINE.md` - Baseline benchmark documentation
 - `libs/db/src/vector/REQUIREMENTS.md` - Ground truth requirements
 - `libs/db/src/vector/BENCHMARK.md` - Detailed benchmark results
 - `libs/db/src/vector/GEMINI-BENCHMARK.md` - Benchmark infrastructure design

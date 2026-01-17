@@ -470,6 +470,11 @@ pub struct SweepArgs {
     /// Show Pareto frontier after sweep (optimal recall-QPS trade-offs)
     #[arg(long)]
     pub show_pareto: bool,
+
+    /// Assert minimum recall threshold (exit code 1 if any recall < threshold)
+    /// Example: --assert-recall 0.80 requires all recall values >= 80%
+    #[arg(long)]
+    pub assert_recall: Option<f64>,
 }
 
 pub async fn sweep(args: SweepArgs) -> Result<()> {
@@ -593,13 +598,16 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
     // Create results directory
     std::fs::create_dir_all(&args.results_dir)?;
 
+    // Track minimum recall across all sweeps
+    let mut overall_min_recall: f64 = 1.0;
+
     if args.rabitq {
         if args.compare_simd {
             // Run both SIMD and scalar modes for comparison
             println!("\n=== SIMD vs Scalar Comparison ===\n");
 
             println!("--- SIMD Mode ---");
-            run_rabitq_sweep(
+            let min_recall = run_rabitq_sweep(
                 &index,
                 &storage,
                 &db_vectors,
@@ -615,9 +623,12 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
                 true, // use_simd_dot
                 args.show_pareto,
             )?;
+            if min_recall < overall_min_recall {
+                overall_min_recall = min_recall;
+            }
 
             println!("\n--- Scalar Mode ---");
-            run_rabitq_sweep(
+            let min_recall = run_rabitq_sweep(
                 &index,
                 &storage,
                 &db_vectors,
@@ -633,9 +644,12 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
                 false, // use_simd_dot
                 args.show_pareto,
             )?;
+            if min_recall < overall_min_recall {
+                overall_min_recall = min_recall;
+            }
         } else {
             // Single mode sweep
-            run_rabitq_sweep(
+            let min_recall = run_rabitq_sweep(
                 &index,
                 &storage,
                 &db_vectors,
@@ -651,10 +665,11 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
                 args.simd_dot,
                 args.show_pareto,
             )?;
+            overall_min_recall = min_recall;
         }
     } else {
         // Standard HNSW sweep
-        run_hnsw_sweep(
+        let min_recall = run_hnsw_sweep(
             &index,
             &storage,
             &queries,
@@ -663,6 +678,23 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
             &k_values,
             build_time,
         )?;
+        overall_min_recall = min_recall;
+    }
+
+    // Check recall assertion if threshold provided
+    if let Some(threshold) = args.assert_recall {
+        println!("\n=== Recall Assertion ===");
+        println!("Minimum recall observed: {:.1}%", overall_min_recall * 100.0);
+        println!("Required threshold: {:.1}%", threshold * 100.0);
+
+        if overall_min_recall < threshold {
+            anyhow::bail!(
+                "Recall assertion FAILED: {:.1}% < {:.1}% threshold",
+                overall_min_recall * 100.0,
+                threshold * 100.0
+            );
+        }
+        println!("✓ Recall assertion PASSED");
     }
 
     Ok(())
@@ -759,6 +791,8 @@ fn compute_ground_truth(
     }).collect()
 }
 
+/// Run HNSW parameter sweep.
+/// Returns the minimum recall observed across all configurations.
 fn run_hnsw_sweep(
     index: &hnsw::Index,
     storage: &Storage,
@@ -767,12 +801,13 @@ fn run_hnsw_sweep(
     ef_values: &[usize],
     k_values: &[usize],
     build_time: f64,
-) -> Result<()> {
+) -> Result<f64> {
     println!("\n=== HNSW Parameter Sweep ===");
     println!("{:<10} {:<10} {:<12} {:<10} {:<10} {:<10}", "ef_search", "k", "Recall", "QPS", "P50(ms)", "P99(ms)");
     println!("{}", "-".repeat(62));
 
     let max_k = *k_values.iter().max().unwrap_or(&10);
+    let mut min_recall: f64 = 1.0;
 
     for &ef_search in ef_values {
         // Run all queries
@@ -791,6 +826,9 @@ fn run_hnsw_sweep(
 
         for &k in k_values {
             let recall = compute_recall(&search_results, ground_truth, k);
+            if recall < min_recall {
+                min_recall = recall;
+            }
             println!(
                 "{:<10} {:<10} {:<12.1}% {:<10.1} {:<10.2} {:<10.2}",
                 ef_search, k, recall * 100.0, stats.qps, stats.p50_ms, stats.p99_ms
@@ -799,9 +837,11 @@ fn run_hnsw_sweep(
     }
 
     println!("\nBuild time: {:.2}s", build_time);
-    Ok(())
+    Ok(min_recall)
 }
 
+/// Run RaBitQ parameter sweep.
+/// Returns the minimum recall observed across all configurations.
 fn run_rabitq_sweep(
     index: &hnsw::Index,
     storage: &Storage,
@@ -817,12 +857,13 @@ fn run_rabitq_sweep(
     results_dir: &PathBuf,
     use_simd_dot: bool,
     show_pareto: bool,
-) -> Result<()> {
+) -> Result<f64> {
     let simd_mode = if use_simd_dot { "SIMD" } else { "scalar" };
     println!("\n=== RaBitQ Parameter Sweep ({}) ===", simd_mode);
 
     let embedding_code: EmbeddingCode = 1;
     let mut all_results: Vec<RabitqExperimentResult> = Vec::new();
+    let mut min_recall: f64 = 1.0;
 
     for &bits in bits_values {
         println!("\n--- {} bits/dim ({}) ---", bits, simd_mode);
@@ -868,6 +909,9 @@ fn run_rabitq_sweep(
                     }
 
                     let recall = compute_recall(&search_results, ground_truth, k);
+                    if recall < min_recall {
+                        min_recall = recall;
+                    }
                     latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
                     let stats = LatencyStats::from_latencies(&latencies);
 
@@ -936,7 +980,7 @@ fn run_rabitq_sweep(
         }
     }
 
-    Ok(())
+    Ok(min_recall)
 }
 
 fn std_dev(values: &[f64]) -> f64 {
