@@ -86,6 +86,11 @@ Bucket 19: 512ms-1s+
 
 Log2 buckets provide good resolution across the full latency range with minimal memory overhead.
 
+**Interpreting Percentiles:** Since buckets are coarse (powers of 2), reported p50/p95/p99
+values represent the **upper bound** of the bucket containing that percentile, not exact
+latency values. For example, if p99 is reported as 8ms, the actual p99 latency is somewhere
+in the 4-8ms range. This trade-off allows lock-free updates without storing individual samples.
+
 ---
 
 ## Task 5.11: Concurrent Benchmark Baseline
@@ -386,19 +391,49 @@ pub enum OpType {
 
 ---
 
-## CODEX Review Notes (Post-sync)
+## Usage Guidance
 
-### Correctness / Reliability
+### When to Use Concurrent Tests vs Benchmarks
 
-- **Concurrent tests allow a 10% error rate** in `test_vector_concurrent.rs`; this can mask real failures. If errors are expected only during the “empty index” window, consider gating searches until at least one insert commits or assert that errors are limited to the empty-graph condition.
-- **Bench/test vec_id derivation** (e.g., `(thread_id << 24) | i`) assumes small `vectors_per_writer`; consider documenting the bound or guarding against overflow if larger configs are used.
-- **Search-before-index-ready behavior** isn’t explicitly documented in these tests; if errors are expected when entry point is missing, call that out in the test comments to avoid false positives.
+| Tool | Purpose | Use When |
+|------|---------|----------|
+| **Stress Tests** (`test_vector_concurrent.rs`) | Validate correctness under load | CI/CD, detecting race conditions, verifying thread safety |
+| **Concurrent Benchmarks** (`ConcurrentBenchmark`) | Measure throughput/latency | Performance tuning, capacity planning, regression testing |
+| **Integration Tests** (`test_vector_multi_embedding.rs`) | Validate API correctness | Feature development, multi-tenancy verification |
 
-### Performance / Measurement Quality
+**Key Differences:**
+- Stress tests prioritize **no panics** and **data integrity** over throughput numbers
+- Benchmarks prioritize **accurate measurements** and **reproducibility**
+- Integration tests prioritize **API contract validation** and **isolation guarantees**
 
-- **Per-vector transactions** in concurrent benchmarks are realistic for correctness but can cap throughput; consider an optional batch mode to measure contention without the overhead of one txn per insert.
-- **Histogram buckets** are coarse by design; note in results interpretation that p50/p99 are bucket upper bounds, not exact values.
+### Error Rate Expectations
 
-### Design / Documentation
+The 10% error threshold in stress tests accounts for expected transient conditions:
 
-- Consider adding a brief “When to use concurrent benchmarks vs integration tests” note to clarify intended usage and to avoid conflating correctness tests with performance baselines.
+1. **Empty graph searches** - Before any insert commits, searches return an error (no entry point)
+2. **Transaction conflicts** - RocksDB optimistic concurrency may reject concurrent writes
+
+These are documented in `test_vector_concurrent.rs` module-level comments. In production:
+- Gate searches until index reports ready, or
+- Handle "empty index" errors gracefully in application code
+
+### vec_id Generation Bounds
+
+Test configurations use bounded vec_id generation:
+- `(thread_id << 16) | i` → max 65,536 vectors per thread (4 threads = 262K max)
+- Atomic counter → max 2^32 vectors total
+
+These bounds are documented in test file headers. Increase thread_id shift if larger configs needed.
+
+### Benchmark Transaction Modes
+
+Current benchmarks use per-vector transactions for correctness validation. For pure throughput
+measurement without transaction overhead, consider:
+
+```rust
+// Future: Batch mode for throughput benchmarks
+let config = BenchConfig::balanced()
+    .with_batch_size(100);  // Commit every 100 vectors
+```
+
+This is not yet implemented but noted for future enhancement.
