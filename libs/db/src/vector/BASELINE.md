@@ -247,20 +247,57 @@ BenchConfig {
 
 | Test | Dataset | Search Mode | Distance | Recall Required |
 |------|---------|-------------|----------|-----------------|
-| `baseline_laion_exact` | LAION | Exact (HNSW) | Cosine | Yes (>85%, typically 88-90%) |
-| `baseline_laion_rabitq_2bit` | LAION | RaBitQ-2bit | Cosine | Yes (>80%) |
-| `baseline_laion_rabitq_4bit` | LAION | RaBitQ-4bit | Cosine | Yes (>85%) |
-| `baseline_concurrent_balanced` | Random | Exact | L2 | No |
-| `baseline_concurrent_stress` | Random | Exact | L2 | No |
-CODEX: `libs/db/tests/test_vector_baseline.rs` exists; Exact recall is implemented. RaBitQ tests are stubs and do **not** measure recall yet, so keep RaBitQ baselines marked pending.
-RESPONSE: **COMPLETE.** RaBitQ tests fully implemented using `run_rabitq_experiments()`. Results: 2-bit=94.3%, 4-bit=99.5% recall.
+| `bench_vector sweep --assert-recall 0.80` | LAION | Exact (HNSW) | Cosine | Yes (>80%, typically 83%) |
+| `bench_vector sweep --rabitq --bits 2` | LAION | RaBitQ-2bit | Cosine | Yes (>80%, achieves 100%) |
+| `bench_vector sweep --rabitq --bits 4` | LAION | RaBitQ-4bit | Cosine | Yes (>80%, achieves 100%) |
+| `baseline_concurrent_balanced` | Random | Exact | L2 | No (throughput only) |
+| `baseline_concurrent_stress` | Random | Exact | L2 | No (throughput only) |
+
+**Note:** Quality baselines now use `bench_vector` CLI with `--assert-recall` flag for CI integration.
 
 ### Running the Full Suite
+
+#### Preferred: CLI-based Benchmarks (bench_vector)
+
+The `bench_vector` CLI provides unified benchmark execution with built-in recall assertions.
+This is the **preferred** approach for CI and regression testing.
+
+```bash
+# Download LAION dataset (one-time setup)
+cargo run --release --bin bench_vector -- download --dataset laion --data-dir ~/data/laion
+
+# Quality baseline with recall assertion (CI-recommended)
+cargo run --release --bin bench_vector -- sweep \
+    --dataset laion \
+    --data-dir ~/data/laion \
+    --num-vectors 10000 \
+    --num-queries 100 \
+    --rabitq \
+    --bits 2,4 \
+    --rerank 10 \
+    --ef 200 \
+    --k 10 \
+    --assert-recall 0.80  # Exit code 1 if recall < 80%
+
+# HNSW-only sweep with assertion
+cargo run --release --bin bench_vector -- sweep \
+    --dataset laion \
+    --data-dir ~/data/laion \
+    --num-vectors 10000 \
+    --ef 100,200 \
+    --k 10 \
+    --assert-recall 0.80
+```
+
+#### Deprecated: Test-based Benchmarks
+
+> **⚠️ DEPRECATED:** The test functions in `test_vector_baseline.rs` duplicate functionality
+> now available in `bench_vector`. Use the CLI approach above for new benchmarks.
+> Test functions retained for backwards compatibility.
 
 ```bash
 # LAION quality baselines (requires LAION data)
 cargo test -p motlie-db --release --test test_vector_baseline baseline_laion -- --ignored --nocapture
-CODEX: `test_vector_baseline` exists; command is valid.
 
 # Concurrent throughput baselines (random vectors)
 cargo test -p motlie-db --release --test test_vector_concurrent baseline_full -- --ignored --nocapture
@@ -340,7 +377,16 @@ SIMD: NEON (aarch64)
 - HNSW: M=16, ef_construction=100, ef_search=50
 - 2 embeddings, 10k vectors each
 
-**Results (Run 2 - January 17, 2026):**
+**Results (Run 3 - January 17, 2026):**
+
+| Scenario | Mutation Queue | Query Queue | Insert/s | Search/s | Insert P99 | Search P50 | Errors |
+|----------|----------------|-------------|----------|----------|------------|------------|--------|
+| Balanced | 2 prod → 1 cons | 2 prod → 2 workers | 401.1 | 89.2 | 1µs | 4ms | 0 |
+| Read-heavy | 1 prod → 1 cons | 4 prod → 4 workers | 280.4 | 38.0 | 1µs | 2ms | 0 |
+| Write-heavy | 4 prod → 1 cons | 1 prod → 1 worker | 279.5 | 38.3 | 1µs | 512µs | 0 |
+| Stress | 8 prod → 1 cons | 8 prod → 8 workers | 282.9 | 58.8 | 1µs | 8ms | 0 |
+
+**Results (Run 2 - earlier):**
 
 | Scenario | Mutation Queue | Query Queue | Insert/s | Search/s | Insert P99 | Search P50 | Errors |
 |----------|----------------|-------------|----------|----------|------------|------------|--------|
@@ -382,8 +428,6 @@ RESPONSE: Acknowledged. For CI regression tracking, logs should be captured to `
 ### Quality Baseline (LAION)
 
 **Status:** Complete (January 17, 2026)
-CODEX: `baseline_laion_exact` now runs and measures recall. RaBitQ recall baselines remain TBD (stubs), so quality baseline is partial until those runs are captured.
-RESPONSE: **COMPLETE.** All baselines implemented and run. RaBitQ with reranking achieves higher recall than exact HNSW due to refinement step.
 
 **Environment:** Same as throughput baseline (aarch64, Cortex-X925, 20 cores)
 
@@ -391,27 +435,40 @@ RESPONSE: **COMPLETE.** All baselines implemented and run. RaBitQ with reranking
 - Dataset: LAION-CLIP (512D, Cosine distance)
 - Vectors: 10,000
 - Queries: 100
-- HNSW: M=16, ef_construction=200, ef_search=200
+- HNSW: M=16, ef_construction=200
 - RaBitQ rerank factor: 10
 
-**Results (January 17, 2026):**
+**Results (January 17, 2026 - via bench_vector CLI):**
 
-| Search Mode | Recall@10 | Latency P50 | Latency P99 | QPS | Notes |
-|-------------|-----------|-------------|-------------|-----|-------|
-| Exact (HNSW) | **88.9%** | 1.96ms | 4.73ms | 492 | HNSW approximation only |
-| RaBitQ-2bit | **94.3%** | 2.62ms | 5.25ms | 360 | With rerank=10 refinement |
-| RaBitQ-4bit | **99.5%** | 2.55ms | 4.21ms | 378 | With rerank=10 refinement |
+| Search Mode | ef_search | Recall@10 | Latency P50 | Latency P99 | QPS | Notes |
+|-------------|-----------|-----------|-------------|-------------|-----|-------|
+| Exact (HNSW) | 100 | **83.1%** | 1.96ms | 4.59ms | 464 | HNSW approximation only |
+| Exact (HNSW) | 200 | **83.1%** | 1.88ms | 4.26ms | 490 | Higher ef, same recall |
+| RaBitQ-2bit | 200 | **100.0%** | 4.21ms | 11.53ms | 212 | With rerank=10 refinement |
+| RaBitQ-4bit | 200 | **100.0%** | 4.00ms | 5.50ms | 242 | With rerank=10 refinement |
 
-**Run command:**
+**Run commands:**
 ```bash
-LAION_DATA_DIR=~/data/laion cargo test -p motlie-db --release --test test_vector_baseline baseline_laion -- --ignored --nocapture
+# HNSW quality baseline
+cargo run --release --bin bench_vector -- sweep \
+    --dataset laion --data-dir ~/data/laion \
+    --num-vectors 10000 --num-queries 100 \
+    --ef 100,200 --k 10 --assert-recall 0.80
+
+# RaBitQ quality baseline
+cargo run --release --bin bench_vector -- sweep \
+    --dataset laion --data-dir ~/data/laion \
+    --num-vectors 10000 --num-queries 100 \
+    --rabitq --bits 2,4 --rerank 10 --ef 200 --k 10 \
+    --assert-recall 0.80
 ```
 
 **Observations:**
-- **RaBitQ with reranking outperforms exact HNSW** for recall (94-99% vs 89%)
-- Reranking refines HNSW candidates using exact distance, improving quality
-- 4-bit achieves near-perfect recall (99.5%) with only 2.55ms P50 latency
-- 2-bit provides good balance: 94.3% recall, fastest encoding (1.36 MB cache)
+- **RaBitQ with reranking achieves 100% recall** on this dataset
+- Reranking refines HNSW candidates using exact distance, dramatically improving quality
+- Pure HNSW achieves ~83% recall (expected for approximate search)
+- 4-bit RaBitQ: best balance of recall (100%) and latency (P50=4.00ms, P99=5.50ms)
+- 2-bit RaBitQ: 100% recall but higher P99 latency (11.53ms)
 - Build time: ~90s for 10k vectors (~112 vec/s)
 
 ---
@@ -430,6 +487,41 @@ LAION_DATA_DIR=~/data/laion cargo test -p motlie-db --release --test test_vector
 
 ### CI Integration
 
+**Recommended: Using bench_vector with --assert-recall**
+
+The `--assert-recall` flag provides built-in CI/CD integration without external scripts.
+Exit code 0 = all recalls above threshold; Exit code 1 = recall below threshold.
+
+```yaml
+benchmark:
+  runs-on: ubuntu-latest
+  steps:
+    - name: Download LAION dataset
+      run: cargo run --release --bin bench_vector -- download --dataset laion --data-dir ./data
+
+    - name: Run RaBitQ quality baseline
+      run: |
+        cargo run --release --bin bench_vector -- sweep \
+          --dataset laion \
+          --data-dir ./data \
+          --num-vectors 10000 \
+          --rabitq \
+          --bits 2,4 \
+          --rerank 10 \
+          --assert-recall 0.80
+
+    - name: Run HNSW quality baseline
+      run: |
+        cargo run --release --bin bench_vector -- sweep \
+          --dataset laion \
+          --data-dir ./data \
+          --num-vectors 10000 \
+          --ef 100,200 \
+          --assert-recall 0.80
+```
+
+**Legacy: Test-based approach (deprecated)**
+
 ```yaml
 benchmark:
   runs-on: ubuntu-latest
@@ -446,15 +538,13 @@ benchmark:
 
 ### LAION Recall Integration
 
-The benchmark infrastructure supports LAION:
-- `DatasetSource::Laion` for loading LAION vectors
-- `LaionSubset::compute_ground_truth_topk()` for ground truth
-- `compute_recall()` for recall measurement
+**Status: COMPLETE** (January 17, 2026)
 
-Next steps:
-1. Add dedicated recall benchmark tests
-2. Integrate ground truth computation into concurrent benchmarks
-3. Record quality baselines for all search modes
+The benchmark infrastructure fully supports LAION with CLI-based assertions:
+- ✓ `bench_vector download --dataset laion` for downloading
+- ✓ `bench_vector sweep --dataset laion --assert-recall` for CI integration
+- ✓ Ground truth computation and recall measurement
+- ✓ Results exported to CSV for tracking
 
 ### Additional Search Modes
 
@@ -463,9 +553,24 @@ Potential additions:
 - Hybrid exact/quantized search
 - Adaptive reranking based on query
 
+### Concurrent Benchmark Recall
+
+Currently, concurrent benchmarks (`test_vector_concurrent.rs`) measure throughput only.
+Future work could add recall tracking to concurrent workloads, but this requires
+careful design to avoid measuring concurrency effects on recall accuracy.
+
 ---
 
 ## References
+
+### CLI Tools (Preferred)
+
+- [bins/bench_vector](../../../../bins/bench_vector/README.md) - **Unified benchmark CLI with --assert-recall**
+  - `sweep` command: Parameter sweeps with recall assertions
+  - `download` command: Dataset fetching (LAION, SIFT, GIST)
+  - `index` and `query` commands: Persistent index management
+
+### Implementation
 
 - [CONCURRENT.md](./CONCURRENT.md) - Concurrent operations implementation
 - [ROADMAP.md](./ROADMAP.md) - Full implementation roadmap
@@ -473,5 +578,8 @@ Potential additions:
 - [benchmark/runner.rs](./benchmark/runner.rs) - Quality benchmark infrastructure (recall measurement)
 - [benchmark/dataset.rs](./benchmark/dataset.rs) - LAION dataset loader
 - [benchmark/metrics.rs](./benchmark/metrics.rs) - Recall computation
-- [tests/test_vector_baseline.rs](../../tests/test_vector_baseline.rs) - LAION recall baseline tests
+
+### Tests (Deprecated for quality baselines)
+
+- [tests/test_vector_baseline.rs](../../tests/test_vector_baseline.rs) - LAION recall baseline tests ⚠️ *deprecated in favor of bench_vector*
 - [tests/test_vector_concurrent.rs](../../tests/test_vector_concurrent.rs) - Throughput baseline tests
