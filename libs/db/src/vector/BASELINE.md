@@ -15,6 +15,8 @@ This document defines a comprehensive baseline benchmark suite for the vector su
 3. **Document expected performance** for capacity planning
 4. **Validate concurrent correctness** under load
 
+CODEX: Concurrent correctness is primarily validated by `test_vector_concurrent.rs`; baseline benchmarks currently do not assert correctness beyond successful completion.
+
 ### Minimum Requirements
 
 All baseline benchmarks MUST meet these minimum requirements:
@@ -25,6 +27,9 @@ All baseline benchmarks MUST meet these minimum requirements:
 | **Embedding spaces** | 2 | Validate multi-tenancy under load |
 | **Duration** | 30 seconds | Statistical significance |
 | **Environment docs** | Complete | Reproducibility |
+
+CODEX: Current `ConcurrentBenchmark::run` benchmarks a single embedding. Minimum requirement "Embedding spaces = 2" is not satisfied by the existing benchmark tests.
+CODEX: Default `BenchConfig` uses `vectors_per_writer=1000`, so 10k vectors/embedding requires explicit overrides in baseline tests.
 
 ---
 
@@ -54,6 +59,7 @@ BenchConfig {
     ef_search: 50,
 }
 ```
+CODEX: No single-threaded baseline test exists in `test_vector_concurrent.rs`. Add a dedicated ignored test or configure `BenchConfig` explicitly.
 
 ### 2. Read-Heavy Workload
 
@@ -70,6 +76,7 @@ Simulates CDN/cache access patterns with many readers, few writers.
 ```rust
 BenchConfig::read_heavy()  // 1 writer, 8 readers
 ```
+CODEX: Implemented as `benchmark_baseline_read_heavy`, but still single-embedding and default `vectors_per_writer` unless overridden.
 
 ### 3. Write-Heavy Workload
 
@@ -86,6 +93,7 @@ Simulates batch ingestion with high insert concurrency.
 ```rust
 BenchConfig::write_heavy()  // 8 writers, 1 reader
 ```
+CODEX: Implemented as `benchmark_baseline_write_heavy`, but still single-embedding and default `vectors_per_writer` unless overridden.
 
 ### 4. Balanced Workload
 
@@ -103,6 +111,7 @@ Simulates mixed production traffic.
 ```rust
 BenchConfig::balanced()  // 4 writers, 4 readers
 ```
+CODEX: Implemented as `benchmark_baseline_balanced`, but still single-embedding and default `vectors_per_writer` unless overridden.
 
 ### 5. Stress Test
 
@@ -119,6 +128,7 @@ Maximum concurrency to find bottlenecks and breaking points.
 ```rust
 BenchConfig::stress()  // 16 writers, 16 readers
 ```
+CODEX: Implemented as `benchmark_baseline_stress`; still single-embedding.
 
 ---
 
@@ -132,6 +142,8 @@ BenchConfig::stress()  // 16 writers, 16 readers
 | `search_count` | Counter | Total successful searches |
 | `delete_count` | Counter | Total successful deletes |
 | `error_count` | Counter | Failed operations |
+
+CODEX: No delete workload is currently executed by `ConcurrentBenchmark`; delete metrics will remain zero unless a delete phase is added.
 
 ### Latency Metrics
 
@@ -402,6 +414,7 @@ Vectors per embedding: 10,000
 Duration: 30s per scenario
 HNSW: M=16, ef_construction=100, ef_search=50
 ```
+CODEX: Multi-embedding benchmark harness is not implemented yet; this configuration is aspirational until `ConcurrentBenchmark` can run multiple embeddings.
 
 **Results:** [TBD - run benchmark suite]
 
