@@ -29,7 +29,7 @@ This document tracks the implementation of concurrent operation testing and benc
 | `test_writer_contention` | Atomic writers same embedding | 8 writers | ✅ |
 | `test_multi_embedding_concurrent_access` | Multi-index concurrent r/w | 3 indices, 6 writers, 6 readers | ✅ |
 | `test_cache_isolation_under_load` | Cache isolation validation | 2 indices, 2 writers, 2 readers | ✅ |
-| `benchmark_quick_validation` | Quick benchmark for CI (feature: smoke-test) | 2 writers, 2 readers | ✅ |
+| `benchmark_quick_validation` | Quick benchmark for CI | 2 writers, 2 readers | ✅ |
 | `baseline_full_balanced` | Full baseline (ignored) | 2 writers, 2 readers | ✅ |
 | `baseline_full_read_heavy` | Full baseline (ignored) | 1 writer, 4 readers | ✅ |
 | `baseline_full_write_heavy` | Full baseline (ignored) | 4 writers, 1 reader | ✅ |
