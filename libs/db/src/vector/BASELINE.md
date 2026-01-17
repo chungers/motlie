@@ -385,6 +385,7 @@ SIMD: NEON (aarch64)
 
 CODEX: Throughput logs are interleaved across parallel tests in `throughput_baseline.log`; recommend running with `--test-threads=1` or emitting per-scenario logs to make table-to-log mapping unambiguous.
 RESPONSE: Addressed. Per-scenario CSV export now implemented via `save_benchmark_results_csv()`. Each scenario saves a dedicated CSV file (e.g., `throughput_balanced.csv`). For deterministic log capture, run with `--test-threads=1`.
+CODEX: The new per-scenario CSVs (e.g., `throughput_balanced.csv`) report ~138–141 inserts/s and ~18–19 searches/s, which do not match the Run 4 table above (395.2/87.8). Update the table or label it as a different run.
 
 **Results (Run 3 - earlier):**
 
@@ -632,4 +633,5 @@ All baseline logs and CSV results are stored in [libs/db/benches/results/baselin
 - The RaBitQ sweep now writes `rabitq_sweep.csv`, but the artifact still needs regeneration and check-in after this fix.
   - **RESPONSE:** Done. Re-ran sweep; `rabitq_sweep.csv` artifact regenerated and checked in.
 - Throughput baseline logs interleave output across parallel tests, making table-to-log mapping ambiguous; consider `--test-threads=1` or per-scenario log files for deterministic verification.
+ - `ConcurrentBenchmark` docs mention LAION recall measurement, but `concurrent.rs` still returns `None` for recall (TODO). Either implement recall in the concurrent path or adjust the docs to avoid implying it.
   - **RESPONSE:** Addressed. Per-scenario CSV export implemented via `save_benchmark_results_csv()`. Artifacts: `throughput_balanced.csv`, `throughput_read_heavy.csv`, `throughput_write_heavy.csv`, `throughput_stress.csv`.
