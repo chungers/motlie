@@ -1,8 +1,8 @@
 # Phase 5.9-5.11: Concurrent Operations
 
-**Status:** ✅ Complete (CODEX: implementation present; baseline numbers not captured in-repo yet)
-CODEX: Verified tests/bench code exists; performance baselines remain unrecorded.
-**Date:** January 16, 2026
+**Status:** ✅ Complete (CODEX: implementation present; baseline numbers captured in repo)
+CODEX: Verified tests/bench code exists; baseline artifacts are captured in `BASELINE.md`.
+**Date:** January 17, 2026
 **Tasks:** 5.9 (Stress Tests), 5.10 (Metrics), 5.11 (Benchmarks)
 
 ---
@@ -155,7 +155,11 @@ CODEX: Benchmark uses per-vector transactions; no batch mode implemented.
 
 *Note: Targets based on 100K vectors, 128D, M=16, ef=100*
 
-### Baseline Results (January 16, 2026)
+### Baseline Results (January 17, 2026)
+
+Full throughput baselines and per-scenario CSV artifacts are recorded in:
+- [BASELINE.md](./BASELINE.md) (Run 5 table + artifacts)
+- `libs/db/benches/results/baseline/throughput_*.csv`
 
 Quick validation benchmark (2 writers, 2 readers, 5s, 64D vectors):
 
@@ -170,7 +174,7 @@ Quick validation benchmark (2 writers, 2 readers, 5s, 64D vectors):
 
 Run full benchmark with:
 ```bash
-cargo test -p motlie-db --test test_vector_concurrent benchmark_baseline -- --ignored --nocapture
+cargo test -p motlie-db --test test_vector_concurrent baseline_full -- --ignored --nocapture
 ```
 
 ---

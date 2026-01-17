@@ -80,7 +80,7 @@ dedicated vector databases or custom storage engines.
 | [Phase 7](#phase-7-async-graph-updater) | Async Graph Updater | 🔲 Not Started |
 | [Phase 8](#phase-8-production-hardening) | Production Hardening | 🔲 Not Started |
 
-### Phase 4 Tasks (Current)
+### Phase 4 Tasks
 
 | Task | Description | Status | Commit |
 |------|-------------|--------|--------|
@@ -243,16 +243,16 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  ├── 4.16-4.17 Distance metric bug fixes ✓                                 │
 │  ├── 4.18 VectorElementType (f16/f32 support) ✓                            │
 │  ├── 4.19-4.20 Parallel reranking (rayon) + threshold tuning ✓             │
-│  └── Files: rabitq.rs, search_config.rs, parallel.rs, navigation.rs        │
+│  └── Files: rabitq.rs, search/config.rs, parallel.rs, navigation.rs        │
 │                                                                              │
-│  Phase 5: Internal Mutation/Query API [NOT STARTED]                          │
+│  Phase 5: Internal Mutation/Query API [COMPLETE]                             │
 │  ├── 5.0 HNSW Transaction Refactoring (prerequisite for atomicity)         │
 │  ├── 5.1-5.7 Processor methods, Storage search, dispatch logic             │
 │  ├── 5.8 Migrate examples/laion_benchmark + integration tests              │
 │  ├── 5.9-5.11 Concurrency stress tests, metrics infra, benchmarks          │
 │  └── Goal: Complete internal API + migration + concurrent validation       │
 │                                                                              │
-│  Phase 6: MPSC/MPMC Public API [NOT STARTED]                                 │
+│  Phase 6: MPSC/MPMC Public API [COMPLETE]                                    │
 │  ├── 6.1-6.6 MutationExecutor, Consumer, Reader, spawn functions           │
 │  └── Goal: Channel-based wrappers matching graph/fulltext patterns         │
 │                                                                              │
@@ -4257,23 +4257,7 @@ See [Task 4.24](#task-424-adc-hnsw-integration) for implementation plan.
 
 ##### Distance Metric Compatibility
 
-**Current Implementation Status:**
-
-```rust
-// hnsw.rs:681 - Currently HARDCODED to L2
-fn distance(&self, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
-    // Use L2 distance for now (TODO: use embedding's configured distance)
-    Ok(l2_distance(query, &vector))
-}
-```
-
-**TODO:** The `distance()` method should use the embedding's configured metric:
-```rust
-fn distance(&self, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
-    let vector = self.get_vector(storage, vec_id)?;
-    Ok(self.config.distance.compute(query, &vector))  // Use configured metric
-}
-```
+**Resolved:** Distance computation now uses the embedding-configured metric via `SearchConfig::compute_distance()` (Phase 4.16). The hardcoded L2 path has been removed.
 
 **RaBitQ Hamming Distance Compatibility:**
 
@@ -4348,14 +4332,14 @@ fn beam_search_layer0_hamming(...)  // ~86 lines (uncached version)
 **Goal:** Use `Embedding` as the single source of truth for search configuration, ensuring
 consistency between index build and search operations.
 
-**Implementation:** `libs/db/src/vector/search_config.rs` (30 unit tests, 11 integration tests)
+**Implementation:** `libs/db/src/vector/search/config.rs` (30 unit tests, 11 integration tests)
 
-##### Problem Statement
+##### Problem Statement (Resolved)
 
-1. **Distance Metric Mismatch**: Index built with Cosine but searched with hardcoded L2 (hnsw.rs:681)
+1. **Distance Metric Mismatch**: Index built with Cosine but searched with hardcoded L2 (resolved via `SearchConfig::compute_distance`)
 2. **RaBitQ Compatibility**: Hamming distance approximates angular distance, works best with Cosine
-3. **No Validation**: No runtime check that search uses correct distance metric
-4. **Configuration Scattered**: Distance metric in Embedding, search params elsewhere
+3. **No Validation**: Runtime validation now enforces embedding distance consistency
+4. **Configuration Scattered**: Consolidated into `SearchConfig`
 
 ##### Key Insight
 
@@ -4679,7 +4663,7 @@ impl HnswIndex {
 
 ##### Migration Path
 
-1. **Step 1**: Add `SearchConfig` to `search_config.rs` (new file)
+1. **Step 1**: Add `SearchConfig` to `search/config.rs` (new file)
 2. **Step 2**: Add `distance_with_config()` to HnswIndex
 3. **Step 3**: Add new `search(config, query)` method
 4. **Step 4**: Deprecate old search methods with migration guide
@@ -4688,17 +4672,7 @@ impl HnswIndex {
 
 ##### Hardcoded L2 Fix
 
-The current code at `hnsw.rs:678-683`:
-```rust
-fn distance(&self, storage: &Storage, query: &[f32], vec_id: VecId) -> Result<f32> {
-    let vector = self.get_vector(storage, vec_id)?;
-    // Use L2 distance for now (TODO: use embedding's configured distance)
-    Ok(l2_distance(query, &vector))
-}
-```
-
-Will be replaced by `distance_with_config()` which delegates to `config.compute_distance()`,
-which delegates to `embedding.distance.compute()`. This ensures the correct metric is used.
+Resolved: HNSW distance now delegates to `SearchConfig::compute_distance()`, which uses the embedding’s configured metric.
 
 ##### API Usage Examples
 
@@ -4757,7 +4731,7 @@ let results = l2_index.search(&storage, &config, &query);
 6. **Clear Error Messages**: Explain why combinations are invalid
 
 **Acceptance Criteria:**
-- [x] Create `search_config.rs` with `SearchConfig` and `SearchStrategy`
+- [x] Create `search/config.rs` with `SearchConfig` and `SearchStrategy`
 - [x] Auto-select strategy based on distance metric
 - [x] Return error for RaBitQ + non-Cosine combinations
 - [x] Validate embedding code match at search time
@@ -4928,7 +4902,7 @@ Cosine + RaBitQ should achieve much higher recall.
 
 **Files Changed:**
 - `libs/db/src/vector/hnsw.rs` - Core fix
-- `libs/db/src/vector/search_config.rs` - Updated default rerank_factor to 10
+- `libs/db/src/vector/search/config.rs` - Updated default rerank_factor to 10
 - `examples/vector2/main.rs` - Pass Distance to HnswIndex
 - `examples/vector2/benchmark.rs` - Added cosine distance functions
 
@@ -8632,7 +8606,7 @@ pub use navigation::{BinaryCodeCache, NavigationCache, NavigationCacheConfig};
 // ─────────────────────────────────────────────────────────────────────────────
 // Search Configuration
 // ─────────────────────────────────────────────────────────────────────────────
-pub use search_config::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
+pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Schema Types
