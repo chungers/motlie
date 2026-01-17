@@ -18,30 +18,35 @@
 //! - [`DatasetSource`] - LAION or random vector generation
 //! - [`SearchMode`] - RaBitQ or exact search strategy
 //!
-//! ## Recall Measurement
+//! ## Throughput vs Quality Measurement
 //!
-//! When using LAION dataset, recall@k is computed by comparing search results
-//! against brute-force ground truth. This is a **required metric** for baseline
-//! benchmarks.
+//! Concurrent benchmarks measure **throughput only** (ops/sec, latency percentiles).
+//! Recall measurement is intentionally omitted because:
+//! - Tracking query/result pairs under concurrent load adds overhead
+//! - Ground truth computation interferes with throughput measurement
+//! - Quality baselines should isolate recall from concurrency effects
+//!
+//! For recall measurement, use the dedicated CLI path:
+//! ```bash
+//! cargo run --release --bin bench_vector -- sweep --dataset laion --assert-recall 0.80
+//! ```
 //!
 //! # Example
 //!
 //! ```ignore
-//! use motlie_db::vector::benchmark::concurrent::{BenchConfig, ConcurrentBenchmark, DatasetSource, SearchMode};
+//! use motlie_db::vector::benchmark::concurrent::{BenchConfig, ConcurrentBenchmark, DatasetSource};
 //!
 //! let config = BenchConfig::balanced()
-//!     .with_dataset(DatasetSource::Laion { data_dir: "/data/laion".into() })
-//!     .with_search_mode(SearchMode::RaBitQ { bits: 2 });
+//!     .with_dataset(DatasetSource::Random { seed: 42 });
 //! let bench = ConcurrentBenchmark::new(config);
 //! let result = bench.run(storage, embedding_code).await?;
-//! println!("Recall@10: {:.1}%", result.recall_at_10.unwrap_or(0.0) * 100.0);
+//! println!("Insert: {:.1}/s, Search: {:.1}/s", result.insert_throughput, result.search_throughput);
 //! ```
 
-use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -50,8 +55,7 @@ use rand::{Rng, SeedableRng};
 use tokio::task::JoinHandle;
 
 use crate::reader::Runnable as QueryRunnable;
-use crate::vector::benchmark::dataset::{LaionDataset, LaionSubset, LAION_EMBEDDING_DIM};
-use crate::vector::benchmark::metrics::compute_recall;
+use crate::vector::benchmark::dataset::LAION_EMBEDDING_DIM;
 use crate::vector::schema::EmbeddingCode;
 use crate::vector::writer::{create_writer, spawn_mutation_consumer_with_storage_autoreg, WriterConfig};
 use crate::vector::reader::{create_search_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig};
@@ -122,43 +126,6 @@ impl fmt::Display for SearchMode {
             SearchMode::Exact => write!(f, "Exact"),
             SearchMode::RaBitQ { bits } => write!(f, "RaBitQ-{}bit", bits),
         }
-    }
-}
-
-// ============================================================================
-// SearchResultCollector - Thread-safe collection of search results for recall
-// ============================================================================
-
-/// Collector for search results to compute recall.
-///
-/// Maps query index → returned neighbor indices.
-#[derive(Debug, Default)]
-struct SearchResultCollector {
-    /// query_idx → Vec<neighbor_idx>
-    results: Mutex<HashMap<usize, Vec<usize>>>,
-}
-
-impl SearchResultCollector {
-    fn new() -> Self {
-        Self {
-            results: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Record search results for a query.
-    fn record(&self, query_idx: usize, neighbor_indices: Vec<usize>) {
-        let mut results = self.results.lock().unwrap();
-        results.insert(query_idx, neighbor_indices);
-    }
-
-    /// Extract all results as ordered Vec (by query index).
-    fn into_results(self, num_queries: usize) -> Vec<Vec<usize>> {
-        let results = self.results.into_inner().unwrap();
-        let mut ordered = Vec::with_capacity(num_queries);
-        for i in 0..num_queries {
-            ordered.push(results.get(&i).cloned().unwrap_or_default());
-        }
-        ordered
     }
 }
 
@@ -916,9 +883,9 @@ impl ConcurrentBenchmark {
             0.0
         };
 
-        // TODO: LAION recall measurement when dataset == DatasetSource::Laion
-        // For now, recall is not computed in concurrent benchmarks.
-        // Use dedicated recall benchmarks (benchmark/runner.rs) for recall measurement.
+        // Concurrent benchmarks intentionally omit recall measurement.
+        // Recall tracking adds overhead and interferes with throughput measurement.
+        // Use `bench_vector sweep --dataset laion` for quality baselines.
         let recall_at_k = None;
         let recall_queries = None;
 
