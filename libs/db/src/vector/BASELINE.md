@@ -30,6 +30,7 @@ All baseline benchmarks MUST meet these minimum requirements:
 
 CODEX: Current `ConcurrentBenchmark::run` benchmarks a single embedding. Minimum requirement "Embedding spaces = 2" is not satisfied by the existing benchmark tests.
 CODEX: Default `BenchConfig` uses `vectors_per_writer=1000`, so 10k vectors/embedding requires explicit overrides in baseline tests.
+CODEX: Quick validation uses 5s duration and 1 embedding; it does not satisfy minimum requirements and should remain smoke-only.
 
 ---
 
@@ -60,6 +61,7 @@ BenchConfig {
 }
 ```
 CODEX: No single-threaded baseline test exists in `test_vector_concurrent.rs`. Add a dedicated ignored test or configure `BenchConfig` explicitly.
+CODEX: Batch insert baseline target is not measurable with current benchmark harness (no batch mode); either add a batch path or drop this metric.
 
 ### 2. Read-Heavy Workload
 
@@ -415,6 +417,7 @@ Duration: 30s per scenario
 HNSW: M=16, ef_construction=100, ef_search=50
 ```
 CODEX: Multi-embedding benchmark harness is not implemented yet; this configuration is aspirational until `ConcurrentBenchmark` can run multiple embeddings.
+CODEX: Current `ConcurrentBenchmark` hard-codes `Distance::L2`; the Cosine variant in this config is not exercised.
 
 **Results:** [TBD - run benchmark suite]
 
@@ -478,6 +481,14 @@ BenchResult {
 
 **Priority:** Medium
 **Rationale:** Ensure concurrent writes don't degrade search quality.
+
+---
+
+## CODEX Additional Feedback (Post-review)
+
+- Baseline suite is not yet compliant with minimum requirements (multi-embedding + 10k/embedding). Treat all baselines as preliminary until a multi-embedding harness exists.
+- Batch insert and delete baselines are specified but not implemented; either add workload coverage or remove those targets to avoid misleading claims.
+- Consider persisting a single reference baseline run (hardware + results) to unblock regression checks and clarify expectations.
 
 ---
 
