@@ -445,9 +445,16 @@ This is not yet implemented but noted for future enhancement.
 ### Correctness / Reliability
 
 - **Non-atomic insert in stress tests:** `test_concurrent_insert_search` and `test_concurrent_batch_insert` store vectors in one transaction (`store_vector`) and insert into HNSW in a separate transaction. This can leave orphaned vectors if the HNSW insert fails. Prefer a single transaction for vector + graph updates to mirror production semantics.
+  - **Proposal:** Replace `store_vector()` + `hnsw::insert()` with a single transaction that writes the vector CF and calls `hnsw::insert()` before commit. This can live in a helper like `insert_vector_txn(storage, index, vec_id, vector)` and be reused across tests/bench.
 - **Error threshold still broad:** 10% error allowance can mask real regressions. Consider gating searches until the first insert commits or assert errors are only from “empty index” or transaction conflicts.
 - **vec_id bounds:** `(thread_id << 16) | i` and `(thread_id << 24) | i` assume small batches. Add an explicit bound or guard to prevent overflow if configs increase.
 
 ### Performance / Measurement Quality
 
 - **Per-vector transactions** are safe but may understate throughput under batching. Consider adding an optional batch commit mode to measure contention without per-transaction overhead.
+
+### Coverage Gaps / Additional Tests
+
+- **Multi-index concurrency under shared `Storage`:** existing `test_vector_multi_embedding.rs` validates isolation, but not concurrent reads/writes across embeddings. Add a test that spawns writers/readers across multiple embeddings concurrently and asserts no cross-contamination.
+- **Concurrent deletes vs searches:** there is no stress test that interleaves deletes with searches; add one to validate tombstone filtering under contention.
+- **Mixed search strategies:** concurrent RaBitQ + exact search over the same embedding (or multiple embeddings) to validate cache correctness under load.
