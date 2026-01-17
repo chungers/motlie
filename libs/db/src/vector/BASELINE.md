@@ -37,6 +37,7 @@ All baseline benchmarks MUST report the following metrics:
 
 **IMPORTANT:** Recall measurement is **mandatory** for baseline benchmarks.
 Benchmarks without recall are considered incomplete.
+CODEX: `ConcurrentBenchmark::run()` currently sets `recall_at_k=None` and does not compute recall; baseline runs are therefore incomplete until recall is wired in.
 
 ### Latency Metrics
 
@@ -69,6 +70,7 @@ Benchmarks use the **production channel infrastructure**:
   A **single consumer** processes all mutations sequentially.
 - **Reads**: Multiple producer tasks send queries through an MPMC channel.
   A **configurable pool** of query workers processes searches in parallel.
+CODEX: Verified in `libs/db/src/vector/benchmark/concurrent.rs` (Writer/Reader channels used).
 
 ---
 
@@ -81,6 +83,7 @@ Full-precision distance computation at all HNSW layers.
 ```rust
 SearchMode::Exact
 ```
+CODEX: SearchMode is defined, but `ConcurrentBenchmark::run()` does not branch on `search_mode`; searches always use `SearchKNN` defaults.
 
 - **Distance metrics**: L2, Cosine, DotProduct
 - **Recall**: ~100% (limited only by HNSW approximation)
@@ -94,6 +97,7 @@ Binary quantization for fast filtering + exact rerank of top candidates.
 SearchMode::RaBitQ { bits: 2 }  // 2-bit quantization
 SearchMode::RaBitQ { bits: 4 }  // 4-bit quantization
 ```
+CODEX: RaBitQ modes are not currently exercised by `ConcurrentBenchmark`; no SearchConfig/strategy selection is applied.
 
 - **Distance metric**: Cosine only (ADC approximates angular distance)
 - **Recall**: Depends on bits and rerank factor
@@ -121,6 +125,7 @@ let subset = dataset.subset(num_vectors, num_queries);
 // Compute ground truth (brute-force exact)
 let ground_truth = subset.compute_ground_truth_topk(k);
 ```
+CODEX: LAION dataset loading and ground truth are not invoked in `ConcurrentBenchmark::run()`; insert workload uses random vectors regardless of dataset.
 
 ### Phase 2: Index Construction
 
@@ -135,6 +140,7 @@ let config = BenchConfig::balanced()
 let bench = ConcurrentBenchmark::new(config);
 let result = bench.run(storage, embedding_code).await?;
 ```
+CODEX: `ConcurrentBenchmark::new` accepts `BenchConfig` but ignores `dataset`/`search_mode` in the workload path; recall is not computed.
 
 ### Phase 3: Search Quality Measurement
 
@@ -231,12 +237,14 @@ BenchConfig {
 | `baseline_laion_rabitq_4bit` | LAION | RaBitQ-4bit | Cosine | Yes (>92%) |
 | `baseline_concurrent_balanced` | Random | Exact | L2 | No |
 | `baseline_concurrent_stress` | Random | Exact | L2 | No |
+CODEX: No `baseline_laion_*` tests exist in `libs/db/tests`; only `baseline_full_*` random-vector tests are implemented in `test_vector_concurrent.rs`.
 
 ### Running the Full Suite
 
 ```bash
 # LAION quality baselines (requires LAION data)
 cargo test -p motlie-db --test test_vector_baseline baseline_laion -- --ignored --nocapture
+CODEX: `test_vector_baseline` test target does not exist in repo; update command or add the missing test file.
 
 # Concurrent throughput baselines (random vectors)
 cargo test -p motlie-db --release --test test_vector_concurrent baseline_full -- --ignored --nocapture
@@ -343,10 +351,12 @@ SIMD: NEON (aarch64)
 - **More query workers improves search throughput**: Stress (8W) = 107/s vs Balanced (2W) = 52/s
 - **Search P50 improves with fewer concurrent searches**: Write-heavy (1S) = 256µs vs Stress (8S) = 16ms
 - **Read-heavy achieves highest throughput**: Fewer inserts = more resources for queries
+CODEX: These baseline numbers are not reproducible from code alone; no run logs or scripts included. Treat as provisional until a run artifact is linked.
 
 ### Quality Baseline (LAION)
 
 **Status:** Pending
+CODEX: This remains the critical blocker for baseline completeness since recall is a required metric.
 
 Run with LAION dataset and record recall@10 for each search mode:
 
