@@ -22,10 +22,12 @@ This document tracks the implementation of concurrent operation testing and benc
 
 | Test | Description | Thread Config | Status |
 |------|-------------|---------------|--------|
-| `test_concurrent_insert_search` | Insert while searching | 2 inserters, 2 searchers | ✅ |
-| `test_concurrent_batch_insert` | Parallel batch inserts | 4 batch inserters | ✅ |
-| `test_high_thread_count_stress` | Maximum concurrency | 8 writers, 8 readers | ✅ |
-| `test_writer_contention` | Multiple writers same embedding | 8 writers | ✅ |
+| `test_concurrent_insert_search` | Atomic insert while searching | 2 inserters, 2 searchers | ✅ |
+| `test_concurrent_batch_insert` | Atomic parallel batch inserts | 4 batch inserters | ✅ |
+| `test_high_thread_count_stress` | Atomic maximum concurrency | 8 writers, 8 readers | ✅ |
+| `test_writer_contention` | Atomic writers same embedding | 8 writers | ✅ |
+| `test_multi_embedding_concurrent_access` | Multi-index concurrent r/w | 3 indices, 6 writers, 6 readers | ✅ |
+| `test_cache_isolation_under_load` | Cache isolation validation | 2 indices, 2 writers, 2 readers | ✅ |
 
 ### Implementation
 
@@ -442,24 +444,38 @@ This is not yet implemented but noted for future enhancement.
 
 ## CODEX Review Notes (Post-sync)
 
+**Status:** ✅ Addressed (January 16, 2026)
+
 ### Correctness / Reliability
 
-- **Non-atomic insert in stress tests:** `test_concurrent_insert_search` and `test_concurrent_batch_insert` store vectors in one transaction (`store_vector`) and insert into HNSW in a separate transaction. This can leave orphaned vectors if the HNSW insert fails. Prefer a single transaction for vector + graph updates to mirror production semantics.
-  - **Proposal:** Replace `store_vector()` + `hnsw::insert()` with a single transaction that writes the vector CF and calls `hnsw::insert()` before commit. This can live in a helper like `insert_vector_txn(storage, index, vec_id, vector)` and be reused across tests/bench.
-- **Error threshold still broad:** 10% error allowance can mask real regressions. Consider gating searches until the first insert commits or assert errors are only from “empty index” or transaction conflicts.
-- **vec_id bounds:** `(thread_id << 16) | i` and `(thread_id << 24) | i` assume small batches. Add an explicit bound or guard to prevent overflow if configs increase.
+- ✅ **Non-atomic insert in stress tests:** Fixed. Created `insert_vector_atomic()` helper in `test_vector_concurrent.rs` that writes vector data and HNSW graph in a single transaction. All 4 original stress tests updated to use this atomic helper. No orphaned vectors possible.
+
+- ✅ **Error threshold still broad:** Addressed via documentation. Module-level comments in `test_vector_concurrent.rs` now explicitly document the two expected error conditions (empty graph search, transaction conflicts) and production mitigation strategies.
+
+- ✅ **vec_id bounds:** Added `MAX_VECTORS_PER_THREAD = 65_536` constant with overflow prevention guard in atomic insert helper.
 
 ### Performance / Measurement Quality
 
-- **Per-vector transactions** are safe but may understate throughput under batching. Consider adding an optional batch commit mode to measure contention without per-transaction overhead.
+- ⏳ **Per-vector transactions** *(Priority: Low)*: Current benchmarks use per-vector transactions for correctness validation. Add optional `BenchConfig::with_batch_size()` for batch commit mode to measure throughput without per-transaction overhead. Rationale: Production workloads often batch commits; current approach may understate throughput.
 
 ### Coverage Gaps / Additional Tests
 
-- **Multi-index concurrency under shared `Storage`:** existing `test_vector_multi_embedding.rs` validates isolation, but not concurrent reads/writes across embeddings. Add a test that spawns writers/readers across multiple embeddings concurrently and asserts no cross-contamination.
-- **Cache isolation under load:** caches are keyed by `EmbeddingCode`, but there is no stress test that validates cache correctness under concurrent multi-embedding access. Add a test that performs concurrent inserts/searches across 2–3 embeddings and asserts result IDs belong only to the queried embedding (no cross-contamination).
-- **Concurrent deletes vs searches:** there is no stress test that interleaves deletes with searches; add one to validate tombstone filtering under contention.
-- **Mixed search strategies:** concurrent RaBitQ + exact search over the same embedding (or multiple embeddings) to validate cache correctness under load.
+- ✅ **Multi-index concurrency under shared `Storage`:** Added `test_multi_embedding_concurrent_access` which spawns concurrent writers/readers across 3 embeddings (EMBEDDING_A, EMBEDDING_B, EMBEDDING_C) and asserts no cross-contamination.
 
-### Unfinished Items (Critical)
+- ✅ **Cache isolation under load:** Added `test_cache_isolation_under_load` which validates NavigationCache correctness under concurrent multi-embedding access. Uses vec_id encoding with embedding prefix to detect any cross-contamination (asserts count = 0).
 
-- **Non-atomic stress inserts still present:** `test_concurrent_insert_search` and `test_concurrent_batch_insert` still split vector storage and HNSW insert into separate transactions. This can leave orphaned vectors if the HNSW insert fails. Must be fixed with a single-transaction helper before treating stress tests as reliable correctness signals.
+- ✅ **Concurrent deletes vs searches:** Added `test_concurrent_deletes_vs_searches` in `test_vector_channel.rs`. Validates tombstone filtering under concurrent delete/search load. Post-delete searches correctly exclude deleted vectors.
+
+- ⏳ **Mixed search strategies** *(Priority: Low)*: Deferred. Concurrent RaBitQ + exact search validation requires setup with >256 vectors per embedding (RaBitQ threshold). Rationale: RaBitQ only activates above 256 vectors; test requires larger dataset setup. Add when benchmark infrastructure supports mixed-strategy scenarios.
+
+### Updated Test Inventory
+
+| Test | File | Description | Status |
+|------|------|-------------|--------|
+| `test_concurrent_insert_search` | `test_vector_concurrent.rs` | Atomic insert while searching | ✅ Fixed |
+| `test_concurrent_batch_insert` | `test_vector_concurrent.rs` | Atomic parallel batch inserts | ✅ Fixed |
+| `test_high_thread_count_stress` | `test_vector_concurrent.rs` | Atomic 16-thread stress | ✅ Fixed |
+| `test_writer_contention` | `test_vector_concurrent.rs` | Atomic 8-writer contention | ✅ Fixed |
+| `test_multi_embedding_concurrent_access` | `test_vector_concurrent.rs` | 3-embedding concurrent access | ✅ NEW |
+| `test_cache_isolation_under_load` | `test_vector_concurrent.rs` | Cache isolation validation | ✅ NEW |
+| `test_concurrent_deletes_vs_searches` | `test_vector_channel.rs` | Delete + search tombstone filtering | ✅ NEW |
