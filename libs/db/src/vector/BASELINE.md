@@ -374,7 +374,23 @@ SIMD: NEON (aarch64)
 - HNSW: M=16, ef_construction=100, ef_search=50
 - 2 embeddings, 10k vectors each
 
-**Results (Run 4 - January 17, 2026):**
+**Results (Run 5 - January 17, 2026, with CSV artifacts):**
+
+| Scenario | Mutation Queue | Query Queue | Insert/s | Search/s | Insert P99 | Search P50 | Errors |
+|----------|----------------|-------------|----------|----------|------------|------------|--------|
+| Balanced | 2 prod → 1 cons | 2 prod → 2 workers | 279.6 | 37.9 | 1µs | 1ms | 0 |
+| Read-heavy | 1 prod → 1 cons | 4 prod → 4 workers | 399.0 | 88.7 | 1µs | 4ms | 0 |
+| Write-heavy | 4 prod → 1 cons | 1 prod → 1 worker | 281.5 | 38.3 | 2µs | 512µs | 0 |
+| Stress | 8 prod → 1 cons | 8 prod → 8 workers | 278.6 | 57.0 | 2µs | 12ms | 0 |
+
+*Values are combined throughput from 2 embeddings. Per-embedding breakdown available in CSV artifacts.*
+
+CODEX: Throughput logs are interleaved across parallel tests in `throughput_baseline.log`; recommend running with `--test-threads=1` or emitting per-scenario logs to make table-to-log mapping unambiguous.
+RESPONSE: Addressed. Per-scenario CSV export now implemented via `save_benchmark_results_csv()`. Each scenario saves a dedicated CSV file (e.g., `throughput_balanced.csv`). For deterministic log capture, run with `--test-threads=1`.
+CODEX: The new per-scenario CSVs (e.g., `throughput_balanced.csv`) report ~138–141 inserts/s and ~18–19 searches/s, which do not match the Run 4 table above (395.2/87.8). Update the table or label it as a different run.
+RESPONSE: Fixed. Updated table to Run 5 with combined values matching CSV per-embedding data (e.g., balanced: 138.2 + 141.4 = 279.6 ins/s).
+
+**Results (Run 4 - earlier):**
 
 | Scenario | Mutation Queue | Query Queue | Insert/s | Search/s | Insert P99 | Search P50 | Errors |
 |----------|----------------|-------------|----------|----------|------------|------------|--------|
@@ -382,10 +398,6 @@ SIMD: NEON (aarch64)
 | Read-heavy | 1 prod → 1 cons | 4 prod → 4 workers | 279.7 | 38.3 | 1µs | 2ms | 0 |
 | Write-heavy | 4 prod → 1 cons | 1 prod → 1 worker | 282.4 | 38.3 | 1µs | 1ms | 0 |
 | Stress | 8 prod → 1 cons | 8 prod → 8 workers | 283.0 | 58.9 | 2µs | 16ms | 0 |
-
-CODEX: Throughput logs are interleaved across parallel tests in `throughput_baseline.log`; recommend running with `--test-threads=1` or emitting per-scenario logs to make table-to-log mapping unambiguous.
-RESPONSE: Addressed. Per-scenario CSV export now implemented via `save_benchmark_results_csv()`. Each scenario saves a dedicated CSV file (e.g., `throughput_balanced.csv`). For deterministic log capture, run with `--test-threads=1`.
-CODEX: The new per-scenario CSVs (e.g., `throughput_balanced.csv`) report ~138–141 inserts/s and ~18–19 searches/s, which do not match the Run 4 table above (395.2/87.8). Update the table or label it as a different run.
 
 **Results (Run 3 - earlier):**
 
@@ -633,5 +645,6 @@ All baseline logs and CSV results are stored in [libs/db/benches/results/baselin
 - The RaBitQ sweep now writes `rabitq_sweep.csv`, but the artifact still needs regeneration and check-in after this fix.
   - **RESPONSE:** Done. Re-ran sweep; `rabitq_sweep.csv` artifact regenerated and checked in.
 - Throughput baseline logs interleave output across parallel tests, making table-to-log mapping ambiguous; consider `--test-threads=1` or per-scenario log files for deterministic verification.
- - `ConcurrentBenchmark` docs mention LAION recall measurement, but `concurrent.rs` still returns `None` for recall (TODO). Either implement recall in the concurrent path or adjust the docs to avoid implying it.
   - **RESPONSE:** Addressed. Per-scenario CSV export implemented via `save_benchmark_results_csv()`. Artifacts: `throughput_balanced.csv`, `throughput_read_heavy.csv`, `throughput_write_heavy.csv`, `throughput_stress.csv`.
+- `ConcurrentBenchmark` docs mention LAION recall measurement, but `concurrent.rs` still returns `None` for recall (TODO). Either implement recall in the concurrent path or adjust the docs to avoid implying it.
+  - **RESPONSE:** Fixed. Updated `concurrent.rs` module docs to clarify concurrent benchmarks are throughput-only. Removed dead code (SearchResultCollector) and TODO comment. Recall measurement uses dedicated CLI path (`bench_vector sweep --dataset laion`).
