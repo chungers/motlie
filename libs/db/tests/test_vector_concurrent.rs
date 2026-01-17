@@ -997,53 +997,57 @@ fn test_cache_isolation_under_load() {
 // ============================================================================
 // Benchmark: Baseline Concurrent Performance (Task 5.11)
 // ============================================================================
+//
+// These benchmarks use the proper MPSC/MPMC channel architecture:
+// - Insert producers send to Writer (MPSC) → single mutation consumer
+// - Search producers send to SearchReader (MPMC) → query worker pool
+//
 
 /// Runs the concurrent benchmark with "balanced" preset and captures baseline numbers.
 ///
 /// This test is marked #[ignore] because it takes longer to run (30s).
 /// Run with: `cargo test -p motlie-db --test test_vector_concurrent benchmark_baseline -- --ignored --nocapture`
-#[test]
+#[tokio::test]
 #[ignore]
-fn benchmark_baseline_balanced() {
+async fn benchmark_baseline_balanced() {
     let (_temp_dir, storage) = create_test_storage();
     let storage = Arc::new(storage);
 
-    // Use balanced preset: 4 writers, 4 readers, 30s duration
+    // Use balanced preset: 4 insert producers, 4 search producers, 4 query workers
     let config = BenchConfig::balanced();
     let metrics = Arc::new(ConcurrentMetrics::new());
     let bench = ConcurrentBenchmark::new(config, metrics);
 
-    println!("\n=== Concurrent Benchmark: Balanced (4w/4r, 30s) ===\n");
+    println!("\n=== Concurrent Benchmark: Balanced (4 producers, 4 workers, 30s) ===\n");
 
-    let result = bench.run(storage, TEST_EMBEDDING).expect("benchmark run");
+    let result = bench.run(storage, TEST_EMBEDDING).await.expect("benchmark run");
 
     println!("{}", result);
     println!("\n=== End Benchmark ===\n");
-
-    // No assertions - this is for capturing baseline numbers
 }
 
 /// Quick benchmark with smaller config for CI validation.
-#[test]
-fn benchmark_quick_validation() {
+#[tokio::test]
+async fn benchmark_quick_validation() {
     let (_temp_dir, storage) = create_test_storage();
     let storage = Arc::new(storage);
 
-    // Quick config: 2 writers, 2 readers, 5s duration
+    // Quick config: 2 insert producers, 2 search producers, 2 query workers, 5s
     let config = BenchConfig {
-        writer_threads: 2,
-        reader_threads: 2,
+        insert_producers: 2,
+        search_producers: 2,
+        query_workers: 2,
         duration: Duration::from_secs(5),
-        vectors_per_writer: 500,
+        vectors_per_producer: 500,
         vector_dim: DIM,
         ..Default::default()
     };
     let metrics = Arc::new(ConcurrentMetrics::new());
     let bench = ConcurrentBenchmark::new(config, metrics);
 
-    println!("\n=== Quick Benchmark Validation (2w/2r, 5s) ===\n");
+    println!("\n=== Quick Benchmark Validation (2 producers, 2 workers, 5s) ===\n");
 
-    let result = bench.run(storage, TEST_EMBEDDING).expect("benchmark run");
+    let result = bench.run(storage, TEST_EMBEDDING).await.expect("benchmark run");
 
     println!("{}", result);
 
@@ -1052,11 +1056,11 @@ fn benchmark_quick_validation() {
     assert!(result.search_throughput > 0.0, "Should have non-zero search throughput");
 }
 
-/// Read-heavy baseline: 1 writer, 8 readers, 30s
+/// Read-heavy baseline: 1 insert producer, 8 search producers, 4 query workers
 /// Simulates CDN/cache access patterns.
-#[test]
+#[tokio::test]
 #[ignore]
-fn benchmark_baseline_read_heavy() {
+async fn benchmark_baseline_read_heavy() {
     let (_temp_dir, storage) = create_test_storage();
     let storage = Arc::new(storage);
 
@@ -1064,19 +1068,19 @@ fn benchmark_baseline_read_heavy() {
     let metrics = Arc::new(ConcurrentMetrics::new());
     let bench = ConcurrentBenchmark::new(config, metrics);
 
-    println!("\n=== Concurrent Benchmark: Read-Heavy (1w/8r, 30s) ===\n");
+    println!("\n=== Concurrent Benchmark: Read-Heavy (1 insert, 8 search, 30s) ===\n");
 
-    let result = bench.run(storage, TEST_EMBEDDING).expect("benchmark run");
+    let result = bench.run(storage, TEST_EMBEDDING).await.expect("benchmark run");
 
     println!("{}", result);
     println!("\n=== End Benchmark ===\n");
 }
 
-/// Write-heavy baseline: 8 writers, 1 reader, 30s
+/// Write-heavy baseline: 4 insert producers, 1 search producer, 1 query worker
 /// Simulates batch ingestion workloads.
-#[test]
+#[tokio::test]
 #[ignore]
-fn benchmark_baseline_write_heavy() {
+async fn benchmark_baseline_write_heavy() {
     let (_temp_dir, storage) = create_test_storage();
     let storage = Arc::new(storage);
 
@@ -1084,19 +1088,19 @@ fn benchmark_baseline_write_heavy() {
     let metrics = Arc::new(ConcurrentMetrics::new());
     let bench = ConcurrentBenchmark::new(config, metrics);
 
-    println!("\n=== Concurrent Benchmark: Write-Heavy (8w/1r, 30s) ===\n");
+    println!("\n=== Concurrent Benchmark: Write-Heavy (4 insert, 1 search, 30s) ===\n");
 
-    let result = bench.run(storage, TEST_EMBEDDING).expect("benchmark run");
+    let result = bench.run(storage, TEST_EMBEDDING).await.expect("benchmark run");
 
     println!("{}", result);
     println!("\n=== End Benchmark ===\n");
 }
 
-/// Stress baseline: 16 writers, 16 readers, 60s
+/// Stress baseline: 8 insert producers, 8 search producers, 8 query workers
 /// Maximum concurrency to find bottlenecks.
-#[test]
+#[tokio::test]
 #[ignore]
-fn benchmark_baseline_stress() {
+async fn benchmark_baseline_stress() {
     let (_temp_dir, storage) = create_test_storage();
     let storage = Arc::new(storage);
 
@@ -1104,10 +1108,224 @@ fn benchmark_baseline_stress() {
     let metrics = Arc::new(ConcurrentMetrics::new());
     let bench = ConcurrentBenchmark::new(config, metrics);
 
-    println!("\n=== Concurrent Benchmark: Stress (16w/16r, 60s) ===\n");
+    println!("\n=== Concurrent Benchmark: Stress (8 producers, 8 workers, 60s) ===\n");
 
-    let result = bench.run(storage, TEST_EMBEDDING).expect("benchmark run");
+    let result = bench.run(storage, TEST_EMBEDDING).await.expect("benchmark run");
 
     println!("{}", result);
     println!("\n=== End Benchmark ===\n");
+}
+
+// ============================================================================
+// Multi-Embedding Baseline Benchmarks (Meeting Minimum Requirements)
+// ============================================================================
+//
+// These benchmarks meet the BASELINE.md minimum requirements:
+// - 10,000+ vectors per embedding
+// - 2+ embedding spaces
+// - 30+ second duration
+//
+// Architecture: Uses proper MPSC/MPMC channel infrastructure.
+// - Insert producers → Writer (MPSC) → single mutation consumer
+// - Search producers → SearchReader (MPMC) → query worker pool
+//
+// Run with: cargo test -p motlie-db --test test_vector_concurrent baseline_full -- --ignored --nocapture
+
+const EMBEDDING_BASELINE_A: EmbeddingCode = 100;
+const EMBEDDING_BASELINE_B: EmbeddingCode = 200;
+
+/// Full baseline benchmark meeting all minimum requirements.
+/// - 2 embeddings (L2 distance, separate registrations)
+/// - 10,000 vectors per embedding (20,000 total)
+/// - 30 second duration
+/// - Balanced workload: 2 insert producers, 2 search producers, 2 query workers
+#[tokio::test]
+#[ignore]
+async fn baseline_full_balanced() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    // Config: 2 insert producers * 5000 vectors = 10k per embedding
+    let config = BenchConfig {
+        insert_producers: 2,
+        search_producers: 2,
+        query_workers: 2,
+        duration: Duration::from_secs(30),
+        vectors_per_producer: 5000,
+        vector_dim: 128,
+        hnsw_m: 16,
+        hnsw_ef_construction: 100,
+        k: 10,
+        ef_search: 50,
+        ..Default::default()
+    };
+
+    println!("\n{}", "=".repeat(70));
+    println!("=== FULL BASELINE: Balanced (2 embeddings, 10k vectors each, 30s) ===");
+    println!("=== Architecture: MPSC writes, MPMC reads (production path) ===");
+    println!("{}\n", "=".repeat(70));
+
+    // Run benchmark on embedding A
+    println!("--- Embedding A ---\n");
+    let metrics_a = Arc::new(ConcurrentMetrics::new());
+    let bench_a = ConcurrentBenchmark::new(config.clone(), metrics_a);
+    let result_a = bench_a.run(Arc::clone(&storage), EMBEDDING_BASELINE_A).await.expect("benchmark A");
+    println!("{}", result_a);
+
+    // Run benchmark on embedding B
+    println!("\n--- Embedding B ---\n");
+    let metrics_b = Arc::new(ConcurrentMetrics::new());
+    let bench_b = ConcurrentBenchmark::new(config.clone(), metrics_b);
+    let result_b = bench_b.run(Arc::clone(&storage), EMBEDDING_BASELINE_B).await.expect("benchmark B");
+    println!("{}", result_b);
+
+    // Aggregate summary
+    println!("\n{}", "=".repeat(70));
+    println!("=== AGGREGATE SUMMARY ===");
+    println!("{}", "=".repeat(70));
+    println!("Embeddings: 2");
+    println!("Total vectors: {} (A) + {} (B)",
+             result_a.metrics.insert_count, result_b.metrics.insert_count);
+    println!("Combined insert throughput: {:.1} ops/sec",
+             result_a.insert_throughput + result_b.insert_throughput);
+    println!("Combined search throughput: {:.1} ops/sec",
+             result_a.search_throughput + result_b.search_throughput);
+    println!("Avg insert P99: {:?}",
+             (result_a.metrics.insert_p99 + result_b.metrics.insert_p99) / 2);
+    println!("Avg search P99: {:?}",
+             (result_a.metrics.search_p99 + result_b.metrics.search_p99) / 2);
+    println!("{}\n", "=".repeat(70));
+}
+
+/// Full baseline: Read-heavy workload
+/// - 2 embeddings, 10k vectors each
+/// - 1 insert producer, 4 search producers, 4 query workers per embedding
+#[tokio::test]
+#[ignore]
+async fn baseline_full_read_heavy() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    let config = BenchConfig {
+        insert_producers: 1,
+        search_producers: 4,
+        query_workers: 4,
+        duration: Duration::from_secs(30),
+        vectors_per_producer: 10000,  // Single producer needs full 10k
+        vector_dim: 128,
+        hnsw_m: 16,
+        hnsw_ef_construction: 100,
+        k: 10,
+        ef_search: 50,
+        ..Default::default()
+    };
+
+    println!("\n{}", "=".repeat(70));
+    println!("=== FULL BASELINE: Read-Heavy (2 embeddings, 10k vectors each) ===");
+    println!("{}\n", "=".repeat(70));
+
+    println!("--- Embedding A ---\n");
+    let metrics_a = Arc::new(ConcurrentMetrics::new());
+    let bench_a = ConcurrentBenchmark::new(config.clone(), metrics_a);
+    let result_a = bench_a.run(Arc::clone(&storage), EMBEDDING_BASELINE_A).await.expect("benchmark A");
+    println!("{}", result_a);
+
+    println!("\n--- Embedding B ---\n");
+    let metrics_b = Arc::new(ConcurrentMetrics::new());
+    let bench_b = ConcurrentBenchmark::new(config.clone(), metrics_b);
+    let result_b = bench_b.run(Arc::clone(&storage), EMBEDDING_BASELINE_B).await.expect("benchmark B");
+    println!("{}", result_b);
+
+    println!("\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
+             result_a.insert_throughput + result_b.insert_throughput,
+             result_a.search_throughput + result_b.search_throughput);
+}
+
+/// Full baseline: Write-heavy workload
+/// - 2 embeddings, 10k vectors each
+/// - 4 insert producers, 1 search producer, 1 query worker per embedding
+#[tokio::test]
+#[ignore]
+async fn baseline_full_write_heavy() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    let config = BenchConfig {
+        insert_producers: 4,
+        search_producers: 1,
+        query_workers: 1,
+        duration: Duration::from_secs(30),
+        vectors_per_producer: 2500,  // 4 producers * 2500 = 10k
+        vector_dim: 128,
+        hnsw_m: 16,
+        hnsw_ef_construction: 100,
+        k: 10,
+        ef_search: 50,
+        ..Default::default()
+    };
+
+    println!("\n{}", "=".repeat(70));
+    println!("=== FULL BASELINE: Write-Heavy (2 embeddings, 10k vectors each) ===");
+    println!("{}\n", "=".repeat(70));
+
+    println!("--- Embedding A ---\n");
+    let metrics_a = Arc::new(ConcurrentMetrics::new());
+    let bench_a = ConcurrentBenchmark::new(config.clone(), metrics_a);
+    let result_a = bench_a.run(Arc::clone(&storage), EMBEDDING_BASELINE_A).await.expect("benchmark A");
+    println!("{}", result_a);
+
+    println!("\n--- Embedding B ---\n");
+    let metrics_b = Arc::new(ConcurrentMetrics::new());
+    let bench_b = ConcurrentBenchmark::new(config.clone(), metrics_b);
+    let result_b = bench_b.run(Arc::clone(&storage), EMBEDDING_BASELINE_B).await.expect("benchmark B");
+    println!("{}", result_b);
+
+    println!("\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
+             result_a.insert_throughput + result_b.insert_throughput,
+             result_a.search_throughput + result_b.search_throughput);
+}
+
+/// Full baseline: Stress test
+/// - 2 embeddings, 10k vectors each
+/// - 8 insert producers, 8 search producers, 8 query workers per embedding
+/// - 60 second duration
+#[tokio::test]
+#[ignore]
+async fn baseline_full_stress() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    let config = BenchConfig {
+        insert_producers: 8,
+        search_producers: 8,
+        query_workers: 8,
+        duration: Duration::from_secs(60),
+        vectors_per_producer: 1250,  // 8 producers * 1250 = 10k
+        vector_dim: 128,
+        hnsw_m: 16,
+        hnsw_ef_construction: 100,
+        k: 10,
+        ef_search: 50,
+        ..Default::default()
+    };
+
+    println!("\n{}", "=".repeat(70));
+    println!("=== FULL BASELINE: Stress (2 embeddings, 10k vectors each, 60s) ===");
+    println!("{}\n", "=".repeat(70));
+
+    println!("--- Embedding A ---\n");
+    let metrics_a = Arc::new(ConcurrentMetrics::new());
+    let bench_a = ConcurrentBenchmark::new(config.clone(), metrics_a);
+    let result_a = bench_a.run(Arc::clone(&storage), EMBEDDING_BASELINE_A).await.expect("benchmark A");
+    println!("{}", result_a);
+
+    println!("\n--- Embedding B ---\n");
+    let metrics_b = Arc::new(ConcurrentMetrics::new());
+    let bench_b = ConcurrentBenchmark::new(config.clone(), metrics_b);
+    let result_b = bench_b.run(Arc::clone(&storage), EMBEDDING_BASELINE_B).await.expect("benchmark B");
+    println!("{}", result_b);
+
+    println!("\n=== Combined: Insert {:.1}/s, Search {:.1}/s ===\n",
+             result_a.insert_throughput + result_b.insert_throughput,
+             result_a.search_throughput + result_b.search_throughput);
 }

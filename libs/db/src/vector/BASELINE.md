@@ -1,196 +1,246 @@
 # Vector Subsystem Baseline Benchmarks
 
-**Status:** Proposed
-**Date:** January 16, 2026
-**Purpose:** Establish reproducible performance baselines for regression tracking
+**Status:** Active
+**Date:** January 17, 2026
+**Purpose:** Establish reproducible performance baselines with recall measurement
 
 ---
 
 ## Overview
 
-This document defines a comprehensive baseline benchmark suite for the vector subsystem. The goals are:
+This document defines a comprehensive baseline benchmark protocol for the vector subsystem. The goals are:
 
-1. **Establish performance baselines** for key workload patterns
-2. **Enable regression detection** in CI/CD pipelines
-3. **Document expected performance** for capacity planning
-4. **Validate concurrent correctness** under load
-
-CODEX: Concurrent correctness is primarily validated by `test_vector_concurrent.rs`; baseline benchmarks currently do not assert correctness beyond successful completion.
-
-### Minimum Requirements
-
-All baseline benchmarks MUST meet these minimum requirements:
-
-| Requirement | Minimum | Rationale |
-|-------------|---------|-----------|
-| **Vector count** | 10,000 per embedding | Realistic index size for HNSW graph structure |
-| **Embedding spaces** | 2 | Validate multi-tenancy under load |
-| **Duration** | 30 seconds | Statistical significance |
-| **Environment docs** | Complete | Reproducibility |
-
-CODEX: Current `ConcurrentBenchmark::run` benchmarks a single embedding. Minimum requirement "Embedding spaces = 2" is not satisfied by the existing benchmark tests.
-CODEX: Default `BenchConfig` uses `vectors_per_writer=1000`, so 10k vectors/embedding requires explicit overrides in baseline tests.
-CODEX: Quick validation uses 5s duration and 1 embedding; it does not satisfy minimum requirements and should remain smoke-only.
+1. **Establish performance baselines** for throughput and latency
+2. **Measure search quality (recall)** using LAION ground truth
+3. **Compare search strategies** (Exact vs RaBitQ 2-bit/4-bit)
+4. **Enable regression detection** in CI/CD pipelines
 
 ---
 
-## Benchmark Scenarios
+## Required Metrics
 
-### 1. Single-Threaded Baseline
+All baseline benchmarks MUST report the following metrics:
 
-Measure raw operation performance without concurrency overhead.
+### Throughput Metrics
 
 | Metric | Description | Target |
 |--------|-------------|--------|
-| Insert latency | Single vector insert (vector + HNSW) | <10ms |
-| Search latency | Single KNN search (k=10, ef=50) | <1ms |
-| Batch insert | 100 vectors in single transaction | <500ms |
+| Insert throughput | Vectors/second | >100 ops/sec |
+| Search throughput | Queries/second | >50 ops/sec |
 
-**Configuration:**
-```rust
-BenchConfig {
-    writer_threads: 1,
-    reader_threads: 0,
-    duration: Duration::from_secs(30),
-    vectors_per_writer: 10_000,
-    vector_dim: 128,
-    hnsw_m: 16,
-    hnsw_ef_construction: 100,
-    k: 10,
-    ef_search: 50,
-}
-```
-CODEX: No single-threaded baseline test exists in `test_vector_concurrent.rs`. Add a dedicated ignored test or configure `BenchConfig` explicitly.
-CODEX: Batch insert baseline target is not measurable with current benchmark harness (no batch mode); either add a batch path or drop this metric.
+### Quality Metrics (REQUIRED)
 
-### 2. Read-Heavy Workload
+| Metric | Description | Target |
+|--------|-------------|--------|
+| **Recall@10** | Fraction of true top-10 found | >90% for production |
+| **Recall@100** | Fraction of true top-100 found | >95% for production |
 
-Simulates CDN/cache access patterns with many readers, few writers.
-
-| Metric | Target | Rationale |
-|--------|--------|-----------|
-| Search throughput | >5,000 ops/sec | High read concurrency |
-| Search P99 | <20ms | Tail latency matters for UX |
-| Insert throughput | >100 ops/sec | Background ingestion |
-| Error rate | <1% | Stable under load |
-
-**Configuration:**
-```rust
-BenchConfig::read_heavy()  // 1 writer, 8 readers
-```
-CODEX: Implemented as `benchmark_baseline_read_heavy`, but still single-embedding and default `vectors_per_writer` unless overridden.
-
-### 3. Write-Heavy Workload
-
-Simulates batch ingestion with high insert concurrency.
-
-| Metric | Target | Rationale |
-|--------|--------|-----------|
-| Insert throughput | >500 ops/sec | Bulk ingestion |
-| Insert P99 | <100ms | Acceptable for background jobs |
-| Search throughput | >100 ops/sec | Verification queries |
-| Error rate | <5% | Transaction conflicts expected |
-
-**Configuration:**
-```rust
-BenchConfig::write_heavy()  // 8 writers, 1 reader
-```
-CODEX: Implemented as `benchmark_baseline_write_heavy`, but still single-embedding and default `vectors_per_writer` unless overridden.
-
-### 4. Balanced Workload
-
-Simulates mixed production traffic.
-
-| Metric | Target | Rationale |
-|--------|--------|-----------|
-| Insert throughput | >200 ops/sec | Steady ingestion |
-| Search throughput | >2,000 ops/sec | User queries |
-| Insert P99 | <50ms | Interactive acceptable |
-| Search P99 | <30ms | UX requirement |
-| Error rate | <2% | Production stability |
-
-**Configuration:**
-```rust
-BenchConfig::balanced()  // 4 writers, 4 readers
-```
-CODEX: Implemented as `benchmark_baseline_balanced`, but still single-embedding and default `vectors_per_writer` unless overridden.
-
-### 5. Stress Test
-
-Maximum concurrency to find bottlenecks and breaking points.
-
-| Metric | Target | Rationale |
-|--------|--------|-----------|
-| No panics | 100% | Stability requirement |
-| No data corruption | 100% | Correctness requirement |
-| Error rate | <10% | Graceful degradation |
-| Throughput | Measure only | Find limits |
-
-**Configuration:**
-```rust
-BenchConfig::stress()  // 16 writers, 16 readers
-```
-CODEX: Implemented as `benchmark_baseline_stress`; still single-embedding.
-
----
-
-## Metrics Collected
-
-### Operation Metrics
-
-| Metric | Type | Collection |
-|--------|------|------------|
-| `insert_count` | Counter | Total successful inserts |
-| `search_count` | Counter | Total successful searches |
-| `delete_count` | Counter | Total successful deletes |
-| `error_count` | Counter | Failed operations |
-
-CODEX: No delete workload is currently executed by `ConcurrentBenchmark`; delete metrics will remain zero unless a delete phase is added.
+**IMPORTANT:** Recall measurement is **mandatory** for baseline benchmarks.
+Benchmarks without recall are considered incomplete.
 
 ### Latency Metrics
 
-| Metric | Type | Buckets |
-|--------|------|---------|
-| `insert_latency` | Histogram | Log2 (1µs - 1s) |
-| `search_latency` | Histogram | Log2 (1µs - 1s) |
-| `delete_latency` | Histogram | Log2 (1µs - 1s) |
-
-### Derived Metrics
-
-| Metric | Formula |
-|--------|---------|
-| Insert throughput | `insert_count / duration_sec` |
-| Search throughput | `search_count / duration_sec` |
-| Error rate | `error_count / total_ops` |
-| P50/P95/P99 | Histogram percentile (upper bound) |
+| Metric | Description | Target |
+|--------|-------------|--------|
+| Insert P50 | Median insert latency | <10ms |
+| Insert P99 | 99th percentile insert | <100ms |
+| Search P50 | Median search latency | <5ms |
+| Search P99 | 99th percentile search | <50ms |
 
 ---
 
-## Test Parameters
+## Benchmark Architecture
 
-### Vector Configuration
+Benchmarks use the **production channel infrastructure**:
 
-| Parameter | Default | Range | Notes |
-|-----------|---------|-------|-------|
-| `vector_dim` | 128 | 64-1024 | Higher dims = slower |
-| `vectors_per_writer` | 1000 | 100-10000 | Per-thread limit |
+```
+                    MPSC (Writes)
+  Insert Producer 1 ──┐
+  Insert Producer 2 ──┼──► Writer ──► Mutation Consumer ──► DB
+  Insert Producer N ──┘     (1)           (1)
 
-### HNSW Configuration
+                    MPMC (Reads)
+  Search Producer 1 ──┐              ┌──► Query Worker 1
+  Search Producer 2 ──┼──► Reader ───┼──► Query Worker 2
+  Search Producer N ──┘              └──► Query Worker N
+```
 
-| Parameter | Default | Range | Notes |
-|-----------|---------|-------|-------|
-| `hnsw_m` | 16 | 8-32 | Higher = better recall, slower |
-| `hnsw_ef_construction` | 100 | 50-200 | Build quality |
-| `ef_search` | 50 | 20-200 | Search quality |
-| `k` | 10 | 1-100 | Neighbors to return |
+- **Writes**: Multiple producer tasks send to a single MPSC Writer channel.
+  A **single consumer** processes all mutations sequentially.
+- **Reads**: Multiple producer tasks send queries through an MPMC channel.
+  A **configurable pool** of query workers processes searches in parallel.
 
-### Concurrency Configuration
+---
 
-| Parameter | Default | Range | Notes |
-|-----------|---------|-------|-------|
-| `writer_threads` | 4 | 1-16 | Insert concurrency |
-| `reader_threads` | 4 | 1-16 | Search concurrency |
-| `duration` | 30s | 5s-300s | Test duration |
+## Search Modes
+
+### 1. Exact Search
+
+Full-precision distance computation at all HNSW layers.
+
+```rust
+SearchMode::Exact
+```
+
+- **Distance metrics**: L2, Cosine, DotProduct
+- **Recall**: ~100% (limited only by HNSW approximation)
+- **Latency**: Higher (full vector comparisons)
+
+### 2. RaBitQ with Reranking
+
+Binary quantization for fast filtering + exact rerank of top candidates.
+
+```rust
+SearchMode::RaBitQ { bits: 2 }  // 2-bit quantization
+SearchMode::RaBitQ { bits: 4 }  // 4-bit quantization
+```
+
+- **Distance metric**: Cosine only (ADC approximates angular distance)
+- **Recall**: Depends on bits and rerank factor
+- **Latency**: Lower (fast ADC filtering)
+
+#### RaBitQ Variants
+
+| Variant | Bits/Dim | Memory (512D) | Expected Recall@10 |
+|---------|----------|---------------|-------------------|
+| RaBitQ-1bit | 1 | 64 bytes | 70-80% |
+| RaBitQ-2bit | 2 | 128 bytes | 85-92% |
+| RaBitQ-4bit | 4 | 256 bytes | 92-98% |
+
+---
+
+## Baseline Protocol
+
+### Phase 1: Dataset Preparation (LAION)
+
+```rust
+// Load LAION-400M CLIP embeddings (512D, Cosine distance)
+let dataset = LaionDataset::load(&data_dir, num_vectors)?;
+let subset = dataset.subset(num_vectors, num_queries);
+
+// Compute ground truth (brute-force exact)
+let ground_truth = subset.compute_ground_truth_topk(k);
+```
+
+### Phase 2: Index Construction
+
+Insert vectors using the channel API:
+
+```rust
+let config = BenchConfig::balanced()
+    .with_dataset(DatasetSource::Laion { data_dir })
+    .with_search_mode(SearchMode::Exact)  // or RaBitQ { bits }
+    .with_vectors_per_producer(10000);
+
+let bench = ConcurrentBenchmark::new(config);
+let result = bench.run(storage, embedding_code).await?;
+```
+
+### Phase 3: Search Quality Measurement
+
+For each search mode, measure recall:
+
+| Test | Search Mode | Distance | Expected Recall@10 |
+|------|-------------|----------|-------------------|
+| Exact baseline | `Exact` | Cosine | >99% |
+| RaBitQ-2bit | `RaBitQ { bits: 2 }` | Cosine | >85% |
+| RaBitQ-4bit | `RaBitQ { bits: 4 }` | Cosine | >92% |
+
+### Phase 4: Throughput Under Load
+
+Run concurrent workloads and measure sustained throughput:
+
+| Scenario | Insert Producers | Search Producers | Query Workers |
+|----------|-----------------|------------------|---------------|
+| Balanced | 4 | 4 | 4 |
+| Read-heavy | 1 | 8 | 4 |
+| Write-heavy | 4 | 1 | 1 |
+| Stress | 8 | 8 | 8 |
+
+---
+
+## Benchmark Configurations
+
+### LAION Baseline (Required for Quality Measurement)
+
+```rust
+BenchConfig {
+    // Concurrency
+    insert_producers: 4,
+    search_producers: 4,
+    query_workers: 4,
+
+    // Dataset
+    dataset: DatasetSource::Laion { data_dir: "/data/laion".into() },
+    vector_dim: 512,  // LAION CLIP embedding dimension
+    distance: Distance::Cosine,
+
+    // Search
+    search_mode: SearchMode::RaBitQ { bits: 2 },  // or Exact, or bits: 4
+    k: 10,
+    ef_search: 100,
+    rerank_factor: 10,
+
+    // Scale
+    vectors_per_producer: 5000,  // 4 * 5000 = 20k vectors
+    num_queries: 1000,           // For recall measurement
+
+    // Timing
+    duration: Duration::from_secs(30),
+
+    ..Default::default()
+}
+```
+
+### Random Vector Baseline (Throughput Only)
+
+For stress testing without recall measurement:
+
+```rust
+BenchConfig {
+    dataset: DatasetSource::Random { seed: 42 },
+    vector_dim: 128,
+    distance: Distance::L2,
+    search_mode: SearchMode::Exact,
+    ..Default::default()
+}
+```
+
+---
+
+## Minimum Requirements
+
+| Requirement | Minimum | Rationale |
+|-------------|---------|-----------|
+| **Vector count** | 10,000 per embedding | Realistic HNSW graph |
+| **Embedding spaces** | 2 | Validate multi-tenancy |
+| **Duration** | 30 seconds | Statistical significance |
+| **Recall measurement** | Required | Quality assurance |
+| **Search modes tested** | 3 (Exact, 2-bit, 4-bit) | Strategy comparison |
+
+---
+
+## Test Matrix
+
+### Required Tests (All Must Pass)
+
+| Test | Dataset | Search Mode | Distance | Recall Required |
+|------|---------|-------------|----------|-----------------|
+| `baseline_laion_exact` | LAION | Exact | Cosine | Yes (>99%) |
+| `baseline_laion_rabitq_2bit` | LAION | RaBitQ-2bit | Cosine | Yes (>85%) |
+| `baseline_laion_rabitq_4bit` | LAION | RaBitQ-4bit | Cosine | Yes (>92%) |
+| `baseline_concurrent_balanced` | Random | Exact | L2 | No |
+| `baseline_concurrent_stress` | Random | Exact | L2 | No |
+
+### Running the Full Suite
+
+```bash
+# LAION quality baselines (requires LAION data)
+cargo test -p motlie-db --test test_vector_baseline baseline_laion -- --ignored --nocapture
+
+# Concurrent throughput baselines (random vectors)
+cargo test -p motlie-db --release --test test_vector_concurrent baseline_full -- --ignored --nocapture
+```
 
 ---
 
@@ -198,58 +248,21 @@ CODEX: No delete workload is currently executed by `ConcurrentBenchmark`; delete
 
 ### Hardware Documentation Template
 
-Every recorded baseline MUST document the complete hardware environment:
-
 ```
 === Hardware Environment ===
 Machine Type: [Physical / VM / Cloud instance type]
-CPU Model: [Full model name from /proc/cpuinfo or lscpu]
-CPU Architecture: [x86_64 / aarch64 / etc.]
+CPU Model: [Full model name from lscpu]
+CPU Architecture: [x86_64 / aarch64]
 Physical Cores: [N]
-Logical Cores: [N threads]
-CPU Frequency: [Base / Boost GHz]
-L1/L2/L3 Cache: [Sizes]
 RAM Total: [N GB]
-RAM Type: [DDR4/DDR5, Speed]
-Storage Type: [NVMe SSD / SATA SSD / HDD]
-Storage Model: [Model name if available]
-Storage IOPS: [Advertised or measured]
-```
+Storage Type: [NVMe SSD / SATA SSD]
 
-### Software Configuration Template
-
-```
 === Software Environment ===
 OS: [Distribution and version]
-Kernel: [uname -r output]
+Kernel: [uname -r]
 Rust Version: [rustc --version]
-Cargo Version: [cargo --version]
-LLVM Version: [if relevant]
-RocksDB Version: [from Cargo.lock]
 Build Profile: release
-Build Flags: [Any custom RUSTFLAGS]
-SIMD: [Enabled features: AVX2/NEON/etc.]
-```
-
-### Capture Environment Script
-
-```bash
-#!/bin/bash
-echo "=== Hardware Environment ==="
-echo "Machine Type: $(hostnamectl | grep 'Chassis' | cut -d: -f2 | xargs)"
-echo "CPU Model: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs)"
-echo "CPU Architecture: $(uname -m)"
-echo "Physical Cores: $(lscpu | grep '^CPU(s):' | cut -d: -f2 | xargs)"
-echo "CPU Frequency: $(lscpu | grep 'MHz' | head -1 | cut -d: -f2 | xargs) MHz"
-echo "RAM Total: $(free -h | grep Mem | awk '{print $2}')"
-echo "Storage: $(df -h . | tail -1 | awk '{print $1}')"
-
-echo ""
-echo "=== Software Environment ==="
-echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')"
-echo "Kernel: $(uname -r)"
-echo "Rust: $(rustc --version)"
-echo "Cargo: $(cargo --version)"
+SIMD: [AVX2 / NEON]
 ```
 
 ### Pre-run Checklist
@@ -258,111 +271,8 @@ echo "Cargo: $(cargo --version)"
 - [ ] System idle (no background load >5% CPU)
 - [ ] Fresh storage directory (no pre-existing data)
 - [ ] Release build (`cargo build --release`)
-- [ ] Warmup run completed and discarded
+- [ ] LAION dataset downloaded (for quality baselines)
 - [ ] Multiple runs averaged (minimum 3 for variance)
-
----
-
-## Running Benchmarks
-
-### Quick Validation (CI)
-
-```bash
-# 5-second smoke test
-cargo test -p motlie-db --test test_vector_concurrent benchmark_quick_validation -- --nocapture
-```
-
-### Full Baseline Suite
-
-```bash
-# Run all baseline benchmarks (ignored by default)
-cargo test -p motlie-db --test test_vector_concurrent benchmark_baseline -- --ignored --nocapture
-
-# Individual scenarios
-cargo test -p motlie-db --test test_vector_concurrent benchmark_baseline_balanced -- --ignored --nocapture
-cargo test -p motlie-db --test test_vector_concurrent benchmark_baseline_read_heavy -- --ignored --nocapture
-cargo test -p motlie-db --test test_vector_concurrent benchmark_baseline_write_heavy -- --ignored --nocapture
-cargo test -p motlie-db --test test_vector_concurrent benchmark_baseline_stress -- --ignored --nocapture
-```
-
-### Capturing Results
-
-```bash
-# Run with output capture
-cargo test -p motlie-db --test test_vector_concurrent benchmark_baseline -- --ignored --nocapture 2>&1 | tee benchmark_results.txt
-
-# Parse key metrics
-grep -E "(Insert|Search|throughput|P99)" benchmark_results.txt
-```
-
----
-
-## Interpreting Results
-
-### Throughput Analysis
-
-| Observation | Likely Cause | Action |
-|-------------|--------------|--------|
-| Insert << target | Write contention | Reduce writers, increase batch size |
-| Search << target | Lock contention | Check cache efficiency |
-| High variance | GC/compaction | Longer test duration |
-
-### Latency Analysis
-
-| Observation | Likely Cause | Action |
-|-------------|--------------|--------|
-| P99 >> P50 | Tail latency spikes | Check for RocksDB compaction |
-| Insert P99 high | HNSW graph updates | Reduce M, use background updates |
-| Search P99 high | Cache misses | Increase cache size |
-
-### Error Analysis
-
-| Error Type | Cause | Mitigation |
-|------------|-------|------------|
-| Empty index | Search before insert | Gate on index readiness |
-| Transaction conflict | Write contention | Retry with backoff |
-| Timeout | Overload | Reduce concurrency |
-
----
-
-## Regression Tracking
-
-### Baseline Thresholds
-
-Define acceptable regression margins:
-
-| Metric | Baseline | Regression Threshold |
-|--------|----------|---------------------|
-| Insert throughput | X ops/sec | >20% drop |
-| Search throughput | X ops/sec | >20% drop |
-| Insert P99 | X ms | >50% increase |
-| Search P99 | X ms | >50% increase |
-| Error rate | X% | >2x increase |
-
-### CI Integration
-
-```yaml
-# Example CI job
-benchmark:
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/checkout@v4
-    - name: Run benchmarks
-      run: |
-        cargo test -p motlie-db --test test_vector_concurrent benchmark_quick_validation -- --nocapture
-    - name: Check regression
-      run: |
-        # Compare against stored baseline
-        ./scripts/check_benchmark_regression.sh
-```
-
-### Baseline Update Process
-
-1. Run full benchmark suite on reference hardware
-2. Review results for anomalies
-3. Update baseline values in this document
-4. Commit with benchmark run ID and date
-5. Tag release with baseline version
 
 ---
 
@@ -372,123 +282,128 @@ benchmark:
 
 Each recorded baseline must include:
 
-1. **Environment** - Full hardware/software documentation (see templates above)
-2. **Configuration** - Exact benchmark parameters used
-3. **Results** - All metrics with statistical context
-4. **Validation** - Confirmation of minimum requirements met
+1. **Environment** - Full hardware/software documentation
+2. **Configuration** - Exact benchmark parameters
+3. **Results** - All metrics including recall
+4. **Validation** - Confirmation of minimum requirements
 
-### Baseline v1 (Pending)
+### Throughput Baseline (Random Vectors)
 
-**Status:** Not yet recorded - requires full benchmark run
-
-**Minimum Requirements Checklist:**
-- [ ] 10,000+ vectors per embedding
-- [ ] 2+ embedding spaces
-- [ ] 30+ second duration per scenario
-- [ ] Environment fully documented
-- [ ] Release build
+**Status:** Complete (January 17, 2026)
 
 **Environment:**
 ```
 === Hardware Environment ===
-Machine Type: [TBD]
-CPU Model: [TBD]
-CPU Architecture: [TBD]
-Physical Cores: [TBD]
-Logical Cores: [TBD]
-CPU Frequency: [TBD]
-RAM Total: [TBD]
-Storage Type: [TBD]
+Machine Type: server
+CPU Model: Cortex-X925 Cortex-A725
+CPU Architecture: aarch64
+Physical Cores: 20
+RAM Total: 119 GiB
+Storage Type: NVMe SSD (3.7T)
 
 === Software Environment ===
-OS: [TBD]
-Kernel: [TBD]
-Rust Version: [TBD]
-RocksDB Version: [TBD]
+OS: Ubuntu 24.04.3 LTS
+Kernel: 6.14.0-1015-nvidia
+Rust Version: rustc 1.92.0
 Build Profile: release
-SIMD: [TBD]
+SIMD: NEON (aarch64)
 ```
 
 **Configuration:**
-```
-Embeddings: 2 (embedding_a: 128D L2, embedding_b: 128D Cosine)
-Vectors per embedding: 10,000
-Duration: 30s per scenario
-HNSW: M=16, ef_construction=100, ef_search=50
-```
-CODEX: Multi-embedding benchmark harness is not implemented yet; this configuration is aspirational until `ConcurrentBenchmark` can run multiple embeddings.
-CODEX: Current `ConcurrentBenchmark` hard-codes `Distance::L2`; the Cosine variant in this config is not exercised.
+- Vector dimension: 128
+- Distance: L2
+- Search mode: Exact
+- HNSW: M=16, ef_construction=100, ef_search=50
+- 2 embeddings, 10k vectors each
 
-**Results:** [TBD - run benchmark suite]
+**Results:**
 
-| Scenario | Embeddings | Vectors | Insert/s | Search/s | Insert P99 | Search P99 | Errors |
-|----------|------------|---------|----------|----------|------------|------------|--------|
-| Read-heavy | 2 | 20,000 | - | - | - | - | - |
-| Write-heavy | 2 | 20,000 | - | - | - | - | - |
-| Balanced | 2 | 20,000 | - | - | - | - | - |
-| Stress | 2 | 20,000 | - | - | - | - | - |
+| Scenario | Mutation Queue | Query Queue | Insert/s | Search/s | Insert P99 | Search P50 | Errors |
+|----------|----------------|-------------|----------|----------|------------|------------|--------|
+| Balanced | 2 prod → 1 cons | 2 prod → 2 workers | 341.8 | 52.5 | 1µs | 2ms | 0 |
+| Read-heavy | 1 prod → 1 cons | 4 prod → 4 workers | 449.4 | 100.1 | 2µs | 2ms | 0 |
+| Write-heavy | 4 prod → 1 cons | 1 prod → 1 worker | 344.9 | 53.0 | 2µs | 256µs | 0 |
+| Stress | 8 prod → 1 cons | 8 prod → 8 workers | 333.3 | 107.7 | 2µs | 16ms | 0 |
 
-### Historical Quick Validation (Reference Only)
+*Mutation Queue: MPSC (always 1 consumer). Query Queue: MPMC (configurable worker pool).*
 
-*Note: This quick validation does NOT meet minimum requirements (insufficient scale/embeddings). Retained for reference only.*
+**Per-Embedding Detail:**
 
-**Config:** 2 writers, 2 readers, 5s, 64D, 1 embedding, ~500 vectors
+| Scenario | Embedding A | Embedding B |
+|----------|-------------|-------------|
+| Balanced | 172.8 ins/s, 26.8 qry/s | 169.0 ins/s, 25.7 qry/s |
+| Read-heavy | 227.6 ins/s, 50.7 qry/s | 221.8 ins/s, 49.4 qry/s |
+| Write-heavy | 173.8 ins/s, 26.9 qry/s | 171.1 ins/s, 26.0 qry/s |
+| Stress | 166.6 ins/s, 63.5 qry/s | 166.7 ins/s, 44.3 qry/s |
 
-| Metric | Value |
-|--------|-------|
-| Insert throughput | 77.6 ops/sec |
-| Search throughput | 37,409 ops/sec |
-| Insert P99 | 33ms |
-| Search P99 | 32µs |
+**Observations:**
+- **Zero errors across all scenarios**: MPSC serialization eliminates transaction conflicts
+- **Insert throughput ~170/s per embedding**: Single mutation consumer is the bottleneck (by design)
+- **More insert producers doesn't increase throughput**: All funnel through 1 consumer
+- **More query workers improves search throughput**: Stress (8W) = 107/s vs Balanced (2W) = 52/s
+- **Search P50 improves with fewer concurrent searches**: Write-heavy (1S) = 256µs vs Stress (8S) = 16ms
+- **Read-heavy achieves highest throughput**: Fewer inserts = more resources for queries
 
----
+### Quality Baseline (LAION)
 
-## Future Enhancements
+**Status:** Pending
 
-### Batch Mode Benchmarks
+Run with LAION dataset and record recall@10 for each search mode:
 
-Currently all benchmarks use per-vector transactions. Add batch mode:
-
-```rust
-BenchConfig::balanced()
-    .with_batch_size(100)  // Commit every 100 vectors
-```
-
-**Priority:** Low
-**Rationale:** Production often batches; current approach may understate throughput.
-
-### Extended Multi-Embedding Benchmarks
-
-Current baseline requires 2 embeddings. Future enhancement to test more:
-
-```rust
-BenchConfig::multi_embedding(5)  // 5 embeddings, balanced load each
-```
-
-**Priority:** Medium
-**Rationale:** Some production deployments have many embedding models (5-10+).
-
-### Recall Under Load
-
-Measure search quality (recall@k) while under concurrent write load:
-
-```rust
-BenchResult {
-    // ... existing fields
-    recall_at_10: f64,  // vs ground truth
-}
-```
-
-**Priority:** Medium
-**Rationale:** Ensure concurrent writes don't degrade search quality.
+| Search Mode | Recall@10 | Recall@100 | Search P50 | Notes |
+|-------------|-----------|------------|------------|-------|
+| Exact | TBD | TBD | TBD | Reference baseline |
+| RaBitQ-2bit | TBD | TBD | TBD | Fast, lower recall |
+| RaBitQ-4bit | TBD | TBD | TBD | Balance speed/quality |
 
 ---
 
-## CODEX Additional Feedback (Post-review)
+## Regression Tracking
 
-- Baseline suite is not yet compliant with minimum requirements (multi-embedding + 10k/embedding). Treat all baselines as preliminary until a multi-embedding harness exists.
-- Batch insert and delete baselines are specified but not implemented; either add workload coverage or remove those targets to avoid misleading claims.
-- Consider persisting a single reference baseline run (hardware + results) to unblock regression checks and clarify expectations.
+### Thresholds
+
+| Metric | Regression Threshold |
+|--------|---------------------|
+| Insert throughput | >20% drop |
+| Search throughput | >20% drop |
+| Recall@10 | >5% drop |
+| Insert P99 | >50% increase |
+| Search P99 | >50% increase |
+
+### CI Integration
+
+```yaml
+benchmark:
+  runs-on: ubuntu-latest
+  steps:
+    - name: Run quality baseline
+      run: cargo test -p motlie-db baseline_laion_exact -- --ignored
+    - name: Check recall threshold
+      run: ./scripts/check_recall_regression.sh
+```
+
+---
+
+## Future Work
+
+### LAION Recall Integration
+
+The benchmark infrastructure supports LAION:
+- `DatasetSource::Laion` for loading LAION vectors
+- `LaionSubset::compute_ground_truth_topk()` for ground truth
+- `compute_recall()` for recall measurement
+
+Next steps:
+1. Add dedicated recall benchmark tests
+2. Integrate ground truth computation into concurrent benchmarks
+3. Record quality baselines for all search modes
+
+### Additional Search Modes
+
+Potential additions:
+- Product Quantization (PQ)
+- Hybrid exact/quantized search
+- Adaptive reranking based on query
 
 ---
 
@@ -496,5 +411,6 @@ BenchResult {
 
 - [CONCURRENT.md](./CONCURRENT.md) - Concurrent operations implementation
 - [ROADMAP.md](./ROADMAP.md) - Full implementation roadmap
-- [PHASE5.md](./PHASE5.md) - Phase 5 task tracking
 - [benchmark/concurrent.rs](./benchmark/concurrent.rs) - Benchmark implementation
+- [benchmark/dataset.rs](./benchmark/dataset.rs) - LAION dataset loader
+- [benchmark/metrics.rs](./benchmark/metrics.rs) - Recall computation
