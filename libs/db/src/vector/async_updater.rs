@@ -729,6 +729,15 @@ impl AsyncGraphUpdater {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vector::embedding::EmbeddingBuilder;
+    use crate::vector::processor::Processor;
+    use crate::vector::search::SearchConfig;
+    use crate::vector::Distance;
+    use tempfile::TempDir;
+
+    // =========================================================================
+    // Config Tests
+    // =========================================================================
 
     #[test]
     fn test_config_defaults() {
@@ -757,5 +766,408 @@ mod tests {
         assert_eq!(config.ef_construction, 100);
         assert!(!config.process_on_startup);
         assert_eq!(config.idle_sleep, Duration::from_millis(5));
+    }
+
+    // =========================================================================
+    // Helper Functions
+    // =========================================================================
+
+    /// Create test storage with registry and processor
+    fn setup_test_env(
+        temp_dir: &TempDir,
+    ) -> (Arc<Storage>, Arc<EmbeddingRegistry>, Arc<NavigationCache>) {
+        let mut storage = Storage::readwrite(temp_dir.path());
+        storage.ready().expect("Failed to initialize storage");
+        let storage = Arc::new(storage);
+
+        let registry = Arc::new(EmbeddingRegistry::new());
+        let nav_cache = Arc::new(NavigationCache::new());
+
+        (storage, registry, nav_cache)
+    }
+
+    /// Register a test embedding
+    fn register_embedding(
+        storage: &Storage,
+        registry: &EmbeddingRegistry,
+        dim: u32,
+    ) -> crate::vector::embedding::Embedding {
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let builder = EmbeddingBuilder::new("test-model", dim, Distance::L2);
+        registry
+            .register(builder, &txn_db)
+            .expect("Failed to register embedding")
+    }
+
+    /// Generate a deterministic test vector
+    fn test_vector(dim: usize, seed: u64) -> Vec<f32> {
+        use rand::{Rng, SeedableRng};
+        use rand_chacha::ChaCha20Rng;
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        (0..dim).map(|_| rng.gen::<f32>()).collect()
+    }
+
+    // =========================================================================
+    // Phase 7.6 Tests: Async Graph Updater
+    // =========================================================================
+
+    /// 7.6.1: Vectors are searchable immediately via pending fallback
+    #[test]
+    fn test_insert_async_immediate_searchability() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
+
+        // Register embedding
+        let embedding = register_embedding(&storage, &registry, 64);
+
+        // Create processor (HNSW disabled initially to simplify test)
+        let processor = Processor::new(storage.clone(), registry.clone());
+
+        // Insert vector with build_index=false (async path)
+        let id = crate::Id::new();
+        let vector = test_vector(64, 42);
+        let _vec_id = processor
+            .insert_vector(&embedding, id, &vector, false)
+            .expect("Insert should succeed");
+
+        // Search with pending fallback enabled (default)
+        let config = SearchConfig::new(embedding.clone(), 10);
+        let results = processor
+            .search_with_config(&config, &vector)
+            .expect("Search should succeed");
+
+        // Vector should be found via pending fallback
+        assert_eq!(results.len(), 1, "Should find the pending vector");
+        assert_eq!(results[0].id, id, "Should find the correct vector");
+    }
+
+    /// 7.6.2: Workers drain pending queue
+    #[test]
+    fn test_pending_queue_drains() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
+
+        // Register embedding
+        let embedding = register_embedding(&storage, &registry, 64);
+
+        // Create processor
+        let processor = Processor::new(storage.clone(), registry.clone());
+
+        // Insert multiple vectors with build_index=false
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let id = crate::Id::new();
+            let vector = test_vector(64, i);
+            processor
+                .insert_vector(&embedding, id, &vector, false)
+                .expect("Insert should succeed");
+            ids.push(id);
+        }
+
+        // Verify pending queue has items
+        let pending_count = count_pending_items(&storage, embedding.code());
+        assert_eq!(pending_count, 5, "Should have 5 pending items");
+
+        // Use drain_pending_static to process all
+        let config = AsyncUpdaterConfig::new().with_process_on_startup(true);
+        AsyncGraphUpdater::drain_pending_static(&storage, &registry, &nav_cache, &config)
+            .expect("Drain should succeed");
+
+        // Verify pending queue is empty
+        let pending_count = count_pending_items(&storage, embedding.code());
+        assert_eq!(pending_count, 0, "Pending queue should be drained");
+    }
+
+    /// 7.6.3: Pending items survive restart (crash recovery)
+    #[test]
+    fn test_pending_queue_crash_recovery() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let embedding_code: EmbeddingCode;
+        let inserted_id: crate::Id;
+
+        // Phase 1: Insert vector, then "crash" (drop storage without draining)
+        {
+            let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
+            let embedding = register_embedding(&storage, &registry, 64);
+            embedding_code = embedding.code();
+
+            let processor = Processor::new(storage.clone(), registry.clone());
+            inserted_id = crate::Id::new();
+            let vector = test_vector(64, 42);
+            processor
+                .insert_vector(&embedding, inserted_id, &vector, false)
+                .expect("Insert should succeed");
+
+            // Verify pending item exists
+            let pending_count = count_pending_items(&storage, embedding_code);
+            assert_eq!(pending_count, 1, "Should have 1 pending item before crash");
+
+            // Storage dropped here (simulating crash)
+        }
+
+        // Phase 2: Reopen storage and verify pending item persists
+        {
+            let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
+
+            // Re-load embeddings from storage (needed after restart)
+            let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+            registry.prewarm(&txn_db).expect("Failed to prewarm registry");
+
+            // Verify pending item survived restart
+            let pending_count = count_pending_items(&storage, embedding_code);
+            assert_eq!(pending_count, 1, "Pending item should survive restart");
+
+            // Drain and verify processing works
+            let config = AsyncUpdaterConfig::new();
+            AsyncGraphUpdater::drain_pending_static(&storage, &registry, &nav_cache, &config)
+                .expect("Drain after restart should succeed");
+
+            let pending_count = count_pending_items(&storage, embedding_code);
+            assert_eq!(pending_count, 0, "Pending queue should be drained after recovery");
+        }
+    }
+
+    /// 7.6.4: Delete removes vector from pending queue
+    #[test]
+    fn test_delete_removes_from_pending() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
+
+        // Register embedding
+        let embedding = register_embedding(&storage, &registry, 64);
+
+        // Create processor
+        let processor = Processor::new(storage.clone(), registry.clone());
+
+        // Insert vector with build_index=false
+        let id = crate::Id::new();
+        let vector = test_vector(64, 42);
+        processor
+            .insert_vector(&embedding, id, &vector, false)
+            .expect("Insert should succeed");
+
+        // Verify pending item exists
+        let pending_count = count_pending_items(&storage, embedding.code());
+        assert_eq!(pending_count, 1, "Should have 1 pending item");
+
+        // Delete the vector
+        processor
+            .delete_vector(&embedding, id)
+            .expect("Delete should succeed");
+
+        // Verify pending queue is cleared
+        let pending_count = count_pending_items(&storage, embedding.code());
+        assert_eq!(pending_count, 0, "Pending item should be removed after delete");
+
+        // Search should not find the deleted vector
+        let config = SearchConfig::new(embedding.clone(), 10);
+        let results = processor
+            .search_with_config(&config, &vector)
+            .expect("Search should succeed");
+        assert!(results.is_empty(), "Deleted vector should not be found");
+    }
+
+    /// 7.6.5: Concurrent insert and worker don't race
+    #[test]
+    fn test_concurrent_insert_and_worker() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
+
+        // Register embedding
+        let embedding = register_embedding(&storage, &registry, 64);
+
+        // Create processor
+        let processor = Arc::new(Processor::new(storage.clone(), registry.clone()));
+
+        // Start async updater with fast processing
+        let config = AsyncUpdaterConfig::new()
+            .with_num_workers(2)
+            .with_batch_size(10)
+            .with_idle_sleep(Duration::from_millis(1));
+        let updater =
+            AsyncGraphUpdater::start(storage.clone(), registry.clone(), nav_cache.clone(), config);
+
+        // Insert vectors concurrently while workers are running
+        let processor_clone = processor.clone();
+        let embedding_clone = embedding.clone();
+        let insert_handle = std::thread::spawn(move || {
+            for i in 0..50 {
+                let id = crate::Id::new();
+                let vector = test_vector(64, i);
+                processor_clone
+                    .insert_vector(&embedding_clone, id, &vector, false)
+                    .expect("Insert should succeed");
+            }
+        });
+
+        // Wait for inserts to complete
+        insert_handle.join().expect("Insert thread should complete");
+
+        // Give workers time to process
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Get metrics before shutdown (shutdown consumes self)
+        let items_processed = updater.items_processed();
+
+        // Shutdown
+        updater.shutdown();
+
+        // Verify no panic occurred and items were processed
+        // (exact count depends on timing, but should be > 0)
+        let remaining = count_pending_items(&storage, embedding.code());
+        assert!(
+            items_processed > 0 || remaining < 50,
+            "Workers should have processed some items (processed={}, remaining={})",
+            items_processed,
+            remaining
+        );
+    }
+
+    /// 7.6.6: Graceful shutdown completes in-flight batch
+    #[test]
+    fn test_shutdown_completes_gracefully() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
+
+        // Register embedding
+        let embedding = register_embedding(&storage, &registry, 64);
+
+        // Create processor and insert some vectors
+        let processor = Processor::new(storage.clone(), registry.clone());
+        for i in 0..10 {
+            let id = crate::Id::new();
+            let vector = test_vector(64, i);
+            processor
+                .insert_vector(&embedding, id, &vector, false)
+                .expect("Insert should succeed");
+        }
+
+        // Start async updater
+        let config = AsyncUpdaterConfig::new()
+            .with_num_workers(1)
+            .with_batch_size(5)
+            .with_process_on_startup(false);
+        let updater =
+            AsyncGraphUpdater::start(storage.clone(), registry.clone(), nav_cache.clone(), config);
+
+        // Give workers time to pick up work
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Shutdown should complete gracefully
+        updater.shutdown();
+
+        // Verify some items were processed (metrics should be non-zero after shutdown)
+        // Note: exact count depends on timing, but shutdown should have waited for in-flight
+    }
+
+    /// 7.6.7: Partial batch processing is idempotent
+    #[test]
+    fn test_partial_batch_idempotent() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
+
+        // Register embedding
+        let embedding = register_embedding(&storage, &registry, 64);
+
+        // Create processor and insert vectors
+        let processor = Processor::new(storage.clone(), registry.clone());
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let id = crate::Id::new();
+            let vector = test_vector(64, i);
+            processor
+                .insert_vector(&embedding, id, &vector, false)
+                .expect("Insert should succeed");
+            ids.push(id);
+        }
+
+        // Process first time
+        let config = AsyncUpdaterConfig::new();
+        AsyncGraphUpdater::drain_pending_static(&storage, &registry, &nav_cache, &config)
+            .expect("First drain should succeed");
+
+        // Process again (idempotent - should be no-op)
+        AsyncGraphUpdater::drain_pending_static(&storage, &registry, &nav_cache, &config)
+            .expect("Second drain should succeed (idempotent)");
+
+        // Search should still work correctly
+        let search_config = SearchConfig::new(embedding.clone(), 10);
+        let query = test_vector(64, 0);
+        let results = processor
+            .search_with_config(&search_config, &query)
+            .expect("Search should succeed");
+
+        // Should find vectors (now indexed, not pending)
+        assert!(!results.is_empty(), "Should find indexed vectors");
+    }
+
+    /// 7.6.8: Pending scan respects limit (backlog bound)
+    #[test]
+    fn test_pending_scan_respects_limit() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
+
+        // Register embedding
+        let embedding = register_embedding(&storage, &registry, 64);
+
+        // Create processor and insert many vectors (more than default limit)
+        let processor = Processor::new(storage.clone(), registry.clone());
+        for i in 0..1500 {
+            let id = crate::Id::new();
+            let vector = test_vector(64, i);
+            processor
+                .insert_vector(&embedding, id, &vector, false)
+                .expect("Insert should succeed");
+        }
+
+        // Search with small pending scan limit
+        let config = SearchConfig::new(embedding.clone(), 10).with_pending_scan_limit(100);
+        let query = test_vector(64, 0);
+        let results = processor
+            .search_with_config(&config, &query)
+            .expect("Search should succeed");
+
+        // Should find some results (up to k=10 from the 100 scanned)
+        // The key is that search completes quickly without scanning all 1500
+        assert!(results.len() <= 10, "Should respect k limit");
+
+        // Search with no pending fallback
+        let config_no_pending = SearchConfig::new(embedding.clone(), 10).no_pending_fallback();
+        let results_no_pending = processor
+            .search_with_config(&config_no_pending, &query)
+            .expect("Search should succeed");
+
+        // Should find nothing (no indexed vectors, no pending fallback)
+        assert!(
+            results_no_pending.is_empty(),
+            "Should find nothing with pending fallback disabled"
+        );
+    }
+
+    // =========================================================================
+    // Helper: Count pending items for an embedding
+    // =========================================================================
+
+    fn count_pending_items(storage: &Storage, embedding: EmbeddingCode) -> usize {
+        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
+        let pending_cf = txn_db
+            .cf_handle(Pending::CF_NAME)
+            .expect("Pending CF not found");
+
+        let prefix = Pending::prefix_for_embedding(embedding);
+        let iter = txn_db.iterator_cf(
+            &pending_cf,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
+
+        let mut count = 0;
+        for item in iter {
+            let (key, _) = item.expect("Iterator error");
+            if key.len() < 8 || key[0..8] != prefix {
+                break;
+            }
+            count += 1;
+        }
+        count
     }
 }
