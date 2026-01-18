@@ -74,7 +74,7 @@ All benchmarks run with:
 **Resolution:** The initial 15-20% regression was caused by batch operation overhead.
 Fixed by making `batch_threshold` configurable (default=64 disables batching).
 
-See `libs/db/src/vector/ROADMAP.md` Phase 3 section for full investigation details.
+See `libs/db/src/vector/docs/ROADMAP.md` Phase 3 section for full investigation details.
 
 ### Analysis
 

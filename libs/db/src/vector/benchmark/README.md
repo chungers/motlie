@@ -945,7 +945,7 @@ bench_vector sweep --dataset laion --bits 4 --mode adc --rerank 10 --ef 100
 ## References
 
 - [GEMINI-BENCHMARK.md](./GEMINI-BENCHMARK.md) - Original improvement proposal
-- [RABITQ.md](../RABITQ.md) - RaBitQ implementation details and ADC analysis
-- [ROADMAP.md](../ROADMAP.md) - Overall project roadmap
+- [RABITQ.md](../docs/RABITQ.md) - RaBitQ implementation details and ADC analysis
+- [ROADMAP.md](../docs/ROADMAP.md) - Overall project roadmap
 - [ann-benchmarks](https://ann-benchmarks.com/) - Standard benchmark datasets
 - [Cohere Wikipedia](https://huggingface.co/datasets/Cohere/wikipedia-22-12-simple-embeddings) - HuggingFace dataset

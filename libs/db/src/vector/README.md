@@ -10,6 +10,24 @@ The vector module provides:
 - **RaBitQ Quantization**: Binary codes for fast approximate distance computation
 - **ID Mapping**: Bidirectional mapping between external ULIDs and internal u32 vec_ids
 
+## Design Docs
+
+All vector design docs live in `docs/` and are kept close to the implementation for easier review.
+
+- [docs/ROADMAP.md](docs/ROADMAP.md) - Primary implementation roadmap and phase history (kept up to date as phases close).
+- [docs/PHASE5.md](docs/PHASE5.md) - Phase 5 execution notes and certification trail.
+- [docs/CONCURRENT.md](docs/CONCURRENT.md) - Concurrency workstream details (tests, metrics, stress plan).
+- [docs/BASELINE.md](docs/BASELINE.md) - Baseline benchmark protocol and recorded results.
+- [docs/BENCHMARK.md](docs/BENCHMARK.md) - Large-scale benchmark results and tuning guidance.
+- [docs/BENCHMARK2.md](docs/BENCHMARK2.md) - Secondary benchmark runs and sweeps (historical comparisons).
+- [docs/API.md](docs/API.md) - Public API reference and usage patterns.
+- [docs/RABITQ.md](docs/RABITQ.md) - RaBitQ design rationale and ADC details.
+- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) - Design constraints and invariants (DATA-1, etc).
+- [docs/CODEX-CODE-REVIEW.md](docs/CODEX-CODE-REVIEW.md) - CODEX review findings and fixes (audit trail).
+- [docs/GEMINI-CODE-REVIEW.md](docs/GEMINI-CODE-REVIEW.md) - Gemini review notes and follow-ups.
+- [docs/GEMINI-BENCHMARK.md](docs/GEMINI-BENCHMARK.md) - Benchmark tooling proposal and status.
+- [docs/GEMINI-REVIEW.md](docs/GEMINI-REVIEW.md) - Misc. Gemini design review notes.
+
 ## Schema
 
 All column families use the `vector/` prefix. Keys use direct byte serialization for RocksDB prefix extraction; values use MessagePack where appropriate.
