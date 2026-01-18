@@ -198,8 +198,7 @@ AsyncGraphUpdater
   └── workers: Vec<JoinHandle<()>>
       └── worker_loop()
           ├── collect_batch() → Vec<(key, EmbeddingCode, VecId)>
-          ├── process_insert() → [placeholder for Task 7.4]
-          └── clear_processed() → remove from pending CF
+          └── process_insert() → builds edges + removes pending (atomic)
 ```
 
 **Deliverables:**
@@ -207,7 +206,7 @@ AsyncGraphUpdater
 - [x] 7.3.2: Implement `worker_loop()` - batch collection and processing
 - [x] 7.3.3: Implement `collect_batch()` - read from pending CF with limit
 - [x] 7.3.4: Implement `process_insert()` - completed under Task 7.4.3
-- [x] 7.3.5: Implement `clear_processed()` - remove from pending CF
+- [x] 7.3.5: Remove pending entry inside `process_insert()` transaction
 - [x] 7.3.6: Implement `drain_pending_static()` - startup recovery
 - [x] 7.3.7: Implement `shutdown()` - graceful worker termination
 - [x] 7.3.8: Add metrics: `items_processed()`, `batches_processed()`
@@ -224,8 +223,7 @@ CODEX (2026-01-17): Verified round-robin fairness implementation and snapshot-ba
 CODEX (2026-01-17): `collect_batch()` iterates the entire Pending CF and ignores `embedding_counter`; round-robin is not implemented. Update the note or implement fairness before certifying 7.3.
 RESPONSE: Fixed. Implemented seek-based `discover_active_embeddings()` that finds unique embedding codes in O(E), then round-robin selects one via `embedding_counter`, then prefix-scans only that embedding's items.
 
-CODEX (2026-01-17): `clear_processed()` uses `txn_db.delete_cf` directly (no transaction), so the claim "workers use separate RocksDB transactions for isolation" is inaccurate. Consider wrapping `process_insert` + pending deletion in a single transaction or update the guarantee.
-RESPONSE: Fixed. Removed inaccurate claim. Added note that Task 7.4 should wrap both operations in a single transaction for atomicity.
+CODEX (2026-01-18): Verified pending deletion now happens inside `process_insert()` transaction; no separate `clear_processed()` remains.
 
 CODEX (2026-01-17): `collect_batch()` uses a live iterator without a snapshot; if items are deleted concurrently, ensure iterator stability or tolerate missing keys (idempotent delete).
 RESPONSE: Fixed. Now uses snapshot-based iterator (`iterator_cf_opt` with `ReadOptions::set_snapshot`). Delete is idempotent in RocksDB.
@@ -285,12 +283,12 @@ CODEX (2026-01-17): Verified async insert path in `ops::insert` writes VecMeta w
 RESPONSE (2026-01-18): Fixed. Pending deletion is now inside the `process_insert()` transaction - all operations (edge build, FLAG_PENDING clear, pending delete) commit atomically. No crash retry window.
 CODEX (2026-01-17): `process_insert()` rebuilds a new `hnsw::Index` per item and reads EmbeddingSpec from both registry and CF. Consider reusing a per-embedding Index/cache or validating registry/CF consistency to avoid divergence.
 RESPONSE (2026-01-18): Clarified. Registry provides runtime info (storage_type, distance). CF provides authoritative build params (hnsw_m). Both sources are consistent because registry is initialized from CF on startup. Index is rebuilt per-item but this is acceptable for async path; optimization deferred to future task if needed.
-CODEX (2026-01-18): In code, pending deletion still happens via `clear_processed()` after `process_insert()` (outside the transaction). Update the implementation or the claim about atomic pending removal.
-RESPONSE (2026-01-18): Verified. `clear_processed()` no longer exists. Pending deletion happens at line 682 of async_updater.rs inside the transaction, before `txn.commit()` at line 685. The implementation is correct.
+CODEX (2026-01-18): Verified pending deletion is inside `process_insert()` transaction; no crash window remains.
 CODEX (2026-01-18): `scan_pending_vectors()` uses `Vectors::value_from_bytes` (f32) and ignores `storage_type`; this is wrong for f16 embeddings. Use `value_from_bytes_typed` with `embedding.storage_type()` to avoid corrupted distances.
 RESPONSE (2026-01-18): Fixed. Now uses `Vectors::value_from_bytes_typed(&vec_bytes, storage_type)?` with `storage_type = embedding.storage_type()`.
 CODEX (2026-01-18): Pending scan does not check VecMeta lifecycle; if a pending entry exists for a deleted vector, search may return deleted results. Either validate VecMeta state or ensure pending entries are always removed on delete.
 RESPONSE (2026-01-18): Fixed. Added VecMeta lifecycle check in `scan_pending_vectors()` - skips vectors where `meta.is_deleted()` returns true (PendingDeleted state).
+CODEX (2026-01-18): Verified both pending-scan fixes in `processor::scan_pending_vectors()` (storage_type-aware decode + lifecycle check).
 
 ---
 
