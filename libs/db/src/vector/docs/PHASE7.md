@@ -31,6 +31,79 @@ Phase 2 (Asynchronous, background):
 
 ---
 
+## Vector Lifecycle States
+
+Vectors transition through well-defined lifecycle states, tracked in the `VecMetadata.flags` field using a type-safe enum + bitmask hybrid design.
+
+### VecLifecycle Enum (bits 0-1)
+
+```rust
+pub(crate) enum VecLifecycle {
+    Indexed = 0b00,        // In HNSW graph, fully searchable
+    Deleted = 0b01,        // Soft-deleted, skip in search
+    Pending = 0b10,        // Awaiting async graph construction
+    PendingDeleted = 0b11, // Deleted before graph construction completed
+}
+```
+
+### State Machine
+
+```
+Insert(build_index=true)  ───────────────────────► Indexed
+Insert(build_index=false) ──► Pending ──► Indexed
+                                 │            │
+                            set_deleted   set_deleted
+                                 ▼            ▼
+                           PendingDeleted  Deleted
+                                 │
+                           clear_pending
+                                 ▼
+                              Deleted
+```
+
+### Flags Byte Layout
+
+```
+flags byte: 0bRRRRRRLL
+            ││││││└┴── Lifecycle (2 bits): VecLifecycle enum (mutually exclusive)
+            │││││└──── Reserved (bit 2)
+            ││││└───── Reserved (bit 3)
+            │││└────── Reserved (bit 4)
+            ││└─────── Reserved (bit 5)
+            │└──────── Reserved (bit 6)
+            └───────── REPLICATED (bit 7) - FUTURE: not yet implemented
+```
+
+### Design Rationale
+
+1. **Type Safety**: `VecLifecycle` enum provides compile-time enforcement of valid states
+2. **State Machine**: `set_deleted()` and `clear_pending()` handle transitions correctly
+3. **Extensibility**: Upper 6 bits reserved for future orthogonal flags (e.g., REPLICATED for distributed deployment)
+4. **Wire Compatibility**: Enum values match original FLAG_DELETED=0x01, FLAG_PENDING=0x02 constants
+
+### Usage
+
+```rust
+// Create pending vector
+let meta = VecMetadata::pending();
+assert!(meta.is_pending());
+assert_eq!(meta.lifecycle(), VecLifecycle::Pending);
+
+// After async graph construction
+meta.clear_pending();  // Pending → Indexed
+
+// Delete handling
+meta.set_deleted();    // Indexed → Deleted (or Pending → PendingDeleted)
+
+// Check state
+if meta.is_deleted() { /* skip in search */ }
+if meta.is_pending() { /* brute-force fallback or async processing needed */ }
+```
+
+**File:** `libs/db/src/vector/schema.rs`
+
+---
+
 ## Task Breakdown
 
 ### Task 7.1: Pending Queue Column Family
@@ -172,7 +245,7 @@ RESPONSE: Keys collected via read-only iterator. Idempotency check will be in pr
 **Goal:** Modify insert path to use two-phase pattern.
 
 **Files:**
-- `libs/db/src/vector/schema.rs` - FLAG_PENDING, FLAG_DELETED constants
+- `libs/db/src/vector/schema.rs` - VecLifecycle enum, VecMetadata
 - `libs/db/src/vector/ops/insert.rs` - Two-phase insert logic
 - `libs/db/src/vector/async_updater.rs` - process_insert() implementation
 
@@ -180,28 +253,29 @@ RESPONSE: Keys collected via read-only iterator. Idempotency check will be in pr
 1. `InsertVector` has `immediate_index: bool` flag (already existed)
 2. When `immediate_index = false` (i.e., `build_index = false`):
    - Store vector data synchronously (Vectors CF)
-   - Store VecMeta with FLAG_PENDING
+   - Store VecMeta with `VecLifecycle::Pending` state
    - Add to Pending queue
    - Skip HNSW edge construction
 3. `process_insert()` builds HNSW edges asynchronously:
-   - Checks FLAG_PENDING (idempotent)
+   - Checks `meta.is_pending()` (idempotent via VecLifecycle enum)
    - Loads vector from Vectors CF
    - Builds HNSW graph via hnsw::insert
-   - Clears FLAG_PENDING (via hnsw::insert writing VecMeta with flags=0)
+   - Transitions to `VecLifecycle::Indexed` (via hnsw::insert writing VecMeta)
 4. Search handles pending vectors via brute-force fallback (deferred to 7.4.4)
 CODEX (2026-01-17): Brute-force fallback must be bounded (e.g., cap pending scan size or time) to avoid O(N) degradation when backlog grows; add an explicit limit and metrics.
 
 **Deliverables:**
-- [x] 7.4.1: Add FLAG_PENDING/FLAG_DELETED to VecMetadata with helper methods
+- [x] 7.4.1: Implement VecLifecycle enum with type-safe state transitions
 - [x] 7.4.2: Modify `ops::insert::vector()` and `ops::insert::batch()` for two-phase
 - [x] 7.4.3: Implement `process_insert()` in async_updater.rs
-- [ ] 7.4.4: Update search to handle pending vectors (FLAG_PENDING) - deferred
+- [ ] 7.4.4: Update search to handle pending vectors (VecLifecycle::Pending) - deferred
 
 **Implementation Notes:**
 - `AsyncGraphUpdater::start()` now requires `registry` and `nav_cache` parameters
 - `process_insert()` creates an hnsw::Index per embedding using stored EmbeddingSpec
-- hnsw::insert() overwrites VecMeta, clearing FLAG_PENDING automatically
+- hnsw::insert() writes VecMeta with `VecLifecycle::Indexed`, transitioning from Pending
 - Pending queue cleared atomically within the same transaction (no separate `clear_processed()`)
+- VecLifecycle enum provides type-safe lifecycle states (see "Vector Lifecycle States" section above)
 CODEX (2026-01-17): Verified async insert path in `ops::insert` writes VecMeta with FLAG_PENDING and enqueues Pending. `process_insert()` is transactional and clears FLAG_PENDING via `hnsw::insert()`. Pending deletion is still outside the transaction; it is idempotent but leaves a retry window on crash.
 RESPONSE (2026-01-18): Fixed. Pending deletion is now inside the `process_insert()` transaction - all operations (edge build, FLAG_PENDING clear, pending delete) commit atomically. No crash retry window.
 CODEX (2026-01-17): `process_insert()` rebuilds a new `hnsw::Index` per item and reads EmbeddingSpec from both registry and CF. Consider reusing a per-embedding Index/cache or validating registry/CF consistency to avoid divergence.
@@ -218,17 +292,25 @@ RESPONSE (2026-01-18): Clarified. Registry provides runtime info (storage_type, 
 - `libs/db/src/vector/schema.rs`
 
 **Delete Flow:**
-1. Phase 1 (sync): Mark deleted, remove from pending queue, free ID
+1. Phase 1 (sync): Call `meta.set_deleted()`, remove from pending queue, free ID
 2. Phase 2 (lazy): Stale edges cleaned during search/compaction
 
-**Node Flags:**
+**Lifecycle Transitions on Delete:**
 ```rust
-const FLAG_DELETED: u8 = 0x01;  // Vector is deleted
-const FLAG_PENDING: u8 = 0x02;  // Waiting for graph construction
+// Delete transitions (handled by VecMetadata::set_deleted())
+Indexed       → Deleted         // Normal indexed vector
+Pending       → PendingDeleted  // Deleted before graph construction
+Deleted       → Deleted         // Already deleted (idempotent)
+PendingDeleted → PendingDeleted // Already deleted (idempotent)
 ```
 
+**Note:** VecLifecycle enum (Task 7.4) already provides:
+- `VecLifecycle::Deleted` and `VecLifecycle::PendingDeleted` states
+- `meta.set_deleted()` for correct state transitions
+- `meta.is_deleted()` to check if vector should be skipped
+
 **Deliverables:**
-- [ ] 7.5.1: Add `FLAG_DELETED` and `FLAG_PENDING` constants
+- [x] 7.5.1: VecLifecycle enum with Deleted/PendingDeleted states (completed in 7.4)
 - [ ] 7.5.2: Implement `mark_deleted()` in Processor
 - [ ] 7.5.3: Implement `remove_from_pending()` helper
 - [ ] 7.5.4: Update search to skip deleted nodes

@@ -340,14 +340,7 @@ fn store_vec_meta(
     max_layer: HnswLayer,
 ) -> Result<()> {
     let key = VecMetaCfKey(index.embedding(), vec_id);
-    let value = VecMetaCfValue(VecMetadata {
-        max_layer,
-        flags: 0,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
-    });
+    let value = VecMetaCfValue(VecMetadata::indexed(max_layer));
 
     let cf = txn_db
         .cf_handle(VecMeta::CF_NAME)
