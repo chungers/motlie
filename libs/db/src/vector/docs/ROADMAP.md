@@ -9,6 +9,7 @@
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
 - [`BENCHMARK.md`](./BENCHMARK.md) - Performance results and configuration reference
 - [`CONCURRENT.md`](./CONCURRENT.md) - Concurrent operations (Tasks 5.9-5.11)
+- [`PHASE7.md`](./PHASE7.md) - Async Graph Updater design (30 subtasks)
 
 ---
 
@@ -7816,6 +7817,9 @@ mod channel_tests {
 ---
 
 ## Phase 7: Async Graph Updater
+
+**Status:** Not Started
+**Design Doc:** [`PHASE7.md`](./PHASE7.md) - Detailed task breakdown with 30 subtasks
 
 **Goal:** Enable online updates by decoupling vector storage from HNSW graph construction.
 
