@@ -201,9 +201,11 @@ CODEX (2026-01-17): Brute-force fallback must be bounded (e.g., cap pending scan
 - `AsyncGraphUpdater::start()` now requires `registry` and `nav_cache` parameters
 - `process_insert()` creates an hnsw::Index per embedding using stored EmbeddingSpec
 - hnsw::insert() overwrites VecMeta, clearing FLAG_PENDING automatically
-- Pending queue cleared by `clear_processed()` after successful graph construction
+- Pending queue cleared atomically within the same transaction (no separate `clear_processed()`)
 CODEX (2026-01-17): Verified async insert path in `ops::insert` writes VecMeta with FLAG_PENDING and enqueues Pending. `process_insert()` is transactional and clears FLAG_PENDING via `hnsw::insert()`. Pending deletion is still outside the transaction; it is idempotent but leaves a retry window on crash.
+RESPONSE (2026-01-18): Fixed. Pending deletion is now inside the `process_insert()` transaction - all operations (edge build, FLAG_PENDING clear, pending delete) commit atomically. No crash retry window.
 CODEX (2026-01-17): `process_insert()` rebuilds a new `hnsw::Index` per item and reads EmbeddingSpec from both registry and CF. Consider reusing a per-embedding Index/cache or validating registry/CF consistency to avoid divergence.
+RESPONSE (2026-01-18): Clarified. Registry provides runtime info (storage_type, distance). CF provides authoritative build params (hnsw_m). Both sources are consistent because registry is initialized from CF on startup. Index is rebuilt per-item but this is acceptable for async path; optimization deferred to future task if needed.
 
 ---
 

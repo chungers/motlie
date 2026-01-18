@@ -17,8 +17,7 @@
 //!   └── workers: Vec<JoinHandle<()>>
 //!       └── worker_loop()
 //!           ├── collect_batch() - round-robin across embeddings
-//!           ├── process_insert() - greedy search + add edges
-//!           └── clear_processed() - remove from pending CF
+//!           └── process_insert() - greedy search + add edges + remove from pending (atomic)
 //! ```
 //!
 //! ## Usage
@@ -368,15 +367,14 @@ impl AsyncGraphUpdater {
 
             // Process each item in the batch
             for (key, embedding, vec_id) in &batch {
-                // Check for idempotency: skip if already processed or deleted
-                // (FLAG_PENDING cleared or FLAG_DELETED set)
-                // This is checked inside process_insert
-
+                // process_insert handles idempotency (checks FLAG_PENDING/FLAG_DELETED)
+                // and deletes from pending CF within the same transaction
                 if let Err(e) = Self::process_insert(
                     &storage,
                     &registry,
                     &nav_cache,
                     &config,
+                    key,
                     *embedding,
                     *vec_id,
                 ) {
@@ -387,19 +385,8 @@ impl AsyncGraphUpdater {
                         error = %e,
                         "Failed to process pending insert (will retry)"
                     );
-                    // Don't clear from pending - will be retried
+                    // Transaction rolled back - item stays in pending for retry
                     continue;
-                }
-
-                // Remove from pending queue after successful processing
-                if let Err(e) = Self::clear_processed(&storage, key) {
-                    error!(
-                        worker_id,
-                        embedding,
-                        vec_id,
-                        error = %e,
-                        "Failed to clear processed item from pending"
-                    );
                 }
 
                 processed += 1;
@@ -569,16 +556,21 @@ impl AsyncGraphUpdater {
     /// This function is idempotent: if the item was already processed
     /// (edges already built) or deleted, it safely skips.
     ///
-    /// The processing is done in a transaction for atomicity:
+    /// The processing is done in a single transaction for atomicity:
     /// 1. Check if vector still exists and is pending (not deleted)
     /// 2. Load vector data from Vectors CF
     /// 3. Build HNSW graph edges
     /// 4. Update VecMeta to clear FLAG_PENDING
+    /// 5. Delete from Pending CF
+    /// 6. Commit (all operations atomic)
+    ///
+    /// This ensures no crash window between graph update and pending deletion.
     fn process_insert(
         storage: &Storage,
         registry: &EmbeddingRegistry,
         nav_cache: &Arc<NavigationCache>,
         config: &AsyncUpdaterConfig,
+        pending_key: &[u8],
         embedding: EmbeddingCode,
         vec_id: VecId,
     ) -> anyhow::Result<()> {
@@ -594,6 +586,12 @@ impl AsyncGraphUpdater {
             Some(bytes) => bytes,
             None => {
                 // Vector metadata doesn't exist - skip (may have been deleted)
+                // Still delete from pending to clean up
+                let pending_cf = txn_db
+                    .cf_handle(Pending::CF_NAME)
+                    .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
+                txn.delete_cf(&pending_cf, pending_key)?;
+                txn.commit()?;
                 debug!(embedding, vec_id, "Vector metadata not found, skipping");
                 return Ok(());
             }
@@ -602,11 +600,23 @@ impl AsyncGraphUpdater {
         let meta = VecMeta::value_from_bytes(&meta_bytes)?;
         if !meta.0.is_pending() {
             // Already processed - idempotent skip
+            // Still delete from pending to clean up
+            let pending_cf = txn_db
+                .cf_handle(Pending::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
+            txn.delete_cf(&pending_cf, pending_key)?;
+            txn.commit()?;
             debug!(embedding, vec_id, "Vector already processed, skipping");
             return Ok(());
         }
         if meta.0.is_deleted() {
             // Deleted - skip
+            // Still delete from pending to clean up
+            let pending_cf = txn_db
+                .cf_handle(Pending::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
+            txn.delete_cf(&pending_cf, pending_key)?;
+            txn.commit()?;
             debug!(embedding, vec_id, "Vector deleted, skipping");
             return Ok(());
         }
@@ -620,7 +630,7 @@ impl AsyncGraphUpdater {
             .get_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?
             .ok_or_else(|| anyhow::anyhow!("Vector data not found for {:?}", vec_id))?;
 
-        // Get embedding spec to determine vector format
+        // Get embedding spec from registry for runtime info (storage_type, distance)
         let emb = registry
             .get_by_code(embedding)
             .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding))?;
@@ -628,7 +638,7 @@ impl AsyncGraphUpdater {
         let vector = Vectors::value_from_bytes_typed(&vec_bytes, storage_type)?;
 
         // 3. Build HNSW index
-        // Create an Index for this embedding
+        // Get hnsw_m from persisted EmbeddingSpec (authoritative for build params)
         let specs_cf = txn_db
             .cf_handle(EmbeddingSpecs::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
@@ -637,8 +647,6 @@ impl AsyncGraphUpdater {
             .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
             .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
         let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
-
-        // Build HNSW config from spec
         let m = embedding_spec.hnsw_m as usize;
         let hnsw_config = hnsw::Config {
             enabled: true,
@@ -667,34 +675,19 @@ impl AsyncGraphUpdater {
         // But we need to make sure FLAG_PENDING is cleared. The hnsw::insert
         // creates new VecMeta with flags=0, so FLAG_PENDING will be cleared.
 
-        // 4. Commit transaction
+        // 4. Delete from pending CF (inside transaction for atomicity)
+        let pending_cf = txn_db
+            .cf_handle(Pending::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
+        txn.delete_cf(&pending_cf, pending_key)?;
+
+        // 5. Commit transaction (all operations atomic)
         txn.commit()?;
 
-        // 5. Apply cache update
+        // 6. Apply cache update
         cache_update.apply(nav_cache);
 
         debug!(embedding, vec_id, "Processed pending insert");
-        Ok(())
-    }
-
-    /// Remove a processed item from the pending queue.
-    ///
-    /// This operation is idempotent: deleting an already-deleted key is a no-op.
-    /// This is important because:
-    /// 1. Concurrent workers might process the same item
-    /// 2. Crash recovery might re-process items
-    ///
-    /// Note: Currently uses direct delete (not transactional). When Task 7.4
-    /// implements process_insert, both operations should be in a single
-    /// transaction for atomicity.
-    fn clear_processed(storage: &Storage, key: &[u8]) -> anyhow::Result<()> {
-        let txn_db = storage.transaction_db()?;
-        let cf = txn_db
-            .cf_handle(Pending::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
-
-        // Delete is idempotent in RocksDB - deleting a non-existent key is a no-op
-        txn_db.delete_cf(cf, key)?;
         Ok(())
     }
 
@@ -716,15 +709,11 @@ impl AsyncGraphUpdater {
             info!(batch_size = batch.len(), "Draining pending batch");
 
             for (key, embedding, vec_id) in &batch {
+                // process_insert handles both graph building and pending deletion atomically
                 if let Err(e) =
-                    Self::process_insert(storage, registry, nav_cache, config, *embedding, *vec_id)
+                    Self::process_insert(storage, registry, nav_cache, config, key, *embedding, *vec_id)
                 {
                     warn!(embedding, vec_id, error = %e, "Failed to process during drain");
-                    continue;
-                }
-
-                if let Err(e) = Self::clear_processed(storage, key) {
-                    error!(embedding, vec_id, error = %e, "Failed to clear during drain");
                 }
             }
         }
