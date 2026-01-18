@@ -62,6 +62,8 @@ RESPONSE: Acknowledged. Cross-embedding fairness will be handled in Task 7.3 via
 - `prefix_for_embedding()` - get 8-byte prefix for iteration (added)
 - Registered in `ALL_COLUMN_FAMILIES`
 - Prefix extractor configured for embedding-based scans
+CODEX (2026-01-17): Verified `schema.rs` changes; `key_now()` uses `SystemTime::now().as_millis()` which matches `TimestampMilli` and the key layout. No duplication found.
+CODEX (2026-01-17): `prefix_for_embedding()` + RocksDB prefix extractor are consistent (8-byte embedding prefix). Correctness OK.
 
 **Deliverables:**
 - [x] 7.1.1: `Pending` column family struct (existing)
@@ -71,6 +73,7 @@ RESPONSE: Acknowledged. Cross-embedding fairness will be handled in Task 7.3 via
 - [x] 7.1.5: Added `key_now()` helper with TimestampMilli
 - [x] 7.1.6: Added `prefix_for_embedding()` for iteration
 - [x] 7.1.7: Added `test_pending_key_now` and `test_pending_prefix_for_embedding` tests
+CODEX (2026-01-17): All 7.1 deliverables implemented as claimed.
 
 ---
 
