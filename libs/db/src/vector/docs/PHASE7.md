@@ -331,6 +331,8 @@ CODEX (2026-01-18): Verified delete path in `ops::delete` + `processor::delete_v
 
 ### Task 7.6: Testing & Crash Recovery
 
+**Status:** ✅ Complete
+
 **Goal:** Comprehensive testing including crash recovery scenarios.
 
 #### Existing Infrastructure
@@ -371,14 +373,20 @@ These tests validate the **synchronous path** (Phase 5/6). Phase 7 requires **ad
 - `test_pending_queue_crash_recovery` mirrors `test_full_crash_recovery_scenario` but for two-phase inserts
 
 **Deliverables:**
-- [ ] 7.6.1: Implement immediate searchability test
-- [ ] 7.6.2: Implement pending queue drain test
-- [ ] 7.6.3: Implement pending queue crash recovery test
-- [ ] 7.6.4: Implement delete + pending interaction test
-- [ ] 7.6.5: Implement concurrent insert/worker test
-- [ ] 7.6.6: Implement graceful shutdown test
-- [ ] 7.6.7: Implement partial batch idempotency test
- - [ ] 7.6.8: Add backlog bound test (pending scan limit respected under large queue).
+- [x] 7.6.1: Implement immediate searchability test
+- [x] 7.6.2: Implement pending queue drain test
+- [x] 7.6.3: Implement pending queue crash recovery test
+- [x] 7.6.4: Implement delete + pending interaction test
+- [x] 7.6.5: Implement concurrent insert/worker test
+- [x] 7.6.6: Implement graceful shutdown test
+- [x] 7.6.7: Implement partial batch idempotency test
+- [x] 7.6.8: Add backlog bound test (pending scan limit respected under large queue)
+
+**Implementation Notes:**
+- All tests implemented in `libs/db/src/vector/async_updater.rs` in the `tests` module
+- Tests use `TempDir` for isolated test storage
+- Helper functions: `setup_test_env()`, `register_embedding()`, `test_vector()`, `count_pending_items()`
+- Crash recovery test uses two-phase approach: insert → drop storage → reopen → verify
 
 ---
 
