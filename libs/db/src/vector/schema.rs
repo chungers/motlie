@@ -652,32 +652,144 @@ impl BinaryCodes {
 pub(crate) struct VecMeta;
 
 /// Domain struct for vector metadata.
+// ============================================================================
+// VecMetadata Flags Design
+// ============================================================================
+//
+// The `flags` field in VecMetadata uses a hybrid enum + bitmask design:
+//
+// ```
+// flags byte: 0bRRRRRRLL
+//             ││││││└┴── Lifecycle (2 bits): mutually exclusive states
+//             │││││└──── Reserved (bit 2)
+//             ││││└───── Reserved (bit 3)
+//             │││└────── Reserved (bit 4)
+//             ││└─────── Reserved (bit 5)
+//             │└──────── Reserved (bit 6)
+//             └───────── REPLICATED (bit 7) - FUTURE: not yet implemented
+// ```
+//
+// ## Lifecycle States (bits 0-1, mutually exclusive)
+//
+// The lower 2 bits represent the vector's lifecycle state as a type-safe enum:
+// - 0b00 = Indexed: fully in HNSW graph, searchable
+// - 0b01 = Deleted: soft-deleted, skip in search, awaiting cleanup
+// - 0b10 = Pending: stored but awaiting async graph construction
+// - 0b11 = PendingDeleted: deleted before graph construction completed
+//
+// ## Orthogonal Flags (bits 2-7, independent)
+//
+// Upper bits are reserved for future orthogonal capabilities that can be
+// combined with any lifecycle state:
+// - Bit 7 (REPLICATED): FUTURE capability for distributed replication.
+//   When implemented, indicates vector data has been replicated to another
+//   node in a distributed deployment. NOT YET IMPLEMENTED - reserved only.
+// - Bits 2-6: Reserved for future use.
+//
+// ## Backward Compatibility
+//
+// This design maintains wire compatibility with the original FLAG_DELETED=0x01
+// and FLAG_PENDING=0x02 constants:
+// - Old Indexed (flags=0x00) → VecLifecycle::Indexed (0b00)
+// - Old Deleted (flags=0x01) → VecLifecycle::Deleted (0b01)
+// - Old Pending (flags=0x02) → VecLifecycle::Pending (0b10)
+// - Old Pending+Deleted (flags=0x03) → VecLifecycle::PendingDeleted (0b11)
+//
+// ============================================================================
+
+/// Vector lifecycle states (mutually exclusive, occupies lower 2 bits of flags).
+///
+/// Represents the vector's position in its lifecycle state machine:
+/// ```text
+/// Insert(build_index=false) ──► Pending ──► Indexed
+///                                  │            │
+///                                  ▼            ▼
+///                            PendingDeleted  Deleted
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum VecLifecycle {
+    /// Vector is fully indexed in the HNSW graph and searchable.
+    Indexed = 0b00,
+    /// Vector has been soft-deleted. Skip in search, awaiting cleanup.
+    Deleted = 0b01,
+    /// Vector is stored but awaiting async HNSW graph construction.
+    /// Search should include via brute-force fallback if needed.
+    Pending = 0b10,
+    /// Vector was deleted before async graph construction completed.
+    /// Still needs removal from Pending queue, but skip in search.
+    PendingDeleted = 0b11,
+}
+
+impl VecLifecycle {
+    /// Bitmask for lifecycle bits (lower 2 bits).
+    const MASK: u8 = 0b0000_0011;
+
+    /// Extract lifecycle state from flags byte.
+    #[inline]
+    fn from_flags(flags: u8) -> Self {
+        match flags & Self::MASK {
+            0b00 => Self::Indexed,
+            0b01 => Self::Deleted,
+            0b10 => Self::Pending,
+            0b11 => Self::PendingDeleted,
+            _ => unreachable!(), // Only 4 possible values with 2-bit mask
+        }
+    }
+
+    /// Apply this lifecycle state to a flags byte, preserving orthogonal flags.
+    #[inline]
+    fn apply_to_flags(self, flags: u8) -> u8 {
+        (flags & !Self::MASK) | (self as u8)
+    }
+}
+
+/// Orthogonal flags for future capabilities (upper bits of flags byte).
+///
+/// These flags are independent of lifecycle state and can be combined with
+/// any VecLifecycle value.
+#[allow(non_snake_case)]
+pub(crate) mod VecFlags {
+    /// FUTURE CAPABILITY - NOT YET IMPLEMENTED.
+    ///
+    /// When implemented, this flag will indicate that the vector data has been
+    /// replicated to another node in a distributed deployment. This enables:
+    /// - Distributed search across multiple nodes
+    /// - Fault tolerance through data redundancy
+    /// - Geographic distribution for latency optimization
+    ///
+    /// Bit 7 is chosen to leave room for other orthogonal flags in bits 2-6.
+    ///
+    /// Usage (when implemented):
+    /// ```ignore
+    /// meta.set_replicated(true);  // Mark as replicated
+    /// if meta.is_replicated() { ... }  // Check replication status
+    /// ```
+    #[allow(dead_code)]
+    pub const REPLICATED: u8 = 0b1000_0000; // bit 7
+}
+
+/// Vector metadata stored in VecMeta column family.
 ///
 /// Rich struct with >2 fields, so defined separately per naming convention.
 /// Uses rkyv for zero-copy access during HNSW search (hot path reads max_layer).
+///
+/// See module-level documentation for flags byte layout.
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Debug, Clone)]
 #[archive(check_bytes)]
 pub(crate) struct VecMetadata {
-    /// Maximum HNSW layer this vector appears in
+    /// Maximum HNSW layer this vector appears in (0 if pending).
     pub(crate) max_layer: u8,
-    /// Flags for vector state (see FLAG_* constants)
-    pub(crate) flags: u8,
-    /// Timestamp when vector was created (millis since epoch)
+    /// Combined lifecycle state (bits 0-1) and orthogonal flags (bits 2-7).
+    /// Use `lifecycle()`, `is_pending()`, etc. instead of direct access.
+    flags: u8,
+    /// Timestamp when vector was created (millis since epoch).
     pub(crate) created_at: u64,
 }
 
-/// Vector has been soft-deleted, pending cleanup.
-/// Search should skip vectors with this flag set.
-pub(crate) const FLAG_DELETED: u8 = 0x01;
-
-/// Vector is pending HNSW graph construction.
-/// Stored in Vectors CF but not yet in HNSW graph.
-/// Search should include these via brute-force fallback.
-pub(crate) const FLAG_PENDING: u8 = 0x02;
-
 impl VecMetadata {
-    /// Create metadata for a new vector.
-    pub(crate) fn new(max_layer: u8, flags: u8) -> Self {
+    /// Create metadata with specified max_layer and raw flags.
+    fn new(max_layer: u8, flags: u8) -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -690,50 +802,142 @@ impl VecMetadata {
         }
     }
 
-    /// Create metadata for a pending vector (not yet in HNSW graph).
+    /// Create metadata for a pending vector (awaiting async graph construction).
     pub(crate) fn pending() -> Self {
-        Self::new(0, FLAG_PENDING)
+        Self::new(0, VecLifecycle::Pending as u8)
     }
 
-    /// Create metadata for an indexed vector.
+    /// Create metadata for an indexed vector (in HNSW graph).
     pub(crate) fn indexed(max_layer: u8) -> Self {
-        Self::new(max_layer, 0)
+        Self::new(max_layer, VecLifecycle::Indexed as u8)
     }
 
-    /// Check if vector is deleted.
+    // ─────────────────────────────────────────────────────────────────────────
+    // Lifecycle State (mutually exclusive, type-safe enum)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Get the current lifecycle state as a type-safe enum.
     #[inline]
-    pub(crate) fn is_deleted(&self) -> bool {
-        self.flags & FLAG_DELETED != 0
+    pub(crate) fn lifecycle(&self) -> VecLifecycle {
+        VecLifecycle::from_flags(self.flags)
+    }
+
+    /// Set lifecycle state, preserving any orthogonal flags.
+    #[inline]
+    pub(crate) fn set_lifecycle(&mut self, state: VecLifecycle) {
+        self.flags = state.apply_to_flags(self.flags);
     }
 
     /// Check if vector is pending graph construction.
+    ///
+    /// Returns true for both `Pending` and `PendingDeleted` states,
+    /// as both require processing by the async graph updater.
     #[inline]
     pub(crate) fn is_pending(&self) -> bool {
-        self.flags & FLAG_PENDING != 0
+        matches!(
+            self.lifecycle(),
+            VecLifecycle::Pending | VecLifecycle::PendingDeleted
+        )
     }
 
-    /// Set the deleted flag.
+    /// Check if vector is deleted (should skip in search).
+    ///
+    /// Returns true for both `Deleted` and `PendingDeleted` states.
+    #[inline]
+    pub(crate) fn is_deleted(&self) -> bool {
+        matches!(
+            self.lifecycle(),
+            VecLifecycle::Deleted | VecLifecycle::PendingDeleted
+        )
+    }
+
+    /// Check if vector is fully indexed and active.
+    #[inline]
+    pub(crate) fn is_indexed(&self) -> bool {
+        self.lifecycle() == VecLifecycle::Indexed
+    }
+
+    /// Mark as deleted, handling state transition correctly.
+    ///
+    /// State transitions:
+    /// - Indexed → Deleted
+    /// - Pending → PendingDeleted (still needs async updater cleanup)
+    /// - Deleted/PendingDeleted → unchanged
     pub(crate) fn set_deleted(&mut self) {
-        self.flags |= FLAG_DELETED;
+        let new_state = match self.lifecycle() {
+            VecLifecycle::Indexed => VecLifecycle::Deleted,
+            VecLifecycle::Pending => VecLifecycle::PendingDeleted,
+            other => other, // Already deleted
+        };
+        self.set_lifecycle(new_state);
     }
 
-    /// Clear the pending flag (after graph construction).
+    /// Clear pending state (after graph construction completes).
+    ///
+    /// State transitions:
+    /// - Pending → Indexed
+    /// - PendingDeleted → Deleted
+    /// - Indexed/Deleted → unchanged
     pub(crate) fn clear_pending(&mut self) {
-        self.flags &= !FLAG_PENDING;
+        let new_state = match self.lifecycle() {
+            VecLifecycle::Pending => VecLifecycle::Indexed,
+            VecLifecycle::PendingDeleted => VecLifecycle::Deleted,
+            other => other,
+        };
+        self.set_lifecycle(new_state);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Orthogonal Flags (FUTURE - not yet implemented)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// FUTURE CAPABILITY - NOT YET IMPLEMENTED.
+    ///
+    /// Check if vector has been replicated to another node.
+    /// Always returns false until distributed replication is implemented.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn is_replicated(&self) -> bool {
+        self.flags & VecFlags::REPLICATED != 0
+    }
+
+    /// FUTURE CAPABILITY - NOT YET IMPLEMENTED.
+    ///
+    /// Set the replicated flag. Has no effect until distributed
+    /// replication is implemented.
+    #[allow(dead_code)]
+    pub(crate) fn set_replicated(&mut self, replicated: bool) {
+        if replicated {
+            self.flags |= VecFlags::REPLICATED;
+        } else {
+            self.flags &= !VecFlags::REPLICATED;
+        }
     }
 }
 
 impl ArchivedVecMetadata {
+    /// Get the current lifecycle state (zero-copy from archived data).
+    #[inline]
+    pub(crate) fn lifecycle(&self) -> VecLifecycle {
+        VecLifecycle::from_flags(self.flags)
+    }
+
     /// Check if vector is deleted (zero-copy from archived data).
     #[inline]
     pub(crate) fn is_deleted(&self) -> bool {
-        self.flags & FLAG_DELETED != 0
+        matches!(
+            self.lifecycle(),
+            VecLifecycle::Deleted | VecLifecycle::PendingDeleted
+        )
     }
 
     /// Check if vector is pending graph construction (zero-copy from archived data).
     #[inline]
     pub(crate) fn is_pending(&self) -> bool {
-        self.flags & FLAG_PENDING != 0
+        matches!(
+            self.lifecycle(),
+            VecLifecycle::Pending | VecLifecycle::PendingDeleted
+        )
     }
 }
 
@@ -1423,5 +1627,107 @@ mod tests {
         let key = Pending::key_now(embedding, 42);
         let key_bytes = Pending::key_to_bytes(&key);
         assert_eq!(&key_bytes[0..8], &prefix);
+    }
+
+    // ========================================================================
+    // VecLifecycle and VecMetadata Tests
+    // ========================================================================
+
+    #[test]
+    fn test_vec_lifecycle_from_flags() {
+        // Verify backward compatibility with old FLAG_* constants
+        assert_eq!(VecLifecycle::from_flags(0b00), VecLifecycle::Indexed);
+        assert_eq!(VecLifecycle::from_flags(0b01), VecLifecycle::Deleted);
+        assert_eq!(VecLifecycle::from_flags(0b10), VecLifecycle::Pending);
+        assert_eq!(VecLifecycle::from_flags(0b11), VecLifecycle::PendingDeleted);
+
+        // Orthogonal flags in upper bits should not affect lifecycle
+        assert_eq!(VecLifecycle::from_flags(0b1000_0000), VecLifecycle::Indexed);
+        assert_eq!(VecLifecycle::from_flags(0b1000_0001), VecLifecycle::Deleted);
+        assert_eq!(VecLifecycle::from_flags(0b1000_0010), VecLifecycle::Pending);
+        assert_eq!(VecLifecycle::from_flags(0b1000_0011), VecLifecycle::PendingDeleted);
+    }
+
+    #[test]
+    fn test_vec_lifecycle_apply_to_flags() {
+        // Should preserve upper bits when changing lifecycle
+        let flags_with_replicated = 0b1000_0010; // Pending + REPLICATED
+        let new_flags = VecLifecycle::Indexed.apply_to_flags(flags_with_replicated);
+        assert_eq!(new_flags, 0b1000_0000); // Indexed + REPLICATED preserved
+    }
+
+    #[test]
+    fn test_vec_metadata_pending() {
+        let meta = VecMetadata::pending();
+        assert_eq!(meta.lifecycle(), VecLifecycle::Pending);
+        assert!(meta.is_pending());
+        assert!(!meta.is_deleted());
+        assert!(!meta.is_indexed());
+        assert_eq!(meta.max_layer, 0);
+    }
+
+    #[test]
+    fn test_vec_metadata_indexed() {
+        let meta = VecMetadata::indexed(5);
+        assert_eq!(meta.lifecycle(), VecLifecycle::Indexed);
+        assert!(!meta.is_pending());
+        assert!(!meta.is_deleted());
+        assert!(meta.is_indexed());
+        assert_eq!(meta.max_layer, 5);
+    }
+
+    #[test]
+    fn test_vec_metadata_state_transitions() {
+        // Pending → Indexed (normal async completion)
+        let mut meta = VecMetadata::pending();
+        meta.clear_pending();
+        assert_eq!(meta.lifecycle(), VecLifecycle::Indexed);
+
+        // Indexed → Deleted (normal delete)
+        meta.set_deleted();
+        assert_eq!(meta.lifecycle(), VecLifecycle::Deleted);
+
+        // Pending → PendingDeleted (delete before async completion)
+        let mut meta2 = VecMetadata::pending();
+        meta2.set_deleted();
+        assert_eq!(meta2.lifecycle(), VecLifecycle::PendingDeleted);
+        assert!(meta2.is_pending()); // Still needs async cleanup
+        assert!(meta2.is_deleted()); // But skip in search
+
+        // PendingDeleted → Deleted (async completes on deleted item)
+        meta2.clear_pending();
+        assert_eq!(meta2.lifecycle(), VecLifecycle::Deleted);
+        assert!(!meta2.is_pending());
+        assert!(meta2.is_deleted());
+    }
+
+    #[test]
+    fn test_vec_metadata_orthogonal_flags_preserved() {
+        let mut meta = VecMetadata::pending();
+
+        // Set future REPLICATED flag
+        meta.set_replicated(true);
+        assert!(meta.is_replicated());
+        assert_eq!(meta.lifecycle(), VecLifecycle::Pending); // Lifecycle unchanged
+
+        // Lifecycle transition should preserve REPLICATED
+        meta.clear_pending();
+        assert!(meta.is_replicated()); // Still replicated
+        assert_eq!(meta.lifecycle(), VecLifecycle::Indexed);
+
+        // Another transition
+        meta.set_deleted();
+        assert!(meta.is_replicated()); // Still replicated
+        assert_eq!(meta.lifecycle(), VecLifecycle::Deleted);
+    }
+
+    #[test]
+    fn test_vec_metadata_wire_compatibility() {
+        // Verify the enum values match old FLAG_* constants for wire compatibility
+        // Old: FLAG_DELETED=0x01, FLAG_PENDING=0x02
+        assert_eq!(VecLifecycle::Indexed as u8, 0x00);
+        assert_eq!(VecLifecycle::Deleted as u8, 0x01);
+        assert_eq!(VecLifecycle::Pending as u8, 0x02);
+        assert_eq!(VecLifecycle::PendingDeleted as u8, 0x03);
     }
 }
