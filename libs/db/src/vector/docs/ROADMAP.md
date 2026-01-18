@@ -1069,7 +1069,7 @@ See `src/vector/README.md` Appendix A for detailed documentation.
 
 #### StorageSubsystem Trait (Generic Storage)
 
-**Implementation:** [`../rocksdb/subsystem.rs`](../rocksdb/subsystem.rs) - `StorageSubsystem` trait enabling type-safe, zero-cost generic storage with:
+**Implementation:** [`../../rocksdb/subsystem.rs`](../../rocksdb/subsystem.rs) - `StorageSubsystem` trait enabling type-safe, zero-cost generic storage with:
 - Associated constants: `NAME`, `COLUMN_FAMILIES`
 - Associated types: `PrewarmConfig`, `Cache`
 - Required methods: `create_cache()`, `cf_descriptors()`, `prewarm()`
@@ -1080,7 +1080,7 @@ Implementations:
 
 #### ComponentWrapper (StorageBuilder Adapter)
 
-**Implementation:** [`../rocksdb/subsystem.rs`](../rocksdb/subsystem.rs) - `ComponentWrapper<S>` adapts any `StorageSubsystem` to implement `ColumnFamilyProvider` for use with `StorageBuilder`.
+**Implementation:** [`../../rocksdb/subsystem.rs`](../../rocksdb/subsystem.rs) - `ComponentWrapper<S>` adapts any `StorageSubsystem` to implement `ColumnFamilyProvider` for use with `StorageBuilder`.
 
 Type aliases and convenience constructors in each module:
 - `graph::Component` / `graph::component()`
@@ -1088,13 +1088,13 @@ Type aliases and convenience constructors in each module:
 
 **Tantivy Providers:**
 
-**Implementation:** [`../index_provider.rs`](../index_provider.rs) - `IndexProvider` trait with `name()`, `schema()`, `on_ready()`, `writer_heap_size()`.
+**Implementation:** [`../../index_provider.rs`](../../index_provider.rs) - `IndexProvider` trait with `name()`, `schema()`, `on_ready()`, `writer_heap_size()`.
 
 - `fulltext::Schema` - Provides Tantivy schema and initialization
 
 #### StorageBuilder Design
 
-**Implementation:** [`../storage_builder.rs`](../storage_builder.rs) - Unified initialization of RocksDB + Tantivy:
+**Implementation:** [`../../storage_builder.rs`](../../storage_builder.rs) - Unified initialization of RocksDB + Tantivy:
 - `StorageBuilder::new()` → `.with_component()` → `.with_index_provider()` → `.build()`
 - Returns `SharedStorage` with access to `db()` (RocksDB) and `index()` (Tantivy)
 - Caches accessible via cloned `Arc`s before building
@@ -5351,7 +5351,7 @@ Created [`BENCHMARK.md`](./BENCHMARK.md) with:
 - `libs/db/src/vector/mod.rs` - Updated module structure
 - `libs/db/src/vector/search/config.rs` - Threshold 800→3200
 - `libs/db/src/vector/search/parallel.rs` - Updated docs and tests
-- `libs/db/src/vector/BENCHMARK.md` - New comprehensive documentation
+- `libs/db/src/vector/docs/BENCHMARK.md` - New comprehensive documentation
 
 ---
 
@@ -8341,7 +8341,7 @@ Before starting, ensure you understand:
 
 1. **RocksDB Column Families**: [RocksDB Wiki](https://github.com/facebook/rocksdb/wiki/Column-Families)
 2. **HNSW Algorithm**: Hierarchical Navigable Small World graphs ([Paper](https://arxiv.org/abs/1603.09320))
-3. **SIMD Distance Functions**: `motlie_core::distance` module ([mod.rs](../../../core/src/distance/mod.rs))
+3. **SIMD Distance Functions**: `motlie_core::distance` module ([mod.rs](../../../../core/src/distance/mod.rs))
 
 ### Implementation Order
 

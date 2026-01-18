@@ -445,11 +445,11 @@ RESPONSE: Fixed. Updated table to Run 5 with combined values matching CSV per-em
 - **Read-heavy achieves highest throughput**: Fewer inserts = more resources for queries
 
 **Artifacts:**
-- [libs/db/benches/results/baseline/throughput_baseline.log](../../benches/results/baseline/throughput_baseline.log)
-- [libs/db/benches/results/baseline/throughput_balanced.csv](../../benches/results/baseline/throughput_balanced.csv)
-- [libs/db/benches/results/baseline/throughput_read_heavy.csv](../../benches/results/baseline/throughput_read_heavy.csv)
-- [libs/db/benches/results/baseline/throughput_write_heavy.csv](../../benches/results/baseline/throughput_write_heavy.csv)
-- [libs/db/benches/results/baseline/throughput_stress.csv](../../benches/results/baseline/throughput_stress.csv)
+- [libs/db/benches/results/baseline/throughput_baseline.log](../../../benches/results/baseline/throughput_baseline.log)
+- [libs/db/benches/results/baseline/throughput_balanced.csv](../../../benches/results/baseline/throughput_balanced.csv)
+- [libs/db/benches/results/baseline/throughput_read_heavy.csv](../../../benches/results/baseline/throughput_read_heavy.csv)
+- [libs/db/benches/results/baseline/throughput_write_heavy.csv](../../../benches/results/baseline/throughput_write_heavy.csv)
+- [libs/db/benches/results/baseline/throughput_stress.csv](../../../benches/results/baseline/throughput_stress.csv)
 
 ### Quality Baseline (LAION)
 
@@ -498,9 +498,9 @@ cargo run --release --bin bench_vector -- sweep \
 ```
 
 **Artifacts:**
-- [libs/db/benches/results/baseline/hnsw_sweep.log](../../benches/results/baseline/hnsw_sweep.log)
-- [libs/db/benches/results/baseline/rabitq_sweep.log](../../benches/results/baseline/rabitq_sweep.log)
-- [libs/db/benches/results/baseline/rabitq_results.csv](../../benches/results/baseline/rabitq_results.csv)
+- [libs/db/benches/results/baseline/hnsw_sweep.log](../../../benches/results/baseline/hnsw_sweep.log)
+- [libs/db/benches/results/baseline/rabitq_sweep.log](../../../benches/results/baseline/rabitq_sweep.log)
+- [libs/db/benches/results/baseline/rabitq_results.csv](../../../benches/results/baseline/rabitq_results.csv)
 
 **Observations:**
 - **RaBitQ with reranking achieves 100% recall** on this dataset
@@ -604,7 +604,7 @@ careful design to avoid measuring concurrency effects on recall accuracy.
 
 ### CLI Tools (Preferred)
 
-- [bins/bench_vector](../../../../bins/bench_vector/README.md) - **Unified benchmark CLI with --assert-recall**
+- [bins/bench_vector](../../../../../bins/bench_vector/README.md) - **Unified benchmark CLI with --assert-recall**
   - `sweep` command: Parameter sweeps with recall assertions
   - `download` command: Dataset fetching (LAION, SIFT, GIST)
   - `index` and `query` commands: Persistent index management
@@ -620,12 +620,12 @@ careful design to avoid measuring concurrency effects on recall accuracy.
 
 ### Tests (Deprecated for quality baselines)
 
-- [tests/test_vector_baseline.rs](../../tests/test_vector_baseline.rs) - LAION recall baseline tests ⚠️ *deprecated in favor of bench_vector*
-- [tests/test_vector_concurrent.rs](../../tests/test_vector_concurrent.rs) - Throughput baseline tests
+- [tests/test_vector_baseline.rs](../../../tests/test_vector_baseline.rs) - LAION recall baseline tests ⚠️ *deprecated in favor of bench_vector*
+- [tests/test_vector_concurrent.rs](../../../tests/test_vector_concurrent.rs) - Throughput baseline tests
 
 ### Baseline Artifacts
 
-All baseline logs and CSV results are stored in [libs/db/benches/results/baseline/](../../benches/results/baseline/):
+All baseline logs and CSV results are stored in [libs/db/benches/results/baseline/](../../../benches/results/baseline/):
 - `hnsw_sweep.log` - HNSW quality baseline run log
 - `rabitq_sweep.log` - RaBitQ quality baseline run log
 - `rabitq_results.csv` - RaBitQ results in CSV format

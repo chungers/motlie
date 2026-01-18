@@ -1,3 +1,4 @@
+#![doc = include_str!("README.md")]
 //! Vector module - HNSW-based vector storage and search.
 //!
 //! This module provides vector similarity search with:
@@ -36,8 +37,8 @@
 //!
 //! ## Design Documents
 //!
-//! - `BENCHMARK.md` - Performance benchmarks and comparison with Faiss
-//! - `ROADMAP.md` - Implementation roadmap and phase details
+//! - `docs/BENCHMARK.md` - Performance benchmarks and comparison with Faiss
+//! - `docs/ROADMAP.md` - Implementation roadmap and phase details
 //! - `REQUIREMENTS.md` - Functional and architectural requirements
 
 // Flat modules - Core types

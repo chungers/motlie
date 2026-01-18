@@ -463,8 +463,8 @@ jobs:
 
 ## See Also
 
-- `libs/db/src/vector/BASELINE.md` - Baseline benchmark documentation
-- `libs/db/src/vector/REQUIREMENTS.md` - Ground truth requirements
-- `libs/db/src/vector/BENCHMARK.md` - Detailed benchmark results
+- `libs/db/src/vector/docs/BASELINE.md` - Baseline benchmark documentation
+- `libs/db/src/vector/docs/REQUIREMENTS.md` - Ground truth requirements
+- `libs/db/src/vector/docs/BENCHMARK.md` - Detailed benchmark results
 - `libs/db/src/vector/GEMINI-BENCHMARK.md` - Benchmark infrastructure design
 - `examples/vector2/` - Additional benchmark examples
