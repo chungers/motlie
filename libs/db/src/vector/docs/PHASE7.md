@@ -1,0 +1,307 @@
+# Phase 7: Async Graph Updater
+
+**Status:** Not Started
+**Date:** January 17, 2026
+**Prerequisite:** Phase 6 (MPSC/MPMC Public API) - Complete
+
+---
+
+## Overview
+
+Phase 7 enables online updates by decoupling vector storage from HNSW graph construction. This two-phase insert pattern reduces insert latency from ~50ms P99 to <5ms while maintaining search quality.
+
+### Problem Statement
+
+Synchronous HNSW graph updates during insert create latency spikes:
+- Building HNSW edges requires greedy search through existing graph
+- P99 latency ~50ms is unacceptable for real-time applications
+- Graph construction blocks the mutation consumer
+
+### Solution: Two-Phase Insert
+
+```
+Phase 1 (Synchronous, <5ms):
+  insert() → Store vector + metadata + binary code → Add to Pending Queue
+            ↓
+  Vector immediately searchable (brute-force fallback for pending items)
+
+Phase 2 (Asynchronous, background):
+  Worker threads drain Pending Queue → Greedy search → Build HNSW edges
+```
+
+---
+
+## Task Breakdown
+
+### Task 7.1: Pending Queue Column Family
+
+**Goal:** Add RocksDB column family to persist pending graph updates.
+
+**File:** `libs/db/src/vector/schema.rs`
+
+**Key Design:**
+- Key: `[embedding_code: u64][timestamp_us: u64][vec_id: u32]` = 20 bytes
+- Value: empty (vector data already in Vectors CF)
+- Timestamp enables FIFO ordering for fair processing
+- Survives crashes for recovery
+
+**Deliverables:**
+- [ ] 7.1.1: Add `PendingInserts` column family struct
+- [ ] 7.1.2: Implement `key()` and `parse_key()` methods
+- [ ] 7.1.3: Register CF in storage initialization
+- [ ] 7.1.4: Add unit tests for key encoding/decoding
+
+**Validation:**
+```rust
+#[test]
+fn test_pending_key_roundtrip() {
+    let embedding = 42u64;
+    let vec_id = 100u32;
+    let key = PendingInserts::key(embedding, vec_id);
+    let (e, _ts, v) = PendingInserts::parse_key(&key);
+    assert_eq!(e, embedding);
+    assert_eq!(v, vec_id);
+}
+```
+
+---
+
+### Task 7.2: Async Updater Configuration
+
+**Goal:** Define configuration for the background graph updater.
+
+**File:** `libs/db/src/vector/async_updater.rs` (new file)
+
+**Configuration Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `batch_size` | usize | 100 | Max vectors per worker batch |
+| `batch_timeout` | Duration | 100ms | Max wait time to fill batch |
+| `num_workers` | usize | 2 | Background worker thread count |
+| `ef_construction` | usize | 200 | ef parameter for greedy search |
+| `process_on_startup` | bool | true | Drain pending queue on startup |
+
+**Deliverables:**
+- [ ] 7.2.1: Create `AsyncUpdaterConfig` struct with defaults
+- [ ] 7.2.2: Add builder methods for configuration
+- [ ] 7.2.3: Document tuning guidance in doc comments
+
+---
+
+### Task 7.3: Async Updater Core Implementation
+
+**Goal:** Implement the background worker that processes pending inserts.
+
+**File:** `libs/db/src/vector/async_updater.rs`
+
+**Architecture:**
+```
+AsyncGraphUpdater
+  ├── storage: Arc<Storage>
+  ├── config: AsyncUpdaterConfig
+  ├── shutdown: Arc<AtomicBool>
+  └── workers: Vec<JoinHandle<()>>
+      └── worker_loop()
+          ├── collect_batch() → Vec<(EmbeddingCode, VecId)>
+          ├── process_insert() → greedy_search + add_edges
+          └── clear_processed() → remove from pending CF
+```
+
+**Deliverables:**
+- [ ] 7.3.1: Implement `AsyncGraphUpdater::start()` - spawn workers
+- [ ] 7.3.2: Implement `worker_loop()` - batch collection and processing
+- [ ] 7.3.3: Implement `collect_batch()` - read from pending CF with limit
+- [ ] 7.3.4: Implement `process_insert()` - greedy search + edge insertion
+- [ ] 7.3.5: Implement `clear_processed()` - remove from pending CF
+- [ ] 7.3.6: Implement `drain_pending()` - startup recovery
+- [ ] 7.3.7: Implement `shutdown()` - graceful worker termination
+
+**Key Implementation Notes:**
+- Workers use separate RocksDB transactions for isolation
+- Batch collection uses prefix scan on embedding code
+- Failed inserts logged but don't block other items
+- Shutdown waits for in-flight batches to complete
+
+---
+
+### Task 7.4: Insert Path Integration
+
+**Goal:** Modify insert path to use two-phase pattern.
+
+**Files:**
+- `libs/db/src/vector/processor.rs`
+- `libs/db/src/vector/mutation.rs`
+
+**Changes:**
+1. `InsertVector` gains `immediate_graph: bool` flag
+2. When `immediate_graph = false`:
+   - Store vector data synchronously
+   - Add to pending queue
+   - Skip HNSW edge construction
+3. Search handles pending vectors via brute-force fallback
+
+**Deliverables:**
+- [ ] 7.4.1: Add `immediate_graph` flag to `InsertVector`
+- [ ] 7.4.2: Modify `Processor::insert_vector_in_txn()` for two-phase
+- [ ] 7.4.3: Add `insert_to_pending_queue()` helper
+- [ ] 7.4.4: Update search to handle pending vectors (FLAG_PENDING)
+
+---
+
+### Task 7.5: Delete Handling
+
+**Goal:** Implement delete with async cleanup pattern.
+
+**Files:**
+- `libs/db/src/vector/processor.rs`
+- `libs/db/src/vector/schema.rs`
+
+**Delete Flow:**
+1. Phase 1 (sync): Mark deleted, remove from pending queue, free ID
+2. Phase 2 (lazy): Stale edges cleaned during search/compaction
+
+**Node Flags:**
+```rust
+const FLAG_DELETED: u8 = 0x01;  // Vector is deleted
+const FLAG_PENDING: u8 = 0x02;  // Waiting for graph construction
+```
+
+**Deliverables:**
+- [ ] 7.5.1: Add `FLAG_DELETED` and `FLAG_PENDING` constants
+- [ ] 7.5.2: Implement `mark_deleted()` in Processor
+- [ ] 7.5.3: Implement `remove_from_pending()` helper
+- [ ] 7.5.4: Update search to skip deleted nodes
+- [ ] 7.5.5: Add ID recycling to allocator
+
+---
+
+### Task 7.6: Testing & Crash Recovery
+
+**Goal:** Comprehensive testing including crash recovery scenarios.
+
+#### Existing Infrastructure
+
+The synchronous path already has crash recovery tests in:
+- **File:** `libs/db/src/vector/crash_recovery_tests.rs`
+
+| Existing Test | Coverage |
+|---------------|----------|
+| `test_uncommitted_transaction_not_visible` | Atomicity: uncommitted txns don't persist |
+| `test_committed_transaction_persists` | Durability: committed txns survive restart |
+| `test_id_allocator_recovery` | IdAllocator state persists across restart |
+| `test_id_allocator_transactional_recovery` | Transactional ID allocation recovery |
+| `test_hnsw_navigation_cold_cache_recovery` | Search works with cold NavigationCache |
+| `test_hnsw_entry_point_persists` | HNSW entry point survives restart |
+| `test_full_crash_recovery_scenario` | End-to-end: insert → crash → search works |
+| `test_transaction_insert_with_recovery` | Insert via txn API → recovery → search |
+
+These tests validate the **synchronous path** (Phase 5/6). Phase 7 requires **additional tests** for the async pending queue.
+
+#### New Tests for Phase 7
+
+**File:** `libs/db/src/vector/async_updater_tests.rs` (new, in-module tests)
+
+| New Test | Description | Builds On |
+|----------|-------------|-----------|
+| `test_insert_async_immediate_searchability` | Vectors searchable before graph built | - |
+| `test_pending_queue_drains` | Workers process all pending items | - |
+| `test_pending_queue_crash_recovery` | Pending items survive restart | `test_full_crash_recovery_scenario` |
+| `test_delete_removes_from_pending` | Delete clears pending entry | - |
+| `test_concurrent_insert_and_worker` | No races between insert and worker | - |
+| `test_shutdown_completes_in_flight` | Graceful shutdown finishes batch | - |
+| `test_partial_batch_idempotent` | Re-processing partial batch is safe | `test_committed_transaction_persists` |
+
+**Relationship to Existing Tests:**
+- Existing tests verify RocksDB transactions work correctly (atomicity, durability)
+- Phase 7 tests build on this foundation: pending queue uses same transaction API
+- `test_pending_queue_crash_recovery` mirrors `test_full_crash_recovery_scenario` but for two-phase inserts
+
+**Deliverables:**
+- [ ] 7.6.1: Implement immediate searchability test
+- [ ] 7.6.2: Implement pending queue drain test
+- [ ] 7.6.3: Implement pending queue crash recovery test
+- [ ] 7.6.4: Implement delete + pending interaction test
+- [ ] 7.6.5: Implement concurrent insert/worker test
+- [ ] 7.6.6: Implement graceful shutdown test
+- [ ] 7.6.7: Implement partial batch idempotency test
+
+---
+
+### Task 7.7: Integration & Benchmarks
+
+**Goal:** Integrate async updater with existing infrastructure and benchmark.
+
+**Deliverables:**
+- [ ] 7.7.1: Add `AsyncGraphUpdater` to `Storage` initialization
+- [ ] 7.7.2: Update `WriterConfig` with async updater options
+- [ ] 7.7.3: Add benchmark comparing sync vs async insert latency
+- [ ] 7.7.4: Document latency characteristics in BASELINE.md
+- [ ] 7.7.5: Update ROADMAP.md to mark Phase 7 complete
+
+---
+
+## Consistency Guarantees
+
+| Scenario | Guarantee |
+|----------|-----------|
+| Crash before Phase 2 | Vector in pending queue, recovered on restart |
+| Crash during Phase 2 | Partial edges may exist; re-processing is idempotent |
+| Search during Phase 2 | Vector found via brute-force fallback |
+| Delete during Phase 2 | Removed from pending queue, edges cleaned lazily |
+
+---
+
+## Performance Targets
+
+| Metric | Current (Sync) | Target (Async) |
+|--------|----------------|----------------|
+| Insert P50 | ~5ms | <1ms |
+| Insert P99 | ~50ms | <5ms |
+| Search (pending) | N/A | <10ms (brute-force) |
+| Search (indexed) | ~2ms | ~2ms (unchanged) |
+| Graph build rate | N/A | >1000 vec/s/worker |
+
+---
+
+## Dependencies
+
+- **Phase 5:** Internal Mutation/Query API (Complete)
+- **Phase 6:** MPSC/MPMC Public API (Complete)
+- **RocksDB:** Column family, transactions, prefix iteration
+
+---
+
+## Risks & Mitigations
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Pending queue grows unboundedly | Memory/disk | Add backpressure when queue > threshold |
+| Brute-force fallback slow at scale | Latency | Limit pending scan to recent items |
+| Worker starvation | Graph quality degrades | Monitor pending queue depth, alert |
+| Race between delete and worker | Data inconsistency | Use transaction isolation |
+
+---
+
+## Estimated Effort
+
+| Task | Subtasks | Effort |
+|------|----------|--------|
+| 7.1: Pending Queue CF | 7.1.1 - 7.1.4 | 0.5 day |
+| 7.2: Configuration | 7.2.1 - 7.2.3 | 0.25 day |
+| 7.3: Core Implementation | 7.3.1 - 7.3.7 | 1.5 days |
+| 7.4: Insert Path Integration | 7.4.1 - 7.4.4 | 0.5 day |
+| 7.5: Delete Handling | 7.5.1 - 7.5.5 | 0.5 day |
+| 7.6: Testing & Crash Recovery | 7.6.1 - 7.6.7 | 1 day |
+| 7.7: Integration & Benchmarks | 7.7.1 - 7.7.5 | 0.75 day |
+| **Total** | **30 subtasks** | **~5 days** |
+
+---
+
+## Success Criteria
+
+1. Insert P99 latency < 5ms (currently ~50ms)
+2. All pending vectors searchable immediately
+3. Crash recovery drains pending queue on restart
+4. No data loss in any failure scenario
+5. Benchmark demonstrates 10x latency improvement
