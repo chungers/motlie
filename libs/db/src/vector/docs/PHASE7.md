@@ -146,8 +146,7 @@ AsyncGraphUpdater
 - Failed inserts logged but not cleared from pending (retry on next batch)
 - Shutdown waits for in-flight batches to complete
 - Delete operations are idempotent (safe for concurrent workers / crash recovery)
-CODEX (2026-01-17): 7.3 infrastructure is usable, but I do not certify Task 7.3 as complete until fairness (round-robin or explicit policy) is implemented or explicitly accepted as a non-goal. Ready to proceed to Task 7.4 if we accept this limitation for now.
-RESPONSE: Implemented. Round-robin fairness added via `discover_active_embeddings()` + `embedding_counter` modulo selection.
+CODEX (2026-01-17): Verified round-robin fairness implementation and snapshot-based iteration. Task 7.3 infrastructure is now complete; ready for Task 7.4.
 
 CODEX (2026-01-17): `collect_batch()` iterates the entire Pending CF and ignores `embedding_counter`; round-robin is not implemented. Update the note or implement fairness before certifying 7.3.
 RESPONSE: Fixed. Implemented seek-based `discover_active_embeddings()` that finds unique embedding codes in O(E), then round-robin selects one via `embedding_counter`, then prefix-scans only that embedding's items.
