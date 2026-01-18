@@ -1,6 +1,6 @@
 # Phase 7: Async Graph Updater
 
-**Status:** In Progress (Tasks 7.1-7.3 Complete)
+**Status:** In Progress (Tasks 7.1-7.4 Core Complete)
 **Date:** January 17, 2026
 **Prerequisite:** Phase 6 (MPSC/MPMC Public API) - Complete
 
@@ -167,26 +167,41 @@ RESPONSE: Keys collected via read-only iterator. Idempotency check will be in pr
 
 ### Task 7.4: Insert Path Integration
 
+**Status:** ✅ Core Implementation Complete (search fallback deferred)
+
 **Goal:** Modify insert path to use two-phase pattern.
 
 **Files:**
-- `libs/db/src/vector/processor.rs`
-- `libs/db/src/vector/mutation.rs`
+- `libs/db/src/vector/schema.rs` - FLAG_PENDING, FLAG_DELETED constants
+- `libs/db/src/vector/ops/insert.rs` - Two-phase insert logic
+- `libs/db/src/vector/async_updater.rs` - process_insert() implementation
 
 **Changes:**
-1. `InsertVector` gains `immediate_graph: bool` flag
-2. When `immediate_graph = false`:
-   - Store vector data synchronously
-   - Add to pending queue
+1. `InsertVector` has `immediate_index: bool` flag (already existed)
+2. When `immediate_index = false` (i.e., `build_index = false`):
+   - Store vector data synchronously (Vectors CF)
+   - Store VecMeta with FLAG_PENDING
+   - Add to Pending queue
    - Skip HNSW edge construction
-3. Search handles pending vectors via brute-force fallback
+3. `process_insert()` builds HNSW edges asynchronously:
+   - Checks FLAG_PENDING (idempotent)
+   - Loads vector from Vectors CF
+   - Builds HNSW graph via hnsw::insert
+   - Clears FLAG_PENDING (via hnsw::insert writing VecMeta with flags=0)
+4. Search handles pending vectors via brute-force fallback (deferred to 7.4.4)
 CODEX (2026-01-17): Brute-force fallback must be bounded (e.g., cap pending scan size or time) to avoid O(N) degradation when backlog grows; add an explicit limit and metrics.
 
 **Deliverables:**
-- [ ] 7.4.1: Add `immediate_graph` flag to `InsertVector`
-- [ ] 7.4.2: Modify `Processor::insert_vector_in_txn()` for two-phase
-- [ ] 7.4.3: Add `insert_to_pending_queue()` helper
-- [ ] 7.4.4: Update search to handle pending vectors (FLAG_PENDING)
+- [x] 7.4.1: Add FLAG_PENDING/FLAG_DELETED to VecMetadata with helper methods
+- [x] 7.4.2: Modify `ops::insert::vector()` and `ops::insert::batch()` for two-phase
+- [x] 7.4.3: Implement `process_insert()` in async_updater.rs
+- [ ] 7.4.4: Update search to handle pending vectors (FLAG_PENDING) - deferred
+
+**Implementation Notes:**
+- `AsyncGraphUpdater::start()` now requires `registry` and `nav_cache` parameters
+- `process_insert()` creates an hnsw::Index per embedding using stored EmbeddingSpec
+- hnsw::insert() overwrites VecMeta, clearing FLAG_PENDING automatically
+- Pending queue cleared by `clear_processed()` after successful graph construction
 
 ---
 

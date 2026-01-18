@@ -660,10 +660,81 @@ pub(crate) struct VecMeta;
 pub(crate) struct VecMetadata {
     /// Maximum HNSW layer this vector appears in
     pub(crate) max_layer: u8,
-    /// Flags (reserved for future use: deleted, etc.)
+    /// Flags for vector state (see FLAG_* constants)
     pub(crate) flags: u8,
     /// Timestamp when vector was created (millis since epoch)
     pub(crate) created_at: u64,
+}
+
+/// Vector has been soft-deleted, pending cleanup.
+/// Search should skip vectors with this flag set.
+pub(crate) const FLAG_DELETED: u8 = 0x01;
+
+/// Vector is pending HNSW graph construction.
+/// Stored in Vectors CF but not yet in HNSW graph.
+/// Search should include these via brute-force fallback.
+pub(crate) const FLAG_PENDING: u8 = 0x02;
+
+impl VecMetadata {
+    /// Create metadata for a new vector.
+    pub(crate) fn new(max_layer: u8, flags: u8) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        Self {
+            max_layer,
+            flags,
+            created_at,
+        }
+    }
+
+    /// Create metadata for a pending vector (not yet in HNSW graph).
+    pub(crate) fn pending() -> Self {
+        Self::new(0, FLAG_PENDING)
+    }
+
+    /// Create metadata for an indexed vector.
+    pub(crate) fn indexed(max_layer: u8) -> Self {
+        Self::new(max_layer, 0)
+    }
+
+    /// Check if vector is deleted.
+    #[inline]
+    pub(crate) fn is_deleted(&self) -> bool {
+        self.flags & FLAG_DELETED != 0
+    }
+
+    /// Check if vector is pending graph construction.
+    #[inline]
+    pub(crate) fn is_pending(&self) -> bool {
+        self.flags & FLAG_PENDING != 0
+    }
+
+    /// Set the deleted flag.
+    pub(crate) fn set_deleted(&mut self) {
+        self.flags |= FLAG_DELETED;
+    }
+
+    /// Clear the pending flag (after graph construction).
+    pub(crate) fn clear_pending(&mut self) {
+        self.flags &= !FLAG_PENDING;
+    }
+}
+
+impl ArchivedVecMetadata {
+    /// Check if vector is deleted (zero-copy from archived data).
+    #[inline]
+    pub(crate) fn is_deleted(&self) -> bool {
+        self.flags & FLAG_DELETED != 0
+    }
+
+    /// Check if vector is pending graph construction (zero-copy from archived data).
+    #[inline]
+    pub(crate) fn is_pending(&self) -> bool {
+        self.flags & FLAG_PENDING != 0
+    }
 }
 
 /// VecMeta key: (embedding_code, vec_id)
