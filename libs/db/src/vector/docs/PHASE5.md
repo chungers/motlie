@@ -2771,7 +2771,9 @@ Phase 6 evaluated and found to be **already implemented** during Phase 5 develop
 | 6.3 | Query Consumer (MPMC) | ✅ | `reader.rs` - flume-based pool |
 | 6.4 | Reader Handle | ✅ | `reader.rs` - SearchReader with Runnable |
 | 6.5 | Runnable + Runtime | ✅ | `subsystem.rs` - Subsystem::start() pattern |
-| 6.6 | Phase 6 Tests | ✅ | `test_vector_channel.rs` - 6 tests |
+| 6.6 | Phase 6 Tests | ✅ | `test_vector_channel.rs` - 7 tests |
+
+CODEX (2026-01-17): Verified Phase 6 implementation across `mutation.rs`, `writer.rs`, `reader.rs`, and `subsystem.rs`, with channel integration tests in `libs/db/tests/test_vector_channel.rs`. Phase 6 is complete and ready for Phase 7 work.
 
 **Key Design Decision:** The explicit `Runnable` trait with `start()`/`stop()`/`is_running()` was NOT implemented. Instead, we use the **unified pattern** already established by graph:: and fulltext:::
 - `Subsystem::start()` returns `(Writer, SearchReader)` handles
