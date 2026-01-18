@@ -386,10 +386,15 @@ impl AsyncGraphUpdater {
         info!(worker_id, "Async updater worker stopped");
     }
 
-    /// Collect a batch of pending items for processing.
+    /// Collect a batch of pending items for processing with round-robin fairness.
     ///
-    /// Currently scans from the start of the Pending CF. Full round-robin
-    /// across embeddings requires embedding registry integration (future).
+    /// Implements fair scheduling across embeddings:
+    /// 1. Discover which embeddings have pending items (using seek-based discovery)
+    /// 2. Round-robin select one embedding using `embedding_counter`
+    /// 3. Collect batch from only that embedding using prefix iteration
+    ///
+    /// This ensures embeddings with fewer pending items aren't starved by
+    /// embeddings with larger queues.
     ///
     /// Uses a snapshot for iterator stability - concurrent deletes won't
     /// affect the iteration. Clear operations are idempotent.
@@ -398,17 +403,39 @@ impl AsyncGraphUpdater {
     fn collect_batch(
         storage: &Storage,
         config: &AsyncUpdaterConfig,
-        _embedding_counter: &AtomicU64, // Reserved for future round-robin
+        embedding_counter: &AtomicU64,
     ) -> anyhow::Result<Vec<(Vec<u8>, EmbeddingCode, VecId)>> {
         let txn_db = storage.transaction_db()?;
         let cf = txn_db
             .cf_handle(Pending::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
 
+        // Step 1: Discover active embeddings using efficient seek-based scan
+        // Note: Uses its own snapshot internally. If items are deleted between
+        // discovery and collection, we'll just get an empty/partial batch.
+        let active_embeddings = Self::discover_active_embeddings(txn_db, cf)?;
+
+        if active_embeddings.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Step 2: Round-robin select an embedding
+        let counter = embedding_counter.fetch_add(1, Ordering::Relaxed);
+        let selected_embedding = active_embeddings[counter as usize % active_embeddings.len()];
+
+        debug!(
+            selected_embedding,
+            active_count = active_embeddings.len(),
+            counter,
+            "Round-robin selected embedding"
+        );
+
+        // Step 3: Collect batch from selected embedding using prefix
+        // Use snapshot for consistent iteration (prevents issues with concurrent deletes)
+        let prefix = Pending::prefix_for_embedding(selected_embedding);
         let mut batch = Vec::with_capacity(config.batch_size);
         let start_time = Instant::now();
 
-        // Use snapshot for consistent iteration (prevents issues with concurrent deletes)
         let snapshot = txn_db.snapshot();
         let mut read_opts = rocksdb::ReadOptions::default();
         read_opts.set_snapshot(&snapshot);
@@ -416,7 +443,7 @@ impl AsyncGraphUpdater {
         let iter = txn_db.iterator_cf_opt(
             cf,
             read_opts,
-            rocksdb::IteratorMode::Start,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
         );
 
         for item in iter {
@@ -428,11 +455,78 @@ impl AsyncGraphUpdater {
             }
 
             let (key, _value) = item?;
+
+            // Check prefix match (stop when we leave this embedding's range)
+            if key.len() < 8 || key[0..8] != prefix {
+                break;
+            }
+
             let parsed = Pending::key_from_bytes(&key)?;
             batch.push((key.to_vec(), parsed.0, parsed.2));
         }
 
         Ok(batch)
+    }
+
+    /// Discover which embeddings have pending items using efficient seeks.
+    ///
+    /// Uses seek to jump between embedding prefixes rather than scanning all items.
+    /// This is O(E) where E is the number of embeddings, not O(N) where N is items.
+    ///
+    /// Returns list of embedding codes with pending items (in key order).
+    fn discover_active_embeddings(
+        txn_db: &rocksdb::TransactionDB,
+        cf: &impl rocksdb::AsColumnFamilyRef,
+    ) -> anyhow::Result<Vec<EmbeddingCode>> {
+        let mut active = Vec::new();
+        let mut next_seek: Option<[u8; 8]> = None;
+
+        // Maximum embeddings to track (prevent runaway in pathological cases)
+        const MAX_EMBEDDINGS: usize = 1000;
+
+        // Use snapshot for consistent discovery
+        let snapshot = txn_db.snapshot();
+
+        loop {
+            if active.len() >= MAX_EMBEDDINGS {
+                break;
+            }
+
+            let mut read_opts = rocksdb::ReadOptions::default();
+            read_opts.set_snapshot(&snapshot);
+
+            let mut iter = match &next_seek {
+                None => txn_db.iterator_cf_opt(cf, read_opts, rocksdb::IteratorMode::Start),
+                Some(prefix) => txn_db.iterator_cf_opt(
+                    cf,
+                    read_opts,
+                    rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+                ),
+            };
+
+            match iter.next() {
+                Some(Ok((key, _))) if key.len() >= 8 => {
+                    let embedding = u64::from_be_bytes(key[0..8].try_into().unwrap());
+                    active.push(embedding);
+
+                    // Calculate next seek position: current_embedding + 1
+                    // This jumps past all items for current embedding
+                    match embedding.checked_add(1) {
+                        Some(next_embedding) => {
+                            next_seek = Some(next_embedding.to_be_bytes());
+                        }
+                        None => {
+                            // Wrapped around u64::MAX, we've covered all possible embeddings
+                            break;
+                        }
+                    }
+                }
+                Some(Err(e)) => return Err(e.into()),
+                _ => break, // No more items
+            }
+        }
+
+        Ok(active)
     }
 
     /// Process a single pending insert by building HNSW graph edges.

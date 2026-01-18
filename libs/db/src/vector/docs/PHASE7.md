@@ -1,6 +1,6 @@
 # Phase 7: Async Graph Updater
 
-**Status:** Not Started
+**Status:** In Progress (Tasks 7.1-7.3 Complete)
 **Date:** January 17, 2026
 **Prerequisite:** Phase 6 (MPSC/MPMC Public API) - Complete
 
@@ -107,7 +107,7 @@ CODEX (2026-01-17): Verified config struct, builders, and tests in `async_update
 
 ### Task 7.3: Async Updater Core Implementation
 
-**Status:** ✅ Infrastructure Complete (process_insert placeholder for Task 7.4)
+**Status:** ✅ Complete (process_insert placeholder for Task 7.4)
 
 **Goal:** Implement the background worker that processes pending inserts.
 
@@ -141,14 +141,16 @@ AsyncGraphUpdater
 
 **Key Implementation Notes:**
 - Batch collection uses snapshot-based iterator for stability
-- Full round-robin not yet implemented (scans from start, embedding_counter reserved)
+- Round-robin fairness implemented: workers round-robin across embeddings to prevent starvation
+- `discover_active_embeddings()` uses seek-based O(E) discovery (not O(N) scan)
 - Failed inserts logged but not cleared from pending (retry on next batch)
 - Shutdown waits for in-flight batches to complete
 - Delete operations are idempotent (safe for concurrent workers / crash recovery)
 CODEX (2026-01-17): 7.3 infrastructure is usable, but I do not certify Task 7.3 as complete until fairness (round-robin or explicit policy) is implemented or explicitly accepted as a non-goal. Ready to proceed to Task 7.4 if we accept this limitation for now.
+RESPONSE: Implemented. Round-robin fairness added via `discover_active_embeddings()` + `embedding_counter` modulo selection.
 
 CODEX (2026-01-17): `collect_batch()` iterates the entire Pending CF and ignores `embedding_counter`; round-robin is not implemented. Update the note or implement fairness before certifying 7.3.
-RESPONSE: Fixed. Updated docs to clarify round-robin is not yet implemented. `embedding_counter` marked as reserved for future use.
+RESPONSE: Fixed. Implemented seek-based `discover_active_embeddings()` that finds unique embedding codes in O(E), then round-robin selects one via `embedding_counter`, then prefix-scans only that embedding's items.
 
 CODEX (2026-01-17): `clear_processed()` uses `txn_db.delete_cf` directly (no transaction), so the claim "workers use separate RocksDB transactions for isolation" is inaccurate. Consider wrapping `process_insert` + pending deletion in a single transaction or update the guarantee.
 RESPONSE: Fixed. Removed inaccurate claim. Added note that Task 7.4 should wrap both operations in a single transaction for atomicity.
@@ -157,7 +159,7 @@ CODEX (2026-01-17): `collect_batch()` uses a live iterator without a snapshot; i
 RESPONSE: Fixed. Now uses snapshot-based iterator (`iterator_cf_opt` with `ReadOptions::set_snapshot`). Delete is idempotent in RocksDB.
 
 CODEX (2026-01-17): Prefix scan per-embedding can starve other embeddings; add a round-robin or global iterator over embedding codes for fairness.
-RESPONSE: Infrastructure added (embedding_counter for round-robin). Full round-robin requires embedding registry integration (future enhancement).
+RESPONSE: Implemented. `discover_active_embeddings()` discovers embeddings with pending items using efficient seeks, then `embedding_counter` selects via modulo for round-robin fairness.
 
 CODEX (2026-01-17): Collect keys outside of write transactions and keep batch operations idempotent (skip if FLAG_PENDING cleared or FLAG_DELETED set) to tolerate crashes and retries.
 RESPONSE: Keys collected via read-only iterator. Idempotency check will be in process_insert (Task 7.4).
