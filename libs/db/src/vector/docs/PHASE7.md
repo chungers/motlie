@@ -133,7 +133,7 @@ AsyncGraphUpdater
 - [x] 7.3.1: Implement `AsyncGraphUpdater::start()` - spawn workers
 - [x] 7.3.2: Implement `worker_loop()` - batch collection and processing
 - [x] 7.3.3: Implement `collect_batch()` - read from pending CF with limit
-- [ ] 7.3.4: Implement `process_insert()` - **placeholder, needs Task 7.4**
+- [x] 7.3.4: Implement `process_insert()` - completed under Task 7.4.3
 - [x] 7.3.5: Implement `clear_processed()` - remove from pending CF
 - [x] 7.3.6: Implement `drain_pending_static()` - startup recovery
 - [x] 7.3.7: Implement `shutdown()` - graceful worker termination
@@ -202,6 +202,8 @@ CODEX (2026-01-17): Brute-force fallback must be bounded (e.g., cap pending scan
 - `process_insert()` creates an hnsw::Index per embedding using stored EmbeddingSpec
 - hnsw::insert() overwrites VecMeta, clearing FLAG_PENDING automatically
 - Pending queue cleared by `clear_processed()` after successful graph construction
+CODEX (2026-01-17): Verified async insert path in `ops::insert` writes VecMeta with FLAG_PENDING and enqueues Pending. `process_insert()` is transactional and clears FLAG_PENDING via `hnsw::insert()`. Pending deletion is still outside the transaction; it is idempotent but leaves a retry window on crash.
+CODEX (2026-01-17): `process_insert()` rebuilds a new `hnsw::Index` per item and reads EmbeddingSpec from both registry and CF. Consider reusing a per-embedding Index/cache or validating registry/CF consistency to avoid divergence.
 
 ---
 
