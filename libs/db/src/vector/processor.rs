@@ -33,14 +33,15 @@ use super::rabitq::RaBitQ;
 use super::registry::EmbeddingRegistry;
 use super::schema::{
     EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, GraphMeta, GraphMetaCfKey,
-    GraphMetaField, IdReverse, IdReverseCfKey, Pending, VecId, VectorCfKey, Vectors,
+    GraphMetaField, IdReverse, IdReverseCfKey, Pending, VecId, VecMeta, VecMetaCfKey, VectorCfKey,
+    Vectors,
 };
 // These types are only used in tests
 #[cfg(test)]
 use super::schema::{GraphMetaCfValue, IdForward, IdForwardCfKey};
 use super::search::{SearchConfig, SearchStrategy};
 use super::Storage;
-use crate::rocksdb::{ColumnFamily, ColumnFamilySerde};
+use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use crate::Id;
 
 // ============================================================================
@@ -976,6 +977,15 @@ impl Processor {
         let vectors_cf = txn_db
             .cf_handle(Vectors::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+        let meta_cf = txn_db
+            .cf_handle(VecMeta::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("VecMeta CF not found"))?;
+        let reverse_cf = txn_db
+            .cf_handle(IdReverse::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+
+        // Get storage type for proper vector deserialization (f32 vs f16)
+        let storage_type = embedding.storage_type();
 
         // Iterate pending entries for this embedding
         let prefix = Pending::prefix_for_embedding(embedding_code);
@@ -1002,23 +1012,28 @@ impl Processor {
             let parsed = Pending::key_from_bytes(&key)?;
             let vec_id = parsed.2;
 
-            // Load vector data from Vectors CF
+            // Check VecMeta lifecycle - skip if deleted (PendingDeleted state)
+            // This handles the case where a vector was deleted before async indexing completed
+            let meta_key = VecMetaCfKey(embedding_code, vec_id);
+            if let Some(meta_bytes) = txn_db.get_cf(&meta_cf, VecMeta::key_to_bytes(&meta_key))? {
+                let meta = VecMeta::value_from_bytes(&meta_bytes)?.0;
+                if meta.is_deleted() {
+                    continue; // Skip deleted vectors (PendingDeleted state)
+                }
+            }
+
+            // Load vector data from Vectors CF using proper storage_type
             let vec_key = VectorCfKey(embedding_code, vec_id);
             let vec_bytes = match txn_db.get_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))? {
                 Some(bytes) => bytes,
                 None => continue, // Vector not found, skip
             };
-            let vector_data = Vectors::value_from_bytes(&vec_bytes)?;
+            let vector_data = Vectors::value_from_bytes_typed(&vec_bytes, storage_type)?;
 
             // Compute exact distance
-            let distance = embedding.compute_distance(query, &vector_data.0);
+            let distance = embedding.compute_distance(query, &vector_data);
 
-            // Look up external ID from IdForward (we need to find it via reverse lookup)
-            // Actually, we need to scan IdForward to find the external ID for this vec_id
-            // This is expensive, so let's use IdReverse instead
-            let reverse_cf = txn_db
-                .cf_handle(IdReverse::CF_NAME)
-                .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+            // Look up external ID via IdReverse
             let reverse_key = IdReverseCfKey(embedding_code, vec_id);
             let external_id = match txn_db.get_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))? {
                 Some(bytes) => IdReverse::value_from_bytes(&bytes)?.0,

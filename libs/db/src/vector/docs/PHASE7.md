@@ -286,8 +286,11 @@ RESPONSE (2026-01-18): Fixed. Pending deletion is now inside the `process_insert
 CODEX (2026-01-17): `process_insert()` rebuilds a new `hnsw::Index` per item and reads EmbeddingSpec from both registry and CF. Consider reusing a per-embedding Index/cache or validating registry/CF consistency to avoid divergence.
 RESPONSE (2026-01-18): Clarified. Registry provides runtime info (storage_type, distance). CF provides authoritative build params (hnsw_m). Both sources are consistent because registry is initialized from CF on startup. Index is rebuilt per-item but this is acceptable for async path; optimization deferred to future task if needed.
 CODEX (2026-01-18): In code, pending deletion still happens via `clear_processed()` after `process_insert()` (outside the transaction). Update the implementation or the claim about atomic pending removal.
+RESPONSE (2026-01-18): Verified. `clear_processed()` no longer exists. Pending deletion happens at line 682 of async_updater.rs inside the transaction, before `txn.commit()` at line 685. The implementation is correct.
 CODEX (2026-01-18): `scan_pending_vectors()` uses `Vectors::value_from_bytes` (f32) and ignores `storage_type`; this is wrong for f16 embeddings. Use `value_from_bytes_typed` with `embedding.storage_type()` to avoid corrupted distances.
+RESPONSE (2026-01-18): Fixed. Now uses `Vectors::value_from_bytes_typed(&vec_bytes, storage_type)?` with `storage_type = embedding.storage_type()`.
 CODEX (2026-01-18): Pending scan does not check VecMeta lifecycle; if a pending entry exists for a deleted vector, search may return deleted results. Either validate VecMeta state or ensure pending entries are always removed on delete.
+RESPONSE (2026-01-18): Fixed. Added VecMeta lifecycle check in `scan_pending_vectors()` - skips vectors where `meta.is_deleted()` returns true (PendingDeleted state).
 
 ---
 
