@@ -600,6 +600,104 @@ careful design to avoid measuring concurrency effects on recall accuracy.
 
 ---
 
+## Async Insert Latency (Phase 7)
+
+**Status:** Implemented (January 2026)
+
+Phase 7 introduced the async graph updater pattern, which decouples vector storage from
+HNSW graph construction. This dramatically reduces insert latency.
+
+### Two-Phase Insert Pattern
+
+| Phase | Description | Latency |
+|-------|-------------|---------|
+| **Phase 1 (sync)** | Store vector + metadata + binary code, add to Pending queue | <5ms P99 |
+| **Phase 2 (async)** | Background workers build HNSW graph edges | N/A (background) |
+
+### Latency Targets
+
+| Metric | Sync Insert (old) | Async Insert (new) | Improvement |
+|--------|-------------------|-------------------|-------------|
+| Insert P50 | ~5ms | <1ms | 5-10x faster |
+| Insert P99 | ~50ms | <5ms | 10x faster |
+
+### Measuring Sync vs Async Latency
+
+Use the `compare_sync_async_latency()` benchmark function:
+
+```rust
+use motlie_db::vector::benchmark::compare_sync_async_latency;
+
+let result = compare_sync_async_latency(storage.clone(), embedding_code, 1000, 128).await?;
+println!("{}", result);
+```
+
+Example output:
+```
+=== Sync vs Async Insert Latency Comparison ===
+Vectors per mode: 1000
+
+Sync Insert (immediate graph build):
+  P50: 5.2ms
+  P99: 48.3ms
+
+Async Insert (deferred graph build):
+  P50: 0.4ms
+  P99: 2.1ms
+
+Speedup:
+  P50: 13.0x faster
+  P99: 23.0x faster
+```
+
+### Search Behavior During Async Processing
+
+While vectors are pending graph construction:
+1. Vectors are immediately searchable via bounded brute-force fallback
+2. `SearchConfig.pending_scan_limit` controls max pending vectors to scan (default: 1000)
+3. Results merge HNSW candidates with pending matches, deduplicated and sorted
+
+### Configuration
+
+```rust
+use motlie_db::vector::{AsyncUpdaterConfig, Subsystem};
+
+// Enable async inserts with custom config
+let async_config = AsyncUpdaterConfig::default()
+    .with_num_workers(4)      // Background worker threads
+    .with_batch_size(200);    // Vectors per worker batch
+
+let (writer, reader) = subsystem.start_with_async(
+    storage,
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,  // query workers
+    Some(async_config),
+);
+
+// Inserts now use async path by default (immediate_index=false)
+InsertVector::new(&embedding, id, vector)
+    .run(&writer)
+    .await?;
+
+// Use .immediate() for sync path when needed
+InsertVector::new(&embedding, id, vector)
+    .immediate()  // Forces sync graph build
+    .run(&writer)
+    .await?;
+```
+
+### Implementation Details
+
+- **Pending Queue CF:** `vector/pending` - persists pending items for crash recovery
+- **VecLifecycle:** Tracks vector state (Indexed, Pending, Deleted, PendingDeleted)
+- **Crash Recovery:** Pending items survive restart; processing is idempotent
+- **Delete Handling:** Removes from pending queue, transitions to PendingDeleted state
+
+See [PHASE7.md](./PHASE7.md) for complete design documentation.
+
+---
+
 ## References
 
 ### CLI Tools (Preferred)

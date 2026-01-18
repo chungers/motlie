@@ -3,7 +3,7 @@
 **Author:** David Chung + Claude
 **Date:** January 2, 2026 (Updated: January 16, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 Complete (Tasks 5.0-5.11), Phase 6 Complete, Phase 7-8 Remaining
+**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 Complete (Tasks 5.0-5.11), Phase 6 Complete, Phase 7 Complete, Phase 8 Remaining
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
@@ -78,7 +78,7 @@ dedicated vector databases or custom storage engines.
 | [Phase 4.5](#phase-45-codex-pre-phase-5-critical-fixes) | CODEX Pre-Phase 5 Critical Fixes | ✅ Complete |
 | [Phase 5](#phase-5-internal-mutationquery-api) | Internal Mutation/Query API | ✅ Complete |
 | [Phase 6](#phase-6-mpscmpmc-public-api) | MPSC/MPMC Public API | ✅ Complete |
-| [Phase 7](#phase-7-async-graph-updater) | Async Graph Updater | 🔲 Not Started |
+| [Phase 7](#phase-7-async-graph-updater) | Async Graph Updater | ✅ Complete |
 | [Phase 8](#phase-8-production-hardening) | Production Hardening | 🔲 Not Started |
 
 ### Phase 4 Tasks
@@ -257,8 +257,8 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  ├── 6.1-6.6 MutationExecutor, Consumer, Reader, spawn functions           │
 │  └── Goal: Channel-based wrappers matching graph/fulltext patterns         │
 │                                                                              │
-│  Phase 7: Async Graph Updater [NOT STARTED]                                  │
-│  ├── 7.1-7.5 Pending queue, async workers, crash recovery                  │
+│  Phase 7: Async Graph Updater [COMPLETE]                                     │
+│  ├── 7.1-7.7 Pending queue, async workers, crash recovery, integration ✓   │
 │  └── Goal: Online updates without blocking search                          │
 │                                                                              │
 │  Phase 8: Production Hardening [NOT STARTED]                                 │

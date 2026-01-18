@@ -1170,4 +1170,83 @@ mod tests {
         }
         count
     }
+
+    /// Latency comparison: sync vs async insert
+    ///
+    /// This test measures the speedup from using async inserts (build_index=false)
+    /// vs sync inserts (build_index=true). Run with --nocapture to see results:
+    ///
+    /// ```sh
+    /// cargo test -p motlie-db --lib test_sync_vs_async_latency -- --nocapture
+    /// ```
+    #[test]
+    fn test_sync_vs_async_latency() {
+        use std::time::Instant;
+
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
+
+        // Register embedding (64 dimensions for faster test)
+        let embedding = register_embedding(&storage, &registry, 64);
+        let processor = Processor::new(storage.clone(), registry.clone());
+
+        const NUM_VECTORS: usize = 100;
+
+        // Measure SYNC insert latency (build_index=true)
+        let mut sync_latencies = Vec::with_capacity(NUM_VECTORS);
+        for i in 0..NUM_VECTORS {
+            let id = crate::Id::new();
+            let vector = test_vector(64, i as u64 + 1000);
+
+            let start = Instant::now();
+            processor
+                .insert_vector(&embedding, id, &vector, true) // SYNC
+                .expect("Sync insert should succeed");
+            sync_latencies.push(start.elapsed());
+        }
+
+        // Measure ASYNC insert latency (build_index=false)
+        let mut async_latencies = Vec::with_capacity(NUM_VECTORS);
+        for i in 0..NUM_VECTORS {
+            let id = crate::Id::new();
+            let vector = test_vector(64, i as u64 + 2000);
+
+            let start = Instant::now();
+            processor
+                .insert_vector(&embedding, id, &vector, false) // ASYNC
+                .expect("Async insert should succeed");
+            async_latencies.push(start.elapsed());
+        }
+
+        // Calculate percentiles
+        sync_latencies.sort();
+        async_latencies.sort();
+
+        let sync_p50 = sync_latencies[NUM_VECTORS / 2];
+        let sync_p99 = sync_latencies[NUM_VECTORS * 99 / 100];
+        let async_p50 = async_latencies[NUM_VECTORS / 2];
+        let async_p99 = async_latencies[NUM_VECTORS * 99 / 100];
+
+        let speedup_p50 = sync_p50.as_nanos() as f64 / async_p50.as_nanos().max(1) as f64;
+        let speedup_p99 = sync_p99.as_nanos() as f64 / async_p99.as_nanos().max(1) as f64;
+
+        println!("\n=== Sync vs Async Insert Latency ===");
+        println!("Vectors: {}", NUM_VECTORS);
+        println!("\nSync Insert (build_index=true):");
+        println!("  P50: {:?}", sync_p50);
+        println!("  P99: {:?}", sync_p99);
+        println!("\nAsync Insert (build_index=false):");
+        println!("  P50: {:?}", async_p50);
+        println!("  P99: {:?}", async_p99);
+        println!("\nSpeedup:");
+        println!("  P50: {:.1}x faster", speedup_p50);
+        println!("  P99: {:.1}x faster", speedup_p99);
+
+        // Assert async is meaningfully faster (at least 2x at P50)
+        assert!(
+            speedup_p50 > 2.0,
+            "Async should be at least 2x faster at P50 (got {:.1}x)",
+            speedup_p50
+        );
+    }
 }
