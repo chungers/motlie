@@ -7695,8 +7695,11 @@ Channel integration tests added:
 | `test_subsystem_start_lifecycle` | Subsystem::start() returns working handles | ✅ |
 | `test_writer_flush_semantics` | Flush guarantees visibility | ✅ |
 | `test_channel_close_propagation` | Writer/Reader detect channel close | ✅ |
+| `test_concurrent_deletes_vs_searches` | Deletes + searches don't return deleted | ✅ |
 
-All 6 tests pass.
+All 7 tests pass.
+
+CODEX (2026-01-17): Verified `test_vector_channel.rs` includes the 7 tests listed above.
 
 <details>
 <summary>Original spec (for reference)</summary>
