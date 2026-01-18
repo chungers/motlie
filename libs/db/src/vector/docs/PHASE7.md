@@ -101,12 +101,13 @@ CODEX (2026-01-17): All 7.1 deliverables implemented as claimed.
 - [x] 7.2.2: Add builder methods (`with_batch_size`, `with_num_workers`, etc.)
 - [x] 7.2.3: Document tuning guidance in doc comments
 - [x] 7.2.4: Add `test_config_defaults` and `test_config_builder` tests
+CODEX (2026-01-17): Verified config struct, builders, and tests in `async_updater.rs` are implemented as claimed. Task 7.2 is complete and ready for 7.3.
 
 ---
 
 ### Task 7.3: Async Updater Core Implementation
 
-**Status:** ✅ Infrastructure Complete (process_insert placeholder for Task 7.4)
+**Status:** ⚠️ Partially Complete (infrastructure added; critical gaps noted below)
 
 **Goal:** Implement the background worker that processes pending inserts.
 
@@ -143,6 +144,9 @@ AsyncGraphUpdater
 - Batch collection uses iterator scan (round-robin prep via embedding_counter)
 - Failed inserts logged but not cleared from pending (retry on next batch)
 - Shutdown waits for in-flight batches to complete
+CODEX (2026-01-17): `collect_batch()` iterates the entire Pending CF and ignores `embedding_counter`; round-robin is not implemented. Update the note or implement fairness before certifying 7.3.
+CODEX (2026-01-17): `clear_processed()` uses `txn_db.delete_cf` directly (no transaction), so the claim “workers use separate RocksDB transactions for isolation” is inaccurate. Consider wrapping `process_insert` + pending deletion in a single transaction or update the guarantee.
+CODEX (2026-01-17): `collect_batch()` uses a live iterator without a snapshot; if items are deleted concurrently, ensure iterator stability or tolerate missing keys (idempotent delete).
 
 CODEX (2026-01-17): Prefix scan per-embedding can starve other embeddings; add a round-robin or global iterator over embedding codes for fairness.
 RESPONSE: Infrastructure added (embedding_counter for round-robin). Full round-robin requires embedding registry integration (future enhancement).
