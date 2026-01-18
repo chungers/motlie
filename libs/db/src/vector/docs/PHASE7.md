@@ -35,37 +35,42 @@ Phase 2 (Asynchronous, background):
 
 ### Task 7.1: Pending Queue Column Family
 
-**Goal:** Add RocksDB column family to persist pending graph updates.
+**Status:** ✅ Complete (existing implementation verified)
+
+**Goal:** RocksDB column family to persist pending graph updates.
 
 **File:** `libs/db/src/vector/schema.rs`
 
 **Key Design:**
-- Key: `[embedding_code: u64][timestamp_us: u64][vec_id: u32]` = 20 bytes
+- Key: `[embedding_code: u64][timestamp_milli: u64][vec_id: u32]` = 20 bytes
 - Value: empty (vector data already in Vectors CF)
-- Timestamp enables FIFO ordering for fair processing
+- Timestamp enables FIFO ordering for fair processing within each embedding
 - Survives crashes for recovery
+- Prefix extractor on embedding_code (8 bytes) for efficient per-embedding scans
+
 CODEX (2026-01-17): `Pending` CF already exists in `schema.rs` with key `(embedding_code, TimestampMilli, vec_id)`; align the design (timestamp units + naming) and avoid adding a duplicate CF.
+RESPONSE: Confirmed. Using existing `Pending` CF with `TimestampMilli`. Added `key_now()` and `prefix_for_embedding()` helpers.
+
 CODEX (2026-01-17): FIFO ordering is only per-embedding with the current key layout; clarify cross-embedding fairness or add a batching strategy that round-robins embeddings.
+RESPONSE: Acknowledged. Cross-embedding fairness will be handled in Task 7.3 via round-robin iteration over embedding codes.
+
+**Existing Implementation:**
+- `Pending` struct with `CF_NAME = "vector/pending"`
+- `PendingCfKey(EmbeddingCode, TimestampMilli, VecId)`
+- `key_to_bytes()` / `key_from_bytes()` for serialization
+- `key_now()` - create key with current timestamp (added)
+- `prefix_for_embedding()` - get 8-byte prefix for iteration (added)
+- Registered in `ALL_COLUMN_FAMILIES`
+- Prefix extractor configured for embedding-based scans
 
 **Deliverables:**
-- [ ] 7.1.1: Add `PendingInserts` column family struct
-- [ ] 7.1.2: Implement `key()` and `parse_key()` methods
-- [ ] 7.1.3: Register CF in storage initialization
-- [ ] 7.1.4: Add unit tests for key encoding/decoding
- - [ ] 7.1.5: Reconcile existing `Pending` CF naming/semantics (TimestampMilli vs timestamp_us) and update docs/tests to match.
-
-**Validation:**
-```rust
-#[test]
-fn test_pending_key_roundtrip() {
-    let embedding = 42u64;
-    let vec_id = 100u32;
-    let key = PendingInserts::key(embedding, vec_id);
-    let (e, _ts, v) = PendingInserts::parse_key(&key);
-    assert_eq!(e, embedding);
-    assert_eq!(v, vec_id);
-}
-```
+- [x] 7.1.1: `Pending` column family struct (existing)
+- [x] 7.1.2: `key_to_bytes()` and `key_from_bytes()` methods (existing)
+- [x] 7.1.3: Registered in `ALL_COLUMN_FAMILIES` (existing)
+- [x] 7.1.4: `test_pending_key_roundtrip` test (existing)
+- [x] 7.1.5: Added `key_now()` helper with TimestampMilli
+- [x] 7.1.6: Added `prefix_for_embedding()` for iteration
+- [x] 7.1.7: Added `test_pending_key_now` and `test_pending_prefix_for_embedding` tests
 
 ---
 
