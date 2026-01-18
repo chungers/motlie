@@ -33,7 +33,7 @@ use super::rabitq::RaBitQ;
 use super::registry::EmbeddingRegistry;
 use super::schema::{
     EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, GraphMeta, GraphMetaCfKey,
-    GraphMetaField, IdReverse, IdReverseCfKey, VecId,
+    GraphMetaField, IdReverse, IdReverseCfKey, Pending, VecId, VectorCfKey, Vectors,
 };
 // These types are only used in tests
 #[cfg(test)]
@@ -889,21 +889,147 @@ impl Processor {
         let key_refs: Vec<_> = keys.iter().map(|k: &Vec<u8>| (&reverse_cf, k.as_slice())).collect();
         let values = txn_db.multi_get_cf(key_refs);
 
-        let mut results = Vec::with_capacity(k);
+        // Collect HNSW results (may contain fewer than k due to deleted vectors)
+        let mut hnsw_results = Vec::with_capacity(k * 2);
         for (i, value_result) in values.into_iter().enumerate() {
-            if results.len() >= k {
-                break;
-            }
             if let Ok(Some(bytes)) = value_result {
                 let id = IdReverse::value_from_bytes(&bytes)?.0;
                 let (distance, vec_id) = raw_results[i];
-                results.push(SearchResult {
+                hnsw_results.push(SearchResult {
                     id,
                     vec_id,
                     distance,
                 });
             }
         }
+
+        // 8. Scan pending vectors if fallback is enabled
+        if config.has_pending_fallback() {
+            let pending_results = self.scan_pending_vectors(
+                config.embedding(),
+                query,
+                config.pending_scan_limit(),
+            )?;
+
+            if !pending_results.is_empty() {
+                // Track vec_ids already in HNSW results to avoid duplicates
+                // (a vector could theoretically be in both if there's a race condition)
+                let hnsw_vec_ids: std::collections::HashSet<VecId> =
+                    hnsw_results.iter().map(|r| r.vec_id).collect();
+
+                // Add pending results that aren't duplicates
+                for (distance, vec_id, external_id) in pending_results {
+                    if !hnsw_vec_ids.contains(&vec_id) {
+                        hnsw_results.push(SearchResult {
+                            id: external_id,
+                            vec_id,
+                            distance,
+                        });
+                    }
+                }
+
+                // Re-sort merged results by distance
+                hnsw_results.sort_by(|a, b| {
+                    a.distance
+                        .partial_cmp(&b.distance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
+
+        // Truncate to requested k
+        hnsw_results.truncate(k);
+        Ok(hnsw_results)
+    }
+
+    /// Scan pending vectors and compute brute-force distances.
+    ///
+    /// This function iterates the Pending CF for the given embedding and computes
+    /// exact distances for up to `limit` pending vectors. These results can then
+    /// be merged with HNSW search results to ensure immediate searchability of
+    /// newly inserted vectors.
+    ///
+    /// # Arguments
+    /// * `embedding` - The embedding specification (for distance computation)
+    /// * `query` - Query vector
+    /// * `limit` - Maximum number of pending vectors to scan
+    ///
+    /// # Returns
+    /// Vector of (distance, vec_id, external_id) tuples, sorted by distance ascending.
+    fn scan_pending_vectors(
+        &self,
+        embedding: &Embedding,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(f32, VecId, Id)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let embedding_code = embedding.code();
+        let txn_db = self.storage.transaction_db()?;
+
+        // Get CF handles
+        let pending_cf = txn_db
+            .cf_handle(Pending::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
+        let vectors_cf = txn_db
+            .cf_handle(Vectors::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+
+        // Iterate pending entries for this embedding
+        let prefix = Pending::prefix_for_embedding(embedding_code);
+        let iter = txn_db.iterator_cf(
+            &pending_cf,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
+
+        let mut results = Vec::with_capacity(limit.min(1024));
+
+        for item in iter {
+            if results.len() >= limit {
+                break;
+            }
+
+            let (key, _value) = item?;
+
+            // Check prefix match (stop when we leave this embedding's range)
+            if key.len() < 8 || key[0..8] != prefix {
+                break;
+            }
+
+            // Parse the pending key to get vec_id
+            let parsed = Pending::key_from_bytes(&key)?;
+            let vec_id = parsed.2;
+
+            // Load vector data from Vectors CF
+            let vec_key = VectorCfKey(embedding_code, vec_id);
+            let vec_bytes = match txn_db.get_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))? {
+                Some(bytes) => bytes,
+                None => continue, // Vector not found, skip
+            };
+            let vector_data = Vectors::value_from_bytes(&vec_bytes)?;
+
+            // Compute exact distance
+            let distance = embedding.compute_distance(query, &vector_data.0);
+
+            // Look up external ID from IdForward (we need to find it via reverse lookup)
+            // Actually, we need to scan IdForward to find the external ID for this vec_id
+            // This is expensive, so let's use IdReverse instead
+            let reverse_cf = txn_db
+                .cf_handle(IdReverse::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+            let reverse_key = IdReverseCfKey(embedding_code, vec_id);
+            let external_id = match txn_db.get_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))? {
+                Some(bytes) => IdReverse::value_from_bytes(&bytes)?.0,
+                None => continue, // No external ID mapping (deleted?), skip
+            };
+
+            results.push((distance, vec_id, external_id));
+        }
+
+        // Sort by distance ascending
+        results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(results)
     }

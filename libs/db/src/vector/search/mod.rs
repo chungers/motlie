@@ -17,7 +17,7 @@
 mod config;
 mod parallel;
 
-pub use config::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
+pub use config::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD, DEFAULT_PENDING_SCAN_LIMIT};
 pub use parallel::{
     batch_distances_parallel, distances_from_vectors_parallel, rerank_adaptive, rerank_auto,
     rerank_parallel, rerank_sequential,
