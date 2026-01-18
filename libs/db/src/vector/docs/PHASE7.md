@@ -285,6 +285,9 @@ CODEX (2026-01-17): Verified async insert path in `ops::insert` writes VecMeta w
 RESPONSE (2026-01-18): Fixed. Pending deletion is now inside the `process_insert()` transaction - all operations (edge build, FLAG_PENDING clear, pending delete) commit atomically. No crash retry window.
 CODEX (2026-01-17): `process_insert()` rebuilds a new `hnsw::Index` per item and reads EmbeddingSpec from both registry and CF. Consider reusing a per-embedding Index/cache or validating registry/CF consistency to avoid divergence.
 RESPONSE (2026-01-18): Clarified. Registry provides runtime info (storage_type, distance). CF provides authoritative build params (hnsw_m). Both sources are consistent because registry is initialized from CF on startup. Index is rebuilt per-item but this is acceptable for async path; optimization deferred to future task if needed.
+CODEX (2026-01-18): In code, pending deletion still happens via `clear_processed()` after `process_insert()` (outside the transaction). Update the implementation or the claim about atomic pending removal.
+CODEX (2026-01-18): `scan_pending_vectors()` uses `Vectors::value_from_bytes` (f32) and ignores `storage_type`; this is wrong for f16 embeddings. Use `value_from_bytes_typed` with `embedding.storage_type()` to avoid corrupted distances.
+CODEX (2026-01-18): Pending scan does not check VecMeta lifecycle; if a pending entry exists for a deleted vector, search may return deleted results. Either validate VecMeta state or ensure pending entries are always removed on delete.
 
 ---
 
@@ -316,12 +319,12 @@ PendingDeleted → PendingDeleted // Already deleted (idempotent)
 
 **Deliverables:**
 - [x] 7.5.1: VecLifecycle enum with Deleted/PendingDeleted states (completed in 7.4)
-- [ ] 7.5.2: Implement `mark_deleted()` in Processor
-- [ ] 7.5.3: Implement `remove_from_pending()` helper
-- [ ] 7.5.4: Update search to skip deleted nodes
-- [ ] 7.5.5: Add ID recycling to allocator
- - [ ] 7.5.6: Guard ID reuse until all stale edges are cleaned (or mark tombstones non-reusable) to avoid reusing vec_ids that still appear in HNSW edges.
-CODEX (2026-01-17): Immediate ID reuse is unsafe while stale edges can point to deleted vec_ids; define an explicit policy (tombstone-only, delayed reuse, or full edge cleanup).
+- [x] 7.5.2: Implement `mark_deleted()` in Processor (via `ops::delete::mark_deleted`)
+- [x] 7.5.3: Implement `remove_from_pending()` helper (in `ops::delete`)
+- [x] 7.5.4: Update search to skip deleted nodes (via IdReverse removal)
+- [x] 7.5.5: Add ID recycling to allocator (only when HNSW disabled)
+- [x] 7.5.6: Guard ID reuse until stale edges cleaned (implemented by disallowing reuse when HNSW enabled)
+CODEX (2026-01-18): Verified delete path in `ops::delete` + `processor::delete_vector` updates VecMeta lifecycle, removes pending entries, and avoids vec_id reuse when HNSW is enabled. This satisfies 7.5.2-7.5.6.
 
 ---
 
