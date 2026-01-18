@@ -2,14 +2,23 @@
 //!
 //! Shared helpers for deleting vectors, used by both `Processor` and
 //! `MutationExecutor` implementations.
+//!
+//! ## Lifecycle Integration
+//!
+//! Delete operations integrate with the VecLifecycle state machine:
+//! - `Indexed` → `Deleted`: Normal delete of indexed vector
+//! - `Pending` → `PendingDeleted`: Delete before async graph construction
+//!
+//! The delete also removes the vector from the Pending queue if present,
+//! preventing the async updater from processing a deleted vector.
 
 use anyhow::Result;
 
-use crate::rocksdb::ColumnFamily;
+use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use crate::vector::processor::Processor;
 use crate::vector::schema::{
     BinaryCodeCfKey, BinaryCodes, EmbeddingCode, IdForward, IdForwardCfKey, IdReverse,
-    IdReverseCfKey, VecId, VectorCfKey, Vectors,
+    IdReverseCfKey, Pending, VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
 };
 use crate::Id;
 
@@ -79,8 +88,16 @@ impl DeleteResult {
 /// **When HNSW is enabled (soft delete):**
 /// - Deletes ID mappings only (vector unreachable by external ID)
 /// - Keeps vector data (needed for HNSW distance calculations)
+/// - Sets VecMetadata to `VecLifecycle::Deleted` (or `PendingDeleted`)
+/// - Removes from Pending queue if present
 /// - Does NOT free VecId (prevents graph corruption from reuse)
 /// - HNSW edges remain intact (standard tombstone approach)
+///
+/// # Lifecycle Transitions
+///
+/// The delete operation transitions the vector's lifecycle state:
+/// - `Indexed` → `Deleted`
+/// - `Pending` → `PendingDeleted` (async updater will skip but clean up)
 ///
 /// # Arguments
 /// * `txn` - Active RocksDB transaction
@@ -126,7 +143,23 @@ pub fn vector(
     // Check if HNSW indexing is enabled - affects cleanup strategy
     let hnsw_enabled = processor.hnsw_config().enabled;
 
-    // 4. Delete vector data (only if HNSW disabled)
+    // 4. Update VecMetadata lifecycle state (soft delete marker)
+    // This allows search to skip deleted vectors even if they're still
+    // referenced by HNSW edges.
+    let was_pending = if hnsw_enabled {
+        mark_deleted(txn, txn_db, embedding, vec_id)?
+    } else {
+        false
+    };
+
+    // 5. Remove from Pending queue if vector was pending
+    // This prevents async updater from processing a deleted vector.
+    // Note: If mark_deleted returned true, the vector was pending.
+    if was_pending {
+        remove_from_pending(txn, txn_db, embedding, vec_id)?;
+    }
+
+    // 6. Delete vector data (only if HNSW disabled)
     // If HNSW is enabled, keep vector data for distance calculations
     // during search traversal (entry point or neighbor edges may reference it)
     let vec_key = VectorCfKey(embedding, vec_id);
@@ -137,7 +170,7 @@ pub fn vector(
         txn.delete_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?;
     }
 
-    // 5. Delete binary code (only if RaBitQ enabled AND HNSW disabled)
+    // 7. Delete binary code (only if RaBitQ enabled AND HNSW disabled)
     if processor.rabitq_enabled() && !hnsw_enabled {
         let code_key = BinaryCodeCfKey(embedding, vec_id);
         let codes_cf = txn_db
@@ -146,7 +179,7 @@ pub fn vector(
         txn.delete_cf(&codes_cf, BinaryCodes::key_to_bytes(&code_key))?;
     }
 
-    // 6. Return VecId to free list (only if HNSW disabled)
+    // 8. Return VecId to free list (only if HNSW disabled)
     // If HNSW is enabled, we cannot reuse the VecId because existing
     // HNSW edges still reference it. Reuse would corrupt graph semantics.
     if !hnsw_enabled {
@@ -158,4 +191,105 @@ pub fn vector(
         vec_id,
         soft_delete: hnsw_enabled,
     })
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Mark a vector as deleted by updating its VecMetadata lifecycle state.
+///
+/// This function reads the current VecMetadata, calls `set_deleted()` to
+/// transition the lifecycle state, and writes it back.
+///
+/// # Lifecycle Transitions
+/// - `Indexed` → `Deleted`
+/// - `Pending` → `PendingDeleted`
+/// - `Deleted` → `Deleted` (idempotent)
+/// - `PendingDeleted` → `PendingDeleted` (idempotent)
+///
+/// # Returns
+/// `true` if the vector was in a pending state (needs removal from Pending queue)
+fn mark_deleted(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    embedding: EmbeddingCode,
+    vec_id: VecId,
+) -> Result<bool> {
+    let meta_cf = txn_db
+        .cf_handle(VecMeta::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("VecMeta CF not found"))?;
+    let meta_key = VecMetaCfKey(embedding, vec_id);
+    let key_bytes = VecMeta::key_to_bytes(&meta_key);
+
+    // Read current metadata (with lock for update)
+    let meta_bytes = match txn.get_for_update_cf(&meta_cf, &key_bytes, true)? {
+        Some(bytes) => bytes,
+        None => {
+            // VecMeta doesn't exist - vector may have been inserted without
+            // async path (build_index=true) and never had metadata created.
+            // Nothing to mark as deleted.
+            return Ok(false);
+        }
+    };
+
+    let mut meta_value = VecMeta::value_from_bytes(&meta_bytes)?;
+    let was_pending = meta_value.0.is_pending();
+
+    // Transition lifecycle state
+    meta_value.0.set_deleted();
+
+    // Write updated metadata
+    txn.put_cf(&meta_cf, &key_bytes, &VecMeta::value_to_bytes(&meta_value)?)?;
+
+    Ok(was_pending)
+}
+
+/// Remove a vector from the Pending queue.
+///
+/// This scans the Pending CF for entries matching the (embedding, vec_id)
+/// and deletes them. The scan is necessary because the Pending key includes
+/// a timestamp that we don't know.
+///
+/// Key format: `[embedding: u64][timestamp: u64][vec_id: u32]`
+///
+/// This is idempotent - if the vector isn't in the pending queue, this is a no-op.
+fn remove_from_pending(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    embedding: EmbeddingCode,
+    vec_id: VecId,
+) -> Result<()> {
+    let pending_cf = txn_db
+        .cf_handle(Pending::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
+
+    // Scan all entries for this embedding to find the one with matching vec_id.
+    // This is O(P) where P is pending items for this embedding, but deletions
+    // of pending items should be rare.
+    let prefix = Pending::prefix_for_embedding(embedding);
+
+    let iter = txn_db.iterator_cf(
+        &pending_cf,
+        rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+    );
+
+    for item in iter {
+        let (key, _value) = item?;
+
+        // Check prefix match (stop when we leave this embedding's range)
+        if key.len() < 8 || key[0..8] != prefix {
+            break;
+        }
+
+        // Parse the key to check vec_id (last 4 bytes)
+        let parsed = Pending::key_from_bytes(&key)?;
+        if parsed.2 == vec_id {
+            // Found it - delete and we're done (should only be one entry per vec_id)
+            txn.delete_cf(&pending_cf, &key)?;
+            break;
+        }
+    }
+
+    Ok(())
 }

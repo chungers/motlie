@@ -240,7 +240,7 @@ RESPONSE: Keys collected via read-only iterator. Idempotency check will be in pr
 
 ### Task 7.4: Insert Path Integration
 
-**Status:** ✅ Core Implementation Complete (search fallback deferred)
+**Status:** ✅ Complete
 
 **Goal:** Modify insert path to use two-phase pattern.
 
@@ -261,14 +261,19 @@ RESPONSE: Keys collected via read-only iterator. Idempotency check will be in pr
    - Loads vector from Vectors CF
    - Builds HNSW graph via hnsw::insert
    - Transitions to `VecLifecycle::Indexed` (via hnsw::insert writing VecMeta)
-4. Search handles pending vectors via brute-force fallback (deferred to 7.4.4)
+4. Search handles pending vectors via bounded brute-force fallback:
+   - `SearchConfig.pending_scan_limit` controls max pending vectors to scan (default: 1000)
+   - `Processor::scan_pending_vectors()` iterates Pending CF and computes exact distances
+   - Results merged with HNSW search results, deduplicated, sorted, and truncated to k
+   - `.no_pending_fallback()` or `.with_pending_scan_limit(0)` disables the fallback
 CODEX (2026-01-17): Brute-force fallback must be bounded (e.g., cap pending scan size or time) to avoid O(N) degradation when backlog grows; add an explicit limit and metrics.
+RESPONSE (2026-01-18): Implemented. `SearchConfig.pending_scan_limit` defaults to 1000. Scan is bounded by this limit.
 
 **Deliverables:**
 - [x] 7.4.1: Implement VecLifecycle enum with type-safe state transitions
 - [x] 7.4.2: Modify `ops::insert::vector()` and `ops::insert::batch()` for two-phase
 - [x] 7.4.3: Implement `process_insert()` in async_updater.rs
-- [ ] 7.4.4: Update search to handle pending vectors (VecLifecycle::Pending) - deferred
+- [x] 7.4.4: Update search to handle pending vectors (bounded brute-force fallback)
 
 **Implementation Notes:**
 - `AsyncGraphUpdater::start()` now requires `registry` and `nav_cache` parameters

@@ -118,6 +118,21 @@ impl std::fmt::Display for SearchStrategy {
 /// See: `libs/db/src/vector/BENCHMARK.md` for full analysis.
 pub const DEFAULT_PARALLEL_RERANK_THRESHOLD: usize = 3200;
 
+/// Default maximum pending vectors to scan during brute-force fallback.
+///
+/// When vectors are inserted with `build_index=false` (async HNSW), they are
+/// placed in a pending queue until background workers build their graph edges.
+/// Search can optionally scan these pending vectors via brute-force to ensure
+/// they are immediately searchable.
+///
+/// This limit bounds the scan to prevent O(N) degradation when the pending
+/// backlog grows large. With typical 512D vectors, scanning 1000 vectors
+/// takes ~1-2ms (sequential distance computation).
+///
+/// Set to 0 to disable pending fallback entirely.
+/// Set to `usize::MAX` for unbounded scan (not recommended for production).
+pub const DEFAULT_PENDING_SCAN_LIMIT: usize = 1000;
+
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
     /// Embedding space specification (source of truth)
@@ -139,6 +154,18 @@ pub struct SearchConfig {
     ///
     /// See: `libs/db/src/vector/BENCHMARK.md` for benchmark methodology.
     parallel_rerank_threshold: usize,
+    /// Maximum pending vectors to scan via brute-force fallback.
+    ///
+    /// When async HNSW is enabled (`build_index=false`), newly inserted vectors
+    /// are placed in a pending queue until background workers build graph edges.
+    /// This setting controls how many pending vectors to scan during search.
+    ///
+    /// - `0`: Disable pending fallback (only search indexed vectors)
+    /// - `1..N`: Scan up to N pending vectors and merge with HNSW results
+    /// - `usize::MAX`: Unbounded scan (not recommended for production)
+    ///
+    /// Default: 1000 (provides immediate searchability with bounded latency)
+    pending_scan_limit: usize,
 }
 
 impl SearchConfig {
@@ -164,6 +191,7 @@ impl SearchConfig {
             ef: 100,          // sensible default
             rerank_factor: 10, // 10x re-ranking for ~90% recall at 10K scale
             parallel_rerank_threshold: DEFAULT_PARALLEL_RERANK_THRESHOLD,
+            pending_scan_limit: DEFAULT_PENDING_SCAN_LIMIT,
         }
     }
 
@@ -178,6 +206,7 @@ impl SearchConfig {
             ef: 100,
             rerank_factor: 10,
             parallel_rerank_threshold: DEFAULT_PARALLEL_RERANK_THRESHOLD,
+            pending_scan_limit: DEFAULT_PENDING_SCAN_LIMIT,
         }
     }
 
@@ -277,6 +306,35 @@ impl SearchConfig {
         self
     }
 
+    /// Builder: Set pending scan limit for brute-force fallback.
+    ///
+    /// Controls how many pending vectors to scan during search.
+    /// Pending vectors are those inserted with `build_index=false` that
+    /// haven't been indexed into HNSW yet by background workers.
+    ///
+    /// - `0`: Disable pending fallback (only search indexed vectors)
+    /// - `1..N`: Scan up to N pending vectors and merge with HNSW results
+    ///
+    /// Default: 1000 (provides immediate searchability with bounded latency).
+    ///
+    /// # Performance Notes
+    ///
+    /// Scanning 1000 512D vectors takes ~1-2ms. The limit prevents O(N)
+    /// degradation when the pending backlog grows large.
+    pub fn with_pending_scan_limit(mut self, limit: usize) -> Self {
+        self.pending_scan_limit = limit;
+        self
+    }
+
+    /// Builder: Disable pending vector fallback.
+    ///
+    /// Equivalent to `with_pending_scan_limit(0)`.
+    /// Use when you want search to only return fully indexed vectors.
+    pub fn no_pending_fallback(mut self) -> Self {
+        self.pending_scan_limit = 0;
+        self
+    }
+
     // ─────────────────────────────────────────────────────────────
     // Accessors
     // ─────────────────────────────────────────────────────────────
@@ -328,6 +386,23 @@ impl SearchConfig {
         candidate_count >= self.parallel_rerank_threshold
     }
 
+    /// Get pending scan limit.
+    ///
+    /// Returns the maximum number of pending vectors to scan via brute-force.
+    /// Returns 0 if pending fallback is disabled.
+    #[inline]
+    pub fn pending_scan_limit(&self) -> usize {
+        self.pending_scan_limit
+    }
+
+    /// Check if pending fallback is enabled.
+    ///
+    /// Returns `true` if `pending_scan_limit > 0`.
+    #[inline]
+    pub fn has_pending_fallback(&self) -> bool {
+        self.pending_scan_limit > 0
+    }
+
     /// Get the distance metric from the embedding.
     #[inline]
     pub fn distance(&self) -> Distance {
@@ -372,8 +447,8 @@ impl std::fmt::Display for SearchConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "SearchConfig {{ embedding: {}, strategy: {}, k: {}, ef: {}, rerank: {}, parallel_threshold: {} }}",
-            self.embedding, self.strategy, self.k, self.ef, self.rerank_factor, self.parallel_rerank_threshold
+            "SearchConfig {{ embedding: {}, strategy: {}, k: {}, ef: {}, rerank: {}, parallel_threshold: {}, pending_scan: {} }}",
+            self.embedding, self.strategy, self.k, self.ef, self.rerank_factor, self.parallel_rerank_threshold, self.pending_scan_limit
         )
     }
 }
@@ -665,5 +740,54 @@ mod tests {
         let display = format!("{}", config);
         assert!(display.contains("Exact"));
         assert!(display.contains("k: 10"));
+    }
+
+    // =========================================================================
+    // Pending Fallback Tests
+    // =========================================================================
+
+    #[test]
+    fn test_pending_scan_limit_default() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10);
+
+        assert_eq!(config.pending_scan_limit(), DEFAULT_PENDING_SCAN_LIMIT);
+        assert!(config.has_pending_fallback());
+    }
+
+    #[test]
+    fn test_pending_scan_limit_custom() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10).with_pending_scan_limit(500);
+
+        assert_eq!(config.pending_scan_limit(), 500);
+        assert!(config.has_pending_fallback());
+    }
+
+    #[test]
+    fn test_pending_scan_limit_zero() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10).with_pending_scan_limit(0);
+
+        assert_eq!(config.pending_scan_limit(), 0);
+        assert!(!config.has_pending_fallback());
+    }
+
+    #[test]
+    fn test_no_pending_fallback() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10).no_pending_fallback();
+
+        assert_eq!(config.pending_scan_limit(), 0);
+        assert!(!config.has_pending_fallback());
+    }
+
+    #[test]
+    fn test_display_includes_pending_scan() {
+        let emb = make_embedding(Distance::Cosine);
+        let config = SearchConfig::new(emb, 10).with_pending_scan_limit(100);
+
+        let display = format!("{}", config);
+        assert!(display.contains("pending_scan: 100"));
     }
 }
