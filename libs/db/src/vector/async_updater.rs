@@ -309,7 +309,8 @@ impl AsyncGraphUpdater {
                 break;
             }
 
-            // Collect a batch of pending inserts (round-robin across embeddings)
+            // Collect a batch of pending inserts
+            // Note: Full round-robin not yet implemented - currently scans from start
             let batch = match Self::collect_batch(
                 &storage,
                 &config,
@@ -385,13 +386,19 @@ impl AsyncGraphUpdater {
         info!(worker_id, "Async updater worker stopped");
     }
 
-    /// Collect a batch of pending items using round-robin across embeddings.
+    /// Collect a batch of pending items for processing.
+    ///
+    /// Currently scans from the start of the Pending CF. Full round-robin
+    /// across embeddings requires embedding registry integration (future).
+    ///
+    /// Uses a snapshot for iterator stability - concurrent deletes won't
+    /// affect the iteration. Clear operations are idempotent.
     ///
     /// Returns Vec<(key_bytes, embedding_code, vec_id)> for processing.
     fn collect_batch(
         storage: &Storage,
         config: &AsyncUpdaterConfig,
-        embedding_counter: &AtomicU64,
+        _embedding_counter: &AtomicU64, // Reserved for future round-robin
     ) -> anyhow::Result<Vec<(Vec<u8>, EmbeddingCode, VecId)>> {
         let txn_db = storage.transaction_db()?;
         let cf = txn_db
@@ -399,15 +406,16 @@ impl AsyncGraphUpdater {
             .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
 
         let mut batch = Vec::with_capacity(config.batch_size);
-
-        // Get list of embeddings to scan (round-robin starting point)
-        // For now, do a full scan with limit - round-robin will be implemented
-        // when we have embedding registry integration
         let start_time = Instant::now();
 
-        // Use iterator to scan pending CF
-        let iter = txn_db.iterator_cf(
+        // Use snapshot for consistent iteration (prevents issues with concurrent deletes)
+        let snapshot = txn_db.snapshot();
+        let mut read_opts = rocksdb::ReadOptions::default();
+        read_opts.set_snapshot(&snapshot);
+
+        let iter = txn_db.iterator_cf_opt(
             cf,
+            read_opts,
             rocksdb::IteratorMode::Start,
         );
 
@@ -423,9 +431,6 @@ impl AsyncGraphUpdater {
             let parsed = Pending::key_from_bytes(&key)?;
             batch.push((key.to_vec(), parsed.0, parsed.2));
         }
-
-        // Increment counter for round-robin (even though not fully used yet)
-        embedding_counter.fetch_add(1, Ordering::Relaxed);
 
         Ok(batch)
     }
@@ -453,12 +458,22 @@ impl AsyncGraphUpdater {
     }
 
     /// Remove a processed item from the pending queue.
+    ///
+    /// This operation is idempotent: deleting an already-deleted key is a no-op.
+    /// This is important because:
+    /// 1. Concurrent workers might process the same item
+    /// 2. Crash recovery might re-process items
+    ///
+    /// Note: Currently uses direct delete (not transactional). When Task 7.4
+    /// implements process_insert, both operations should be in a single
+    /// transaction for atomicity.
     fn clear_processed(storage: &Storage, key: &[u8]) -> anyhow::Result<()> {
         let txn_db = storage.transaction_db()?;
         let cf = txn_db
             .cf_handle(Pending::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
 
+        // Delete is idempotent in RocksDB - deleting a non-existent key is a no-op
         txn_db.delete_cf(cf, key)?;
         Ok(())
     }
