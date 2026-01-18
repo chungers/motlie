@@ -42,6 +42,7 @@
 //! - `REQUIREMENTS.md` - Functional and architectural requirements
 
 // Flat modules - Core types
+pub mod async_updater;
 pub mod config;
 pub mod distance;
 pub mod embedding;
@@ -111,6 +112,9 @@ pub use schema::{
     VecId, VectorCfKey, VectorCfValue, VectorElementType, Vectors, ALL_COLUMN_FAMILIES,
 };
 pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
+
+// Async updater for two-phase inserts (Phase 7)
+pub use async_updater::{AsyncGraphUpdater, AsyncUpdaterConfig};
 
 // Mutation types and infrastructure (following graph::mutation pattern)
 // Note: UpdateEdges, UpdateGraphMeta, EdgeOperation, GraphMetaUpdate are internal-only
