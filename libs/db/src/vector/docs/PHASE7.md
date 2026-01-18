@@ -79,9 +79,11 @@ CODEX (2026-01-17): All 7.1 deliverables implemented as claimed.
 
 ### Task 7.2: Async Updater Configuration
 
+**Status:** ✅ Complete
+
 **Goal:** Define configuration for the background graph updater.
 
-**File:** `libs/db/src/vector/async_updater.rs` (new file)
+**File:** `libs/db/src/vector/async_updater.rs`
 
 **Configuration Parameters:**
 
@@ -92,15 +94,19 @@ CODEX (2026-01-17): All 7.1 deliverables implemented as claimed.
 | `num_workers` | usize | 2 | Background worker thread count |
 | `ef_construction` | usize | 200 | ef parameter for greedy search |
 | `process_on_startup` | bool | true | Drain pending queue on startup |
+| `idle_sleep` | Duration | 10ms | Sleep when no pending items (added) |
 
 **Deliverables:**
-- [ ] 7.2.1: Create `AsyncUpdaterConfig` struct with defaults
-- [ ] 7.2.2: Add builder methods for configuration
-- [ ] 7.2.3: Document tuning guidance in doc comments
+- [x] 7.2.1: Create `AsyncUpdaterConfig` struct with defaults
+- [x] 7.2.2: Add builder methods (`with_batch_size`, `with_num_workers`, etc.)
+- [x] 7.2.3: Document tuning guidance in doc comments
+- [x] 7.2.4: Add `test_config_defaults` and `test_config_builder` tests
 
 ---
 
 ### Task 7.3: Async Updater Core Implementation
+
+**Status:** ✅ Infrastructure Complete (process_insert placeholder for Task 7.4)
 
 **Goal:** Implement the background worker that processes pending inserts.
 
@@ -112,29 +118,37 @@ AsyncGraphUpdater
   ├── storage: Arc<Storage>
   ├── config: AsyncUpdaterConfig
   ├── shutdown: Arc<AtomicBool>
+  ├── embedding_counter: Arc<AtomicU64>  (for round-robin)
+  ├── items_processed: Arc<AtomicU64>    (metrics)
+  ├── batches_processed: Arc<AtomicU64>  (metrics)
   └── workers: Vec<JoinHandle<()>>
       └── worker_loop()
-          ├── collect_batch() → Vec<(EmbeddingCode, VecId)>
-          ├── process_insert() → greedy_search + add_edges
+          ├── collect_batch() → Vec<(key, EmbeddingCode, VecId)>
+          ├── process_insert() → [placeholder for Task 7.4]
           └── clear_processed() → remove from pending CF
 ```
 
 **Deliverables:**
-- [ ] 7.3.1: Implement `AsyncGraphUpdater::start()` - spawn workers
-- [ ] 7.3.2: Implement `worker_loop()` - batch collection and processing
-- [ ] 7.3.3: Implement `collect_batch()` - read from pending CF with limit
-- [ ] 7.3.4: Implement `process_insert()` - greedy search + edge insertion
-- [ ] 7.3.5: Implement `clear_processed()` - remove from pending CF
-- [ ] 7.3.6: Implement `drain_pending()` - startup recovery
-- [ ] 7.3.7: Implement `shutdown()` - graceful worker termination
+- [x] 7.3.1: Implement `AsyncGraphUpdater::start()` - spawn workers
+- [x] 7.3.2: Implement `worker_loop()` - batch collection and processing
+- [x] 7.3.3: Implement `collect_batch()` - read from pending CF with limit
+- [ ] 7.3.4: Implement `process_insert()` - **placeholder, needs Task 7.4**
+- [x] 7.3.5: Implement `clear_processed()` - remove from pending CF
+- [x] 7.3.6: Implement `drain_pending_static()` - startup recovery
+- [x] 7.3.7: Implement `shutdown()` - graceful worker termination
+- [x] 7.3.8: Add metrics: `items_processed()`, `batches_processed()`
 
 **Key Implementation Notes:**
 - Workers use separate RocksDB transactions for isolation
-- Batch collection uses prefix scan on embedding code
-- Failed inserts logged but don't block other items
+- Batch collection uses iterator scan (round-robin prep via embedding_counter)
+- Failed inserts logged but not cleared from pending (retry on next batch)
 - Shutdown waits for in-flight batches to complete
+
 CODEX (2026-01-17): Prefix scan per-embedding can starve other embeddings; add a round-robin or global iterator over embedding codes for fairness.
+RESPONSE: Infrastructure added (embedding_counter for round-robin). Full round-robin requires embedding registry integration (future enhancement).
+
 CODEX (2026-01-17): Collect keys outside of write transactions and keep batch operations idempotent (skip if FLAG_PENDING cleared or FLAG_DELETED set) to tolerate crashes and retries.
+RESPONSE: Keys collected via read-only iterator. Idempotency check will be in process_insert (Task 7.4).
 
 ---
 
