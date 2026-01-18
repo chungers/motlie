@@ -987,6 +987,166 @@ async fn search_producer_workload(
 }
 
 // ============================================================================
+// Sync vs Async Insert Latency Comparison
+// ============================================================================
+
+/// Result of sync vs async insert latency comparison.
+#[derive(Debug, Clone)]
+pub struct SyncAsyncLatencyResult {
+    /// Number of vectors inserted for each mode
+    pub num_vectors: usize,
+    /// Sync insert latency P50 (immediate graph build)
+    pub sync_p50: Duration,
+    /// Sync insert latency P99
+    pub sync_p99: Duration,
+    /// Async insert latency P50 (deferred graph build)
+    pub async_p50: Duration,
+    /// Async insert latency P99
+    pub async_p99: Duration,
+    /// Speedup factor (sync P50 / async P50)
+    pub speedup_p50: f64,
+    /// Speedup factor (sync P99 / async P99)
+    pub speedup_p99: f64,
+}
+
+impl fmt::Display for SyncAsyncLatencyResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "=== Sync vs Async Insert Latency Comparison ===")?;
+        writeln!(f, "Vectors per mode: {}", self.num_vectors)?;
+        writeln!(f)?;
+        writeln!(f, "Sync Insert (immediate graph build):")?;
+        writeln!(f, "  P50: {:?}", self.sync_p50)?;
+        writeln!(f, "  P99: {:?}", self.sync_p99)?;
+        writeln!(f)?;
+        writeln!(f, "Async Insert (deferred graph build):")?;
+        writeln!(f, "  P50: {:?}", self.async_p50)?;
+        writeln!(f, "  P99: {:?}", self.async_p99)?;
+        writeln!(f)?;
+        writeln!(f, "Speedup:")?;
+        writeln!(f, "  P50: {:.1}x faster", self.speedup_p50)?;
+        writeln!(f, "  P99: {:.1}x faster", self.speedup_p99)?;
+        Ok(())
+    }
+}
+
+/// Compare sync vs async insert latency.
+///
+/// This benchmark measures the latency difference between:
+/// - **Sync insert** (build_index=true): Builds HNSW graph edges immediately
+/// - **Async insert** (build_index=false): Stores vector, adds to pending queue, returns immediately
+///
+/// # Arguments
+/// * `storage` - Vector storage
+/// * `embedding_code` - Embedding space code
+/// * `num_vectors` - Number of vectors to insert per mode
+/// * `dim` - Vector dimension
+///
+/// # Returns
+/// `SyncAsyncLatencyResult` with P50/P99 latency for both modes and speedup factors.
+///
+/// # Example
+///
+/// ```ignore
+/// let result = compare_sync_async_latency(storage.clone(), embedding_code, 1000, 128).await?;
+/// println!("{}", result);
+/// // Output:
+/// // Sync Insert (immediate graph build):
+/// //   P50: 5.2ms
+/// //   P99: 48.3ms
+/// // Async Insert (deferred graph build):
+/// //   P50: 0.4ms
+/// //   P99: 2.1ms
+/// // Speedup:
+/// //   P50: 13.0x faster
+/// //   P99: 23.0x faster
+/// ```
+pub async fn compare_sync_async_latency(
+    storage: Arc<Storage>,
+    embedding_code: EmbeddingCode,
+    num_vectors: usize,
+    dim: usize,
+) -> Result<SyncAsyncLatencyResult> {
+    // Create writer and spawn consumer
+    let (writer, receiver) = create_writer(WriterConfig::default());
+    let _consumer_handle = spawn_mutation_consumer_with_storage_autoreg(
+        receiver,
+        WriterConfig::default(),
+        storage.clone(),
+    );
+
+    // Get embedding from registry
+    let embedding = storage
+        .cache()
+        .get_by_code(embedding_code)
+        .ok_or_else(|| anyhow::anyhow!("Embedding not found for code {}", embedding_code))?;
+
+    // Metrics for sync inserts
+    let sync_metrics = ConcurrentMetrics::new();
+    let mut rng = StdRng::seed_from_u64(42);
+
+    // Phase 1: Sync inserts (immediate graph build)
+    tracing::info!(num_vectors, "Starting sync insert phase (immediate graph build)");
+    for _ in 0..num_vectors {
+        let vector: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let id = Id::new();
+
+        let op_start = Instant::now();
+        InsertVector::new(&embedding, id, vector)
+            .immediate() // build_index = true (sync)
+            .run(&writer)
+            .await?;
+        sync_metrics.record_insert(op_start.elapsed());
+    }
+    writer.flush().await?;
+
+    // Metrics for async inserts
+    let async_metrics = ConcurrentMetrics::new();
+    let mut rng = StdRng::seed_from_u64(43); // Different seed
+
+    // Phase 2: Async inserts (deferred graph build)
+    tracing::info!(num_vectors, "Starting async insert phase (deferred graph build)");
+    for _ in 0..num_vectors {
+        let vector: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+        let id = Id::new();
+
+        let op_start = Instant::now();
+        // Default is immediate_index=false (async - defers graph build)
+        InsertVector::new(&embedding, id, vector)
+            .run(&writer)
+            .await?;
+        async_metrics.record_insert(op_start.elapsed());
+    }
+    writer.flush().await?;
+
+    // Calculate results
+    let sync_p50 = sync_metrics.insert_percentile(0.50);
+    let sync_p99 = sync_metrics.insert_percentile(0.99);
+    let async_p50 = async_metrics.insert_percentile(0.50);
+    let async_p99 = async_metrics.insert_percentile(0.99);
+
+    let speedup_p50 = if async_p50.as_nanos() > 0 {
+        sync_p50.as_nanos() as f64 / async_p50.as_nanos() as f64
+    } else {
+        f64::INFINITY
+    };
+    let speedup_p99 = if async_p99.as_nanos() > 0 {
+        sync_p99.as_nanos() as f64 / async_p99.as_nanos() as f64
+    } else {
+        f64::INFINITY
+    };
+
+    Ok(SyncAsyncLatencyResult {
+        num_vectors,
+        sync_p50,
+        sync_p99,
+        async_p50,
+        async_p99,
+        speedup_p50,
+        speedup_p99,
+    })
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

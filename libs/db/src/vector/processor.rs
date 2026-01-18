@@ -116,6 +116,24 @@ impl Processor {
         )
     }
 
+    /// Create a new Processor with a shared navigation cache.
+    ///
+    /// Use this when the navigation cache needs to be shared with other components
+    /// (e.g., AsyncGraphUpdater for two-phase inserts).
+    pub fn new_with_nav_cache(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        nav_cache: Arc<NavigationCache>,
+    ) -> Self {
+        Self::with_config_and_nav_cache(
+            storage,
+            registry,
+            RaBitQConfig::default(),
+            hnsw::Config::default(),
+            nav_cache,
+        )
+    }
+
     /// Create a Processor with custom RaBitQ configuration.
     pub fn with_rabitq_config(
         storage: Arc<Storage>,
@@ -132,6 +150,23 @@ impl Processor {
         rabitq_config: RaBitQConfig,
         hnsw_config: hnsw::Config,
     ) -> Self {
+        Self::with_config_and_nav_cache(
+            storage,
+            registry,
+            rabitq_config,
+            hnsw_config,
+            Arc::new(NavigationCache::new()),
+        )
+    }
+
+    /// Create a Processor with custom configurations and shared navigation cache.
+    pub fn with_config_and_nav_cache(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        rabitq_config: RaBitQConfig,
+        hnsw_config: hnsw::Config,
+        nav_cache: Arc<NavigationCache>,
+    ) -> Self {
         Self {
             storage,
             registry,
@@ -139,7 +174,7 @@ impl Processor {
             rabitq_encoders: DashMap::new(),
             rabitq_config,
             hnsw_indices: DashMap::new(),
-            nav_cache: Arc::new(NavigationCache::new()),
+            nav_cache,
             hnsw_config,
             code_cache: Arc::new(BinaryCodeCache::new()),
         }

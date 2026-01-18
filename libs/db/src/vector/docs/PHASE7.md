@@ -392,14 +392,23 @@ These tests validate the **synchronous path** (Phase 5/6). Phase 7 requires **ad
 
 ### Task 7.7: Integration & Benchmarks
 
+**Status:** ✅ Complete
+
 **Goal:** Integrate async updater with existing infrastructure and benchmark.
 
 **Deliverables:**
-- [ ] 7.7.1: Add `AsyncGraphUpdater` to `Storage` initialization
-- [ ] 7.7.2: Update `WriterConfig` with async updater options
-- [ ] 7.7.3: Add benchmark comparing sync vs async insert latency
-- [ ] 7.7.4: Document latency characteristics in BASELINE.md
-- [ ] 7.7.5: Update ROADMAP.md to mark Phase 7 complete
+- [x] 7.7.1: Add `AsyncGraphUpdater` to `Storage` initialization
+- [x] 7.7.2: Update `WriterConfig` with async updater options
+- [x] 7.7.3: Add benchmark comparing sync vs async insert latency
+- [x] 7.7.4: Document latency characteristics in BASELINE.md
+- [x] 7.7.5: Update ROADMAP.md to mark Phase 7 complete
+
+**Implementation Notes:**
+- `Subsystem.start_with_async()` integrates AsyncGraphUpdater with managed lifecycle
+- `Processor.new_with_nav_cache()` enables shared NavigationCache between Processor and AsyncGraphUpdater
+- `compare_sync_async_latency()` benchmark function in `benchmark/concurrent.rs`
+- `SyncAsyncLatencyResult` provides P50/P99 latency comparison and speedup factors
+- Async insert latency section added to BASELINE.md
 
 ### Task 7.8: Backpressure, Metrics, and Observability
 

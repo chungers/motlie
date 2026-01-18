@@ -11,6 +11,8 @@ use crate::rocksdb::{prewarm_cf, BlockCacheConfig, ColumnFamily, ColumnFamilyCon
 use crate::SubsystemProvider;
 use motlie_core::telemetry::SubsystemInfo;
 
+use super::async_updater::{AsyncGraphUpdater, AsyncUpdaterConfig};
+use super::cache::NavigationCache;
 use super::processor::Processor;
 use super::reader::{create_search_reader, ReaderConfig, SearchReader, spawn_consumers_with_processor};
 use super::registry::EmbeddingRegistry;
@@ -49,6 +51,12 @@ pub struct Subsystem {
     /// Optional writer for graceful shutdown flush.
     /// Registered via `set_writer()` after storage initialization.
     writer: RwLock<Option<Writer>>,
+    /// Optional async graph updater for two-phase inserts.
+    /// Registered via `start_with_async()` when async updates are enabled.
+    async_updater: RwLock<Option<AsyncGraphUpdater>>,
+    /// Navigation cache for HNSW operations.
+    /// Shared between Processor and AsyncGraphUpdater.
+    nav_cache: Arc<NavigationCache>,
 }
 
 impl Subsystem {
@@ -58,6 +66,8 @@ impl Subsystem {
             cache: Arc::new(EmbeddingRegistry::new()),
             prewarm_config: EmbeddingRegistryConfig::default(),
             writer: RwLock::new(None),
+            async_updater: RwLock::new(None),
+            nav_cache: Arc::new(NavigationCache::default()),
         }
     }
 
@@ -169,6 +179,10 @@ impl Subsystem {
     /// spawn_mutation_consumer_with_storage(...);
     /// // You are responsible for calling writer.flush() before shutdown
     /// ```
+    ///
+    /// # See Also
+    ///
+    /// - [`start_with_async`] - Start with async graph updater for two-phase inserts
     pub fn start(
         &self,
         storage: Arc<super::Storage>,
@@ -176,8 +190,81 @@ impl Subsystem {
         reader_config: ReaderConfig,
         num_query_workers: usize,
     ) -> (Writer, SearchReader) {
+        self.start_with_async(storage, writer_config, reader_config, num_query_workers, None)
+    }
+
+    /// Start the vector subsystem with async graph updater for two-phase inserts.
+    ///
+    /// This extends [`start`] with an optional async graph updater that enables
+    /// low-latency inserts by decoupling vector storage from HNSW graph construction.
+    ///
+    /// ## Two-Phase Insert Pattern
+    ///
+    /// When async updater is enabled:
+    /// - **Phase 1 (sync, <5ms):** Store vector data + metadata, add to pending queue
+    /// - **Phase 2 (async, background):** Workers build HNSW graph edges
+    ///
+    /// Vectors are immediately searchable via brute-force fallback on the pending
+    /// queue, then transition to HNSW search once graph edges are built.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Vector storage instance
+    /// * `writer_config` - Configuration for mutation writer
+    /// * `reader_config` - Configuration for query reader
+    /// * `num_query_workers` - Number of parallel query workers
+    /// * `async_config` - Optional async updater config; None disables async updates
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (Writer, SearchReader) for sending mutations and queries.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use motlie_db::vector::{Subsystem, WriterConfig, ReaderConfig, AsyncUpdaterConfig};
+    ///
+    /// // Start with async graph updater for low-latency inserts
+    /// let async_config = AsyncUpdaterConfig::default()
+    ///     .with_num_workers(4)
+    ///     .with_batch_size(200);
+    ///
+    /// let (writer, search_reader) = subsystem.start_with_async(
+    ///     storage.clone(),
+    ///     WriterConfig::default(),
+    ///     ReaderConfig::default(),
+    ///     4,
+    ///     Some(async_config),
+    /// );
+    ///
+    /// // Inserts now use two-phase pattern (fast sync + async graph build)
+    /// InsertVector::new(&embedding, id, vec)
+    ///     .build_index(false)  // Use async path
+    ///     .run(&writer).await?;
+    /// ```
+    ///
+    /// # Lifecycle
+    ///
+    /// When `on_shutdown()` is called:
+    /// 1. Async graph updater is shut down gracefully (waits for in-flight batches)
+    /// 2. Pending mutations are flushed
+    ///
+    /// This ensures all pending graph updates complete before storage closes.
+    pub fn start_with_async(
+        &self,
+        storage: Arc<super::Storage>,
+        writer_config: WriterConfig,
+        reader_config: ReaderConfig,
+        num_query_workers: usize,
+        async_config: Option<AsyncUpdaterConfig>,
+    ) -> (Writer, SearchReader) {
         // Create processor (shared by mutation consumer and query consumers)
-        let processor = Arc::new(Processor::new(storage, self.cache.clone()));
+        // Processor uses the shared nav_cache for HNSW operations
+        let processor = Arc::new(Processor::new_with_nav_cache(
+            storage.clone(),
+            self.cache.clone(),
+            self.nav_cache.clone(),
+        ));
 
         // Create and spawn mutation consumer
         let (writer, mutation_receiver) = create_writer(writer_config.clone());
@@ -196,7 +283,26 @@ impl Subsystem {
         // Register writer for shutdown flush
         self.set_writer(writer.clone());
 
+        // Start async graph updater if configured
+        if let Some(config) = async_config {
+            let updater = AsyncGraphUpdater::start(
+                storage,
+                self.cache.clone(),
+                self.nav_cache.clone(),
+                config,
+            );
+            *self.async_updater.write().expect("async_updater lock poisoned") = Some(updater);
+        }
+
         (writer, search_reader)
+    }
+
+    /// Get reference to the navigation cache.
+    ///
+    /// The navigation cache is shared between the Processor and AsyncGraphUpdater
+    /// for HNSW operations.
+    pub fn nav_cache(&self) -> &Arc<NavigationCache> {
+        &self.nav_cache
     }
 
     /// Internal method to build CF descriptors.
@@ -296,6 +402,14 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
 
     fn on_shutdown(&self) -> Result<()> {
         tracing::info!(subsystem = "vector", "Shutting down");
+
+        // Shutdown async graph updater first (graceful - waits for in-flight batches)
+        // This must happen before flushing mutations to ensure all pending inserts are processed.
+        if let Some(updater) = self.async_updater.write().expect("async_updater lock poisoned").take() {
+            tracing::debug!(subsystem = "vector", "Shutting down async graph updater");
+            updater.shutdown();
+            tracing::debug!(subsystem = "vector", "Async graph updater shut down");
+        }
 
         // Best-effort flush of pending mutations
         if let Some(writer) = self.writer.read().expect("writer lock poisoned").as_ref() {

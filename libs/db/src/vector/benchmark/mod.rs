@@ -102,6 +102,7 @@ pub use metadata::{BenchmarkMetadata, GroundTruthCache};
 
 // Re-exports for public API - Concurrent benchmarks
 pub use concurrent::{
-    save_benchmark_results_csv, BenchConfig, BenchResult, ConcurrentBenchmark, ConcurrentMetrics,
-    DatasetSource, MetricsSummary, SearchMode,
+    compare_sync_async_latency, save_benchmark_results_csv, BenchConfig, BenchResult,
+    ConcurrentBenchmark, ConcurrentMetrics, DatasetSource, MetricsSummary, SearchMode,
+    SyncAsyncLatencyResult,
 };
