@@ -1200,6 +1200,26 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for Pending {
 }
 
 impl Pending {
+    /// Create a pending key with the current timestamp.
+    ///
+    /// Keys are ordered by (embedding, timestamp, vec_id) for FIFO processing
+    /// within each embedding. Use `prefix_for_embedding()` for iteration.
+    pub fn key_now(embedding: EmbeddingCode, vec_id: VecId) -> PendingCfKey {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        PendingCfKey(embedding, TimestampMilli(timestamp), vec_id)
+    }
+
+    /// Get the 8-byte prefix for iterating all pending items for an embedding.
+    ///
+    /// Use with RocksDB prefix iterator to scan pending queue per embedding.
+    pub fn prefix_for_embedding(embedding: EmbeddingCode) -> [u8; 8] {
+        embedding.to_be_bytes()
+    }
+
     pub fn key_to_bytes(key: &PendingCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(20);
         bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -1297,5 +1317,40 @@ mod tests {
         assert_eq!(parsed.0, 1);
         assert_eq!(parsed.1, TimestampMilli(1000));
         assert_eq!(parsed.2, 42);
+    }
+
+    #[test]
+    fn test_pending_key_now() {
+        let embedding = 42u64;
+        let vec_id = 100u32;
+
+        let key1 = Pending::key_now(embedding, vec_id);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let key2 = Pending::key_now(embedding, vec_id + 1);
+
+        // Same embedding
+        assert_eq!(key1.0, embedding);
+        assert_eq!(key2.0, embedding);
+
+        // Timestamps should be increasing (FIFO order)
+        assert!(key2.1 .0 >= key1.1 .0, "timestamps should be monotonic");
+
+        // Vec IDs preserved
+        assert_eq!(key1.2, vec_id);
+        assert_eq!(key2.2, vec_id + 1);
+    }
+
+    #[test]
+    fn test_pending_prefix_for_embedding() {
+        let embedding = 0x0102030405060708u64;
+        let prefix = Pending::prefix_for_embedding(embedding);
+
+        // Prefix should be big-endian embedding bytes
+        assert_eq!(prefix, [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+
+        // Key should start with this prefix
+        let key = Pending::key_now(embedding, 42);
+        let key_bytes = Pending::key_to_bytes(&key);
+        assert_eq!(&key_bytes[0..8], &prefix);
     }
 }
