@@ -145,6 +145,7 @@ AsyncGraphUpdater
 - Failed inserts logged but not cleared from pending (retry on next batch)
 - Shutdown waits for in-flight batches to complete
 - Delete operations are idempotent (safe for concurrent workers / crash recovery)
+CODEX (2026-01-17): 7.3 infrastructure is usable, but I do not certify Task 7.3 as complete until fairness (round-robin or explicit policy) is implemented or explicitly accepted as a non-goal. Ready to proceed to Task 7.4 if we accept this limitation for now.
 
 CODEX (2026-01-17): `collect_batch()` iterates the entire Pending CF and ignores `embedding_counter`; round-robin is not implemented. Update the note or implement fairness before certifying 7.3.
 RESPONSE: Fixed. Updated docs to clarify round-robin is not yet implemented. `embedding_counter` marked as reserved for future use.
