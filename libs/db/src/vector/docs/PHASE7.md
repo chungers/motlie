@@ -44,12 +44,15 @@ Phase 2 (Asynchronous, background):
 - Value: empty (vector data already in Vectors CF)
 - Timestamp enables FIFO ordering for fair processing
 - Survives crashes for recovery
+CODEX (2026-01-17): `Pending` CF already exists in `schema.rs` with key `(embedding_code, TimestampMilli, vec_id)`; align the design (timestamp units + naming) and avoid adding a duplicate CF.
+CODEX (2026-01-17): FIFO ordering is only per-embedding with the current key layout; clarify cross-embedding fairness or add a batching strategy that round-robins embeddings.
 
 **Deliverables:**
 - [ ] 7.1.1: Add `PendingInserts` column family struct
 - [ ] 7.1.2: Implement `key()` and `parse_key()` methods
 - [ ] 7.1.3: Register CF in storage initialization
 - [ ] 7.1.4: Add unit tests for key encoding/decoding
+ - [ ] 7.1.5: Reconcile existing `Pending` CF naming/semantics (TimestampMilli vs timestamp_us) and update docs/tests to match.
 
 **Validation:**
 ```rust
@@ -122,6 +125,8 @@ AsyncGraphUpdater
 - Batch collection uses prefix scan on embedding code
 - Failed inserts logged but don't block other items
 - Shutdown waits for in-flight batches to complete
+CODEX (2026-01-17): Prefix scan per-embedding can starve other embeddings; add a round-robin or global iterator over embedding codes for fairness.
+CODEX (2026-01-17): Collect keys outside of write transactions and keep batch operations idempotent (skip if FLAG_PENDING cleared or FLAG_DELETED set) to tolerate crashes and retries.
 
 ---
 
@@ -140,6 +145,7 @@ AsyncGraphUpdater
    - Add to pending queue
    - Skip HNSW edge construction
 3. Search handles pending vectors via brute-force fallback
+CODEX (2026-01-17): Brute-force fallback must be bounded (e.g., cap pending scan size or time) to avoid O(N) degradation when backlog grows; add an explicit limit and metrics.
 
 **Deliverables:**
 - [ ] 7.4.1: Add `immediate_graph` flag to `InsertVector`
@@ -173,6 +179,8 @@ const FLAG_PENDING: u8 = 0x02;  // Waiting for graph construction
 - [ ] 7.5.3: Implement `remove_from_pending()` helper
 - [ ] 7.5.4: Update search to skip deleted nodes
 - [ ] 7.5.5: Add ID recycling to allocator
+ - [ ] 7.5.6: Guard ID reuse until all stale edges are cleaned (or mark tombstones non-reusable) to avoid reusing vec_ids that still appear in HNSW edges.
+CODEX (2026-01-17): Immediate ID reuse is unsafe while stale edges can point to deleted vec_ids; define an explicit policy (tombstone-only, delayed reuse, or full edge cleanup).
 
 ---
 
@@ -225,6 +233,7 @@ These tests validate the **synchronous path** (Phase 5/6). Phase 7 requires **ad
 - [ ] 7.6.5: Implement concurrent insert/worker test
 - [ ] 7.6.6: Implement graceful shutdown test
 - [ ] 7.6.7: Implement partial batch idempotency test
+ - [ ] 7.6.8: Add backlog bound test (pending scan limit respected under large queue).
 
 ---
 
@@ -238,6 +247,15 @@ These tests validate the **synchronous path** (Phase 5/6). Phase 7 requires **ad
 - [ ] 7.7.3: Add benchmark comparing sync vs async insert latency
 - [ ] 7.7.4: Document latency characteristics in BASELINE.md
 - [ ] 7.7.5: Update ROADMAP.md to mark Phase 7 complete
+
+### Task 7.8: Backpressure, Metrics, and Observability
+
+**Goal:** Prevent unbounded queue growth and expose health signals.
+
+**Deliverables:**
+- [ ] 7.8.1: Add pending queue size metric (gauge) and worker throughput counters
+- [ ] 7.8.2: Enforce backpressure when pending queue exceeds threshold (configurable)
+- [ ] 7.8.3: Surface backlog depth and drain rate in logs/metrics
 
 ---
 
