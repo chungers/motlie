@@ -7,15 +7,15 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::rocksdb::{ColumnFamily, ColumnFamilySerde};
+use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use crate::vector::cache::BinaryCodeCache;
 use crate::vector::hnsw::{self, CacheUpdate};
 use crate::vector::processor::Processor;
 use crate::vector::schema::{
     AdcCorrection, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpecCfKey,
     EmbeddingSpecs, GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField, IdForward,
-    IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue, VecId,
-    VectorCfKey, Vectors,
+    IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue, Pending, VecId,
+    VecMeta, VecMetaCfKey, VecMetaCfValue, VecMetadata, VectorCfKey, Vectors,
 };
 use crate::Id;
 
@@ -228,8 +228,10 @@ pub fn vector(
     // 9. Validate/store spec hash (drift detection)
     validate_or_store_spec_hash(txn, txn_db, embedding)?;
 
-    // 10. Build HNSW index (if requested)
+    // 10. Build HNSW index or queue for async processing
     let nav_cache_update = if build_index {
+        // Synchronous path: build HNSW graph immediately
+        // (VecMeta is written inside hnsw::insert with max_layer and flags=0)
         if let Some(index) = processor.get_or_create_index(embedding) {
             Some(hnsw::insert(
                 &index,
@@ -243,6 +245,28 @@ pub fn vector(
             None
         }
     } else {
+        // Async path: store with FLAG_PENDING and add to pending queue
+        // Vector data is stored (steps 5-8), graph construction deferred
+
+        // Store VecMeta with FLAG_PENDING
+        let vec_meta_cf = txn_db
+            .cf_handle(VecMeta::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("VecMeta CF not found"))?;
+        let meta_key = VecMetaCfKey(embedding, vec_id);
+        let meta_value = VecMetaCfValue(VecMetadata::pending());
+        txn.put_cf(
+            &vec_meta_cf,
+            VecMeta::key_to_bytes(&meta_key),
+            VecMeta::value_to_bytes(&meta_value)?,
+        )?;
+
+        // Add to pending queue for async graph construction
+        let pending_cf = txn_db
+            .cf_handle(Pending::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
+        let pending_key = Pending::key_now(embedding, vec_id);
+        txn.put_cf(&pending_cf, Pending::key_to_bytes(&pending_key), &[])?;
+
         None
     };
 
@@ -428,19 +452,20 @@ pub fn batch(
         }
     }
 
-    // 9. Build HNSW index (if requested) - after all vectors are stored
-    //
-    // IMPORTANT: We use insert_for_batch with BatchEdgeCache which:
-    // 1. Uses transaction-aware reads to access uncommitted vector data
-    // 2. Uses batch edge cache to see edges from earlier inserts in the same batch
-    //    (RocksDB transactions don't expose pending merge operands to reads)
-    // 3. Applies cache updates incrementally so subsequent inserts see the entry point
-    //
-    // If the transaction fails after we've applied some cache updates, the nav_cache
-    // becomes stale. However, on next access, get_or_init_navigation() will reload
-    // from storage and correct itself.
+    // 9. Build HNSW index or queue for async processing - after all vectors are stored
     let mut nav_cache_updates = Vec::new();
     if build_index {
+        // Synchronous path: build HNSW graph immediately
+        //
+        // IMPORTANT: We use insert_for_batch with BatchEdgeCache which:
+        // 1. Uses transaction-aware reads to access uncommitted vector data
+        // 2. Uses batch edge cache to see edges from earlier inserts in the same batch
+        //    (RocksDB transactions don't expose pending merge operands to reads)
+        // 3. Applies cache updates incrementally so subsequent inserts see the entry point
+        //
+        // If the transaction fails after we've applied some cache updates, the nav_cache
+        // becomes stale. However, on next access, get_or_init_navigation() will reload
+        // from storage and correct itself.
         if let Some(index) = processor.get_or_create_index(embedding) {
             // Create batch edge cache to track edges added during this batch
             let mut batch_edge_cache = hnsw::BatchEdgeCache::new();
@@ -461,6 +486,31 @@ pub fn batch(
                 update.clone().apply(index.nav_cache());
                 nav_cache_updates.push(update);
             }
+        }
+    } else {
+        // Async path: store with FLAG_PENDING and add to pending queue
+        // Vector data is stored (steps 5-8), graph construction deferred
+
+        let vec_meta_cf = txn_db
+            .cf_handle(VecMeta::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("VecMeta CF not found"))?;
+        let pending_cf = txn_db
+            .cf_handle(Pending::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
+
+        for vec_id in &vec_ids {
+            // Store VecMeta with FLAG_PENDING
+            let meta_key = VecMetaCfKey(embedding, *vec_id);
+            let meta_value = VecMetaCfValue(VecMetadata::pending());
+            txn.put_cf(
+                &vec_meta_cf,
+                VecMeta::key_to_bytes(&meta_key),
+                VecMeta::value_to_bytes(&meta_value)?,
+            )?;
+
+            // Add to pending queue for async graph construction
+            let pending_key = Pending::key_now(embedding, *vec_id);
+            txn.put_cf(&pending_cf, Pending::key_to_bytes(&pending_key), &[])?;
         }
     }
 

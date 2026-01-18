@@ -42,8 +42,14 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, warn};
 
-use crate::rocksdb::ColumnFamily;
-use crate::vector::schema::{EmbeddingCode, Pending, VecId};
+use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
+use crate::vector::cache::NavigationCache;
+use crate::vector::hnsw;
+use crate::vector::registry::EmbeddingRegistry;
+use crate::vector::schema::{
+    EmbeddingCode, EmbeddingSpecCfKey, EmbeddingSpecs, Pending, VecId, VecMeta, VecMetaCfKey,
+    VectorCfKey, Vectors,
+};
 use crate::vector::Storage;
 
 // ============================================================================
@@ -178,6 +184,8 @@ impl AsyncUpdaterConfig {
 /// idempotent: re-processing an item that was partially processed is safe.
 pub struct AsyncGraphUpdater {
     storage: Arc<Storage>,
+    registry: Arc<EmbeddingRegistry>,
+    nav_cache: Arc<NavigationCache>,
     config: AsyncUpdaterConfig,
     shutdown: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
@@ -192,9 +200,20 @@ pub struct AsyncGraphUpdater {
 impl AsyncGraphUpdater {
     /// Start the async updater with worker threads.
     ///
+    /// # Arguments
+    /// * `storage` - Storage for RocksDB access
+    /// * `registry` - Embedding registry for looking up specs
+    /// * `nav_cache` - Navigation cache for HNSW operations
+    /// * `config` - Updater configuration
+    ///
     /// If `config.process_on_startup` is true, drains any existing pending
     /// items before starting normal worker operation.
-    pub fn start(storage: Arc<Storage>, config: AsyncUpdaterConfig) -> Self {
+    pub fn start(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        nav_cache: Arc<NavigationCache>,
+        config: AsyncUpdaterConfig,
+    ) -> Self {
         let shutdown = Arc::new(AtomicBool::new(false));
         let embedding_counter = Arc::new(AtomicU64::new(0));
         let items_processed = Arc::new(AtomicU64::new(0));
@@ -203,7 +222,9 @@ impl AsyncGraphUpdater {
         // Drain pending queue on startup if configured
         if config.process_on_startup {
             info!("AsyncGraphUpdater: draining pending queue on startup");
-            if let Err(e) = Self::drain_pending_static(&storage, &config) {
+            if let Err(e) =
+                Self::drain_pending_static(&storage, &registry, &nav_cache, &config)
+            {
                 error!(error = %e, "Failed to drain pending queue on startup");
             }
         }
@@ -212,6 +233,8 @@ impl AsyncGraphUpdater {
         let workers = (0..config.num_workers)
             .map(|worker_id| {
                 let storage = Arc::clone(&storage);
+                let registry = Arc::clone(&registry);
+                let nav_cache = Arc::clone(&nav_cache);
                 let config = config.clone();
                 let shutdown = Arc::clone(&shutdown);
                 let embedding_counter = Arc::clone(&embedding_counter);
@@ -222,6 +245,8 @@ impl AsyncGraphUpdater {
                     Self::worker_loop(
                         worker_id,
                         storage,
+                        registry,
+                        nav_cache,
                         config,
                         shutdown,
                         embedding_counter,
@@ -240,6 +265,8 @@ impl AsyncGraphUpdater {
 
         Self {
             storage,
+            registry,
+            nav_cache,
             config,
             shutdown,
             workers,
@@ -296,6 +323,8 @@ impl AsyncGraphUpdater {
     fn worker_loop(
         worker_id: usize,
         storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        nav_cache: Arc<NavigationCache>,
         config: AsyncUpdaterConfig,
         shutdown: Arc<AtomicBool>,
         embedding_counter: Arc<AtomicU64>,
@@ -309,8 +338,7 @@ impl AsyncGraphUpdater {
                 break;
             }
 
-            // Collect a batch of pending inserts
-            // Note: Full round-robin not yet implemented - currently scans from start
+            // Collect a batch of pending inserts using round-robin across embeddings
             let batch = match Self::collect_batch(
                 &storage,
                 &config,
@@ -344,7 +372,14 @@ impl AsyncGraphUpdater {
                 // (FLAG_PENDING cleared or FLAG_DELETED set)
                 // This is checked inside process_insert
 
-                if let Err(e) = Self::process_insert(&storage, &config, *embedding, *vec_id) {
+                if let Err(e) = Self::process_insert(
+                    &storage,
+                    &registry,
+                    &nav_cache,
+                    &config,
+                    *embedding,
+                    *vec_id,
+                ) {
                     warn!(
                         worker_id,
                         embedding,
@@ -533,21 +568,112 @@ impl AsyncGraphUpdater {
     ///
     /// This function is idempotent: if the item was already processed
     /// (edges already built) or deleted, it safely skips.
+    ///
+    /// The processing is done in a transaction for atomicity:
+    /// 1. Check if vector still exists and is pending (not deleted)
+    /// 2. Load vector data from Vectors CF
+    /// 3. Build HNSW graph edges
+    /// 4. Update VecMeta to clear FLAG_PENDING
     fn process_insert(
-        _storage: &Storage,
-        _config: &AsyncUpdaterConfig,
+        storage: &Storage,
+        registry: &EmbeddingRegistry,
+        nav_cache: &Arc<NavigationCache>,
+        config: &AsyncUpdaterConfig,
         embedding: EmbeddingCode,
         vec_id: VecId,
     ) -> anyhow::Result<()> {
-        // TODO (Task 7.4): Implement actual edge building
-        // 1. Check if vector still exists and is pending (not deleted)
-        // 2. Load vector data from Vectors CF
-        // 3. Call HNSW greedy search to find neighbors
-        // 4. Build bidirectional edges
-        // 5. Clear FLAG_PENDING from VecMeta
+        let txn_db = storage.transaction_db()?;
+        let txn = txn_db.transaction();
 
-        debug!(embedding, vec_id, "process_insert placeholder");
+        // 1. Check if vector still exists and is pending
+        let vec_meta_cf = txn_db
+            .cf_handle(VecMeta::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("VecMeta CF not found"))?;
+        let meta_key = VecMetaCfKey(embedding, vec_id);
+        let meta_bytes = match txn.get_cf(&vec_meta_cf, VecMeta::key_to_bytes(&meta_key))? {
+            Some(bytes) => bytes,
+            None => {
+                // Vector metadata doesn't exist - skip (may have been deleted)
+                debug!(embedding, vec_id, "Vector metadata not found, skipping");
+                return Ok(());
+            }
+        };
 
+        let meta = VecMeta::value_from_bytes(&meta_bytes)?;
+        if !meta.0.is_pending() {
+            // Already processed - idempotent skip
+            debug!(embedding, vec_id, "Vector already processed, skipping");
+            return Ok(());
+        }
+        if meta.0.is_deleted() {
+            // Deleted - skip
+            debug!(embedding, vec_id, "Vector deleted, skipping");
+            return Ok(());
+        }
+
+        // 2. Load vector data
+        let vectors_cf = txn_db
+            .cf_handle(Vectors::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+        let vec_key = VectorCfKey(embedding, vec_id);
+        let vec_bytes = txn
+            .get_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?
+            .ok_or_else(|| anyhow::anyhow!("Vector data not found for {:?}", vec_id))?;
+
+        // Get embedding spec to determine vector format
+        let emb = registry
+            .get_by_code(embedding)
+            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", embedding))?;
+        let storage_type = emb.storage_type();
+        let vector = Vectors::value_from_bytes_typed(&vec_bytes, storage_type)?;
+
+        // 3. Build HNSW index
+        // Create an Index for this embedding
+        let specs_cf = txn_db
+            .cf_handle(EmbeddingSpecs::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
+        let spec_key = EmbeddingSpecCfKey(embedding);
+        let spec_bytes = txn
+            .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
+            .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
+        let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
+
+        // Build HNSW config from spec
+        let m = embedding_spec.hnsw_m as usize;
+        let hnsw_config = hnsw::Config {
+            enabled: true,
+            dim: emb.dim() as usize,
+            m,
+            m_max: m * 2,
+            m_max_0: m * 2,
+            ef_construction: config.ef_construction,
+            m_l: 1.0 / (m as f32).ln(),
+            max_level: None,
+            batch_threshold: 64, // Default, effectively disables batching
+        };
+
+        let index = hnsw::Index::with_storage_type(
+            embedding,
+            emb.distance(),
+            storage_type,
+            hnsw_config,
+            Arc::clone(nav_cache),
+        );
+
+        // Call hnsw::insert to build edges
+        let cache_update = hnsw::insert(&index, &txn, &txn_db, storage, vec_id, &vector)?;
+
+        // Note: hnsw::insert already updates VecMeta with max_layer and flags=0
+        // But we need to make sure FLAG_PENDING is cleared. The hnsw::insert
+        // creates new VecMeta with flags=0, so FLAG_PENDING will be cleared.
+
+        // 4. Commit transaction
+        txn.commit()?;
+
+        // 5. Apply cache update
+        cache_update.apply(nav_cache);
+
+        debug!(embedding, vec_id, "Processed pending insert");
         Ok(())
     }
 
@@ -573,7 +699,12 @@ impl AsyncGraphUpdater {
     }
 
     /// Drain all pending items (used for startup recovery).
-    fn drain_pending_static(storage: &Storage, config: &AsyncUpdaterConfig) -> anyhow::Result<()> {
+    fn drain_pending_static(
+        storage: &Storage,
+        registry: &EmbeddingRegistry,
+        nav_cache: &Arc<NavigationCache>,
+        config: &AsyncUpdaterConfig,
+    ) -> anyhow::Result<()> {
         let embedding_counter = AtomicU64::new(0);
 
         loop {
@@ -585,7 +716,9 @@ impl AsyncGraphUpdater {
             info!(batch_size = batch.len(), "Draining pending batch");
 
             for (key, embedding, vec_id) in &batch {
-                if let Err(e) = Self::process_insert(storage, config, *embedding, *vec_id) {
+                if let Err(e) =
+                    Self::process_insert(storage, registry, nav_cache, config, *embedding, *vec_id)
+                {
                     warn!(embedding, vec_id, error = %e, "Failed to process during drain");
                     continue;
                 }
