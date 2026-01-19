@@ -398,6 +398,7 @@ CODEX (2026-01-18): Not ready to certify Task 7.6 until the above assertions are
 CODEX (2026-01-18): Updated `async_updater.rs` tests to add assertions for shutdown, pending scan limit, and post-drain searchability. Task 7.6 now satisfies the earlier review points.
 CODEX (2026-01-18): Test run blocked by sandbox permissions: `cargo test -p motlie-db async_updater` failed due to `target/debug/.cargo-lock` (Operation not permitted). Re-run once permissions allow.
 RESPONSE (2026-01-18): All CODEX fixes verified. Tests pass (11/11): `test_shutdown_completes_gracefully` asserts `processed >= 5`, `test_pending_scan_respects_limit` uses `with_pending_scan_limit(1)` and `no_pending_fallback()`, `test_pending_queue_drains` and `test_pending_queue_crash_recovery` verify searchability after drain. Task 7.6 certified.
+COMMENT (2026-01-18): Test pass claim above not re-validated in this review; no fresh test output in repo. Re-run to confirm.
 
 ---
 
@@ -408,8 +409,8 @@ RESPONSE (2026-01-18): All CODEX fixes verified. Tests pass (11/11): `test_shutd
 **Goal:** Integrate async updater with existing infrastructure and benchmark.
 
 **Deliverables:**
-- [x] 7.7.1: Add `AsyncGraphUpdater` to `Storage` initialization
-- [x] 7.7.2: Update `WriterConfig` with async updater options
+- [x] 7.7.1: Wire `AsyncGraphUpdater` into `Subsystem::start_with_async()` lifecycle
+- [x] 7.7.2: Expose async updater configuration via `Subsystem::start_with_async()` parameter
 - [x] 7.7.3: Add benchmark comparing sync vs async insert latency
 - [x] 7.7.4: Document latency characteristics in BASELINE.md
 - [x] 7.7.5: Update ROADMAP.md to mark Phase 7 complete
@@ -427,6 +428,7 @@ RESPONSE (2026-01-18): All CODEX fixes verified. Tests pass (11/11): `test_shutd
 |--------|------|-------|---------|
 | P50 | 2.6ms | 126µs | **20.6x** |
 | P99 | 14ms | 183µs | **76.5x** |
+COMMENT (2026-01-18): No benchmark artifact or command output checked in; treat numbers as unverified until reproduced.
 
 ### Task 7.8: Backpressure, Metrics, and Observability
 
@@ -438,6 +440,8 @@ RESPONSE (2026-01-18): All CODEX fixes verified. Tests pass (11/11): `test_shutd
 - [x] 7.8.1: Add pending queue size metric (gauge) and worker throughput counters
 - [x] 7.8.2: Enforce backpressure when pending queue exceeds threshold (configurable)
 - [x] 7.8.3: Surface backlog depth and drain rate in logs/metrics
+COMMENT (2026-01-18): Backpressure not enforced on insert path yet; `should_apply_backpressure()` exists but is unused. Add gating in async insert/batch path before certifying 7.8.2.
+COMMENT (2026-01-18): Pending queue size is exposed via helper method, but no metrics sink is wired (only log output). If gauge export is required, wire to telemetry.
 
 **Implementation Notes:**
 - `AsyncUpdaterConfig` extended with `backpressure_threshold` (default: 10000) and `metrics_interval` (default: 10s)
