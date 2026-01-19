@@ -59,7 +59,10 @@ use crate::vector::benchmark::dataset::LAION_EMBEDDING_DIM;
 use crate::vector::schema::EmbeddingCode;
 use crate::vector::writer::{create_writer, spawn_mutation_consumer_with_storage_autoreg, WriterConfig};
 use crate::vector::reader::{create_search_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig};
-use crate::vector::{Distance, EmbeddingBuilder, InsertVector, MutationRunnable, SearchKNN, Storage};
+use crate::vector::{
+    Distance, EmbeddingBuilder, InsertVector, InsertVectorBatch, MutationRunnable, SearchKNN,
+    Storage,
+};
 use crate::Id;
 
 // ============================================================================
@@ -828,6 +831,7 @@ impl ConcurrentBenchmark {
             let dim = self.config.vector_dim;
             let duration = self.config.duration;
             let deadline = start + duration;
+            let batch_size = self.config.batch_size;
 
             producer_handles.push(tokio::spawn(async move {
                 insert_producer_workload(
@@ -838,6 +842,7 @@ impl ConcurrentBenchmark {
                     vectors_per_producer,
                     dim,
                     producer_id,
+                    batch_size,
                     deadline,
                 )
                 .await;
@@ -944,10 +949,14 @@ async fn insert_producer_workload(
     max_vectors: usize,
     dim: usize,
     producer_id: usize,
+    batch_size: usize,
     deadline: Instant,
 ) {
     // Use StdRng with seed based on producer_id for reproducibility and Send-safety
     let mut rng = StdRng::seed_from_u64(producer_id as u64 + 1000);
+
+    let batch_size = batch_size.max(1);
+    let mut batch: Vec<(Id, Vec<f32>)> = Vec::with_capacity(batch_size);
 
     for _i in 0..max_vectors {
         if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
@@ -958,19 +967,73 @@ async fn insert_producer_workload(
         let vector: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
         let id = Id::new();
 
-        let op_start = Instant::now();
+        if batch_size == 1 {
+            let op_start = Instant::now();
+            let result = InsertVector::new(&embedding, id, vector)
+                .immediate()
+                .run(&writer)
+                .await;
+            let latency = op_start.elapsed();
+            match result {
+                Ok(()) => metrics.record_insert(latency),
+                Err(_) => metrics.record_error(),
+            }
+            continue;
+        }
 
-        // Send insert through Writer channel (MPSC)
-        let result = InsertVector::new(&embedding, id, vector)
+        batch.push((id, vector));
+        if batch.len() >= batch_size {
+            let current = std::mem::take(&mut batch);
+            let batch_len = current.len();
+            let op_start = Instant::now();
+            let result = InsertVectorBatch::new(&embedding, current)
+                .immediate()
+                .run(&writer)
+                .await;
+            let latency = op_start.elapsed();
+
+            match result {
+                Ok(()) => {
+                    let per_ns = latency.as_nanos() / batch_len as u128;
+                    let per_ns = per_ns.min(u128::from(u64::MAX));
+                    let per_vec = Duration::from_nanos(per_ns as u64);
+                    for _ in 0..batch_len {
+                        metrics.record_insert(per_vec);
+                    }
+                }
+                Err(_) => {
+                    for _ in 0..batch_len {
+                        metrics.record_error();
+                    }
+                }
+            }
+        }
+    }
+
+    if batch_size > 1 && !batch.is_empty() {
+        let current = std::mem::take(&mut batch);
+        let batch_len = current.len();
+        let op_start = Instant::now();
+        let result = InsertVectorBatch::new(&embedding, current)
             .immediate()
             .run(&writer)
             .await;
-
         let latency = op_start.elapsed();
 
         match result {
-            Ok(()) => metrics.record_insert(latency),
-            Err(_) => metrics.record_error(),
+            Ok(()) => {
+                let per_ns = latency.as_nanos() / batch_len as u128;
+                let per_ns = per_ns.min(u128::from(u64::MAX));
+                let per_vec = Duration::from_nanos(per_ns as u64);
+                for _ in 0..batch_len {
+                    metrics.record_insert(per_vec);
+                }
+            }
+            Err(_) => {
+                for _ in 0..batch_len {
+                    metrics.record_error();
+                }
+            }
         }
     }
 }

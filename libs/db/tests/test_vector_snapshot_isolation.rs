@@ -4,19 +4,19 @@
 //!
 //! | Test | Description | Validates |
 //! |------|-------------|-----------|
-//! | `test_snapshot_isolation_delete_during_search` | Search sees consistent snapshot despite concurrent deletes | Isolation |
-//! | `test_snapshot_isolation_insert_during_search` | Search snapshot excludes concurrent inserts | Isolation |
-//! | `test_transaction_conflict_resolution` | Optimistic concurrency detects conflicts | Conflict handling |
+//! | `test_snapshot_isolation_delete_during_search` | Snapshot count remains stable while SearchReader queries run during deletes | Isolation + end-to-end |
+//! | `test_snapshot_isolation_insert_during_search` | Snapshot excludes concurrent inserts | Isolation |
+//! | `test_transaction_conflict_resolution` | Pessimistic locking serializes conflicts | Conflict handling |
 //! | `test_transaction_conflict_stress` | High-contention conflict handling | Stress |
 //!
 //! ## RocksDB Snapshot Isolation
 //!
 //! RocksDB provides snapshot isolation through:
 //! 1. **Read snapshots**: `db.snapshot()` returns a point-in-time view
-//! 2. **Optimistic transactions**: Detect write-write conflicts at commit time
+//! 2. **Pessimistic transactions**: TransactionDB serializes conflicting writes
 //!
 //! These tests verify that:
-//! - Searches with snapshots see consistent data
+//! - Snapshot reads see consistent data under concurrent writes
 //! - Concurrent modifications don't corrupt ongoing reads
 //! - Transaction conflicts are properly detected and reported
 
@@ -28,13 +28,21 @@ use std::time::Instant;
 use motlie_db::vector::benchmark::ConcurrentMetrics;
 use motlie_db::vector::hnsw::{self, Config as HnswConfig};
 use motlie_db::vector::schema::{EmbeddingCode, VectorCfKey, VectorCfValue, Vectors};
-use motlie_db::vector::{cache::NavigationCache, Distance, Storage};
+use motlie_db::vector::reader::{
+    create_search_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig,
+};
+use motlie_db::vector::{
+    cache::NavigationCache, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+    DeleteVector, Distance, EmbeddingBuilder, InsertVector, MutationRunnable, Storage, WriterConfig,
+};
 use motlie_db::rocksdb::ColumnFamily;
+use motlie_db::Id;
 use rand::prelude::*;
 use tempfile::TempDir;
 
 const DIM: usize = 64;
 const TEST_EMBEDDING: EmbeddingCode = 1;
+const ID_REVERSE_CF: &str = "vector/id_reverse";
 
 /// Helper: Create test storage
 fn create_test_storage() -> (TempDir, Storage) {
@@ -122,78 +130,122 @@ fn test_snapshot_isolation_delete_during_search() {
     let (_temp_dir, storage) = create_test_storage();
     let storage = Arc::new(storage);
 
-    // Create HNSW index
-    let nav_cache = Arc::new(NavigationCache::new());
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
-    let index = Arc::new(hnsw::Index::new(
-        TEST_EMBEDDING,
-        Distance::L2,
-        hnsw_config,
-        nav_cache,
-    ));
+    // Register embedding for SearchReader/Processor path
+    let registry = storage.cache().clone();
+    let txn_db = storage.transaction_db().expect("txn_db");
+    let embedding = registry
+        .register(
+            EmbeddingBuilder::new("snapshot-test", DIM as u32, Distance::L2)
+                .with_hnsw_m(16)
+                .with_hnsw_ef_construction(100),
+            &txn_db,
+        )
+        .expect("embedding register");
 
-    // Step 1: Insert 1000 vectors
     let num_vectors = 1000u32;
-    println!("Inserting {} vectors...", num_vectors);
-
+    let mut inserts = Vec::with_capacity(num_vectors as usize);
     for vec_id in 0..num_vectors {
+        let id = Id::new();
         let vector = seeded_vector(DIM, vec_id as u64);
-        match insert_vector_atomic(&storage, &index, TEST_EMBEDDING, vec_id, &vector) {
-            InsertResult::Success(cache_update) => {
-                cache_update.apply(index.nav_cache());
-            }
-            _ => panic!("Insert {} failed", vec_id),
-        }
+        inserts.push((id, vector));
     }
+    let ids: Vec<Id> = inserts.iter().map(|(id, _)| *id).collect();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let (writer, writer_rx) = create_writer(WriterConfig {
+        channel_buffer_size: 10_000,
+    });
+    let mutation_handle = {
+        let _guard = runtime.enter();
+        spawn_mutation_consumer_with_storage_autoreg(
+            writer_rx,
+            WriterConfig::default(),
+            storage.clone(),
+        )
+    };
+
+    println!("Inserting {} vectors...", num_vectors);
+    runtime.block_on(async {
+        for (id, vector) in inserts {
+            InsertVector::new(&embedding, id, vector)
+                .immediate()
+                .run(&writer)
+                .await
+                .expect("insert");
+        }
+        writer.flush().await.expect("flush");
+    });
     println!("Inserted {} vectors", num_vectors);
 
-    // Step 2: Take a snapshot before deletes
     let txn_db = storage.transaction_db().expect("txn_db");
     let snapshot = txn_db.snapshot();
 
     // Verify initial count via snapshot
-    let vectors_cf = txn_db.cf_handle(Vectors::CF_NAME).expect("cf");
+    let reverse_cf = txn_db.cf_handle(ID_REVERSE_CF).expect("cf");
     let initial_count: usize = txn_db
-        .iterator_cf(&vectors_cf, rocksdb::IteratorMode::Start)
+        .iterator_cf(&reverse_cf, rocksdb::IteratorMode::Start)
         .count();
     assert_eq!(initial_count, num_vectors as usize, "Should have all vectors before delete");
 
-    // Step 3: Concurrent delete of 500 vectors (vec_ids 0-499)
+    // Step 3: Concurrent delete of 500 vectors (ids 0-499)
     let delete_count = 500u32;
-    let storage_clone = Arc::clone(&storage);
-    let delete_handle = thread::spawn(move || {
-        let txn_db = storage_clone.transaction_db().expect("txn_db");
-        let vectors_cf = txn_db.cf_handle(Vectors::CF_NAME).expect("cf");
-
-        let mut deleted = 0u32;
-        for vec_id in 0..delete_count {
-            let key = VectorCfKey(TEST_EMBEDDING, vec_id);
-            let txn = txn_db.transaction();
-            if txn.delete_cf(&vectors_cf, Vectors::key_to_bytes(&key)).is_ok() {
-                if txn.commit().is_ok() {
-                    deleted += 1;
-                }
+    let delete_ids = ids[..delete_count as usize].to_vec();
+    let writer_clone = writer.clone();
+    let embedding_clone = embedding.clone();
+    let search_results = runtime.block_on(async {
+        let delete_handle = tokio::spawn(async move {
+            for id in delete_ids {
+                DeleteVector::new(&embedding_clone, id)
+                    .run(&writer_clone)
+                    .await
+                    .expect("delete");
             }
+            writer_clone.flush().await.expect("flush");
+            delete_count
+        });
+
+        let (search_reader, reader_rx) =
+            create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        let query_handles = spawn_query_consumers_with_storage_autoreg(
+            reader_rx,
+            ReaderConfig::default(),
+            storage.clone(),
+            2,
+        );
+
+        let mut results = Vec::new();
+        let timeout = std::time::Duration::from_secs(5);
+        let query = seeded_vector(DIM, 4242);
+
+        for _ in 0..5 {
+            let result = search_reader
+                .search_knn(&embedding, query.clone(), 10, 100, timeout)
+                .await
+                .expect("search");
+            results.push(result);
         }
-        deleted
+
+        drop(search_reader);
+        for handle in query_handles {
+            let _ = handle.await;
+        }
+        let deleted = delete_handle.await.expect("delete task");
+
+        (results, deleted)
     });
 
     // Step 4: While deletes are happening, read using snapshot
     // Snapshot should see all 1000 vectors (point-in-time consistency)
     let snapshot_count: usize = {
-        let iter = snapshot.iterator_cf(&vectors_cf, rocksdb::IteratorMode::Start);
+        let iter = snapshot.iterator_cf(&reverse_cf, rocksdb::IteratorMode::Start);
         iter.count()
     };
 
-    // Wait for deletes to complete
-    let deleted = delete_handle.join().expect("delete thread");
+    let (search_results, deleted) = search_results;
     println!("Deleted {} vectors", deleted);
 
     // Step 5: Verify snapshot isolation
@@ -205,7 +257,7 @@ fn test_snapshot_isolation_delete_during_search() {
 
     // Step 6: New read (without snapshot) should see fewer vectors
     let current_count: usize = txn_db
-        .iterator_cf(&vectors_cf, rocksdb::IteratorMode::Start)
+        .iterator_cf(&reverse_cf, rocksdb::IteratorMode::Start)
         .count();
 
     assert!(
@@ -218,6 +270,17 @@ fn test_snapshot_isolation_delete_during_search() {
         "Snapshot isolation validated: snapshot saw {}, current sees {}",
         snapshot_count, current_count
     );
+
+    for (idx, result) in search_results.iter().enumerate() {
+        assert!(
+            !result.is_empty(),
+            "SearchReader result {} should not be empty during deletes",
+            idx
+        );
+    }
+
+    drop(writer);
+    let _ = runtime.block_on(async { mutation_handle.await });
 }
 
 /// Test: Snapshot isolation during concurrent inserts.
@@ -312,6 +375,139 @@ fn test_snapshot_isolation_insert_during_search() {
         "Snapshot isolation validated: snapshot saw {}, current sees {}",
         snapshot_count, current_count
     );
+}
+
+/// Test: Snapshot isolation with SearchReader during concurrent inserts.
+///
+/// Validates that snapshot count remains stable while SearchReader queries
+/// run during inserts.
+#[test]
+fn test_snapshot_isolation_insert_during_search_reader() {
+    let (_temp_dir, storage) = create_test_storage();
+    let storage = Arc::new(storage);
+
+    let registry = storage.cache().clone();
+    let txn_db = storage.transaction_db().expect("txn_db");
+    let embedding = registry
+        .register(
+            EmbeddingBuilder::new("snapshot-test-reader", DIM as u32, Distance::L2)
+                .with_hnsw_m(16)
+                .with_hnsw_ef_construction(100),
+            &txn_db,
+        )
+        .expect("embedding register");
+
+    let initial_count = 500u32;
+    let mut inserts = Vec::with_capacity(initial_count as usize);
+    for seed in 0..initial_count {
+        inserts.push((Id::new(), seeded_vector(DIM, seed as u64)));
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let (writer, writer_rx) = create_writer(WriterConfig {
+        channel_buffer_size: 10_000,
+    });
+    let mutation_handle = {
+        let _guard = runtime.enter();
+        spawn_mutation_consumer_with_storage_autoreg(
+            writer_rx,
+            WriterConfig::default(),
+            storage.clone(),
+        )
+    };
+
+    runtime.block_on(async {
+        for (id, vector) in inserts {
+            InsertVector::new(&embedding, id, vector)
+                .immediate()
+                .run(&writer)
+                .await
+                .expect("insert");
+        }
+        writer.flush().await.expect("flush");
+    });
+
+    let txn_db = storage.transaction_db().expect("txn_db");
+    let snapshot = txn_db.snapshot();
+    let reverse_cf = txn_db.cf_handle(ID_REVERSE_CF).expect("cf");
+    let snapshot_count: usize = snapshot
+        .iterator_cf(&reverse_cf, rocksdb::IteratorMode::Start)
+        .count();
+    assert_eq!(
+        snapshot_count, initial_count as usize,
+        "Snapshot should see initial {} vectors",
+        initial_count
+    );
+
+    let writer_clone = writer.clone();
+    let embedding_clone = embedding.clone();
+    let search_results = runtime.block_on(async {
+        let insert_handle = tokio::spawn(async move {
+            for seed in initial_count..(initial_count + 200) {
+                let vector = seeded_vector(DIM, seed as u64);
+                InsertVector::new(&embedding_clone, Id::new(), vector)
+                    .immediate()
+                    .run(&writer_clone)
+                    .await
+                    .expect("insert");
+            }
+            writer_clone.flush().await.expect("flush");
+            initial_count + 200
+        });
+
+        let (search_reader, reader_rx) =
+            create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        let query_handles = spawn_query_consumers_with_storage_autoreg(
+            reader_rx,
+            ReaderConfig::default(),
+            storage.clone(),
+            2,
+        );
+
+        let mut results = Vec::new();
+        let timeout = std::time::Duration::from_secs(5);
+        let query = seeded_vector(DIM, 4243);
+
+        for _ in 0..3 {
+            let result = search_reader
+                .search_knn(&embedding, query.clone(), 10, 100, timeout)
+                .await
+                .expect("search");
+            results.push(result);
+        }
+
+        drop(search_reader);
+        for handle in query_handles {
+            let _ = handle.await;
+        }
+
+        let inserted = insert_handle.await.expect("insert task");
+        (results, inserted)
+    });
+
+    let (search_results, inserted) = search_results;
+    let current_count: usize = txn_db
+        .iterator_cf(&reverse_cf, rocksdb::IteratorMode::Start)
+        .count();
+    assert!(
+        current_count >= inserted as usize,
+        "Current view should see inserts after completion"
+    );
+
+    for (idx, result) in search_results.iter().enumerate() {
+        assert!(
+            !result.is_empty(),
+            "SearchReader result {} should not be empty during inserts",
+            idx
+        );
+    }
+
+    drop(writer);
+    let _ = runtime.block_on(async { mutation_handle.await });
 }
 
 // ============================================================================
