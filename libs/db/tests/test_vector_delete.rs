@@ -394,6 +394,22 @@ async fn test_async_updater_delete_race() {
     }
     writer.flush().await.expect("flush");
 
+    // Capture vec_ids via IdForward before deletes (IdForward removed on delete)
+    let id_forward_cf = txn_db.cf_handle("vector/id_forward").expect("id_forward cf");
+    let mut vec_ids = Vec::new();
+    for id in &ids {
+        let mut key = Vec::with_capacity(24);
+        key.extend_from_slice(&embedding.code().to_be_bytes());
+        key.extend_from_slice(id.as_bytes());
+        let bytes = txn_db
+            .get_cf(&id_forward_cf, &key)
+            .expect("read")
+            .expect("IdForward should exist");
+        // Value is VecId (u32) in BE
+        let vec_id = u32::from_be_bytes(bytes.as_slice().try_into().expect("vec_id bytes"));
+        vec_ids.push(vec_id);
+    }
+
     // Delete half before async updater runs (indices 0-9)
     for id in &ids[0..10] {
         DeleteVector::new(&embedding, *id)
@@ -494,9 +510,11 @@ async fn test_async_updater_delete_race() {
 
     // Check that deleted ids (0-9) have no IdReverse mapping
     let mut deleted_found_in_reverse = 0;
-    for id in &ids[0..10] {
-        let key = id.as_bytes();
-        if txn_db.get_cf(&id_reverse_cf, key).expect("read").is_some() {
+    for vec_id in &vec_ids[0..10] {
+        let mut key = Vec::with_capacity(12);
+        key.extend_from_slice(&embedding.code().to_be_bytes());
+        key.extend_from_slice(&vec_id.to_be_bytes());
+        if txn_db.get_cf(&id_reverse_cf, &key).expect("read").is_some() {
             deleted_found_in_reverse += 1;
         }
     }
