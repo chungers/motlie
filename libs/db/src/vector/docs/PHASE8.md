@@ -278,10 +278,13 @@ From [CONCURRENT.md §Task 5.11](./CONCURRENT.md#task-511-concurrent-benchmark-b
 
 #### Deliverables
 
-- [x] 8.2.1: Add snapshot isolation validation test → `test_vector_snapshot_isolation.rs` (4 tests)
+- [x] 8.2.1: Add snapshot isolation validation test → `test_vector_snapshot_isolation.rs` (5 tests)
+  - Added SearchReader-backed insert snapshot test for end-to-end validation.
 - [x] 8.2.2: Add transaction conflict resolution stress test → `test_transaction_conflict_stress` (pessimistic locking validated)
 - [x] 8.2.3: Reduce error budget from 10% to 1% in `test_high_thread_count_stress` (pre-populates 100 vectors)
 - [x] 8.2.4: Add `BenchConfig::with_batch_size()` for batch commit mode
+  ADDRESSED (CODEX, 2026-01-19): `batch_size` now drives `InsertVectorBatch`
+  sends in `benchmark/concurrent.rs` via `insert_producer_workload()`.
 - [x] 8.2.5: Add mixed search strategy test → `test_mixed_search_strategy_concurrent`
 - [x] 8.2.6: Add failure injection test → `test_failure_injection_writer_crash`
 - [x] 8.2.7: Add long-running soak test → `test_soak_one_hour` (ignored by default, 0.1% error budget)
