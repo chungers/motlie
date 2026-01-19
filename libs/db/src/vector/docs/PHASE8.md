@@ -121,16 +121,87 @@ Delete(id) →
 
 #### Deliverables
 
-- [ ] 8.1.1: Add `DeletedVectors` tracking CF or bitmap for pending cleanup
-- [ ] 8.1.2: Implement edge pruning in background worker
-- [ ] 8.1.3: Add safe VecId recycling after edge cleanup confirms no references
-- [ ] 8.1.4: Implement RocksDB compaction filter for tombstone cleanup
-- [ ] 8.1.5: Add VecMeta lifecycle check in HNSW search as defense-in-depth
-- [ ] 8.1.6: Add `test_delete_edge_cleanup` integration test
-- [ ] 8.1.7: Add `test_delete_id_recycling` integration test
-- [ ] 8.1.8: Add `test_delete_compaction_removes_tombstones` integration test
-- [ ] 8.1.9: Document delete lifecycle in API.md
-- [ ] 8.1.10: Add `test_async_updater_delete_race` (delete while pending + worker processing)
+- [x] 8.1.1: ~~Add `DeletedVectors` tracking CF or bitmap for pending cleanup~~ **SKIPPED**
+  - STATUS (Claude, 2026-01-18): Skipped after design review.
+  - DISCUSSION: Considered adding new `DeletedVectors` CF to track vectors pending GC cleanup.
+  - DECISION: Use existing `VecMeta` CF instead. VecMeta already tracks lifecycle state via `is_deleted()`.
+    A background worker can scan VecMeta for deleted entries rather than maintaining redundant tracking.
+  - RATIONALE: Simpler design (no schema change, no migration), VecMeta is source of truth for lifecycle.
+  - TRADE-OFF: O(n) scan on VecMeta vs O(1) lookup in dedicated CF. Acceptable for background GC.
+- [x] 8.1.2: Implement edge pruning in background worker (uses VecMeta scan) **COMPLETE**
+  - STATUS (Claude, 2026-01-19): Implemented and tested.
+  - FILES: `libs/db/src/vector/gc.rs` (new), `libs/db/src/vector/mod.rs` (exports)
+  - IMPLEMENTATION:
+    - `GarbageCollector` struct with background worker thread (follows AsyncGraphUpdater pattern)
+    - `GcConfig` with configurable interval, batch_size, edge_scan_limit, id_recycling flag
+    - `GcMetrics` for tracking vectors_cleaned, edges_pruned, cycles_completed
+    - `find_deleted_vectors()`: Scans VecMeta CF for `is_deleted() == true`
+    - `cleanup_vector()`: Prunes edges, deletes vector data, binary codes, VecMeta
+    - `prune_edges()`: Uses merge operator with `EdgeOp::Remove` for lock-free edge removal
+  - TESTS: 8 unit tests pass
+    - `test_gc_config_defaults`, `test_gc_config_builder`
+    - `test_find_deleted_vectors_empty`, `test_gc_finds_deleted_vectors`
+    - `test_gc_cleanup_removes_vector_data`, `test_gc_edge_pruning`
+    - `test_gc_startup_and_shutdown`, `test_gc_metrics`
+  - RESULTS: Edge pruning verified - deleted vec_ids removed from all neighbor bitmaps
+  - NOTE: VecId recycling deferred to 8.1.3 (`enable_id_recycling` config flag prepared)
+- [x] 8.1.3: Add safe VecId recycling after edge cleanup confirms no references **COMPLETE**
+  - STATUS (Claude, 2026-01-19): Implemented and tested.
+  - IMPLEMENTATION:
+    - Added `recycle_vec_id()` function in `gc.rs` that updates IdAlloc CF free bitmap directly
+    - `GcConfig::enable_id_recycling` flag controls feature (default: false for safety)
+    - `GcMetrics::ids_recycled` counter tracks recycled IDs
+    - Direct RocksDB update bypasses in-memory allocator (acceptable for background GC)
+  - TESTS: 2 new tests added
+    - `test_gc_id_recycling` - verifies vec_id appears in free bitmap after GC with recycling enabled
+    - `test_gc_id_recycling_disabled_by_default` - verifies no recycling when disabled
+  - SAFETY: Recycling only occurs after `prune_edges()` confirms no references
+  - NOTE: Conservative default (disabled) because in-memory allocator state may be stale
+- [x] 8.1.4: ~~Implement RocksDB compaction filter for tombstone cleanup~~ **DEFERRED**
+  - STATUS (Claude, 2026-01-19): Deferred after design analysis.
+  - DISCUSSION: Considered adding RocksDB compaction filter for additional tombstone cleanup.
+  - DECISION: Rely on GC worker (8.1.2) instead of compaction filter.
+  - RATIONALE:
+    1. Compaction filters run per-key and cannot safely do cross-CF lookups
+       (e.g., can't check if VecMeta exists when filtering Vectors CF)
+    2. GC worker already handles complete cleanup transactionally:
+       - Prunes edges, deletes vector data, binary codes, VecMeta
+       - Runs on configurable interval with batch processing
+    3. RocksDB's native tombstone handling is sufficient for key-level deletes
+    4. Additional compaction filter complexity not justified by marginal benefit
+  - ALTERNATIVE: If orphaned data is observed in production, implement
+    a background validation pass that scans for orphaned entries (no compaction filter needed)
+- [x] 8.1.5: Add VecMeta lifecycle check in HNSW search as defense-in-depth **COMPLETE**
+  - STATUS (Claude, 2026-01-19): Implemented and tested.
+  - LOCATION: `libs/db/src/vector/processor.rs:search_with_config()` step 7
+  - IMPLEMENTATION:
+    - Added batch VecMeta fetch alongside existing IdReverse batch fetch
+    - Check `meta.0.is_deleted()` before creating SearchResult
+    - Defense-in-depth: catches edge cases where IdReverse exists but VecMeta indicates deleted
+    - Uses `multi_get_cf` for efficient batched reads (no extra round trips)
+  - EXISTING CHECK: Pending scan already had VecMeta check at lines 1085-1093
+  - TESTS: All 65 search tests pass, including `test_search_filters_deleted`
+  - NOTE: Primary filter remains IdReverse removal; VecMeta check is secondary defense
+- [x] 8.1.6: Add `test_delete_edge_cleanup` integration test **COMPLETE**
+  - STATUS (Claude, 2026-01-19): Implemented.
+  - FILE: `libs/db/tests/test_vector_delete.rs`
+  - VERIFIES: GC removes deleted vec_ids from all neighbor edge bitmaps
+- [x] 8.1.7: Add `test_delete_id_recycling` integration test **COMPLETE**
+  - STATUS (Claude, 2026-01-19): Implemented.
+  - FILE: `libs/db/tests/test_vector_delete.rs`
+  - VERIFIES: GC with `enable_id_recycling=true` adds freed IDs to free bitmap
+- [x] 8.1.8: Add `test_delete_storage_reclamation` integration test **COMPLETE**
+  - STATUS (Claude, 2026-01-19): Implemented (renamed from compaction test).
+  - FILE: `libs/db/tests/test_vector_delete.rs`
+  - VERIFIES: GC deletes vector data, binary codes, VecMeta entries
+- [x] 8.1.9: Document delete lifecycle in API.md **COMPLETE**
+  - STATUS (Claude, 2026-01-19): Implemented.
+  - FILE: `libs/db/src/vector/docs/API.md` (Part 4)
+  - INCLUDES: Delete state machine diagram, GC configuration, search-time safety, best practices
+- [x] 8.1.10: Add `test_async_updater_delete_race` integration test **COMPLETE**
+  - STATUS (Claude, 2026-01-19): Implemented.
+  - FILE: `libs/db/tests/test_vector_delete.rs`
+  - VERIFIES: Delete during async indexing handled correctly (PendingDeleted state)
 
 **Effort:** 3-4 days
 

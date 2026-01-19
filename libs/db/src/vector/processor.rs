@@ -943,13 +943,19 @@ impl Processor {
             }
         };
 
-        // 7. Filter deleted vectors using batched IdReverse lookup
+        // 7. Filter deleted vectors using batched IdReverse + VecMeta lookup
+        // Primary filter: IdReverse (deleted vectors have no reverse mapping)
+        // Defense-in-depth: VecMeta lifecycle check (Task 8.1.5)
         let txn_db = self.storage.transaction_db()?;
         let reverse_cf = txn_db
             .cf_handle(IdReverse::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+        let meta_cf = txn_db
+            .cf_handle(VecMeta::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("VecMeta CF not found"))?;
 
-        let keys: Vec<_> = raw_results
+        // Batch fetch IdReverse
+        let reverse_keys: Vec<_> = raw_results
             .iter()
             .map(|(_, vec_id)| {
                 let key = IdReverseCfKey(embedding_code, *vec_id);
@@ -957,13 +963,43 @@ impl Processor {
             })
             .collect();
 
-        let key_refs: Vec<_> = keys.iter().map(|k: &Vec<u8>| (&reverse_cf, k.as_slice())).collect();
-        let values = txn_db.multi_get_cf(key_refs);
+        let reverse_refs: Vec<_> = reverse_keys
+            .iter()
+            .map(|k: &Vec<u8>| (&reverse_cf, k.as_slice()))
+            .collect();
+        let reverse_values = txn_db.multi_get_cf(reverse_refs);
+
+        // Batch fetch VecMeta for defense-in-depth deleted check
+        let meta_keys: Vec<_> = raw_results
+            .iter()
+            .map(|(_, vec_id)| {
+                let key = VecMetaCfKey(embedding_code, *vec_id);
+                VecMeta::key_to_bytes(&key)
+            })
+            .collect();
+
+        let meta_refs: Vec<_> = meta_keys
+            .iter()
+            .map(|k: &Vec<u8>| (&meta_cf, k.as_slice()))
+            .collect();
+        let meta_values = txn_db.multi_get_cf(meta_refs);
 
         // Collect HNSW results (may contain fewer than k due to deleted vectors)
         let mut hnsw_results = Vec::with_capacity(k * 2);
-        for (i, value_result) in values.into_iter().enumerate() {
+        for (i, value_result) in reverse_values.into_iter().enumerate() {
             if let Ok(Some(bytes)) = value_result {
+                // Primary filter passed: IdReverse exists
+                // Defense-in-depth: Check VecMeta lifecycle (Task 8.1.5)
+                if let Ok(Some(meta_bytes)) = &meta_values[i] {
+                    if let Ok(meta) = VecMeta::value_from_bytes(meta_bytes) {
+                        if meta.0.is_deleted() {
+                            // VecMeta indicates deleted - skip (defense-in-depth)
+                            // This catches edge cases where IdReverse wasn't cleaned up
+                            continue;
+                        }
+                    }
+                }
+
                 let id = IdReverse::value_from_bytes(&bytes)?.0;
                 let (distance, vec_id) = raw_results[i];
                 hnsw_results.push(SearchResult {
