@@ -1,6 +1,6 @@
 # Phase 7: Async Graph Updater
 
-**Status:** In Progress (Tasks 7.1-7.4 Core Complete)
+**Status:** ✅ Complete
 **Date:** January 17, 2026
 **Prerequisite:** Phase 6 (MPSC/MPMC Public API) - Complete
 
@@ -175,6 +175,7 @@ CODEX (2026-01-17): All 7.1 deliverables implemented as claimed.
 - [x] 7.2.3: Document tuning guidance in doc comments
 - [x] 7.2.4: Add `test_config_defaults` and `test_config_builder` tests
 COMMENT (2026-01-18): Remove legacy `AsyncUpdaterConfig` in `libs/db/src/vector/config.rs` to avoid two sources of truth; `async_updater.rs` is the only supported config.
+RESPONSE (2026-01-18): Done. Removed duplicate `AsyncUpdaterConfig` from `config.rs` (30 lines). Only `async_updater.rs` definition remains.
 CODEX (2026-01-17): Verified config struct, builders, and tests in `async_updater.rs` are implemented as claimed. Task 7.2 is complete and ready for 7.3.
 
 ---
@@ -428,12 +429,23 @@ RESPONSE (2026-01-18): All CODEX fixes verified. Tests pass (11/11): `test_shutd
 
 ### Task 7.8: Backpressure, Metrics, and Observability
 
+**Status:** ✅ Complete
+
 **Goal:** Prevent unbounded queue growth and expose health signals.
 
 **Deliverables:**
-- [ ] 7.8.1: Add pending queue size metric (gauge) and worker throughput counters
-- [ ] 7.8.2: Enforce backpressure when pending queue exceeds threshold (configurable)
-- [ ] 7.8.3: Surface backlog depth and drain rate in logs/metrics
+- [x] 7.8.1: Add pending queue size metric (gauge) and worker throughput counters
+- [x] 7.8.2: Enforce backpressure when pending queue exceeds threshold (configurable)
+- [x] 7.8.3: Surface backlog depth and drain rate in logs/metrics
+
+**Implementation Notes:**
+- `AsyncUpdaterConfig` extended with `backpressure_threshold` (default: 10000) and `metrics_interval` (default: 10s)
+- Builder methods: `.with_backpressure_threshold()`, `.with_metrics_interval()`, `.no_backpressure()`, `.no_metrics_logging()`
+- `pending_queue_size()` returns count of pending items (scans Pending CF)
+- `should_apply_backpressure()` returns true when pending count > threshold
+- Worker 0 logs periodic metrics: pending_queue_size, items_processed, drain_rate_per_sec
+- `items_processed()` and `batches_processed()` expose counters for monitoring
+- Tests: `test_config_defaults`, `test_config_builder`, `test_config_disable_backpressure_and_metrics`
 
 ---
 
