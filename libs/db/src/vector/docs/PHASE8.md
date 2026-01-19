@@ -1,7 +1,7 @@
 # Phase 8: Production Hardening
 
-**Status:** Not Started
-**Date:** January 18, 2026
+**Status:** In Progress (8.1, 8.2 Complete; 8.3 Pending)
+**Date:** January 18, 2026 (Updated: January 19, 2026)
 **Prerequisite:** Phase 7 (Async Graph Updater) - Complete
 
 ---
@@ -80,7 +80,7 @@ RESPONSE (2026-01-18): VecMeta check for HNSW should be in **reranking phase** (
 
 ### Task 8.1: Delete Refinement
 
-**Status:** Not Started
+**Status:** Complete (2026-01-18)
 
 **Goal:** Complete the delete lifecycle with edge cleanup, ID recycling, and tombstone compaction.
 
@@ -241,14 +241,15 @@ For simplicity, Phase 8 may defer ID recycling to future work if edge cleanup al
 
 ### Task 8.2: Concurrent Access Hardening
 
-**Status:** Not Started
+**Status:** Complete (2026-01-19)
 
 **Goal:** Production-grade concurrent access validation with snapshot isolation and failure injection.
 
 **Files:**
 - `libs/db/tests/test_vector_concurrent.rs` - Enhanced stress tests
-- `libs/db/src/vector/benchmark/concurrent.rs` - Batch mode support
+- `libs/db/src/vector/benchmark/concurrent.rs` - Batch mode support + backpressure benchmark
 - `libs/db/tests/test_vector_snapshot_isolation.rs` - New: isolation tests
+- `libs/db/src/vector/docs/API.md` - Concurrent access guarantees documentation
 
 **Foundation:** [CONCURRENT.md](./CONCURRENT.md) - Tasks 5.9-5.11
 
@@ -260,7 +261,7 @@ From [CONCURRENT.md §Task 5.9](./CONCURRENT.md#task-59-multi-threaded-stress-te
 |------|------|---------------|-----|
 | `test_concurrent_insert_search` | `test_vector_concurrent.rs:154` | 2 inserters, 2 searchers | No snapshot isolation |
 | `test_concurrent_batch_insert` | `test_vector_concurrent.rs:300` | 4 batch inserters | - |
-| `test_high_thread_count_stress` | `test_vector_concurrent.rs:409` | 8 writers, 8 readers | 10% error budget |
+| `test_high_thread_count_stress` | `test_vector_concurrent.rs:409` | 8 writers, 8 readers | ~~10% error budget~~ 1% error budget |
 | `test_writer_contention` | `test_vector_concurrent.rs:542` | 8 writers | - |
 | `test_multi_embedding_concurrent_access` | `test_vector_concurrent.rs:664` | 3 indices, 6W, 6R | No failure injection |
 | `test_cache_isolation_under_load` | `test_vector_concurrent.rs:843` | 2 indices, 2W, 2R | - |
@@ -277,15 +278,21 @@ From [CONCURRENT.md §Task 5.11](./CONCURRENT.md#task-511-concurrent-benchmark-b
 
 #### Deliverables
 
-- [ ] 8.2.1: Add snapshot isolation validation test (extends `test_concurrent_insert_search`)
-- [ ] 8.2.2: Add transaction conflict resolution stress test (extends `test_writer_contention`)
-- [ ] 8.2.3: Reduce error budget from 10% to 1% in `test_high_thread_count_stress` ([CONCURRENT.md §Error Rate Expectations](./CONCURRENT.md#error-rate-expectations))
-- [ ] 8.2.4: Add `BenchConfig::with_batch_size()` for batch commit mode ([CONCURRENT.md §Benchmark Transaction Modes](./CONCURRENT.md#benchmark-transaction-modes))
-- [ ] 8.2.5: Add mixed search strategy test (RaBitQ + exact concurrent) - deferred from [CONCURRENT.md §Coverage Gaps](./CONCURRENT.md#coverage-gaps--additional-tests)
-- [ ] 8.2.6: Add failure injection test (kill writer mid-batch, extends `test_multi_embedding_concurrent_access`)
-- [ ] 8.2.7: Add long-running soak test (1hr+ continuous operation, uses `ConcurrentBenchmark`)
-- [ ] 8.2.8: Document concurrent access guarantees in API.md
-- [ ] 8.2.9: Add backpressure throughput impact benchmark (async vs sync fallback under load)
+- [x] 8.2.1: Add snapshot isolation validation test → `test_vector_snapshot_isolation.rs` (4 tests)
+- [x] 8.2.2: Add transaction conflict resolution stress test → `test_transaction_conflict_stress` (pessimistic locking validated)
+- [x] 8.2.3: Reduce error budget from 10% to 1% in `test_high_thread_count_stress` (pre-populates 100 vectors)
+- [x] 8.2.4: Add `BenchConfig::with_batch_size()` for batch commit mode
+- [x] 8.2.5: Add mixed search strategy test → `test_mixed_search_strategy_concurrent`
+- [x] 8.2.6: Add failure injection test → `test_failure_injection_writer_crash`
+- [x] 8.2.7: Add long-running soak test → `test_soak_one_hour` (ignored by default, 0.1% error budget)
+- [x] 8.2.8: Document concurrent access guarantees in API.md § Part 5
+- [x] 8.2.9: Add backpressure throughput impact benchmark → `measure_backpressure_impact()`, `test_backpressure_throughput_impact`
+
+**Key Findings:**
+- RocksDB TransactionDB uses **pessimistic locking** (not optimistic): concurrent writers block on lock acquisition
+- Snapshot isolation provides repeatable reads; concurrent deletes don't affect existing snapshots
+- Pre-populating index before stress test eliminates "empty graph" errors, enabling tighter error budgets
+- Failure injection test validates system remains operational after simulated writer crashes
 
 **Effort:** 2-3 days
 
