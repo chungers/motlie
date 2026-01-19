@@ -820,7 +820,7 @@ mod tests {
         // Register embedding
         let embedding = register_embedding(&storage, &registry, 64);
 
-        // Create processor (HNSW disabled initially to simplify test)
+        // Create processor (default config)
         let processor = Processor::new(storage.clone(), registry.clone());
 
         // Insert vector with build_index=false (async path)
@@ -855,12 +855,16 @@ mod tests {
 
         // Insert multiple vectors with build_index=false
         let mut ids = Vec::new();
+        let mut first = None;
         for i in 0..5 {
             let id = crate::Id::new();
             let vector = test_vector(64, i);
             processor
                 .insert_vector(&embedding, id, &vector, false)
                 .expect("Insert should succeed");
+            if first.is_none() {
+                first = Some((id, vector));
+            }
             ids.push(id);
         }
 
@@ -876,6 +880,17 @@ mod tests {
         // Verify pending queue is empty
         let pending_count = count_pending_items(&storage, embedding.code());
         assert_eq!(pending_count, 0, "Pending queue should be drained");
+
+        // Verify vectors are indexed/searchable after draining
+        let (first_id, first_vector) = first.expect("Expected at least one vector");
+        let search_config = SearchConfig::new(embedding.clone(), 5);
+        let results = processor
+            .search_with_config(&search_config, &first_vector)
+            .expect("Search should succeed");
+        assert!(
+            results.iter().any(|result| result.id == first_id),
+            "Drained vector should be searchable"
+        );
     }
 
     /// 7.6.3: Pending items survive restart (crash recovery)
@@ -912,6 +927,10 @@ mod tests {
             // Re-load embeddings from storage (needed after restart)
             let txn_db = storage.transaction_db().expect("Failed to get txn_db");
             registry.prewarm(&txn_db).expect("Failed to prewarm registry");
+            let embedding = registry
+                .get_by_code(embedding_code)
+                .expect("Embedding should exist after restart");
+            let processor = Processor::new(storage.clone(), registry.clone());
 
             // Verify pending item survived restart
             let pending_count = count_pending_items(&storage, embedding_code);
@@ -924,6 +943,17 @@ mod tests {
 
             let pending_count = count_pending_items(&storage, embedding_code);
             assert_eq!(pending_count, 0, "Pending queue should be drained after recovery");
+
+            // Verify vector is indexed/searchable after recovery
+            let query = test_vector(64, 42);
+            let search_config = SearchConfig::new(embedding, 5);
+            let results = processor
+                .search_with_config(&search_config, &query)
+                .expect("Search should succeed");
+            assert!(
+                results.iter().any(|result| result.id == inserted_id),
+                "Recovered vector should be searchable"
+            );
         }
     }
 
@@ -1041,6 +1071,8 @@ mod tests {
                 .insert_vector(&embedding, id, &vector, false)
                 .expect("Insert should succeed");
         }
+        let pending_initial = count_pending_items(&storage, embedding.code());
+        assert_eq!(pending_initial, 10, "Expected pending backlog before start");
 
         // Start async updater
         let config = AsyncUpdaterConfig::new()
@@ -1053,11 +1085,35 @@ mod tests {
         // Give workers time to pick up work
         std::thread::sleep(Duration::from_millis(100));
 
+        let mut processed = 0u64;
+        for _ in 0..200 {
+            processed = updater.items_processed();
+            if processed >= 5 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            processed >= 5,
+            "Expected at least one full batch to process before shutdown"
+        );
+
         // Shutdown should complete gracefully
         updater.shutdown();
 
-        // Verify some items were processed (metrics should be non-zero after shutdown)
-        // Note: exact count depends on timing, but shutdown should have waited for in-flight
+        // Verify shutdown waited for in-flight work (pending should not exceed pre-shutdown backlog)
+        let pending_after = count_pending_items(&storage, embedding.code());
+        assert!(
+            pending_after <= pending_initial.saturating_sub(processed as usize),
+            "Pending queue should not grow after shutdown (initial={}, processed={}, after={})",
+            pending_initial,
+            processed,
+            pending_after
+        );
+        assert!(
+            pending_after < pending_initial,
+            "Shutdown should allow in-flight batch completion"
+        );
     }
 
     /// 7.6.7: Partial batch processing is idempotent
@@ -1120,16 +1176,15 @@ mod tests {
                 .expect("Insert should succeed");
         }
 
-        // Search with small pending scan limit
-        let config = SearchConfig::new(embedding.clone(), 10).with_pending_scan_limit(100);
+        // Search with tiny pending scan limit
+        let config = SearchConfig::new(embedding.clone(), 10).with_pending_scan_limit(1);
         let query = test_vector(64, 0);
         let results = processor
             .search_with_config(&config, &query)
             .expect("Search should succeed");
 
-        // Should find some results (up to k=10 from the 100 scanned)
-        // The key is that search completes quickly without scanning all 1500
-        assert!(results.len() <= 10, "Should respect k limit");
+        // Should only return from the single scanned pending vector
+        assert_eq!(results.len(), 1, "Should respect pending scan limit");
 
         // Search with no pending fallback
         let config_no_pending = SearchConfig::new(embedding.clone(), 10).no_pending_fallback();
