@@ -585,6 +585,7 @@ gc.shutdown();
 4. Delete binary codes from BinaryCodes CF
 5. Delete VecMeta entry
 6. Optionally recycle VecId (if `enable_id_recycling=true`)
+COMMENT (CODEX, 2026-01-19): If `edge_scan_limit` is hit, some references may remain; ID recycling should be skipped or deferred to avoid reuse while edges still point to the vec_id.
 
 ### GC Configuration
 

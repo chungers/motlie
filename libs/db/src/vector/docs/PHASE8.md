@@ -157,6 +157,7 @@ Delete(id) →
     - `test_gc_id_recycling_disabled_by_default` - verifies no recycling when disabled
   - SAFETY: Recycling only occurs after `prune_edges()` confirms no references
   - NOTE: Conservative default (disabled) because in-memory allocator state may be stale
+COMMENT (CODEX, 2026-01-19): `prune_edges()` can stop early on `edge_scan_limit` but GC still recycles IDs; add a guard or return a “fully scanned” flag to prevent unsafe recycling.
 - [x] 8.1.4: ~~Implement RocksDB compaction filter for tombstone cleanup~~ **DEFERRED**
   - STATUS (Claude, 2026-01-19): Deferred after design analysis.
   - DISCUSSION: Considered adding RocksDB compaction filter for additional tombstone cleanup.
@@ -198,6 +199,7 @@ Delete(id) →
   - STATUS (Claude, 2026-01-19): Implemented.
   - FILE: `libs/db/src/vector/docs/API.md` (Part 4)
   - INCLUDES: Delete state machine diagram, GC configuration, search-time safety, best practices
+- [ ] 8.1.11: Skip VecId recycling when edge scan limit is hit (or record incomplete cleanup for retry)
 - [x] 8.1.10: Add `test_async_updater_delete_race` integration test **COMPLETE**
   - STATUS (Claude, 2026-01-19): Implemented.
   - FILE: `libs/db/tests/test_vector_delete.rs`

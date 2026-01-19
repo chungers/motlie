@@ -147,6 +147,8 @@ async fn test_delete_edge_cleanup() {
         let _bitmap = RoaringBitmap::deserialize_from(&value[..]).expect("deserialize");
         edges_checked += 1;
     }
+    // COMMENT (CODEX, 2026-01-19): This test does not assert that deleted vec_ids are absent
+    // from edge bitmaps. Add explicit checks against deleted vec_ids to validate pruning.
 
     // Verify metrics - should have cleaned 20 vectors
     let metrics = gc.metrics();
@@ -213,6 +215,8 @@ async fn test_delete_id_recycling() {
     let alloc_cf = txn_db.cf_handle("vector/id_alloc").expect("alloc cf");
 
     // Build key for free bitmap (embedding_code + discriminant 1)
+    // COMMENT (CODEX, 2026-01-19): Prefer IdAllocCfKey::free_bitmap + IdAlloc::key_to_bytes
+    // to avoid hardcoding the discriminant.
     let mut key = Vec::with_capacity(9);
     key.extend_from_slice(&embedding.code().to_be_bytes());
     key.push(1); // FreeBitmap discriminant
@@ -425,6 +429,8 @@ async fn test_async_updater_delete_race() {
 
     // Should have entries for both deleted (pending cleanup) and indexed
     assert!(indexed_count > 0, "Should have VecMeta entries");
+    // COMMENT (CODEX, 2026-01-19): This test does not verify deleted vectors are excluded
+    // from indexed search results. Consider a search or VecMeta state assertions.
 
     // Run GC to clean up deleted vectors
     let gc_config = GcConfig::new().with_process_on_startup(false);

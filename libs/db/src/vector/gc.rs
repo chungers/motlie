@@ -183,6 +183,8 @@ pub struct GcMetrics {
     /// Total VecIds recycled (if enabled)
     pub ids_recycled: AtomicU64,
 }
+// COMMENT (CODEX, 2026-01-19): `bytes_reclaimed` is never updated; either wire it up
+// during cleanup or remove to avoid misleading metrics.
 
 // ============================================================================
 // GarbageCollector
