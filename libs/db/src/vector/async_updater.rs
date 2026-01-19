@@ -73,6 +73,12 @@ use crate::vector::Storage;
 ///
 /// - **`process_on_startup`**: Enable to drain any pending items from a previous
 ///   crash. Disable only for testing or if you handle recovery elsewhere.
+///
+/// - **`backpressure_threshold`**: Maximum pending items before inserts block.
+///   Set to 0 to disable backpressure. Default: 10000
+///
+/// - **`metrics_interval`**: How often to log backlog depth and drain rate.
+///   Set to None to disable periodic logging. Default: 10s
 #[derive(Debug, Clone)]
 pub struct AsyncUpdaterConfig {
     /// Maximum vectors per worker batch.
@@ -109,6 +115,19 @@ pub struct AsyncUpdaterConfig {
     /// Workers sleep this long before checking for new items when the
     /// pending queue is empty. Default: 10ms
     pub idle_sleep: Duration,
+
+    /// Maximum pending items before backpressure is applied.
+    ///
+    /// When the pending queue exceeds this threshold, new async inserts
+    /// will be rejected with an error until the queue drains below threshold.
+    /// Set to 0 to disable backpressure (unbounded queue). Default: 10000
+    pub backpressure_threshold: usize,
+
+    /// Interval for logging metrics (backlog depth, drain rate).
+    ///
+    /// Workers log pending queue size and processing rate at this interval.
+    /// Set to None to disable periodic logging. Default: Some(10s)
+    pub metrics_interval: Option<Duration>,
 }
 
 impl Default for AsyncUpdaterConfig {
@@ -120,6 +139,8 @@ impl Default for AsyncUpdaterConfig {
             ef_construction: 200,
             process_on_startup: true,
             idle_sleep: Duration::from_millis(10),
+            backpressure_threshold: 10000,
+            metrics_interval: Some(Duration::from_secs(10)),
         }
     }
 }
@@ -163,6 +184,35 @@ impl AsyncUpdaterConfig {
     /// Set idle sleep duration.
     pub fn with_idle_sleep(mut self, duration: Duration) -> Self {
         self.idle_sleep = duration;
+        self
+    }
+
+    /// Set backpressure threshold.
+    ///
+    /// When pending queue exceeds this, async inserts are rejected.
+    /// Set to 0 to disable backpressure.
+    pub fn with_backpressure_threshold(mut self, threshold: usize) -> Self {
+        self.backpressure_threshold = threshold;
+        self
+    }
+
+    /// Set metrics logging interval.
+    ///
+    /// Set to None to disable periodic metrics logging.
+    pub fn with_metrics_interval(mut self, interval: Option<Duration>) -> Self {
+        self.metrics_interval = interval;
+        self
+    }
+
+    /// Disable backpressure (allow unbounded queue growth).
+    pub fn no_backpressure(mut self) -> Self {
+        self.backpressure_threshold = 0;
+        self
+    }
+
+    /// Disable periodic metrics logging.
+    pub fn no_metrics_logging(mut self) -> Self {
+        self.metrics_interval = None;
         self
     }
 }
@@ -315,6 +365,41 @@ impl AsyncGraphUpdater {
         &self.config
     }
 
+    /// Get the current pending queue size across all embeddings.
+    ///
+    /// This scans the Pending CF to count items. For high-frequency monitoring,
+    /// consider using `items_processed()` and `batches_processed()` instead.
+    pub fn pending_queue_size(&self) -> usize {
+        Self::count_pending_items_static(&self.storage)
+    }
+
+    /// Check if backpressure should be applied.
+    ///
+    /// Returns true if pending queue exceeds `backpressure_threshold` and
+    /// backpressure is enabled (threshold > 0).
+    pub fn should_apply_backpressure(&self) -> bool {
+        if self.config.backpressure_threshold == 0 {
+            return false;
+        }
+        self.pending_queue_size() >= self.config.backpressure_threshold
+    }
+
+    /// Count pending items across all embeddings (static version).
+    fn count_pending_items_static(storage: &Storage) -> usize {
+        let txn_db = match storage.transaction_db() {
+            Ok(db) => db,
+            Err(_) => return 0,
+        };
+
+        let pending_cf = match txn_db.cf_handle(Pending::CF_NAME) {
+            Some(cf) => cf,
+            None => return 0,
+        };
+
+        let iter = txn_db.iterator_cf(&pending_cf, rocksdb::IteratorMode::Start);
+        iter.count()
+    }
+
     // ========================================================================
     // Worker Implementation
     // ========================================================================
@@ -332,9 +417,38 @@ impl AsyncGraphUpdater {
     ) {
         info!(worker_id, "Async updater worker started");
 
+        // Metrics logging state (only worker 0 logs to avoid duplicates)
+        let mut last_metrics_log = Instant::now();
+        let mut last_items_processed = 0u64;
+
         loop {
             if shutdown.load(Ordering::Relaxed) {
                 break;
+            }
+
+            // Periodic metrics logging (worker 0 only)
+            if worker_id == 0 {
+                if let Some(interval) = config.metrics_interval {
+                    if last_metrics_log.elapsed() >= interval {
+                        let current_items = items_processed.load(Ordering::Relaxed);
+                        let current_batches = batches_processed.load(Ordering::Relaxed);
+                        let pending_size = Self::count_pending_items_static(&storage);
+                        let drain_rate = (current_items - last_items_processed) as f64
+                            / last_metrics_log.elapsed().as_secs_f64();
+
+                        info!(
+                            pending_queue_size = pending_size,
+                            items_processed = current_items,
+                            batches_processed = current_batches,
+                            drain_rate_per_sec = format!("{:.1}", drain_rate),
+                            backpressure_threshold = config.backpressure_threshold,
+                            "Async updater metrics"
+                        );
+
+                        last_metrics_log = Instant::now();
+                        last_items_processed = current_items;
+                    }
+                }
             }
 
             // Collect a batch of pending inserts using round-robin across embeddings
@@ -748,6 +862,9 @@ mod tests {
         assert_eq!(config.ef_construction, 200);
         assert!(config.process_on_startup);
         assert_eq!(config.idle_sleep, Duration::from_millis(10));
+        // Task 7.8: Backpressure and metrics
+        assert_eq!(config.backpressure_threshold, 10000);
+        assert_eq!(config.metrics_interval, Some(Duration::from_secs(10)));
     }
 
     #[test]
@@ -758,7 +875,9 @@ mod tests {
             .with_num_workers(4)
             .with_ef_construction(100)
             .with_process_on_startup(false)
-            .with_idle_sleep(Duration::from_millis(5));
+            .with_idle_sleep(Duration::from_millis(5))
+            .with_backpressure_threshold(5000)
+            .with_metrics_interval(Some(Duration::from_secs(30)));
 
         assert_eq!(config.batch_size, 200);
         assert_eq!(config.batch_timeout, Duration::from_millis(50));
@@ -766,6 +885,19 @@ mod tests {
         assert_eq!(config.ef_construction, 100);
         assert!(!config.process_on_startup);
         assert_eq!(config.idle_sleep, Duration::from_millis(5));
+        // Task 7.8: Backpressure and metrics builder
+        assert_eq!(config.backpressure_threshold, 5000);
+        assert_eq!(config.metrics_interval, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn test_config_disable_backpressure_and_metrics() {
+        let config = AsyncUpdaterConfig::new()
+            .no_backpressure()
+            .no_metrics_logging();
+
+        assert_eq!(config.backpressure_threshold, 0);
+        assert_eq!(config.metrics_interval, None);
     }
 
     // =========================================================================
