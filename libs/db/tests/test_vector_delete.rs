@@ -456,6 +456,8 @@ async fn test_async_updater_delete_race() {
     let id_forward_cf = txn_db.cf_handle("vector/id_forward").expect("id_forward cf");
 
     // Check that deleted ids (0-9) have no IdForward mapping (primary search exclusion)
+    // COMMENT (CODEX, 2026-01-19): Search result filtering relies on IdReverse, not IdForward.
+    // Add an IdReverse check (or a search assertion) to verify deleted vectors cannot be returned.
     let mut deleted_found_in_forward = 0;
     for id in &ids[0..10] {
         // IdForward key format: [embedding_code: u64 BE][external_id: 16 bytes]

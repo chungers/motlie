@@ -495,6 +495,10 @@ impl GarbageCollector {
 
         // 1. Find and prune edges pointing to this vec_id
         let prune_result = Self::prune_edges(&txn, txn_db, config, embedding, vec_id)?;
+        // COMMENT (CODEX, 2026-01-19): If prune_result.fully_scanned is false, we still delete
+        // vector data and VecMeta below. This can leave dangling edge references to missing
+        // vectors and cause search errors. Consider deferring data/VecMeta deletion or
+        // marking a GC-pending state for retry.
 
         // 2. Delete vector data
         let vectors_cf = txn_db
