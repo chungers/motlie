@@ -305,6 +305,53 @@ impl Subsystem {
         &self.nav_cache
     }
 
+    /// Check if backpressure should be applied to async inserts.
+    ///
+    /// Returns true if the async graph updater's pending queue exceeds
+    /// the configured backpressure threshold. When true, callers should
+    /// either wait before sending more async inserts or switch to sync mode.
+    ///
+    /// Returns false if no async updater is configured or backpressure is disabled.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Check before sending async insert
+    /// if subsystem.should_apply_backpressure() {
+    ///     // Option 1: Wait and retry
+    ///     tokio::time::sleep(Duration::from_millis(100)).await;
+    ///
+    ///     // Option 2: Switch to sync mode
+    ///     InsertVector::new(&embedding, id, vec)
+    ///         .immediate()  // Use sync path instead
+    ///         .run(&writer).await?;
+    /// }
+    /// ```
+    pub fn should_apply_backpressure(&self) -> bool {
+        self.async_updater
+            .read()
+            .expect("async_updater lock poisoned")
+            .as_ref()
+            .map(|u| u.should_apply_backpressure())
+            .unwrap_or(false)
+    }
+
+    /// Get the current pending queue size for async graph updates.
+    ///
+    /// Returns the number of vectors waiting for HNSW graph construction.
+    /// Returns 0 if no async updater is configured.
+    ///
+    /// Note: This scans the pending CF and may be slow for large queues.
+    /// For high-frequency monitoring, prefer checking `should_apply_backpressure()`.
+    pub fn pending_queue_size(&self) -> usize {
+        self.async_updater
+            .read()
+            .expect("async_updater lock poisoned")
+            .as_ref()
+            .map(|u| u.pending_queue_size())
+            .unwrap_or(0)
+    }
+
     /// Internal method to build CF descriptors.
     fn build_cf_descriptors(
         block_cache: &Cache,
