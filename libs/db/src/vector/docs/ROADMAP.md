@@ -8152,6 +8152,7 @@ mod async_updater_tests {
 **Status:** 📋 Planned
 **Goal:** Production-ready vector search with full feature set.
 **Detailed Plan:** See [`PHASE8.md`](./PHASE8.md) for comprehensive task breakdown (26 subtasks)
+COMMENT (CODEX, 2026-01-18): PHASE8 now lists 8.1.10, 8.2.9, 8.3.10; update the “26 subtasks” count if it changes.
 
 ### Task 8.1: Delete Refinement
 
@@ -8263,6 +8264,7 @@ mod production_tests {
 - [ ] Concurrent read/write stress tests pass
 - [ ] 1B scale benchmark completed
 - [ ] Memory usage within 64GB budget
+COMMENT (CODEX, 2026-01-18): Memory budget here conflicts with PHASE8 projections (~500GB cache at 1B). Align budget with target hardware or scale tier.
 
 ---
 
