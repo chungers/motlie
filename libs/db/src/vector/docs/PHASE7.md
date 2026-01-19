@@ -174,6 +174,7 @@ CODEX (2026-01-17): All 7.1 deliverables implemented as claimed.
 - [x] 7.2.2: Add builder methods (`with_batch_size`, `with_num_workers`, etc.)
 - [x] 7.2.3: Document tuning guidance in doc comments
 - [x] 7.2.4: Add `test_config_defaults` and `test_config_builder` tests
+COMMENT (2026-01-18): Remove legacy `AsyncUpdaterConfig` in `libs/db/src/vector/config.rs` to avoid two sources of truth; `async_updater.rs` is the only supported config.
 CODEX (2026-01-17): Verified config struct, builders, and tests in `async_updater.rs` are implemented as claimed. Task 7.2 is complete and ready for 7.3.
 
 ---

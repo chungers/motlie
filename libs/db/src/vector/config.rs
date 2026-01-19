@@ -115,41 +115,11 @@ impl RaBitQConfig {
     }
 }
 
-/// Async graph updater configuration.
-///
-/// Controls background graph refinement for online updates.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AsyncUpdaterConfig {
-    /// Enable async graph updates.
-    pub enabled: bool,
-
-    /// Maximum pending vectors before blocking inserts.
-    pub max_pending: usize,
-
-    /// Batch size for graph updates.
-    pub batch_size: usize,
-
-    /// Interval between update batches in milliseconds.
-    pub interval_ms: u64,
-}
-
-impl Default for AsyncUpdaterConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_pending: 10_000,
-            batch_size: 100,
-            interval_ms: 100,
-        }
-    }
-}
-
 /// Complete vector storage configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VectorConfig {
     pub hnsw: Config,
     pub rabitq: RaBitQConfig,
-    pub async_updater: AsyncUpdaterConfig,
 }
 
 impl VectorConfig {
