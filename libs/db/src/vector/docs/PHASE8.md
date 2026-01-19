@@ -205,6 +205,8 @@ Delete(id) →
   - FILE: `libs/db/src/vector/gc.rs`
   - CHANGES: Added `PruneResult.fully_scanned` flag; `cleanup_vector()` skips ID recycling
     when `fully_scanned=false`; added `GcMetrics.recycling_skipped_incomplete` counter
+COMMENT (CODEX, 2026-01-19): GC still deletes vector data/VecMeta even when `fully_scanned=false`.
+Consider deferring data/VecMeta deletion (or tracking a GC-pending state) to avoid dangling edges.
 - [x] 8.1.10: Add `test_async_updater_delete_race` integration test **COMPLETE**
   - STATUS (Claude, 2026-01-19): Implemented.
   - FILE: `libs/db/tests/test_vector_delete.rs`
