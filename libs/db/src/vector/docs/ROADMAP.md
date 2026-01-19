@@ -3,13 +3,14 @@
 **Author:** David Chung + Claude
 **Date:** January 2, 2026 (Updated: January 16, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 Complete (Tasks 5.0-5.11), Phase 6 Complete, Phase 7 Complete, Phase 8 Remaining
+**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 Complete (Tasks 5.0-5.11), Phase 6 Complete, Phase 7 Complete, Phase 8 Planned
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
 - [`BENCHMARK.md`](./BENCHMARK.md) - Performance results and configuration reference
 - [`CONCURRENT.md`](./CONCURRENT.md) - Concurrent operations (Tasks 5.9-5.11)
 - [`PHASE7.md`](./PHASE7.md) - Async Graph Updater design (30 subtasks)
+- [`PHASE8.md`](./PHASE8.md) - Production Hardening (26 subtasks)
 
 ---
 
@@ -79,7 +80,7 @@ dedicated vector databases or custom storage engines.
 | [Phase 5](#phase-5-internal-mutationquery-api) | Internal Mutation/Query API | ✅ Complete |
 | [Phase 6](#phase-6-mpscmpmc-public-api) | MPSC/MPMC Public API | ✅ Complete |
 | [Phase 7](#phase-7-async-graph-updater) | Async Graph Updater | ✅ Complete |
-| [Phase 8](#phase-8-production-hardening) | Production Hardening | 🔲 Not Started |
+| [Phase 8](#phase-8-production-hardening) | Production Hardening | 📋 Planned |
 
 ### Phase 4 Tasks
 
@@ -8148,7 +8149,9 @@ mod async_updater_tests {
 
 ## Phase 8: Production Hardening
 
+**Status:** 📋 Planned
 **Goal:** Production-ready vector search with full feature set.
+**Detailed Plan:** See [`PHASE8.md`](./PHASE8.md) for comprehensive task breakdown (26 subtasks)
 
 ### Task 8.1: Delete Refinement
 
