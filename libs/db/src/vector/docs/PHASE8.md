@@ -9,6 +9,7 @@
 ## Overview
 
 Phase 8 focuses on production readiness: ensuring deletes are clean, concurrent access is safe, and the system scales to billion-vector workloads. This phase addresses technical debt from earlier phases and validates the system under realistic production conditions.
+COMMENT (CODEX, 2026-01-18): “Billion-vector workloads” implies multi-TB storage and multi-100GB cache; confirm target hardware class to keep scale tasks realistic (single-node vs distributed).
 
 ### Problem Statement
 
@@ -61,6 +62,7 @@ See [CONCURRENT.md](./CONCURRENT.md) for full concurrent test inventory and base
 | VecId reuse | IDs never freed when HNSW enabled | Add safe ID recycling after edges are cleaned |
 | Tombstone compaction | Deleted vector data kept forever | Add compaction filter or background cleanup |
 | Search filtering | Relies on IdReverse removal | Add VecMeta lifecycle check as defense-in-depth |
+COMMENT (CODEX, 2026-01-18): VecMeta checks already exist in pending scan; for HNSW traversal, clarify where to skip deleted nodes to avoid duplicate logic or inconsistent filtering.
 
 ### From Scale Analysis
 
@@ -126,6 +128,7 @@ Delete(id) →
 - [ ] 8.1.7: Add `test_delete_id_recycling` integration test
 - [ ] 8.1.8: Add `test_delete_compaction_removes_tombstones` integration test
 - [ ] 8.1.9: Document delete lifecycle in API.md
+- [ ] 8.1.10: Add `test_async_updater_delete_race` (delete while pending + worker processing)
 
 **Effort:** 3-4 days
 
@@ -198,6 +201,7 @@ From [CONCURRENT.md §Task 5.11](./CONCURRENT.md#task-511-concurrent-benchmark-b
 - [ ] 8.2.6: Add failure injection test (kill writer mid-batch, extends `test_multi_embedding_concurrent_access`)
 - [ ] 8.2.7: Add long-running soak test (1hr+ continuous operation, uses `ConcurrentBenchmark`)
 - [ ] 8.2.8: Document concurrent access guarantees in API.md
+- [ ] 8.2.9: Add backpressure throughput impact benchmark (async vs sync fallback under load)
 
 **Effort:** 2-3 days
 
@@ -297,6 +301,7 @@ Scale projections:
 - [ ] 8.3.7: Profile memory usage at each scale
 - [ ] 8.3.8: Document scaling characteristics in SCALE.md
 - [ ] 8.3.9: Add CI gate for regression detection at 1M scale
+- [ ] 8.3.10: Add reproducible synthetic dataset generator (seeded) for large-scale runs
 
 **Effort:** 1-2 weeks
 
@@ -321,6 +326,7 @@ cargo run --release -p motlie-db --bin bench_vector -- \
 | 1B | >10 | >5 | <500ms | >70% |
 
 *Note: These are initial targets. Actual performance may vary based on hardware and HNSW parameters.*
+COMMENT (CODEX, 2026-01-18): Consider adding a “hardware profile” subsection (CPU/RAM/SSD) so target numbers remain interpretable and comparable.
 
 ---
 
