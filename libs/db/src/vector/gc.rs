@@ -495,12 +495,27 @@ impl GarbageCollector {
 
         // 1. Find and prune edges pointing to this vec_id
         let prune_result = Self::prune_edges(&txn, txn_db, config, embedding, vec_id)?;
-        // COMMENT (CODEX, 2026-01-19): If prune_result.fully_scanned is false, we still delete
-        // vector data and VecMeta below. This can leave dangling edge references to missing
-        // vectors and cause search errors. Consider deferring data/VecMeta deletion or
-        // marking a GC-pending state for retry.
 
-        // 2. Delete vector data
+        // ADDRESSED (Claude, 2026-01-19): If edge scan incomplete, commit partial progress
+        // (edge prunes done so far) but skip data/VecMeta deletion. Vector stays in Deleted
+        // state and will be retried in next GC cycle until all edges are pruned.
+        if !prune_result.fully_scanned {
+            // Commit partial edge cleanup progress
+            txn.commit()?;
+            warn!(
+                embedding,
+                vec_id,
+                edges_pruned = prune_result.edges_pruned,
+                "Edge scan incomplete - deferring data deletion to next GC cycle"
+            );
+            return Ok(CleanupResult {
+                edges_pruned: prune_result.edges_pruned,
+                id_recycled: false,
+                recycling_skipped: true, // Tracks deferred cleanup
+            });
+        }
+
+        // 2. Delete vector data (only if edge scan was complete)
         let vectors_cf = txn_db
             .cf_handle(Vectors::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
@@ -538,25 +553,13 @@ impl GarbageCollector {
         let meta_key = VecMetaCfKey(embedding, vec_id);
         txn.delete_cf(&meta_cf, VecMeta::key_to_bytes(&meta_key))?;
 
-        // 6. Recycle VecId if enabled AND edge scan was complete (Task 8.1.3 + 8.1.11)
-        // ADDRESSED (Claude, 2026-01-19): Skip ID recycling when edge_scan_limit is hit
-        // to prevent reusing an ID that may still have edge references.
-        let (id_recycled, recycling_skipped) = if config.enable_id_recycling {
-            if prune_result.fully_scanned {
-                // Safe: we confirmed all edges were scanned and pruned
-                Self::recycle_vec_id(&txn, txn_db, embedding, vec_id)?;
-                (true, false)
-            } else {
-                // Unsafe: edge scan was incomplete, defer ID recycling
-                warn!(
-                    embedding,
-                    vec_id,
-                    "Skipping ID recycling - edge scan incomplete"
-                );
-                (false, true)
-            }
+        // 6. Recycle VecId if enabled (Task 8.1.3)
+        // Note: We only reach here if fully_scanned==true (early return above handles incomplete)
+        let id_recycled = if config.enable_id_recycling {
+            Self::recycle_vec_id(&txn, txn_db, embedding, vec_id)?;
+            true
         } else {
-            (false, false)
+            false
         };
 
         // Commit the cleanup transaction
@@ -567,14 +570,13 @@ impl GarbageCollector {
             vec_id,
             edges_pruned = prune_result.edges_pruned,
             id_recycled,
-            recycling_skipped,
             "Cleaned up deleted vector"
         );
 
         Ok(CleanupResult {
             edges_pruned: prune_result.edges_pruned,
             id_recycled,
-            recycling_skipped,
+            recycling_skipped: false, // Only true when we return early above
         })
     }
 
