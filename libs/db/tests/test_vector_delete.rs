@@ -455,9 +455,7 @@ async fn test_async_updater_delete_race() {
     // 2. After GC, only non-deleted VecMeta entries remain
     let id_forward_cf = txn_db.cf_handle("vector/id_forward").expect("id_forward cf");
 
-    // Check that deleted ids (0-9) have no IdForward mapping (primary search exclusion)
-    // COMMENT (CODEX, 2026-01-19): Search result filtering relies on IdReverse, not IdForward.
-    // Add an IdReverse check (or a search assertion) to verify deleted vectors cannot be returned.
+    // Check that deleted ids (0-9) have no IdForward mapping
     let mut deleted_found_in_forward = 0;
     for id in &ids[0..10] {
         // IdForward key format: [embedding_code: u64 BE][external_id: 16 bytes]
@@ -487,6 +485,31 @@ async fn test_async_updater_delete_race() {
         live_found_in_forward, 10,
         "Non-deleted vectors should have IdForward mapping"
     );
+
+    // ADDRESSED (Claude, 2026-01-19): Also check IdReverse (used by search result resolution)
+    // IdReverse key format: [external_id: 16 bytes] -> (embedding_code, vec_id)
+    // Note: In async insert mode, IdReverse may be created during async indexing, not Phase 1.
+    // We verify deleted vectors have no IdReverse (soft delete removes it if present).
+    let id_reverse_cf = txn_db.cf_handle("vector/id_reverse").expect("id_reverse cf");
+
+    // Check that deleted ids (0-9) have no IdReverse mapping
+    let mut deleted_found_in_reverse = 0;
+    for id in &ids[0..10] {
+        let key = id.as_bytes();
+        if txn_db.get_cf(&id_reverse_cf, key).expect("read").is_some() {
+            deleted_found_in_reverse += 1;
+        }
+    }
+    assert_eq!(
+        deleted_found_in_reverse, 0,
+        "Deleted vectors should have no IdReverse mapping"
+    );
+
+    // Note: Non-deleted vectors may or may not have IdReverse depending on async indexing timing.
+    // The key safety guarantee is that deleted vectors are excluded from search results via:
+    // 1. IdForward removal (prevents external_id -> vec_id resolution for reinsert)
+    // 2. IdReverse removal (prevents vec_id -> external_id resolution in results)
+    // 3. VecMeta lifecycle check (defense-in-depth during search)
 
     // Run GC to clean up deleted vectors
     let gc_config = GcConfig::new().with_process_on_startup(false);
