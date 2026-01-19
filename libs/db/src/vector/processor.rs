@@ -20,6 +20,7 @@
 //! - HNSW indices use DashMap for lock-free concurrent access
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -103,6 +104,8 @@ pub struct Processor {
     hnsw_config: hnsw::Config,
     /// Shared binary code cache for RaBitQ search
     code_cache: Arc<BinaryCodeCache>,
+    /// Backpressure threshold for async inserts (0 disables).
+    async_backpressure_threshold: AtomicUsize,
 }
 
 impl Processor {
@@ -177,7 +180,39 @@ impl Processor {
             nav_cache,
             hnsw_config,
             code_cache: Arc::new(BinaryCodeCache::new()),
+            async_backpressure_threshold: AtomicUsize::new(0),
         }
+    }
+
+    /// Set async insert backpressure threshold.
+    ///
+    /// When non-zero, async inserts (build_index=false) will error if the
+    /// pending queue size is at or above this threshold.
+    pub fn set_async_backpressure_threshold(&self, threshold: usize) {
+        self.async_backpressure_threshold
+            .store(threshold, Ordering::Relaxed);
+    }
+
+    /// Get current async insert backpressure threshold.
+    pub fn async_backpressure_threshold(&self) -> usize {
+        self.async_backpressure_threshold.load(Ordering::Relaxed)
+    }
+
+    /// Count pending queue items across all embeddings.
+    pub fn pending_queue_size(&self) -> usize {
+        let txn_db = match self.storage.transaction_db() {
+            Ok(db) => db,
+            Err(_) => return 0,
+        };
+
+        let pending_cf = match txn_db.cf_handle(Pending::CF_NAME) {
+            Some(cf) => cf,
+            None => return 0,
+        };
+
+        txn_db
+            .iterator_cf(&pending_cf, rocksdb::IteratorMode::Start)
+            .count()
     }
 
     /// Get access to the underlying storage.

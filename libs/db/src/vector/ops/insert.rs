@@ -167,13 +167,28 @@ pub fn vector(
         ));
     }
 
-    // 4. Allocate internal ID
+    // 4. Apply backpressure for async inserts if configured
+    if !build_index {
+        let threshold = processor.async_backpressure_threshold();
+        if threshold > 0 {
+            let pending = processor.pending_queue_size();
+            if pending >= threshold {
+                return Err(anyhow::anyhow!(
+                    "Async insert backpressure: pending queue size {} exceeds threshold {}",
+                    pending,
+                    threshold
+                ));
+            }
+        }
+    }
+
+    // 5. Allocate internal ID
     let vec_id = {
         let allocator = processor.get_or_create_allocator(embedding);
         allocator.allocate(txn, txn_db, embedding)?
     };
 
-    // 5. Store Id -> VecId mapping (IdForward)
+    // 6. Store Id -> VecId mapping (IdForward)
     let forward_value = IdForwardCfValue(vec_id);
     txn.put_cf(
         &forward_cf,
@@ -181,7 +196,7 @@ pub fn vector(
         IdForward::value_to_bytes(&forward_value),
     )?;
 
-    // 6. Store VecId -> Id mapping (IdReverse)
+    // 7. Store VecId -> Id mapping (IdReverse)
     let reverse_key = IdReverseCfKey(embedding, vec_id);
     let reverse_value = IdReverseCfValue(id);
     let reverse_cf = txn_db
@@ -193,7 +208,7 @@ pub fn vector(
         IdReverse::value_to_bytes(&reverse_value),
     )?;
 
-    // 7. Store vector data
+    // 8. Store vector data
     let vec_key = VectorCfKey(embedding, vec_id);
     let vectors_cf = txn_db
         .cf_handle(Vectors::CF_NAME)
@@ -204,7 +219,7 @@ pub fn vector(
         Vectors::value_to_bytes_typed(vector, storage_type),
     )?;
 
-    // 8. Store binary code with ADC correction (if RaBitQ enabled)
+    // 9. Store binary code with ADC correction (if RaBitQ enabled)
     let code_cache_update = if let Some(encoder) = processor.get_or_create_encoder(embedding) {
         let (code, correction) = encoder.encode_with_correction(vector);
         let code_key = BinaryCodeCfKey(embedding, vec_id);
@@ -225,10 +240,10 @@ pub fn vector(
         None
     };
 
-    // 9. Validate/store spec hash (drift detection)
+    // 10. Validate/store spec hash (drift detection)
     validate_or_store_spec_hash(txn, txn_db, embedding)?;
 
-    // 10. Build HNSW index or queue for async processing
+    // 11. Build HNSW index or queue for async processing
     let nav_cache_update = if build_index {
         // Synchronous path: build HNSW graph immediately
         // (VecMeta is written inside hnsw::insert with max_layer and flags=0)
@@ -362,7 +377,24 @@ pub fn batch(
         }
     }
 
-    // 4. Get column family handles
+    // 4. Apply backpressure for async inserts if configured
+    if !build_index {
+        let threshold = processor.async_backpressure_threshold();
+        if threshold > 0 {
+            let pending = processor.pending_queue_size();
+            let projected = pending.saturating_add(vectors.len());
+            if projected > threshold {
+                return Err(anyhow::anyhow!(
+                    "Async insert backpressure: pending queue size {} + batch {} exceeds threshold {}",
+                    pending,
+                    vectors.len(),
+                    threshold
+                ));
+            }
+        }
+    }
+
+    // 5. Get column family handles
     let forward_cf = txn_db
         .cf_handle(IdForward::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
@@ -373,7 +405,7 @@ pub fn batch(
         .cf_handle(Vectors::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
 
-    // 5. Check for existing external IDs (acquire locks to prevent races)
+    // 6. Check for existing external IDs (acquire locks to prevent races)
     for (id, _) in vectors {
         let forward_key = IdForwardCfKey(embedding, *id);
         if txn
@@ -388,13 +420,13 @@ pub fn batch(
         }
     }
 
-    // 6. Validate/store spec hash (drift detection) - once per batch
+    // 7. Validate/store spec hash (drift detection) - once per batch
     validate_or_store_spec_hash(txn, txn_db, embedding)?;
 
-    // 7. Get RaBitQ encoder if enabled
+    // 8. Get RaBitQ encoder if enabled
     let encoder = processor.get_or_create_encoder(embedding);
 
-    // 8. Allocate IDs and store all vectors
+    // 9. Allocate IDs and store all vectors
     let mut vec_ids = Vec::with_capacity(vectors.len());
     let mut code_cache_updates = Vec::with_capacity(vectors.len());
 
@@ -452,7 +484,7 @@ pub fn batch(
         }
     }
 
-    // 9. Build HNSW index or queue for async processing - after all vectors are stored
+    // 10. Build HNSW index or queue for async processing - after all vectors are stored
     let mut nav_cache_updates = Vec::new();
     if build_index {
         // Synchronous path: build HNSW graph immediately
