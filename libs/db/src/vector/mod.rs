@@ -47,6 +47,7 @@ pub mod config;
 pub mod distance;
 pub mod embedding;
 mod error;
+pub mod gc;
 pub mod id;
 pub mod merge;
 pub mod mutation;
@@ -115,6 +116,9 @@ pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD
 
 // Async updater for two-phase inserts (Phase 7)
 pub use async_updater::{AsyncGraphUpdater, AsyncUpdaterConfig};
+
+// Garbage collector for deleted vector cleanup (Phase 8)
+pub use gc::{GarbageCollector, GcConfig, GcMetrics};
 
 // Mutation types and infrastructure (following graph::mutation pattern)
 // Note: UpdateEdges, UpdateGraphMeta, EdgeOperation, GraphMetaUpdate are internal-only

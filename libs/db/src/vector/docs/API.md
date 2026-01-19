@@ -21,8 +21,14 @@
    - [HNSW Parameters](#hnsw-parameters)
    - [Cache Configuration](#cache-configuration)
    - [Parallel Reranking](#parallel-reranking)
-5. [Complete Usage Flow](#complete-usage-flow)
-6. [Public API Reference](#public-api-reference)
+5. [Part 4: Delete Lifecycle and Garbage Collection](#part-4-delete-lifecycle-and-garbage-collection)
+   - [Delete State Machine](#delete-state-machine)
+   - [Soft Delete Operations](#soft-delete-operations)
+   - [Garbage Collector](#garbage-collector)
+   - [Search-time Safety](#search-time-safety)
+   - [Best Practices](#best-practices)
+6. [Complete Usage Flow](#complete-usage-flow)
+7. [Public API Reference](#public-api-reference)
 
 ---
 
@@ -481,6 +487,167 @@ let results = rerank_auto(&candidates, |vec_id| compute_distance(vec_id), k);
 | 6400 | 827ms | 478ms | 1.73x |
 
 *Benchmarked on 512D LAION-CLIP, aarch64 NEON, January 2026*
+
+---
+
+## Part 4: Delete Lifecycle and Garbage Collection
+
+### Overview
+
+Vector deletion follows a **two-phase** approach for safety:
+
+1. **Soft Delete** (immediate): Mark vector as deleted, remove ID mappings
+2. **Hard Delete** (background GC): Remove edges, data, recycle VecId
+
+This ensures HNSW graph consistency: edges pointing to deleted vectors are cleaned up asynchronously rather than during the delete operation.
+
+### Delete State Machine
+
+```
+                    ┌─────────────┐
+                    │   Insert    │
+                    └──────┬──────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+           ┌────────│   Pending   │  (immediate_index=false)
+           │        └──────┬──────┘
+           │               │ Async worker processes
+           │               ▼
+           │        ┌─────────────┐
+           │        │   Indexed   │
+           │        └──────┬──────┘
+           │               │ delete_vector()
+           ▼               ▼
+    ┌──────────────┐  ┌─────────────┐
+    │PendingDeleted│  │   Deleted   │
+    └──────┬───────┘  └──────┬──────┘
+           │                 │
+           └────────┬────────┘
+                    │ GC cleanup
+                    ▼
+              ┌───────────┐
+              │  Removed  │  (data + VecMeta deleted)
+              └───────────┘
+```
+
+### Soft Delete Operations
+
+When `DeleteVector` is executed:
+
+1. **IdForward removed**: External ID → VecId mapping deleted
+2. **IdReverse removed**: VecId → External ID mapping deleted
+3. **VecMeta updated**: Lifecycle set to `Deleted` or `PendingDeleted`
+4. **Data preserved**: Vector data, binary codes, edges kept (for GC)
+
+```rust
+use motlie_db::vector::{DeleteVector, MutationRunnable};
+
+// Delete via mutation channel
+DeleteVector::new(&embedding, external_id)
+    .run(&writer)
+    .await?;
+writer.flush().await?;
+
+// After soft delete:
+// - Search won't return this vector (IdReverse missing)
+// - Vector data still in storage (pending GC)
+```
+
+### Garbage Collector
+
+The `GarbageCollector` runs in the background to clean up soft-deleted vectors:
+
+```rust
+use motlie_db::vector::{GarbageCollector, GcConfig};
+
+// Configure GC
+let config = GcConfig::new()
+    .with_interval(Duration::from_secs(60))  // Run every 60s
+    .with_batch_size(100)                    // Process 100 vectors per cycle
+    .with_edge_scan_limit(10000)             // Max edges to scan
+    .with_id_recycling(false);               // Don't recycle VecIds (safe default)
+
+// Start GC (spawns background thread)
+let gc = GarbageCollector::start(storage.clone(), registry.clone(), config);
+
+// ... application runs ...
+
+// Graceful shutdown
+gc.shutdown();
+```
+
+**GC Cleanup Steps (per deleted vector):**
+
+1. Scan VecMeta for `is_deleted() == true`
+2. Prune edges: Remove vec_id from all neighbor bitmaps
+3. Delete vector data from Vectors CF
+4. Delete binary codes from BinaryCodes CF
+5. Delete VecMeta entry
+6. Optionally recycle VecId (if `enable_id_recycling=true`)
+
+### GC Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `interval` | 60s | Time between GC cycles |
+| `batch_size` | 100 | Max vectors per cycle |
+| `process_on_startup` | true | Run cleanup on GC start |
+| `edge_scan_limit` | 10000 | Max edges to scan per vector |
+| `enable_id_recycling` | false | Return VecIds to free list |
+
+**ID Recycling:**
+
+When enabled, freed VecIds are added to a bitmap and can be reused for new vectors. This is disabled by default because:
+- It's only beneficial at very large scale (billions of vectors)
+- In-memory allocator may be out of sync with persisted state
+- Most deployments don't need ID reuse
+
+### Search-time Safety
+
+Search results are filtered using two mechanisms:
+
+1. **Primary**: IdReverse lookup - deleted vectors have no reverse mapping
+2. **Defense-in-depth**: VecMeta lifecycle check - catches edge cases
+
+```rust
+// Search automatically filters deleted vectors
+let results = processor.search_with_config(&config, &query)?;
+// results will never contain deleted vectors
+```
+
+### Monitoring GC
+
+```rust
+// Check GC metrics
+let metrics = gc.metrics();
+println!("Vectors cleaned: {}", metrics.vectors_cleaned.load(Ordering::Relaxed));
+println!("Edges pruned: {}", metrics.edges_pruned.load(Ordering::Relaxed));
+println!("IDs recycled: {}", metrics.ids_recycled.load(Ordering::Relaxed));
+println!("Cycles completed: {}", metrics.cycles_completed.load(Ordering::Relaxed));
+
+// Manual GC cycle (for testing)
+let cleaned = gc.run_cycle()?;
+println!("Cleaned {} vectors in this cycle", cleaned);
+```
+
+### Best Practices
+
+1. **Start GC early**: Start the GC when your application starts, even if no deletes expected
+2. **Tune interval**: Frequent deletes → shorter interval; rare deletes → longer interval
+3. **Monitor edge pruning**: High `edges_pruned` indicates well-connected HNSW graph
+4. **Avoid ID recycling** unless at billion-scale with ID exhaustion concerns
+5. **Graceful shutdown**: Always call `gc.shutdown()` to complete in-flight cleanup
+
+### Delete + Async Indexing
+
+When a vector is deleted while pending async indexing:
+
+1. The vector's VecMeta transitions to `PendingDeleted`
+2. The async worker skips `PendingDeleted` vectors
+3. GC cleans up the vector data
+
+This ensures no race conditions between async indexing and deletion.
 
 ---
 
