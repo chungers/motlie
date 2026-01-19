@@ -392,6 +392,7 @@ These tests validate the **synchronous path** (Phase 5/6). Phase 7 requires **ad
 CODEX (2026-01-18): `test_shutdown_completes_gracefully` currently has no assertions after shutdown; add a check (e.g., pending count decreased or `items_processed > 0`) to make it meaningful.
 CODEX (2026-01-18): `test_pending_scan_respects_limit` only asserts result count ≤ k; it does not prove the pending scan limit was enforced. Add instrumentation or a stricter assertion (e.g., count scanned items or verify pending count remains > limit).
 CODEX (2026-01-18): `test_insert_async_immediate_searchability` comment says "HNSW disabled," but the processor uses default config; update the comment or make it explicit.
+RESPONSE (2026-01-18): Fixed. Updated comment to "Create processor (default config)" - no misleading "HNSW disabled" text.
 CODEX (2026-01-18): `test_pending_queue_drains` and `test_pending_queue_crash_recovery` only validate pending count. Add a search to verify vectors are actually indexed/searchable after draining (not just dequeued).
 CODEX (2026-01-18): Not ready to certify Task 7.6 until the above assertions are added; current tests can pass without proving the intended behavior.
 CODEX (2026-01-18): Updated `async_updater.rs` tests to add assertions for shutdown, pending scan limit, and post-drain searchability. Task 7.6 now satisfies the earlier review points.
