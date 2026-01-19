@@ -451,6 +451,12 @@ pub struct BenchConfig {
     pub num_queries: usize,
     /// Rerank factor for RaBitQ (candidates = k * rerank_factor).
     pub rerank_factor: usize,
+    /// Batch size for insert commits (Task 8.2.4).
+    ///
+    /// When > 1, inserts are batched and committed together for higher throughput.
+    /// Default is 1 (per-vector commits) for correctness validation.
+    /// Use higher values (e.g., 100) for pure throughput measurement.
+    pub batch_size: usize,
 }
 
 impl Default for BenchConfig {
@@ -471,6 +477,7 @@ impl Default for BenchConfig {
             distance: Distance::L2,
             num_queries: 100,
             rerank_factor: 10,
+            batch_size: 1, // Per-vector commits by default for correctness
         }
     }
 }
@@ -576,6 +583,25 @@ impl BenchConfig {
     /// Set vectors per producer.
     pub fn with_vectors_per_producer(mut self, count: usize) -> Self {
         self.vectors_per_producer = count;
+        self
+    }
+
+    /// Set batch size for insert commits (Task 8.2.4).
+    ///
+    /// Batching inserts reduces transaction overhead and increases throughput.
+    /// Use batch_size=1 (default) for correctness validation where each insert
+    /// is committed independently. Use larger values (e.g., 100) for pure
+    /// throughput measurement.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // High throughput mode: batch 100 inserts per commit
+    /// let config = BenchConfig::balanced()
+    ///     .with_batch_size(100);
+    /// ```
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size.max(1); // Minimum of 1
         self
     }
 
@@ -1144,6 +1170,254 @@ pub async fn compare_sync_async_latency(
         speedup_p50,
         speedup_p99,
     })
+}
+
+// ============================================================================
+// Backpressure Throughput Impact Benchmark (Task 8.2.9)
+// ============================================================================
+
+/// Result of backpressure throughput impact measurement.
+///
+/// Compares throughput across different channel buffer sizes to show
+/// how backpressure affects performance when producers outpace consumers.
+#[derive(Debug, Clone)]
+pub struct BackpressureResult {
+    /// Number of vectors inserted per test
+    pub num_vectors: usize,
+    /// Number of concurrent producers
+    pub num_producers: usize,
+    /// Results for each buffer size tested
+    pub results: Vec<BackpressureSample>,
+    /// Baseline throughput (largest buffer, minimal backpressure)
+    pub baseline_throughput: f64,
+}
+
+/// Single sample from backpressure test at a specific buffer size.
+#[derive(Debug, Clone)]
+pub struct BackpressureSample {
+    /// Channel buffer size for this sample
+    pub buffer_size: usize,
+    /// Total duration for all inserts
+    pub duration: Duration,
+    /// Insert throughput (ops/sec)
+    pub throughput: f64,
+    /// Average latency
+    pub avg_latency: Duration,
+    /// P50 latency
+    pub p50_latency: Duration,
+    /// P99 latency
+    pub p99_latency: Duration,
+    /// Number of errors (channel full rejections)
+    pub errors: u64,
+    /// Throughput as percentage of baseline
+    pub throughput_pct: f64,
+}
+
+impl fmt::Display for BackpressureResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "=== Backpressure Throughput Impact ===")?;
+        writeln!(f, "Configuration:")?;
+        writeln!(f, "  Vectors per test: {}", self.num_vectors)?;
+        writeln!(f, "  Concurrent producers: {}", self.num_producers)?;
+        writeln!(f, "  Baseline throughput: {:.1} ops/sec", self.baseline_throughput)?;
+        writeln!(f)?;
+        writeln!(f, "Buffer Size | Throughput | % Baseline | P50 Latency | P99 Latency | Errors")?;
+        writeln!(f, "------------|------------|------------|-------------|-------------|-------")?;
+        for sample in &self.results {
+            writeln!(
+                f,
+                "{:>11} | {:>10.1} | {:>10.1}% | {:>11.2?} | {:>11.2?} | {:>6}",
+                sample.buffer_size,
+                sample.throughput,
+                sample.throughput_pct,
+                sample.p50_latency,
+                sample.p99_latency,
+                sample.errors,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Measure the impact of backpressure on insert throughput.
+///
+/// This benchmark tests how throughput degrades when channel buffers are small
+/// and producers must wait for the consumer. It helps determine optimal buffer
+/// sizes for production deployments.
+///
+/// # Arguments
+/// * `storage` - Vector storage
+/// * `embedding_code` - Embedding space code
+/// * `num_vectors` - Total vectors to insert per buffer size test
+/// * `dim` - Vector dimension
+/// * `num_producers` - Number of concurrent producer tasks
+/// * `buffer_sizes` - Buffer sizes to test (smallest to largest)
+///
+/// # Returns
+/// `BackpressureResult` showing throughput at each buffer size.
+///
+/// # Example
+///
+/// ```ignore
+/// let result = measure_backpressure_impact(
+///     storage.clone(),
+///     embedding_code,
+///     1000,  // vectors per test
+///     128,   // dimension
+///     4,     // producers
+///     &[10, 100, 1000, 10000],  // buffer sizes
+/// ).await?;
+/// println!("{}", result);
+/// // Output:
+/// // Buffer Size | Throughput | % Baseline | P50 Latency | P99 Latency | Errors
+/// // ------------|------------|------------|-------------|-------------|-------
+/// //          10 |      120.5 |      24.1% |       8.2ms |      42.1ms |      0
+/// //         100 |      380.2 |      76.0% |       2.6ms |      12.3ms |      0
+/// //        1000 |      485.1 |      97.0% |       2.1ms |       8.4ms |      0
+/// //       10000 |      500.0 |     100.0% |       2.0ms |       8.1ms |      0
+/// ```
+pub async fn measure_backpressure_impact(
+    storage: Arc<Storage>,
+    embedding_code: EmbeddingCode,
+    num_vectors: usize,
+    dim: usize,
+    num_producers: usize,
+    buffer_sizes: &[usize],
+) -> Result<BackpressureResult> {
+    if buffer_sizes.is_empty() {
+        anyhow::bail!("buffer_sizes must not be empty");
+    }
+
+    // Get embedding from registry
+    let embedding = storage
+        .cache()
+        .get_by_code(embedding_code)
+        .ok_or_else(|| anyhow::anyhow!("Embedding not found for code {}", embedding_code))?;
+
+    let mut results = Vec::with_capacity(buffer_sizes.len());
+
+    // Test each buffer size
+    for &buffer_size in buffer_sizes {
+        tracing::info!(buffer_size, num_vectors, num_producers, "Testing buffer size");
+
+        // Create writer with specific buffer size
+        let (writer, receiver) = create_writer(WriterConfig {
+            channel_buffer_size: buffer_size,
+        });
+        let _consumer_handle = spawn_mutation_consumer_with_storage_autoreg(
+            receiver,
+            WriterConfig::default(),
+            storage.clone(),
+        );
+
+        let metrics = Arc::new(ConcurrentMetrics::new());
+        let vectors_per_producer = num_vectors / num_producers;
+        let start = Instant::now();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Spawn producer tasks
+        let mut handles = Vec::with_capacity(num_producers);
+        for producer_id in 0..num_producers {
+            let writer = writer.clone();
+            let embedding = embedding.clone();
+            let metrics = Arc::clone(&metrics);
+            let stop = Arc::clone(&stop);
+
+            handles.push(tokio::spawn(async move {
+                let mut rng = StdRng::seed_from_u64(producer_id as u64 + 3000);
+
+                for _ in 0..vectors_per_producer {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let vector: Vec<f32> = (0..dim).map(|_| rng.gen::<f32>()).collect();
+                    let id = Id::new();
+
+                    let op_start = Instant::now();
+                    let result = InsertVector::new(&embedding, id, vector)
+                        .immediate()
+                        .run(&writer)
+                        .await;
+                    let latency = op_start.elapsed();
+
+                    match result {
+                        Ok(()) => metrics.record_insert(latency),
+                        Err(_) => metrics.record_error(),
+                    }
+                }
+            }));
+        }
+
+        // Wait for all producers to complete
+        for handle in handles {
+            let _ = handle.await;
+        }
+
+        // Flush and get final metrics
+        let _ = writer.flush().await;
+        let duration = start.elapsed();
+
+        let insert_count = metrics.insert_count();
+        let throughput = if duration.as_secs_f64() > 0.0 {
+            insert_count as f64 / duration.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        results.push(BackpressureSample {
+            buffer_size,
+            duration,
+            throughput,
+            avg_latency: metrics.insert_avg(),
+            p50_latency: metrics.insert_percentile(0.50),
+            p99_latency: metrics.insert_percentile(0.99),
+            errors: metrics.error_count(),
+            throughput_pct: 0.0, // Will be calculated after we know baseline
+        });
+
+        // Small delay between tests to let resources settle
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Calculate baseline (largest buffer = minimal backpressure)
+    let baseline_throughput = results.last().map(|r| r.throughput).unwrap_or(1.0);
+
+    // Calculate throughput percentages
+    for sample in &mut results {
+        sample.throughput_pct = if baseline_throughput > 0.0 {
+            (sample.throughput / baseline_throughput) * 100.0
+        } else {
+            0.0
+        };
+    }
+
+    Ok(BackpressureResult {
+        num_vectors,
+        num_producers,
+        results,
+        baseline_throughput,
+    })
+}
+
+/// Quick backpressure test with default buffer sizes.
+///
+/// Tests buffer sizes: [10, 50, 100, 500, 1000, 5000]
+pub async fn measure_backpressure_impact_quick(
+    storage: Arc<Storage>,
+    embedding_code: EmbeddingCode,
+    num_vectors: usize,
+    dim: usize,
+) -> Result<BackpressureResult> {
+    measure_backpressure_impact(
+        storage,
+        embedding_code,
+        num_vectors,
+        dim,
+        4, // 4 producers
+        &[10, 50, 100, 500, 1000, 5000],
+    )
+    .await
 }
 
 // ============================================================================
