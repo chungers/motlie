@@ -1331,6 +1331,39 @@ mod tests {
         );
     }
 
+    /// 7.8.2: Async insert backpressure blocks when threshold exceeded
+    #[test]
+    fn test_async_insert_backpressure_blocks() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
+
+        // Register embedding
+        let embedding = register_embedding(&storage, &registry, 64);
+
+        // Create processor with backpressure threshold of 1
+        let processor = Processor::new(storage.clone(), registry.clone());
+        processor.set_async_backpressure_threshold(1);
+
+        // First async insert should succeed
+        let id1 = crate::Id::new();
+        let vector1 = test_vector(64, 1);
+        processor
+            .insert_vector(&embedding, id1, &vector1, false)
+            .expect("First async insert should succeed");
+
+        // Second async insert should be blocked by backpressure
+        let id2 = crate::Id::new();
+        let vector2 = test_vector(64, 2);
+        let err = processor
+            .insert_vector(&embedding, id2, &vector2, false)
+            .expect_err("Second async insert should fail due to backpressure");
+        assert!(
+            err.to_string().to_lowercase().contains("backpressure"),
+            "Expected backpressure error, got: {}",
+            err
+        );
+    }
+
     // =========================================================================
     // Helper: Count pending items for an embedding
     // =========================================================================

@@ -265,6 +265,9 @@ impl Subsystem {
             self.cache.clone(),
             self.nav_cache.clone(),
         ));
+        if let Some(ref config) = async_config {
+            processor.set_async_backpressure_threshold(config.backpressure_threshold);
+        }
 
         // Create and spawn mutation consumer
         let (writer, mutation_receiver) = create_writer(writer_config.clone());
