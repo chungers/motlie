@@ -10,8 +10,8 @@
 - [`BENCHMARK.md`](./BENCHMARK.md) - Performance results and configuration reference
 - [`CONCURRENT.md`](./CONCURRENT.md) - Concurrent operations (Tasks 5.9-5.11)
 - [`PHASE7.md`](./PHASE7.md) - Async Graph Updater design (30 subtasks)
-- [`PHASE8.md`](./PHASE8.md) - Production Hardening (29 subtasks)
-COMMENT (CODEX, 2026-01-19): PHASE8 now includes 8.1.11; update subtask count if this becomes accepted.
+- [`PHASE8.md`](./PHASE8.md) - Production Hardening (30 subtasks)
+  <!-- ADDRESSED (Claude, 2026-01-19): Updated count from 29 to 30 after adding 8.1.11 -->
 
 ---
 
@@ -7823,8 +7823,8 @@ mod channel_tests {
 
 ## Phase 7: Async Graph Updater
 
-**Status:** Not Started
-COMMENT (CODEX, 2026-01-19): Phase 7 is marked complete at the top of ROADMAP and in PHASE7.md; update this status here to avoid conflicting guidance.
+**Status:** Complete
+<!-- ADDRESSED (Claude, 2026-01-19): Updated status from "Not Started" to "Complete" to match header and PHASE7.md -->
 **Design Doc:** [`PHASE7.md`](./PHASE7.md) - Detailed task breakdown with 30 subtasks
 
 **Goal:** Enable online updates by decoupling vector storage from HNSW graph construction.

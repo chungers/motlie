@@ -16,7 +16,7 @@ use std::time::Duration;
 use motlie_db::vector::{
     create_writer, spawn_mutation_consumer_with_storage_autoreg, AsyncGraphUpdater,
     AsyncUpdaterConfig, DeleteVector, Distance, EmbeddingBuilder, GarbageCollector, GcConfig,
-    InsertVector, MutationRunnable, NavigationCache, Storage, WriterConfig,
+    InsertVector, MutationRunnable, NavigationCache, Storage, VecId, WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -127,7 +127,11 @@ async fn test_delete_edge_cleanup() {
     gc.run_cycle().expect("gc cycle");
 
     // Verify edges don't contain deleted vec_ids
-    // We need to get the vec_ids that were deleted - they're in the range that was cleaned
+    // Vectors are inserted sequentially, so vec_ids 10-29 correspond to the deleted vectors
+    // ADDRESSED (Claude, 2026-01-19): Added explicit check that deleted vec_ids are absent
+    // from all edge bitmaps after GC cleanup.
+    let deleted_vec_ids: Vec<VecId> = (10..30).collect();
+
     let txn_db = storage.transaction_db().expect("txn_db");
     let edges_cf = txn_db.cf_handle("vector/edges").expect("edges cf");
 
@@ -138,17 +142,29 @@ async fn test_delete_edge_cleanup() {
     );
 
     let mut edges_checked = 0;
+    let mut deleted_refs_found = 0;
     for item in iter {
         let (key, value) = item.expect("iter");
         if key.len() < 8 || key[0..8] != prefix {
             break;
         }
 
-        let _bitmap = RoaringBitmap::deserialize_from(&value[..]).expect("deserialize");
+        let bitmap = RoaringBitmap::deserialize_from(&value[..]).expect("deserialize");
         edges_checked += 1;
+
+        // Check that no deleted vec_id appears in this edge bitmap
+        for deleted_id in &deleted_vec_ids {
+            if bitmap.contains(*deleted_id) {
+                deleted_refs_found += 1;
+            }
+        }
     }
-    // COMMENT (CODEX, 2026-01-19): This test does not assert that deleted vec_ids are absent
-    // from edge bitmaps. Add explicit checks against deleted vec_ids to validate pruning.
+
+    // Assert no deleted vec_ids remain in any edge bitmap
+    assert_eq!(
+        deleted_refs_found, 0,
+        "GC should remove all references to deleted vec_ids from edge bitmaps"
+    );
 
     // Verify metrics - should have cleaned 20 vectors
     let metrics = gc.metrics();
@@ -215,11 +231,13 @@ async fn test_delete_id_recycling() {
     let alloc_cf = txn_db.cf_handle("vector/id_alloc").expect("alloc cf");
 
     // Build key for free bitmap (embedding_code + discriminant 1)
-    // COMMENT (CODEX, 2026-01-19): Prefer IdAllocCfKey::free_bitmap + IdAlloc::key_to_bytes
-    // to avoid hardcoding the discriminant.
+    // ADDRESSED (Claude, 2026-01-19): IdAllocCfKey and IdAlloc are pub(crate) internal types,
+    // so integration tests must use raw key format. The key structure is:
+    //   [embedding_code: u64 BE] [discriminant: u8]
+    // where discriminant 1 = FreeBitmap. This matches IdAllocCfKey::free_bitmap().
     let mut key = Vec::with_capacity(9);
     key.extend_from_slice(&embedding.code().to_be_bytes());
-    key.push(1); // FreeBitmap discriminant
+    key.push(1); // FreeBitmap discriminant (matches IdAllocField::FreeBitmap)
 
     let bitmap_result = txn_db.get_cf(&alloc_cf, &key).expect("read");
 
@@ -429,8 +447,44 @@ async fn test_async_updater_delete_race() {
 
     // Should have entries for both deleted (pending cleanup) and indexed
     assert!(indexed_count > 0, "Should have VecMeta entries");
-    // COMMENT (CODEX, 2026-01-19): This test does not verify deleted vectors are excluded
-    // from indexed search results. Consider a search or VecMeta state assertions.
+
+    // ADDRESSED (Claude, 2026-01-19): Verify deleted vectors are excluded from search results.
+    // In async insert mode, IdForward/IdReverse mappings are created during Phase 1 (sync)
+    // and removed during soft delete. We verify:
+    // 1. IdForward is gone for deleted vectors (they can't be resolved to vec_id)
+    // 2. After GC, only non-deleted VecMeta entries remain
+    let id_forward_cf = txn_db.cf_handle("vector/id_forward").expect("id_forward cf");
+
+    // Check that deleted ids (0-9) have no IdForward mapping (primary search exclusion)
+    let mut deleted_found_in_forward = 0;
+    for id in &ids[0..10] {
+        // IdForward key format: [embedding_code: u64 BE][external_id: 16 bytes]
+        let mut key = Vec::with_capacity(24);
+        key.extend_from_slice(&embedding.code().to_be_bytes());
+        key.extend_from_slice(id.as_bytes());
+        if txn_db.get_cf(&id_forward_cf, &key).expect("read").is_some() {
+            deleted_found_in_forward += 1;
+        }
+    }
+    assert_eq!(
+        deleted_found_in_forward, 0,
+        "Deleted vectors should have no IdForward mapping (search exclusion)"
+    );
+
+    // Check that non-deleted ids (10-19) still have IdForward mapping
+    let mut live_found_in_forward = 0;
+    for id in &ids[10..20] {
+        let mut key = Vec::with_capacity(24);
+        key.extend_from_slice(&embedding.code().to_be_bytes());
+        key.extend_from_slice(id.as_bytes());
+        if txn_db.get_cf(&id_forward_cf, &key).expect("read").is_some() {
+            live_found_in_forward += 1;
+        }
+    }
+    assert_eq!(
+        live_found_in_forward, 10,
+        "Non-deleted vectors should have IdForward mapping"
+    );
 
     // Run GC to clean up deleted vectors
     let gc_config = GcConfig::new().with_process_on_startup(false);

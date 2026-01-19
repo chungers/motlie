@@ -176,15 +176,38 @@ pub struct GcMetrics {
     pub vectors_cleaned: AtomicU64,
     /// Total edges pruned
     pub edges_pruned: AtomicU64,
-    /// Total bytes reclaimed (approximate)
-    pub bytes_reclaimed: AtomicU64,
     /// Total GC cycles completed
     pub cycles_completed: AtomicU64,
     /// Total VecIds recycled (if enabled)
     pub ids_recycled: AtomicU64,
+    /// Total vectors skipped due to incomplete edge scan (ID recycling deferred)
+    pub recycling_skipped_incomplete: AtomicU64,
 }
-// COMMENT (CODEX, 2026-01-19): `bytes_reclaimed` is never updated; either wire it up
-// during cleanup or remove to avoid misleading metrics.
+// ADDRESSED (Claude, 2026-01-19): Removed `bytes_reclaimed` - tracking byte sizes would
+// require reading values before delete which adds I/O overhead. Added `recycling_skipped_incomplete`
+// to track when ID recycling is deferred due to edge_scan_limit being hit.
+
+// ============================================================================
+// Internal Result Types
+// ============================================================================
+
+/// Result of edge pruning operation.
+struct PruneResult {
+    /// Number of edges pruned
+    edges_pruned: u64,
+    /// Whether the scan completed fully (did not hit edge_scan_limit)
+    fully_scanned: bool,
+}
+
+/// Result of cleaning up a single deleted vector.
+struct CleanupResult {
+    /// Number of edges pruned
+    edges_pruned: u64,
+    /// Whether the VecId was recycled
+    id_recycled: bool,
+    /// Whether ID recycling was skipped due to incomplete edge scan
+    recycling_skipped: bool,
+}
 
 // ============================================================================
 // GarbageCollector
@@ -381,14 +404,18 @@ impl GarbageCollector {
         let mut total_cleaned = 0u64;
         let mut total_edges_pruned = 0u64;
         let mut total_ids_recycled = 0u64;
+        let mut total_recycling_skipped = 0u64;
 
         for (embedding, vec_id) in &deleted {
             match Self::cleanup_vector(&txn_db, config, *embedding, *vec_id) {
-                Ok((edges_pruned, id_recycled)) => {
+                Ok(result) => {
                     total_cleaned += 1;
-                    total_edges_pruned += edges_pruned;
-                    if id_recycled {
+                    total_edges_pruned += result.edges_pruned;
+                    if result.id_recycled {
                         total_ids_recycled += 1;
+                    }
+                    if result.recycling_skipped {
+                        total_recycling_skipped += 1;
                     }
                 }
                 Err(e) => {
@@ -406,6 +433,9 @@ impl GarbageCollector {
         metrics
             .ids_recycled
             .fetch_add(total_ids_recycled, Ordering::Relaxed);
+        metrics
+            .recycling_skipped_incomplete
+            .fetch_add(total_recycling_skipped, Ordering::Relaxed);
 
         Ok(total_cleaned as usize)
     }
@@ -452,19 +482,19 @@ impl GarbageCollector {
     /// 2. Removes vec_id from those neighbor bitmaps
     /// 3. Deletes vector data and binary codes
     /// 4. Deletes VecMeta entry
-    /// 5. Optionally recycles VecId (if enabled)
+    /// 5. Optionally recycles VecId (if enabled AND edge scan was complete)
     ///
-    /// Returns (edges_pruned, id_recycled).
+    /// Returns CleanupResult with edges_pruned, id_recycled, and recycling_skipped.
     fn cleanup_vector(
         txn_db: &rocksdb::TransactionDB,
         config: &GcConfig,
         embedding: EmbeddingCode,
         vec_id: VecId,
-    ) -> anyhow::Result<(u64, bool)> {
+    ) -> anyhow::Result<CleanupResult> {
         let txn = txn_db.transaction();
 
         // 1. Find and prune edges pointing to this vec_id
-        let edges_pruned = Self::prune_edges(&txn, txn_db, config, embedding, vec_id)?;
+        let prune_result = Self::prune_edges(&txn, txn_db, config, embedding, vec_id)?;
 
         // 2. Delete vector data
         let vectors_cf = txn_db
@@ -504,13 +534,25 @@ impl GarbageCollector {
         let meta_key = VecMetaCfKey(embedding, vec_id);
         txn.delete_cf(&meta_cf, VecMeta::key_to_bytes(&meta_key))?;
 
-        // 6. Recycle VecId if enabled (Task 8.1.3)
-        // Safe because we just removed all edge references to this vec_id
-        let id_recycled = if config.enable_id_recycling {
-            Self::recycle_vec_id(&txn, txn_db, embedding, vec_id)?;
-            true
+        // 6. Recycle VecId if enabled AND edge scan was complete (Task 8.1.3 + 8.1.11)
+        // ADDRESSED (Claude, 2026-01-19): Skip ID recycling when edge_scan_limit is hit
+        // to prevent reusing an ID that may still have edge references.
+        let (id_recycled, recycling_skipped) = if config.enable_id_recycling {
+            if prune_result.fully_scanned {
+                // Safe: we confirmed all edges were scanned and pruned
+                Self::recycle_vec_id(&txn, txn_db, embedding, vec_id)?;
+                (true, false)
+            } else {
+                // Unsafe: edge scan was incomplete, defer ID recycling
+                warn!(
+                    embedding,
+                    vec_id,
+                    "Skipping ID recycling - edge scan incomplete"
+                );
+                (false, true)
+            }
         } else {
-            false
+            (false, false)
         };
 
         // Commit the cleanup transaction
@@ -519,12 +561,17 @@ impl GarbageCollector {
         debug!(
             embedding,
             vec_id,
-            edges_pruned,
+            edges_pruned = prune_result.edges_pruned,
             id_recycled,
+            recycling_skipped,
             "Cleaned up deleted vector"
         );
 
-        Ok((edges_pruned, id_recycled))
+        Ok(CleanupResult {
+            edges_pruned: prune_result.edges_pruned,
+            id_recycled,
+            recycling_skipped,
+        })
     }
 
     /// Prune edges pointing to a deleted vector.
@@ -534,13 +581,17 @@ impl GarbageCollector {
     ///
     /// This is O(E) where E is the number of edge entries for the embedding,
     /// limited by `config.edge_scan_limit`.
+    ///
+    /// Returns a `PruneResult` with the number of edges pruned and whether
+    /// the scan completed fully. If `fully_scanned` is false, ID recycling
+    /// should be skipped to avoid reusing an ID that may still have references.
     fn prune_edges(
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
         config: &GcConfig,
         embedding: EmbeddingCode,
         deleted_vec_id: VecId,
-    ) -> anyhow::Result<u64> {
+    ) -> anyhow::Result<PruneResult> {
         let edges_cf = txn_db
             .cf_handle(Edges::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Edges CF not found"))?;
@@ -555,6 +606,7 @@ impl GarbageCollector {
 
         let mut edges_pruned = 0u64;
         let mut scanned = 0usize;
+        let mut fully_scanned = true;
 
         for item in iter {
             if scanned >= config.edge_scan_limit {
@@ -564,6 +616,7 @@ impl GarbageCollector {
                     scanned,
                     "Edge scan limit reached, some edges may not be pruned"
                 );
+                fully_scanned = false;
                 break;
             }
 
@@ -602,7 +655,10 @@ impl GarbageCollector {
             }
         }
 
-        Ok(edges_pruned)
+        Ok(PruneResult {
+            edges_pruned,
+            fully_scanned,
+        })
     }
 
     /// Recycle a VecId by adding it to the free bitmap (Task 8.1.3).

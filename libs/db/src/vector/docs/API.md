@@ -584,8 +584,11 @@ gc.shutdown();
 3. Delete vector data from Vectors CF
 4. Delete binary codes from BinaryCodes CF
 5. Delete VecMeta entry
-6. Optionally recycle VecId (if `enable_id_recycling=true`)
-COMMENT (CODEX, 2026-01-19): If `edge_scan_limit` is hit, some references may remain; ID recycling should be skipped or deferred to avoid reuse while edges still point to the vec_id.
+6. Optionally recycle VecId (if `enable_id_recycling=true` AND edge scan completed fully)
+
+> **Note:** ID recycling is automatically skipped when `edge_scan_limit` is hit, ensuring
+> no vec_id is reused while edges may still reference it. The `recycling_skipped_incomplete`
+> metric tracks when this safety guard activates.
 
 ### GC Configuration
 
