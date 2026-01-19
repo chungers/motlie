@@ -9,7 +9,8 @@
 ## Overview
 
 Phase 8 focuses on production readiness: ensuring deletes are clean, concurrent access is safe, and the system scales to billion-vector workloads. This phase addresses technical debt from earlier phases and validates the system under realistic production conditions.
-COMMENT (CODEX, 2026-01-18): “Billion-vector workloads” implies multi-TB storage and multi-100GB cache; confirm target hardware class to keep scale tasks realistic (single-node vs distributed).
+COMMENT (CODEX, 2026-01-18): "Billion-vector workloads" implies multi-TB storage and multi-100GB cache; confirm target hardware class to keep scale tasks realistic (single-node vs distributed).
+RESPONSE (2026-01-18): Target is **single-node** deployment. 1B scale is aspirational validation only (may use sampling). Primary targets are 10M-100M on commodity hardware (64GB RAM, NVMe SSD). Updated Task 8.3 with hardware profile section.
 
 ### Problem Statement
 
@@ -63,6 +64,7 @@ See [CONCURRENT.md](./CONCURRENT.md) for full concurrent test inventory and base
 | Tombstone compaction | Deleted vector data kept forever | Add compaction filter or background cleanup |
 | Search filtering | Relies on IdReverse removal | Add VecMeta lifecycle check as defense-in-depth |
 COMMENT (CODEX, 2026-01-18): VecMeta checks already exist in pending scan; for HNSW traversal, clarify where to skip deleted nodes to avoid duplicate logic or inconsistent filtering.
+RESPONSE (2026-01-18): VecMeta check for HNSW should be in **reranking phase** (after candidates collected, before returning results). Pending scan already has check at `processor.rs:1090`. HNSW traversal itself doesn't need check (edges may point to deleted nodes, but final results are filtered). Task 8.1.5 clarified to target reranking.
 
 ### From Scale Analysis
 
@@ -326,7 +328,21 @@ cargo run --release -p motlie-db --bin bench_vector -- \
 | 1B | >10 | >5 | <500ms | >70% |
 
 *Note: These are initial targets. Actual performance may vary based on hardware and HNSW parameters.*
-COMMENT (CODEX, 2026-01-18): Consider adding a “hardware profile” subsection (CPU/RAM/SSD) so target numbers remain interpretable and comparable.
+COMMENT (CODEX, 2026-01-18): Consider adding a "hardware profile" subsection (CPU/RAM/SSD) so target numbers remain interpretable and comparable.
+RESPONSE (2026-01-18): Added Hardware Profile section below.
+
+#### Hardware Profile (Reference)
+
+Target hardware for benchmark reproducibility:
+
+| Tier | CPU | RAM | Storage | Target Scale |
+|------|-----|-----|---------|--------------|
+| **Development** | 4+ cores | 16GB | SSD | 1M |
+| **Production (Small)** | 8+ cores | 64GB | NVMe | 10M |
+| **Production (Medium)** | 16+ cores | 128GB | NVMe | 100M |
+| **Production (Large)** | 32+ cores | 256GB+ | NVMe RAID | 1B (sampling) |
+
+All benchmarks should record: CPU model, core count, RAM size, storage type, OS version.
 
 ---
 
@@ -439,10 +455,10 @@ fn test_scale_100m_insert_search() {
 
 | Task | Subtasks | Effort |
 |------|----------|--------|
-| 8.1: Delete Refinement | 8.1.1 - 8.1.9 | 3-4 days |
-| 8.2: Concurrent Access Hardening | 8.2.1 - 8.2.8 | 2-3 days |
-| 8.3: Scale Validation | 8.3.1 - 8.3.9 | 1-2 weeks |
-| **Total** | **26 subtasks** | **~2-3 weeks** |
+| 8.1: Delete Refinement | 8.1.1 - 8.1.10 | 3-4 days |
+| 8.2: Concurrent Access Hardening | 8.2.1 - 8.2.9 | 2-3 days |
+| 8.3: Scale Validation | 8.3.1 - 8.3.10 | 1-2 weeks |
+| **Total** | **29 subtasks** | **~2-3 weeks** |
 
 ---
 

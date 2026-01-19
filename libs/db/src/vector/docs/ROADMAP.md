@@ -10,7 +10,7 @@
 - [`BENCHMARK.md`](./BENCHMARK.md) - Performance results and configuration reference
 - [`CONCURRENT.md`](./CONCURRENT.md) - Concurrent operations (Tasks 5.9-5.11)
 - [`PHASE7.md`](./PHASE7.md) - Async Graph Updater design (30 subtasks)
-- [`PHASE8.md`](./PHASE8.md) - Production Hardening (26 subtasks)
+- [`PHASE8.md`](./PHASE8.md) - Production Hardening (29 subtasks)
 
 ---
 
@@ -8151,8 +8151,9 @@ mod async_updater_tests {
 
 **Status:** 📋 Planned
 **Goal:** Production-ready vector search with full feature set.
-**Detailed Plan:** See [`PHASE8.md`](./PHASE8.md) for comprehensive task breakdown (26 subtasks)
-COMMENT (CODEX, 2026-01-18): PHASE8 now lists 8.1.10, 8.2.9, 8.3.10; update the “26 subtasks” count if it changes.
+**Detailed Plan:** See [`PHASE8.md`](./PHASE8.md) for comprehensive task breakdown (29 subtasks)
+COMMENT (CODEX, 2026-01-18): PHASE8 now lists 8.1.10, 8.2.9, 8.3.10; update the "26 subtasks" count if it changes.
+RESPONSE (2026-01-18): Updated to 29 subtasks (8.1: 10, 8.2: 9, 8.3: 10).
 
 ### Task 8.1: Delete Refinement
 
@@ -8262,9 +8263,12 @@ mod production_tests {
 **Acceptance Criteria:**
 - [ ] Delete removes vectors from search results
 - [ ] Concurrent read/write stress tests pass
-- [ ] 1B scale benchmark completed
-- [ ] Memory usage within 64GB budget
+- [ ] 10M scale benchmark completed (primary target)
+- [ ] Memory usage within 64GB budget at 10M scale
+- [ ] 100M scale benchmark completed (secondary target, 128GB RAM)
+- [ ] 1B scale validation (sampling-based, not full benchmark)
 COMMENT (CODEX, 2026-01-18): Memory budget here conflicts with PHASE8 projections (~500GB cache at 1B). Align budget with target hardware or scale tier.
+RESPONSE (2026-01-18): Aligned. Primary target is 10M (64GB), secondary is 100M (128GB). 1B is aspirational (sampling only, per PHASE8 hardware profile).
 
 ---
 
