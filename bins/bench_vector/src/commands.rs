@@ -1139,6 +1139,10 @@ pub struct ScaleArgs {
     #[arg(long, default_value = "42")]
     pub seed: u64,
 
+    /// Distance metric: cosine, l2, dot
+    #[arg(long, default_value = "cosine")]
+    pub distance: String,
+
     /// Progress reporting interval in seconds
     #[arg(long, default_value = "10")]
     pub progress_interval: u64,
@@ -1167,10 +1171,21 @@ pub fn scale(args: ScaleArgs) -> Result<()> {
     use motlie_db::vector::{AsyncGraphUpdater, AsyncUpdaterConfig, Distance, EmbeddingBuilder};
     use std::time::Duration;
 
+    let distance = match args.distance.to_lowercase().as_str() {
+        "cosine" => Distance::Cosine,
+        "l2" | "euclidean" => Distance::L2,
+        "dot" | "dotproduct" => Distance::DotProduct,
+        _ => anyhow::bail!(
+            "Invalid distance: {} (use cosine, l2, or dot)",
+            args.distance
+        ),
+    };
+
     println!("=== Scale Benchmark ===");
     println!("Vectors: {}", args.num_vectors);
     println!("Dimension: {}D", args.dim);
     println!("HNSW: M={}, ef_construction={}", args.m, args.ef_construction);
+    println!("Distance: {:?}", distance);
     println!("Batch size: {}", args.batch_size);
     if args.r#async {
         println!("Insert mode: ASYNC ({} workers)", args.async_workers);
@@ -1195,7 +1210,7 @@ pub fn scale(args: ScaleArgs) -> Result<()> {
     let embedding = storage
         .cache()
         .register(
-            EmbeddingBuilder::new("scale-bench", args.dim as u32, Distance::Cosine)
+            EmbeddingBuilder::new("scale-bench", args.dim as u32, distance)
                 .with_hnsw_m(args.m as u16)
                 .with_hnsw_ef_construction(args.ef_construction as u16),
             &txn_db,
@@ -1227,6 +1242,7 @@ pub fn scale(args: ScaleArgs) -> Result<()> {
     let config = ScaleConfig::new(args.num_vectors, args.dim)
         .with_batch_size(args.batch_size)
         .with_seed(args.seed)
+        .with_distance(distance)
         .with_progress_interval(Duration::from_secs(args.progress_interval))
         .with_num_queries(args.num_queries)
         .with_ef_search(args.ef_search)
