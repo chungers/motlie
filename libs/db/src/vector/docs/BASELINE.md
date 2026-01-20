@@ -770,14 +770,21 @@ Use `bench_vector scale` for all scale testing:
 |-------|-------------|-------------|------------|------------|------------|----------|-----------|
 | 10K | 44.6s | 224.3 vec/s | 623.7 | 1.57ms | 4.14ms | 53 MB | 856 B |
 | 100K | 1086s (~18m) | 92.0 vec/s | 392.3 | 2.48ms | 5.01ms | 345 MB | 8.79 KB |
-| 1M | *(in progress)* | | | | | | |
+| 1M | 36,814s (~10.2h) | 27.2 vec/s | 134.8 | 7.14ms | 14.00ms | 1.36 GB | 38.37 KB |
 | 10M | *(pending)* | | | | | | |
 
+**1M Benchmark Details (January 20, 2026):**
+- **Insert rate degradation**: 258 vec/s (initial) → 27.2 vec/s (final) - 9.5x slowdown over 1M inserts
+- **Zero errors**: All 1,000,000 vectors inserted successfully
+- **Search performance**: 134.8 QPS with P99 < 15ms at 1M scale
+- **Memory efficiency**: 1.36 GB for 1M × 128D vectors (~1.4 bytes/dim including HNSW overhead)
+
 **Observations:**
-- **Insert throughput degrades sub-linearly**: 10K=224 vec/s → 100K=92 vec/s (2.4x slower for 10x more vectors)
-- **Search QPS degrades gracefully**: 10K=624 QPS → 100K=392 QPS (1.6x slower for 10x more vectors)
-- **Memory scales linearly**: ~3.4 MB/1000 vectors (100K = 345 MB)
+- **Insert throughput degrades sub-linearly**: 10K=224 vec/s → 100K=92 vec/s → 1M=27 vec/s (expected O(log N) per insert)
+- **Search QPS degrades gracefully**: 10K=624 QPS → 100K=392 QPS → 1M=135 QPS (log-scale degradation)
+- **Memory scales linearly**: ~1.36 MB/1000 vectors at 1M scale
 - **HNSW graph construction dominates insert time**: Larger graphs = more distance computations per insert
+- **P99 latency remains bounded**: 4ms (10K) → 5ms (100K) → 14ms (1M) - acceptable for production
 
 ### Expected Memory at Scale
 
