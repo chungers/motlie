@@ -49,7 +49,8 @@ enum Commands {
     /// Parameter sweep (grid search over bits, ef, rerank)
     Sweep(commands::SweepArgs),
 
-    /// Scale benchmark (10K - 1B vectors with progress reporting)
+    /// Scale benchmark (deprecated: use index/query with --dataset random --stream)
+    #[command(hide = true)]
     Scale(commands::ScaleArgs),
 
     /// Check RaBitQ rotation distribution (validates √D scaling)

@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,10 +19,14 @@ use motlie_db::vector::benchmark::{
     RandomDataset, SiftDataset, save_rabitq_results_csv, GIST_QUERIES,
 };
 use motlie_db::vector::{
-    hnsw, BinaryCodeCache, Distance, EmbeddingCode, NavigationCache, RaBitQ,
-    Storage, VecId, VectorCfKey, VectorElementType, Vectors,
+    create_search_reader_with_storage, create_writer, hnsw, spawn_mutation_consumer_with_storage_autoreg,
+    spawn_query_consumers_with_storage_autoreg, AsyncGraphUpdater, AsyncUpdaterConfig,
+    BinaryCodeCache, Distance, EmbeddingBuilder, IdAllocator, InsertVectorBatch, RaBitQ,
+    ReaderConfig, Runnable, SearchKNN, Storage, VecId, VectorCfKey, VectorElementType, Vectors,
+    WriterConfig,
 };
 use motlie_db::rocksdb::ColumnFamily;
+use motlie_db::Id;
 
 // ============================================================================
 // Download Command
@@ -132,6 +137,26 @@ pub struct IndexArgs {
     /// Random seed (only for 'random' dataset)
     #[arg(long, default_value = "42")]
     pub seed: u64,
+
+    /// Stream random vectors instead of loading into memory (random dataset only)
+    #[arg(long, default_value = "false")]
+    pub stream: bool,
+
+    /// Batch size for streaming inserts (random dataset only)
+    #[arg(long, default_value = "1000")]
+    pub batch_size: usize,
+
+    /// Progress reporting interval (seconds) for streaming inserts
+    #[arg(long, default_value = "10")]
+    pub progress_interval: u64,
+
+    /// Use async inserts (deferred HNSW graph construction)
+    #[arg(long, default_value = "false")]
+    pub r#async: bool,
+
+    /// Number of async workers (only used with --async)
+    #[arg(long, default_value = "1")]
+    pub async_workers: usize,
 }
 
 pub async fn index(args: IndexArgs) -> Result<()> {
@@ -155,16 +180,6 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         }
     };
     println!("Distance: {:?}", distance);
-
-    // Load dataset
-    let (vectors, dim) = load_dataset_vectors_with_random(
-        &args.dataset,
-        &args.data_dir,
-        args.num_vectors,
-        args.dim,
-        args.seed,
-    )?;
-    println!("Loaded {} vectors, dim={}", vectors.len(), dim);
 
     // Handle fresh start
     if args.fresh && args.db_path.exists() {
@@ -190,36 +205,198 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     std::fs::create_dir_all(&args.db_path)?;
 
     // Initialize storage
-    let mut storage = Storage::readwrite(&args.db_path);
+    let storage = Arc::new(Storage::readwrite(&args.db_path));
     storage.ready()?;
 
-    // Create HNSW index
-    let nav_cache = Arc::new(NavigationCache::new());
-    let embedding_code: EmbeddingCode = 1;
-    let storage_type = VectorElementType::F16;
-
-    let hnsw_config = hnsw::Config {
-        dim,
-        m: args.m,
-        m_max: args.m * 2,
-        m_max_0: args.m * 2,
-        ef_construction: args.ef_construction,
-        ..Default::default()
-    };
-
-    let index = hnsw::Index::with_storage_type(
-        embedding_code,
-        distance,
-        storage_type,
-        hnsw_config,
-        nav_cache,
-    );
-
-    // Get vectors CF
+    // Prepare embedding registry
     let txn_db = storage.transaction_db()?;
-    let vectors_cf = txn_db
-        .cf_handle(Vectors::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+    let registry = storage.cache().clone();
+    let model = format!("bench-{}", args.dataset.to_lowercase());
+    let is_random = args.dataset.to_lowercase() == "random";
+
+    if args.stream && !is_random {
+        anyhow::bail!("--stream is only supported for the random dataset.");
+    }
+    if args.r#async && !args.stream {
+        anyhow::bail!("--async requires --stream with the random dataset.");
+    }
+
+    if is_random && args.stream {
+        let dim = args.dim;
+        let embedding = registry.register(
+            EmbeddingBuilder::new(&model, dim as u32, distance)
+                .with_hnsw_m(args.m as u16)
+                .with_hnsw_ef_construction(args.ef_construction as u16),
+            &txn_db,
+        )?;
+
+        if existing_count > 0 {
+            let allocator = IdAllocator::recover(&txn_db, embedding.code())?;
+            let next_id = allocator.next_id() as usize;
+            if next_id < existing_count {
+                anyhow::bail!(
+                    "Existing index allocator state ({}) behind metadata count ({}). Rebuild with --fresh.",
+                    next_id,
+                    existing_count
+                );
+            }
+        }
+
+        if existing_count > 0 {
+            anyhow::bail!("Streaming random index requires a fresh database.");
+        }
+
+        if args.r#async {
+            println!("Insert mode: ASYNC ({} workers)", args.async_workers);
+        }
+
+        let async_updater = if args.r#async {
+            let async_config = AsyncUpdaterConfig::new()
+                .with_num_workers(args.async_workers)
+                .with_batch_size(100)
+                .with_ef_construction(args.ef_construction)
+                .with_process_on_startup(false);
+            let registry = storage.cache().clone();
+            let nav_cache = Arc::new(motlie_db::vector::NavigationCache::new());
+            Some(Arc::new(AsyncGraphUpdater::start(
+                storage.clone(),
+                registry,
+                nav_cache,
+                async_config,
+            )))
+        } else {
+            None
+        };
+
+        let (writer, writer_rx) = create_writer(WriterConfig::default());
+        let consumer_handle = spawn_mutation_consumer_with_storage_autoreg(
+            writer_rx,
+            WriterConfig::default(),
+            storage.clone(),
+        );
+
+        let start = Instant::now();
+        let mut generator = motlie_db::vector::benchmark::StreamingVectorGenerator::new_with_distance(
+            args.dim,
+            args.num_vectors,
+            args.seed,
+            distance,
+        );
+        let mut sent = 0usize;
+        let mut last_progress = Instant::now();
+        let progress_interval = std::time::Duration::from_secs(args.progress_interval);
+        let immediate = !args.r#async;
+
+        println!("\nStreaming {} vectors (dim={})...", args.num_vectors, args.dim);
+
+        while let Some(batch) = generator.next_batch(args.batch_size) {
+            let batch_start = sent;
+            let batch_len = batch.len();
+            let mut payload = Vec::with_capacity(batch_len);
+
+            for (offset, vector) in batch.into_iter().enumerate() {
+                let id = Id::from_bytes(((batch_start + offset) as u128).to_be_bytes());
+                payload.push((id, vector));
+            }
+
+            let mutation = InsertVectorBatch::new(&embedding, payload);
+            let mutation = if immediate { mutation.immediate() } else { mutation };
+            writer.send(vec![mutation.into()]).await?;
+            sent += batch_len;
+
+            if last_progress.elapsed() >= progress_interval || sent == args.num_vectors {
+                let elapsed = start.elapsed().as_secs_f64();
+                let rate = sent as f64 / elapsed.max(0.0001);
+                println!("  {}/{} vectors ({:.1} vec/s)", sent, args.num_vectors, rate);
+                last_progress = Instant::now();
+            }
+        }
+
+        writer.flush().await?;
+        drop(writer);
+        consumer_handle.await??;
+
+        if let Some(updater) = async_updater {
+            println!("Waiting for async workers to drain pending queue...");
+            loop {
+                let pending = updater.pending_queue_size();
+                if pending == 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            match Arc::try_unwrap(updater) {
+                Ok(owned) => owned.shutdown(),
+                Err(_) => {
+                    println!("Note: async workers still shutting down in background");
+                }
+            }
+        }
+
+        let build_time = start.elapsed().as_secs_f64();
+        println!(
+            "\nIndex built in {:.2}s ({:.1} vec/s)",
+            build_time,
+            args.num_vectors as f64 / build_time.max(0.0001)
+        );
+
+        let mut meta = BenchmarkMetadata::new(
+            dim,
+            &format!("{:?}", distance).to_lowercase(),
+            false,
+            0,
+            false,
+            args.m,
+            args.ef_construction,
+            &args.dataset,
+        );
+        meta.num_vectors = args.num_vectors;
+        if is_random {
+            meta.vector_seed = args.seed;
+            meta.query_seed = args.seed.saturating_add(1_000_000);
+        }
+        meta.checkpoint(&args.db_path)?;
+        println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
+
+        return Ok(());
+    }
+
+    // Load dataset
+    let (vectors, dim) = load_dataset_vectors_with_random(
+        &args.dataset,
+        &args.data_dir,
+        args.num_vectors,
+        args.dim,
+        args.seed,
+    )?;
+    println!("Loaded {} vectors, dim={}", vectors.len(), dim);
+
+    let embedding = registry.register(
+        EmbeddingBuilder::new(&model, dim as u32, distance)
+            .with_hnsw_m(args.m as u16)
+            .with_hnsw_ef_construction(args.ef_construction as u16),
+        &txn_db,
+    )?;
+
+    if existing_count > 0 {
+        let allocator = IdAllocator::recover(&txn_db, embedding.code())?;
+        let next_id = allocator.next_id() as usize;
+        if next_id < existing_count {
+            anyhow::bail!(
+                "Existing index allocator state ({}) behind metadata count ({}). Rebuild with --fresh.",
+                next_id,
+                existing_count
+            );
+        }
+    }
+
+    // Setup mutation writer/consumer
+    let (writer, writer_rx) = create_writer(WriterConfig::default());
+    let consumer_handle = spawn_mutation_consumer_with_storage_autoreg(
+        writer_rx,
+        WriterConfig::default(),
+        storage.clone(),
+    );
 
     // Insert vectors (skip already indexed)
     let start = Instant::now();
@@ -228,25 +405,32 @@ pub async fn index(args: IndexArgs) -> Result<()> {
 
     println!("\nInserting {} vectors (starting from {})...", total, existing_count);
 
-    for (i, vector) in vectors_to_add.iter().enumerate() {
-        let vec_id = (existing_count + i) as VecId;
+    let batch_size = 1000usize;
+    let mut sent = 0usize;
 
-        // Store vector and insert into HNSW index atomically
-        let key = VectorCfKey(embedding_code, vec_id);
-        let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
+    for batch in vectors_to_add.chunks(batch_size) {
+        let batch_start = existing_count + sent;
+        let mut payload = Vec::with_capacity(batch.len());
 
-        let txn = txn_db.transaction();
-        txn.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
-        let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, vector)?;
-        txn.commit()?;
-        cache_update.apply(index.nav_cache());
+        for (offset, vector) in batch.iter().enumerate() {
+            let id = Id::from_bytes(((batch_start + offset) as u128).to_be_bytes());
+            payload.push((id, vector.clone()));
+        }
 
-        if (i + 1) % 10000 == 0 || i + 1 == total {
+        let mutation = InsertVectorBatch::new(&embedding, payload).immediate();
+        writer.send(vec![mutation.into()]).await?;
+        sent += batch.len();
+
+        if sent % 10000 == 0 || sent == total {
             let elapsed = start.elapsed().as_secs_f64();
-            let rate = (i + 1) as f64 / elapsed;
-            println!("  {}/{} vectors ({:.1} vec/s)", i + 1, total, rate);
+            let rate = sent as f64 / elapsed;
+            println!("  {}/{} vectors ({:.1} vec/s)", sent, total, rate);
         }
     }
+
+    writer.flush().await?;
+    drop(writer);
+    consumer_handle.await??;
 
     let build_time = start.elapsed().as_secs_f64();
     println!(
@@ -267,6 +451,10 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         &args.dataset,
     );
     meta.num_vectors = args.num_vectors;
+    if is_random {
+        meta.vector_seed = args.seed;
+        meta.query_seed = args.seed.saturating_add(1_000_000);
+    }
     meta.checkpoint(&args.db_path)?;
     println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
 
@@ -302,6 +490,22 @@ pub struct QueryArgs {
     /// Number of queries to run
     #[arg(long, default_value = "1000")]
     pub num_queries: usize,
+
+    /// Random seed for random dataset queries (defaults to metadata if present)
+    #[arg(long)]
+    pub query_seed: Option<u64>,
+
+    /// Random seed for random dataset vectors (defaults to metadata if present)
+    #[arg(long)]
+    pub vector_seed: Option<u64>,
+
+    /// Recall sample size for random dataset (0 disables)
+    #[arg(long, default_value = "0")]
+    pub recall_sample_size: usize,
+
+    /// Skip recall/ground truth computation
+    #[arg(long, default_value = "false")]
+    pub skip_recall: bool,
 }
 
 pub async fn query(args: QueryArgs) -> Result<()> {
@@ -323,76 +527,234 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         _ => Distance::Cosine,
     };
 
-    // Load queries and ground truth
-    let (db_vectors, queries, dim) = load_dataset_for_query(
-        &args.dataset,
-        &args.data_dir,
-        meta.num_vectors,
-        args.num_queries,
-    )?;
-    println!("Loaded {} queries, dim={}", queries.len(), dim);
+    let is_random = args.dataset.to_lowercase() == "random";
+    let dim = meta.dim;
 
-    // Compute ground truth
-    println!("Computing ground truth...");
-    let ground_truth = compute_ground_truth(&db_vectors, &queries, args.k, distance);
+    let (queries, ground_truth, mut skip_recall, vector_seed, query_seed) = if is_random {
+        let vector_seed = args.vector_seed.unwrap_or(meta.vector_seed);
+        let query_seed = args.query_seed.unwrap_or(meta.query_seed);
+        let mut skip_recall = args.skip_recall;
 
-    // Open storage
-    let mut storage = Storage::readwrite(&args.db_path);
-    storage.ready()?;
+        if args.recall_sample_size == 0 && !skip_recall {
+            println!("Skipping recall for random dataset (set --recall-sample-size to enable).");
+            skip_recall = true;
+        }
 
-    // Create HNSW index handle
-    let nav_cache = Arc::new(NavigationCache::new());
-    let embedding_code: EmbeddingCode = 1;
-    let storage_type = VectorElementType::F16;
+        (Vec::new(), Vec::new(), skip_recall, vector_seed, query_seed)
+    } else {
+        // Load queries and ground truth
+        let (db_vectors, queries, _dim) = load_dataset_for_query(
+            &args.dataset,
+            &args.data_dir,
+            meta.num_vectors,
+            args.num_queries,
+        )?;
+        println!("Loaded {} queries, dim={}", queries.len(), dim);
 
-    let hnsw_config = hnsw::Config {
-        dim,
-        m: meta.hnsw_m,
-        m_max: meta.hnsw_m * 2,
-        m_max_0: meta.hnsw_m * 2,
-        ef_construction: meta.hnsw_ef_construction,
-        ..Default::default()
+        let ground_truth = if args.skip_recall {
+            Vec::new()
+        } else {
+            println!("Computing ground truth...");
+            compute_ground_truth(&db_vectors, &queries, args.k, distance)
+        };
+        (queries, ground_truth, args.skip_recall, 0, 0)
     };
 
-    let index = hnsw::Index::with_storage_type(
-        embedding_code,
-        distance,
-        storage_type,
-        hnsw_config,
-        nav_cache,
+    // Open storage
+    let storage = Arc::new(Storage::readwrite(&args.db_path));
+    storage.ready()?;
+
+    // Ensure embedding spec exists for public query API
+    let txn_db = storage.transaction_db()?;
+    let registry = storage.cache().clone();
+    let model = format!("bench-{}", args.dataset.to_lowercase());
+    let embedding = match registry.get(&model, dim as u32, distance) {
+        Some(existing) => existing,
+        None => registry.register(
+            EmbeddingBuilder::new(&model, dim as u32, distance)
+                .with_hnsw_m(meta.hnsw_m as u16)
+                .with_hnsw_ef_construction(meta.hnsw_ef_construction as u16),
+            &txn_db,
+        )?,
+    };
+
+    // Setup query reader/consumers
+    let (search_reader, query_rx) =
+        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+    let query_handles = spawn_query_consumers_with_storage_autoreg(
+        query_rx,
+        ReaderConfig::default(),
+        storage.clone(),
+        2,
     );
 
     // Run queries
-    println!("\nRunning {} queries (ef_search={})...", queries.len(), args.ef_search);
-    let mut latencies = Vec::with_capacity(queries.len());
-    let mut search_results = Vec::with_capacity(queries.len());
+    let query_count = if is_random { args.num_queries } else { queries.len() };
+    println!(
+        "\nRunning {} queries (ef_search={})...",
+        query_count, args.ef_search
+    );
+    let mut latencies = Vec::with_capacity(query_count);
+    let mut search_results: Vec<Vec<usize>> = Vec::new();
 
-    for (qi, query) in queries.iter().enumerate() {
-        let start = Instant::now();
-        let results = index.search(&storage, query, args.ef_search, args.k)?;
-        let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let timeout = std::time::Duration::from_secs(30);
 
-        latencies.push(latency_ms);
-        let result_ids: Vec<usize> = results.iter().map(|(_, id)| *id as usize).collect();
-        search_results.push(result_ids);
+    if is_random {
+        let mut query_gen =
+            motlie_db::vector::benchmark::StreamingVectorGenerator::new_with_distance(
+                dim,
+                args.num_queries,
+                query_seed,
+                distance,
+            );
 
-        if (qi + 1) % 100 == 0 {
-            println!("  {}/{} queries", qi + 1, queries.len());
+        for qi in 0..args.num_queries {
+            let query = query_gen.generate_query();
+            let start = Instant::now();
+            let results = SearchKNN::new(&embedding, query, args.k)
+                .with_ef(args.ef_search)
+                .exact()
+                .run(&search_reader, timeout)
+                .await?;
+            let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+            latencies.push(latency_ms);
+
+            if (qi + 1) % 100 == 0 {
+                println!("  {}/{} queries", qi + 1, args.num_queries);
+            }
+        }
+    } else {
+        for (qi, query) in queries.iter().enumerate() {
+            let start = Instant::now();
+            let results = SearchKNN::new(&embedding, query.clone(), args.k)
+                .with_ef(args.ef_search)
+                .exact()
+                .run(&search_reader, timeout)
+                .await?;
+            let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+            latencies.push(latency_ms);
+            if !skip_recall {
+                let result_ids: Vec<usize> =
+                    results.iter().map(|result| result.vec_id as usize).collect();
+                search_results.push(result_ids);
+            }
+
+            if (qi + 1) % 100 == 0 {
+                println!("  {}/{} queries", qi + 1, queries.len());
+            }
         }
     }
 
     // Compute metrics
-    let recall = compute_recall(&search_results, &ground_truth, args.k);
+    let mut recall_at_k: Option<f64> = None;
+
+    if !skip_recall && !is_random {
+        recall_at_k = Some(compute_recall(&search_results, &ground_truth, args.k));
+    }
+
+    if is_random && args.recall_sample_size > 0 && !skip_recall {
+        println!(
+            "\nComputing recall with {} random sample queries (brute-force ground truth)...",
+            args.recall_sample_size
+        );
+
+        let mut db_gen =
+            motlie_db::vector::benchmark::StreamingVectorGenerator::new_with_distance(
+                dim,
+                meta.num_vectors,
+                vector_seed,
+                distance,
+            );
+        let mut db_vectors: Vec<Vec<f32>> = Vec::with_capacity(meta.num_vectors);
+        while let Some(batch) = db_gen.next_batch(10_000) {
+            db_vectors.extend(batch);
+            if db_vectors.len() % 100_000 == 0 {
+                print!(
+                    "\r  Regenerated {}/{} vectors for ground truth...",
+                    db_vectors.len(),
+                    meta.num_vectors
+                );
+                std::io::stdout().flush().ok();
+            }
+        }
+        println!(
+            "\r  Regenerated {} vectors for ground truth.          ",
+            db_vectors.len()
+        );
+
+        let recall_seed = query_seed.saturating_add(1_000_000);
+        let mut recall_query_gen =
+            motlie_db::vector::benchmark::StreamingVectorGenerator::new_with_distance(
+                dim,
+                args.recall_sample_size,
+                recall_seed,
+                distance,
+            );
+
+        let mut all_search_results: Vec<Vec<usize>> =
+            Vec::with_capacity(args.recall_sample_size);
+        let mut all_ground_truth: Vec<Vec<usize>> =
+            Vec::with_capacity(args.recall_sample_size);
+
+        for qi in 0..args.recall_sample_size {
+            let query = recall_query_gen.generate_query();
+
+            let mut distances: Vec<(usize, f32)> = db_vectors
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (i, distance.compute(&query, v)))
+                .collect();
+            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            let ground_truth: Vec<usize> = distances
+                .iter()
+                .take(args.k)
+                .map(|(i, _)| *i)
+                .collect();
+            all_ground_truth.push(ground_truth);
+
+            let results = SearchKNN::new(&embedding, query, args.k)
+                .with_ef(args.ef_search)
+                .exact()
+                .run(&search_reader, timeout)
+                .await?;
+            let result_indices: Vec<usize> =
+                results.iter().map(|result| result.vec_id as usize).collect();
+            all_search_results.push(result_indices);
+
+            if (qi + 1) % 20 == 0 || qi + 1 == args.recall_sample_size {
+                print!(
+                    "\r  Computed {}/{} recall queries...",
+                    qi + 1,
+                    args.recall_sample_size
+                );
+                std::io::stdout().flush().ok();
+            }
+        }
+        println!();
+
+        recall_at_k = Some(compute_recall(&all_search_results, &all_ground_truth, args.k));
+    }
     latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let stats = LatencyStats::from_latencies(&latencies);
 
     println!("\n=== Results ===");
-    println!("Recall@{}: {:.1}%", args.k, recall * 100.0);
+    if let Some(recall) = recall_at_k {
+        println!("Recall@{}: {:.1}%", args.k, recall * 100.0);
+    } else {
+        println!("Recall@{}: skipped", args.k);
+    }
     println!("QPS: {:.1}", stats.qps);
     println!(
         "Latency: avg={:.2}ms, p50={:.2}ms, p95={:.2}ms, p99={:.2}ms",
         stats.avg_ms, stats.p50_ms, stats.p95_ms, stats.p99_ms
     );
+
+    drop(search_reader);
+    for handle in query_handles {
+        handle.await??;
+    }
 
     Ok(())
 }
@@ -1178,6 +1540,11 @@ pub fn scale(args: ScaleArgs) -> Result<()> {
     use motlie_db::vector::benchmark::{AsyncMetrics, ScaleBenchmark, ScaleConfig};
     use motlie_db::vector::{AsyncGraphUpdater, AsyncUpdaterConfig, Distance, EmbeddingBuilder};
     use std::time::Duration;
+
+    eprintln!(
+        "Warning: 'bench_vector scale' is deprecated. Use 'bench_vector index --dataset random --stream' \
+         and 'bench_vector query --dataset random' instead."
+    );
 
     let distance = match args.distance.to_lowercase().as_str() {
         "cosine" => Distance::Cosine,

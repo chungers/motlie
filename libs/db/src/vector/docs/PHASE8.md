@@ -342,7 +342,7 @@ This extends `ConcurrentBenchmark` in `libs/db/src/vector/benchmark/concurrent.r
 
 **Files:**
 - `libs/db/src/vector/benchmark/scale.rs` - Scale benchmark infrastructure
-- `bins/bench_vector/src/commands.rs` - `bench_vector scale` command
+- `bins/bench_vector/src/commands.rs` - streaming random dataset support via `bench_vector index/query`
 - `libs/db/src/vector/docs/BASELINE.md` - Scale benchmark results
 
 **Foundation:**
@@ -389,7 +389,7 @@ Scale projections:
 - [x] 8.3.1: Create scale benchmark infrastructure with progress reporting
   - `benchmark/scale.rs`: `ScaleConfig`, `ScaleBenchmark`, `ScaleProgress`, `ScaleResult`
   - Real-time progress with throughput, ETA, memory tracking
-  - Integrated into `bench_vector scale` CLI command (not separate test file)
+  - CLI now uses `bench_vector index/query` with streaming random datasets; `bench_vector scale` is deprecated
   - Distance wiring added (`--distance cosine|l2|dot`), with Cosine normalization only
 - [x] 8.3.2: Run baseline benchmarks (10K, 100K, 1M) **COMPLETE**
   - 10K: 224.3 vec/s insert, 623.7 QPS, 53 MB RSS
@@ -421,23 +421,66 @@ Scale projections:
 cargo build --release --bin bench_vector
 
 # Quick validation (10K vectors, ~1 min)
-./target/release/bench_vector scale \
-    --num-vectors 10000 --dim 128 --db-path /tmp/bench_10k
+./target/release/bench_vector index \
+    --dataset random \
+    --num-vectors 10000 \
+    --dim 128 \
+    --stream \
+    --db-path /tmp/bench_10k \
+    --fresh
+
+./target/release/bench_vector query \
+    --dataset random \
+    --db-path /tmp/bench_10k \
+    --num-queries 100 \
+    --skip-recall
 
 # Medium scale (100K vectors, ~18 min)
-./target/release/bench_vector scale \
-    --num-vectors 100000 --dim 128 --db-path /tmp/bench_100k \
-    --output results/scale_100k.json
+./target/release/bench_vector index \
+    --dataset random \
+    --num-vectors 100000 \
+    --dim 128 \
+    --stream \
+    --db-path /tmp/bench_100k \
+    --fresh
+
+./target/release/bench_vector query \
+    --dataset random \
+    --db-path /tmp/bench_100k \
+    --num-queries 500 \
+    --skip-recall
 
 # Large scale (1M vectors, ~10 hours)
-./target/release/bench_vector scale \
-    --num-vectors 1000000 --dim 128 --batch-size 5000 \
-    --db-path /tmp/bench_1m --output results/scale_1m.json
+./target/release/bench_vector index \
+    --dataset random \
+    --num-vectors 1000000 \
+    --dim 128 \
+    --stream \
+    --batch-size 5000 \
+    --db-path /tmp/bench_1m \
+    --fresh
+
+./target/release/bench_vector query \
+    --dataset random \
+    --db-path /tmp/bench_1m \
+    --num-queries 1000 \
+    --skip-recall
 
 # 10M benchmark (estimated 20+ hours)
-./target/release/bench_vector scale \
-    --num-vectors 10000000 --dim 128 --batch-size 5000 \
-    --db-path /tmp/bench_10m --output results/scale_10m.json
+./target/release/bench_vector index \
+    --dataset random \
+    --num-vectors 10000000 \
+    --dim 128 \
+    --stream \
+    --batch-size 5000 \
+    --db-path /tmp/bench_10m \
+    --fresh
+
+./target/release/bench_vector query \
+    --dataset random \
+    --db-path /tmp/bench_10m \
+    --num-queries 1000 \
+    --skip-recall
 ```
 
 #### Expected Performance Targets
