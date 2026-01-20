@@ -8,6 +8,9 @@
 //! - **Memory profiling**: Track peak RSS and cache sizes
 //! - **Checkpoint support**: Resume interrupted benchmarks
 //!
+//! COMMENT (CODEX, 2026-01-19): Checkpoint/resume is not implemented yet.
+//! Current code always starts fresh and does not persist progress state.
+//!
 //! ## Usage
 //!
 //! ```ignore
@@ -128,6 +131,12 @@ impl ScaleConfig {
         self
     }
 
+    /// Set distance metric.
+    pub fn with_distance(mut self, distance: Distance) -> Self {
+        self.distance = distance;
+        self
+    }
+
     /// Set HNSW M parameter.
     pub fn with_hnsw_m(mut self, m: usize) -> Self {
         self.hnsw_m = m;
@@ -142,6 +151,9 @@ impl ScaleConfig {
 
     /// Estimated memory usage in bytes.
     pub fn estimated_memory_bytes(&self) -> u64 {
+        // COMMENT (CODEX, 2026-01-19): This assumes f16 storage, but default
+        // EmbeddingSpec storage_type is F32; estimates will undercount unless
+        // storage_type is explicitly set to F16.
         // Per-vector estimate (from PHASE8.md):
         // - Vector data (f16): dim * 2 bytes
         // - Binary code: dim / 8 bytes
@@ -391,6 +403,7 @@ pub struct StreamingVectorGenerator {
     dim: usize,
     generated: usize,
     total: usize,
+    normalize: bool,
 }
 
 impl StreamingVectorGenerator {
@@ -401,10 +414,22 @@ impl StreamingVectorGenerator {
             dim,
             generated: 0,
             total,
+            normalize: true,
         }
     }
 
-    /// Generate next batch of normalized vectors.
+    /// Create a generator with normalization behavior based on distance.
+    pub fn new_with_distance(dim: usize, total: usize, seed: u64, distance: Distance) -> Self {
+        Self {
+            rng: ChaCha8Rng::seed_from_u64(seed),
+            dim,
+            generated: 0,
+            total,
+            normalize: matches!(distance, Distance::Cosine),
+        }
+    }
+
+    /// Generate next batch of vectors.
     ///
     /// Returns None when all vectors have been generated.
     pub fn next_batch(&mut self, batch_size: usize) -> Option<Vec<Vec<f32>>> {
@@ -424,11 +449,13 @@ impl StreamingVectorGenerator {
                 })
                 .collect();
 
-            // Normalize to unit length (for Cosine distance)
-            let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-            if norm > 1e-10 {
-                for v in &mut vector {
-                    *v /= norm;
+            if self.normalize {
+                // Normalize to unit length (for Cosine distance)
+                let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm > 1e-10 {
+                    for v in &mut vector {
+                        *v /= norm;
+                    }
                 }
             }
 
@@ -447,10 +474,12 @@ impl StreamingVectorGenerator {
                 r * 2.0 - 1.0
             })
             .collect();
-        let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm > 1e-10 {
-            for v in &mut vector {
-                *v /= norm;
+        if self.normalize {
+            let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 1e-10 {
+                for v in &mut vector {
+                    *v /= norm;
+                }
             }
         }
         vector
@@ -493,6 +522,8 @@ pub fn get_rss_bytes() -> u64 {
     {
         // macOS: use mach task_info (simplified - returns 0 for now)
         // Full implementation would use mach_task_self() and task_info()
+        // COMMENT (CODEX, 2026-01-19): RSS tracking is a no-op on macOS, so
+        // reported peak RSS will be 0 unless this is implemented.
         0
     }
 
@@ -559,7 +590,12 @@ impl ScaleBenchmark {
 
         // Phase 1: Insert using Processor batch API
         let insert_start = Instant::now();
-        let mut generator = StreamingVectorGenerator::new(config.dim, config.num_vectors, config.seed);
+        let mut generator = StreamingVectorGenerator::new_with_distance(
+            config.dim,
+            config.num_vectors,
+            config.seed,
+            config.distance,
+        );
         let mut last_progress = Instant::now();
         let mut peak_rss: u64 = 0;
         let mut peak_pending: usize = 0;
@@ -642,12 +678,34 @@ impl ScaleBenchmark {
         };
 
         // Phase 2: Search using Processor's index
+        // NOTE: For async inserts, wait for pending queue to drain before search
+        // when async metrics are available. Otherwise, results will reflect a
+        // partially built index.
+        if !config.immediate_index {
+            if let Some(ref metrics) = async_metrics {
+                println!("Waiting for async workers to drain pending queue...");
+                loop {
+                    let pending = (metrics.pending_queue_size)();
+                    if pending == 0 {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            } else {
+                println!("Warning: async mode without metrics; search reflects partial index");
+            }
+        }
         println!("Running {} search queries...", config.num_queries);
         let search_start = Instant::now();
         let mut latencies: Vec<Duration> = Vec::with_capacity(config.num_queries);
 
         // Use different seed for queries
-        let mut query_gen = StreamingVectorGenerator::new(config.dim, config.num_queries, config.seed + 1_000_000);
+        let mut query_gen = StreamingVectorGenerator::new_with_distance(
+            config.dim,
+            config.num_queries,
+            config.seed + 1_000_000,
+            config.distance,
+        );
 
         // Get the HNSW index from processor
         let index = processor
@@ -658,7 +716,7 @@ impl ScaleBenchmark {
             let query = query_gen.generate_query();
             let query_start = Instant::now();
 
-            match index.search(storage.as_ref(), &query, config.ef_search, config.k) {
+            match index.search(storage.as_ref(), &query, config.k, config.ef_search) {
                 Ok(_results) => {
                     latencies.push(query_start.elapsed());
                 }

@@ -272,6 +272,9 @@ bench_vector scale --num-vectors 100000 --db-path /tmp/bench_100k --output resul
 
 # Large scale (1M vectors)
 bench_vector scale --num-vectors 1000000 --dim 128 --batch-size 5000 --db-path /tmp/bench_1m
+
+# L2 scale run
+bench_vector scale --num-vectors 100000 --dim 128 --distance l2 --db-path /tmp/bench_100k_l2
 ```
 
 **Options:**

@@ -390,6 +390,7 @@ Scale projections:
   - `benchmark/scale.rs`: `ScaleConfig`, `ScaleBenchmark`, `ScaleProgress`, `ScaleResult`
   - Real-time progress with throughput, ETA, memory tracking
   - Integrated into `bench_vector scale` CLI command (not separate test file)
+  - Distance wiring added (`--distance cosine|l2|dot`), with Cosine normalization only
 - [x] 8.3.2: Run baseline benchmarks (10K, 100K, 1M)
   - 10K: 224.3 vec/s insert, 623.7 QPS, 53 MB RSS
   - 100K: 92.0 vec/s insert, 392.3 QPS, 345 MB RSS
