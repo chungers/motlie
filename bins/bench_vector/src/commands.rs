@@ -1164,6 +1164,14 @@ pub struct ScaleArgs {
     /// with multiple embeddings.
     #[arg(long, default_value = "1")]
     pub async_workers: usize,
+
+    /// Number of queries to sample for recall computation (0 to disable)
+    #[arg(long, default_value = "100")]
+    pub recall_sample_size: usize,
+
+    /// Rerank factor for search (candidates = k * rerank_factor)
+    #[arg(long, default_value = "4")]
+    pub rerank_factor: usize,
 }
 
 pub fn scale(args: ScaleArgs) -> Result<()> {
@@ -1249,7 +1257,9 @@ pub fn scale(args: ScaleArgs) -> Result<()> {
         .with_k(args.k)
         .with_hnsw_m(args.m)
         .with_hnsw_ef_construction(args.ef_construction)
-        .with_immediate_index(!args.r#async); // false = async inserts
+        .with_immediate_index(!args.r#async) // false = async inserts
+        .with_recall_sample_size(args.recall_sample_size)
+        .with_rerank_factor(args.rerank_factor);
 
     // Create async metrics callback if in async mode
     let async_metrics = if let Some(ref updater) = async_updater {
@@ -1335,6 +1345,11 @@ pub fn scale(args: ScaleArgs) -> Result<()> {
             "memory": {
                 "peak_rss_bytes": result.peak_memory_bytes,
                 "nav_cache_bytes": result.nav_cache_bytes,
+            },
+            "recall": {
+                "recall_at_k": result.recall_at_k,
+                "k": result.config.k,
+                "sample_queries": result.recall_queries,
             }
         });
 

@@ -33,6 +33,8 @@ use rand_chacha::ChaCha8Rng;
 use crate::vector::{Distance, Embedding, Processor, Storage};
 use crate::Id;
 
+use super::metrics::compute_recall;
+
 // ============================================================================
 // ScaleConfig
 // ============================================================================
@@ -64,6 +66,10 @@ pub struct ScaleConfig {
     pub hnsw_m: usize,
     /// HNSW ef_construction parameter.
     pub hnsw_ef_construction: usize,
+    /// Number of queries to sample for recall computation (0 to disable).
+    pub recall_sample_size: usize,
+    /// Rerank factor for search (for RaBitQ distance refinement).
+    pub rerank_factor: usize,
 }
 
 impl ScaleConfig {
@@ -82,6 +88,8 @@ impl ScaleConfig {
             distance: Distance::Cosine,
             hnsw_m: 16,
             hnsw_ef_construction: 200,
+            recall_sample_size: 100,
+            rerank_factor: 4,
         }
     }
 
@@ -145,6 +153,18 @@ impl ScaleConfig {
         self
     }
 
+    /// Set recall sample size (number of queries for recall computation).
+    pub fn with_recall_sample_size(mut self, size: usize) -> Self {
+        self.recall_sample_size = size;
+        self
+    }
+
+    /// Set rerank factor for search.
+    pub fn with_rerank_factor(mut self, factor: usize) -> Self {
+        self.rerank_factor = factor;
+        self
+    }
+
     /// Estimated memory usage in bytes.
     pub fn estimated_memory_bytes(&self) -> u64 {
         // COMMENT (CODEX, 2026-01-19): This assumes f16 storage, but default
@@ -178,7 +198,22 @@ impl ScaleConfig {
 
 impl Default for ScaleConfig {
     fn default() -> Self {
-        Self::new(1_000_000, 512)
+        Self {
+            num_vectors: 1_000_000,
+            dim: 512,
+            batch_size: 1000,
+            seed: 42,
+            progress_interval: Duration::from_secs(10),
+            num_queries: 1000,
+            ef_search: 100,
+            k: 10,
+            immediate_index: true,
+            distance: Distance::Cosine,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            recall_sample_size: 100,
+            rerank_factor: 4,
+        }
     }
 }
 
@@ -332,6 +367,10 @@ pub struct ScaleResult {
     pub peak_memory_bytes: u64,
     /// Navigation cache size in bytes.
     pub nav_cache_bytes: u64,
+    /// Recall@k computed via brute-force ground truth (None if disabled).
+    pub recall_at_k: Option<f64>,
+    /// Number of queries used for recall computation.
+    pub recall_queries: usize,
 }
 
 impl ScaleResult {
@@ -383,6 +422,12 @@ impl fmt::Display for ScaleResult {
         writeln!(f, "Memory:")?;
         writeln!(f, "  Peak RSS: {}", self.peak_memory_human())?;
         writeln!(f, "  Nav cache: {}", self.nav_cache_human())?;
+        writeln!(f)?;
+        if let Some(recall) = self.recall_at_k {
+            writeln!(f, "Recall:")?;
+            writeln!(f, "  Recall@{}: {:.1}%", self.config.k, recall * 100.0)?;
+            writeln!(f, "  Sampled queries: {}", self.recall_queries)?;
+        }
         Ok(())
     }
 }
@@ -743,6 +788,91 @@ impl ScaleBenchmark {
         let (nav_entries, nav_bytes) = processor.nav_cache().edge_cache_stats();
         println!("Nav cache: {} entries, {} bytes", nav_entries, nav_bytes);
 
+        // Phase 3: Recall computation (if enabled)
+        let (recall_at_k, recall_queries) = if config.recall_sample_size > 0 {
+            println!(
+                "\nComputing recall with {} sample queries (brute-force ground truth)...",
+                config.recall_sample_size
+            );
+            let recall_start = Instant::now();
+
+            // Re-generate database vectors (deterministic from seed)
+            let mut db_gen = StreamingVectorGenerator::new_with_distance(
+                config.dim,
+                vectors_inserted as usize,
+                config.seed,
+                config.distance,
+            );
+            let mut db_vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors_inserted as usize);
+            while let Some(batch) = db_gen.next_batch(10_000) {
+                db_vectors.extend(batch);
+                if db_vectors.len() % 100_000 == 0 {
+                    print!("\r  Regenerated {}/{} vectors for ground truth...", db_vectors.len(), vectors_inserted);
+                    std::io::stdout().flush().ok();
+                }
+            }
+            println!("\r  Regenerated {} vectors for ground truth.          ", db_vectors.len());
+
+            // Generate recall test queries (different seed)
+            let mut recall_query_gen = StreamingVectorGenerator::new_with_distance(
+                config.dim,
+                config.recall_sample_size,
+                config.seed + 2_000_000, // Different seed from search queries
+                config.distance,
+            );
+
+            let mut all_search_results: Vec<Vec<usize>> = Vec::with_capacity(config.recall_sample_size);
+            let mut all_ground_truth: Vec<Vec<usize>> = Vec::with_capacity(config.recall_sample_size);
+
+            for qi in 0..config.recall_sample_size {
+                let query = recall_query_gen.generate_query();
+
+                // Compute brute-force ground truth
+                let mut distances: Vec<(usize, f32)> = db_vectors
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| (i, config.distance.compute(&query, v)))
+                    .collect();
+                distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                let ground_truth: Vec<usize> = distances.iter().take(config.k).map(|(i, _)| *i).collect();
+                all_ground_truth.push(ground_truth);
+
+                // Run HNSW search
+                match index.search(storage.as_ref(), &query, config.k, config.ef_search) {
+                    Ok(results) => {
+                        // Convert VecId (u32) to usize for recall computation
+                        // VecId matches insertion order (0, 1, 2, ...) since we use sequential insert
+                        let result_indices: Vec<usize> = results
+                            .iter()
+                            .map(|(_dist, vid)| *vid as usize)
+                            .collect();
+                        all_search_results.push(result_indices);
+                    }
+                    Err(_) => {
+                        all_search_results.push(vec![]);
+                    }
+                }
+
+                if (qi + 1) % 20 == 0 || qi + 1 == config.recall_sample_size {
+                    print!("\r  Computed {}/{} recall queries...", qi + 1, config.recall_sample_size);
+                    std::io::stdout().flush().ok();
+                }
+            }
+
+            let recall = compute_recall(&all_search_results, &all_ground_truth, config.k);
+            println!(
+                "\n  Recall@{}: {:.1}% ({} queries, {:.1}s)",
+                config.k,
+                recall * 100.0,
+                config.recall_sample_size,
+                recall_start.elapsed().as_secs_f64()
+            );
+
+            (Some(recall), config.recall_sample_size)
+        } else {
+            (None, 0)
+        };
+
         Ok(ScaleResult {
             config,
             vectors_inserted,
@@ -756,6 +886,8 @@ impl ScaleBenchmark {
             search_p99,
             peak_memory_bytes: peak_rss,
             nav_cache_bytes: nav_bytes as u64,
+            recall_at_k,
+            recall_queries,
         })
     }
 }
