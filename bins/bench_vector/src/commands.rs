@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -132,14 +133,45 @@ pub struct IndexArgs {
     /// Random seed (only for 'random' dataset)
     #[arg(long, default_value = "42")]
     pub seed: u64,
+
+    /// Batch size for inserts (vectors per transaction)
+    #[arg(long, default_value = "1000")]
+    pub batch_size: usize,
+
+    /// Use async inserts (deferred HNSW graph construction)
+    #[arg(long, default_value = "false")]
+    pub r#async: bool,
+
+    /// Number of async workers (only used with --async)
+    #[arg(long, default_value = "1")]
+    pub async_workers: usize,
+
+    /// Output results to JSON file
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// Progress reporting interval in seconds
+    #[arg(long, default_value = "10")]
+    pub progress_interval: u64,
 }
 
 pub async fn index(args: IndexArgs) -> Result<()> {
+    use motlie_db::vector::benchmark::scale::get_rss_bytes;
+    use motlie_db::vector::{AsyncGraphUpdater, AsyncUpdaterConfig, EmbeddingBuilder, Processor};
+    use motlie_db::Id;
+    use std::time::Duration;
+
     println!("=== Vector Index Build ===");
     println!("Dataset: {}", args.dataset);
     println!("Vectors: {}", args.num_vectors);
     println!("Database: {:?}", args.db_path);
     println!("HNSW: M={}, ef_construction={}", args.m, args.ef_construction);
+    println!("Batch size: {}", args.batch_size);
+    if args.r#async {
+        println!("Insert mode: ASYNC ({} workers)", args.async_workers);
+    } else {
+        println!("Insert mode: SYNC (immediate indexing)");
+    }
 
     // Determine distance metric
     let distance = if args.cosine {
@@ -189,70 +221,147 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     // Create database directory
     std::fs::create_dir_all(&args.db_path)?;
 
-    // Initialize storage
+    // Initialize storage with Processor API
     let mut storage = Storage::readwrite(&args.db_path);
     storage.ready()?;
+    let storage = Arc::new(storage);
 
-    // Create HNSW index
-    let nav_cache = Arc::new(NavigationCache::new());
-    let embedding_code: EmbeddingCode = 1;
-    let storage_type = VectorElementType::F16;
+    // Register embedding
+    let txn_db = storage.transaction_db().context("Failed to get transaction DB")?;
+    let embedding = storage
+        .cache()
+        .register(
+            EmbeddingBuilder::new("bench", dim as u32, distance)
+                .with_hnsw_m(args.m as u16)
+                .with_hnsw_ef_construction(args.ef_construction as u16),
+            &txn_db,
+        )
+        .context("Failed to register embedding")?;
 
-    let hnsw_config = hnsw::Config {
-        dim,
-        m: args.m,
-        m_max: args.m * 2,
-        m_max_0: args.m * 2,
-        ef_construction: args.ef_construction,
-        ..Default::default()
+    // Create processor
+    let registry = storage.cache().clone();
+    let processor = Processor::new(storage.clone(), registry);
+
+    // Start async updater if async mode enabled
+    let async_updater: Option<Arc<AsyncGraphUpdater>> = if args.r#async {
+        let async_config = AsyncUpdaterConfig::new()
+            .with_num_workers(args.async_workers)
+            .with_batch_size(100)
+            .with_ef_construction(args.ef_construction)
+            .with_process_on_startup(false);
+
+        let registry = storage.cache().clone();
+        let nav_cache = Arc::new(NavigationCache::new());
+
+        Some(Arc::new(AsyncGraphUpdater::start(
+            storage.clone(),
+            registry,
+            nav_cache,
+            async_config,
+        )))
+    } else {
+        None
     };
 
-    let index = hnsw::Index::with_storage_type(
-        embedding_code,
-        distance,
-        storage_type,
-        hnsw_config,
-        nav_cache,
-    );
-
-    // Get vectors CF
-    let txn_db = storage.transaction_db()?;
-    let vectors_cf = txn_db
-        .cf_handle(Vectors::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-
-    // Insert vectors (skip already indexed)
+    // Insert vectors using batch API
     let start = Instant::now();
     let vectors_to_add = &vectors[existing_count..];
     let total = vectors_to_add.len();
+    let mut inserted = 0usize;
+    let mut errors = 0usize;
+    let mut peak_rss: u64 = 0;
+    let mut last_progress = Instant::now();
+    let progress_interval = Duration::from_secs(args.progress_interval);
 
     println!("\nInserting {} vectors (starting from {})...", total, existing_count);
+    println!();
 
-    for (i, vector) in vectors_to_add.iter().enumerate() {
-        let vec_id = (existing_count + i) as VecId;
+    for batch_start in (0..total).step_by(args.batch_size) {
+        let batch_end = (batch_start + args.batch_size).min(total);
+        let batch: Vec<(Id, Vec<f32>)> = vectors_to_add[batch_start..batch_end]
+            .iter()
+            .map(|v| (Id::new(), v.clone()))
+            .collect();
+        let batch_len = batch.len();
 
-        // Store vector and insert into HNSW index atomically
-        let key = VectorCfKey(embedding_code, vec_id);
-        let value_bytes = Vectors::value_to_bytes_typed(vector, storage_type);
+        match processor.insert_batch(&embedding, &batch, !args.r#async) {
+            Ok(_) => {
+                inserted += batch_len;
+            }
+            Err(e) => {
+                tracing::warn!("Batch insert failed: {}", e);
+                errors += batch_len;
+            }
+        }
 
-        let txn = txn_db.transaction();
-        txn.put_cf(&vectors_cf, Vectors::key_to_bytes(&key), value_bytes)?;
-        let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, vector)?;
-        txn.commit()?;
-        cache_update.apply(index.nav_cache());
-
-        if (i + 1) % 10000 == 0 || i + 1 == total {
+        // Progress reporting with ETA
+        if last_progress.elapsed() >= progress_interval {
+            let rss = get_rss_bytes();
+            peak_rss = peak_rss.max(rss);
             let elapsed = start.elapsed().as_secs_f64();
-            let rate = (i + 1) as f64 / elapsed;
-            println!("  {}/{} vectors ({:.1} vec/s)", i + 1, total, rate);
+            let rate = inserted as f64 / elapsed;
+            let remaining = total - inserted;
+            let eta_secs = if rate > 0.0 { remaining as f64 / rate } else { 0.0 };
+            let eta_str = format_eta(eta_secs);
+
+            // Async metrics if available
+            if let Some(ref updater) = async_updater {
+                let pending = updater.pending_queue_size();
+                print!(
+                    "\r[{:>6.2}%] {}/{} vectors | {:.1} vec/s | Pending: {} | Errors: {} | ETA: {}    ",
+                    (inserted as f64 / total as f64) * 100.0,
+                    inserted, total, rate, pending, errors, eta_str
+                );
+            } else {
+                print!(
+                    "\r[{:>6.2}%] {}/{} vectors | {:.1} vec/s | Errors: {} | ETA: {}    ",
+                    (inserted as f64 / total as f64) * 100.0,
+                    inserted, total, rate, errors, eta_str
+                );
+            }
+            std::io::stdout().flush().ok();
+            last_progress = Instant::now();
+        }
+    }
+
+    // Wait for async workers if needed
+    if let Some(updater) = async_updater {
+        println!("\n\nWaiting for async workers to drain pending queue...");
+        loop {
+            let pending = updater.pending_queue_size();
+            if pending == 0 {
+                break;
+            }
+            println!(
+                "  Pending: {} vectors, processed: {} items",
+                pending,
+                updater.items_processed()
+            );
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        let items_processed = updater.items_processed();
+        println!("Async workers drained ({} items processed)", items_processed);
+
+        match Arc::try_unwrap(updater) {
+            Ok(owned_updater) => owned_updater.shutdown(),
+            Err(_) => println!("Note: Async workers still shutting down in background"),
         }
     }
 
     let build_time = start.elapsed().as_secs_f64();
+    let final_rss = get_rss_bytes();
+    peak_rss = peak_rss.max(final_rss);
+
     println!(
-        "\nIndex built in {:.2}s ({:.1} vec/s)",
-        build_time,
-        total as f64 / build_time
+        "\n\n=== Index Build Complete ===\n\
+         Vectors inserted: {}\n\
+         Errors: {}\n\
+         Duration: {:.2}s\n\
+         Throughput: {:.1} vec/s\n\
+         Peak RSS: {:.2} MB",
+        inserted, errors, build_time,
+        inserted as f64 / build_time,
+        peak_rss as f64 / 1_000_000.0
     );
 
     // Save metadata
@@ -266,11 +375,54 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         args.ef_construction,
         &args.dataset,
     );
-    meta.num_vectors = args.num_vectors;
+    meta.num_vectors = existing_count + inserted;
+    meta.vector_seed = args.seed;
     meta.checkpoint(&args.db_path)?;
     println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
 
+    // Save JSON output if requested
+    if let Some(output_path) = args.output {
+        let json = serde_json::json!({
+            "command": "index",
+            "config": {
+                "dataset": args.dataset,
+                "num_vectors": args.num_vectors,
+                "dim": dim,
+                "hnsw_m": args.m,
+                "hnsw_ef_construction": args.ef_construction,
+                "batch_size": args.batch_size,
+                "seed": args.seed,
+                "distance": format!("{:?}", distance).to_lowercase(),
+                "async": args.r#async,
+            },
+            "results": {
+                "vectors_inserted": inserted,
+                "errors": errors,
+                "duration_secs": build_time,
+                "throughput_vec_per_sec": inserted as f64 / build_time,
+                "peak_rss_bytes": peak_rss,
+            }
+        });
+
+        std::fs::write(&output_path, serde_json::to_string_pretty(&json)?)
+            .context("Failed to write output file")?;
+        println!("Results saved to: {:?}", output_path);
+    }
+
     Ok(())
+}
+
+/// Format ETA as human-readable string
+fn format_eta(secs: f64) -> String {
+    if secs > 86400.0 * 365.0 {
+        "N/A".to_string()
+    } else if secs > 3600.0 {
+        format!("{}h{}m", (secs / 3600.0) as u64, ((secs % 3600.0) / 60.0) as u64)
+    } else if secs > 60.0 {
+        format!("{}m{}s", (secs / 60.0) as u64, (secs % 60.0) as u64)
+    } else {
+        format!("{}s", secs as u64)
+    }
 }
 
 // ============================================================================
@@ -283,11 +435,11 @@ pub struct QueryArgs {
     #[arg(long)]
     pub db_path: PathBuf,
 
-    /// Dataset for queries (to load test vectors)
+    /// Dataset for queries (to load test vectors). Use 'random' to generate from seed.
     #[arg(long)]
     pub dataset: String,
 
-    /// Data directory (for dataset files)
+    /// Data directory (for dataset files, not used for 'random')
     #[arg(long, default_value = "./data")]
     pub data_dir: PathBuf,
 
@@ -302,12 +454,28 @@ pub struct QueryArgs {
     /// Number of queries to run
     #[arg(long, default_value = "1000")]
     pub num_queries: usize,
+
+    /// Random seed for query generation (only for 'random' dataset).
+    /// If not specified, uses vector_seed + 1000000 from metadata.
+    #[arg(long)]
+    pub seed: Option<u64>,
+
+    /// Number of queries to sample for recall computation (0 uses all queries)
+    #[arg(long, default_value = "0")]
+    pub recall_sample_size: usize,
+
+    /// Output results to JSON file
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 pub async fn query(args: QueryArgs) -> Result<()> {
+    use motlie_db::vector::benchmark::scale::{get_rss_bytes, StreamingVectorGenerator};
+
     println!("=== Vector Search ===");
     println!("Database: {:?}", args.db_path);
-    println!("k={}, ef_search={}", args.k, args.ef_search);
+    println!("Dataset: {}", args.dataset);
+    println!("k={}, ef_search={}, num_queries={}", args.k, args.ef_search, args.num_queries);
 
     // Load metadata
     if !BenchmarkMetadata::exists(&args.db_path) {
@@ -323,49 +491,90 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         _ => Distance::Cosine,
     };
 
-    // Load queries and ground truth
-    let (db_vectors, queries, dim) = load_dataset_for_query(
-        &args.dataset,
-        &args.data_dir,
-        meta.num_vectors,
-        args.num_queries,
-    )?;
+    // Load or generate queries and database vectors for ground truth
+    let (db_vectors, queries, dim) = if args.dataset.to_lowercase() == "random" {
+        // For random datasets, regenerate vectors from seed for ground truth
+        let query_seed = args.seed.unwrap_or(meta.vector_seed + 1_000_000);
+        println!("Regenerating {} vectors from seed {} for ground truth...", meta.num_vectors, meta.vector_seed);
+
+        // Regenerate database vectors
+        let mut db_gen = StreamingVectorGenerator::new_with_distance(
+            meta.dim,
+            meta.num_vectors,
+            meta.vector_seed,
+            distance,
+        );
+        let mut db_vectors: Vec<Vec<f32>> = Vec::with_capacity(meta.num_vectors);
+        while let Some(batch) = db_gen.next_batch(10_000) {
+            db_vectors.extend(batch);
+            if db_vectors.len() % 100_000 == 0 {
+                print!("\r  Regenerated {}/{} vectors...", db_vectors.len(), meta.num_vectors);
+                std::io::stdout().flush().ok();
+            }
+        }
+        println!("\r  Regenerated {} vectors.          ", db_vectors.len());
+
+        // Generate query vectors
+        println!("Generating {} query vectors from seed {}...", args.num_queries, query_seed);
+        let mut query_gen = StreamingVectorGenerator::new_with_distance(
+            meta.dim,
+            args.num_queries,
+            query_seed,
+            distance,
+        );
+        let mut queries: Vec<Vec<f32>> = Vec::with_capacity(args.num_queries);
+        while let Some(batch) = query_gen.next_batch(1000) {
+            queries.extend(batch);
+        }
+
+        (db_vectors, queries, meta.dim)
+    } else {
+        // Load from dataset files
+        load_dataset_for_query(
+            &args.dataset,
+            &args.data_dir,
+            meta.num_vectors,
+            args.num_queries,
+        )?
+    };
     println!("Loaded {} queries, dim={}", queries.len(), dim);
 
-    // Compute ground truth
-    println!("Computing ground truth...");
-    let ground_truth = compute_ground_truth(&db_vectors, &queries, args.k, distance);
-
-    // Open storage
-    let mut storage = Storage::readwrite(&args.db_path);
-    storage.ready()?;
-
-    // Create HNSW index handle
-    let nav_cache = Arc::new(NavigationCache::new());
-    let embedding_code: EmbeddingCode = 1;
-    let storage_type = VectorElementType::F16;
-
-    let hnsw_config = hnsw::Config {
-        dim,
-        m: meta.hnsw_m,
-        m_max: meta.hnsw_m * 2,
-        m_max_0: meta.hnsw_m * 2,
-        ef_construction: meta.hnsw_ef_construction,
-        ..Default::default()
+    // Compute ground truth (optionally sample for large datasets)
+    let recall_queries = if args.recall_sample_size > 0 && args.recall_sample_size < queries.len() {
+        args.recall_sample_size
+    } else {
+        queries.len()
     };
 
-    let index = hnsw::Index::with_storage_type(
-        embedding_code,
-        distance,
-        storage_type,
-        hnsw_config,
-        nav_cache,
-    );
+    println!("Computing ground truth for {} queries...", recall_queries);
+    let ground_truth = compute_ground_truth(&db_vectors, &queries[..recall_queries], args.k, distance);
 
-    // Run queries
+    // Open storage with Processor API
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+    let storage = Arc::new(storage);
+
+    // Create processor to access the index properly
+    let registry = storage.cache().clone();
+    let processor = motlie_db::vector::Processor::new(storage.clone(), registry);
+
+    // Get the embedding (registered during index build)
+    let embedding = storage
+        .cache()
+        .get("bench", dim as u32, distance)
+        .ok_or_else(|| anyhow::anyhow!("Embedding 'bench' not found in registry"))?;
+
+    // Get the HNSW index with proper entry point loaded
+    let index = processor
+        .get_or_create_index(embedding.code())
+        .ok_or_else(|| anyhow::anyhow!("Failed to get HNSW index"))?;
+
+    // Run queries using low-level HNSW search (returns vec_ids directly for recall)
+    let peak_rss_before = get_rss_bytes();
     println!("\nRunning {} queries (ef_search={})...", queries.len(), args.ef_search);
+    let search_start = Instant::now();
     let mut latencies = Vec::with_capacity(queries.len());
-    let mut search_results = Vec::with_capacity(queries.len());
+    let mut search_results = Vec::with_capacity(recall_queries);
 
     for (qi, query) in queries.iter().enumerate() {
         let start = Instant::now();
@@ -373,13 +582,21 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         latencies.push(latency_ms);
-        let result_ids: Vec<usize> = results.iter().map(|(_, id)| *id as usize).collect();
-        search_results.push(result_ids);
+        // Only collect results for recall computation
+        if qi < recall_queries {
+            // HNSW search returns (distance, vec_id) - vec_id matches insertion order
+            let result_ids: Vec<usize> = results.iter().map(|(_, vid)| *vid as usize).collect();
+            search_results.push(result_ids);
+        }
 
-        if (qi + 1) % 100 == 0 {
-            println!("  {}/{} queries", qi + 1, queries.len());
+        if (qi + 1) % 100 == 0 || qi + 1 == queries.len() {
+            print!("\r  {}/{} queries", qi + 1, queries.len());
+            std::io::stdout().flush().ok();
         }
     }
+    let search_duration = search_start.elapsed();
+    let peak_rss_after = get_rss_bytes();
+    println!();
 
     // Compute metrics
     let recall = compute_recall(&search_results, &ground_truth, args.k);
@@ -387,12 +604,41 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     let stats = LatencyStats::from_latencies(&latencies);
 
     println!("\n=== Results ===");
-    println!("Recall@{}: {:.1}%", args.k, recall * 100.0);
+    println!("Recall@{}: {:.1}% ({} queries sampled)", args.k, recall * 100.0, recall_queries);
     println!("QPS: {:.1}", stats.qps);
     println!(
         "Latency: avg={:.2}ms, p50={:.2}ms, p95={:.2}ms, p99={:.2}ms",
         stats.avg_ms, stats.p50_ms, stats.p95_ms, stats.p99_ms
     );
+    println!("Peak RSS: {:.2} MB", peak_rss_after.max(peak_rss_before) as f64 / 1_000_000.0);
+
+    // Save JSON output if requested
+    if let Some(output_path) = args.output {
+        let json = serde_json::json!({
+            "command": "query",
+            "config": {
+                "dataset": args.dataset,
+                "num_queries": queries.len(),
+                "recall_sample_size": recall_queries,
+                "k": args.k,
+                "ef_search": args.ef_search,
+            },
+            "results": {
+                "recall_at_k": recall,
+                "qps": stats.qps,
+                "latency_avg_ms": stats.avg_ms,
+                "latency_p50_ms": stats.p50_ms,
+                "latency_p95_ms": stats.p95_ms,
+                "latency_p99_ms": stats.p99_ms,
+                "search_duration_secs": search_duration.as_secs_f64(),
+                "peak_rss_bytes": peak_rss_after.max(peak_rss_before),
+            }
+        });
+
+        std::fs::write(&output_path, serde_json::to_string_pretty(&json)?)
+            .context("Failed to write output file")?;
+        println!("Results saved to: {:?}", output_path);
+    }
 
     Ok(())
 }
@@ -1174,10 +1420,27 @@ pub struct ScaleArgs {
     pub rerank_factor: usize,
 }
 
+/// **DEPRECATED**: Use `index` + `query` commands instead.
+///
+/// The `scale` command is deprecated in favor of composable `index` and `query` commands:
+/// ```bash
+/// # Instead of: bench_vector scale --num-vectors 1000000 --dim 128 --db-path /tmp/bench
+/// # Use:
+/// bench_vector index --dataset random --num-vectors 1000000 --dim 128 --seed 42 \
+///     --fresh --batch-size 5000 --db-path /tmp/bench --output /tmp/index.json
+/// bench_vector query --db-path /tmp/bench --dataset random \
+///     --num-queries 1000 --k 10 --ef-search 100 --output /tmp/query.json
+/// ```
+///
+/// See `bins/bench_vector/BENCH2.md` for the full migration guide.
 pub fn scale(args: ScaleArgs) -> Result<()> {
     use motlie_db::vector::benchmark::{AsyncMetrics, ScaleBenchmark, ScaleConfig};
     use motlie_db::vector::{AsyncGraphUpdater, AsyncUpdaterConfig, Distance, EmbeddingBuilder};
     use std::time::Duration;
+
+    // Print deprecation warning
+    eprintln!("\n⚠️  DEPRECATED: The 'scale' command is deprecated.");
+    eprintln!("   Use 'index' + 'query' commands instead. See BENCH2.md for migration guide.\n");
 
     let distance = match args.distance.to_lowercase().as_str() {
         "cosine" => Distance::Cosine,
