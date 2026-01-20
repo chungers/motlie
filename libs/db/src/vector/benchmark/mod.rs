@@ -52,6 +52,7 @@ pub mod dataset;
 pub mod metadata;
 pub mod metrics;
 pub mod runner;
+pub mod scale;
 pub mod sift;
 
 // Re-exports for public API - LAION
@@ -106,4 +107,10 @@ pub use concurrent::{
     save_benchmark_results_csv, BackpressureResult, BackpressureSample, BenchConfig, BenchResult,
     ConcurrentBenchmark, ConcurrentMetrics, DatasetSource, MetricsSummary, SearchMode,
     SyncAsyncLatencyResult,
+};
+
+// Re-exports for public API - Scale benchmarks
+pub use scale::{
+    get_rss_bytes, AsyncMetrics, ScaleBenchmark, ScaleConfig, ScaleProgress, ScaleResult,
+    StreamingVectorGenerator,
 };

@@ -259,6 +259,73 @@ Interpretation:
   ✓ RaBitQ should work well on this dataset
 ```
 
+### `scale` - Scale Validation Benchmark
+
+Tests insert and search performance at various scales (10K to 1B vectors) with reproducible synthetic data generation.
+
+```bash
+# Quick validation (10K vectors)
+bench_vector scale --num-vectors 10000 --db-path /tmp/bench_10k
+
+# Medium scale (100K vectors)
+bench_vector scale --num-vectors 100000 --db-path /tmp/bench_100k --output results.json
+
+# Large scale (1M vectors)
+bench_vector scale --num-vectors 1000000 --dim 128 --batch-size 5000 --db-path /tmp/bench_1m
+```
+
+**Options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--num-vectors` | Required | Number of vectors to insert |
+| `--db-path` | Required | Database path (cleared on start) |
+| `--dim` | 128 | Vector dimension |
+| `--batch-size` | 1000 | Vectors per batch insert |
+| `--num-queries` | 1000 | Search queries after insert |
+| `--m` | 16 | HNSW M parameter |
+| `--ef-construction` | 200 | HNSW ef_construction |
+| `--ef-search` | 100 | Search ef parameter |
+| `--k` | 10 | Top-k results |
+| `--seed` | 42 | Random seed for reproducibility |
+| `--progress-interval` | 10 | Progress report interval (seconds) |
+| `--output` | (optional) | JSON output file |
+
+**Output Example:**
+
+```
+=== Scale Benchmark Results ===
+Configuration:
+  Vectors: 100,000
+  Dimension: 128D
+  HNSW M=16, ef_construction=200
+  Batch size: 1000
+
+Insert Performance:
+  Vectors inserted: 100,000
+  Errors: 0
+  Duration: 1086.5s
+  Throughput: 92.0 vec/s
+
+Search Performance:
+  Queries: 500
+  Duration: 1.3s
+  QPS: 392.3
+  Latency P50: 2.48ms
+  Latency P99: 5.01ms
+
+Memory:
+  Peak RSS: 345.24 MB
+  Nav cache: 8.79 KB
+```
+
+**Use Cases:**
+
+1. **Validate scalability**: Ensure insert/search performance doesn't degrade unexpectedly at scale
+2. **CI regression detection**: Run at 1M scale to catch performance regressions
+3. **Memory profiling**: Monitor RSS growth to estimate hardware requirements
+4. **Reproducible benchmarks**: Fixed seed ensures identical vectors across runs
+
 ### `datasets` - List Available Options
 
 Shows all available datasets and usage examples.

@@ -698,6 +698,119 @@ See [PHASE7.md](./PHASE7.md) for complete design documentation.
 
 ---
 
+## Scale Benchmarks (Phase 8.3)
+
+**Status:** In Progress (January 2026)
+
+Phase 8.3 validates scalability from 10K to 1B vectors using synthetic workloads
+with reproducible random vector generation.
+
+### Running Scale Benchmarks
+
+Use `bench_vector scale` for all scale testing:
+
+```bash
+# Quick validation (10K vectors)
+./target/release/bench_vector scale \
+    --num-vectors 10000 \
+    --dim 128 \
+    --batch-size 500 \
+    --num-queries 100 \
+    --db-path /tmp/bench_10k
+
+# Medium scale (100K vectors)
+./target/release/bench_vector scale \
+    --num-vectors 100000 \
+    --dim 128 \
+    --batch-size 1000 \
+    --num-queries 500 \
+    --db-path /tmp/bench_100k \
+    --output results_100k.json
+
+# Large scale (1M vectors)
+./target/release/bench_vector scale \
+    --num-vectors 1000000 \
+    --dim 128 \
+    --batch-size 5000 \
+    --num-queries 1000 \
+    --db-path /tmp/bench_1m \
+    --output results_1m.json
+```
+
+### Scale Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--num-vectors` | (required) | Number of vectors to insert |
+| `--dim` | 128 | Vector dimension |
+| `--batch-size` | 1000 | Vectors per batch insert |
+| `--num-queries` | 1000 | Search queries after insert |
+| `--m` | 16 | HNSW M parameter |
+| `--ef-construction` | 200 | HNSW ef_construction |
+| `--ef-search` | 100 | Search ef parameter |
+| `--k` | 10 | Top-k results |
+| `--seed` | 42 | Random seed for reproducibility |
+| `--progress-interval` | 10 | Progress report interval (seconds) |
+| `--db-path` | (required) | Database path (cleared on start) |
+| `--output` | (optional) | JSON output file |
+
+### Scale Baseline Results
+
+**Environment:** Same as throughput baseline (aarch64, Cortex-X925, 20 cores, NVMe SSD)
+
+**Configuration:**
+- Vector dimension: 128
+- Distance: Cosine
+- HNSW: M=16, ef_construction=200
+- Seed: 42 (reproducible random vectors)
+
+**Results (January 20, 2026):**
+
+| Scale | Insert Time | Insert Rate | Search QPS | Search P50 | Search P99 | Peak RSS | Nav Cache |
+|-------|-------------|-------------|------------|------------|------------|----------|-----------|
+| 10K | 44.6s | 224.3 vec/s | 623.7 | 1.57ms | 4.14ms | 53 MB | 856 B |
+| 100K | 1086s (~18m) | 92.0 vec/s | 392.3 | 2.48ms | 5.01ms | 345 MB | 8.79 KB |
+| 1M | *(in progress)* | | | | | | |
+| 10M | *(pending)* | | | | | | |
+
+**Observations:**
+- **Insert throughput degrades sub-linearly**: 10K=224 vec/s → 100K=92 vec/s (2.4x slower for 10x more vectors)
+- **Search QPS degrades gracefully**: 10K=624 QPS → 100K=392 QPS (1.6x slower for 10x more vectors)
+- **Memory scales linearly**: ~3.4 MB/1000 vectors (100K = 345 MB)
+- **HNSW graph construction dominates insert time**: Larger graphs = more distance computations per insert
+
+### Expected Memory at Scale
+
+Based on per-vector overhead analysis:
+
+| Scale | Estimated Memory | Notes |
+|-------|------------------|-------|
+| 1M | ~3.4 GB | Fits comfortably in RAM |
+| 10M | ~34 GB | Requires 64GB+ system |
+| 100M | ~340 GB | Requires high-memory server or disk-backed storage |
+| 1B | ~3.4 TB | Requires distributed architecture |
+
+### CI Regression Gate
+
+For CI, run 1M scale benchmark and assert minimum thresholds:
+
+```bash
+# CI gate: 1M scale with minimum performance requirements
+./target/release/bench_vector scale \
+    --num-vectors 1000000 \
+    --dim 128 \
+    --batch-size 5000 \
+    --num-queries 500 \
+    --db-path /tmp/ci_bench_1m
+
+# Check results meet thresholds:
+# - Insert rate: >50 vec/s
+# - Search QPS: >100
+# - Errors: 0
+```
+
+---
+
 ## References
 
 ### CLI Tools (Preferred)
