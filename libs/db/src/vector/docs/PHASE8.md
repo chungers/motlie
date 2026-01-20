@@ -391,10 +391,12 @@ Scale projections:
   - Real-time progress with throughput, ETA, memory tracking
   - Integrated into `bench_vector scale` CLI command (not separate test file)
   - Distance wiring added (`--distance cosine|l2|dot`), with Cosine normalization only
-- [x] 8.3.2: Run baseline benchmarks (10K, 100K, 1M)
+- [x] 8.3.2: Run baseline benchmarks (10K, 100K, 1M) **COMPLETE**
   - 10K: 224.3 vec/s insert, 623.7 QPS, 53 MB RSS
   - 100K: 92.0 vec/s insert, 392.3 QPS, 345 MB RSS
-  - 1M: In progress (ETA ~2 hours)
+  - 1M: 27.2 vec/s insert, 134.8 QPS, 1.36 GB RSS (10.2 hours, 0 errors)
+  - Insert rate: 258 vec/s (initial) → 27.2 vec/s (final) - 9.5x degradation over 1M inserts
+  - Search P50: 7.14ms, P99: 14.00ms at 1M scale
 - [ ] 8.3.3: Benchmark 10M scale (insert, search, memory)
 - [ ] 8.3.4: Generate or source 100M vector dataset
 - [ ] 8.3.5: Benchmark 100M scale (insert, search, memory)
@@ -427,7 +429,7 @@ cargo build --release --bin bench_vector
     --num-vectors 100000 --dim 128 --db-path /tmp/bench_100k \
     --output results/scale_100k.json
 
-# Large scale (1M vectors, ~2 hours)
+# Large scale (1M vectors, ~10 hours)
 ./target/release/bench_vector scale \
     --num-vectors 1000000 --dim 128 --batch-size 5000 \
     --db-path /tmp/bench_1m --output results/scale_1m.json
@@ -450,7 +452,7 @@ cargo build --release --bin bench_vector
 
 #### Single-Node Feasibility (Current Design)
 
-Based on observed ~40 QPS sync inserts at 1M scale and the current HNSW design:
+Based on observed ~27 vec/s sync inserts at 1M scale (128D vectors, M=16) and the current HNSW design:
 
 - **Practical single-node ceiling**: ~10M–30M vectors on 64GB RAM + NVMe (512D, M=16).
 - **Upper stretch (with tuning/async)**: ~50M vectors if cache sizing and async indexing are optimized.
