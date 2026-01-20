@@ -707,34 +707,57 @@ with reproducible random vector generation.
 
 ### Running Scale Benchmarks
 
-Use `bench_vector scale` for all scale testing:
+`bench_vector scale` is deprecated. Use `bench_vector index` + `bench_vector query`
+with the random streaming dataset instead:
 
 ```bash
 # Quick validation (10K vectors)
-./target/release/bench_vector scale \
+./target/release/bench_vector index \
+    --dataset random \
     --num-vectors 10000 \
     --dim 128 \
+    --stream \
     --batch-size 500 \
+    --db-path /tmp/bench_10k \
+    --fresh
+
+./target/release/bench_vector query \
+    --dataset random \
+    --db-path /tmp/bench_10k \
     --num-queries 100 \
-    --db-path /tmp/bench_10k
+    --skip-recall
 
 # Medium scale (100K vectors)
-./target/release/bench_vector scale \
+./target/release/bench_vector index \
+    --dataset random \
     --num-vectors 100000 \
     --dim 128 \
+    --stream \
     --batch-size 1000 \
-    --num-queries 500 \
     --db-path /tmp/bench_100k \
-    --output results_100k.json
+    --fresh
+
+./target/release/bench_vector query \
+    --dataset random \
+    --db-path /tmp/bench_100k \
+    --num-queries 500 \
+    --skip-recall
 
 # Large scale (1M vectors)
-./target/release/bench_vector scale \
+./target/release/bench_vector index \
+    --dataset random \
     --num-vectors 1000000 \
     --dim 128 \
+    --stream \
     --batch-size 5000 \
-    --num-queries 1000 \
     --db-path /tmp/bench_1m \
-    --output results_1m.json
+    --fresh
+
+./target/release/bench_vector query \
+    --dataset random \
+    --db-path /tmp/bench_1m \
+    --num-queries 1000 \
+    --skip-recall
 ```
 
 ### Scale Parameters
@@ -803,12 +826,20 @@ For CI, run 1M scale benchmark and assert minimum thresholds:
 
 ```bash
 # CI gate: 1M scale with minimum performance requirements
-./target/release/bench_vector scale \
+./target/release/bench_vector index \
+    --dataset random \
     --num-vectors 1000000 \
     --dim 128 \
+    --stream \
     --batch-size 5000 \
+    --db-path /tmp/ci_bench_1m \
+    --fresh
+
+./target/release/bench_vector query \
+    --dataset random \
+    --db-path /tmp/ci_bench_1m \
     --num-queries 500 \
-    --db-path /tmp/ci_bench_1m
+    --skip-recall
 
 # Check results meet thresholds:
 # - Insert rate: >50 vec/s
