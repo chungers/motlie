@@ -6,10 +6,6 @@
 //! - **Streaming generation**: Vectors generated on-the-fly, not pre-loaded
 //! - **Progress reporting**: Real-time throughput and ETA updates
 //! - **Memory profiling**: Track peak RSS and cache sizes
-//! - **Checkpoint support**: Resume interrupted benchmarks
-//!
-//! COMMENT (CODEX, 2026-01-19): Checkpoint/resume is not implemented yet.
-//! Current code always starts fresh and does not persist progress state.
 //!
 //! ## Usage
 //!
