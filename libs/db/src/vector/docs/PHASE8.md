@@ -447,6 +447,20 @@ cargo build --release --bin bench_vector
 | 1B | >10 | >5 | <500ms | >70% |
 
 *Note: These are initial targets. Actual performance may vary based on hardware and HNSW parameters.*
+
+#### Single-Node Feasibility (Current Design)
+
+Based on observed ~40 QPS sync inserts at 1M scale and the current HNSW design:
+
+- **Practical single-node ceiling**: ~10M–30M vectors on 64GB RAM + NVMe (512D, M=16).
+- **Upper stretch (with tuning/async)**: ~50M vectors if cache sizing and async indexing are optimized.
+- **100M+ vectors**: Likely requires 128GB+ RAM or sharding/tiering.
+
+**Why:** HNSW insert/search is sublinear per op (≈ `O(M * ef * log N)`), but space is linear and
+constant factors (distance computations, cache misses, edge maintenance) dominate at 1B.
+
+**Implication:** 1B scale is not realistic on a single node without sharding, tiered indexing, or
+alternative partitioning (IVF/coarse routing) ahead of HNSW.
 COMMENT (CODEX, 2026-01-18): Consider adding a "hardware profile" subsection (CPU/RAM/SSD) so target numbers remain interpretable and comparable.
 RESPONSE (2026-01-18): Added Hardware Profile section below.
 
