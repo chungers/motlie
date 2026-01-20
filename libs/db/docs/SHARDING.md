@@ -184,6 +184,9 @@ The simplest deployment separates routing from storage:
 | **Node (Shard)** | `motlie-db` | **None** - existing single-node binary unchanged |
 | **Router** | `motlie-router` | **New** - routing logic + own RocksDB |
 | **Communication** | gRPC/HTTP | Uses existing public APIs of each crate |
+COMMENT (CODEX, 2026-01-20): "No changes" assumes each shard runs with an isolated
+DB path and registry; using a shared RocksDB with key prefixes would require
+schema/key changes and isn't supported by the current binaries.
 
 ### Node Binary (Unchanged)
 
@@ -352,6 +355,9 @@ Rebalancing must support:
 │  │ Background task (using public APIs):                            │    │
 │  │ • Read entities from shard 0 (source) via get_vector/query     │    │
 │  │ • Write to shard 2 (dest) via insert_vector                    │    │
+│  │ COMMENT (CODEX, 2026-01-20): Current public APIs don't expose a │    │
+│  │ full shard scan to enumerate all entities; background copy     │    │
+│  │ needs a scan/list API or internal access.                      │    │
 │  │ • Track progress: copied_count, last_id                        │    │
 │  │ • Rate limit to avoid overloading shards                       │    │
 │  └────────────────────────────────────────────────────────────────┘    │
@@ -364,6 +370,10 @@ Rebalancing must support:
 │  │ • Mark migration COMPLETE                                      │    │
 │  │ • Stop dual-write, route only to shard 2                       │    │
 │  └────────────────────────────────────────────────────────────────┘    │
+│  COMMENT (CODEX, 2026-01-20): `insert_vector` is not an upsert; background
+│  copy after dual-write can fail on duplicate IDs unless copy is idempotent.
+│  "Atomic" shard_map update also needs routing epochs to handle in-flight
+│  requests during cutover.                                               │
 │                              │                                          │
 │                              ▼                                          │
 │  Phase 5: CLEANUP (garbage collection)                                 │
@@ -658,6 +668,10 @@ impl Router {
 | Search | Query both, deduplicate | Correct results |
 | Delete | Delete from both | Consistent removal |
 | Update | Apply to both | Eventual consistency |
+COMMENT (CODEX, 2026-01-20): "No data loss"/"Correct results" depend on
+idempotent dual-writes and a failure-handling policy. As written, a single-shard
+write failure or partial delete can break these guarantees unless retries or
+write-ahead routing logs are specified.
 
 ### Performance Impact During Migration
 
@@ -828,6 +842,9 @@ pub struct IndexRouter {
 
     // Term routing (per-index)
     term_shard_hints: BloomFilter<ShardId>,  // term → likely shards
+    COMMENT (CODEX, 2026-01-20): A BloomFilter can't return shard IDs for a term;
+    it only supports membership tests. This should be a term→BitSet/Vec<ShardId>
+    map, or per-shard BloomFilters checked by term.
 
     // Entity location cache (per-index)
     entity_shard_cache: LruCache<EntityId, ShardId>,
