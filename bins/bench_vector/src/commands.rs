@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,6 +27,7 @@ use motlie_db::vector::{
 };
 use motlie_db::rocksdb::ColumnFamily;
 use motlie_db::Id;
+use motlie_db::vector::schema::{EmbeddingSpec, EmbeddingSpecs};
 
 // ============================================================================
 // Download Command
@@ -142,29 +143,42 @@ pub struct IndexArgs {
     #[arg(long, default_value = "false")]
     pub stream: bool,
 
-    /// Batch size for streaming inserts (random dataset only)
+    /// Batch size for inserts (vectors per transaction)
     #[arg(long, default_value = "1000")]
     pub batch_size: usize,
 
-    /// Progress reporting interval (seconds) for streaming inserts
+    /// Progress reporting interval (seconds)
     #[arg(long, default_value = "10")]
     pub progress_interval: u64,
 
-    /// Use async inserts (deferred HNSW graph construction)
-    #[arg(long, default_value = "false")]
-    pub r#async: bool,
-
-    /// Number of async workers (only used with --async)
-    #[arg(long, default_value = "1")]
+    /// Number of async workers (0 = sync inserts)
+    #[arg(long, default_value = "0")]
     pub async_workers: usize,
+
+    /// Drain pending async updates only (no new inserts)
+    #[arg(long, default_value = "false")]
+    pub drain_pending: bool,
+
+    /// Output results to JSON file
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 pub async fn index(args: IndexArgs) -> Result<()> {
+    use motlie_db::vector::benchmark::scale::get_rss_bytes;
+    use std::time::Duration;
+
     println!("=== Vector Index Build ===");
     println!("Dataset: {}", args.dataset);
     println!("Vectors: {}", args.num_vectors);
     println!("Database: {:?}", args.db_path);
     println!("HNSW: M={}, ef_construction={}", args.m, args.ef_construction);
+    println!("Batch size: {}", args.batch_size);
+    if args.async_workers > 0 {
+        println!("Insert mode: ASYNC ({} workers)", args.async_workers);
+    } else {
+        println!("Insert mode: SYNC (immediate indexing)");
+    }
 
     // Determine distance metric
     let distance = if args.cosine {
@@ -196,30 +210,73 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         0
     };
 
-    if existing_count >= args.num_vectors {
+    if existing_count >= args.num_vectors && !args.drain_pending {
         println!("Index already has {} vectors, nothing to do.", existing_count);
         return Ok(());
     }
 
-    // Create database directory
-    std::fs::create_dir_all(&args.db_path)?;
-
-    // Initialize storage
-    let storage = Arc::new(Storage::readwrite(&args.db_path));
-    storage.ready()?;
-
-    // Prepare embedding registry
-    let txn_db = storage.transaction_db()?;
-    let registry = storage.cache().clone();
-    let model = format!("bench-{}", args.dataset.to_lowercase());
     let is_random = args.dataset.to_lowercase() == "random";
 
     if args.stream && !is_random {
         anyhow::bail!("--stream is only supported for the random dataset.");
     }
-    if args.r#async && !args.stream {
-        anyhow::bail!("--async requires --stream with the random dataset.");
+    if args.async_workers > 0 && !args.stream && !args.drain_pending {
+        anyhow::bail!("--async-workers requires --stream with the random dataset.");
     }
+    if args.drain_pending && args.async_workers == 0 {
+        anyhow::bail!("--drain-pending requires --async-workers > 0.");
+    }
+    if args.drain_pending && !args.db_path.exists() {
+        anyhow::bail!("Database path does not exist for --drain-pending.");
+    }
+
+    if !args.drain_pending {
+        // Create database directory
+        std::fs::create_dir_all(&args.db_path)?;
+    }
+
+    // Initialize storage
+    let storage = Arc::new(Storage::readwrite(&args.db_path));
+    storage.ready()?;
+
+    if args.drain_pending {
+        println!(
+            "Draining pending async updates with {} worker(s)...",
+            args.async_workers
+        );
+
+        let async_config = AsyncUpdaterConfig::new()
+            .with_num_workers(args.async_workers)
+            .with_batch_size(args.batch_size)
+            .with_ef_construction(args.ef_construction)
+            .with_process_on_startup(true);
+        let registry = storage.cache().clone();
+        let nav_cache = Arc::new(motlie_db::vector::NavigationCache::new());
+        let updater = AsyncGraphUpdater::start(
+            storage.clone(),
+            registry,
+            nav_cache,
+            async_config,
+        );
+
+        loop {
+            let pending = updater.pending_queue_size();
+            if pending == 0 {
+                break;
+            }
+            println!("  Pending: {} vectors", pending);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+
+        updater.shutdown();
+        println!("Pending queue drained.");
+        return Ok(());
+    }
+
+    // Prepare embedding registry
+    let txn_db = storage.transaction_db()?;
+    let registry = storage.cache().clone();
+    let model = format!("bench-{}", args.dataset.to_lowercase());
 
     if is_random && args.stream {
         let dim = args.dim;
@@ -246,11 +303,11 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             anyhow::bail!("Streaming random index requires a fresh database.");
         }
 
-        if args.r#async {
+        if args.async_workers > 0 {
             println!("Insert mode: ASYNC ({} workers)", args.async_workers);
         }
 
-        let async_updater = if args.r#async {
+        let async_updater = if args.async_workers > 0 {
             let async_config = AsyncUpdaterConfig::new()
                 .with_num_workers(args.async_workers)
                 .with_batch_size(100)
@@ -282,15 +339,19 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             args.seed,
             distance,
         );
-        let mut sent = 0usize;
+        let total = args.num_vectors;
+        let mut inserted = 0usize;
+        let mut errors = 0usize;
+        let mut peak_rss: u64 = 0;
         let mut last_progress = Instant::now();
-        let progress_interval = std::time::Duration::from_secs(args.progress_interval);
-        let immediate = !args.r#async;
+        let progress_interval = Duration::from_secs(args.progress_interval);
+        let immediate = args.async_workers == 0;
 
-        println!("\nStreaming {} vectors (dim={})...", args.num_vectors, args.dim);
+        println!("\nStreaming {} vectors (dim={})...", total, args.dim);
+        println!();
 
         while let Some(batch) = generator.next_batch(args.batch_size) {
-            let batch_start = sent;
+            let batch_start = inserted;
             let batch_len = batch.len();
             let mut payload = Vec::with_capacity(batch_len);
 
@@ -301,13 +362,45 @@ pub async fn index(args: IndexArgs) -> Result<()> {
 
             let mutation = InsertVectorBatch::new(&embedding, payload);
             let mutation = if immediate { mutation.immediate() } else { mutation };
-            writer.send(vec![mutation.into()]).await?;
-            sent += batch_len;
+            if let Err(err) = writer.send(vec![mutation.into()]).await {
+                errors += batch_len;
+                return Err(err);
+            }
+            inserted += batch_len;
 
-            if last_progress.elapsed() >= progress_interval || sent == args.num_vectors {
+            if last_progress.elapsed() >= progress_interval {
+                let rss = get_rss_bytes();
+                peak_rss = peak_rss.max(rss);
                 let elapsed = start.elapsed().as_secs_f64();
-                let rate = sent as f64 / elapsed.max(0.0001);
-                println!("  {}/{} vectors ({:.1} vec/s)", sent, args.num_vectors, rate);
+                let rate = inserted as f64 / elapsed.max(0.0001);
+                let remaining = total.saturating_sub(inserted);
+                let eta_secs = if rate > 0.0 { remaining as f64 / rate } else { 0.0 };
+                let eta_str = format_eta(eta_secs);
+
+                if let Some(ref updater) = async_updater {
+                    let pending = updater.pending_queue_size();
+                    print!(
+                        "\r[{:>6.2}%] {}/{} vectors | {:.1} vec/s | Pending: {} | Errors: {} | ETA: {}    ",
+                        (inserted as f64 / total as f64) * 100.0,
+                        inserted,
+                        total,
+                        rate,
+                        pending,
+                        errors,
+                        eta_str
+                    );
+                } else {
+                    print!(
+                        "\r[{:>6.2}%] {}/{} vectors | {:.1} vec/s | Errors: {} | ETA: {}    ",
+                        (inserted as f64 / total as f64) * 100.0,
+                        inserted,
+                        total,
+                        rate,
+                        errors,
+                        eta_str
+                    );
+                }
+                std::io::stdout().flush().ok();
                 last_progress = Instant::now();
             }
         }
@@ -317,12 +410,17 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         consumer_handle.await??;
 
         if let Some(updater) = async_updater {
-            println!("Waiting for async workers to drain pending queue...");
+            println!("\n\nWaiting for async workers to drain pending queue...");
             loop {
                 let pending = updater.pending_queue_size();
                 if pending == 0 {
                     break;
                 }
+                println!(
+                    "  Pending: {} vectors, processed: {} items",
+                    pending,
+                    updater.items_processed()
+                );
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
             match Arc::try_unwrap(updater) {
@@ -334,10 +432,21 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         }
 
         let build_time = start.elapsed().as_secs_f64();
+        let final_rss = get_rss_bytes();
+        peak_rss = peak_rss.max(final_rss);
+
         println!(
-            "\nIndex built in {:.2}s ({:.1} vec/s)",
+            "\n\n=== Index Build Complete ===\n\
+             Vectors inserted: {}\n\
+             Errors: {}\n\
+             Duration: {:.2}s\n\
+             Throughput: {:.1} vec/s\n\
+             Peak RSS: {:.2} MB",
+            inserted,
+            errors,
             build_time,
-            args.num_vectors as f64 / build_time.max(0.0001)
+            inserted as f64 / build_time.max(0.0001),
+            peak_rss as f64 / 1_000_000.0
         );
 
         let mut meta = BenchmarkMetadata::new(
@@ -350,13 +459,42 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             args.ef_construction,
             &args.dataset,
         );
-        meta.num_vectors = args.num_vectors;
+        meta.num_vectors = inserted;
         if is_random {
             meta.vector_seed = args.seed;
             meta.query_seed = args.seed.saturating_add(1_000_000);
         }
         meta.checkpoint(&args.db_path)?;
         println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
+
+        if let Some(output_path) = args.output {
+            let json = serde_json::json!({
+                "command": "index",
+                "config": {
+                    "dataset": args.dataset,
+                    "num_vectors": args.num_vectors,
+                    "dim": dim,
+                    "hnsw_m": args.m,
+                    "hnsw_ef_construction": args.ef_construction,
+                    "batch_size": args.batch_size,
+                    "seed": args.seed,
+                    "distance": format!("{:?}", distance).to_lowercase(),
+                    "async_workers": args.async_workers,
+                    "stream": args.stream,
+                },
+                "results": {
+                    "vectors_inserted": inserted,
+                    "errors": errors,
+                    "duration_secs": build_time,
+                    "throughput_vec_per_sec": inserted as f64 / build_time.max(0.0001),
+                    "peak_rss_bytes": peak_rss,
+                }
+            });
+
+            std::fs::write(&output_path, serde_json::to_string_pretty(&json)?)
+                .context("Failed to write output file")?;
+            println!("Results saved to: {:?}", output_path);
+        }
 
         return Ok(());
     }
@@ -405,11 +543,14 @@ pub async fn index(args: IndexArgs) -> Result<()> {
 
     println!("\nInserting {} vectors (starting from {})...", total, existing_count);
 
-    let batch_size = 1000usize;
-    let mut sent = 0usize;
+    let mut inserted = 0usize;
+    let mut errors = 0usize;
+    let mut peak_rss: u64 = 0;
+    let mut last_progress = Instant::now();
+    let progress_interval = Duration::from_secs(args.progress_interval);
 
-    for batch in vectors_to_add.chunks(batch_size) {
-        let batch_start = existing_count + sent;
+    for batch in vectors_to_add.chunks(args.batch_size) {
+        let batch_start = existing_count + inserted;
         let mut payload = Vec::with_capacity(batch.len());
 
         for (offset, vector) in batch.iter().enumerate() {
@@ -418,13 +559,31 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         }
 
         let mutation = InsertVectorBatch::new(&embedding, payload).immediate();
-        writer.send(vec![mutation.into()]).await?;
-        sent += batch.len();
+        if let Err(err) = writer.send(vec![mutation.into()]).await {
+            errors += batch.len();
+            return Err(err);
+        }
+        inserted += batch.len();
 
-        if sent % 10000 == 0 || sent == total {
+        if last_progress.elapsed() >= progress_interval || inserted == total {
+            let rss = get_rss_bytes();
+            peak_rss = peak_rss.max(rss);
             let elapsed = start.elapsed().as_secs_f64();
-            let rate = sent as f64 / elapsed;
-            println!("  {}/{} vectors ({:.1} vec/s)", sent, total, rate);
+            let rate = inserted as f64 / elapsed.max(0.0001);
+            let remaining = total.saturating_sub(inserted);
+            let eta_secs = if rate > 0.0 { remaining as f64 / rate } else { 0.0 };
+            let eta_str = format_eta(eta_secs);
+            print!(
+                "\r[{:>6.2}%] {}/{} vectors | {:.1} vec/s | Errors: {} | ETA: {}    ",
+                (inserted as f64 / total as f64) * 100.0,
+                inserted,
+                total,
+                rate,
+                errors,
+                eta_str
+            );
+            std::io::stdout().flush().ok();
+            last_progress = Instant::now();
         }
     }
 
@@ -433,10 +592,20 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     consumer_handle.await??;
 
     let build_time = start.elapsed().as_secs_f64();
+    let final_rss = get_rss_bytes();
+    peak_rss = peak_rss.max(final_rss);
     println!(
-        "\nIndex built in {:.2}s ({:.1} vec/s)",
+        "\n\n=== Index Build Complete ===\n\
+         Vectors inserted: {}\n\
+         Errors: {}\n\
+         Duration: {:.2}s\n\
+         Throughput: {:.1} vec/s\n\
+         Peak RSS: {:.2} MB",
+        inserted,
+        errors,
         build_time,
-        total as f64 / build_time
+        inserted as f64 / build_time.max(0.0001),
+        peak_rss as f64 / 1_000_000.0
     );
 
     // Save metadata
@@ -450,13 +619,42 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         args.ef_construction,
         &args.dataset,
     );
-    meta.num_vectors = args.num_vectors;
+    meta.num_vectors = existing_count + inserted;
     if is_random {
         meta.vector_seed = args.seed;
         meta.query_seed = args.seed.saturating_add(1_000_000);
     }
     meta.checkpoint(&args.db_path)?;
     println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
+
+    if let Some(output_path) = args.output {
+        let json = serde_json::json!({
+            "command": "index",
+            "config": {
+                "dataset": args.dataset,
+                "num_vectors": args.num_vectors,
+                "dim": dim,
+                "hnsw_m": args.m,
+                "hnsw_ef_construction": args.ef_construction,
+                "batch_size": args.batch_size,
+                "seed": args.seed,
+                "distance": format!("{:?}", distance).to_lowercase(),
+                "async_workers": args.async_workers,
+                "stream": args.stream,
+            },
+            "results": {
+                "vectors_inserted": inserted,
+                "errors": errors,
+                "duration_secs": build_time,
+                "throughput_vec_per_sec": inserted as f64 / build_time.max(0.0001),
+                "peak_rss_bytes": peak_rss,
+            }
+        });
+
+        std::fs::write(&output_path, serde_json::to_string_pretty(&json)?)
+            .context("Failed to write output file")?;
+        println!("Results saved to: {:?}", output_path);
+    }
 
     Ok(())
 }
@@ -499,6 +697,10 @@ pub struct QueryArgs {
     #[arg(long)]
     pub vector_seed: Option<u64>,
 
+    /// Convenience seed for random dataset (sets both vector/query seeds)
+    #[arg(long)]
+    pub seed: Option<u64>,
+
     /// Recall sample size for random dataset (0 disables)
     #[arg(long, default_value = "0")]
     pub recall_sample_size: usize,
@@ -506,9 +708,19 @@ pub struct QueryArgs {
     /// Skip recall/ground truth computation
     #[arg(long, default_value = "false")]
     pub skip_recall: bool,
+
+    /// Output results to JSON file
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// Read a single query vector from stdin as a JSON array
+    #[arg(long, default_value = "false")]
+    pub stdin: bool,
 }
 
 pub async fn query(args: QueryArgs) -> Result<()> {
+    use motlie_db::vector::benchmark::scale::get_rss_bytes;
+
     println!("=== Vector Search ===");
     println!("Database: {:?}", args.db_path);
     println!("k={}, ef_search={}", args.k, args.ef_search);
@@ -531,8 +743,9 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     let dim = meta.dim;
 
     let (queries, ground_truth, mut skip_recall, vector_seed, query_seed) = if is_random {
-        let vector_seed = args.vector_seed.unwrap_or(meta.vector_seed);
-        let query_seed = args.query_seed.unwrap_or(meta.query_seed);
+        let seed = args.seed;
+        let vector_seed = seed.or(args.vector_seed).unwrap_or(meta.vector_seed);
+        let query_seed = seed.or(args.query_seed).unwrap_or(meta.query_seed);
         let mut skip_recall = args.skip_recall;
 
         if args.recall_sample_size == 0 && !skip_recall {
@@ -578,6 +791,68 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         )?,
     };
 
+    if args.stdin {
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .context("Failed to read stdin")?;
+        let query: Vec<f32> = serde_json::from_str(&input)
+            .context("Expected stdin as JSON array of floats")?;
+
+        let (search_reader, query_rx) =
+            create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        let query_handles = spawn_query_consumers_with_storage_autoreg(
+            query_rx,
+            ReaderConfig::default(),
+            storage.clone(),
+            2,
+        );
+
+        let timeout = std::time::Duration::from_secs(30);
+        let results = SearchKNN::new(&embedding, query, args.k)
+            .with_ef(args.ef_search)
+            .exact()
+            .run(&search_reader, timeout)
+            .await?;
+
+        if let Some(output_path) = args.output {
+            let json = serde_json::json!({
+                "command": "query",
+                "config": {
+                    "dataset": args.dataset,
+                    "k": args.k,
+                    "ef_search": args.ef_search,
+                    "stdin": true,
+                },
+                "results": results.iter().map(|r| serde_json::json!({
+                    "vec_id": r.vec_id,
+                    "distance": r.distance,
+                    "id": r.id.as_str(),
+                })).collect::<Vec<_>>(),
+            });
+            std::fs::write(&output_path, serde_json::to_string_pretty(&json)?)
+                .context("Failed to write output file")?;
+            println!("Results saved to: {:?}", output_path);
+        } else {
+            println!("Results:");
+            for result in results {
+                println!(
+                    "  vec_id={} id={} distance={:.6}",
+                    result.vec_id,
+                    result.id.as_str(),
+                    result.distance
+                );
+            }
+        }
+
+        drop(search_reader);
+        for handle in query_handles {
+            handle.await??;
+        }
+
+        return Ok(());
+    }
+
     // Setup query reader/consumers
     let (search_reader, query_rx) =
         create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
@@ -590,10 +865,13 @@ pub async fn query(args: QueryArgs) -> Result<()> {
 
     // Run queries
     let query_count = if is_random { args.num_queries } else { queries.len() };
+    let peak_rss_before = get_rss_bytes();
+
     println!(
         "\nRunning {} queries (ef_search={})...",
         query_count, args.ef_search
     );
+    let search_start = Instant::now();
     let mut latencies = Vec::with_capacity(query_count);
     let mut search_results: Vec<Vec<usize>> = Vec::new();
 
@@ -646,6 +924,9 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             }
         }
     }
+
+    let search_duration = search_start.elapsed();
+    let peak_rss_after = get_rss_bytes();
 
     // Compute metrics
     let mut recall_at_k: Option<f64> = None;
@@ -750,6 +1031,35 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         "Latency: avg={:.2}ms, p50={:.2}ms, p95={:.2}ms, p99={:.2}ms",
         stats.avg_ms, stats.p50_ms, stats.p95_ms, stats.p99_ms
     );
+    let peak_rss = peak_rss_after.max(peak_rss_before);
+    println!("Peak RSS: {:.2} MB", peak_rss as f64 / 1_000_000.0);
+
+    if let Some(output_path) = args.output {
+        let json = serde_json::json!({
+            "command": "query",
+            "config": {
+                "dataset": args.dataset,
+                "num_queries": query_count,
+                "recall_sample_size": args.recall_sample_size,
+                "k": args.k,
+                "ef_search": args.ef_search,
+            },
+            "results": {
+                "recall_at_k": recall_at_k,
+                "qps": stats.qps,
+                "latency_avg_ms": stats.avg_ms,
+                "latency_p50_ms": stats.p50_ms,
+                "latency_p95_ms": stats.p95_ms,
+                "latency_p99_ms": stats.p99_ms,
+                "search_duration_secs": search_duration.as_secs_f64(),
+                "peak_rss_bytes": peak_rss,
+            }
+        });
+
+        std::fs::write(&output_path, serde_json::to_string_pretty(&json)?)
+            .context("Failed to write output file")?;
+        println!("Results saved to: {:?}", output_path);
+    }
 
     drop(search_reader);
     for handle in query_handles {
@@ -1065,6 +1375,117 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+fn format_eta(secs: f64) -> String {
+    if secs > 86400.0 * 365.0 {
+        "N/A".to_string()
+    } else if secs > 3600.0 {
+        format!("{}h{}m", (secs / 3600.0) as u64, ((secs % 3600.0) / 60.0) as u64)
+    } else if secs > 60.0 {
+        format!("{}m{}s", (secs / 60.0) as u64, (secs % 60.0) as u64)
+    } else {
+        format!("{}s", secs as u64)
+    }
+}
+
+fn parse_distance(value: &str) -> Result<Distance> {
+    match value.to_lowercase().as_str() {
+        "cosine" => Ok(Distance::Cosine),
+        "l2" | "euclidean" => Ok(Distance::L2),
+        "dot" | "dotproduct" => Ok(Distance::DotProduct),
+        other => anyhow::bail!("Invalid distance: {} (use cosine, l2, or dot)", other),
+    }
+}
+
+fn load_embedding_specs(db_path: &PathBuf) -> Result<Vec<(u64, EmbeddingSpec)>> {
+    let mut storage = Storage::readwrite(db_path);
+    storage.ready()?;
+    let db = storage.transaction_db()?;
+    let cf = db
+        .cf_handle(EmbeddingSpecs::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
+    let iter = db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+
+    let mut specs = Vec::new();
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        let key = EmbeddingSpecs::key_from_bytes(&key_bytes)?;
+        let value = EmbeddingSpecs::value_from_bytes(&value_bytes)?;
+        specs.push((key.0, value.0));
+    }
+
+    Ok(specs)
+}
+
+fn resolve_embedding_spec(
+    db_path: &PathBuf,
+    code: Option<u64>,
+    model: Option<&str>,
+    dim: Option<u32>,
+    distance: Option<&str>,
+) -> Result<(u64, EmbeddingSpec)> {
+    let specs = load_embedding_specs(db_path)?;
+
+    if let Some(code) = code {
+        return specs
+            .into_iter()
+            .find(|(existing, _)| *existing == code)
+            .ok_or_else(|| anyhow::anyhow!("No embedding found for code {}", code));
+    }
+
+    let model = model.ok_or_else(|| anyhow::anyhow!("--model is required without --code"))?;
+    let dim = dim.ok_or_else(|| anyhow::anyhow!("--dim is required without --code"))?;
+    let distance_str =
+        distance.ok_or_else(|| anyhow::anyhow!("--distance is required without --code"))?;
+    let distance = parse_distance(distance_str)?;
+
+    specs
+        .into_iter()
+        .find(|(_, spec)| spec.model == model && spec.dim == dim && spec.distance == distance)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No embedding found for model={}, dim={}, distance={}",
+                model,
+                dim,
+                distance_str
+            )
+        })
+}
+
+fn load_vectors_for_embedding(
+    db_path: &PathBuf,
+    embedding: u64,
+    storage_type: VectorElementType,
+    limit: usize,
+) -> Result<Vec<(VecId, Vec<f32>)>> {
+    let mut storage = Storage::readwrite(db_path);
+    storage.ready()?;
+    let db = storage.transaction_db()?;
+    let cf = db
+        .cf_handle(Vectors::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
+
+    let prefix = embedding.to_be_bytes();
+    let mut vectors = Vec::with_capacity(limit);
+    let iter = db.iterator_cf(&cf, rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward));
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let key = Vectors::key_from_bytes(&key_bytes)?;
+        if key.0 != embedding {
+            continue;
+        }
+        let vector = Vectors::value_from_bytes_typed(&value_bytes, storage_type)?;
+        vectors.push((key.1, vector));
+        if vectors.len() >= limit {
+            break;
+        }
+    }
+
+    Ok(vectors)
+}
 
 fn load_dataset_vectors(
     dataset: &str,
@@ -1458,6 +1879,288 @@ pub fn check_distribution(args: CheckDistributionArgs) -> Result<()> {
 }
 
 // ============================================================================
+// Embeddings Command
+// ============================================================================
+
+#[derive(Parser)]
+pub struct EmbeddingsArgs {
+    #[command(subcommand)]
+    pub command: EmbeddingsCommand,
+}
+
+#[derive(Parser)]
+pub enum EmbeddingsCommand {
+    /// List embedding specs in the registry
+    List(EmbeddingsListArgs),
+    /// Inspect a specific embedding spec
+    Inspect(EmbeddingsInspectArgs),
+    /// Generate ground truth vectors and matches for testing
+    Groundtruth(EmbeddingsGroundtruthArgs),
+}
+
+#[derive(Parser)]
+pub struct EmbeddingsListArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Filter by model name
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Filter by dimension
+    #[arg(long)]
+    pub dim: Option<u32>,
+
+    /// Filter by distance (cosine, l2, dot)
+    #[arg(long)]
+    pub distance: Option<String>,
+}
+
+#[derive(Parser)]
+pub struct EmbeddingsInspectArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code to inspect
+    #[arg(long)]
+    pub code: Option<u64>,
+
+    /// Model name (required if code is not provided)
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Dimension (required if code is not provided)
+    #[arg(long)]
+    pub dim: Option<u32>,
+
+    /// Distance (cosine, l2, dot) (required if code is not provided)
+    #[arg(long)]
+    pub distance: Option<String>,
+}
+
+#[derive(Parser)]
+pub struct EmbeddingsGroundtruthArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code to use
+    #[arg(long)]
+    pub code: Option<u64>,
+
+    /// Model name (required if code is not provided)
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Dimension (required if code is not provided)
+    #[arg(long)]
+    pub dim: Option<u32>,
+
+    /// Distance (cosine, l2, dot) (required if code is not provided)
+    #[arg(long)]
+    pub distance: Option<String>,
+
+    /// Number of vectors to sample
+    #[arg(long, default_value = "1000")]
+    pub count: usize,
+
+    /// Number of query vectors to generate
+    #[arg(long, default_value = "10")]
+    pub queries: usize,
+
+    /// k for top-k matches
+    #[arg(long, default_value = "10")]
+    pub k: usize,
+
+    /// RNG seed for query generation
+    #[arg(long, default_value = "42")]
+    pub seed: u64,
+
+    /// Output JSON file (defaults to stdout)
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+pub fn embeddings(args: EmbeddingsArgs) -> Result<()> {
+    match args.command {
+        EmbeddingsCommand::List(args) => embeddings_list(args),
+        EmbeddingsCommand::Inspect(args) => embeddings_inspect(args),
+        EmbeddingsCommand::Groundtruth(args) => embeddings_groundtruth(args),
+    }
+}
+
+fn embeddings_list(args: EmbeddingsListArgs) -> Result<()> {
+    let specs = load_embedding_specs(&args.db_path)?;
+    let distance = match args.distance.as_deref() {
+        Some(value) => Some(parse_distance(value)?),
+        None => None,
+    };
+
+    let mut rows = Vec::new();
+    for (code, spec) in specs {
+        if let Some(ref model) = args.model {
+            if spec.model != *model {
+                continue;
+            }
+        }
+        if let Some(dim) = args.dim {
+            if spec.dim != dim {
+                continue;
+            }
+        }
+        if let Some(distance) = distance {
+            if spec.distance != distance {
+                continue;
+            }
+        }
+        rows.push((code, spec));
+    }
+
+    if rows.is_empty() {
+        println!("No embeddings found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<6} {:<24} {:<6} {:<8} {:<6} {:<6} {:<6} {:<6}",
+        "Code", "Model", "Dim", "Distance", "M", "ef", "Bits", "Seed"
+    );
+    println!("{}", "-".repeat(84));
+
+    for (code, spec) in rows {
+        println!(
+            "{:<6} {:<24} {:<6} {:<8} {:<6} {:<6} {:<6} {:<6}",
+            code,
+            spec.model,
+            spec.dim,
+            format!("{:?}", spec.distance).to_lowercase(),
+            spec.hnsw_m,
+            spec.hnsw_ef_construction,
+            spec.rabitq_bits,
+            spec.rabitq_seed
+        );
+    }
+
+    Ok(())
+}
+
+fn embeddings_inspect(args: EmbeddingsInspectArgs) -> Result<()> {
+    let (code, spec) = resolve_embedding_spec(
+        &args.db_path,
+        args.code,
+        args.model.as_deref(),
+        args.dim,
+        args.distance.as_deref(),
+    )?;
+
+    println!("Code: {}", code);
+    println!("Model: {}", spec.model);
+    println!("Dim: {}", spec.dim);
+    println!("Distance: {:?}", spec.distance);
+    println!("Storage: {:?}", spec.storage_type);
+    println!("HNSW M: {}", spec.hnsw_m);
+    println!("HNSW ef_construction: {}", spec.hnsw_ef_construction);
+    println!("RaBitQ bits: {}", spec.rabitq_bits);
+    println!("RaBitQ seed: {}", spec.rabitq_seed);
+
+    Ok(())
+}
+
+fn embeddings_groundtruth(args: EmbeddingsGroundtruthArgs) -> Result<()> {
+    let (code, spec) = resolve_embedding_spec(
+        &args.db_path,
+        args.code,
+        args.model.as_deref(),
+        args.dim,
+        args.distance.as_deref(),
+    )?;
+
+    let vectors = load_vectors_for_embedding(&args.db_path, code, spec.storage_type, args.count)?;
+    if vectors.len() < args.count {
+        anyhow::bail!(
+            "Requested {} vectors but only {} found for embedding {}",
+            args.count,
+            vectors.len(),
+            code
+        );
+    }
+
+    let mut query_gen = motlie_db::vector::benchmark::StreamingVectorGenerator::new_with_distance(
+        spec.dim as usize,
+        args.queries,
+        args.seed,
+        spec.distance,
+    );
+
+    let mut queries = Vec::with_capacity(args.queries);
+    let mut results = Vec::with_capacity(args.queries);
+
+    for _ in 0..args.queries {
+        let query = query_gen.generate_query();
+
+        let mut distances: Vec<(VecId, f32)> = vectors
+            .iter()
+            .map(|(vec_id, vec)| (*vec_id, spec.distance.compute(&query, vec)))
+            .collect();
+        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        let matches: Vec<serde_json::Value> = distances
+            .iter()
+            .take(args.k)
+            .map(|(vec_id, dist)| {
+                serde_json::json!({
+                    "vec_id": vec_id,
+                    "distance": dist,
+                })
+            })
+            .collect();
+
+        queries.push(serde_json::json!({ "vector": query }));
+        results.push(serde_json::json!({
+            "matches": matches,
+        }));
+    }
+
+    let payload = serde_json::json!({
+        "embedding": {
+            "code": code,
+            "model": spec.model,
+            "dim": spec.dim,
+            "distance": format!("{:?}", spec.distance).to_lowercase(),
+            "storage_type": format!("{:?}", spec.storage_type),
+            "hnsw_m": spec.hnsw_m,
+            "hnsw_ef_construction": spec.hnsw_ef_construction,
+            "rabitq_bits": spec.rabitq_bits,
+            "rabitq_seed": spec.rabitq_seed,
+        },
+        "vectors": vectors.iter().map(|(vec_id, vec)| serde_json::json!({
+            "vec_id": vec_id,
+            "vector": vec,
+        })).collect::<Vec<_>>(),
+        "queries": queries.iter().zip(results.iter()).map(|(query, result)| {
+            serde_json::json!({
+                "vector": query["vector"].clone(),
+                "matches": result["matches"].clone(),
+            })
+        }).collect::<Vec<_>>(),
+        "k": args.k,
+        "seed": args.seed,
+    });
+
+    let output = serde_json::to_string_pretty(&payload)?;
+    if let Some(path) = args.output {
+        std::fs::write(&path, output)?;
+        println!("Ground truth saved to: {:?}", path);
+    } else {
+        println!("{}", output);
+    }
+
+    Ok(())
+}
+
+// ============================================================================
 // Datasets Command
 // ============================================================================
 // Scale Command
@@ -1517,14 +2220,8 @@ pub struct ScaleArgs {
     #[arg(long)]
     pub output: Option<PathBuf>,
 
-    /// Use async inserts (deferred HNSW graph construction)
-    #[arg(long, default_value = "false")]
-    pub r#async: bool,
-
-    /// Number of async workers (only used with --async). Default is 1 to avoid
-    /// lock contention on single-embedding workloads. Use higher values only
-    /// with multiple embeddings.
-    #[arg(long, default_value = "1")]
+    /// Number of async workers (0 = sync inserts).
+    #[arg(long, default_value = "0")]
     pub async_workers: usize,
 
     /// Number of queries to sample for recall computation (0 to disable)
@@ -1562,7 +2259,7 @@ pub fn scale(args: ScaleArgs) -> Result<()> {
     println!("HNSW: M={}, ef_construction={}", args.m, args.ef_construction);
     println!("Distance: {:?}", distance);
     println!("Batch size: {}", args.batch_size);
-    if args.r#async {
+    if args.async_workers > 0 {
         println!("Insert mode: ASYNC ({} workers)", args.async_workers);
     } else {
         println!("Insert mode: SYNC (immediate indexing)");
@@ -1593,7 +2290,7 @@ pub fn scale(args: ScaleArgs) -> Result<()> {
         .context("Failed to register embedding")?;
 
     // Start async updater if async mode enabled (wrap in Arc for sharing)
-    let async_updater: Option<Arc<AsyncGraphUpdater>> = if args.r#async {
+    let async_updater: Option<Arc<AsyncGraphUpdater>> = if args.async_workers > 0 {
         let async_config = AsyncUpdaterConfig::new()
             .with_num_workers(args.async_workers)
             .with_batch_size(100)
@@ -1624,7 +2321,7 @@ pub fn scale(args: ScaleArgs) -> Result<()> {
         .with_k(args.k)
         .with_hnsw_m(args.m)
         .with_hnsw_ef_construction(args.ef_construction)
-        .with_immediate_index(!args.r#async) // false = async inserts
+        .with_immediate_index(args.async_workers == 0)
         .with_recall_sample_size(args.recall_sample_size)
         .with_rerank_factor(args.rerank_factor);
 
