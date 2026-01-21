@@ -1,3 +1,4 @@
+#![cfg(feature = "benchmark")]
 //! Integration test: Complete vector workflow with LAION-CLIP style data.
 //!
 //! This test demonstrates the full lifecycle:

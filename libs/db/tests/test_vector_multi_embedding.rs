@@ -1,3 +1,4 @@
+#![cfg(feature = "benchmark")]
 //! Integration test: Multi-embedding configurations with different RaBitQ bit depths.
 //!
 //! This test validates:

@@ -60,6 +60,7 @@ pub mod subsystem;
 pub mod writer;
 
 // Nested modules
+#[cfg(feature = "benchmark")]
 pub mod benchmark;
 pub mod cache;
 pub mod hnsw;

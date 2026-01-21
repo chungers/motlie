@@ -1,3 +1,4 @@
+#![cfg(feature = "benchmark")]
 //! LAION smoke tests for vector search infrastructure.
 //!
 //! **NOTE:** Quality baseline tests (recall measurement) have been moved to the

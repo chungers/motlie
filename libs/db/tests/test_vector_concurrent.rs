@@ -1,3 +1,4 @@
+#![cfg(feature = "benchmark")]
 //! Multi-threaded stress tests for vector subsystem (Task 5.9).
 //!
 //! These tests validate concurrent access patterns without data corruption or panics.
