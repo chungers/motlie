@@ -341,8 +341,8 @@ This extends `ConcurrentBenchmark` in `libs/db/src/vector/benchmark/concurrent.r
 **Goal:** Validate performance and resource usage at production scale.
 
 **Files:**
-- `libs/db/src/vector/benchmark/scale.rs` - Scale benchmark infrastructure (deprecated)
-- `bins/bench_vector/src/commands.rs` - `bench_vector index` + `query` commands
+- `libs/db/src/vector/benchmark/scale.rs` - Scale benchmark infrastructure (CLI deprecated)
+- `bins/bench_vector/src/commands.rs` - streaming random dataset support via `bench_vector index/query`
 - `libs/db/src/vector/docs/BASELINE.md` - Scale benchmark results
 - `bins/bench_vector/BENCH2.md` - Deprecation plan for scale → index+query
 
@@ -390,7 +390,7 @@ Scale projections:
 - [x] 8.3.1: Create scale benchmark infrastructure with progress reporting
   - `benchmark/scale.rs`: `ScaleConfig`, `ScaleBenchmark`, `ScaleProgress`, `ScaleResult`
   - Real-time progress with throughput, ETA, memory tracking
-  - Integrated into `bench_vector scale` CLI command (not separate test file)
+  - CLI now uses `bench_vector index/query` with streaming random datasets; `bench_vector scale` is deprecated
   - Distance wiring added (`--distance cosine|l2|dot`), with Cosine normalization only
 - [x] 8.3.2: Run baseline benchmarks (10K, 100K, 1M) **COMPLETE**
   - 10K: 224.3 vec/s insert, 623.7 QPS, 53 MB RSS
@@ -422,33 +422,34 @@ The benchmark uses composable `index` + `query` commands for flexibility:
 ```bash
 # Build release binary
 cargo build --release --bin bench_vector
-
 # Quick validation (10K vectors)
 ./target/release/bench_vector index \
     --dataset random --num-vectors 10000 --dim 128 --seed 42 \
-    --m 16 --ef-construction 200 --fresh --batch-size 1000 \
+    --m 16 --ef-construction 200 --fresh --stream --batch-size 1000 \
     --db-path /tmp/bench_10k --output /tmp/bench_10k_index.json
 
 ./target/release/bench_vector query \
     --db-path /tmp/bench_10k --dataset random \
     --num-queries 1000 --k 10 --ef-search 100 \
+    --skip-recall \
     --output /tmp/bench_10k_query.json
 
 # Medium scale (100K vectors)
 ./target/release/bench_vector index \
     --dataset random --num-vectors 100000 --dim 128 --seed 42 \
-    --m 16 --ef-construction 200 --fresh --batch-size 5000 \
+    --m 16 --ef-construction 200 --fresh --stream --batch-size 5000 \
     --db-path /tmp/bench_100k --output /tmp/bench_100k_index.json
 
 ./target/release/bench_vector query \
     --db-path /tmp/bench_100k --dataset random \
     --num-queries 1000 --k 10 --ef-search 100 \
+    --skip-recall \
     --output /tmp/bench_100k_query.json
 
 # Large scale (1M vectors)
 ./target/release/bench_vector index \
     --dataset random --num-vectors 1000000 --dim 128 --seed 42 \
-    --m 16 --ef-construction 200 --fresh --batch-size 5000 \
+    --m 16 --ef-construction 200 --fresh --stream --batch-size 5000 \
     --db-path /tmp/bench_1m --output /tmp/bench_1m_index.json
 
 ./target/release/bench_vector query \
@@ -460,7 +461,7 @@ cargo build --release --bin bench_vector
 # 10M benchmark
 ./target/release/bench_vector index \
     --dataset random --num-vectors 10000000 --dim 128 --seed 42 \
-    --m 16 --ef-construction 200 --fresh --batch-size 5000 \
+    --m 16 --ef-construction 200 --fresh --stream --batch-size 5000 \
     --db-path /tmp/bench_10m --output /tmp/bench_10m_index.json
 
 ./target/release/bench_vector query \
