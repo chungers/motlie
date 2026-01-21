@@ -21,11 +21,11 @@ use motlie_db::vector::benchmark::{
 use motlie_db::vector::{
     create_search_reader_with_storage, create_writer, hnsw, spawn_mutation_consumer_with_storage_autoreg,
     spawn_query_consumers_with_storage_autoreg, AsyncGraphUpdater, AsyncUpdaterConfig,
-    BinaryCodeCache, Distance, EmbeddingBuilder, IdAllocator, InsertVectorBatch, RaBitQ,
-    ReaderConfig, Runnable, SearchKNN, Storage, VecId, VectorCfKey, VectorElementType, Vectors,
-    WriterConfig,
+    BinaryCodeCache, Distance, EmbeddingBuilder, EmbeddingCode, IdAllocator, InsertVectorBatch,
+    NavigationCache, RaBitQ, ReaderConfig, Runnable, SearchKNN, Storage, VecId, VectorCfKey,
+    VectorElementType, Vectors, WriterConfig,
 };
-use motlie_db::rocksdb::ColumnFamily;
+use motlie_db::rocksdb::{ColumnFamily, ColumnFamilySerde};
 use motlie_db::Id;
 use motlie_db::vector::schema::{EmbeddingSpec, EmbeddingSpecs};
 
@@ -236,8 +236,9 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     }
 
     // Initialize storage
-    let storage = Arc::new(Storage::readwrite(&args.db_path));
+    let mut storage = Storage::readwrite(&args.db_path);
     storage.ready()?;
+    let storage = Arc::new(storage);
 
     if args.drain_pending {
         println!(
@@ -251,7 +252,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             .with_ef_construction(args.ef_construction)
             .with_process_on_startup(true);
         let registry = storage.cache().clone();
-        let nav_cache = Arc::new(motlie_db::vector::NavigationCache::new());
+        let nav_cache = Arc::new(NavigationCache::new());
         let updater = AsyncGraphUpdater::start(
             storage.clone(),
             registry,
@@ -314,7 +315,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
                 .with_ef_construction(args.ef_construction)
                 .with_process_on_startup(false);
             let registry = storage.cache().clone();
-            let nav_cache = Arc::new(motlie_db::vector::NavigationCache::new());
+            let nav_cache = Arc::new(NavigationCache::new());
             Some(Arc::new(AsyncGraphUpdater::start(
                 storage.clone(),
                 registry,
@@ -774,8 +775,9 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     };
 
     // Open storage
-    let storage = Arc::new(Storage::readwrite(&args.db_path));
+    let mut storage = Storage::readwrite(&args.db_path);
     storage.ready()?;
+    let storage = Arc::new(storage);
 
     // Ensure embedding spec exists for public query API
     let txn_db = storage.transaction_db()?;
@@ -2298,7 +2300,7 @@ pub fn scale(args: ScaleArgs) -> Result<()> {
             .with_process_on_startup(false); // Don't drain on startup
 
         let registry = storage.cache().clone();
-        let nav_cache = Arc::new(motlie_db::vector::NavigationCache::new());
+        let nav_cache = Arc::new(NavigationCache::new());
 
         Some(Arc::new(AsyncGraphUpdater::start(
             storage.clone(),

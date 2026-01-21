@@ -1,3 +1,4 @@
+#![cfg(feature = "benchmark")]
 //! Integration tests for vector cache infrastructure.
 //!
 //! Tests the Arc-based BinaryCodeCache under concurrent access patterns:

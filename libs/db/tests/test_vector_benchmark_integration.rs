@@ -1,3 +1,4 @@
+#![cfg(feature = "benchmark")]
 //! Integration tests for vector benchmark infrastructure.
 //!
 //! Tests the complete search pipeline at 1K scale for both datasets:

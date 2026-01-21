@@ -1,3 +1,4 @@
+#![cfg(feature = "benchmark")]
 //! Snapshot Isolation Tests for Vector Subsystem (Task 8.2.1, 8.2.2).
 //!
 //! These tests validate RocksDB's snapshot isolation guarantees under concurrent access:
