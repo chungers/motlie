@@ -56,6 +56,9 @@ enum Commands {
     /// Check RaBitQ rotation distribution (validates √D scaling)
     CheckDistribution(commands::CheckDistributionArgs),
 
+    /// List or inspect embedding specs
+    Embeddings(commands::EmbeddingsArgs),
+
     /// List available datasets
     Datasets,
 }
@@ -77,6 +80,7 @@ async fn main() -> Result<()> {
         Commands::Sweep(args) => commands::sweep(args).await,
         Commands::Scale(args) => commands::scale(args),
         Commands::CheckDistribution(args) => commands::check_distribution(args),
+        Commands::Embeddings(args) => commands::embeddings(args),
         Commands::Datasets => commands::list_datasets(),
     }
 }
