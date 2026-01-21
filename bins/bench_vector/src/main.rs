@@ -49,11 +49,15 @@ enum Commands {
     /// Parameter sweep (grid search over bits, ef, rerank)
     Sweep(commands::SweepArgs),
 
-    /// Scale benchmark (10K - 1B vectors with progress reporting)
+    /// Scale benchmark (deprecated: use index/query with --dataset random --stream)
+    #[command(hide = true)]
     Scale(commands::ScaleArgs),
 
     /// Check RaBitQ rotation distribution (validates √D scaling)
     CheckDistribution(commands::CheckDistributionArgs),
+
+    /// List or inspect embedding specs
+    Embeddings(commands::EmbeddingsArgs),
 
     /// List available datasets
     Datasets,
@@ -76,6 +80,7 @@ async fn main() -> Result<()> {
         Commands::Sweep(args) => commands::sweep(args).await,
         Commands::Scale(args) => commands::scale(args),
         Commands::CheckDistribution(args) => commands::check_distribution(args),
+        Commands::Embeddings(args) => commands::embeddings(args),
         Commands::Datasets => commands::list_datasets(),
     }
 }
