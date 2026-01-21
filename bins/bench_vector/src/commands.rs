@@ -1454,12 +1454,20 @@ fn resolve_embedding_spec(
         })
 }
 
+/// Load vectors for an embedding using reservoir sampling.
+///
+/// Uses Algorithm R to uniformly sample `limit` vectors from all vectors
+/// in the embedding, avoiding bias from insertion order.
 fn load_vectors_for_embedding(
     db_path: &PathBuf,
     embedding: u64,
     storage_type: VectorElementType,
     limit: usize,
+    seed: u64,
 ) -> Result<Vec<(VecId, Vec<f32>)>> {
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
     let mut storage = Storage::readwrite(db_path);
     storage.ready()?;
     let db = storage.transaction_db()?;
@@ -1468,8 +1476,13 @@ fn load_vectors_for_embedding(
         .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
 
     let prefix = embedding.to_be_bytes();
-    let mut vectors = Vec::with_capacity(limit);
     let iter = db.iterator_cf(&cf, rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward));
+
+    // Reservoir sampling (Algorithm R) for unbiased random sample
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut reservoir: Vec<(VecId, Vec<f32>)> = Vec::with_capacity(limit);
+    let mut count = 0usize;
+
     for item in iter {
         let (key_bytes, value_bytes) = item?;
         if !key_bytes.starts_with(&prefix) {
@@ -1480,13 +1493,22 @@ fn load_vectors_for_embedding(
             continue;
         }
         let vector = Vectors::value_from_bytes_typed(&value_bytes, storage_type)?;
-        vectors.push((key.1, vector));
-        if vectors.len() >= limit {
-            break;
+
+        if count < limit {
+            // Fill reservoir
+            reservoir.push((key.1, vector));
+        } else {
+            // Replace with probability limit / (count + 1)
+            let j = rng.gen_range(0..=count);
+            if j < limit {
+                reservoir[j] = (key.1, vector);
+            }
         }
+        count += 1;
     }
 
-    Ok(vectors)
+    println!("Reservoir sampled {} vectors from {} total", reservoir.len(), count);
+    Ok(reservoir)
 }
 
 fn load_dataset_vectors(
@@ -2079,10 +2101,13 @@ fn embeddings_groundtruth(args: EmbeddingsGroundtruthArgs) -> Result<()> {
         args.distance.as_deref(),
     )?;
 
-    let vectors = load_vectors_for_embedding(&args.db_path, code, spec.storage_type, args.count)?;
+    let vectors = load_vectors_for_embedding(&args.db_path, code, spec.storage_type, args.count, args.seed)?;
+    if vectors.is_empty() {
+        anyhow::bail!("No vectors found for embedding {}", code);
+    }
     if vectors.len() < args.count {
-        anyhow::bail!(
-            "Requested {} vectors but only {} found for embedding {}",
+        println!(
+            "Warning: Requested {} vectors but only {} found for embedding {}",
             args.count,
             vectors.len(),
             code
