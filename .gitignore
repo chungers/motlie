@@ -14,3 +14,5 @@ target/
 
 # MacOS
 .DS_Store
+examples/laion_benchmark/data/*.npy
+*.npy

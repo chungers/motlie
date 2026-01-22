@@ -1,113 +1,14 @@
 //! Configuration types for vector storage and indexing.
 //!
 //! References:
-//! - HNSW paper: https://arxiv.org/abs/1603.09320
 //! - RaBitQ paper: https://arxiv.org/abs/2405.12497
+//! - HNSW config: see `crate::vector::hnsw::Config`
 //! - motlie design: libs/db/src/vector/ROADMAP.md
 
 use serde::{Deserialize, Serialize};
 
-/// HNSW algorithm parameters.
-///
-/// HNSW (Hierarchical Navigable Small World) is a graph-based approximate
-/// nearest neighbor search algorithm. These parameters control the trade-off
-/// between index quality, memory usage, and search speed.
-///
-/// # Parameter Guidelines
-///
-/// | Scale | M | ef_construction | ef_search | Memory/Vector |
-/// |-------|---|-----------------|-----------|---------------|
-/// | 10K   | 16| 100             | 50        | ~0.5KB        |
-/// | 100K  | 16| 200             | 100       | ~0.5KB        |
-/// | 1M    | 16-32| 200-400      | 100-200   | ~0.5-1KB      |
-/// | 1B    | 16| 200             | 100       | ~0.5KB        |
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HnswConfig {
-    /// Vector dimensionality (must match embedding model).
-    /// Common values: 128 (SIFT), 768 (BERT), 1536 (OpenAI ada-002)
-    pub dim: usize,
-
-    /// Number of bidirectional links per node at layer 0.
-    /// Higher M = better recall, more memory, slower insert.
-    /// Recommended: 16-64, Default: 16
-    pub m: usize,
-
-    /// Maximum links per node at layers > 0 (typically 2*M).
-    /// Default: 2 * m
-    pub m_max: usize,
-
-    /// Maximum links per node at layer 0 (typically M or 2*M).
-    /// Layer 0 is denser, so higher limit improves recall.
-    /// Default: 2 * m
-    pub m_max_0: usize,
-
-    /// Search beam width during index construction.
-    /// Higher ef_construction = better graph quality, slower build.
-    /// Recommended: 100-500, Default: 200
-    pub ef_construction: usize,
-
-    /// Probability multiplier for layer assignment.
-    /// P(layer = L) = exp(-L * m_l)
-    /// Default: 1.0 / ln(m)
-    pub m_l: f32,
-
-    /// Maximum search layer (auto-determined based on N).
-    /// Default: None (auto-calculate as floor(ln(N) * m_l))
-    pub max_level: Option<u8>,
-}
-
-impl Default for HnswConfig {
-    fn default() -> Self {
-        let m = 16;
-        Self {
-            dim: 128,
-            m,
-            m_max: 2 * m,
-            m_max_0: 2 * m,
-            ef_construction: 200,
-            m_l: 1.0 / (m as f32).ln(),
-            max_level: None,
-        }
-    }
-}
-
-impl HnswConfig {
-    /// Create config for specific dimension with default parameters.
-    pub fn for_dim(dim: usize) -> Self {
-        Self {
-            dim,
-            ..Default::default()
-        }
-    }
-
-    /// High-recall configuration (slower, more memory).
-    /// Best for applications where recall is critical.
-    pub fn high_recall(dim: usize) -> Self {
-        Self {
-            dim,
-            m: 32,
-            m_max: 64,
-            m_max_0: 64,
-            ef_construction: 400,
-            m_l: 1.0 / 32f32.ln(),
-            max_level: None,
-        }
-    }
-
-    /// Memory-optimized configuration (faster, less recall).
-    /// Best for resource-constrained environments.
-    pub fn compact(dim: usize) -> Self {
-        Self {
-            dim,
-            m: 8,
-            m_max: 16,
-            m_max_0: 16,
-            ef_construction: 100,
-            m_l: 1.0 / 8f32.ln(),
-            max_level: None,
-        }
-    }
-}
+// Re-export Config from hnsw module for VectorConfig (crate-internal only)
+pub(crate) use crate::vector::hnsw::Config;
 
 /// RaBitQ binary quantization parameters.
 ///
@@ -136,6 +37,16 @@ pub struct RaBitQConfig {
 
     /// Enable RaBitQ (can be disabled for full-precision search).
     pub enabled: bool,
+
+    /// Use SIMD-optimized dot products from motlie_core::distance::quantized.
+    /// When true (default), uses AVX2/NEON accelerated implementations.
+    /// When false, uses local scalar implementation for debugging/comparison.
+    #[serde(default = "default_use_simd")]
+    pub use_simd_dot: bool,
+}
+
+fn default_use_simd() -> bool {
+    true
 }
 
 impl Default for RaBitQConfig {
@@ -144,6 +55,28 @@ impl Default for RaBitQConfig {
             bits_per_dim: 1,
             rotation_seed: 42,
             enabled: true,
+            use_simd_dot: true,
+        }
+    }
+}
+
+/// Configuration warning for RaBitQ settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RaBitQConfigWarning {
+    /// bits_per_dim must be 1, 2, 4, or 8
+    InvalidBitsPerDim(u8),
+}
+
+impl std::fmt::Display for RaBitQConfigWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RaBitQConfigWarning::InvalidBitsPerDim(bits) => {
+                write!(
+                    f,
+                    "bits_per_dim={} is invalid (must be 1, 2, 4, or 8)",
+                    bits
+                )
+            }
         }
     }
 }
@@ -153,76 +86,47 @@ impl RaBitQConfig {
     pub fn code_size(&self, dim: usize) -> usize {
         (dim * self.bits_per_dim as usize + 7) / 8
     }
-}
 
-/// Async graph updater configuration.
-///
-/// Controls background graph refinement for online updates.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AsyncUpdaterConfig {
-    /// Enable async graph updates.
-    pub enabled: bool,
+    /// Validate configuration and return warnings for invalid settings.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use motlie_db::vector::RaBitQConfig;
+    ///
+    /// let config = RaBitQConfig { bits_per_dim: 3, ..Default::default() };
+    /// let warnings = config.validate();
+    /// assert!(!warnings.is_empty()); // Warning: invalid bits_per_dim
+    /// ```
+    pub fn validate(&self) -> Vec<RaBitQConfigWarning> {
+        let mut warnings = Vec::new();
 
-    /// Maximum pending vectors before blocking inserts.
-    pub max_pending: usize,
-
-    /// Batch size for graph updates.
-    pub batch_size: usize,
-
-    /// Interval between update batches in milliseconds.
-    pub interval_ms: u64,
-}
-
-impl Default for AsyncUpdaterConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_pending: 10_000,
-            batch_size: 100,
-            interval_ms: 100,
+        // bits_per_dim must be 1, 2, 4, or 8
+        if ![1, 2, 4, 8].contains(&self.bits_per_dim) {
+            warnings.push(RaBitQConfigWarning::InvalidBitsPerDim(self.bits_per_dim));
         }
+
+        warnings
     }
-}
 
-/// Navigation cache configuration.
-///
-/// Caches top HNSW layers in memory for faster search.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NavigationCacheConfig {
-    /// Enable navigation cache.
-    pub enabled: bool,
-
-    /// Maximum layers to cache (from top).
-    pub max_cached_layers: u8,
-
-    /// Maximum nodes per layer to cache.
-    pub max_nodes_per_layer: usize,
-}
-
-impl Default for NavigationCacheConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_cached_layers: 3,
-            max_nodes_per_layer: 10_000,
-        }
+    /// Check if this configuration is valid (no critical issues).
+    pub fn is_valid(&self) -> bool {
+        [1, 2, 4, 8].contains(&self.bits_per_dim)
     }
 }
 
 /// Complete vector storage configuration.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VectorConfig {
-    pub hnsw: HnswConfig,
+    pub hnsw: Config,
     pub rabitq: RaBitQConfig,
-    pub async_updater: AsyncUpdaterConfig,
-    pub navigation_cache: NavigationCacheConfig,
 }
 
 impl VectorConfig {
     /// Configuration for 128-dimensional embeddings (e.g., SIFT).
     pub fn dim_128() -> Self {
         Self {
-            hnsw: HnswConfig::for_dim(128),
+            hnsw: Config::for_dim(128),
             ..Default::default()
         }
     }
@@ -230,7 +134,7 @@ impl VectorConfig {
     /// Configuration for 768-dimensional embeddings (e.g., BERT, Gemma).
     pub fn dim_768() -> Self {
         Self {
-            hnsw: HnswConfig::for_dim(768),
+            hnsw: Config::for_dim(768),
             ..Default::default()
         }
     }
@@ -238,7 +142,7 @@ impl VectorConfig {
     /// Configuration for 1024-dimensional embeddings (e.g., Qwen3).
     pub fn dim_1024() -> Self {
         Self {
-            hnsw: HnswConfig::for_dim(1024),
+            hnsw: Config::for_dim(1024),
             ..Default::default()
         }
     }
@@ -246,7 +150,7 @@ impl VectorConfig {
     /// Configuration for 1536-dimensional embeddings (e.g., OpenAI ada-002).
     pub fn dim_1536() -> Self {
         Self {
-            hnsw: HnswConfig::for_dim(1536),
+            hnsw: Config::for_dim(1536),
             ..Default::default()
         }
     }
@@ -255,39 +159,6 @@ impl VectorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_hnsw_defaults() {
-        let config = HnswConfig::default();
-        assert_eq!(config.dim, 128);
-        assert_eq!(config.m, 16);
-        assert_eq!(config.m_max, 32);
-        assert_eq!(config.m_max_0, 32);
-        assert_eq!(config.ef_construction, 200);
-    }
-
-    #[test]
-    fn test_hnsw_for_dim() {
-        let config = HnswConfig::for_dim(768);
-        assert_eq!(config.dim, 768);
-        assert_eq!(config.m, 16); // Other params stay default
-    }
-
-    #[test]
-    fn test_hnsw_high_recall() {
-        let config = HnswConfig::high_recall(768);
-        assert_eq!(config.dim, 768);
-        assert_eq!(config.m, 32);
-        assert_eq!(config.ef_construction, 400);
-    }
-
-    #[test]
-    fn test_hnsw_compact() {
-        let config = HnswConfig::compact(768);
-        assert_eq!(config.dim, 768);
-        assert_eq!(config.m, 8);
-        assert_eq!(config.ef_construction, 100);
-    }
 
     #[test]
     fn test_rabitq_code_size() {
@@ -315,5 +186,49 @@ mod tests {
 
         let c1536 = VectorConfig::dim_1536();
         assert_eq!(c1536.hnsw.dim, 1536);
+    }
+
+    #[test]
+    fn test_rabitq_validate_default_no_warnings() {
+        let config = RaBitQConfig::default();
+        let warnings = config.validate();
+        assert!(
+            warnings.is_empty(),
+            "Default config should have no warnings"
+        );
+        assert!(config.is_valid());
+    }
+
+    #[test]
+    fn test_rabitq_validate_invalid_bits() {
+        let config = RaBitQConfig {
+            bits_per_dim: 3, // Invalid: not 1, 2, 4, or 8
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(warnings
+            .iter()
+            .any(|w| matches!(w, RaBitQConfigWarning::InvalidBitsPerDim(3))));
+        assert!(!config.is_valid());
+    }
+
+    #[test]
+    fn test_rabitq_validate_valid_bits() {
+        for bits in [1, 2, 4, 8] {
+            let config = RaBitQConfig {
+                bits_per_dim: bits,
+                ..Default::default()
+            };
+            assert!(config.is_valid(), "bits_per_dim={} should be valid", bits);
+            assert!(config.validate().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_rabitq_config_warning_display() {
+        let warning = RaBitQConfigWarning::InvalidBitsPerDim(3);
+        let display = format!("{}", warning);
+        assert!(display.contains("bits_per_dim=3"));
+        assert!(display.contains("invalid"));
     }
 }

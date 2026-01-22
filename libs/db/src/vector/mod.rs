@@ -1,3 +1,4 @@
+#![doc = include_str!("README.md")]
 //! Vector module - HNSW-based vector storage and search.
 //!
 //! This module provides vector similarity search with:
@@ -8,35 +9,151 @@
 //!
 //! ## Module Structure
 //!
-//! - `mod.rs` - Module exports and VectorStorage
-//! - `config.rs` - Configuration types (HnswConfig, RaBitQConfig, VectorConfig)
+//! ### Core Types (flat)
+//! - `config.rs` - Configuration types (RaBitQConfig, VectorConfig)
+//! - `hnsw/config.rs` - HNSW configuration (`hnsw::Config`)
 //! - `distance.rs` - Distance metrics (Cosine, L2, DotProduct)
 //! - `embedding.rs` - Embedding type and Embedder trait
 //! - `registry.rs` - EmbeddingRegistry for managing embedding spaces
 //! - `schema.rs` - RocksDB column family definitions
 //! - `error.rs` - Error handling utilities
+//! - `id.rs` - ID allocation
+//! - `merge.rs` - RocksDB merge operators
+//! - `subsystem.rs` - Storage subsystem configuration
+//!
+//! ### IO Operations (flat)
+//! - `mutation.rs` - Write operations (Mutation enum, MutationExecutor trait)
+//! - `query.rs` - Read operations (Query enum, QueryExecutor trait)
+//! - `reader.rs` - Reader implementation (channel-based query dispatch)
+//! - `writer.rs` - Writer implementation (channel-based mutation dispatch)
+//! - `processor.rs` - Core operations (insert, delete, search with transactions)
+//!
+//! ### Nested Modules
+//! - `hnsw/` - HNSW index implementation
+//! - `cache/` - Caching infrastructure (NavigationCache, BinaryCodeCache)
+//! - `quantization/` - Vector quantization (RaBitQ)
+//! - `search/` - Search configuration and parallel utilities
+//! - `benchmark/` - Benchmark infrastructure (LAION dataset, metrics)
 //!
 //! ## Design Documents
 //!
-//! - `ROADMAP.md` - Implementation roadmap and phase details
+//! - `docs/BENCHMARK.md` - Performance benchmarks and comparison with Faiss
+//! - `docs/ROADMAP.md` - Implementation roadmap and phase details
 //! - `REQUIREMENTS.md` - Functional and architectural requirements
 
-// Submodules
+// Flat modules - Core types
+pub mod async_updater;
 pub mod config;
 pub mod distance;
 pub mod embedding;
 mod error;
+pub mod gc;
+pub mod id;
+pub mod merge;
 pub mod mutation;
+pub mod processor;
+pub mod query;
+pub mod reader;
 pub mod registry;
 pub mod schema;
 pub mod subsystem;
+pub mod writer;
+
+// Nested modules
+#[cfg(feature = "benchmark")]
+pub mod benchmark;
+pub mod cache;
+pub mod hnsw;
+pub mod ops;
+pub mod quantization;
+pub mod search;
+
+// Test modules
+#[cfg(test)]
+mod crash_recovery_tests;
+
+// Legacy module aliases for backwards compatibility during transition
+// TODO: Remove these after updating all imports
+pub mod navigation {
+    //! Re-export from cache module for backwards compatibility.
+    pub use crate::vector::cache::{
+        BinaryCodeCache, NavigationCache, NavigationCacheConfig, NavigationLayerInfo,
+    };
+}
+pub mod rabitq {
+    //! Re-export from quantization module for backwards compatibility.
+    pub use crate::vector::quantization::RaBitQ;
+}
+pub mod parallel {
+    //! Re-export from search module for backwards compatibility.
+    pub use crate::vector::search::{
+        batch_distances_parallel, distances_from_vectors_parallel, rerank_adaptive, rerank_auto,
+        rerank_parallel, rerank_sequential,
+    };
+}
+pub mod search_config {
+    //! Re-export from search module for backwards compatibility.
+    pub use crate::vector::search::{
+        SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD,
+    };
+}
 
 // Re-exports for public API
-pub use config::{HnswConfig, RaBitQConfig, VectorConfig};
+pub use cache::{BinaryCodeCache, BinaryCodeEntry, NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
+pub use config::{RaBitQConfig, RaBitQConfigWarning, VectorConfig};
 pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
+pub use hnsw::ConfigWarning;
+pub use id::IdAllocator;
+pub use processor::{Processor, SearchResult};
+pub use quantization::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
-pub use schema::ALL_COLUMN_FAMILIES;
+pub use schema::{
+    AdcCorrection, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpec,
+    VecId, VectorCfKey, VectorCfValue, VectorElementType, Vectors, ALL_COLUMN_FAMILIES,
+};
+pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
+
+// Async updater for two-phase inserts (Phase 7)
+pub use async_updater::{AsyncGraphUpdater, AsyncUpdaterConfig};
+
+// Garbage collector for deleted vector cleanup (Phase 8)
+pub use gc::{GarbageCollector, GcConfig, GcMetrics};
+
+// Mutation types and infrastructure (following graph::mutation pattern)
+// Note: UpdateEdges, UpdateGraphMeta, EdgeOperation, GraphMetaUpdate are internal-only
+// Graph repair requires full rebuild - no partial repair API exposed
+pub use mutation::{
+    AddEmbeddingSpec, DeleteVector, FlushMarker, InsertVector, InsertVectorBatch, Mutation,
+    MutationBatch, Runnable as MutationRunnable,
+};
+pub use writer::{
+    create_writer,
+    spawn_consumer as spawn_mutation_consumer,
+    spawn_mutation_consumer_with_storage,
+    spawn_mutation_consumer_with_storage_autoreg,
+    Consumer as MutationConsumer, MutationCacheUpdate, MutationExecutor, MutationProcessor, Writer,
+    WriterConfig,
+};
+
+// Query types and infrastructure (following graph::query pattern)
+// Runnable<R> is the query trait (with timeout + Output), MutationRunnable is for mutations
+pub use crate::reader::Runnable;
+pub use query::{
+    FindEmbeddings, GetExternalId, GetInternalId, GetVector, ListEmbeddings, Query,
+    QueryExecutor, QueryProcessor, QueryWithTimeout, ResolveIds, SearchKNN,
+};
+pub use reader::{
+    create_reader, create_search_reader, create_search_reader_with_storage,
+    spawn_consumer as spawn_query_consumer,
+    spawn_consumer_with_processor as spawn_query_consumer_with_processor,
+    spawn_consumers as spawn_query_consumers,
+    spawn_consumers_with_processor as spawn_query_consumers_with_processor,
+    spawn_query_consumers_with_storage,
+    spawn_query_consumers_with_storage_autoreg,
+    Consumer as QueryConsumer, ProcessorConsumer as ProcessorQueryConsumer, Reader, ReaderConfig,
+    SearchReader,
+};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{EmbeddingRegistryConfig, Subsystem, VectorBlockCacheConfig};
@@ -47,70 +164,7 @@ pub type Storage = crate::rocksdb::Storage<Subsystem>;
 /// BlockCacheConfig re-export (alias to VectorBlockCacheConfig for backwards compat)
 pub type BlockCacheConfig = VectorBlockCacheConfig;
 
-/// Component type for use with StorageBuilder
-pub type Component = crate::rocksdb::ComponentWrapper<Subsystem>;
-
-/// Convenience constructor for vector component
-pub fn component() -> Component {
-    Component::new()
-}
-
-// Internal re-exports
-pub(crate) use error::Result;
-
-// ============================================================================
-// SystemInfo - Telemetry
-// ============================================================================
-
-/// Static configuration info for the vector database subsystem.
-///
-/// Used by the `motlie info` command to display vector DB settings.
-/// Implements [`motlie_core::telemetry::SubsystemInfo`] for consistent formatting.
-///
-/// # Example
-///
-/// ```ignore
-/// use motlie_db::vector::SystemInfo;
-/// use motlie_core::telemetry::{format_subsystem_info, SubsystemInfo};
-///
-/// let info = SystemInfo::default();
-/// println!("{}", format_subsystem_info(&info));
-/// ```
-#[derive(Debug, Clone)]
-pub struct SystemInfo {
-    /// Block cache configuration
-    pub block_cache_config: BlockCacheConfig,
-    /// EmbeddingRegistry pre-warming configuration
-    pub registry_config: EmbeddingRegistryConfig,
-    /// List of column families
-    pub column_families: Vec<&'static str>,
-}
-
-impl Default for SystemInfo {
-    fn default() -> Self {
-        Self {
-            block_cache_config: BlockCacheConfig::default(),
-            registry_config: EmbeddingRegistryConfig::default(),
-            column_families: ALL_COLUMN_FAMILIES.to_vec(),
-        }
-    }
-}
-
-impl motlie_core::telemetry::SubsystemInfo for SystemInfo {
-    fn name(&self) -> &'static str {
-        "Vector Database (RocksDB)"
-    }
-
-    fn info_lines(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("Block Cache Size", format_bytes(self.block_cache_config.cache_size_bytes)),
-            ("Default Block Size", format_bytes(self.block_cache_config.default_block_size)),
-            ("Vector Block Size", format_bytes(self.block_cache_config.vector_block_size)),
-            ("Registry Prewarm", self.registry_config.prewarm_limit.to_string()),
-            ("Column Families", self.column_families.join(", ")),
-        ]
-    }
-}
+// Note: SystemInfo functionality is now in Subsystem which implements SubsystemInfo
 
 /// Format a byte count as a human-readable string.
 fn format_bytes(bytes: usize) -> String {
@@ -151,15 +205,15 @@ mod tests {
 
     #[test]
     fn test_hnsw_config_presets() {
-        let default = HnswConfig::default();
+        let default = hnsw::Config::default();
         assert_eq!(default.dim, 128);
         assert_eq!(default.m, 16);
 
-        let high_recall = HnswConfig::high_recall(768);
+        let high_recall = hnsw::Config::high_recall(768);
         assert_eq!(high_recall.dim, 768);
         assert_eq!(high_recall.m, 32);
 
-        let compact = HnswConfig::compact(768);
+        let compact = hnsw::Config::compact(768);
         assert_eq!(compact.dim, 768);
         assert_eq!(compact.m, 8);
     }

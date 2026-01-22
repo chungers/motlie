@@ -69,6 +69,18 @@ impl Variant {
             Variant::Scalar => scalar::dot(a, b),
         }
     }
+
+    /// Compute Hamming distance between binary codes
+    #[inline]
+    pub fn hamming_distance(&self, a: &[u8], b: &[u8]) -> u32 {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Variant::Avx512 => unsafe { avx512::hamming_distance(a, b) },
+            #[cfg(target_arch = "x86_64")]
+            Variant::Avx2 => unsafe { avx2::hamming_distance(a, b) },
+            Variant::Scalar => scalar::hamming_distance(a, b),
+        }
+    }
 }
 
 /// Detect the best available SIMD variant for the current CPU
@@ -177,5 +189,31 @@ mod tests {
             result,
             expected
         );
+    }
+
+    #[test]
+    fn test_runtime_hamming_identical() {
+        let variant = detect();
+        let a = vec![0xFF, 0x00, 0xAA, 0x55];
+        let b = vec![0xFF, 0x00, 0xAA, 0x55];
+        assert_eq!(variant.hamming_distance(&a, &b), 0);
+    }
+
+    #[test]
+    fn test_runtime_hamming_opposite() {
+        let variant = detect();
+        let a = vec![0x00, 0x00];
+        let b = vec![0xFF, 0xFF];
+        assert_eq!(variant.hamming_distance(&a, &b), 16);
+    }
+
+    #[test]
+    fn test_runtime_hamming_large() {
+        let variant = detect();
+        // 64 bytes (512 bits) - tests AVX-512 path
+        let a = vec![0u8; 64];
+        let b = vec![0xFFu8; 64];
+        let result = variant.hamming_distance(&a, &b);
+        assert_eq!(result, 512, "{}: got {}, expected 512", variant.name(), result);
     }
 }

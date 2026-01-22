@@ -130,84 +130,67 @@ impl Clone for Index {
 }
 
 // ============================================================================
-// Subsystem Info
+// FulltextSubsystem Trait
+// ============================================================================
+
+use crate::SubsystemProvider;
+
+/// Extension trait for fulltext (Tantivy) subsystems.
+///
+/// Extends [`SubsystemProvider<tantivy::Index>`] with Tantivy-specific methods
+/// for schema definition and writer configuration.
+///
+/// # Example
+///
+/// ```ignore
+/// use motlie_db::fulltext::FulltextSubsystem;
+/// use motlie_db::SubsystemProvider;
+/// use motlie_core::telemetry::SubsystemInfo;
+///
+/// struct MyFulltextSchema { /* ... */ }
+///
+/// impl SubsystemInfo for MyFulltextSchema {
+///     fn name(&self) -> &'static str { "my-fulltext" }
+///     fn info_lines(&self) -> Vec<(&'static str, String)> { vec![] }
+/// }
+///
+/// impl SubsystemProvider<tantivy::Index> for MyFulltextSchema {
+///     fn on_ready(&self, index: &tantivy::Index) -> anyhow::Result<()> { Ok(()) }
+/// }
+///
+/// impl FulltextSubsystem for MyFulltextSchema {
+///     fn schema(&self) -> tantivy::schema::Schema { /* ... */ }
+/// }
+/// ```
+pub trait FulltextSubsystem: SubsystemProvider<tantivy::Index> {
+    /// Short identifier for this subsystem (e.g., "fulltext").
+    ///
+    /// Used for programmatic lookup via `SharedStorage::get_fulltext()`.
+    /// This is distinct from `SubsystemInfo::name()` which is for display.
+    fn id(&self) -> &'static str;
+
+    /// Returns the Tantivy schema for this subsystem.
+    ///
+    /// Called during index creation to define the document structure.
+    fn schema(&self) -> tantivy::schema::Schema;
+
+    /// Returns the writer heap size in bytes.
+    ///
+    /// Default: 50MB. Larger values improve throughput for bulk indexing.
+    fn writer_heap_size(&self) -> usize {
+        DEFAULT_WRITER_HEAP_SIZE
+    }
+}
+
+// ============================================================================
+// Constants
 // ============================================================================
 
 /// Default writer heap size in bytes (50MB).
 pub const DEFAULT_WRITER_HEAP_SIZE: usize = 50_000_000;
 
-/// Default number of indexing threads (Tantivy default: number of CPUs).
-pub const DEFAULT_NUM_THREADS: usize = 0; // 0 means use Tantivy's default
-
-/// Static configuration info for the fulltext search subsystem.
-///
-/// Used by the `motlie info` command to display Tantivy settings.
-/// Implements [`motlie_core::telemetry::SubsystemInfo`] for consistent formatting.
-///
-/// # Example
-///
-/// ```ignore
-/// use motlie_db::fulltext::SystemInfo;
-/// use motlie_core::telemetry::{format_subsystem_info, SubsystemInfo};
-///
-/// let info = SystemInfo::default();
-/// println!("{}", format_subsystem_info(&info));
-/// ```
-#[derive(Debug, Clone)]
-pub struct SystemInfo {
-    /// IndexWriter heap size in bytes (memory buffer for indexing).
-    /// Default: 50MB. Larger values improve throughput for bulk indexing.
-    pub writer_heap_size: usize,
-    /// Number of indexing threads. 0 means use Tantivy's default (num CPUs).
-    pub num_threads: usize,
-    /// Whether the index uses STORED fields (content is retrievable).
-    pub stored_fields: bool,
-    /// Whether BM25 scoring is enabled (default Tantivy scorer).
-    pub bm25_scoring: bool,
-    /// Whether faceted search is enabled.
-    pub faceted_search: bool,
-    /// Whether fuzzy search is supported.
-    pub fuzzy_search: bool,
-}
-
-impl Default for SystemInfo {
-    fn default() -> Self {
-        Self {
-            writer_heap_size: DEFAULT_WRITER_HEAP_SIZE,
-            num_threads: DEFAULT_NUM_THREADS,
-            stored_fields: true,   // We store content for retrieval
-            bm25_scoring: true,    // Tantivy default
-            faceted_search: true,  // We use facets for filtering
-            fuzzy_search: true,    // We support fuzzy queries
-        }
-    }
-}
-
-impl motlie_core::telemetry::SubsystemInfo for SystemInfo {
-    fn name(&self) -> &'static str {
-        "Fulltext Search (Tantivy)"
-    }
-
-    fn info_lines(&self) -> Vec<(&'static str, String)> {
-        let threads_str = if self.num_threads == 0 {
-            "auto (num CPUs)".to_string()
-        } else {
-            self.num_threads.to_string()
-        };
-
-        vec![
-            ("Writer Heap Size", format_bytes(self.writer_heap_size)),
-            ("Indexing Threads", threads_str),
-            ("Stored Fields", self.stored_fields.to_string()),
-            ("BM25 Scoring", self.bm25_scoring.to_string()),
-            ("Faceted Search", self.faceted_search.to_string()),
-            ("Fuzzy Search", self.fuzzy_search.to_string()),
-        ]
-    }
-}
-
 /// Format a byte count as a human-readable string.
-fn format_bytes(bytes: usize) -> String {
+pub(crate) fn format_bytes(bytes: usize) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         format!("{} GB", bytes / (1024 * 1024 * 1024))
     } else if bytes >= 1024 * 1024 {

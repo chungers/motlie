@@ -1,0 +1,323 @@
+   Compiling motlie-core v0.1.0 (/home/dchung/projects/github.com/chungers/motlie/feature-vector/libs/core)
+   Compiling motlie v0.1.0 (/home/dchung/projects/github.com/chungers/motlie/feature-vector)
+warning: motlie-core@0.1.0: SIMD: Targeting NEON for aarch64 Linux
+warning: function `euclidean_squared` is never used
+ --> libs/core/src/distance/scalar.rs:8:8
+  |
+8 | pub fn euclidean_squared(a: &[f32], b: &[f32]) -> f32 {
+  |        ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `cosine` is never used
+  --> libs/core/src/distance/scalar.rs:20:8
+   |
+20 | pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+   |        ^^^^^^
+
+warning: function `dot` is never used
+  --> libs/core/src/distance/scalar.rs:43:8
+   |
+43 | pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+   |        ^^^
+
+warning: function `hamming_distance` is never used
+  --> libs/core/src/distance/scalar.rs:52:8
+   |
+52 | pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+   |        ^^^^^^^^^^^^^^^^
+
+   Compiling motlie-db v0.1.0 (/home/dchung/projects/github.com/chungers/motlie/feature-vector/libs/db)
+warning: `motlie-core` (lib) generated 4 warnings
+warning: unused import: `error::Result`
+  --> libs/db/src/vector/mod.rs:79:16
+   |
+79 | pub(crate) use error::Result;
+   |                ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `TEXT`
+ --> libs/db/src/fulltext/schema.rs:7:13
+  |
+7 |     STRING, TEXT,
+  |             ^^^^
+
+warning: unused variable: `config`
+   --> libs/db/src/graph/reader.rs:530:13
+    |
+530 |         let config = config.clone();
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_config`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `current_dist` is never read
+   --> libs/db/src/vector/hnsw.rs:163:17
+    |
+163 |                 current_dist = dist;
+    |                 ^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `GetVectorDispatch` is more private than the item `vector::query::Query::GetVector::0`
+   --> libs/db/src/vector/query.rs:51:15
+    |
+ 51 |     GetVector(GetVectorDispatch),
+    |               ^^^^^^^^^^^^^^^^^ field `vector::query::Query::GetVector::0` is reachable at visibility `pub`
+    |
+note: but type `GetVectorDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:197:1
+    |
+197 | pub(crate) struct GetVectorDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `GetInternalIdDispatch` is more private than the item `vector::query::Query::GetInternalId::0`
+   --> libs/db/src/vector/query.rs:53:19
+    |
+ 53 |     GetInternalId(GetInternalIdDispatch),
+    |                   ^^^^^^^^^^^^^^^^^^^^^ field `vector::query::Query::GetInternalId::0` is reachable at visibility `pub`
+    |
+note: but type `GetInternalIdDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:296:1
+    |
+296 | pub(crate) struct GetInternalIdDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `GetExternalIdDispatch` is more private than the item `vector::query::Query::GetExternalId::0`
+   --> libs/db/src/vector/query.rs:55:19
+    |
+ 55 |     GetExternalId(GetExternalIdDispatch),
+    |                   ^^^^^^^^^^^^^^^^^^^^^ field `vector::query::Query::GetExternalId::0` is reachable at visibility `pub`
+    |
+note: but type `GetExternalIdDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:366:1
+    |
+366 | pub(crate) struct GetExternalIdDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `ResolveIdsDispatch` is more private than the item `vector::query::Query::ResolveIds::0`
+   --> libs/db/src/vector/query.rs:57:16
+    |
+ 57 |     ResolveIds(ResolveIdsDispatch),
+    |                ^^^^^^^^^^^^^^^^^^ field `vector::query::Query::ResolveIds::0` is reachable at visibility `pub`
+    |
+note: but type `ResolveIdsDispatch` is only usable at visibility `pub(crate)`
+   --> libs/db/src/vector/query.rs:436:1
+    |
+436 | pub(crate) struct ResolveIdsDispatch {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `BlockCacheConfig` is never used
+  --> libs/db/src/graph/schema.rs:56:6
+   |
+56 | type BlockCacheConfig = GraphBlockCacheConfig;
+   |      ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `dimension_mismatch` is never used
+  --> libs/db/src/vector/error.rs:11:8
+   |
+11 | pub fn dimension_mismatch(expected: u32, got: usize) -> anyhow::Error {
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `unknown_embedding` is never used
+  --> libs/db/src/vector/error.rs:20:8
+   |
+20 | pub fn unknown_embedding(code: u64) -> anyhow::Error {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `embedding_not_registered` is never used
+  --> libs/db/src/vector/error.rs:30:8
+   |
+30 | pub fn embedding_not_registered(model: &str, dim: u32, distance: &str) -> anyhow::Error {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `timeout` is never read
+   --> libs/db/src/vector/query.rs:199:16
+    |
+197 | pub(crate) struct GetVectorDispatch {
+    |                   ----------------- field in this struct
+198 |     pub(crate) params: GetVector,
+199 |     pub(crate) timeout: Duration,
+    |                ^^^^^^^
+    |
+    = note: `GetVectorDispatch` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `timeout` is never read
+   --> libs/db/src/vector/query.rs:298:16
+    |
+296 | pub(crate) struct GetInternalIdDispatch {
+    |                   --------------------- field in this struct
+297 |     pub(crate) params: GetInternalId,
+298 |     pub(crate) timeout: Duration,
+    |                ^^^^^^^
+    |
+    = note: `GetInternalIdDispatch` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `timeout` is never read
+   --> libs/db/src/vector/query.rs:368:16
+    |
+366 | pub(crate) struct GetExternalIdDispatch {
+    |                   --------------------- field in this struct
+367 |     pub(crate) params: GetExternalId,
+368 |     pub(crate) timeout: Duration,
+    |                ^^^^^^^
+    |
+    = note: `GetExternalIdDispatch` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `timeout` is never read
+   --> libs/db/src/vector/query.rs:438:16
+    |
+436 | pub(crate) struct ResolveIdsDispatch {
+    |                   ------------------ field in this struct
+437 |     pub(crate) params: ResolveIds,
+438 |     pub(crate) timeout: Duration,
+    |                ^^^^^^^
+    |
+    = note: `ResolveIdsDispatch` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: struct `EdgeCfValue` is never constructed
+   --> libs/db/src/vector/schema.rs:282:19
+    |
+282 | pub(crate) struct EdgeCfValue(pub(crate) RoaringBitmapBytes);
+    |                   ^^^^^^^^^^^
+
+warning: associated functions `key_from_bytes`, `value_to_bytes`, and `value_from_bytes` are never used
+   --> libs/db/src/vector/schema.rs:325:12
+    |
+316 | impl Edges {
+    | ---------- associated functions in this implementation
+...
+325 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<EdgeCfKey> {
+    |            ^^^^^^^^^^^^^^
+...
+339 |     pub fn value_to_bytes(value: &EdgeCfValue) -> Vec<u8> {
+    |            ^^^^^^^^^^^^^^
+...
+344 |     pub fn value_from_bytes(bytes: &[u8]) -> Result<EdgeCfValue> {
+    |            ^^^^^^^^^^^^^^^^
+
+warning: variants `Count` and `Config` are never constructed
+   --> libs/db/src/vector/schema.rs:519:5
+    |
+513 | pub(crate) enum GraphMetaField {
+    |                 -------------- variants in this enum
+...
+519 |     Count(u32),
+    |     ^^^^^
+520 |     /// Serialized HNSW configuration
+521 |     Config(Vec<u8>),
+    |     ^^^^^^
+    |
+    = note: `GraphMetaField` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated functions `count` and `config` are never used
+   --> libs/db/src/vector/schema.rs:552:12
+    |
+540 | impl GraphMetaCfKey {
+    | ------------------- associated functions in this implementation
+...
+552 |     pub fn count(embedding_code: EmbeddingCode) -> Self {
+    |            ^^^^^
+...
+557 |     pub fn config(embedding_code: EmbeddingCode) -> Self {
+    |            ^^^^^^
+
+warning: associated function `key_from_bytes` is never used
+   --> libs/db/src/vector/schema.rs:593:12
+    |
+585 | impl GraphMeta {
+    | -------------- associated function in this implementation
+...
+593 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<GraphMetaCfKey> {
+    |            ^^^^^^^^^^^^^^
+
+warning: associated function `key_from_bytes` is never used
+   --> libs/db/src/vector/schema.rs:698:12
+    |
+690 | impl IdForward {
+    | -------------- associated function in this implementation
+...
+698 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<IdForwardCfKey> {
+    |            ^^^^^^^^^^^^^^
+
+warning: associated function `key_from_bytes` is never used
+   --> libs/db/src/vector/schema.rs:771:12
+    |
+763 | impl IdReverse {
+    | -------------- associated function in this implementation
+...
+771 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<IdReverseCfKey> {
+    |            ^^^^^^^^^^^^^^
+
+warning: associated function `key_from_bytes` is never used
+   --> libs/db/src/vector/schema.rs:879:12
+    |
+871 | impl IdAlloc {
+    | ------------ associated function in this implementation
+...
+879 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<IdAllocCfKey> {
+    |            ^^^^^^^^^^^^^^
+
+warning: struct `PendingCfKey` is never constructed
+   --> libs/db/src/vector/schema.rs:934:19
+    |
+934 | pub(crate) struct PendingCfKey(pub(crate) EmbeddingCode, pub(crate) TimestampMilli, pub(crate) VecId);
+    |                   ^^^^^^^^^^^^
+
+warning: struct `PendingCfValue` is never constructed
+   --> libs/db/src/vector/schema.rs:938:19
+    |
+938 | pub(crate) struct PendingCfValue(pub(crate) ());
+    |                   ^^^^^^^^^^^^^^
+
+warning: associated functions `key_to_bytes`, `key_from_bytes`, `value_to_bytes`, and `value_from_bytes` are never used
+   --> libs/db/src/vector/schema.rs:960:12
+    |
+959 | impl Pending {
+    | ------------ associated functions in this implementation
+960 |     pub fn key_to_bytes(key: &PendingCfKey) -> Vec<u8> {
+    |            ^^^^^^^^^^^^
+...
+968 |     pub fn key_from_bytes(bytes: &[u8]) -> Result<PendingCfKey> {
+    |            ^^^^^^^^^^^^^^
+...
+981 |     pub fn value_to_bytes(_value: &PendingCfValue) -> Vec<u8> {
+    |            ^^^^^^^^^^^^^^
+...
+985 |     pub fn value_from_bytes(_bytes: &[u8]) -> Result<PendingCfValue> {
+    |            ^^^^^^^^^^^^^^^^
+
+   Compiling motlie-mcp v0.1.0 (/home/dchung/projects/github.com/chungers/motlie/feature-vector/libs/mcp)
+warning: `motlie-db` (lib) generated 27 warnings (run `cargo fix --lib -p motlie-db` to apply 3 suggestions)
+    Finished `release` profile [optimized] target(s) in 7.94s
+     Running `target/release/examples/vector2 --dataset sift1m --num-vectors 100000 --num-queries 100 --k 10 --ef 100`
+=== Vector2: Phase 2 HNSW Benchmark ===
+
+Configuration:
+  Dataset:         sift1m
+  Vectors:         100000
+  Queries:         100
+  K:               10
+  ef (search):     100
+  M:               16
+  ef_construction: 200
+  Cache Size:      256 MB
+  Distance:        L2
+  Search Mode:     standard (L2)
+
+Loading sift1m dataset...
+Loading SIFT dataset: 100000 base vectors, 100 queries...
+Loaded: 100000 base vectors (128D), 100 queries, avg 12.3 ground truth per query
+Database path: /tmp/.tmpQ8fCx0
+[2m2026-01-09T05:42:25.617202Z[0m [32m INFO[0m [1mready[0m[1m{[0m[3msubsystem[0m[2m=[0m"vector" [3mpath[0m[2m=[0m"/tmp/.tmpQ8fCx0"[1m}[0m[2m:[0m [2mmotlie_db::rocksdb::storage[0m[2m:[0m [2mlibs/db/src/rocksdb/storage.rs[0m[2m:[0m[2m208:[0m [vector] Created block cache [3msubsystem[0m[2m=[0m"vector" [3mcache_mb[0m[2m=[0m256
+[2m2026-01-09T05:42:25.617370Z[0m [34mDEBUG[0m [1mready[0m[1m{[0m[3msubsystem[0m[2m=[0m"vector" [3mpath[0m[2m=[0m"/tmp/.tmpQ8fCx0"[1m}[0m[2m:[0m [2mmotlie_db::rocksdb::storage[0m[2m:[0m [2mlibs/db/src/rocksdb/storage.rs[0m[2m:[0m[2m218:[0m [vector] Built CF descriptors [3msubsystem[0m[2m=[0m"vector" [3mcf_count[0m[2m=[0m10
+[2m2026-01-09T05:42:25.780996Z[0m [32m INFO[0m [1mready[0m[1m{[0m[3msubsystem[0m[2m=[0m"vector" [3mpath[0m[2m=[0m"/tmp/.tmpQ8fCx0"[1m}[0m[2m:[0m [2mmotlie_db::rocksdb::storage[0m[2m:[0m [2mlibs/db/src/rocksdb/storage.rs[0m[2m:[0m[2m265:[0m [vector] Pre-warmed cache [3msubsystem[0m[2m=[0m"vector" [3mloaded[0m[2m=[0m0
+[2m2026-01-09T05:42:25.781016Z[0m [32m INFO[0m [1mready[0m[1m{[0m[3msubsystem[0m[2m=[0m"vector" [3mpath[0m[2m=[0m"/tmp/.tmpQ8fCx0"[1m}[0m[2m:[0m [2mmotlie_db::rocksdb::storage[0m[2m:[0m [2mlibs/db/src/rocksdb/storage.rs[0m[2m:[0m[2m272:[0m [vector] Ready [3msubsystem[0m[2m=[0m"vector"
+
+HNSW Config: HnswConfig { dim: 128, m: 16, m_max: 32, m_max_0: 32, ef_construction: 200, m_l: 0.36067376, max_level: None, batch_threshold: 64 }
+
+Indexing 100000 vectors...

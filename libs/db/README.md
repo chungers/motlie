@@ -10,6 +10,24 @@ A temporal graph database with integrated fulltext search, combining RocksDB (gr
 
 2. **Subsystem APIs (Plumbing)** - Direct access to `motlie_db::graph` and `motlie_db::fulltext` modules for advanced usage, extension, and testing.
 
+## Vector Design Docs
+
+Vector design docs live alongside the implementation under `src/vector/docs/`:
+
+- `src/vector/docs/ROADMAP.md` - Primary roadmap and phase history (source of truth for status).
+- `src/vector/docs/PHASE5.md` - Phase 5 execution notes and certification trail.
+- `src/vector/docs/CONCURRENT.md` - Concurrency tests, metrics, and stress coverage.
+- `src/vector/docs/BASELINE.md` - Baseline benchmark protocol and recorded results.
+- `src/vector/docs/BENCHMARK.md` - Large-scale benchmark results and tuning guidance.
+- `src/vector/docs/BENCHMARK2.md` - Secondary benchmark runs (historical comparisons).
+- `src/vector/docs/API.md` - Vector public API reference and usage patterns.
+- `src/vector/docs/RABITQ.md` - RaBitQ design rationale and ADC details.
+- `src/vector/docs/REQUIREMENTS.md` - Design constraints and invariants (DATA-1, etc).
+- `src/vector/docs/CODEX-CODE-REVIEW.md` - CODEX review findings and fixes (audit trail).
+- `src/vector/docs/GEMINI-CODE-REVIEW.md` - Gemini review notes and follow-ups.
+- `src/vector/docs/GEMINI-BENCHMARK.md` - Benchmark tooling proposal and status.
+- `src/vector/docs/GEMINI-REVIEW.md` - Additional Gemini design review notes.
+
 ## Quick Start
 
 ### Read-Write Mode (Mutations + Queries)

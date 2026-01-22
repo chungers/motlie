@@ -1,0 +1,2793 @@
+# Phase 5: Internal Mutation/Query API
+
+**CODEX Certification:** ✅ Phase 5 complete as of 2026-01-17 (commit `f9dda759c9acec446f41b22b01958cc9a9b6b67f`).
+
+**Status:** ✅ Complete (All Tasks 5.0-5.11)
+**Date:** January 15, 2026
+**Commits:** `3e33c88`, `f672a2f`, `1524679`, `be0751a`, `c29dceb`, `6ee252b`, `0cbd597`, `dc4c3f9`
+
+## Task Numbering Alignment with ROADMAP.md
+
+| ROADMAP Task | Description | PHASE5 Status |
+|--------------|-------------|---------------|
+| 5.0 | HNSW Transaction Refactoring | ✅ Complete |
+| 5.1 | Processor::insert_vector() | ✅ Complete |
+| 5.2 | Processor::delete_vector() | ✅ Complete |
+| 5.3 | Processor::insert_batch() | ✅ Complete |
+| 5.4 | Storage/Processor Search | ✅ Complete (5.4a-5.4g) |
+| 5.5 | Processor::add_embedding_spec() | ✅ Complete (via registry) |
+| 5.6 | Mutation Dispatch | ✅ Complete |
+| 5.7 | Query Dispatch | ✅ Complete |
+| 5.7.1 | Remove Redundant api.rs | ✅ Complete |
+| 5.8 | Migrate Examples/Integration Tests | ✅ Complete |
+| 5.8.1 | Make Processor pub(crate) + Runnable Migration | ✅ Complete |
+| 5.8.x | Fix insert_batch() HNSW nav-cache updates | ✅ Complete |
+| 5.8.y | Remove non-transactional writes (production) | ✅ Complete |
+| 5.9 | Multi-Threaded Stress Tests | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
+| 5.10 | Metrics Collection Infrastructure | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
+| 5.11 | Concurrent Benchmark Baseline | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md), [BASELINE.md](./BASELINE.md)) |
+
+---
+
+## Overview
+
+Phase 5 implements the internal mutation and query API for vector operations, building on the foundation established in Phases 0-4. The primary goal is to ensure **atomic transactions** for all vector operations, enabling safe online serving.
+
+---
+
+## Task 5.0: HNSW Transaction Refactoring (COMPLETE)
+
+### Problem Statement
+
+The original HNSW implementation used raw `txn_db.put_cf()` and `txn_db.merge_cf()` calls instead of transactional writes:
+
+```rust
+// BEFORE: Non-atomic writes
+txn_db.put_cf(&cf, key, value)?;   // Could crash mid-write
+txn_db.merge_cf(&cf, key, value)?; // Leaves inconsistent state
+
+// AFTER: Atomic writes within transaction
+txn.put_cf(&cf, key, value)?;      // All-or-nothing
+txn.merge_cf(&cf, key, value)?;    // Rolled back on failure
+```
+
+**Impact:** A crash during insert could leave the HNSW graph in an inconsistent state with orphaned nodes, missing edges, or corrupted entry points.
+
+### Solution: Transaction-Aware APIs
+
+#### 5.0.1: IdAllocator Transaction Support
+
+Added transaction-aware allocation methods to `id.rs`:
+
+```rust
+impl IdAllocator {
+    /// Allocate ID and persist state within transaction
+    pub fn allocate(
+        &self,
+        txn: &rocksdb::Transaction<'_, TransactionDB>,
+        txn_db: &TransactionDB,
+        embedding: EmbeddingCode,
+    ) -> Result<VecId>;
+
+    /// Free ID and persist bitmap within transaction
+    pub fn free(
+        &self,
+        txn: &rocksdb::Transaction<'_, TransactionDB>,
+        txn_db: &TransactionDB,
+        embedding: EmbeddingCode,
+        id: VecId,
+    ) -> Result<()>;
+
+    /// In-memory only allocation (for tests)
+    pub fn allocate_local(&self) -> VecId;
+
+    /// In-memory only free (for tests)
+    pub fn free_local(&self, id: VecId);
+}
+```
+
+#### 5.0.2: HNSW Insert Refactoring
+
+Refactored `hnsw/insert.rs` with a new transaction-aware API:
+
+```rust
+/// Deferred cache update - applied ONLY after commit
+pub struct CacheUpdate {
+    pub embedding: EmbeddingCode,
+    pub vec_id: VecId,
+    pub node_layer: HnswLayer,
+    pub is_new_entry_point: bool,
+    pub m: usize,
+}
+
+impl CacheUpdate {
+    /// Apply after txn.commit() succeeds
+    pub fn apply(self, nav_cache: &NavigationCache);
+}
+
+/// Transaction-aware insert (the standard API)
+pub fn insert(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    storage: &Storage,
+    vec_id: VecId,
+    vector: &[f32],
+) -> Result<CacheUpdate>;
+```
+
+#### 5.0.3: Graph Edge Connections
+
+Added `connect_neighbors()` to `hnsw/graph.rs`:
+
+```rust
+pub fn connect_neighbors(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    vec_id: VecId,
+    neighbors: &[(f32, VecId)],
+    layer: HnswLayer,
+) -> Result<()>;
+```
+
+#### 5.0.4: Cache Update Timing
+
+**Critical pattern:** Cache updates are deferred until AFTER transaction commit:
+
+```rust
+// WRONG: Cache updated before commit (caches uncommitted state)
+nav_cache.update(...);
+txn.commit()?;
+
+// CORRECT: Cache updated after successful commit
+txn.commit()?;
+nav_cache.update(...);  // Only on success
+```
+
+This ensures the navigation cache never contains uncommitted graph state.
+
+#### 5.0.5: Writer Integration
+
+Updated `writer.rs` to use transactional HNSW operations:
+
+```rust
+async fn execute_mutations(&self, mutations: &[Mutation]) -> Result<()> {
+    let txn_db = self.processor.storage().transaction_db()?;
+    let txn = txn_db.transaction();
+
+    // Collect cache updates during processing
+    let mut cache_updates: Vec<CacheUpdate> = Vec::new();
+
+    for mutation in mutations {
+        if let Some(update) = self.execute_single(&txn, &txn_db, mutation)? {
+            cache_updates.push(update);
+        }
+    }
+
+    // Commit transaction - all mutations are atomic
+    txn.commit()?;
+
+    // Apply cache updates ONLY after successful commit
+    for update in cache_updates {
+        update.apply(self.processor.nav_cache());
+    }
+
+    Ok(())
+}
+```
+
+#### 5.0.6: Crash Recovery Tests
+
+Added comprehensive tests in `crash_recovery_tests.rs`:
+
+| Test | Purpose |
+|------|---------|
+| `test_uncommitted_transaction_not_visible` | Verify uncommitted data doesn't persist |
+| `test_committed_transaction_persists` | Verify committed data survives restart |
+| `test_id_allocator_recovery` | Verify IdAllocator state recovery |
+| `test_id_allocator_transactional_recovery` | Verify transactional allocation |
+| `test_hnsw_navigation_cold_cache_recovery` | Verify search works with cold cache |
+| `test_hnsw_entry_point_persists` | Verify entry point persistence |
+| `test_full_crash_recovery_scenario` | End-to-end crash recovery |
+| `test_transaction_insert_with_recovery` | Verify insert with recovery |
+
+---
+
+## Files Modified
+
+| File | Changes |
+|------|---------|
+| `id.rs` | Added `allocate()`, `free()` (transactional); `allocate_local()`, `free_local()` (in-memory) |
+| `hnsw/insert.rs` | Added `CacheUpdate`, `insert()`, transaction helpers |
+| `hnsw/graph.rs` | Added `connect_neighbors()` |
+| `hnsw/mod.rs` | Export new APIs, `Index` derives `Clone` |
+| `processor.rs` | Added `get_or_create_index()`, `nav_cache()`, `hnsw_config()`, `index_count()` |
+| `writer.rs` | Collect and apply `CacheUpdate`s after commit |
+| `mod.rs` | Added `crash_recovery_tests` module |
+| `crash_recovery_tests.rs` | New file with 8 tests |
+
+---
+
+## Processor HNSW Management
+
+The `Processor` now manages HNSW indices similar to RaBitQ encoders:
+
+```rust
+pub struct Processor {
+    // ... existing fields ...
+
+    /// Per-embedding HNSW indices (lazily created)
+    hnsw_indices: DashMap<EmbeddingCode, hnsw::Index>,
+    /// Shared navigation cache for all HNSW indices
+    nav_cache: Arc<NavigationCache>,
+    /// HNSW configuration (shared across all embeddings)
+    hnsw_config: hnsw::Config,
+}
+
+impl Processor {
+    /// Get or create an HNSW index for the given embedding space
+    pub fn get_or_create_index(&self, embedding: EmbeddingCode) -> Option<hnsw::Index>;
+
+    /// Get the shared navigation cache
+    pub fn nav_cache(&self) -> &Arc<NavigationCache>;
+
+    /// Get the HNSW configuration
+    pub fn hnsw_config(&self) -> &hnsw::Config;
+
+    /// Get the number of cached HNSW indices
+    pub fn index_count(&self) -> usize;
+}
+```
+
+---
+
+## Transaction Flow
+
+The complete transaction flow for vector insertion with HNSW indexing:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    execute_mutations()                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. txn = txn_db.transaction()                              │
+│                                                             │
+│  2. For each mutation:                                      │
+│     ├── IdForward: txn.put_cf()                            │
+│     ├── IdReverse: txn.put_cf()                            │
+│     ├── Vectors: txn.put_cf()                              │
+│     ├── BinaryCodes: txn.put_cf()                          │
+│     └── HNSW (if immediate_index):                         │
+│         ├── VecMeta: txn.put_cf()                          │
+│         ├── GraphMeta: txn.put_cf()                        │
+│         ├── Edges: txn.merge_cf()                          │
+│         └── Returns CacheUpdate                            │
+│                                                             │
+│  3. txn.commit()  ─────────────────── ATOMIC BOUNDARY ───  │
+│                                                             │
+│  4. For each CacheUpdate:                                   │
+│     └── update.apply(nav_cache)  ── Only after commit ──   │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## CODEX Concerns Addressed
+
+Two concerns raised by CODEX during Phase 5 planning:
+
+### 1. All Side Effects in Same Transaction
+
+**Concern:** Ensure all vector insert side effects share the same RocksDB transaction.
+
+**Solution:** All CF writes use the same `&Transaction`:
+- IdForward, IdReverse (ID mapping)
+- Vectors (vector data)
+- BinaryCodes (RaBitQ codes)
+- VecMeta (HNSW node metadata)
+- GraphMeta (entry point, max level)
+- Edges (HNSW graph edges)
+- IdAlloc (allocator state)
+
+### 2. Defer Cache Updates Until After Commit
+
+**Concern:** Avoid caching uncommitted graph state.
+
+**Solution:** `CacheUpdate` pattern:
+- `insert()` returns `CacheUpdate` instead of updating cache directly
+- Cache updates collected during mutation processing
+- Applied only after `txn.commit()` succeeds
+- On transaction failure, cache remains unchanged
+
+---
+
+## Testing
+
+All tests pass:
+- 487 existing tests
+- 8 new crash recovery tests
+- Total: 495 tests
+
+```bash
+cargo test -p motlie-db --lib
+# test result: ok. 495 passed; 0 failed
+```
+
+---
+
+## CODEX Review (Post-sync)
+
+**Assessment:** Overall direction is sound: HNSW writes are transaction-scoped, cache updates are deferred until commit, and crash recovery tests are comprehensive. Two correctness gaps remain that should be addressed before declaring Task 5.0 fully complete:
+
+1) **IdAllocator transactional persistence not wired into the write path.**
+   - The code introduces transactional `allocate()` / `free()`, but `writer.rs` still calls the in-memory-only versions.
+   - This means IdAlloc CF may lag behind committed inserts/deletes, and a crash could re-use IDs that were already committed (collision risk).
+   - **Action:** Use `allocate()` and `free()` (transactional) inside `execute_single()` so allocator state is persisted in the same transaction as vector writes.
+
+2) **Layer count update behavior changed for the empty-graph case.**
+   - `insert()` returns a `CacheUpdate` that increments `layer_counts[node_layer]`.
+   - In the prior empty-graph path, the cache incremented layer 0 unconditionally, ensuring `layer_counts[0]` equals total nodes even when `node_layer > 0`.
+   - If `node_layer` is ever > 0 on the first insert, `layer_counts[0]` may remain 0 (affecting `total_nodes()` and diagnostics).
+   - **Action:** Consider incrementing layer 0 for the first node (or updating `CacheUpdate::apply` logic for the empty-graph path).
+
+If these are addressed, Task 5.0 aligns with the CODEX concerns raised earlier.
+
+### Resolution (Commit `0cbd597`)
+
+Both issues have been fixed:
+
+1. **IdAllocator transactional persistence - FIXED**
+   ```rust
+   // BEFORE (writer.rs)
+   let vec_id = allocator.allocate_local();
+   allocator.free_local(vec_id);
+
+   // AFTER (writer.rs)
+   let vec_id = allocator.allocate(txn, txn_db, op.embedding)?;
+   allocator.free(txn, txn_db, op.embedding, vec_id)?;
+   ```
+
+2. **Layer counts for all nodes - FIXED**
+   ```rust
+   // BEFORE (CacheUpdate::apply)
+   info.increment_layer_count(self.node_layer);
+
+   // AFTER (CacheUpdate::apply)
+   // Increment for ALL layers from 0 to node_layer
+   for layer in 0..=self.node_layer {
+       info.increment_layer_count(layer);
+   }
+   ```
+
+All 495 tests pass. Task 5.0 is now fully complete.
+
+---
+
+## CODEX Verification (Post-update)
+
+- ✅ `writer.rs` now uses transactional `allocate()` and `free()` so IdAlloc state is transactionally persisted alongside vector writes.
+- ✅ `CacheUpdate::apply` now increments layer counts for all layers `0..=node_layer`, preserving `layer_counts[0]`/`total_nodes()` correctness even for the first node.
+- ✅ Changes align with the CODEX concerns raised in the previous review; Task 5.0 looks complete from a correctness standpoint.
+
+No additional follow-up items at this time.
+
+---
+
+## Task 5.1: Processor::insert_vector() (COMPLETE)
+
+### Overview
+
+Task 5.1 implements the high-level `insert_vector()` method on the `Processor` struct, providing a unified API for inserting vectors with full transactional guarantees.
+
+### API Signature
+
+```rust
+impl Processor {
+    /// Insert a vector into an embedding space.
+    ///
+    /// This method performs all necessary operations atomically:
+    /// 1. Validates embedding exists and dimension matches
+    /// 2. Allocates internal VecId
+    /// 3. Stores ID mappings (forward: Id→VecId, reverse: VecId→Id)
+    /// 4. Stores vector data
+    /// 5. Encodes and stores binary codes (RaBitQ)
+    /// 6. Optionally builds HNSW index
+    ///
+    /// # Arguments
+    /// * `embedding` - Embedding space code
+    /// * `id` - External ID for the vector
+    /// * `vector` - Vector data (must match embedding dimension)
+    /// * `build_index` - Whether to add to HNSW index immediately
+    ///
+    /// # Returns
+    /// The allocated internal VecId on success.
+    pub fn insert_vector(
+        &self,
+        embedding: EmbeddingCode,
+        id: Id,
+        vector: &[f32],
+        build_index: bool,
+    ) -> Result<VecId>;
+}
+```
+
+### Implementation Details
+
+#### Transaction Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    insert_vector()                           │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. Validate embedding exists in registry                   │
+│  2. Validate vector dimension matches spec                  │
+│                                                             │
+│  3. txn = txn_db.transaction()                              │
+│                                                             │
+│  4. vec_id = allocator.allocate()                          │
+│                                                             │
+│  5. IdForward: txn.put_cf(id → vec_id)                     │
+│  6. IdReverse: txn.put_cf(vec_id → id)                     │
+│  7. Vectors: txn.put_cf(vec_id → vector_bytes)             │
+│                                                             │
+│  8. BinaryCodes (if RaBitQ encoder available):             │
+│     └── txn.put_cf(vec_id → binary_code)                   │
+│                                                             │
+│  9. HNSW (if build_index && hnsw_config.enabled):          │
+│     └── insert() → CacheUpdate                             │
+│                                                             │
+│  10. txn.commit() ─────────────────── ATOMIC BOUNDARY ───  │
+│                                                             │
+│  11. cache_update.apply(nav_cache) ── Only after commit ── │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Key Features
+
+1. **Validation First**: Embedding existence and dimension validated before transaction starts
+2. **Single Transaction**: All writes (ID mappings, vector, codes, HNSW) in same transaction
+3. **Deferred Cache Update**: HNSW cache updated only after commit succeeds
+4. **Optional Indexing**: `build_index` flag allows deferring HNSW indexing for batch loads
+
+### Tests
+
+| Test | Purpose |
+|------|---------|
+| `test_insert_vector_unknown_embedding` | Verify error for unknown embedding code |
+| `test_insert_vector_dimension_mismatch` | Verify error for wrong dimension |
+| `test_insert_vector_integration` | Full insert with ID mappings, vector storage, binary codes |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Added `insert_vector()` method (~100 lines) and 3 tests |
+
+---
+
+## CODEX Review (Task 5.1)
+
+Overall, the implementation is solid: validation is up-front, all writes are within a single transaction, and cache updates are deferred. Two correctness gaps remain to address before relying on this API in production:
+
+1) **Transactional IdAllocator persistence is incomplete for reused IDs.**
+   - `allocate()` persists `next_id` but does not persist the updated free bitmap after popping an ID from `free_ids`.
+   - Crash scenario: if a reused ID is allocated and the process dies before any future `free()` write, `IdAlloc` recovery will still include that ID in the free bitmap, allowing duplicate allocation.
+   - **Suggested fix:** persist the free bitmap inside `allocate()` whenever allocation consumes a freed ID (or persist the bitmap unconditionally).
+
+2) **Duplicate external IDs are not checked.**
+   - `insert_vector()` writes IdForward/IdReverse without checking if the external `Id` already exists.
+   - This can overwrite IdForward to a new vec_id while leaving the old vec_id orphaned (and its IdReverse mapping stale).
+   - **Suggested fix:** check `IdForward` before insert; either return an error or treat this as an upsert with a proper delete + insert flow.
+
+Once these are addressed, Task 5.1 will be complete from a correctness perspective.
+
+### Resolution (Commit `6ee252b`)
+
+Both issues have been fixed:
+
+1. **IdAllocator free bitmap persistence - FIXED**
+
+   Refactored `allocate()` to handle allocation and persistence atomically:
+   ```rust
+   // BEFORE: Only persisted next_id
+   let id = self.allocate();  // May remove from bitmap
+   // Persist only next_id...
+
+   // AFTER: Inline allocation + conditional bitmap persistence
+   let (id, reused) = {
+       let mut free = self.free_ids.lock().unwrap();
+       if let Some(freed_id) = free.iter().next() {
+           free.remove(freed_id);
+           (freed_id, true)
+       } else {
+           (self.next_id.fetch_add(1, Ordering::Relaxed), false)
+       }
+   };
+   // Persist next_id...
+   if reused {
+       // Also persist free bitmap
+   }
+   ```
+
+2. **Duplicate external ID check - FIXED**
+
+   Added check before ID allocation in `insert_vector()`:
+   ```rust
+   // Check if external ID already exists (avoid duplicates)
+   let forward_cf = txn_db.cf_handle(IdForward::CF_NAME)?;
+   let forward_key = IdForwardCfKey(embedding, id);
+   if txn_db.get_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))?.is_some() {
+       return Err(anyhow::anyhow!(
+           "External ID {} already exists in embedding space {}",
+           id, embedding
+       ));
+   }
+   ```
+
+   Added test `test_insert_vector_duplicate_id` to verify the behavior.
+
+All 499 tests pass. Task 5.1 is now complete from a correctness perspective.
+
+---
+
+## CODEX Verification (Post-fix)
+
+- ✅ IdAllocator reuse now persists the free bitmap inside `allocate()`, addressing crash-reuse duplication risk.
+- ✅ `insert_vector()` rejects duplicate external IDs and includes a regression test.
+- ⚠️ **Remaining improvement:** the duplicate-ID check uses `txn_db.get_cf()` outside the transaction. This can race under concurrent inserts of the same external ID. Prefer `txn.get_cf()` (or `get_for_update`) so the read participates in the same transaction/locking semantics as the write to `IdForward`.
+
+No other correctness issues found in the Task 5.1 implementation.
+
+### Resolution (Race Condition Fix)
+
+Changed `txn_db.get_cf()` to `txn.get_for_update_cf()`:
+
+```rust
+// BEFORE: Non-transactional read (can race)
+if txn_db.get_cf(&forward_cf, key)?.is_some() { ... }
+
+// AFTER: Transactional read with lock
+if txn.get_for_update_cf(&forward_cf, key, true)?.is_some() { ... }
+```
+
+The `get_for_update_cf()` acquires a lock on the key, preventing concurrent inserts of the same external ID from racing. All 499 tests pass.
+
+## CODEX Verification (Post-race-fix)
+
+- ✅ Duplicate-ID check is now transactional via `get_for_update_cf`, removing the race noted in the prior review.
+- ✅ No additional correctness gaps found in Task 5.1 after this change.
+
+---
+
+## Task 5.2: Processor::delete_vector() (COMPLETE)
+
+### Overview
+
+Task 5.2 implements the `delete_vector()` method on the `Processor` struct, providing atomic vector deletion with ID reuse.
+
+### API Signature
+
+```rust
+impl Processor {
+    /// Delete a vector from an embedding space.
+    ///
+    /// # Returns
+    /// - `Ok(Some(vec_id))` - Vector was deleted, returns the freed VecId
+    /// - `Ok(None)` - Vector did not exist (idempotent)
+    /// - `Err(...)` - Storage or transaction error
+    pub fn delete_vector(
+        &self,
+        embedding: EmbeddingCode,
+        id: Id,
+    ) -> Result<Option<VecId>>;
+}
+```
+
+### Implementation Details
+
+#### Transaction Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    delete_vector()                           │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. txn = txn_db.transaction()                              │
+│                                                             │
+│  2. vec_id = txn.get_for_update_cf(IdForward, id)          │
+│     └── Return Ok(None) if not found (idempotent)          │
+│                                                             │
+│  3. txn.delete_cf(IdForward, id)                           │
+│  4. txn.delete_cf(IdReverse, vec_id)                       │
+│  5. txn.delete_cf(Vectors, vec_id)                         │
+│  6. txn.delete_cf(BinaryCodes, vec_id) ── if RaBitQ ──    │
+│  7. allocator.free(vec_id)                                 │
+│                                                             │
+│  8. txn.commit() ─────────────────── ATOMIC BOUNDARY ───   │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Key Features
+
+1. **Idempotent**: Deleting non-existent vector returns `Ok(None)` instead of error
+2. **Race-safe**: Uses `get_for_update_cf()` to lock the key during lookup
+3. **ID Reuse**: Freed VecIds are returned to allocator for reuse
+4. **Atomic**: All deletes in single transaction
+
+#### HNSW Note
+
+HNSW graph edges are NOT cleaned up on delete. This is standard HNSW behavior:
+- Deleted nodes are skipped during search
+- Edges cleaned up lazily during compaction or rebuild
+
+### Tests
+
+| Test | Purpose |
+|------|---------|
+| `test_delete_vector_success` | Delete existing vector, verify mappings removed |
+| `test_delete_vector_not_found` | Delete non-existent vector (idempotent) |
+| `test_delete_vector_id_reuse` | Verify VecId reuse after delete |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Added `delete_vector()` method (~65 lines) and 3 tests |
+
+---
+
+## CODEX Review (Task 5.2)
+
+The transactional delete logic is clean, but there are two correctness risks if HNSW indexing is enabled:
+
+1) **VecId reuse while HNSW edges still reference the old node.**
+   - `delete_vector()` frees the VecId back to the allocator, but HNSW edges are left intact.
+   - If the VecId is reused, existing edges now point to a *different* vector, corrupting graph semantics and search results.
+   - **Suggested fix:** do not reuse VecIds for indexed embeddings until edges are cleaned; alternatively, add a tombstone flag and keep IDs reserved.
+
+2) **Entry point / navigation can point to deleted nodes.**
+   - `GraphMeta` entry point is not updated on delete, and vector data is removed.
+   - Search starts from the entry point and calls `distance()`, which will error if the vector data is missing.
+   - **Suggested fix:** keep vector data for deleted nodes (tombstone) or update search to skip missing vectors and repair entry points.
+
+If deletes are intended only for non-indexed embeddings, document that constraint explicitly. Otherwise, the above needs addressing before Task 5.2 can be considered safe for indexed usage.
+
+### Resolution
+
+Both issues addressed by implementing **soft delete** when HNSW is enabled:
+
+1. **VecId reuse prevention - FIXED**
+   - Added `enabled` field to `hnsw::Config` (default: `true`)
+   - When HNSW is enabled, `delete_vector()` does NOT free the VecId
+   - This prevents graph corruption from VecId reuse
+
+2. **Vector data preservation - FIXED**
+   - When HNSW is enabled, vector data is kept (not deleted)
+   - Entry point and edges can still compute distances
+   - Only ID mappings (IdForward, IdReverse) are removed
+
+**Behavior summary:**
+
+| HNSW Enabled | ID Mappings | Vector Data | VecId | Binary Codes |
+|--------------|-------------|-------------|-------|--------------|
+| `false`      | Deleted     | Deleted     | Freed | Deleted      |
+| `true`       | Deleted     | **Kept**    | **Reserved** | Kept    |
+
+Updated docstring documents this "soft delete" behavior. Full cleanup requires index rebuild (future work).
+
+All 502 tests pass.
+
+---
+
+## CODEX Verification (Post-soft-delete)
+
+- ✅ Soft delete behavior addresses both VecId reuse corruption and entry-point distance errors for HNSW-enabled embeddings.
+- ⚠️ **Remaining improvement:** deleted nodes can still appear in search results because the graph is unchanged and no tombstone filter exists. Consider adding a deleted-flag check (e.g., IdReverse existence or a VecMeta flag) during search/rerank to exclude deleted vectors from results.
+
+### Design Note: Deleted Node Filtering (for Task 5.3)
+
+**Problem:** Soft-deleted vectors remain in the HNSW graph and will appear in raw search results.
+
+**Solution:** Filter deleted vectors during result processing in `Processor::search()`:
+
+```rust
+// After HNSW search returns raw VecId results:
+// 1. Batch lookup IdReverse for all result VecIds
+// 2. Filter out results where IdReverse is missing (deleted)
+// 3. Return only live vectors with their external Ids
+
+fn filter_deleted_results(
+    results: Vec<(f32, VecId)>,
+    embedding: EmbeddingCode,
+    txn_db: &TransactionDB,
+) -> Result<Vec<(f32, VecId, Id)>> {
+    let reverse_cf = txn_db.cf_handle(IdReverse::CF_NAME)?;
+
+    results.into_iter()
+        .filter_map(|(dist, vec_id)| {
+            // Check if IdReverse exists (not deleted)
+            let key = IdReverseCfKey(embedding, vec_id);
+            match txn_db.get_cf(&reverse_cf, IdReverse::key_to_bytes(&key)) {
+                Ok(Some(bytes)) => {
+                    let id = IdReverse::value_from_bytes(&bytes).ok()?.0;
+                    Some(Ok((dist, vec_id, id)))
+                }
+                Ok(None) => None, // Deleted - skip
+                Err(e) => Some(Err(e.into())),
+            }
+        })
+        .collect()
+}
+```
+
+This approach:
+- Uses IdReverse as implicit tombstone (deleted = missing)
+- Avoids extra storage for tombstone flags
+- Batch-friendly with MultiGet optimization potential
+
+---
+
+## Task 5.3: Processor::insert_batch() (COMPLETE)
+
+### Overview
+
+Task 5.3 implements batch vector insertion for efficiency. More efficient than individual `insert_vector()` calls:
+- Single transaction for all vectors (atomic commit)
+- Spec hash validated once per batch
+- Batched RocksDB writes
+- HNSW graph built after all vectors stored (better connectivity)
+
+### API Signature
+
+```rust
+impl Processor {
+    /// Batch insert multiple vectors into an embedding space.
+    pub fn insert_batch(
+        &self,
+        embedding: EmbeddingCode,
+        vectors: &[(Id, Vec<f32>)],
+        build_index: bool,
+    ) -> Result<Vec<VecId>>;
+}
+```
+
+### Implementation Details
+
+#### Transaction Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    insert_batch()                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. Validate embedding exists                               │
+│  2. Validate ALL dimensions upfront (fail fast)            │
+│  3. Check for duplicate IDs within batch                   │
+│                                                             │
+│  4. txn = txn_db.transaction()                              │
+│                                                             │
+│  5. Check for existing external IDs (acquire locks)        │
+│  6. Validate/store spec hash (once per batch)              │
+│                                                             │
+│  7. For each vector:                                        │
+│     ├── vec_id = allocator.allocate()                     │
+│     ├── IdForward: txn.put_cf(id → vec_id)                │
+│     ├── IdReverse: txn.put_cf(vec_id → id)                │
+│     ├── Vectors: txn.put_cf(vec_id → vector_bytes)        │
+│     └── BinaryCodes: txn.put_cf() (if RaBitQ)             │
+│                                                             │
+│  8. Build HNSW index (if build_index):                     │
+│     └── For each vec_id: insert() → CacheUpdate           │
+│                                                             │
+│  9. txn.commit() ─────────────────── ATOMIC BOUNDARY ───   │
+│                                                             │
+│  10. Apply nav_cache and code_cache updates                │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Key Features
+
+1. **Fail-Fast Validation**: All dimensions and IDs validated before transaction starts
+2. **Duplicate Detection**: Checks both within-batch and against existing data
+3. **Spec Hash Once**: Drift detection run only once for the entire batch
+4. **Deferred HNSW Build**: All vectors stored before graph connections (better connectivity)
+5. **Atomic Commit**: All-or-nothing - failed batch leaves no partial state
+
+#### Error Cases
+
+| Error | Condition |
+|-------|-----------|
+| Unknown embedding | Embedding code not in registry |
+| Dimension mismatch | Any vector dimension != embedding spec |
+| Duplicate in batch | Same external ID appears twice in input |
+| Duplicate existing | External ID already exists in embedding space |
+| Spec hash mismatch | EmbeddingSpec changed since previous insert |
+
+### Tests
+
+| Test | Purpose |
+|------|---------|
+| `test_insert_batch_basic` | Insert 10 vectors without index, verify VecIds |
+| `test_insert_batch_with_index` | Insert 20 vectors with HNSW, verify search works |
+| `test_insert_batch_empty` | Empty batch returns empty result |
+| `test_insert_batch_dimension_mismatch` | Verify error on wrong dimension |
+| `test_insert_batch_duplicate_in_batch` | Detect duplicate IDs within batch |
+| `test_insert_batch_duplicate_existing` | Detect conflict with existing data |
+| `test_insert_batch_unknown_embedding` | Verify error on unknown embedding |
+| `test_insert_batch_atomicity` | Failed batch does not partially commit |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Added `insert_batch()` method (~250 lines) and 8 tests |
+
+---
+
+## Task 5.3: CODEX Review - Batch Insert Assessment
+
+**Overall:** Solid implementation with correct transactional semantics, spec-hash validation once per batch, and deferred HNSW insertion for better connectivity. Tests cover the critical failure modes and atomicity.
+
+**Remaining issues / improvements**
+
+1) **BinaryCodes CF handling is inconsistent with single insert.**  
+   `insert_batch()` treats `BinaryCodes` CF as optional (`codes_cf` is `Option`), so when RaBitQ is enabled but the CF is missing it silently skips code writes. `insert_vector()` hard-fails in this case.  
+   - **Risk:** silent perf regression and cache misses in search; violates “config implies data exists.”  
+   - **Fix:** align with `insert_vector()` by requiring the CF when encoder is present, or explicitly disable RaBitQ in this path with a warning.
+
+2) **Spec hash lookup uses `txn_db.get_cf` instead of `txn.get_cf`.**  
+   This mirrors `insert_vector()`, so it’s not new, but it means the spec-hash read is outside the transaction snapshot.  
+   - **Risk:** benign race if another writer updates spec hash between validation and commit (should be impossible if spec is immutable, but worth keeping consistent).  
+   - **Fix:** use the transaction handle for all reads in the batch path for clarity.
+
+No other correctness issues found in the batch implementation.
+
+---
+
+## Task 5.3: CODEX Review Fixes (COMPLETE)
+
+Both issues identified in the CODEX review have been addressed:
+
+### Fix 1: BinaryCodes CF Consistency
+
+**Before:** `insert_batch()` treated BinaryCodes CF as optional, silently skipping writes if CF was missing.
+
+**After:** Now fails with error if encoder exists but CF is missing, matching `insert_vector()` behavior.
+
+```rust
+// Before (buggy): silently skipped
+let codes_cf = txn_db.cf_handle(BinaryCodes::CF_NAME);  // Option
+if let Some(ref enc) = encoder {
+    if let Some(ref cf) = codes_cf {  // silently skipped if None
+        // ...
+    }
+}
+
+// After (fixed): fails if CF missing when encoder present
+if let Some(ref enc) = encoder {
+    let codes_cf = txn_db
+        .cf_handle(BinaryCodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
+    // ...
+}
+```
+
+### Fix 2: Spec Hash Transaction Consistency
+
+**Before:** Used `txn_db.get_cf()` for spec hash lookup (outside transaction snapshot).
+
+**After:** Uses `txn.get_cf()` for snapshot consistency within the transaction.
+
+```rust
+// Before: outside transaction snapshot
+let spec_bytes = txn_db.get_cf(&specs_cf, ...)?;
+if let Some(stored_bytes) = txn_db.get_cf(&graph_meta_cf, ...)? { ... }
+
+// After: within transaction snapshot
+let spec_bytes = txn.get_cf(&specs_cf, ...)?;
+if let Some(stored_bytes) = txn.get_cf(&graph_meta_cf, ...)? { ... }
+```
+
+All 524 tests pass after fixes.
+
+---
+
+## Task 5.3: CODEX Review - Fix Verification
+
+**Status:** ✅ Verified
+
+Both issues I flagged are resolved and the fixes align with the rest of the codebase:
+
+- **BinaryCodes CF consistency** now matches `insert_vector()` (hard-fail if encoder exists but CF missing).
+- **Spec hash read** uses `txn.get_cf()` for transaction snapshot consistency.
+
+No additional issues found in this pass.
+
+---
+
+## Task 5.4a: Processor::search() (COMPLETE)
+
+### Overview
+
+Task 5.4a implements the unified search API that:
+1. Performs HNSW approximate nearest neighbor search
+2. Filters out soft-deleted vectors
+3. Returns external IDs with distances
+
+### API Signature
+
+```rust
+/// Search result with external ID and distance.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    /// External ID (ULID)
+    pub id: Id,
+    /// Internal vector ID
+    pub vec_id: VecId,
+    /// Distance to query vector
+    pub distance: f32,
+}
+
+impl Processor {
+    /// Search for nearest neighbors in an embedding space.
+    ///
+    /// # Arguments
+    /// * `embedding` - Embedding space code
+    /// * `query` - Query vector (must match embedding dimension)
+    /// * `k` - Number of results to return
+    /// * `ef_search` - Search beam width (higher = better recall, slower)
+    ///
+    /// # Returns
+    /// Up to k nearest neighbors, sorted by distance (ascending).
+    /// Soft-deleted vectors are automatically filtered out.
+    pub fn search(
+        &self,
+        embedding: EmbeddingCode,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+    ) -> Result<Vec<SearchResult>>;
+}
+```
+
+### Implementation Details
+
+#### Search Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       search()                               │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. Validate embedding exists in registry                   │
+│  2. Validate query dimension matches spec                   │
+│  3. Check HNSW is enabled (error if disabled)              │
+│                                                             │
+│  4. Get or create HNSW index for embedding                  │
+│                                                             │
+│  5. HNSW search: index.search(query, k, ef_search)         │
+│     └── Returns raw Vec<(distance, VecId)>                 │
+│                                                             │
+│  6. Filter deleted vectors:                                 │
+│     For each (distance, vec_id):                           │
+│       └── Check IdReverse exists (not deleted)             │
+│       └── If missing → skip (soft-deleted)                 │
+│       └── If present → include in results with external Id │
+│                                                             │
+│  7. Return Vec<SearchResult>                               │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Key Features
+
+1. **Validation First**: Embedding existence, dimension, and HNSW enabled checked before search
+2. **Tombstone Filtering**: Uses IdReverse existence as implicit tombstone check
+3. **External ID Resolution**: Returns external Ids (not internal VecIds) for client use
+4. **Sorted Results**: Results are sorted by distance ascending (from HNSW)
+
+#### Error Cases
+
+| Error | Condition |
+|-------|-----------|
+| Unknown embedding | Embedding code not in registry |
+| Dimension mismatch | Query dimension != embedding spec dimension |
+| HNSW disabled | `hnsw_config.enabled = false` |
+
+### Tests
+
+| Test | Purpose |
+|------|---------|
+| `test_search_basic` | Insert vectors, search, verify results sorted by distance |
+| `test_search_filters_deleted` | Insert and delete vectors, verify deleted are filtered |
+| `test_search_dimension_mismatch` | Verify error for wrong query dimension |
+| `test_search_hnsw_disabled` | Verify error when HNSW is disabled |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Added `SearchResult` struct, `search()` method (~60 lines), 4 tests |
+
+---
+
+## CODEX Review (Task 5.3)
+
+Search works and correctly filters deleted vectors, but there are two practical improvements worth addressing:
+
+1) **Underfilled results when many tombstones exist.**
+   - The search runs HNSW with `k` and then filters deleted results. If many results are soft-deleted, callers may receive fewer than `k` results.
+   - **Suggested fix:** overfetch candidates (e.g., `k * 2` or `k + deleted_slack`) and then filter down to `k`, or add a loop to increase `ef_search`/`k` until enough live results are found (bounded).
+
+2) **IdReverse lookups are per-result, not batched.**
+   - Current filter uses `txn_db.get_cf()` in a loop, which is fine for small `k` but becomes costly as `k` or ef_search grows.
+   - **Suggested fix:** use `multi_get_cf` or a small batch read for IdReverse keys to reduce RocksDB overhead.
+
+These are performance/UX improvements rather than correctness blockers, but they become important as the number of soft-deleted nodes grows.
+
+### Resolution
+
+Both improvements implemented:
+
+1. **Overfetch with 2x multiplier - FIXED**
+   ```rust
+   // Overfetch by 2x to ensure we get enough live results after filtering
+   let overfetch_k = k * 2;
+   let raw_results = index.search(&self.storage, query, overfetch_k, ef_search)?;
+   ```
+
+2. **Batched IdReverse lookups using multi_get_cf - FIXED**
+   ```rust
+   // Build batch of keys for multi_get
+   let keys: Vec<_> = raw_results.iter()
+       .map(|(_, vec_id)| IdReverse::key_to_bytes(&IdReverseCfKey(embedding, *vec_id)))
+       .collect();
+
+   // Batch lookup all IdReverse keys at once
+   let key_refs: Vec<_> = keys.iter().map(|k| (&reverse_cf, k.as_slice())).collect();
+   let values = txn_db.multi_get_cf(key_refs);
+
+   // Filter and resolve external IDs, truncate to k
+   ```
+
+All 506 tests pass. Task 5.3 improvements complete.
+
+---
+
+## CODEX Verification (Post-overfetch/batch)
+
+- ✅ Overfetch + batched IdReverse lookup fixes the two performance/UX concerns raised for Task 5.3.
+- ⚠️ **Remaining improvement:** if `ef_search < overfetch_k`, the HNSW search still returns at most `ef_search` candidates, so tombstones can still reduce results below `k`. Consider setting `effective_ef = max(ef_search, overfetch_k)` or scaling `ef_search` along with overfetch.
+
+### Resolution
+
+Fixed by ensuring `ef_search >= overfetch_k`:
+
+```rust
+let overfetch_k = k * 2;
+let effective_ef = ef_search.max(overfetch_k);
+let raw_results = index.search(&self.storage, query, overfetch_k, effective_ef)?;
+```
+
+This guarantees HNSW explores enough candidates to return `overfetch_k` results.
+
+## CODEX Verification (Post-ef scaling)
+
+- ✅ `effective_ef = max(ef_search, overfetch_k)` addresses the underfilled-results risk when tombstones are present.
+- ✅ No further issues identified for Task 5.3 at this time.
+
+---
+
+## Task 5.4b: Storage Layer Search (COMPLETE)
+
+### Overview
+
+The ROADMAP specified `Storage::search()` as a convenience wrapper. This functionality is **already implemented** via `Processor::search()`, which is the recommended high-level API.
+
+### Architecture Decision
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Layer                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Processor  ◄─── Primary API for vector operations          │
+│    ├── insert_vector()                                      │
+│    ├── delete_vector()                                      │
+│    └── search()  ◄─── Implements all ROADMAP 5.4 features   │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Storage = rocksdb::Storage<Subsystem>                      │
+│    └── Low-level RocksDB wrapper                           │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### What Was Implemented (via Processor)
+
+| ROADMAP Requirement | Implementation |
+|---------------------|----------------|
+| Search with external ID resolution | `Processor::search()` |
+| `SearchResult` struct | `processor::SearchResult` (now re-exported) |
+| Dimension validation | ✅ Validates query.len() vs spec.dim() |
+| Tombstone filtering | ✅ Via IdReverse existence check |
+| Batch lookups | ✅ Via `multi_get_cf` |
+| Overfetch for tombstones | ✅ 2x overfetch with ef scaling |
+
+### Export Added
+
+```rust
+// libs/db/src/vector/mod.rs
+pub use processor::{Processor, SearchResult};
+```
+
+---
+
+## Task 5.4c: Search Strategy Dispatch (COMPLETE)
+
+### Overview
+
+Task 5.5 implements strategy-based search dispatch via `Processor::search_with_config()`.
+
+### Implementation
+
+```rust
+impl Processor {
+    /// Search using a SearchConfig for strategy-based dispatch.
+    pub fn search_with_config(
+        &self,
+        config: &SearchConfig,
+        query: &[f32],
+    ) -> Result<Vec<SearchResult>> {
+        // Dispatch based on strategy
+        match config.strategy() {
+            SearchStrategy::Exact => {
+                // Standard HNSW search with exact distance
+                index.search(...)
+            }
+            SearchStrategy::RaBitQ { use_cache } => {
+                if use_cache {
+                    // Two-phase search with cached binary codes
+                    index.search_with_rabitq_cached(...)
+                } else {
+                    // Fallback to exact (uncached RaBitQ defeats purpose)
+                    index.search(...)
+                }
+            }
+        }
+    }
+}
+```
+
+### Changes Made
+
+| File | Changes |
+|------|---------|
+| `processor.rs` | Added `BinaryCodeCache` field, `code_cache()` getter, `search_with_config()` method |
+| `processor.rs` | Updated `insert_vector()` to populate code_cache after commit |
+| `processor.rs` | Added 2 tests: `test_search_with_config_exact`, `test_search_with_config_rabitq` |
+
+### Strategy Selection
+
+| Distance Metric | Auto-Selected Strategy |
+|-----------------|------------------------|
+| Cosine | RaBitQ (ADC approximates angular distance) |
+| L2 | Exact (ADC not compatible) |
+| DotProduct | Exact (ADC not compatible) |
+
+### Code Cache Integration
+
+Binary codes are now:
+1. Persisted to `BinaryCodes` CF in RocksDB (for durability)
+2. Cached in `BinaryCodeCache` (for fast RaBitQ search)
+
+Both updates happen after transaction commit to maintain consistency.
+
+---
+
+## CODEX Review (API Consistency + Workflow)
+
+Given the intended workflow (register embedding → build index → search), there are a few consistency checks and design improvements to consider so search is constrained by how the index was built:
+
+1) **Validate SearchConfig vs registered embedding spec.**
+   - `search_with_config()` uses `config.embedding().code()` but does not verify that the `SearchConfig`'s embedding (distance/dim/storage type) matches the registry spec for that code.
+   - **Suggestion:** compare the registry spec to `config.embedding()` and error on mismatch to avoid stale or forged configs.
+
+2) **Persist per-embedding HNSW/RaBitQ parameters.**
+   - HNSW config (M, ef_construction, etc.) and RaBitQ config (bits_per_dim, rotation_seed) are global in `Processor`, but indexes are built per embedding.
+   - If these configs change between build and search, the search config may no longer reflect how the index was built.
+   - **Suggestion:** persist HNSW config (and RaBitQ params) in GraphMeta/EmbeddingSpec, and have `get_or_create_index()` use the persisted values. Then validate SearchConfig against those persisted params.
+
+3) **RaBitQ cache lifecycle and fallback behavior.**
+   - `BinaryCodeCache` is in-memory only and not warmed from `BinaryCodes` on restart.
+   - `search_with_config()` will still work (falls back to exact distance on cache miss) but performance can degrade silently.
+   - **Suggestion:** either prewarm the cache from `BinaryCodes` on startup, or detect low cache coverage and fall back to Exact with a warning/metric.
+
+4) **Explicit behavior for RaBitQ without cache.**
+   - `SearchStrategy::RaBitQ { use_cache: false }` currently falls back to Exact.
+   - **Suggestion:** either document this clearly or return an error to avoid surprising behavior.
+
+These are not correctness blockers today, but they tighten the guarantee that search reflects the registered embedding and built index parameters.
+
+---
+
+### Agreement Summary (Workflow Consistency)
+
+We are aligned on the following approach for embedding → build → search consistency:
+
+1) **Phase 1 (no overrides):** Do not allow `prefer_exact` / strategy override to avoid surprises. SearchStrategy is derived strictly from the registered embedding + persisted build config.
+
+2) **Phase 2 (validated overrides):** Allow `prefer_exact` only after build-affecting configs are persisted and drift checks are implemented. Overrides must be validated against stored spec/graph metadata.
+
+3) **Persist build config:** Store HNSW + RaBitQ build parameters (bits_per_dim, rotation_seed, etc.) so SearchStrategy construction and validation use the same source of truth as index build.
+
+4) **Drift mitigation:** Store `spec_hash` in GraphMeta at build time. On search, compare registry spec hash to graph spec hash and error/warn on mismatch (require rebuild).
+
+This keeps the search API consistent with how the index was built while allowing explicit, validated overrides later.
+
+### Resolution
+
+**Alignment: AGREE with all points.** Implemented immediate fix for #1:
+
+1. **SearchConfig vs registry validation - FIXED**
+   ```rust
+   // 2. Validate SearchConfig embedding matches registry spec
+   let config_embedding = config.embedding();
+   if config_embedding.dim() != spec.dim() {
+       return Err(anyhow!("SearchConfig embedding dimension mismatch..."));
+   }
+   if config_embedding.distance() != spec.distance() {
+       return Err(anyhow!("SearchConfig embedding distance mismatch..."));
+   }
+   ```
+
+2. **Persist per-embedding configs** - Agree. Deferred to future phase (requires GraphMeta schema changes).
+
+3. **Cache warmup** - Agree. Currently undocumented gap. Options:
+   - Prewarm from BinaryCodes on startup
+   - Detect low cache coverage and warn/fallback
+   - For now: document behavior
+
+4. **RaBitQ fallback documentation** - Agree. `use_cache: false` falls back to Exact (documented in code comment).
+
+**Phase 2 workflow consistency** - Aligned with proposed approach:
+- No overrides in Phase 1 (current)
+- Validated overrides after config persistence (future)
+- Drift mitigation via spec_hash (future)
+
+---
+
+## Task 5.4d: Build Config Persistence (COMPLETE)
+
+**Note:** This task was added via CODEX feedback to ensure build parameters are persisted and validated.
+
+### Proposed Design
+
+### Problem
+
+Current implementation has global HNSW/RaBitQ configs in `Processor`. If configs change between index build and search, behavior is undefined.
+
+### Design Principle
+
+| Store | Purpose | Contents |
+|-------|---------|----------|
+| **EmbeddingSpec** | HOW to build/search | All configuration for the embedding space |
+| **GraphMeta** | Runtime state | Graph state + drift detection hash |
+
+EmbeddingSpec is the single source of truth for build configuration. GraphMeta only stores a hash to detect if the spec changed after build.
+
+### Schema Changes
+
+#### EmbeddingSpec (Extended)
+
+```rust
+// libs/db/src/vector/schema.rs
+
+pub struct EmbeddingSpec {
+    // Existing fields
+    pub model: String,
+    pub dim: u32,
+    pub distance: Distance,
+    pub storage_type: VectorElementType,
+
+    // NEW: HNSW build parameters
+    pub hnsw_m: u16,              // M parameter (default: 16)
+    pub hnsw_ef_construction: u16, // ef_construction (default: 200)
+
+    // NEW: RaBitQ parameters
+    pub rabitq_bits: u8,          // bits_per_dim (default: 1)
+    pub rabitq_seed: u64,         // rotation_seed (default: 42)
+}
+```
+
+#### GraphMeta (Add SpecHash)
+
+```rust
+// libs/db/src/vector/schema.rs
+
+pub enum GraphMetaField {
+    // Existing
+    EntryPoint(VecId),
+    MaxLevel(u8),
+    Count(u32),
+    Config(Vec<u8>),  // deprecated, use EmbeddingSpec
+
+    // NEW: Hash of EmbeddingSpec at build time
+    SpecHash(u64),
+}
+```
+
+### Workflow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Register Embedding                                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   EmbeddingBuilder::new("model", 768, Cosine)              │
+│       .with_hnsw_m(16)                                      │
+│       .with_hnsw_ef_construction(200)                       │
+│       .with_rabitq_bits(1)                                  │
+│       .with_rabitq_seed(42)                                 │
+│   → Persists complete EmbeddingSpec to EmbeddingSpecs CF    │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 2. First Insert (Index Build Start)                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   processor.insert_vector(embedding, id, vector, true)      │
+│       → Compute spec_hash = hash(EmbeddingSpec)             │
+│       → Store GraphMeta::SpecHash(spec_hash)                │
+│       → Build index using EmbeddingSpec params              │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Search (Drift Detection)                                 │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   processor.search_with_config(config, query)               │
+│       → Load stored_hash from GraphMeta::SpecHash           │
+│       → Compute current_hash = hash(registry EmbeddingSpec) │
+│       → If stored_hash != current_hash:                     │
+│           ERROR: "Spec changed since build - rebuild index" │
+│       → Else: proceed with search                           │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Hash Computation
+
+```rust
+fn compute_spec_hash(spec: &EmbeddingSpec) -> u64 {
+    use std::hash::{Hash, Hasher};
+    use std::collections::hash_map::DefaultHasher;
+
+    let mut hasher = DefaultHasher::new();
+    spec.dim.hash(&mut hasher);
+    spec.distance.hash(&mut hasher);
+    spec.storage_type.hash(&mut hasher);
+    spec.hnsw_m.hash(&mut hasher);
+    spec.hnsw_ef_construction.hash(&mut hasher);
+    spec.rabitq_bits.hash(&mut hasher);
+    spec.rabitq_seed.hash(&mut hasher);
+    hasher.finish()
+}
+```
+
+### Migration Path
+
+1. **Backward compatibility:** Existing EmbeddingSpecs without new fields use defaults
+2. **No GraphMeta::SpecHash:** Skip drift check (legacy indexes)
+3. **Future:** Require SpecHash for all new indexes
+
+### Cache Warmup (Separate Concern)
+
+BinaryCodeCache warmup is orthogonal to config persistence:
+
+| Option | Implementation |
+|--------|----------------|
+| Lazy load | `ensure_cache_warmed(embedding)` before RaBitQ search |
+| Startup prewarm | Iterate BinaryCodes CF on `Processor::new()` |
+| Background | Spawn async task after startup |
+
+Recommend: Lazy load with metrics for Phase 5, prewarm for Phase 6.
+
+---
+
+## CODEX Review (Build Config Persistence Plan)
+
+I agree with the overall plan: EmbeddingSpec as source of truth, GraphMeta holding a spec hash for drift detection. A few improvements to make it robust:
+
+1) **Hash must include model + distance + storage_type + HNSW + RaBitQ.**
+   - The proposed hash includes dim/distance/storage and HNSW/RaBitQ; also include `model` to avoid mismatches when two models share dim/distance.
+
+2) **SpecHash should be written exactly once (first index build).**
+   - Enforce “first insert sets spec_hash, subsequent inserts must match.” This prevents partial drift if a user updates EmbeddingSpec mid-build.
+
+3) **SearchConfig should be validated against registry spec and stored hash.**
+   - On search, compare config.embedding() to registry spec *and* compare registry spec hash to GraphMeta::SpecHash. Reject on mismatch to force rebuild.
+
+4) **Migration path should include a warning when no SpecHash exists.**
+   - Legacy indexes without SpecHash should log a warning (or metric) that drift checks are skipped.
+
+These are minor tweaks; the plan is sound.
+
+### Resolution
+
+**Aligned with all four points.** Updated plan:
+
+1. **Hash includes model** - Updated `compute_spec_hash()`:
+   ```rust
+   fn compute_spec_hash(spec: &EmbeddingSpec) -> u64 {
+       let mut hasher = DefaultHasher::new();
+       spec.model.hash(&mut hasher);  // Added
+       spec.dim.hash(&mut hasher);
+       spec.distance.hash(&mut hasher);
+       spec.storage_type.hash(&mut hasher);
+       spec.hnsw_m.hash(&mut hasher);
+       spec.hnsw_ef_construction.hash(&mut hasher);
+       spec.rabitq_bits.hash(&mut hasher);
+       spec.rabitq_seed.hash(&mut hasher);
+       hasher.finish()
+   }
+   ```
+
+2. **SpecHash immutable after first write** - In `insert_vector()`:
+   ```rust
+   // On first insert: store spec_hash
+   if graph_meta.spec_hash.is_none() {
+       let hash = compute_spec_hash(&spec);
+       txn.put_cf(&cf, GraphMeta::spec_hash_key(embedding), hash.to_le_bytes())?;
+   } else {
+       // On subsequent inserts: validate hash matches
+       let stored_hash = graph_meta.spec_hash.unwrap();
+       let current_hash = compute_spec_hash(&spec);
+       if stored_hash != current_hash {
+           return Err(anyhow!("EmbeddingSpec changed since index build - rebuild required"));
+       }
+   }
+   ```
+
+3. **Double validation in search** - In `search_with_config()`:
+   ```rust
+   // Validate config vs registry spec
+   validate_config_vs_spec(config, &registry_spec)?;
+
+   // Validate registry spec hash vs stored graph hash
+   if let Some(stored_hash) = graph_meta.spec_hash {
+       let registry_hash = compute_spec_hash(&registry_spec);
+       if stored_hash != registry_hash {
+           return Err(anyhow!("Registry spec changed since build - rebuild required"));
+       }
+   } else {
+       log::warn!("Legacy index without SpecHash - drift check skipped");
+   }
+   ```
+
+4. **Legacy warning** - Implemented via `log::warn!` as shown above.
+
+Implementation will proceed with schema changes to EmbeddingSpec and GraphMeta.
+
+---
+
+## CODEX Review: Workflow Consistency and Config Drift (post-75930c9)
+
+This pass checks the workflow: **register embedding → build index (insert) → search** and whether build/search parameters remain consistent.
+
+**What looks good now**
+
+- **Spec hash drift detection is in place.** `EmbeddingSpec::compute_spec_hash()` includes model + build params, stored on first insert, validated on later inserts and searches. This is the right guardrail for spec changes once data exists.
+- **SearchConfig validation is stronger.** `search_with_config()` now validates embedding code + dimension + distance against registry, and checks `SpecHash` vs `EmbeddingSpecs` in RocksDB. This addresses stale/forged configs and post-build drift.
+
+**Gaps: build parameters are persisted but not actually used**
+
+Right now, the build/search runtime still uses **global configs**, not the persisted `EmbeddingSpec` fields:
+
+- `Processor::get_or_create_index()` builds HNSW with `self.hnsw_config` only. It ignores `EmbeddingSpec.hnsw_m` and `EmbeddingSpec.hnsw_ef_construction`.
+- `Processor::get_or_create_encoder()` builds RaBitQ with `self.rabitq_config` only. It ignores `EmbeddingSpec.rabitq_bits` and `EmbeddingSpec.rabitq_seed`.
+
+That means the **SpecHash can match while the index/encoder is built with different parameters** (i.e., config drift can still happen, just not *spec* drift). This is the core correctness issue for the workflow: the persisted spec is not yet the source of truth for build/search behavior.
+
+**Implications**
+
+- A cluster-wide config change (HNSW/RaBitQ) silently changes behavior while SpecHash remains valid.
+- Search may run with a `SearchStrategy` consistent with the embedding but inconsistent with the actual index or binary codes on disk.
+- Future migrations or rebuilds cannot be reliably compared to stored `SpecHash` if the runtime ignores it.
+
+**Proposed fix (Phase 5 follow-up)**
+
+1) **Use EmbeddingSpec to build HNSW and RaBitQ.**
+   - When creating HNSW `Config`, override `m` and `ef_construction` from `EmbeddingSpec`.
+   - When creating RaBitQ encoder, construct from `EmbeddingSpec.rabitq_bits` + `rabitq_seed` (and make `rabitq_config.enabled` gating explicit).
+
+2) **Add API surface to set build params at registration time.**
+   - `EmbeddingBuilder` should accept `hnsw_m`, `hnsw_ef_construction`, `rabitq_bits`, `rabitq_seed`.
+   - `EmbeddingRegistry::register()` should persist those values instead of hard-coded defaults (currently `16/200/1/42`).
+   - Without this, **SpecHash locks in defaults** on first insert and users cannot tune before building index.
+
+3) **SpecHash timing: consider storing on first index build, not first insert.**
+   - Today: SpecHash is set on first insert even if `build_index=false`.
+   - Consequence: users cannot adjust build params after inserting raw vectors but before building HNSW.
+   - Option A (strict): keep current behavior (spec immutable once data exists). If so, document it.
+   - Option B (flex): set SpecHash only when HNSW is built the first time; allow spec tweaks before the first build.
+
+4) **Validate storage_type too.**
+   - `search_with_config()` checks dim + distance but not `storage_type`.
+   - If `Embedding` in SearchConfig differs (e.g., stale cache), we should reject to avoid searching with the wrong representation.
+
+**API design suggestion (search constrains to build spec)**
+
+Phase 1 (safe, no surprises):
+```rust
+// New constructor that pulls spec from registry and derives strategy.
+let config = SearchConfig::from_registry(&registry, embedding_code, k)
+    .with_ef(200)
+    .with_rerank_factor(4);
+// Strategy is auto-selected and cannot be overridden here.
+```
+
+Phase 2 (allow overrides with validation):
+```rust
+let config = SearchConfig::from_registry(&registry, embedding_code, k)
+    .prefer_exact() // Allowed, but validated against EmbeddingSpec + SpecHash
+    .with_ef(200);
+```
+
+This keeps **SearchStrategy constrained by how the index was built**, while still allowing safe tuning.
+
+**Bottom line**
+
+Task 5.4d added the necessary **persisted spec + drift detection**, but **the runtime still ignores the spec** for index/encoder construction. This is the next correctness gap to close before the workflow can be considered fully consistent.
+
+---
+
+## Task 5.4e: Runtime Uses EmbeddingSpec (COMPLETE)
+
+**Date:** January 14, 2026
+
+### Problem Statement
+
+Task 5.4d established config persistence and drift detection via `SpecHash`, but the runtime was **not using** the persisted build parameters:
+
+```rust
+// BEFORE: Ignored EmbeddingSpec build params
+fn get_or_create_index(&self, embedding: EmbeddingCode) -> Option<hnsw::Index> {
+    // Uses self.hnsw_config (from Processor constructor), NOT EmbeddingSpec
+    let config = self.hnsw_config.clone();  // BUG: ignores persisted params
+    hnsw::Index::with_storage_type(embedding, distance, storage_type, config, ...)
+}
+
+fn get_or_create_encoder(&self, embedding: EmbeddingCode) -> Option<Arc<RaBitQ>> {
+    // Uses self.rabitq_config, NOT EmbeddingSpec
+    RaBitQ::from_config(dim, &self.rabitq_config)  // BUG: ignores persisted params
+}
+```
+
+**Impact:** SpecHash could match while index/encoder was built with different parameters, causing silent config drift.
+
+### Solution: Read EmbeddingSpec from Storage
+
+#### 5.7a: HNSW Index Uses EmbeddingSpec
+
+Updated `get_or_create_index()` to read persisted build params:
+
+```rust
+fn get_or_create_index(&self, embedding: EmbeddingCode) -> Option<hnsw::Index> {
+    // Read EmbeddingSpec from RocksDB
+    let spec = self.get_embedding_spec(embedding)?;
+
+    // Build HNSW config using EmbeddingSpec params (not self.hnsw_config)
+    let m = spec.hnsw_m as usize;
+    let config = hnsw::Config {
+        enabled: self.hnsw_config.enabled,  // Runtime control
+        dim,
+        m,
+        m_max: 2 * m,
+        m_max_0: 2 * m,
+        ef_construction: spec.hnsw_ef_construction as usize,
+        m_l: 1.0 / (m as f32).ln(),
+        max_level: self.hnsw_config.max_level,      // Runtime control
+        batch_threshold: self.hnsw_config.batch_threshold,  // Runtime control
+    };
+
+    hnsw::Index::with_storage_type(embedding, distance, storage_type, config, ...)
+}
+```
+
+#### 5.7b: RaBitQ Encoder Uses EmbeddingSpec
+
+Updated `get_or_create_encoder()` to read persisted build params:
+
+```rust
+fn get_or_create_encoder(&self, embedding: EmbeddingCode) -> Option<Arc<RaBitQ>> {
+    // Read EmbeddingSpec from RocksDB
+    let spec = self.get_embedding_spec(embedding)?;
+
+    // Create encoder using EmbeddingSpec params (not self.rabitq_config)
+    RaBitQ::new(dim, spec.rabitq_bits, spec.rabitq_seed)
+}
+```
+
+#### 5.7c: EmbeddingBuilder API for Build Params
+
+Added builder methods for configuring build params at registration time:
+
+```rust
+let embedding = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
+    .with_hnsw_m(32)              // Custom M (default: 16)
+    .with_hnsw_ef_construction(400) // Custom ef_construction (default: 200)
+    .with_rabitq_bits(2)           // Custom bits (default: 1)
+    .with_rabitq_seed(12345)       // Custom seed (default: 42)
+    .register(&registry)?;
+```
+
+These values are persisted to `EmbeddingSpecs` CF and used for all subsequent index/encoder creation.
+
+#### 5.7d: storage_type Validation in Search
+
+Added explicit storage_type validation in `search_with_config()`:
+
+```rust
+if config_embedding.storage_type() != spec.storage_type() {
+    return Err(anyhow::anyhow!(
+        "SearchConfig embedding storage_type mismatch: config has {:?}, registry has {:?}",
+        config_embedding.storage_type(),
+        spec.storage_type()
+    ));
+}
+```
+
+### SpecHash Timing: Strict Behavior
+
+The SpecHash is stored on **first insert** and validated on all subsequent operations:
+
+**On Insert:**
+1. First insert → compute SpecHash, store in `GraphMeta::SpecHash`
+2. Subsequent inserts → compute SpecHash, compare to stored, error on mismatch
+
+**On Search:**
+1. Compute SpecHash from current `EmbeddingSpec`
+2. Compare to stored `GraphMeta::SpecHash`
+3. Error on mismatch: "Rebuild required"
+4. Warn on missing: "Legacy index without SpecHash"
+
+**Implications:**
+- Build params are **immutable after first insert**
+- Changing `hnsw_m`, `rabitq_bits`, etc. after data exists requires rebuild
+- This prevents "partial drift" where some vectors use old params and some use new
+
+**Example Error:**
+```
+EmbeddingSpec changed since index build (hash 12345678 != 87654321). Rebuild required.
+```
+
+### Runtime vs Build Params
+
+| Parameter | Source | Can Change After Build? |
+|-----------|--------|-------------------------|
+| `hnsw_m` | EmbeddingSpec | **No** - SpecHash |
+| `hnsw_ef_construction` | EmbeddingSpec | **No** - SpecHash |
+| `rabitq_bits` | EmbeddingSpec | **No** - SpecHash |
+| `rabitq_seed` | EmbeddingSpec | **No** - SpecHash |
+| `enabled` | Processor config | Yes - runtime toggle |
+| `max_level` | Processor config | Yes - runtime override |
+| `batch_threshold` | Processor config | Yes - runtime tuning |
+| `ef_search` | SearchConfig | Yes - query-time param |
+
+### Tests
+
+Added tests in `processor.rs`:
+- `test_spec_hash_stored_on_first_insert` - verifies hash storage
+- `test_spec_hash_validated_on_subsequent_insert` - verifies drift detection
+- `test_search_validates_spec_hash` - verifies search validation
+
+Added tests in `embedding.rs`:
+- `test_embedding_builder_with_build_params` - verifies builder API
+- `test_embedding_builder_invalid_rabitq_bits` - verifies validation
+
+---
+
+## Task 5.4f: CODEX Review - Runtime EmbeddingSpec Assessment
+
+**Overall:** This change closes the main correctness gap I flagged: runtime HNSW/RaBitQ construction now uses persisted `EmbeddingSpec` parameters, and `search_with_config()` validates `storage_type`. Good alignment with the register → build → search workflow and SpecHash drift detection.
+
+**Remaining issues / improvements**
+
+1) **HNSW M validation (correctness).**  
+   `get_or_create_index()` computes `m_l = 1.0 / ln(m)`. If `hnsw_m <= 1`, `ln(m)` is `0` or `-inf`, yielding `inf`/`-0` and likely unstable layer assignment.  
+   - **Fix:** validate `hnsw_m >= 2` at registration (prefer `Result`), or clamp/guard before computing `m_l`.  
+   - Suggest using `hnsw::Config::is_valid()` plus a dedicated error for `m <= 1`.
+
+2) **Builder validation uses `assert!` (API behavior).**  
+   `EmbeddingBuilder::with_rabitq_bits()` panics on invalid bits. That’s consistent with `RaBitQ::new()` but is surprising for a public API; prefer returning `Result<Self>` or a `try_with_*` variant.  
+   - If keeping panics, document it clearly in API.md and RABITQ.md.
+
+3) **SpecHash timing is strict (documented).**  
+   The new doc section confirms SpecHash is set on first insert even if `build_index=false`. That prevents tuning build params after inserting raw vectors.  
+   - This is acceptable if intended; just ensure API docs explicitly call it out (users may expect to tune HNSW/RaBitQ before first build).
+
+**Quality assessment**
+
+This is a strong improvement: persisted build params now drive runtime behavior, closing a correctness hole and aligning the API with the declared workflow. Once HNSW M validation is enforced (and builder panics are either documented or converted to `Result`), the design is sound.
+
+---
+
+## Task 5.4g: CODEX Review - Validation Assessment
+
+**Overall:** This addresses the two issues I raised:
+- `hnsw_m >= 2` validation prevents invalid `m_l = 1/ln(m)` computation.
+- `with_rabitq_bits()` no longer panics; validation moved to `EmbeddingBuilder::validate()` and invoked during registration.
+- API.md now documents SpecHash timing and the immutability expectation.
+
+**Remaining issues / improvements**
+
+1) **Validation happens before idempotent fast-path.**  
+   `EmbeddingRegistry::register()` now calls `builder.validate()` before checking if the spec already exists. Because the registry’s identity key is `(model, dim, distance)` only, a caller can supply invalid build params but still expect to retrieve the existing embedding.  
+   - **Risk:** This breaks the “idempotent” expectation and makes read-only calls fail.  
+   - **Fix:** Check `by_spec` first; if found, return existing embedding without validating build params (or validate only if caller explicitly requests a new spec with build params).
+
+2) **Missing validation for `hnsw_ef_construction` and `rabitq_seed` ranges.**  
+   - `hnsw_ef_construction` can be set to `0` (u16) and will produce an invalid HNSW config (`Config::is_valid()` requires > 0).  
+   - **Fix:** enforce `hnsw_ef_construction >= 1` in `EmbeddingBuilder::validate()`.
+
+**Quality assessment**
+
+The changes align well with the workflow and close the key correctness hole. Once validation order is adjusted to preserve idempotent registration behavior, and `hnsw_ef_construction` is validated, this should be robust.
+
+---
+
+**Update (post-task numbering alignment / commit 8f93965):**
+
+- **Idempotent registration preserved.** Validation now runs only on new registrations; existing embeddings return without failing on invalid builder params.
+- **`hnsw_ef_construction` validated.** Builder rejects values `< 1`, preventing invalid HNSW configs.
+
+No further issues from this review pass.
+
+---
+
+## Task 5.5: Processor::add_embedding_spec() (COMPLETE)
+
+**Status:** ✅ Complete (via `EmbeddingRegistry::register()`)
+
+Per ROADMAP.md, this task implements embedding spec registration. This functionality is provided via `EmbeddingRegistry::register()` which:
+- Validates build parameters
+- Persists to `EmbeddingSpecs` CF
+- Returns registered `Embedding`
+
+See `registry.rs` for implementation.
+
+---
+
+## Task 5.6: Mutation Dispatch (COMPLETE)
+
+**Status:** ✅ Complete
+**Date:** January 15, 2026
+
+### Overview
+
+Task 5.6 implements the mutation dispatch pattern following the established `graph::mutation` module design. Each mutation type implements the `MutationExecutor` trait to define HOW to write to RocksDB.
+
+### Design Pattern (Following graph::mutation)
+
+The vector module follows the same dispatch pattern as `graph::mutation`:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    graph::mutation Pattern                   │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. MutationExecutor trait - defines execute(&self, txn)   │
+│  2. Mutation::execute() - dispatches to appropriate impl   │
+│  3. Consumer processes batches atomically                  │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### MutationExecutor Trait
+
+Added to `writer.rs`:
+
+```rust
+/// Trait for mutations to execute themselves directly against storage.
+///
+/// This trait defines HOW to write the mutation to the database.
+/// Each mutation type knows how to execute its own database write operations.
+pub trait MutationExecutor: Send + Sync {
+    /// Execute this mutation directly against a RocksDB transaction.
+    ///
+    /// Returns an optional CacheUpdate if HNSW indexing was performed.
+    /// The CacheUpdate should be applied AFTER transaction commit.
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<Option<CacheUpdate>>;
+}
+```
+
+### Mutation::execute() Dispatch
+
+Added to `mutation.rs`:
+
+```rust
+impl Mutation {
+    /// Execute this mutation against the processor.
+    pub fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+        processor: &Processor,
+    ) -> Result<Option<CacheUpdate>> {
+        match self {
+            Mutation::AddEmbeddingSpec(op) => op.execute(txn, txn_db, processor),
+            Mutation::InsertVector(op) => op.execute(txn, txn_db, processor),
+            Mutation::DeleteVector(op) => op.execute(txn, txn_db, processor),
+            Mutation::InsertVectorBatch(op) => op.execute(txn, txn_db, processor),
+            Mutation::UpdateEdges(op) => op.execute(txn, txn_db, processor),
+            Mutation::UpdateGraphMeta(op) => op.execute(txn, txn_db, processor),
+            Mutation::Flush(_) => Ok(None),
+        }
+    }
+}
+```
+
+### MutationExecutor Implementations
+
+Each mutation type implements `MutationExecutor`:
+
+| Mutation Type | Implementation |
+|---------------|----------------|
+| `InsertVector` | Full implementation with ID allocation, storage, binary codes, HNSW indexing |
+| `DeleteVector` | ID lookup, soft/hard delete based on HNSW enabled |
+| `AddEmbeddingSpec` | Spec validation and persistence |
+| `InsertVectorBatch` | Batch expansion into individual InsertVector operations |
+| `UpdateEdges` | HNSW edge merge operations |
+| `UpdateGraphMeta` | Entry point and max level updates |
+
+### Consumer Integration
+
+Updated `Consumer::execute_single()` to delegate to `Mutation::execute()`:
+
+```rust
+fn execute_single(
+    &self,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    mutation: &Mutation,
+) -> Result<Option<CacheUpdate>> {
+    mutation.execute(txn, txn_db, &self.processor)
+}
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `writer.rs` | Added `MutationExecutor` and `MutationProcessor` traits |
+| `mutation.rs` | Added `Mutation::execute()` dispatch, `MutationExecutor` impls for all types |
+| `mod.rs` | Added mutation type exports following graph pattern |
+
+---
+
+## Task 5.6: CODEX Review - Mutation Dispatch Assessment
+
+**Overall:** The dispatch wiring matches the graph/fulltext pattern, but several invariants enforced in `Processor` are now bypassed in the mutation path. This is a correctness gap if the public mutation API is used by clients.
+
+**Findings**
+
+1) **InsertVector bypasses critical validation (correctness).**  
+   The `MutationExecutor` implementation does not check:
+   - dimension mismatch,
+   - duplicate external IDs (no `get_for_update_cf` lock),
+   - `SpecHash` drift validation.  
+   These checks exist in `Processor::insert_vector()` and are now skipped in the writer path.
+
+2) **DeleteVector diverges from soft-delete behavior (correctness).**  
+   `MutationExecutor` hard-deletes vectors and frees IDs even when HNSW is enabled. This contradicts `Processor::delete_vector()` which intentionally **does not** delete vectors/binary codes or reuse IDs when HNSW is on. This can corrupt the HNSW graph or cause ID reuse issues.
+
+3) **BinaryCodeCache is not updated (performance).**  
+   Writer only applies `CacheUpdate` (nav cache) after commit. The `BinaryCodeCache` never receives updates on mutation inserts, which can degrade RaBitQ search performance (cold cache misses).
+
+4) **InsertVectorBatch expansion lacks batch validation (correctness).**  
+   In `Consumer::execute_mutations()`, batch mutations are expanded into individual `InsertVector` ops, but there is no duplicate-in-batch detection or existing-ID check. This regresses the protections in `Processor::insert_batch()`.
+
+5) **AddEmbeddingSpec does not update the in-memory registry (correctness).**  
+   The mutation writes to `EmbeddingSpecs` CF but never updates `EmbeddingRegistry`. Subsequent mutations in the same process may fail to resolve the new embedding code (registry miss), or use stale config.
+
+**Recommendation**
+
+Consider refactoring mutation execution to call shared internal helpers that include validation, spec hash enforcement, and cache updates. If the mutation API is intended to be “trusted internal only”, document that clearly and keep it out of public-facing paths.
+
+---
+
+**Update (post ops/ refactor):**
+
+The shared ops helpers now centralize validation and soft-delete behavior (good), but two issues remain:
+
+1) **Registry update uses wrong storage_type (correctness).**
+   `add_embedding_spec()` registers embeddings with `VectorElementType::default()` instead of `spec.storage_type`. This can cause **F16 embeddings to be treated as F32** by the registry, leading to incorrect serialization and search behavior.
+   - Fix: pass `spec.storage_type` into `register_from_db`.
+
+2) **BinaryCodeCache still not updated in mutation path (performance).**  
+   `InsertVector`/`InsertVectorBatch` mutation executors discard `code_cache_update` from ops results. Writer applies only `CacheUpdate` (nav cache).  
+   - Fix: extend the cache update type or add a post-commit hook to apply `code_cache_update(s)` when mutations run through `Writer`.
+
+---
+
+**Update (post MutationCacheUpdate):**
+
+- **Resolved:** registry now uses `spec.storage_type` (F16 correctness).
+- **Resolved:** writer now applies both nav + code cache updates via `MutationCacheUpdate`.
+
+**Remaining**
+
+1) **Direct `InsertVectorBatch::execute()` drops cache updates (correctness/perf).**  
+   The mutation executor logs that cache updates are lost when `InsertVectorBatch` is executed directly (not via `Writer` expansion). For external users calling mutation APIs directly, this can lead to stale caches.  
+   - Fix: return a batch cache update (e.g., extend `MutationCacheUpdate` with a batch variant), or document that `InsertVectorBatch` must be sent via `Writer`.
+
+---
+
+**Update (post Batch MutationCacheUpdate):**
+
+- **Resolved:** `InsertVectorBatch::execute()` now returns batch cache updates via `MutationCacheUpdate::Batch`, and `apply()` handles nested updates. Cache consistency is preserved even for direct batch execution.
+
+No further issues found in this pass.
+
+---
+
+**Additional Feedback (public API clarity):**
+
+- `UpdateEdges` and `UpdateGraphMeta` are public mutation variants but are currently no-ops (log + return). For external users, this is confusing and implies repair capabilities that don’t exist.
+- **Recommendation:** remove or hide these variants from the public `Mutation` API until there is a validated repair workflow. Document that **repair = rebuild** to avoid partial graph drift/corruption.
+
+---
+
+**Update (public API cleanup applied):**
+
+- **Resolved:** internal graph mutation types (`UpdateEdges`, `UpdateGraphMeta`, `EdgeOperation`, `GraphMetaUpdate`) are now `pub(crate)` and no longer re-exported. Public API now aligns with “repair = rebuild”.
+
+---
+
+**Follow-up Recommendation (prefer removal):**
+
+Even as `pub(crate)`, these variants are still no-ops and can be accidentally used internally. Recommend **removing them entirely** until a real repair workflow exists, and explicitly documenting “repair = rebuild” in API docs and ROADMAP. This keeps the mutation surface minimal and avoids implying partial graph repair is supported.
+
+---
+
+**Update (no-op mutations removed):**
+
+- **Resolved:** `UpdateEdges`/`UpdateGraphMeta` and related enums removed from `Mutation`. Public and internal mutation surfaces now align with “repair = rebuild,” reducing confusion and eliminating dead paths.
+
+---
+
+**New Feedback (public API parity):**
+
+- **AddEmbeddingSpec should share validation with EmbeddingRegistry::register.**  
+  Since `AddEmbeddingSpec` is public, it must enforce the same build-parameter validation (hnsw_m >= 2, ef_construction >= 1, rabitq_bits ∈ {1,2,4}). Right now it bypasses builder validation in the mutation path.  
+  - **Fix:** route mutation spec validation through the same helper as `EmbeddingBuilder::validate()` or call it directly before persisting.
+
+---
+
+**Update (validation unified):**
+
+- **Resolved:** `add_embedding_spec()` now validates via `EmbeddingBuilder::validate()` for a single source of truth.
+
+---
+
+**API Direction (agreed): Transaction-only public surface**
+
+- **Public API should always be transactional.** No external txn handles yet; public methods should create and commit their own transactions.
+- **Internal helpers can stay txn-aware** for composition (batching, mutation dispatch). Keep them `pub(crate)` only.
+- **Naming cleanup:** ✅ COMPLETED - `_in_txn` suffixes removed; transactional APIs are now the default (e.g., `insert()`, `allocate()`, `connect_neighbors()`).
+- This avoids exposing “non-transactional” APIs externally while still enabling internal reuse in mutation/consumer paths.
+
+---
+
+## Task 5.7: Query Dispatch (COMPLETE)
+
+**Status:** ✅ Complete
+**Date:** January 15, 2026
+
+### Overview
+
+Task 5.7 implements the query dispatch pattern following the established `graph::query` module design. The key addition is `SearchKNN` for HNSW nearest neighbor search.
+
+### Design Pattern (Following graph::query)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    graph::query Pattern                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. Query params struct - SearchKNN, GetVector, etc.        │
+│  2. Dispatch wrapper - SearchKNNDispatch (adds timeout, tx) │
+│  3. QueryProcessor trait - process_and_send(self, storage)  │
+│  4. Query::process() - dispatches to appropriate impl       │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### SearchKNN Query Type
+
+Added to `query.rs`:
+
+```rust
+/// Search for k nearest neighbors in an embedding space.
+#[derive(Debug, Clone)]
+pub struct SearchKNN {
+    /// Embedding space code
+    pub embedding: EmbeddingCode,
+    /// Query vector
+    pub query: Vec<f32>,
+    /// Number of results to return
+    pub k: usize,
+    /// Search expansion factor (higher = more accurate, slower)
+    pub ef: usize,
+}
+
+impl SearchKNN {
+    pub fn new(embedding: EmbeddingCode, query: Vec<f32>, k: usize) -> Self;
+    pub fn with_ef(mut self, ef: usize) -> Self;
+    pub fn execute_with_processor(&self, processor: &Processor) -> Result<Vec<SearchResult>>;
+}
+```
+
+### SearchKNNDispatch Wrapper
+
+Unlike point lookups that only need Storage, SearchKNN requires a Processor for HNSW index access:
+
+```rust
+pub struct SearchKNNDispatch {
+    pub(crate) params: SearchKNN,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<SearchResult>>>,
+    pub(crate) processor: Arc<Processor>,
+}
+
+impl SearchKNNDispatch {
+    pub fn new(
+        params: SearchKNN,
+        timeout: Duration,
+        processor: Arc<Processor>,
+    ) -> (Self, oneshot::Receiver<Result<Vec<SearchResult>>>);
+}
+
+#[async_trait::async_trait]
+impl QueryProcessor for SearchKNNDispatch {
+    async fn process_and_send(self, _storage: &Storage) {
+        // Use processor directly instead of storage
+        let result = self.params.execute_with_processor(&self.processor);
+        self.send_result(result);
+    }
+}
+```
+
+### Query Dispatch
+
+Updated `Query::process()` to include SearchKNN:
+
+```rust
+impl Query {
+    pub async fn process(self, storage: &Storage) {
+        match self {
+            Query::GetVector(dispatch) => dispatch.process_and_send(storage).await,
+            Query::GetInternalId(dispatch) => dispatch.process_and_send(storage).await,
+            Query::GetExternalId(dispatch) => dispatch.process_and_send(storage).await,
+            Query::ResolveIds(dispatch) => dispatch.process_and_send(storage).await,
+            Query::SearchKNN(dispatch) => dispatch.process_and_send(storage).await,
+        }
+    }
+}
+```
+
+### Module Exports
+
+Updated `mod.rs` following the graph module pattern:
+
+```rust
+// Mutation types and infrastructure (following graph::mutation pattern)
+pub use mutation::{
+    AddEmbeddingSpec, DeleteVector, EdgeOperation, FlushMarker, GraphMetaUpdate, InsertVector,
+    InsertVectorBatch, Mutation, UpdateEdges, UpdateGraphMeta,
+};
+pub use writer::{
+    create_writer, spawn_consumer as spawn_mutation_consumer, Consumer as MutationConsumer,
+    MutationExecutor, MutationProcessor, Writer, WriterConfig,
+};
+
+// Query types and infrastructure (following graph::query pattern)
+pub use query::{
+    GetExternalId, GetInternalId, GetVector, Query, QueryExecutor, QueryProcessor,
+    QueryWithTimeout, ResolveIds, SearchKNN,
+};
+pub use reader::{
+    create_reader, spawn_consumer as spawn_query_consumer, spawn_consumers as spawn_query_consumers,
+    Consumer as QueryConsumer, Reader, ReaderConfig,
+};
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `query.rs` | Added `SearchKNN`, `SearchKNNDispatch`, updated `Query::process()` |
+| `mod.rs` | Added mutation/query type exports following graph pattern |
+
+### Tests
+
+All 520 tests pass after implementing Tasks 5.6 and 5.7.
+
+---
+
+## Task 5.7: CODEX Review - Query Dispatch Assessment
+
+**Overall:** SearchKNN dispatch is wired in and matches graph query patterns, but the reader/consumer API still assumes Storage-only execution. SearchKNN now requires a Processor, which changes how callers must construct queries.
+
+**Findings**
+
+1) **SearchKNN requires Processor, but Reader/Consumer is Storage-only (API mismatch).**  
+   `SearchKNNDispatch` carries `Arc<Processor>`, while `Consumer` only owns `Arc<Storage>`. This is fine technically (dispatch ignores storage), but it means:
+   - clients must have a `Processor` on the query construction side, and
+   - this differs from other query types, which are Storage-only.  
+   Consider documenting this explicitly or adding a `Processor`-backed reader/consumer variant.
+
+**Recommendation**
+
+Document how callers should obtain/hold a `Processor` for SearchKNN (or add a dedicated `SearchReader` that bundles Storage + Processor).
+
+---
+
+**Update (post ops/ refactor):**  
+Processor-backed reader/consumer is still missing. Recommend adding a `spawn_query_consumer_with_processor(...)` or a `SearchReader` wrapper so SearchKNN doesn’t require ad-hoc Processor plumbing at call sites.
+
+---
+
+**New Feedback (public search correctness):**
+
+- **SearchKNN is the only public search API; it must enforce SpecHash drift checks.**  
+  `SearchKNN` dispatch calls `Processor::search()` which does not validate SpecHash (only `search_with_config()` does). This allows searching against a stale index without error.  
+  - **Fix:** either add SpecHash validation to `Processor::search()` or route `SearchKNN` to `search_with_config()` with a derived `SearchConfig` from the registry spec.
+
+---
+
+**Update (SpecHash enforced in search):**
+
+- **Resolved:** `Processor::search()` now validates SpecHash against stored graph metadata, closing the drift gap for public SearchKNN.
+
+---
+
+**Update (Processor-backed consumers added):**
+
+- `ProcessorConsumer` and `spawn_*_with_processor` were added to support SearchKNN ergonomics.  
+- **Note:** `Query::process()` still only receives `Storage`, so SearchKNN still requires a `Processor` at query construction time (`SearchKNNDispatch` holds it). The new consumer does not automatically inject a processor into queries.  
+  - If the goal is to fully remove ad-hoc processor plumbing, consider adding a `SearchReader` helper or a `Reader::search_knn(...)` API that uses the stored processor to build dispatch objects.
+
+---
+
+**New Feedback (public API ergonomics):**
+
+- Public APIs should accept `&Embedding` instead of `EmbeddingCode` to avoid forcing users to call `.code()` everywhere.  
+  - **Option A (simple):** add `*_with_embedding(&Embedding, ...)` overloads and keep internal `EmbeddingCode` versions for ops.  
+  - **Option B (flexible):** add `EmbeddingHandle` trait implemented by `Embedding` and `EmbeddingCode` and accept `impl EmbeddingHandle`.  
+  - This keeps `Embedding` as the primary public handle while preserving internal code paths.
+
+---
+
+**Update (Embedding-based public APIs):**
+
+- **Resolved:** `Processor::{insert_vector, insert_batch, delete_vector, search}` now accept `&Embedding`; `SearchReader::search_knn` takes `&Embedding`. This removes the need for callers to pass raw `EmbeddingCode`.
+
+---
+
+**New Feedback (public SearchReader strategy gap):**
+
+- `SearchReader::search_knn` always uses `Processor::search()` (exact HNSW). This means the public reader API **cannot select RaBitQ** even when the index is built with quantization.  
+  - From a user perspective, this is surprising and likely a bug: quantized search should be available via the public reader path just like `SearchConfig` allows.  
+  - **Fix:** add a `SearchReader::search_with_config(&SearchConfig, ...)` (or `SearchQuery::SearchKNNConfig`) to expose `SearchConfig` strategy selection (Exact vs RaBitQ) through the reader/consumer pipeline.
+
+---
+
+**New Feedback (mutation consumer ergonomics):**
+
+- Consider a `spawn_mutation_consumer_with_storage(...)` helper that accepts `Arc<Storage>` and `Arc<EmbeddingRegistry>` and constructs the internal `Processor`, so users don’t have to wire a Processor manually (matching graph’s pattern).  
+  - Optionally add `spawn_mutation_consumer_with_storage_autoreg(...)` that creates + prewarms a registry from storage for quickstart use.
+- **Public API note:** `spawn_mutation_consumer_with_processor(...)` should be `pub(crate)` only. Exposing Processor in the public mutation surface defeats the intended abstraction (graph hides it).
+
+---
+
+**Update (SearchKNN strategy + storage-based consumers):**
+
+- **Resolved:** `SearchKNN` now owns `Embedding` and supports auto strategy selection with `.exact()` override; `SearchReader::search_knn()` auto-selects RaBitQ for cosine and `search_knn_exact()` forces exact.  
+- **Resolved:** storage-based mutation and query consumer helpers were added; processor-exposing mutation consumer is now `pub(crate)`.
+
+No issues found in this update.
+
+---
+
+**New Feedback (query ergonomics: hide dispatch):**
+
+- Graph’s usage hides `send_query` behind a `run(timeout)` helper. Vector should follow that pattern so users don’t manually construct dispatch + oneshot.  
+  - **Recommendation:** add `Runnable` impls (or `SearchReader::run`) so callers do `SearchKNN::run(&reader, timeout)`; keep raw dispatch types internal.
+
+---
+
+**Status:** Not implemented yet.
+
+---
+
+**Update (run() ergonomics added):**
+
+- **Resolved:** `SearchKNN` now implements `Runnable<SearchReader>` with `run(&reader, timeout)` and `SearchKNNDispatch` is `pub(crate)`. This aligns vector query usage with graph’s public pattern.
+
+---
+
+**New Feedback (mutation run() ergonomics):**
+
+- Mutations still require `writer.send(...)` + `flush()`; there is no `Runnable<Writer>` implementation for `InsertVector`, `InsertVectorBatch`, `DeleteVector`, etc.  
+  - **Recommendation:** add `Runnable<Writer>` impls (and a `MutationBatch` helper) so users can do `InsertVector::new(...).run(&writer, timeout)` like graph. This fully hides `send` in the public API.
+
+---
+
+**Update (mutation run() ergonomics added):**
+
+- **Resolved:** `MutationRunnable` trait added with `run(&writer)` for `InsertVector`, `InsertVectorBatch`, `DeleteVector`, and `AddEmbeddingSpec`, plus `MutationBatch` helper. This now hides `writer.send(...)` and matches graph’s mutation ergonomics.
+
+---
+
+**New Feedback (public API surface: delete):**
+
+- Keep `Processor::delete_vector` **internal-only** (pub(crate)) for now, and steer public users to `DeleteVector::run(&writer)` for deletes.  
+  - Rationale: consistent mutation pipeline, uniform async semantics, and aligned with graph’s mutation-first public API.
+
+---
+
+**Update (delete API hidden):**
+
+- **Resolved:** `Processor::delete_vector` is now `pub(crate)` and integration tests use `DeleteVector::run(&writer)` to demonstrate the public mutation API pattern.
+
+---
+
+**New Feedback (point-lookup query ergonomics):**
+
+- Only `SearchKNN` has `Runnable` today. Point-lookups (GetVector/GetInternalId/GetExternalId/ResolveIds) still require dispatch or `QueryWithTimeout` plumbing.
+  - **Recommendation:** add `Runnable<Reader>` impls for point-lookups to fully hide `send_query` across the public API, matching graph's query ergonomics.
+
+---
+
+**Update (point-lookup Runnable impls added):**
+
+- **Resolved:** Added `Runnable<Reader>` implementations for `GetVector`, `GetInternalId`, `GetExternalId`, and `ResolveIds`. Point lookups now support the ergonomic `.run(&reader, timeout)` pattern, fully hiding dispatch/channel plumbing.
+
+```rust
+// Example usage
+let vector = GetVector::new(embedding.code(), id).run(&reader, timeout).await?;
+let vec_id = GetInternalId::new(embedding.code(), id).run(&reader, timeout).await?;
+let external_id = GetExternalId::new(embedding.code(), vec_id).run(&reader, timeout).await?;
+let ids = ResolveIds::new(embedding.code(), vec_ids).run(&reader, timeout).await?;
+```
+
+---
+
+**New Feedback (embedding registry queries):**
+
+- Public `vector::query` API has no way to list/find embeddings. Users must hold the `EmbeddingRegistry` directly.
+  - **Recommendation:** add query types like `ListEmbeddings` / `FindEmbeddings` (by model/dim/distance) so registry introspection is available through the reader pipeline when desired.
+
+---
+
+**Update (embedding registry queries added):**
+
+- **Resolved:** Added `ListEmbeddings` and `FindEmbeddings` query types with `Runnable<Reader>` implementations. Registry introspection is now available through the reader pipeline.
+
+```rust
+// List all registered embeddings
+let embeddings = ListEmbeddings::new().run(&reader, timeout).await?;
+
+// Find embeddings by filter criteria
+let embeddings = FindEmbeddings::new(
+    EmbeddingFilter::default()
+        .model("clip-vit-b32")
+        .distance(Distance::Cosine)
+).run(&reader, timeout).await?;
+```
+
+---
+
+**Review Note:** Implementation matches the requested ergonomics; no correctness issues found in this pass.
+
+---
+
+## Task 5.7.1: Remove Redundant api.rs (COMPLETE)
+
+**Status:** ✅ Complete
+**Date:** January 15, 2026
+
+### Overview
+
+Removed the redundant `api.rs` convenience layer. The `Processor` now provides all operations with proper transactional guarantees, making `api.rs` unnecessary.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `api.rs` | **Deleted** |
+| `mod.rs` | Removed `pub mod api;`, updated module documentation |
+| `ROADMAP.md` | Updated references to reflect Processor as primary API |
+
+### Rationale
+
+- `api.rs` functions were never used in the codebase
+- `Processor` provides complete functionality with transactions
+- Removes dead code and simplifies the module
+
+All 520 tests pass after removal.
+
+---
+
+## Task 5.7.2: Subsystem Managed Lifecycle (COMPLETE)
+
+**Status:** ✅ Complete
+**Date:** January 15, 2026
+
+### Overview
+
+Added `Subsystem::start()` method to both vector and graph subsystems for managed lifecycle. This provides a batteries-included setup that wires Writer, Reader, and consumers together with automatic shutdown flush.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `vector/subsystem.rs` | Added `start()` method, `set_writer()`, `clear_writer()`, shutdown flush in `on_shutdown()` |
+| `graph/subsystem.rs` | Added `start()` method, `set_writer()`, `clear_writer()`, shutdown flush in `on_shutdown()` |
+| `vector/processor.rs` | Changed `delete_vector` to `pub(crate)` |
+| `tests/test_vector_workflow_integration.rs` | Updated to use `DeleteVector::run(&writer)` |
+
+### Design
+
+**Managed Lifecycle (via `start()`):**
+```rust
+// Subsystem owns Writer lifecycle, automatic shutdown flush
+let (writer, reader) = subsystem.start(
+    storage,
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,  // query workers
+);
+
+// Use writer and reader...
+InsertVector::new(&embedding, id, vec).run(&writer).await?;
+SearchKNN::new(&embedding, query, 10).run(&reader, timeout).await?;
+
+// Shutdown automatically flushes pending mutations
+storage.shutdown()?;
+```
+
+**Manual Lifecycle (for advanced users):**
+```rust
+// User manages their own Writer and flush
+let (writer, receiver) = create_writer(config);
+let processor = Arc::new(Processor::new(storage, registry));
+spawn_mutation_consumer_with_storage(...);
+
+// User responsible for calling writer.flush() before shutdown
+```
+
+### Rationale
+
+- `RwLock<Option<Writer>>` pattern silently hides missing initialization
+- `start()` provides safe default that ensures flush on shutdown
+- Users who need manual control can still create components directly
+- Aligns with graph's existing mutation-first public API
+
+### Public API Visibility
+
+- `Processor::delete_vector` is `pub(crate)` (internal only)
+- Public users must use `DeleteVector::run(&writer)` for consistent async semantics
+- Integration tests updated to demonstrate the public API pattern
+
+---
+
+**Review Note:** Start-managed lifecycle wiring looks correct. Writer is registered for shutdown flush and consumers are spawned with a shared Processor. No correctness issues found in this addition.
+
+---
+
+## Task 5.8: Migrate Benchmark Integration Tests (COMPLETE)
+
+**Date:** January 15, 2026
+
+### Objective
+
+Migrate `test_vector_benchmark_integration.rs` from direct Index/CF access to use the Processor API, demonstrating the recommended usage patterns.
+
+### Changes Made
+
+| File | Change |
+|------|--------|
+| `tests/test_vector_benchmark_integration.rs` | Complete rewrite using Processor API |
+
+### Implementation Details
+
+#### Before (Direct Index/CF Access)
+```rust
+// Old: Manual CF manipulation and direct index access
+let nav_cache = Arc::new(NavigationCache::new());
+let index = hnsw::Index::new(embedding_code, distance, config, nav_cache);
+for (i, vector) in vectors.iter().enumerate() {
+    // Manual vector storage to CF
+    let key = VectorCfKey(embedding_code, i as VecId);
+    storage.put_cf(&vectors_cf, key.to_bytes(), &vector_bytes)?;
+    // Direct index insert
+    index.insert(&storage, i as VecId, vector)?;
+}
+let results = index.search(&storage, query, k, ef_search)?;
+```
+
+#### After (Processor API)
+```rust
+// New: Clean Processor API with EmbeddingBuilder
+let registry = Arc::new(EmbeddingRegistry::new());
+let builder = EmbeddingBuilder::new(model_name, dim as u32, distance)
+    .with_hnsw_m(hnsw_m as u16)
+    .with_hnsw_ef_construction(hnsw_ef_construction as u16);
+let embedding = registry.register(builder, &txn_db)?;
+
+let processor = Processor::with_config(storage, registry, rabitq_config, hnsw_config);
+
+// Insert vectors (builds HNSW graph + populates caches)
+for vector in vectors {
+    let id = Id::new();
+    processor.insert_vector(&embedding, id, vector, true)?;
+}
+
+// Search using Processor
+let results = processor.search(&embedding, query, k, ef_search)?;
+```
+
+### Bug Discovery: insert_batch Nav Cache Issue
+
+During migration, discovered that `Processor::insert_batch()` has a bug where the navigation cache is not updated between vector inserts within the batch. This causes all vectors except the first to get empty HNSW edges.
+
+**Root Cause:** In `ops/insert.rs`, the batch insert loop calls `hnsw::insert()` for each vector, but the `CacheUpdate` returned is deferred until after transaction commit. Each insert reads from the nav_cache which still shows no entry point, so every vector thinks it's the first node.
+
+**Workaround:** Use `insert_vector()` in a loop instead of `insert_batch()` for workloads that require HNSW indexing.
+
+**Future Fix:** Batch insert should maintain temporary nav state during the batch, or apply CacheUpdates incrementally during the loop.
+
+### Test Results
+
+| Test | Recall | Status |
+|------|--------|--------|
+| SIFT L2 (1K vectors) | 100% | ✅ Pass |
+| LAION-CLIP Cosine Exact (1K) | 100% | ✅ Pass |
+| LAION-CLIP Cosine RaBitQ (1K) | 86% | ✅ Pass (>40%) |
+
+### Files Modified
+
+- `libs/db/tests/test_vector_benchmark_integration.rs` - Complete migration
+
+### Review Note
+
+Migration is correctly scoped to the public Processor path (registry + insert + search). The new flow exercises transactional inserts and HNSW build as intended. No additional correctness regressions found beyond the already documented `insert_batch()` nav-cache bug.
+
+### Follow-up Task (5.8.x)
+
+**5.8.x: Fix insert_batch() HNSW nav-cache updates**
+- **Problem:** In `ops::insert::batch`, cache updates from `hnsw::insert()` are only applied after the transaction commits. During the batch, the `nav_cache` stays empty, so every insert thinks it's the first node and builds no edges.
+- **Impact:** All vectors except the first get empty HNSW edges when `build_index=true`, degrading recall.
+- **Fix options:** Apply cache updates incrementally inside the batch loop, or maintain a temporary in-memory nav state for the batch and merge it post-commit.
+- **Workaround:** Use `insert_vector()` in a loop for now when HNSW indexing is required.
+
+---
+
+## Task 5.8.1: Make Processor `pub(crate)` + Runnable Migration (COMPLETE)
+
+**Date:** January 15, 2026
+
+### Objective
+
+Make `Processor` internal (`pub(crate)`) by migrating all integration tests to use only public Runnable traits:
+- `InsertVector::run(&writer)` for inserts
+- `SearchKNN::run(&search_reader, timeout)` for searches
+- `DeleteVector::run(&writer)` for soft-deletes (tombstone when HNSW enabled)
+
+This enforces proper encapsulation - external code uses the async Writer/Reader pattern, not direct Processor access.
+
+### Changes Made
+
+| File | Change |
+|------|--------|
+| `vector/mod.rs` | Changed `pub use processor::Processor` to `pub(crate)` |
+| `vector/reader.rs` | Added `create_search_reader_with_storage()` |
+| `tests/test_vector_benchmark_integration.rs` | Migrated from Processor to Runnable traits |
+| `tests/test_vector_workflow_integration.rs` | Migrated from Processor to Runnable traits |
+| `tests/test_vector_writer_errors.rs` | Migrated from direct Consumer creation |
+
+### API Pattern: Before vs After
+
+#### Before (Task 5.8 - Direct Processor Access)
+```rust
+let processor = Arc::new(Processor::with_config(storage, registry, ...));
+
+// Insert vectors
+for vector in vectors {
+    processor.insert_vector(&embedding, id, vector, true)?;
+}
+
+// Search
+let results = processor.search(&embedding, query, k, ef_search)?;
+```
+
+#### After (Task 5.8.1 - Public Runnable Traits)
+```rust
+// Writer/Reader setup - Processor created internally
+let (writer, writer_rx) = create_writer(WriterConfig::default());
+spawn_mutation_consumer_with_storage_autoreg(writer_rx, config, storage.clone());
+
+let (search_reader, reader_rx) =
+    create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+spawn_query_consumers_with_storage_autoreg(reader_rx, config, storage.clone(), 2);
+
+// Insert via MutationRunnable
+InsertVector::new(&embedding, id, vector.clone())
+    .immediate()
+    .run(&writer)
+    .await?;
+writer.flush().await?;
+
+// Search via Runnable
+let results = SearchKNN::new(&embedding, query, k)
+    .with_ef(100)
+    .exact()  // or without for RaBitQ auto-strategy
+    .run(&search_reader, timeout)
+    .await?;
+```
+
+### New Public API: `create_search_reader_with_storage`
+
+Added convenience function to create `SearchReader` without direct `Processor` access:
+
+```rust
+/// Create a SearchReader from Storage (auto-creates Processor internally).
+pub fn create_search_reader_with_storage(
+    config: ReaderConfig,
+    storage: Arc<Storage>,
+) -> (SearchReader, flume::Receiver<Query>) {
+    let registry = storage.cache().clone();
+    let processor = Arc::new(Processor::new(storage, registry));
+    create_search_reader(config, processor)
+}
+```
+
+### Test Results
+
+All tests pass with excellent recall:
+
+| Test | Recall | Status |
+|------|--------|--------|
+| SIFT L2 (1K vectors) | 100% | ✅ Pass |
+| LAION-CLIP Cosine Exact (1K) | 100% | ✅ Pass |
+| LAION-CLIP Cosine RaBitQ (1K) | 99.8% | ✅ Pass |
+| Workflow - Exact | 100% | ✅ Pass |
+| Workflow - RaBitQ | 100% | ✅ Pass |
+| Writer Errors | - | ✅ Pass |
+
+### Benefits
+
+1. **Encapsulation**: External code cannot bypass Writer/Reader patterns
+2. **Async-First**: All external APIs are async, matching intended usage
+3. **Consistency**: Forces use of Runnable traits for mutations and queries
+4. **Future-Proof**: Internal Processor API can evolve without breaking external code
+
+### Files Modified
+
+- `libs/db/src/vector/mod.rs` - Visibility change
+- `libs/db/src/vector/reader.rs` - New convenience function
+- `libs/db/tests/test_vector_benchmark_integration.rs` - Complete migration
+- `libs/db/tests/test_vector_workflow_integration.rs` - Complete migration
+- `libs/db/tests/test_vector_writer_errors.rs` - Spawn pattern update
+
+---
+
+## Task 5.8.x: Fix insert_batch() HNSW Nav-Cache Updates (COMPLETE)
+
+### Problem Statement
+
+CODEX review identified a bug in `insert_batch()` when building HNSW index:
+
+1. **Nav-cache not updated between batch inserts**: The navigation cache was only updated after all vectors were inserted, but subsequent vectors in the batch need to see the entry point from earlier inserts.
+
+2. **Transaction visibility issue**: `get_vector()` in `hnsw/graph.rs` uses `txn_db.get_cf()` which only reads committed data. During batch insert, vectors are stored in an uncommitted transaction, so later vectors in the batch can't read earlier vectors for distance computation.
+
+### Root Cause
+
+```rust
+// BEFORE: All nav-cache updates applied after the loop
+let mut nav_cache_updates = Vec::new();
+for (i, vec_id) in vec_ids.iter().enumerate() {
+    let update = hnsw::insert(...)?;  // Can't read uncommitted vectors!
+    nav_cache_updates.push(update);    // Entry point not visible to next insert
+}
+// Updates applied here - too late for batch neighbors to find entry point
+```
+
+### Solution
+
+Two-part fix:
+
+1. **Transaction-aware HNSW graph functions** in `hnsw/graph.rs`:
+   - `get_vector_in_txn()` - reads from uncommitted transaction (internal helper name retained)
+   - `distance_in_txn()` - computes distance using transaction reads (internal helper name retained)
+   - `greedy_search_layer_with_batch_cache()` - greedy descent with batch cache visibility
+   - `search_layer_with_batch_cache()` - layer search with batch cache visibility
+
+2. **Batch-specific insert function** in `hnsw/insert.rs`:
+   - `insert_for_batch()` - uses batch-cache-aware search functions
+   - Applies cache updates incrementally so subsequent inserts see entry point
+
+```rust
+// AFTER: Batch-aware insert with incremental cache updates
+let mut nav_cache_updates = Vec::new();
+let mut batch_cache = BatchEdgeCache::new();
+for (i, vec_id) in vec_ids.iter().enumerate() {
+    let update = hnsw::insert_for_batch(
+        &index, txn, txn_db, storage, *vec_id, vector, &mut batch_cache
+    )?;
+    // Apply cache update immediately so next insert sees entry point
+    update.clone().apply(index.nav_cache());
+    nav_cache_updates.push(update);
+}
+```
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `hnsw/graph.rs` | Added `distance_in_txn()`, `get_vector_in_txn()`, `greedy_search_layer_with_batch_cache()`, `search_layer_with_batch_cache()`, `BatchEdgeCache` |
+| `hnsw/insert.rs` | Added `insert_for_batch()` |
+| `hnsw/mod.rs` | Exported `insert_for_batch`, `BatchEdgeCache` |
+| `ops/insert.rs` | Updated batch loop to use `insert_for_batch()` with incremental cache updates |
+
+### Key Insight
+
+The difference between `txn.get_cf()` and `txn_db.get_cf()`:
+
+- `txn_db.get_cf()` - reads only committed data (default read)
+- `txn.get_cf()` - reads uncommitted data from the transaction's write batch
+
+For batch insert, vectors are in the uncommitted transaction, so HNSW neighbor search must use `txn.get_cf()` to see them.
+
+### Test Results
+
+All tests pass including the critical batch insert test:
+- `test_insert_batch_with_index` - ✅ Pass
+- `test_vector_batch_insert_workflow` - ✅ Pass
+
+### Review Note (CODEX)
+
+The fix correctly addresses vector visibility (transaction reads) and incremental nav-cache entry-point updates. One remaining correctness concern: `search_layer_with_batch_cache()` still reads neighbors via `get_neighbors()` which uses `txn_db.get_cf()` (committed reads). Edges written earlier in the same batch are in the transaction (via `txn.merge_cf`) and are not visible to these reads. That means later inserts do not see edges from earlier inserts, and batch graph structure can diverge from sequential insert behavior (typically a star around the original entry). **Resolution:** `BatchEdgeCache` was implemented to stage edge updates so neighbor search sees newly added edges.
+
+### Resolution: BatchEdgeCache
+
+Implemented `BatchEdgeCache` to track edges added during batch insert:
+
+```rust
+/// In-memory cache for edges added during a batch transaction.
+///
+/// RocksDB's `Transaction::get()` does NOT include pending merge operands,
+/// so edges written via `txn.merge_cf()` are not visible to reads within
+/// the same transaction.
+pub struct BatchEdgeCache {
+    /// Forward and reverse edges: (vec_id, layer) -> neighbors
+    edges: HashMap<(VecId, HnswLayer), RoaringBitmap>,
+}
+```
+
+**Key functions added:**
+- `get_neighbors_with_batch_cache()` - merges DB edges with cached edges
+- `greedy_search_layer_with_batch_cache()` - greedy descent with cache support
+- `search_layer_with_batch_cache()` - ef-search with cache support
+
+**Usage in batch insert:**
+```rust
+let mut batch_edge_cache = BatchEdgeCache::new();
+for vector in vectors {
+    let update = insert_for_batch(..., &mut batch_edge_cache)?;
+    // Edges are recorded in batch_cache for subsequent inserts to see
+    update.apply(nav_cache);
+}
+```
+
+This ensures later inserts in a batch see edges from earlier inserts, producing the same graph structure as sequential single-insert operations.
+
+### Review Note (CODEX)
+
+BatchEdgeCache closes the remaining correctness gap: edges from earlier inserts are now visible during batch search/greedy descent despite pending merge ops. The batch insert path now sees both uncommitted vectors and in-transaction edges, so batch connectivity should match sequential inserts. The fix is well-scoped and aligns with the earlier review note.
+
+### Task 5.8.y: Remove Non-Transactional Writes (COMPLETE)
+
+**Production code paths fixed:**
+- ✅ `EmbeddingRegistry::register()` - Now uses `txn.put_cf()` with commit
+- ✅ `IdAllocator::persist()` - Test-only; production uses `allocate()`/`free()` with transactions
+- ✅ `connect_neighbors()` - Transactional variant only (legacy non-txn path removed)
+- ✅ `Processor::persist_allocators()` - Removed (dead code)
+
+**Test/bench helpers also migrated:**
+- ✅ `hnsw/mod.rs` tests - `store_vectors()` now uses transaction
+- ✅ `benchmark/runner.rs` - vector storage now batched in transaction
+- ✅ `crash_recovery_tests.rs` - all vector stores now use transactions
+
+**All writes are now transactional.** `_in_txn` rename completed; CODEX2 checklist retired.
+
+**Review Note (CODEX):** Rename looks mechanically consistent across ops, tests, and benchmarks. Remaining cleanup is documentation-only (a few internal helper names still use `_in_txn` in HNSW graph code).
+
+---
+
+## Remaining Phase 5 Tasks (Aligned with ROADMAP.md)
+
+| Task | Description | Status |
+|------|-------------|--------|
+| 5.0 | HNSW Transaction Refactoring | ✅ **Complete** |
+| 5.1 | Processor::insert_vector() | ✅ **Complete** |
+| 5.2 | Processor::delete_vector() | ✅ **Complete** |
+| 5.3 | Processor::insert_batch() | ✅ **Complete** |
+| 5.4 | Processor::search() + Storage layer | ✅ **Complete** (5.4a-5.4g) |
+| 5.5 | Processor::add_embedding_spec() | ✅ **Complete** (via registry) |
+| 5.6 | Mutation Dispatch | ✅ **Complete** |
+| 5.7 | Query Dispatch | ✅ **Complete** |
+| 5.7.1 | Remove Redundant api.rs | ✅ **Complete** |
+| 5.7.2 | Subsystem Managed Lifecycle | ✅ **Complete** |
+| 5.8 | Migrate Examples/Integration Tests | ✅ **Complete** |
+| 5.8.x | Fix insert_batch() HNSW nav-cache updates | ✅ **Complete** |
+| 5.8.y | Remove non-transactional writes (production) | ✅ **Complete** |
+| 5.9 | Multi-Threaded Stress Tests | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
+| 5.10 | Metrics Collection Infrastructure | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md)) |
+| 5.11 | Concurrent Benchmark Baseline | ✅ Complete ([CONCURRENT.md](./CONCURRENT.md), [BASELINE.md](./BASELINE.md)) |
+
+---
+
+## Phase 6 Status: MPSC/MPMC Public API ✅ Complete
+
+**Date:** January 16, 2026
+
+Phase 6 evaluated and found to be **already implemented** during Phase 5 development. The channel-based infrastructure was built as part of the Writer/Reader implementation.
+
+| Task | Description | Status | Implementation |
+|------|-------------|--------|----------------|
+| 6.1 | MutationExecutor Trait | ✅ | `mutation.rs` - transactional, sync |
+| 6.2 | Mutation Consumer | ✅ | `writer.rs` - MPSC with flush semantics |
+| 6.3 | Query Consumer (MPMC) | ✅ | `reader.rs` - flume-based pool |
+| 6.4 | Reader Handle | ✅ | `reader.rs` - SearchReader with Runnable |
+| 6.5 | Runnable + Runtime | ✅ | `subsystem.rs` - Subsystem::start() pattern |
+| 6.6 | Phase 6 Tests | ✅ | `test_vector_channel.rs` - 7 tests |
+
+CODEX (2026-01-17): Verified Phase 6 implementation across `mutation.rs`, `writer.rs`, `reader.rs`, and `subsystem.rs`, with channel integration tests in `libs/db/tests/test_vector_channel.rs`. Phase 6 is complete and ready for Phase 7 work.
+
+**Key Design Decision:** The explicit `Runnable` trait with `start()`/`stop()`/`is_running()` was NOT implemented. Instead, we use the **unified pattern** already established by graph:: and fulltext:::
+- `Subsystem::start()` returns `(Writer, SearchReader)` handles
+- `SubsystemProvider::on_shutdown()` provides graceful shutdown
+- `Writer::is_closed()` / `SearchReader::is_closed()` provide health checks
+
+See [ROADMAP.md#phase-6](./ROADMAP.md#phase-6-mpscmpmc-public-api) for full details.
+
+---
+
+## References
+
+- [ROADMAP.md](./ROADMAP.md) - Full implementation roadmap
+- [CONCURRENT.md](./CONCURRENT.md) - Tasks 5.9-5.11: Concurrent operations
+- [BASELINE.md](./BASELINE.md) - Baseline benchmark requirements and recorded results
+- [API.md](./API.md) - Public API reference
+- [BENCHMARK.md](./BENCHMARK.md) - Performance results

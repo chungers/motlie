@@ -105,6 +105,47 @@ pub unsafe fn dot(a: &[f32], b: &[f32]) -> f32 {
     result
 }
 
+/// Compute Hamming distance using NEON vcnt (popcount) instruction.
+///
+/// Processes 16 bytes at a time using 128-bit vectors.
+#[target_feature(enable = "neon")]
+#[inline]
+pub unsafe fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+    let len = a.len();
+    let chunks = len / 16;
+
+    // Accumulator for popcount results (as u8 per lane, sum later)
+    let mut total = vdupq_n_u8(0);
+
+    for i in 0..chunks {
+        let offset = i * 16;
+        // Load 16 bytes from each array
+        let va = vld1q_u8(a.as_ptr().add(offset));
+        let vb = vld1q_u8(b.as_ptr().add(offset));
+
+        // XOR to find differing bits
+        let xor_result = veorq_u8(va, vb);
+
+        // Count bits in each byte using vcnt
+        let popcnt = vcntq_u8(xor_result);
+
+        // Accumulate (will overflow if > 255*16 = 4080 bytes, but that's 32K bits)
+        total = vaddq_u8(total, popcnt);
+    }
+
+    // Horizontal sum of all 16 bytes
+    // vaddlvq_u8 sums all bytes into a u16, but we need u32
+    let sum16 = vaddlvq_u8(total);
+    let mut result = sum16 as u32;
+
+    // Handle remaining bytes
+    for i in (chunks * 16)..len {
+        result += (*a.get_unchecked(i) ^ *b.get_unchecked(i)).count_ones();
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

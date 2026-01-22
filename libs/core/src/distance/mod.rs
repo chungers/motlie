@@ -42,6 +42,12 @@
 
 mod scalar;
 
+/// Quantized dot product operations for ADC (Asymmetric Distance Computation).
+///
+/// Provides SIMD-optimized functions for computing dot products between
+/// float query vectors and packed binary codes (1-bit, 2-bit, 4-bit).
+pub mod quantized;
+
 #[cfg(all(target_arch = "x86_64", any(simd_level = "avx2", simd_level = "runtime")))]
 mod avx2;
 
@@ -205,6 +211,39 @@ impl SimdDispatcher {
         }
     }
 
+    /// Compute Hamming distance between two binary codes
+    ///
+    /// Returns the number of differing bits
+    #[inline]
+    pub fn hamming_distance(&self, a: &[u8], b: &[u8]) -> u32 {
+        debug_assert_eq!(a.len(), b.len(), "Code lengths must match");
+
+        #[cfg(simd_level = "avx512")]
+        {
+            unsafe { avx512::hamming_distance(a, b) }
+        }
+
+        #[cfg(simd_level = "avx2")]
+        {
+            unsafe { avx2::hamming_distance(a, b) }
+        }
+
+        #[cfg(simd_level = "neon")]
+        {
+            unsafe { neon::hamming_distance(a, b) }
+        }
+
+        #[cfg(simd_level = "scalar")]
+        {
+            scalar::hamming_distance(a, b)
+        }
+
+        #[cfg(simd_level = "runtime")]
+        {
+            self.variant.hamming_distance(a, b)
+        }
+    }
+
     /// Returns the SIMD level being used
     pub fn level(&self) -> &'static str {
         #[cfg(simd_level = "avx512")]
@@ -330,6 +369,26 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     DISPATCHER.dot(a, b)
+}
+
+/// Compute Hamming distance between two binary codes
+///
+/// Returns the number of differing bits between `a` and `b`.
+/// Uses SIMD-optimized implementation when available.
+///
+/// # Example
+///
+/// ```
+/// use motlie_core::distance::hamming_distance;
+///
+/// let a = vec![0x00, 0xFF];  // 00000000 11111111
+/// let b = vec![0x0F, 0xF0];  // 00001111 11110000
+/// let dist = hamming_distance(&a, &b);
+/// assert_eq!(dist, 8);  // 4 bits different in each byte
+/// ```
+#[inline]
+pub fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+    DISPATCHER.hamming_distance(a, b)
 }
 
 /// Returns the active SIMD implementation level

@@ -1,18 +1,18 @@
-//! Storage builder for composing modular storage components.
+//! Storage builder for composing modular storage subsystems.
 //!
 //! This module provides [`StorageBuilder`] which enables multiple storage modules
 //! to share storage instances without coupling between modules:
 //!
-//! - **RocksDB components** (`ColumnFamilyProvider`): graph, vector modules share TransactionDB
-//! - **Tantivy components** (`IndexProvider`): fulltext module for full-text search
+//! - **RocksDB subsystems** (`RocksdbSubsystem`): graph, vector modules share TransactionDB
+//! - **Fulltext subsystems** (`FulltextSubsystem`): fulltext module for full-text search
 //!
 //! # Design Rationale (Task 0.4)
 //!
 //! - Graph module shouldn't know about vector-specific CFs
 //! - Vector module needs to share the same TransactionDB
 //! - Fulltext module uses Tantivy independently but initialized through same builder
-//! - Each module registers its own initialization logic via component traits
-//! - Pre-warm isolation: each module's `on_ready()` handles its own caches
+//! - Each module registers its own initialization logic via subsystem traits
+//! - Pre-warm isolation: each subsystem's `on_ready()` handles its own caches
 //!
 //! # Example
 //!
@@ -24,9 +24,9 @@
 //!
 //! // Build shared storage with RocksDB and Tantivy
 //! let storage = StorageBuilder::new(&base_path)
-//!     .with_component(Box::new(graph::component()))
-//!     .with_component(Box::new(vector::component()))
-//!     .with_index_provider(Box::new(fulltext::Schema::new()))
+//!     .with_rocksdb(Box::new(graph::Subsystem::new()))
+//!     .with_rocksdb(Box::new(vector::Subsystem::new()))
+//!     .with_fulltext(Box::new(fulltext::Schema::new()))
 //!     .with_cache_size(512 * 1024 * 1024)  // 512MB
 //!     .build()?;
 //!
@@ -44,8 +44,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rocksdb::{Cache, ColumnFamilyDescriptor, Options, TransactionDB, TransactionDBOptions};
 
-use crate::index_provider::IndexProvider;
-use crate::provider::ColumnFamilyProvider;
+use crate::fulltext::FulltextSubsystem;
+use crate::rocksdb::{BlockCacheConfig, RocksdbSubsystem};
+use motlie_core::telemetry::SubsystemInfo;
 
 // ============================================================================
 // StorageBuilder Configuration
@@ -76,11 +77,11 @@ impl Default for CacheConfig {
 // StorageBuilder
 // ============================================================================
 
-/// Builder for composing modular storage components into shared storage instances.
+/// Builder for composing modular storage subsystems into shared storage instances.
 ///
 /// This builder collects:
-/// - `ColumnFamilyProvider` implementations for RocksDB (graph, vector modules)
-/// - `IndexProvider` implementations for Tantivy (fulltext module)
+/// - `RocksdbSubsystem` implementations for RocksDB (graph, vector modules)
+/// - `FulltextSubsystem` implementations for Tantivy (fulltext module)
 ///
 /// # Directory Structure
 ///
@@ -97,17 +98,17 @@ impl Default for CacheConfig {
 /// use motlie_db::fulltext;
 ///
 /// let storage = StorageBuilder::new(&base_path)
-///     .with_component(Box::new(graph::component()))
-///     .with_component(Box::new(vector::component()))
-///     .with_index_provider(Box::new(fulltext::Schema::new()))
+///     .with_rocksdb(Box::new(graph::Subsystem::new()))
+///     .with_rocksdb(Box::new(vector::Subsystem::new()))
+///     .with_fulltext(Box::new(fulltext::Schema::new()))
 ///     .build()?;
 /// ```
 pub struct StorageBuilder {
     path: PathBuf,
-    /// RocksDB column family components
-    components: Vec<Box<dyn ColumnFamilyProvider>>,
-    /// Tantivy index providers
-    index_providers: Vec<Box<dyn IndexProvider>>,
+    /// RocksDB subsystems
+    rocksdb_subsystems: Vec<Box<dyn RocksdbSubsystem>>,
+    /// Fulltext (Tantivy) subsystems
+    fulltext_subsystems: Vec<Box<dyn FulltextSubsystem>>,
     cache_config: CacheConfig,
     db_options: Options,
     txn_db_options: TransactionDBOptions,
@@ -120,8 +121,8 @@ impl StorageBuilder {
     /// * `path` - Base path for storage directories
     ///
     /// # Directory Structure
-    /// - `<path>/rocksdb` - RocksDB TransactionDB (if components added)
-    /// - `<path>/tantivy` - Tantivy fulltext index (if index providers added)
+    /// - `<path>/rocksdb` - RocksDB TransactionDB (if subsystems added)
+    /// - `<path>/tantivy` - Tantivy fulltext index (if fulltext subsystems added)
     pub fn new(path: &Path) -> Self {
         let mut db_options = Options::default();
         db_options.create_if_missing(true);
@@ -129,29 +130,29 @@ impl StorageBuilder {
 
         Self {
             path: path.to_path_buf(),
-            components: Vec::new(),
-            index_providers: Vec::new(),
+            rocksdb_subsystems: Vec::new(),
+            fulltext_subsystems: Vec::new(),
             cache_config: CacheConfig::default(),
             db_options,
             txn_db_options: TransactionDBOptions::default(),
         }
     }
 
-    /// Add a RocksDB column family component.
+    /// Add a RocksDB subsystem.
     ///
-    /// Components are registered in order and their column families are collected
+    /// Subsystems are registered in order and their column families are collected
     /// during `build()`.
-    pub fn with_component(mut self, component: Box<dyn ColumnFamilyProvider>) -> Self {
-        self.components.push(component);
+    pub fn with_rocksdb(mut self, subsystem: Box<dyn RocksdbSubsystem>) -> Self {
+        self.rocksdb_subsystems.push(subsystem);
         self
     }
 
-    /// Add a Tantivy index provider.
+    /// Add a fulltext (Tantivy) subsystem.
     ///
-    /// Index providers define the Tantivy schema and initialization logic.
-    /// Currently supports a single index provider (fulltext).
-    pub fn with_index_provider(mut self, provider: Box<dyn IndexProvider>) -> Self {
-        self.index_providers.push(provider);
+    /// Fulltext subsystems define the Tantivy schema and initialization logic.
+    /// Currently supports a single fulltext subsystem.
+    pub fn with_fulltext(mut self, subsystem: Box<dyn FulltextSubsystem>) -> Self {
+        self.fulltext_subsystems.push(subsystem);
         self
     }
 
@@ -189,18 +190,18 @@ impl StorageBuilder {
     ///
     /// This method:
     /// 1. Creates a shared block cache for RocksDB
-    /// 2. Collects CF descriptors from all RocksDB components
+    /// 2. Collects CF descriptors from all RocksDB subsystems
     /// 3. Opens the TransactionDB with all CFs
-    /// 4. Calls `on_ready()` on each RocksDB component
-    /// 5. Creates/opens Tantivy index if index providers are registered
-    /// 6. Calls `on_ready()` on each index provider
+    /// 4. Calls `on_ready()` on each RocksDB subsystem
+    /// 5. Creates/opens Tantivy index if fulltext subsystems are registered
+    /// 6. Calls `on_ready()` on each fulltext subsystem
     ///
     /// # Errors
     /// Returns an error if:
     /// - The database cannot be opened
     /// - The Tantivy index cannot be created/opened
-    /// - Any component's `on_ready()` fails
-    #[tracing::instrument(skip(self), fields(path = ?self.path, components = self.components.len(), index_providers = self.index_providers.len()))]
+    /// - Any subsystem's `on_ready()` fails
+    #[tracing::instrument(skip(self), fields(path = ?self.path, rocksdb_subsystems = self.rocksdb_subsystems.len(), fulltext_subsystems = self.fulltext_subsystems.len()))]
     pub fn build(self) -> Result<SharedStorage> {
         let rocksdb_path = self.path.join("rocksdb");
         let tantivy_path = self.path.join("tantivy");
@@ -209,7 +210,7 @@ impl StorageBuilder {
         // RocksDB Initialization
         // ─────────────────────────────────────────────────────────────
 
-        let (db_arc, cache, component_map) = if !self.components.is_empty() {
+        let (db_arc, cache, subsystem_map) = if !self.rocksdb_subsystems.is_empty() {
             // Create shared block cache
             let cache = Cache::new_lru_cache(self.cache_config.size_bytes);
 
@@ -219,28 +220,34 @@ impl StorageBuilder {
                 "[StorageBuilder] Created shared block cache"
             );
 
-            // Collect CF descriptors from all components
+            // Collect CF descriptors from all subsystems
             let mut all_descriptors: Vec<ColumnFamilyDescriptor> = Vec::new();
-            let mut component_names: Vec<&'static str> = Vec::new();
+            let mut subsystem_names: Vec<&'static str> = Vec::new();
 
-            for component in &self.components {
-                let name = component.name();
-                let descriptors =
-                    component.column_family_descriptors(Some(&cache), self.cache_config.block_size);
+            let block_cache_config = BlockCacheConfig {
+                cache_size_bytes: self.cache_config.size_bytes,
+                default_block_size: self.cache_config.block_size,
+                large_block_size: self.cache_config.block_size,
+                ..Default::default()
+            };
+
+            for subsystem in &self.rocksdb_subsystems {
+                let name = SubsystemInfo::name(subsystem.as_ref());
+                let descriptors = subsystem.cf_descriptors(&cache, &block_cache_config);
 
                 tracing::debug!(
-                    component = name,
+                    subsystem = name,
                     cf_count = descriptors.len(),
                     "[StorageBuilder] Collected CF descriptors"
                 );
 
                 all_descriptors.extend(descriptors);
-                component_names.push(name);
+                subsystem_names.push(name);
             }
 
             tracing::info!(
                 total_cfs = all_descriptors.len(),
-                components = ?component_names,
+                subsystems = ?subsystem_names,
                 path = ?rocksdb_path,
                 "[StorageBuilder] Opening TransactionDB with all CFs"
             );
@@ -255,25 +262,25 @@ impl StorageBuilder {
 
             let db_arc = Arc::new(db);
 
-            // Call on_ready for each component
-            for component in &self.components {
-                let name = component.name();
-                tracing::debug!(component = name, "[StorageBuilder] Calling RocksDB on_ready");
-                component.on_ready(&db_arc)?;
+            // Call on_ready for each subsystem
+            for subsystem in &self.rocksdb_subsystems {
+                let name = SubsystemInfo::name(subsystem.as_ref());
+                tracing::debug!(subsystem = name, "[StorageBuilder] Calling RocksDB on_ready");
+                subsystem.on_ready(&db_arc)?;
             }
 
             tracing::info!(
-                components = ?component_names,
-                "[StorageBuilder] All RocksDB components initialized"
+                subsystems = ?subsystem_names,
+                "[StorageBuilder] All RocksDB subsystems initialized"
             );
 
-            // Build component name -> index map for lookup
-            let mut component_map: HashMap<&'static str, usize> = HashMap::new();
-            for (i, component) in self.components.iter().enumerate() {
-                component_map.insert(component.name(), i);
+            // Build subsystem id -> index map for lookup
+            let mut subsystem_map: HashMap<&'static str, usize> = HashMap::new();
+            for (i, subsystem) in self.rocksdb_subsystems.iter().enumerate() {
+                subsystem_map.insert(subsystem.id(), i);
             }
 
-            (Some(db_arc), Some(cache), component_map)
+            (Some(db_arc), Some(cache), subsystem_map)
         } else {
             (None, None, HashMap::new())
         };
@@ -282,12 +289,12 @@ impl StorageBuilder {
         // Tantivy Initialization
         // ─────────────────────────────────────────────────────────────
 
-        let (index_arc, index_provider_map) = if !self.index_providers.is_empty() {
-            // For now, we support a single index provider (can be extended later)
-            // The first provider's schema is used
-            let first_provider = &self.index_providers[0];
-            let schema = first_provider.schema();
-            let writer_heap_size = first_provider.writer_heap_size();
+        let (index_arc, fulltext_map) = if !self.fulltext_subsystems.is_empty() {
+            // For now, we support a single fulltext subsystem (can be extended later)
+            // The first subsystem's schema is used
+            let first_subsystem = &self.fulltext_subsystems[0];
+            let schema = first_subsystem.schema();
+            let writer_heap_size = first_subsystem.writer_heap_size();
 
             // Create or open index
             let meta_path = tantivy_path.join("meta.json");
@@ -309,25 +316,25 @@ impl StorageBuilder {
 
             let index_arc = Arc::new(index);
 
-            // Call on_ready for each index provider
-            for provider in &self.index_providers {
-                let name = provider.name();
-                tracing::debug!(provider = name, "[StorageBuilder] Calling Tantivy on_ready");
-                provider.on_ready(&index_arc)?;
+            // Call on_ready for each fulltext subsystem
+            for subsystem in &self.fulltext_subsystems {
+                let name = SubsystemInfo::name(subsystem.as_ref());
+                tracing::debug!(subsystem = name, "[StorageBuilder] Calling Tantivy on_ready");
+                subsystem.on_ready(&index_arc)?;
             }
 
-            // Build index provider name -> index map
-            let mut index_provider_map: HashMap<&'static str, usize> = HashMap::new();
-            for (i, provider) in self.index_providers.iter().enumerate() {
-                index_provider_map.insert(provider.name(), i);
+            // Build fulltext subsystem id -> index map
+            let mut fulltext_map: HashMap<&'static str, usize> = HashMap::new();
+            for (i, subsystem) in self.fulltext_subsystems.iter().enumerate() {
+                fulltext_map.insert(subsystem.id(), i);
             }
 
             tracing::info!(
-                providers = self.index_providers.len(),
-                "[StorageBuilder] All Tantivy providers initialized"
+                subsystems = self.fulltext_subsystems.len(),
+                "[StorageBuilder] All fulltext subsystems initialized"
             );
 
-            (Some(index_arc), index_provider_map)
+            (Some(index_arc), fulltext_map)
         } else {
             (None, HashMap::new())
         };
@@ -336,11 +343,11 @@ impl StorageBuilder {
             path: self.path,
             db: db_arc,
             cache,
-            components: self.components,
-            component_map,
+            rocksdb_subsystems: self.rocksdb_subsystems,
+            rocksdb_map: subsystem_map,
             index: index_arc,
-            index_providers: self.index_providers,
-            index_provider_map,
+            fulltext_subsystems: self.fulltext_subsystems,
+            fulltext_map,
         })
     }
 }
@@ -352,9 +359,9 @@ impl StorageBuilder {
 /// Shared storage handle providing access to RocksDB and Tantivy storage.
 ///
 /// This is the result of [`StorageBuilder::build()`]. It provides:
-/// - Access to the shared RocksDB `TransactionDB` (if RocksDB components registered)
-/// - Access to the shared Tantivy `Index` (if index providers registered)
-/// - Access to individual components by name
+/// - Access to the shared RocksDB `TransactionDB` (if RocksDB subsystems registered)
+/// - Access to the shared Tantivy `Index` (if fulltext subsystems registered)
+/// - Access to individual subsystems by name
 /// - The shared block cache
 pub struct SharedStorage {
     path: PathBuf,
@@ -362,12 +369,12 @@ pub struct SharedStorage {
     db: Option<Arc<TransactionDB>>,
     #[allow(dead_code)]
     cache: Option<Cache>,
-    components: Vec<Box<dyn ColumnFamilyProvider>>,
-    component_map: HashMap<&'static str, usize>,
+    rocksdb_subsystems: Vec<Box<dyn RocksdbSubsystem>>,
+    rocksdb_map: HashMap<&'static str, usize>,
     // Tantivy storage
     index: Option<Arc<tantivy::Index>>,
-    index_providers: Vec<Box<dyn IndexProvider>>,
-    index_provider_map: HashMap<&'static str, usize>,
+    fulltext_subsystems: Vec<Box<dyn FulltextSubsystem>>,
+    fulltext_map: HashMap<&'static str, usize>,
 }
 
 impl SharedStorage {
@@ -404,25 +411,28 @@ impl SharedStorage {
         self.db.clone()
     }
 
-    /// Get a RocksDB component by name.
+    /// Get a RocksDB component by id (e.g., "graph", "vector").
     ///
-    /// Returns `None` if no component with the given name is registered.
-    pub fn get_component(&self, name: &str) -> Option<&dyn ColumnFamilyProvider> {
-        self.component_map
-            .get(name)
-            .map(|&i| self.components[i].as_ref())
+    /// Returns `None` if no component with the given id is registered.
+    pub fn get_component(&self, id: &str) -> Option<&dyn RocksdbSubsystem> {
+        self.rocksdb_map
+            .get(id)
+            .map(|&i| self.rocksdb_subsystems[i].as_ref())
     }
 
-    /// List all registered RocksDB component names.
+    /// List all registered RocksDB component ids.
     pub fn component_names(&self) -> Vec<&'static str> {
-        self.components.iter().map(|p| p.name()).collect()
+        self.rocksdb_subsystems
+            .iter()
+            .map(|p| p.id())
+            .collect()
     }
 
-    /// List all column family names across all RocksDB components.
+    /// List all column family names across all RocksDB subsystems.
     pub fn all_cf_names(&self) -> Vec<&'static str> {
         let mut names: Vec<&'static str> = Vec::new();
-        for component in &self.components {
-            names.extend(component.cf_names());
+        for subsystem in &self.rocksdb_subsystems {
+            names.extend(subsystem.cf_names());
         }
         names
     }
@@ -450,18 +460,21 @@ impl SharedStorage {
         self.index.clone()
     }
 
-    /// Get an index provider by name.
+    /// Get a fulltext component by id (e.g., "fulltext").
     ///
-    /// Returns `None` if no provider with the given name is registered.
-    pub fn get_index_provider(&self, name: &str) -> Option<&dyn IndexProvider> {
-        self.index_provider_map
-            .get(name)
-            .map(|&i| self.index_providers[i].as_ref())
+    /// Returns `None` if no component with the given id is registered.
+    pub fn get_fulltext(&self, id: &str) -> Option<&dyn FulltextSubsystem> {
+        self.fulltext_map
+            .get(id)
+            .map(|&i| self.fulltext_subsystems[i].as_ref())
     }
 
-    /// List all registered index provider names.
-    pub fn index_provider_names(&self) -> Vec<&'static str> {
-        self.index_providers.iter().map(|p| p.name()).collect()
+    /// List all registered fulltext component ids.
+    pub fn fulltext_names(&self) -> Vec<&'static str> {
+        self.fulltext_subsystems
+            .iter()
+            .map(|p| p.id())
+            .collect()
     }
 
     /// Check if Tantivy storage is available.
@@ -477,16 +490,17 @@ impl SharedStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SubsystemProvider;
     use tempfile::TempDir;
 
-    /// Mock provider for testing
-    struct MockProvider {
+    /// Mock RocksDB subsystem for testing
+    struct MockRocksdbSubsystem {
         name: &'static str,
         cf_name: &'static str,
         on_ready_called: std::sync::atomic::AtomicBool,
     }
 
-    impl MockProvider {
+    impl MockRocksdbSubsystem {
         fn new(name: &'static str, cf_name: &'static str) -> Self {
             Self {
                 name,
@@ -500,30 +514,51 @@ mod tests {
         }
     }
 
-    impl ColumnFamilyProvider for MockProvider {
+    impl SubsystemInfo for MockRocksdbSubsystem {
         fn name(&self) -> &'static str {
             self.name
         }
 
-        fn column_family_descriptors(
-            &self,
-            _cache: Option<&Cache>,
-            _block_size: usize,
-        ) -> Vec<ColumnFamilyDescriptor> {
-            vec![ColumnFamilyDescriptor::new(
-                self.cf_name,
-                Options::default(),
-            )]
+        fn info_lines(&self) -> Vec<(&'static str, String)> {
+            vec![]
         }
+    }
 
+    impl SubsystemProvider<TransactionDB> for MockRocksdbSubsystem {
         fn on_ready(&self, _db: &TransactionDB) -> Result<()> {
             self.on_ready_called
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+    }
 
-        fn cf_names(&self) -> Vec<&'static str> {
-            vec![self.cf_name]
+    impl RocksdbSubsystem for MockRocksdbSubsystem {
+        fn id(&self) -> &'static str {
+            self.name
+        }
+
+        fn cf_names(&self) -> &'static [&'static str] {
+            // For testing, we return a static slice
+            // In real code, this would be a constant
+            match self.cf_name {
+                "mock_cf" => &["mock_cf"],
+                "cf1" => &["cf1"],
+                "cf2" => &["cf2"],
+                "test_cf" => &["test_cf"],
+                "tracked_cf" => &["tracked_cf"],
+                _ => &[],
+            }
+        }
+
+        fn cf_descriptors(
+            &self,
+            _cache: &Cache,
+            _config: &BlockCacheConfig,
+        ) -> Vec<ColumnFamilyDescriptor> {
+            vec![ColumnFamilyDescriptor::new(
+                self.cf_name,
+                Options::default(),
+            )]
         }
     }
 
@@ -539,15 +574,15 @@ mod tests {
         let path = Path::new("/tmp/test_db");
         let builder = StorageBuilder::new(path);
         assert_eq!(builder.path, path);
-        assert!(builder.components.is_empty());
+        assert!(builder.rocksdb_subsystems.is_empty());
     }
 
     #[test]
-    fn test_storage_builder_with_component() {
+    fn test_storage_builder_with_rocksdb() {
         let path = Path::new("/tmp/test_db");
         let builder = StorageBuilder::new(path)
-            .with_component(Box::new(MockProvider::new("test", "test_cf")));
-        assert_eq!(builder.components.len(), 1);
+            .with_rocksdb(Box::new(MockRocksdbSubsystem::new("test", "test_cf")));
+        assert_eq!(builder.rocksdb_subsystems.len(), 1);
     }
 
     #[test]
@@ -562,12 +597,12 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_builder_build_single_component() {
+    fn test_storage_builder_build_single_subsystem() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_component(Box::new(MockProvider::new("mock", "mock_cf")))
+            .with_rocksdb(Box::new(MockRocksdbSubsystem::new("mock", "mock_cf")))
             .build()
             .expect("Failed to build storage");
 
@@ -579,18 +614,18 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_builder_build_multiple_components() {
+    fn test_storage_builder_build_multiple_subsystems() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_component(Box::new(MockProvider::new("component1", "cf1")))
-            .with_component(Box::new(MockProvider::new("component2", "cf2")))
+            .with_rocksdb(Box::new(MockRocksdbSubsystem::new("subsystem1", "cf1")))
+            .with_rocksdb(Box::new(MockRocksdbSubsystem::new("subsystem2", "cf2")))
             .build()
             .expect("Failed to build storage");
 
-        assert!(storage.get_component("component1").is_some());
-        assert!(storage.get_component("component2").is_some());
+        assert!(storage.get_component("subsystem1").is_some());
+        assert!(storage.get_component("subsystem2").is_some());
         assert_eq!(storage.component_names().len(), 2);
         assert_eq!(storage.all_cf_names().len(), 2);
     }
@@ -600,46 +635,58 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
-        // Create provider with ready tracking
-        let provider = std::sync::Arc::new(MockProvider::new("tracked", "tracked_cf"));
+        // Create subsystem with ready tracking
+        let subsystem = std::sync::Arc::new(MockRocksdbSubsystem::new("tracked", "tracked_cf"));
 
         // We need to use Arc to track the state
-        struct TrackedProvider {
-            inner: std::sync::Arc<MockProvider>,
+        struct TrackedSubsystem {
+            inner: std::sync::Arc<MockRocksdbSubsystem>,
         }
 
-        impl ColumnFamilyProvider for TrackedProvider {
+        impl SubsystemInfo for TrackedSubsystem {
             fn name(&self) -> &'static str {
-                self.inner.name()
+                SubsystemInfo::name(self.inner.as_ref())
             }
 
-            fn column_family_descriptors(
-                &self,
-                cache: Option<&Cache>,
-                block_size: usize,
-            ) -> Vec<ColumnFamilyDescriptor> {
-                self.inner.column_family_descriptors(cache, block_size)
+            fn info_lines(&self) -> Vec<(&'static str, String)> {
+                vec![]
             }
+        }
 
+        impl SubsystemProvider<TransactionDB> for TrackedSubsystem {
             fn on_ready(&self, db: &TransactionDB) -> Result<()> {
-                self.inner.on_ready(db)
+                SubsystemProvider::on_ready(self.inner.as_ref(), db)
+            }
+        }
+
+        impl RocksdbSubsystem for TrackedSubsystem {
+            fn id(&self) -> &'static str {
+                self.inner.id()
             }
 
-            fn cf_names(&self) -> Vec<&'static str> {
+            fn cf_names(&self) -> &'static [&'static str] {
                 self.inner.cf_names()
             }
+
+            fn cf_descriptors(
+                &self,
+                cache: &Cache,
+                config: &BlockCacheConfig,
+            ) -> Vec<ColumnFamilyDescriptor> {
+                self.inner.cf_descriptors(cache, config)
+            }
         }
 
-        let tracked = TrackedProvider {
-            inner: provider.clone(),
+        let tracked = TrackedSubsystem {
+            inner: subsystem.clone(),
         };
 
         let _storage = StorageBuilder::new(&db_path)
-            .with_component(Box::new(tracked))
+            .with_rocksdb(Box::new(tracked))
             .build()
             .expect("Failed to build storage");
 
-        assert!(provider.was_ready_called());
+        assert!(subsystem.was_ready_called());
     }
 
     #[test]
@@ -648,7 +695,7 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_component(Box::new(MockProvider::new("test", "test_cf")))
+            .with_rocksdb(Box::new(MockRocksdbSubsystem::new("test", "test_cf")))
             .build()
             .expect("Failed to build storage");
 
@@ -663,20 +710,20 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_builder_with_index_provider() {
+    fn test_storage_builder_with_fulltext() {
         let path = Path::new("/tmp/test_db");
         let builder = StorageBuilder::new(path)
-            .with_index_provider(Box::new(MockIndexProvider::new()));
-        assert_eq!(builder.index_providers.len(), 1);
+            .with_fulltext(Box::new(MockFulltextSubsystem::new()));
+        assert_eq!(builder.fulltext_subsystems.len(), 1);
     }
 
     #[test]
-    fn test_storage_with_index_provider() {
+    fn test_storage_with_fulltext() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_index_provider(Box::new(MockIndexProvider::new()))
+            .with_fulltext(Box::new(MockFulltextSubsystem::new()))
             .build()
             .expect("Failed to build storage");
 
@@ -685,17 +732,17 @@ mod tests {
         assert!(!storage.has_rocksdb());
         assert!(storage.index().is_some());
         assert!(storage.db().is_none());
-        assert_eq!(storage.index_provider_names(), vec!["mock_index"]);
+        assert_eq!(storage.fulltext_names(), vec!["mock_fulltext"]);
     }
 
     #[test]
-    fn test_storage_with_both_providers() {
+    fn test_storage_with_both_subsystems() {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_component(Box::new(MockProvider::new("test", "test_cf")))
-            .with_index_provider(Box::new(MockIndexProvider::new()))
+            .with_rocksdb(Box::new(MockRocksdbSubsystem::new("test", "test_cf")))
+            .with_fulltext(Box::new(MockFulltextSubsystem::new()))
             .build()
             .expect("Failed to build storage");
 
@@ -705,7 +752,7 @@ mod tests {
         assert!(storage.db().is_some());
         assert!(storage.index().is_some());
         assert_eq!(storage.component_names(), vec!["test"]);
-        assert_eq!(storage.index_provider_names(), vec!["mock_index"]);
+        assert_eq!(storage.fulltext_names(), vec!["mock_fulltext"]);
     }
 
     #[test]
@@ -714,7 +761,7 @@ mod tests {
         let db_path = temp_dir.path().join("test_db");
 
         let storage = StorageBuilder::new(&db_path)
-            .with_component(Box::new(MockProvider::new("test", "test_cf")))
+            .with_rocksdb(Box::new(MockRocksdbSubsystem::new("test", "test_cf")))
             .build()
             .expect("Failed to build storage");
 
@@ -723,12 +770,12 @@ mod tests {
         assert_eq!(storage.tantivy_path(), db_path.join("tantivy"));
     }
 
-    /// Mock index provider for testing
-    struct MockIndexProvider {
+    /// Mock fulltext subsystem for testing
+    struct MockFulltextSubsystem {
         on_ready_called: std::sync::atomic::AtomicBool,
     }
 
-    impl MockIndexProvider {
+    impl MockFulltextSubsystem {
         fn new() -> Self {
             Self {
                 on_ready_called: std::sync::atomic::AtomicBool::new(false),
@@ -736,21 +783,33 @@ mod tests {
         }
     }
 
-    impl IndexProvider for MockIndexProvider {
+    impl SubsystemInfo for MockFulltextSubsystem {
         fn name(&self) -> &'static str {
-            "mock_index"
+            "mock_fulltext"
+        }
+
+        fn info_lines(&self) -> Vec<(&'static str, String)> {
+            vec![]
+        }
+    }
+
+    impl SubsystemProvider<tantivy::Index> for MockFulltextSubsystem {
+        fn on_ready(&self, _index: &tantivy::Index) -> Result<()> {
+            self.on_ready_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl FulltextSubsystem for MockFulltextSubsystem {
+        fn id(&self) -> &'static str {
+            "mock_fulltext"
         }
 
         fn schema(&self) -> tantivy::schema::Schema {
             let mut builder = tantivy::schema::Schema::builder();
             builder.add_text_field("content", tantivy::schema::TEXT);
             builder.build()
-        }
-
-        fn on_ready(&self, _index: &tantivy::Index) -> Result<()> {
-            self.on_ready_called
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
         }
     }
 }
