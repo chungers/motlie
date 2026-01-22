@@ -707,8 +707,7 @@ with reproducible random vector generation.
 
 ### Running Scale Benchmarks
 
-`bench_vector scale` is deprecated. Use `bench_vector index` + `bench_vector query`
-with the random streaming dataset instead:
+Use `bench_vector index` + `bench_vector query` with the random streaming dataset:
 
 ```bash
 # Quick validation (10K vectors)
@@ -756,6 +755,7 @@ with the random streaming dataset instead:
 ./target/release/bench_vector query \
     --dataset random \
     --db-path /tmp/bench_1m \
+    --embedding-code <EMBEDDING_CODE> \
     --num-queries 1000 \
     --skip-recall
 ```
@@ -776,6 +776,9 @@ with the random streaming dataset instead:
 | `--progress-interval` | 10 | Progress report interval (seconds) |
 | `--db-path` | (required) | Database path (cleared on start) |
 | `--output` | (optional) | JSON output file |
+
+**Note:** `bench_vector index` prints the embedding code and includes it in the JSON output.
+Prefer `bench_vector query --embedding-code <CODE>` to avoid mismatched specs.
 
 ### Scale Baseline Results
 

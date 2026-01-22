@@ -43,6 +43,39 @@ bench_vector sweep --dataset laion --num-vectors 50000 --rabitq --show-pareto
 bench_vector check-distribution --dataset random --dim 1024
 ```
 
+## End-to-End Example (Index → Inspect → Query)
+
+```bash
+# Build the CLI
+cargo build --release --bin bench_vector
+
+# Index 1M random vectors (streaming)
+./target/release/bench_vector index \
+  --dataset random \
+  --num-vectors 1000000 \
+  --dim 128 \
+  --stream \
+  --batch-size 5000 \
+  --db-path /tmp/bench_1m \
+  --fresh \
+  --output /tmp/bench_1m_index.json
+
+# Inspect the embedding code printed by index
+./target/release/bench_vector embeddings inspect \
+  --db-path /tmp/bench_1m \
+  --code <EMBEDDING_CODE>
+
+# Query using the embedding code to avoid mismatches
+./target/release/bench_vector query \
+  --db-path /tmp/bench_1m \
+  --dataset random \
+  --embedding-code <EMBEDDING_CODE> \
+  --num-queries 1000 \
+  --ef-search 100 \
+  --skip-recall \
+  --output /tmp/bench_1m_query.json
+```
+
 ## Commands
 
 ### `download` - Fetch Benchmark Datasets
@@ -92,6 +125,9 @@ bench_vector index --dataset random --num-vectors 100000 --dim 512 --db-path ./r
 
 **Why incremental?** Building large indices takes hours. The `index` command saves metadata checkpoints, allowing you to resume after interruption.
 
+**Embedding info:** `index` prints the embedding code and writes the full spec into the JSON output.
+Use that code with `bench_vector embeddings inspect --code <CODE>` and `bench_vector query --embedding-code <CODE>`.
+
 ### `query` - Run Search Queries
 
 Executes search queries against an existing index and reports recall/latency.
@@ -109,6 +145,9 @@ bench_vector query --db-path ./bench_db --dataset laion --k 10 --ef-search 100
 | `--k` | 10 | Number of results per query |
 | `--ef-search` | 100 | Search beam width |
 | `--num-queries` | 1000 | Number of queries to run |
+| `--embedding-code` | none | Use a specific embedding code (recommended) |
+| `--skip-recall` | false | Skip recall/ground-truth computation |
+| `--recall-sample-size` | 0 | Enable recall sampling for random datasets |
 
 ### `sweep` - Parameter Grid Search
 
@@ -258,76 +297,6 @@ Interpretation:
   ✓ Rotation matrix has correct √D scaling
   ✓ RaBitQ should work well on this dataset
 ```
-
-### `scale` - Scale Validation Benchmark
-
-Tests insert and search performance at various scales (10K to 1B vectors) with reproducible synthetic data generation.
-
-```bash
-# Quick validation (10K vectors)
-bench_vector scale --num-vectors 10000 --db-path /tmp/bench_10k
-
-# Medium scale (100K vectors)
-bench_vector scale --num-vectors 100000 --db-path /tmp/bench_100k --output results.json
-
-# Large scale (1M vectors)
-bench_vector scale --num-vectors 1000000 --dim 128 --batch-size 5000 --db-path /tmp/bench_1m
-
-# L2 scale run
-bench_vector scale --num-vectors 100000 --dim 128 --distance l2 --db-path /tmp/bench_100k_l2
-```
-
-**Options:**
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--num-vectors` | Required | Number of vectors to insert |
-| `--db-path` | Required | Database path (cleared on start) |
-| `--dim` | 128 | Vector dimension |
-| `--batch-size` | 1000 | Vectors per batch insert |
-| `--num-queries` | 1000 | Search queries after insert |
-| `--m` | 16 | HNSW M parameter |
-| `--ef-construction` | 200 | HNSW ef_construction |
-| `--ef-search` | 100 | Search ef parameter |
-| `--k` | 10 | Top-k results |
-| `--seed` | 42 | Random seed for reproducibility |
-| `--progress-interval` | 10 | Progress report interval (seconds) |
-| `--output` | (optional) | JSON output file |
-
-**Output Example:**
-
-```
-=== Scale Benchmark Results ===
-Configuration:
-  Vectors: 100,000
-  Dimension: 128D
-  HNSW M=16, ef_construction=200
-  Batch size: 1000
-
-Insert Performance:
-  Vectors inserted: 100,000
-  Errors: 0
-  Duration: 1086.5s
-  Throughput: 92.0 vec/s
-
-Search Performance:
-  Queries: 500
-  Duration: 1.3s
-  QPS: 392.3
-  Latency P50: 2.48ms
-  Latency P99: 5.01ms
-
-Memory:
-  Peak RSS: 345.24 MB
-  Nav cache: 8.79 KB
-```
-
-**Use Cases:**
-
-1. **Validate scalability**: Ensure insert/search performance doesn't degrade unexpectedly at scale
-2. **CI regression detection**: Run at 1M scale to catch performance regressions
-3. **Memory profiling**: Monitor RSS growth to estimate hardware requirements
-4. **Reproducible benchmarks**: Fixed seed ensures identical vectors across runs
 
 ### `datasets` - List Available Options
 

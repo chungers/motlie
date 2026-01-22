@@ -287,6 +287,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
                 .with_hnsw_ef_construction(args.ef_construction as u16),
             &txn_db,
         )?;
+        print_embedding_summary(&args.db_path, embedding.code())?;
 
         if existing_count > 0 {
             let allocator = IdAllocator::recover(&txn_db, embedding.code())?;
@@ -469,6 +470,8 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
 
         if let Some(output_path) = args.output {
+            let (embedding_code, embedding_spec) =
+                resolve_embedding_spec(&args.db_path, Some(embedding.code()), None, None, None)?;
             let json = serde_json::json!({
                 "command": "index",
                 "config": {
@@ -483,6 +486,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
                     "async_workers": args.async_workers,
                     "stream": args.stream,
                 },
+                "embedding": embedding_spec_json(embedding_code, &embedding_spec),
                 "results": {
                     "vectors_inserted": inserted,
                     "errors": errors,
@@ -516,6 +520,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             .with_hnsw_ef_construction(args.ef_construction as u16),
         &txn_db,
     )?;
+    print_embedding_summary(&args.db_path, embedding.code())?;
 
     if existing_count > 0 {
         let allocator = IdAllocator::recover(&txn_db, embedding.code())?;
@@ -628,27 +633,30 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     meta.checkpoint(&args.db_path)?;
     println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
 
-    if let Some(output_path) = args.output {
-        let json = serde_json::json!({
-            "command": "index",
-            "config": {
-                "dataset": args.dataset,
-                "num_vectors": args.num_vectors,
+        if let Some(output_path) = args.output {
+            let (embedding_code, embedding_spec) =
+                resolve_embedding_spec(&args.db_path, Some(embedding.code()), None, None, None)?;
+            let json = serde_json::json!({
+                "command": "index",
+                "config": {
+                    "dataset": args.dataset,
+                    "num_vectors": args.num_vectors,
                 "dim": dim,
                 "hnsw_m": args.m,
                 "hnsw_ef_construction": args.ef_construction,
                 "batch_size": args.batch_size,
                 "seed": args.seed,
-                "distance": format!("{:?}", distance).to_lowercase(),
-                "async_workers": args.async_workers,
-                "stream": args.stream,
-            },
-            "results": {
-                "vectors_inserted": inserted,
-                "errors": errors,
-                "duration_secs": build_time,
-                "throughput_vec_per_sec": inserted as f64 / build_time.max(0.0001),
-                "peak_rss_bytes": peak_rss,
+                    "distance": format!("{:?}", distance).to_lowercase(),
+                    "async_workers": args.async_workers,
+                    "stream": args.stream,
+                },
+                "embedding": embedding_spec_json(embedding_code, &embedding_spec),
+                "results": {
+                    "vectors_inserted": inserted,
+                    "errors": errors,
+                    "duration_secs": build_time,
+                    "throughput_vec_per_sec": inserted as f64 / build_time.max(0.0001),
+                    "peak_rss_bytes": peak_rss,
             }
         });
 
@@ -669,6 +677,10 @@ pub struct QueryArgs {
     /// Database path
     #[arg(long)]
     pub db_path: PathBuf,
+
+    /// Embedding code to use (overrides dataset-based lookup)
+    #[arg(long)]
+    pub embedding_code: Option<u64>,
 
     /// Dataset for queries (to load test vectors)
     #[arg(long)]
@@ -779,19 +791,39 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     storage.ready()?;
     let storage = Arc::new(storage);
 
-    // Ensure embedding spec exists for public query API
-    let txn_db = storage.transaction_db()?;
+    // Resolve embedding spec without mutating the registry/DB.
     let registry = storage.cache().clone();
     let model = format!("bench-{}", args.dataset.to_lowercase());
-    let embedding = match registry.get(&model, dim as u32, distance) {
-        Some(existing) => existing,
-        None => registry.register(
-            EmbeddingBuilder::new(&model, dim as u32, distance)
-                .with_hnsw_m(meta.hnsw_m as u16)
-                .with_hnsw_ef_construction(meta.hnsw_ef_construction as u16),
-            &txn_db,
-        )?,
+    let (embedding_code, embedding_spec) = if let Some(code) = args.embedding_code {
+        resolve_embedding_spec(&args.db_path, Some(code), None, None, None)?
+    } else {
+        resolve_embedding_spec(
+            &args.db_path,
+            None,
+            Some(&model),
+            Some(dim as u32),
+            Some(meta.distance.as_str()),
+        )?
     };
+
+    if embedding_spec.dim != dim as u32 || embedding_spec.distance != distance {
+        anyhow::bail!(
+            "Embedding spec mismatch for code {}: spec dim={} distance={:?}, metadata dim={} distance={:?}",
+            embedding_code,
+            embedding_spec.dim,
+            embedding_spec.distance,
+            dim,
+            distance
+        );
+    }
+
+    let txn_db = storage.transaction_db()?;
+    if registry.get_by_code(embedding_code).is_none() {
+        registry.prewarm(&txn_db)?;
+    }
+    let embedding = registry
+        .get_by_code(embedding_code)
+        .ok_or_else(|| anyhow::anyhow!("No embedding found for code {}", embedding_code))?;
 
     if args.stdin {
         let mut input = String::new();
@@ -1045,7 +1077,10 @@ pub async fn query(args: QueryArgs) -> Result<()> {
                 "recall_sample_size": args.recall_sample_size,
                 "k": args.k,
                 "ef_search": args.ef_search,
+                "skip_recall": skip_recall,
+                "embedding_code": embedding_code,
             },
+            "embedding": embedding_spec_json(embedding_code, &embedding_spec),
             "results": {
                 "recall_at_k": recall_at_k,
                 "qps": stats.qps,
@@ -1452,6 +1487,40 @@ fn resolve_embedding_spec(
                 distance_str
             )
         })
+}
+
+fn embedding_spec_json(code: u64, spec: &EmbeddingSpec) -> serde_json::Value {
+    serde_json::json!({
+        "code": code,
+        "model": spec.model,
+        "dim": spec.dim,
+        "distance": format!("{:?}", spec.distance).to_lowercase(),
+        "storage_type": format!("{:?}", spec.storage_type).to_lowercase(),
+        "hnsw_m": spec.hnsw_m,
+        "hnsw_ef_construction": spec.hnsw_ef_construction,
+        "rabitq_bits": spec.rabitq_bits,
+        "rabitq_seed": spec.rabitq_seed,
+    })
+}
+
+fn print_embedding_summary(db_path: &PathBuf, code: u64) -> Result<()> {
+    let (code, spec) = resolve_embedding_spec(db_path, Some(code), None, None, None)?;
+    println!("\nEmbedding registered:");
+    println!("  Code: {}", code);
+    println!("  Model: {}", spec.model);
+    println!("  Dim: {}", spec.dim);
+    println!("  Distance: {:?}", spec.distance);
+    println!("  Storage: {:?}", spec.storage_type);
+    println!("  HNSW M: {}", spec.hnsw_m);
+    println!("  HNSW ef_construction: {}", spec.hnsw_ef_construction);
+    println!("  RaBitQ bits: {}", spec.rabitq_bits);
+    println!("  RaBitQ seed: {}", spec.rabitq_seed);
+    println!(
+        "  Inspect: bench_vector embeddings inspect --db-path {} --code {}",
+        db_path.display(),
+        code
+    );
+    Ok(())
 }
 
 /// Load vectors for an embedding using reservoir sampling.
@@ -2189,269 +2258,6 @@ fn embeddings_groundtruth(args: EmbeddingsGroundtruthArgs) -> Result<()> {
 
 // ============================================================================
 // Datasets Command
-// ============================================================================
-// Scale Command
-// ============================================================================
-
-#[derive(Parser)]
-pub struct ScaleArgs {
-    /// Number of vectors to insert
-    #[arg(long)]
-    pub num_vectors: usize,
-
-    /// Vector dimension
-    #[arg(long, default_value = "128")]
-    pub dim: usize,
-
-    /// Batch size for inserts
-    #[arg(long, default_value = "1000")]
-    pub batch_size: usize,
-
-    /// Number of search queries after insert
-    #[arg(long, default_value = "1000")]
-    pub num_queries: usize,
-
-    /// ef_search parameter
-    #[arg(long, default_value = "100")]
-    pub ef_search: usize,
-
-    /// k for top-k search
-    #[arg(long, default_value = "10")]
-    pub k: usize,
-
-    /// HNSW M parameter
-    #[arg(long, default_value = "16")]
-    pub m: usize,
-
-    /// HNSW ef_construction parameter
-    #[arg(long, default_value = "200")]
-    pub ef_construction: usize,
-
-    /// Random seed for reproducibility
-    #[arg(long, default_value = "42")]
-    pub seed: u64,
-
-    /// Distance metric: cosine, l2, dot
-    #[arg(long, default_value = "cosine")]
-    pub distance: String,
-
-    /// Progress reporting interval in seconds
-    #[arg(long, default_value = "10")]
-    pub progress_interval: u64,
-
-    /// Database path (required)
-    #[arg(long)]
-    pub db_path: PathBuf,
-
-    /// Output results to JSON file
-    #[arg(long)]
-    pub output: Option<PathBuf>,
-
-    /// Number of async workers (0 = sync inserts).
-    #[arg(long, default_value = "0")]
-    pub async_workers: usize,
-
-    /// Number of queries to sample for recall computation (0 to disable)
-    #[arg(long, default_value = "100")]
-    pub recall_sample_size: usize,
-
-    /// Rerank factor for search (candidates = k * rerank_factor)
-    #[arg(long, default_value = "4")]
-    pub rerank_factor: usize,
-}
-
-pub fn scale(args: ScaleArgs) -> Result<()> {
-    use motlie_db::vector::benchmark::{AsyncMetrics, ScaleBenchmark, ScaleConfig};
-    use motlie_db::vector::{AsyncGraphUpdater, AsyncUpdaterConfig, Distance, EmbeddingBuilder};
-    use std::time::Duration;
-
-    eprintln!(
-        "Warning: 'bench_vector scale' is deprecated. Use 'bench_vector index --dataset random --stream' \
-         and 'bench_vector query --dataset random' instead."
-    );
-
-    let distance = match args.distance.to_lowercase().as_str() {
-        "cosine" => Distance::Cosine,
-        "l2" | "euclidean" => Distance::L2,
-        "dot" | "dotproduct" => Distance::DotProduct,
-        _ => anyhow::bail!(
-            "Invalid distance: {} (use cosine, l2, or dot)",
-            args.distance
-        ),
-    };
-
-    println!("=== Scale Benchmark ===");
-    println!("Vectors: {}", args.num_vectors);
-    println!("Dimension: {}D", args.dim);
-    println!("HNSW: M={}, ef_construction={}", args.m, args.ef_construction);
-    println!("Distance: {:?}", distance);
-    println!("Batch size: {}", args.batch_size);
-    if args.async_workers > 0 {
-        println!("Insert mode: ASYNC ({} workers)", args.async_workers);
-    } else {
-        println!("Insert mode: SYNC (immediate indexing)");
-    }
-    println!("Database: {:?}", args.db_path);
-    println!();
-
-    // Delete existing DB if exists (fresh benchmark)
-    if args.db_path.exists() {
-        std::fs::remove_dir_all(&args.db_path)
-            .context("Failed to remove existing database")?;
-    }
-
-    let mut storage = motlie_db::vector::Storage::readwrite(&args.db_path);
-    storage.ready().context("Failed to initialize storage")?;
-    let storage = Arc::new(storage);
-
-    // Register embedding
-    let txn_db = storage.transaction_db().context("Failed to get transaction DB")?;
-    let embedding = storage
-        .cache()
-        .register(
-            EmbeddingBuilder::new("scale-bench", args.dim as u32, distance)
-                .with_hnsw_m(args.m as u16)
-                .with_hnsw_ef_construction(args.ef_construction as u16),
-            &txn_db,
-        )
-        .context("Failed to register embedding")?;
-
-    // Start async updater if async mode enabled (wrap in Arc for sharing)
-    let async_updater: Option<Arc<AsyncGraphUpdater>> = if args.async_workers > 0 {
-        let async_config = AsyncUpdaterConfig::new()
-            .with_num_workers(args.async_workers)
-            .with_batch_size(100)
-            .with_ef_construction(args.ef_construction)
-            .with_process_on_startup(false); // Don't drain on startup
-
-        let registry = storage.cache().clone();
-        let nav_cache = Arc::new(NavigationCache::new());
-
-        Some(Arc::new(AsyncGraphUpdater::start(
-            storage.clone(),
-            registry,
-            nav_cache,
-            async_config,
-        )))
-    } else {
-        None
-    };
-
-    // Build config
-    let config = ScaleConfig::new(args.num_vectors, args.dim)
-        .with_batch_size(args.batch_size)
-        .with_seed(args.seed)
-        .with_distance(distance)
-        .with_progress_interval(Duration::from_secs(args.progress_interval))
-        .with_num_queries(args.num_queries)
-        .with_ef_search(args.ef_search)
-        .with_k(args.k)
-        .with_hnsw_m(args.m)
-        .with_hnsw_ef_construction(args.ef_construction)
-        .with_immediate_index(args.async_workers == 0)
-        .with_recall_sample_size(args.recall_sample_size)
-        .with_rerank_factor(args.rerank_factor);
-
-    // Create async metrics callback if in async mode
-    let async_metrics = if let Some(ref updater) = async_updater {
-        // Clone Arc references for the closures
-        let updater_pending = Arc::clone(updater);
-        let updater_items = Arc::clone(updater);
-
-        Some(AsyncMetrics {
-            pending_queue_size: Box::new(move || updater_pending.pending_queue_size()),
-            items_processed: Box::new(move || updater_items.items_processed()),
-        })
-    } else {
-        None
-    };
-
-    // Run benchmark (inserts phase) with async metrics tracking
-    let result = ScaleBenchmark::run_with_async_metrics(&storage, &embedding, config, async_metrics)?;
-
-    // Wait for async workers to drain pending queue before reporting results
-    if let Some(updater) = async_updater {
-        println!("\nWaiting for async workers to drain pending queue...");
-        let drain_start = std::time::Instant::now();
-
-        // Poll until pending queue is empty
-        loop {
-            let pending = updater.pending_queue_size();
-            if pending == 0 {
-                break;
-            }
-            println!(
-                "  Pending: {} vectors, processed: {} items",
-                pending,
-                updater.items_processed()
-            );
-            std::thread::sleep(Duration::from_secs(2));
-        }
-
-        let items_processed = updater.items_processed();
-        println!(
-            "Async workers drained in {:.1}s ({} items processed)",
-            drain_start.elapsed().as_secs_f64(),
-            items_processed
-        );
-
-        // Shutdown workers - unwrap Arc to get ownership
-        match Arc::try_unwrap(updater) {
-            Ok(owned_updater) => owned_updater.shutdown(),
-            Err(_arc) => {
-                // Arc still has other references - just drop it
-                // Workers will be signaled to stop when Arc is dropped
-                println!("Note: Async workers still shutting down in background");
-            }
-        }
-    }
-
-    // Print results
-    println!("{}", result);
-
-    // Save to JSON if requested
-    if let Some(output_path) = args.output {
-        let json = serde_json::json!({
-            "config": {
-                "num_vectors": result.config.num_vectors,
-                "dim": result.config.dim,
-                "batch_size": result.config.batch_size,
-                "hnsw_m": result.config.hnsw_m,
-                "hnsw_ef_construction": result.config.hnsw_ef_construction,
-                "seed": result.config.seed,
-            },
-            "insert": {
-                "vectors_inserted": result.vectors_inserted,
-                "errors": result.insert_errors,
-                "duration_secs": result.insert_duration.as_secs_f64(),
-                "throughput_vec_per_sec": result.insert_throughput,
-            },
-            "search": {
-                "queries_executed": result.queries_executed,
-                "duration_secs": result.search_duration.as_secs_f64(),
-                "qps": result.search_qps,
-                "p50_ms": result.search_p50.as_secs_f64() * 1000.0,
-                "p99_ms": result.search_p99.as_secs_f64() * 1000.0,
-            },
-            "memory": {
-                "peak_rss_bytes": result.peak_memory_bytes,
-                "nav_cache_bytes": result.nav_cache_bytes,
-            },
-            "recall": {
-                "recall_at_k": result.recall_at_k,
-                "k": result.config.k,
-                "sample_queries": result.recall_queries,
-            }
-        });
-
-        std::fs::write(&output_path, serde_json::to_string_pretty(&json)?)
-            .context("Failed to write output file")?;
-        println!("\nResults saved to: {:?}", output_path);
-    }
-
-    Ok(())
-}
-
 // ============================================================================
 // List Datasets Command
 // ============================================================================
