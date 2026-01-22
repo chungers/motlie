@@ -364,10 +364,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
 
             let mutation = InsertVectorBatch::new(&embedding, payload);
             let mutation = if immediate { mutation.immediate() } else { mutation };
-            if let Err(err) = writer.send(vec![mutation.into()]).await {
-                errors += batch_len;
-                return Err(err);
-            }
+            writer.send(vec![mutation.into()]).await?;
             inserted += batch_len;
 
             if last_progress.elapsed() >= progress_interval {
@@ -565,10 +562,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         }
 
         let mutation = InsertVectorBatch::new(&embedding, payload).immediate();
-        if let Err(err) = writer.send(vec![mutation.into()]).await {
-            errors += batch.len();
-            return Err(err);
-        }
+        writer.send(vec![mutation.into()]).await?;
         inserted += batch.len();
 
         if last_progress.elapsed() >= progress_interval || inserted == total {
@@ -755,7 +749,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     let is_random = args.dataset.to_lowercase() == "random";
     let dim = meta.dim;
 
-    let (queries, ground_truth, mut skip_recall, vector_seed, query_seed) = if is_random {
+    let (queries, ground_truth, skip_recall, vector_seed, query_seed) = if is_random {
         let seed = args.seed;
         let vector_seed = seed.or(args.vector_seed).unwrap_or(meta.vector_seed);
         let query_seed = seed.or(args.query_seed).unwrap_or(meta.query_seed);
@@ -923,7 +917,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         for qi in 0..args.num_queries {
             let query = query_gen.generate_query();
             let start = Instant::now();
-            let results = SearchKNN::new(&embedding, query, args.k)
+            let _results = SearchKNN::new(&embedding, query, args.k)
                 .with_ef(args.ef_search)
                 .exact()
                 .run(&search_reader, timeout)

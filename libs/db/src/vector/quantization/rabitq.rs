@@ -385,6 +385,7 @@ impl RaBitQ {
     ///
     /// Inverse of `to_gray_code()`. Used for decoding multi-bit quantization levels.
     #[inline]
+    #[allow(dead_code)] // Reserved for multi-bit quantization support
     const fn from_gray_code(gray: u8) -> u8 {
         let mut n = gray;
         let mut mask = n >> 1;

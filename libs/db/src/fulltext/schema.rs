@@ -4,7 +4,7 @@
 
 use tantivy::schema::{
     self, Facet, Field, IndexRecordOption, TextFieldIndexing, TextOptions, FAST, INDEXED, STORED,
-    STRING, TEXT,
+    STRING,
 };
 
 /// Field handles for efficient access to the Tantivy schema fields.
