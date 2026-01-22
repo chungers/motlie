@@ -341,10 +341,9 @@ This extends `ConcurrentBenchmark` in `libs/db/src/vector/benchmark/concurrent.r
 **Goal:** Validate performance and resource usage at production scale.
 
 **Files:**
-- `libs/db/src/vector/benchmark/scale.rs` - Scale benchmark infrastructure (CLI deprecated)
+- `libs/db/src/vector/benchmark/scale.rs` - Scale benchmark infrastructure
 - `bins/bench_vector/src/commands.rs` - streaming random dataset support via `bench_vector index/query`
 - `libs/db/src/vector/docs/BASELINE.md` - Scale benchmark results
-- `bins/bench_vector/BENCH2.md` - Deprecation plan for scale → index+query
 
 **Foundation:**
 - [BASELINE.md](./BASELINE.md) - Current benchmark baselines (50K-1M)
@@ -390,7 +389,6 @@ Scale projections:
 - [x] 8.3.1: Create scale benchmark infrastructure with progress reporting
   - `benchmark/scale.rs`: `ScaleConfig`, `ScaleBenchmark`, `ScaleProgress`, `ScaleResult`
   - Real-time progress with throughput, ETA, memory tracking
-  - CLI now uses `bench_vector index/query` with streaming random datasets; `bench_vector scale` is deprecated
   - Distance wiring added (`--distance cosine|l2|dot`), with Cosine normalization only
 - [x] 8.3.2: Run baseline benchmarks (10K, 100K, 1M) **COMPLETE**
   - 10K: 224.3 vec/s insert, 623.7 QPS, 53 MB RSS
@@ -454,6 +452,7 @@ cargo build --release --bin bench_vector
 
 ./target/release/bench_vector query \
     --db-path /tmp/bench_1m --dataset random \
+    --embedding-code <EMBEDDING_CODE> \
     --num-queries 1000 --k 10 --ef-search 100 \
     --recall-sample-size 100 \
     --output /tmp/bench_1m_query.json
@@ -466,6 +465,7 @@ cargo build --release --bin bench_vector
 
 ./target/release/bench_vector query \
     --db-path /tmp/bench_10m --dataset random \
+    --embedding-code <EMBEDDING_CODE> \
     --num-queries 1000 --k 10 --ef-search 100 \
     --recall-sample-size 100 \
     --output /tmp/bench_10m_query.json
@@ -473,6 +473,9 @@ cargo build --release --bin bench_vector
 # Combine results (optional)
 jq -s '.[0] * .[1]' /tmp/bench_1m_index.json /tmp/bench_1m_query.json > /tmp/bench_1m.json
 ```
+
+**Note:** `bench_vector index` prints the embedding code and also writes it to the JSON output.
+Use that code with `bench_vector query --embedding-code <CODE>` to avoid mismatched specs.
 
 #### Expected Performance Targets
 
