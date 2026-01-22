@@ -3,6 +3,8 @@
 //! These are portable fallback implementations that work on any platform.
 //! They may still benefit from auto-vectorization by the compiler.
 
+#![allow(dead_code)] // Fallback implementations - may be unused when SIMD is available
+
 /// Compute squared Euclidean distance
 #[inline]
 pub fn euclidean_squared(a: &[f32], b: &[f32]) -> f32 {

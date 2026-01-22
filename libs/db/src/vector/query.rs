@@ -44,7 +44,10 @@ use crate::Id;
 /// Query enum for vector storage operations.
 ///
 /// All vector queries are variants of this enum, enabling type-safe
-/// dispatch in query consumers.
+/// dispatch in query consumers. This is an internal dispatch mechanism;
+/// the public API is through builder types like `GetVector`, `SearchKNN`, etc.
+#[doc(hidden)]
+#[allow(private_interfaces)]
 #[derive(Debug)]
 pub enum Query {
     // ─────────────────────────────────────────────────────────────

@@ -14,7 +14,7 @@
 
 use anyhow::Result;
 
-use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
+use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 use crate::vector::processor::Processor;
 use crate::vector::schema::{
     BinaryCodeCfKey, BinaryCodes, EmbeddingCode, IdForward, IdForwardCfKey, IdReverse,

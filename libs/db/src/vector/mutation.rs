@@ -11,6 +11,8 @@
 //! Mutations implement `MutationCodec` to marshal themselves to CF key-value pairs.
 //! This keeps marshaling logic with the mutation definitions rather than in schema.
 
+use std::sync::Mutex;
+
 use anyhow::Result;
 use tokio::sync::oneshot;
 
@@ -37,7 +39,7 @@ use super::writer::{MutationCacheUpdate, MutationExecutor};
 /// **Note on graph repair:** HNSW graph operations (edge updates, metadata)
 /// are handled internally during InsertVector. There is no public API for
 /// partial graph repair - repair requires full rebuild.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Mutation {
     // ─────────────────────────────────────────────────────────────
     // Embedding Space Management
@@ -277,23 +279,57 @@ impl From<InsertVectorBatch> for Mutation {
 // ============================================================================
 
 /// Synchronization marker for flush semantics.
+/// Marker for flush synchronization.
+///
+/// Contains a oneshot sender that signals when the flush completes.
+/// Uses `Mutex<Option<...>>` to allow taking ownership from a shared reference,
+/// since `process_batch` may receive `&[Mutation]`.
 ///
 /// When a FlushMarker is processed by the consumer, it signals the
 /// oneshot channel to indicate that all prior mutations have been committed.
 /// This enables the `Writer::flush()` and `Writer::send_sync()` methods.
-#[derive(Debug)]
-pub struct FlushMarker(pub(crate) oneshot::Sender<()>);
+pub struct FlushMarker {
+    completion: Mutex<Option<oneshot::Sender<()>>>,
+}
 
 impl FlushMarker {
-    /// Create a new flush marker with a oneshot channel.
-    pub fn new() -> (Self, oneshot::Receiver<()>) {
-        let (tx, rx) = oneshot::channel();
-        (Self(tx), rx)
+    /// Create a new flush marker with completion channel.
+    pub fn new(completion: oneshot::Sender<()>) -> Self {
+        Self {
+            completion: Mutex::new(Some(completion)),
+        }
     }
 
-    /// Signal that flush is complete.
-    pub fn complete(self) {
-        let _ = self.0.send(());
+    /// Take the completion sender (can only be called once).
+    ///
+    /// Returns `None` if already taken or if the mutex is poisoned.
+    pub fn take_completion(&self) -> Option<oneshot::Sender<()>> {
+        self.completion.lock().ok()?.take()
+    }
+}
+
+impl std::fmt::Debug for FlushMarker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let has_completion = self
+            .completion
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+        f.debug_struct("FlushMarker")
+            .field("has_completion", &has_completion)
+            .finish()
+    }
+}
+
+// FlushMarker cannot be Clone since oneshot::Sender is not Clone
+// We implement a manual Clone that creates an "empty" marker
+impl Clone for FlushMarker {
+    fn clone(&self) -> Self {
+        // Cloning a FlushMarker creates an empty one (no completion channel)
+        // This is intentional - only the original can signal completion
+        Self {
+            completion: Mutex::new(None),
+        }
     }
 }
 
@@ -601,9 +637,30 @@ mod tests {
 
     #[test]
     fn test_flush_marker() {
-        let (marker, mut rx) = FlushMarker::new();
-        marker.complete();
-        // Should not panic - receiver gets the signal
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let marker = FlushMarker::new(tx);
+
+        // Take completion and signal
+        let completion = marker.take_completion().expect("should have completion");
+        completion.send(()).expect("should send");
+
+        // Receiver gets the signal
         assert!(rx.try_recv().is_ok());
+
+        // Second take returns None
+        assert!(marker.take_completion().is_none());
+    }
+
+    #[test]
+    fn test_flush_marker_clone() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let marker = FlushMarker::new(tx);
+
+        // Clone creates empty marker
+        let cloned = marker.clone();
+        assert!(cloned.take_completion().is_none());
+
+        // Original still has completion
+        assert!(marker.take_completion().is_some());
     }
 }

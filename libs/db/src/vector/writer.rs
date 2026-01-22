@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::hnsw::CacheUpdate;
 use super::mutation::{FlushMarker, Mutation};
@@ -308,7 +308,8 @@ impl Writer {
     /// Returns when all mutations sent before this call are committed
     /// to RocksDB and visible to readers.
     pub async fn flush(&self) -> Result<()> {
-        let (marker, rx) = FlushMarker::new();
+        let (tx, rx) = oneshot::channel();
+        let marker = FlushMarker::new(tx);
 
         // Send flush marker through the same channel as mutations
         self.sender
@@ -443,9 +444,13 @@ impl Consumer {
         self.execute_mutations(&mutations).await?;
 
         // Signal completion for any flush markers
-        for mutation in mutations {
+        for mutation in &mutations {
             if let Mutation::Flush(marker) = mutation {
-                marker.complete();
+                if let Some(completion) = marker.take_completion() {
+                    // Signal that flush is complete - ignore send errors
+                    // (receiver may have been dropped if caller timed out)
+                    let _ = completion.send(());
+                }
             }
         }
 
@@ -598,6 +603,7 @@ pub fn spawn_mutation_consumer_with_storage_autoreg(
 ///
 /// This function is `pub(crate)` to encourage use of the storage-based API
 /// which hides the Processor abstraction.
+#[allow(dead_code)] // Available for advanced use cases requiring custom processors
 pub(crate) fn spawn_mutation_consumer_with_processor(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
