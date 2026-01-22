@@ -7,8 +7,8 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────┐
-//! │                     StorageSubsystem Trait                          │
-//! │  Defines: column families, cache type, prewarm logic                │
+//! │                     RocksdbSubsystem Trait                           │
+//! │  Extends: SubsystemProvider<TransactionDB> with CF management       │
 //! └─────────────────────────────────────────────────────────────────────┘
 //!                              ▲
 //!                              │ implements
@@ -40,13 +40,12 @@
 //! ## Shared (multiple subsystems via StorageBuilder)
 //!
 //! ```ignore
-//! // Create components and get cache references before boxing
-//! let graph_component = graph::component();
-//! let name_cache = graph_component.cache().clone();
+//! let graph_subsystem = graph::Subsystem::new();
+//! let name_cache = graph_subsystem.cache().clone();
 //!
 //! let shared = StorageBuilder::new(path)
-//!     .with_component(Box::new(graph_component))
-//!     .with_component(Box::new(vector::component()))
+//!     .with_rocksdb(Box::new(graph_subsystem))
+//!     .with_rocksdb(Box::new(vector::Subsystem::new()))
 //!     .build()?;
 //! ```
 //!
@@ -66,4 +65,4 @@ pub use cf_traits::{
 pub use config::BlockCacheConfig;
 pub use handle::{DatabaseHandle, StorageMode, StorageOptions};
 pub use storage::Storage;
-pub use subsystem::{ComponentWrapper, DbAccess, StorageSubsystem};
+pub use subsystem::{DbAccess, RocksdbSubsystem, StorageSubsystem};

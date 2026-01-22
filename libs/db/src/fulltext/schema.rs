@@ -201,12 +201,19 @@ pub fn compute_validity_facet(temporal_range: &Option<crate::TemporalRange>) -> 
 }
 
 // ============================================================================
-// Schema - IndexProvider Implementation
+// Schema - SubsystemProvider + FulltextSubsystem Implementation
 // ============================================================================
 
-use crate::index_provider::IndexProvider;
+use crate::SubsystemProvider;
+use super::{format_bytes, FulltextSubsystem};
+use motlie_core::telemetry::SubsystemInfo;
 
-/// Fulltext module schema implementing the IndexProvider trait.
+/// Fulltext module schema implementing the subsystem provider traits.
+///
+/// Implements:
+/// - [`SubsystemInfo`] - Identity and observability
+/// - [`SubsystemProvider<tantivy::Index>`] - Lifecycle hooks
+/// - [`FulltextSubsystem`] - Tantivy-specific schema and configuration
 ///
 /// This enables the fulltext module to register its Tantivy schema with
 /// StorageBuilder for unified initialization.
@@ -269,8 +276,48 @@ impl Default for Schema {
     }
 }
 
-impl IndexProvider for Schema {
+// ----------------------------------------------------------------------------
+// SubsystemInfo Implementation (from motlie_core::telemetry)
+// ----------------------------------------------------------------------------
+
+impl SubsystemInfo for Schema {
     fn name(&self) -> &'static str {
+        "Fulltext Search (Tantivy)"
+    }
+
+    fn info_lines(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("Writer Heap Size", format_bytes(self.writer_heap_size)),
+            ("Stored Fields", "true".to_string()),
+            ("BM25 Scoring", "true".to_string()),
+            ("Faceted Search", "true".to_string()),
+            ("Fuzzy Search", "true".to_string()),
+        ]
+    }
+}
+
+// ----------------------------------------------------------------------------
+// SubsystemProvider<tantivy::Index> Implementation
+// ----------------------------------------------------------------------------
+
+impl SubsystemProvider<tantivy::Index> for Schema {
+    fn on_ready(&self, _index: &tantivy::Index) -> anyhow::Result<()> {
+        tracing::info!(subsystem = "fulltext", "Index ready");
+        Ok(())
+    }
+
+    fn on_shutdown(&self) -> anyhow::Result<()> {
+        tracing::info!(subsystem = "fulltext", "Shutting down");
+        Ok(())
+    }
+}
+
+// ----------------------------------------------------------------------------
+// FulltextSubsystem Implementation
+// ----------------------------------------------------------------------------
+
+impl FulltextSubsystem for Schema {
+    fn id(&self) -> &'static str {
         "fulltext"
     }
 
@@ -280,11 +327,6 @@ impl IndexProvider for Schema {
 
     fn writer_heap_size(&self) -> usize {
         self.writer_heap_size
-    }
-
-    fn on_ready(&self, _index: &tantivy::Index) -> anyhow::Result<()> {
-        tracing::info!("[fulltext::Schema] Index ready");
-        Ok(())
     }
 }
 

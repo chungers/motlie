@@ -62,13 +62,13 @@ use super::subsystem::VectorBlockCacheConfig;
 /// This is the primary key of the `EmbeddingSpecs` CF and serves as a
 /// foreign key in all other vector CFs. Using a type alias makes the
 /// relationship explicit without relying on comments.
-pub(crate) type EmbeddingCode = u64;
+pub type EmbeddingCode = u64;
 
 /// Internal vector identifier within an embedding space.
 ///
 /// Compact u32 index used for HNSW graph edges and storage.
 /// Mapped bidirectionally to external ULIDs via IdForward/IdReverse CFs.
-pub(crate) type VecId = u32;
+pub type VecId = u32;
 
 /// HNSW graph layer index.
 ///
@@ -86,7 +86,72 @@ pub(crate) type RoaringBitmapBytes = Vec<u8>;
 ///
 /// Fixed-size binary representation of a vector for fast approximate distance.
 /// Size depends on vector dimensionality (e.g., 16 bytes for 128-dim 1-bit RaBitQ).
-pub(crate) type RabitqCode = Vec<u8>;
+/// Type alias for RaBitQ binary code
+pub type RabitqCode = Vec<u8>;
+
+/// ADC (Asymmetric Distance Computation) corrective factors.
+///
+/// Stores per-vector correction data needed for accurate distance estimation
+/// in RaBitQ ADC mode. Unlike symmetric Hamming, ADC keeps the query as float32
+/// and uses these factors to correct the binary approximation.
+///
+/// # Storage
+///
+/// 8 bytes per vector (2 × f32).
+///
+/// # Formula
+///
+/// Distance estimation uses:
+/// ```text
+/// ⟨q, v⟩_estimated = binary_dot(q_rotated, v_code) / quantization_error
+/// ```
+///
+/// See `RABITQ.md` for detailed explanation of why ADC solves the multi-bit problem.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AdcCorrection {
+    /// L2 norm of the vector: ||v||
+    ///
+    /// For normalized unit vectors this is ~1.0, but we store it for generality
+    /// and to handle vectors that aren't perfectly normalized.
+    pub vector_norm: f32,
+
+    /// Quantization error correction: ⟨v_quantized_decoded, v_normalized⟩
+    ///
+    /// This captures how much the quantized representation deviates from the
+    /// original vector. Used to unbias the inner product estimate.
+    pub quantization_error: f32,
+}
+
+impl AdcCorrection {
+    /// Create a new ADC correction.
+    #[inline]
+    pub fn new(vector_norm: f32, quantization_error: f32) -> Self {
+        Self {
+            vector_norm,
+            quantization_error,
+        }
+    }
+}
+
+/// Vector element type.
+///
+/// Controls how vector elements are serialized in the Vectors CF.
+/// All computation is done in f32 regardless of element type.
+///
+/// # Storage Savings
+///
+/// | Type | Bytes/Element | 512D Vector | Savings |
+/// |------|---------------|-------------|---------|
+/// | F32  | 4 bytes       | 2,048 bytes | -       |
+/// | F16  | 2 bytes       | 1,024 bytes | **50%** |
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum VectorElementType {
+    /// 32-bit IEEE 754 floating point (default, full precision)
+    #[default]
+    F32,
+    /// 16-bit IEEE 754 half-precision (50% smaller, ~0.1% precision loss for normalized vectors)
+    F16,
+}
 
 // ============================================================================
 // Column Family Names
@@ -122,6 +187,7 @@ pub struct EmbeddingSpecs;
 /// Domain struct for embedding specification.
 ///
 /// Rich struct with >2 fields, so defined separately per naming convention.
+/// This is the **single source of truth** for how to build and search an embedding space.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EmbeddingSpec {
     /// Model name (e.g., "gemma", "qwen3", "ada-002")
@@ -130,6 +196,72 @@ pub struct EmbeddingSpec {
     pub dim: u32,
     /// Distance metric for similarity computation
     pub distance: Distance,
+    /// Storage type for vector elements (default: F32 for backward compatibility)
+    #[serde(default)]
+    pub storage_type: VectorElementType,
+
+    // =========================================================================
+    // Build Parameters (Phase 5.6 - Config Persistence)
+    // =========================================================================
+
+    /// HNSW M parameter: number of bidirectional links per node.
+    /// Higher M = better recall, more memory. Default: 16
+    #[serde(default = "default_hnsw_m")]
+    pub hnsw_m: u16,
+
+    /// HNSW ef_construction: search beam width during index build.
+    /// Higher = better graph quality, slower build. Default: 200
+    #[serde(default = "default_hnsw_ef_construction")]
+    pub hnsw_ef_construction: u16,
+
+    /// RaBitQ bits per dimension for binary quantization.
+    /// 1 = 32x compression, 2 = 16x, 4 = 8x. Default: 1
+    #[serde(default = "default_rabitq_bits")]
+    pub rabitq_bits: u8,
+
+    /// RaBitQ rotation matrix seed for deterministic encoding.
+    /// Same seed = same rotation matrix. Default: 42
+    #[serde(default = "default_rabitq_seed")]
+    pub rabitq_seed: u64,
+}
+
+// Serde default functions for backward compatibility
+fn default_hnsw_m() -> u16 {
+    16
+}
+fn default_hnsw_ef_construction() -> u16 {
+    200
+}
+fn default_rabitq_bits() -> u8 {
+    1
+}
+fn default_rabitq_seed() -> u64 {
+    42
+}
+
+impl EmbeddingSpec {
+    /// Compute a deterministic hash of all build-affecting parameters.
+    ///
+    /// This hash is stored in GraphMeta::SpecHash on first index build and validated
+    /// on subsequent inserts and searches to detect configuration drift.
+    ///
+    /// Includes: model, dim, distance, storage_type, hnsw_m, hnsw_ef_construction,
+    /// rabitq_bits, rabitq_seed
+    pub fn compute_spec_hash(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        self.model.hash(&mut hasher);
+        self.dim.hash(&mut hasher);
+        self.distance.hash(&mut hasher);
+        self.storage_type.hash(&mut hasher);
+        self.hnsw_m.hash(&mut hasher);
+        self.hnsw_ef_construction.hash(&mut hasher);
+        self.rabitq_bits.hash(&mut hasher);
+        self.rabitq_seed.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 /// EmbeddingSpecs key: the embedding space identifier (primary key)
@@ -187,15 +319,15 @@ impl ColumnFamilySerde for EmbeddingSpecs {
 ///
 /// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
 /// Value: f32[dim] as raw bytes (e.g., 512 bytes for 128D)
-pub(crate) struct Vectors;
+pub struct Vectors;
 
 /// Vectors key: (embedding_code, vec_id)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct VectorCfKey(pub(crate) EmbeddingCode, pub(crate) VecId);
+pub struct VectorCfKey(pub EmbeddingCode, pub VecId);
 
 /// Vectors value: raw f32 vector data
 #[derive(Debug, Clone)]
-pub(crate) struct VectorCfValue(pub(crate) Vec<f32>);
+pub struct VectorCfValue(pub Vec<f32>);
 
 impl ColumnFamily for Vectors {
     const CF_NAME: &'static str = "vector/vectors";
@@ -237,28 +369,95 @@ impl Vectors {
         Ok(VectorCfKey(embedding_code, vec_id))
     }
 
-    /// Store vector as raw f32 bytes (no compression for fast access)
+    /// Store vector as raw f32 bytes (backward compatible, uses F32 storage)
     pub fn value_to_bytes(value: &VectorCfValue) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(value.0.len() * 4);
-        for &v in &value.0 {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        bytes
+        Self::value_to_bytes_typed(&value.0, VectorElementType::F32)
     }
 
-    /// Load vector from raw f32 bytes
+    /// Load vector from raw f32 bytes (backward compatible, assumes F32 storage)
     pub fn value_from_bytes(bytes: &[u8]) -> Result<VectorCfValue> {
-        if bytes.len() % 4 != 0 {
-            anyhow::bail!(
-                "Invalid vector bytes length: {} is not divisible by 4",
-                bytes.len()
-            );
+        Self::value_from_bytes_typed(bytes, VectorElementType::F32).map(VectorCfValue)
+    }
+
+    /// Store vector with specified storage type.
+    ///
+    /// # Arguments
+    /// * `value` - Vector as f32 slice (source is always f32)
+    /// * `storage_type` - Target storage format (F32 or F16)
+    ///
+    /// # Returns
+    /// Serialized bytes in the specified format
+    pub fn value_to_bytes_typed(value: &[f32], storage_type: VectorElementType) -> Vec<u8> {
+        match storage_type {
+            VectorElementType::F32 => {
+                let mut bytes = Vec::with_capacity(value.len() * 4);
+                for &v in value {
+                    bytes.extend_from_slice(&v.to_le_bytes());
+                }
+                bytes
+            }
+            VectorElementType::F16 => {
+                use half::f16;
+                let mut bytes = Vec::with_capacity(value.len() * 2);
+                for &v in value {
+                    let h = f16::from_f32(v);
+                    bytes.extend_from_slice(&h.to_le_bytes());
+                }
+                bytes
+            }
         }
-        let mut vector = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
-            vector.push(f32::from_le_bytes(chunk.try_into()?));
+    }
+
+    /// Load vector from bytes with specified storage type.
+    ///
+    /// # Arguments
+    /// * `bytes` - Serialized vector bytes
+    /// * `storage_type` - Storage format used when serializing
+    ///
+    /// # Returns
+    /// Vector as Vec<f32> (always returns f32 for computation)
+    pub fn value_from_bytes_typed(
+        bytes: &[u8],
+        storage_type: VectorElementType,
+    ) -> Result<Vec<f32>> {
+        match storage_type {
+            VectorElementType::F32 => {
+                if bytes.len() % 4 != 0 {
+                    anyhow::bail!(
+                        "Invalid F32 vector bytes length: {} is not divisible by 4",
+                        bytes.len()
+                    );
+                }
+                let mut vector = Vec::with_capacity(bytes.len() / 4);
+                for chunk in bytes.chunks_exact(4) {
+                    vector.push(f32::from_le_bytes(chunk.try_into()?));
+                }
+                Ok(vector)
+            }
+            VectorElementType::F16 => {
+                use half::f16;
+                if bytes.len() % 2 != 0 {
+                    anyhow::bail!(
+                        "Invalid F16 vector bytes length: {} is not divisible by 2",
+                        bytes.len()
+                    );
+                }
+                let mut vector = Vec::with_capacity(bytes.len() / 2);
+                for chunk in bytes.chunks_exact(2) {
+                    let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                    vector.push(f16::from_bits(bits).to_f32());
+                }
+                Ok(vector)
+            }
         }
-        Ok(VectorCfValue(vector))
+    }
+
+    /// Calculate storage size in bytes for a vector of given dimension.
+    pub fn storage_size(dim: usize, storage_type: VectorElementType) -> usize {
+        match storage_type {
+            VectorElementType::F32 => dim * 4,
+            VectorElementType::F16 => dim * 2,
+        }
     }
 }
 
@@ -274,7 +473,11 @@ pub(crate) struct Edges;
 
 /// Edges key: (embedding_code, vec_id, layer)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EdgeCfKey(pub(crate) EmbeddingCode, pub(crate) VecId, pub(crate) HnswLayer);
+pub(crate) struct EdgeCfKey(
+    pub(crate) EmbeddingCode,
+    pub(crate) VecId,
+    pub(crate) HnswLayer,
+);
 
 /// Edges value: serialized RoaringBitmap of neighbor vec_ids
 #[derive(Debug, Clone)]
@@ -293,9 +496,21 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for Edges {
 
         block_opts.set_block_cache(cache);
         block_opts.set_block_size(config.default_block_size);
+
+        // Enable bloom filter for fast point lookups (10 bits per key)
+        // This is critical for HNSW get_neighbors performance
+        block_opts.set_bloom_filter(10.0, false);
+
         opts.set_compression_type(rocksdb::DBCompressionType::None);
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(12));
         opts.set_block_based_table_factory(&block_opts);
+
+        // Configure merge operator for concurrent edge updates
+        opts.set_merge_operator_associative(
+            super::merge::EDGE_MERGE_OPERATOR_NAME,
+            super::merge::edge_full_merge,
+        );
+
         opts
     }
 }
@@ -311,10 +526,7 @@ impl Edges {
 
     pub fn key_from_bytes(bytes: &[u8]) -> Result<EdgeCfKey> {
         if bytes.len() != 13 {
-            anyhow::bail!(
-                "Invalid EdgeCfKey length: expected 13, got {}",
-                bytes.len()
-            );
+            anyhow::bail!("Invalid EdgeCfKey length: expected 13, got {}", bytes.len());
         }
         let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
         let vec_id = u32::from_be_bytes(bytes[8..12].try_into()?);
@@ -337,19 +549,28 @@ impl Edges {
 // BinaryCodes CF
 // ============================================================================
 
-/// Binary codes column family - RaBitQ quantized vectors.
+/// Binary codes column family - RaBitQ quantized vectors with ADC corrections.
 ///
 /// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
-/// Value: u8[code_size] (e.g., 16 bytes for 128-dim 1-bit RaBitQ)
-pub(crate) struct BinaryCodes;
+/// Value: [binary_code: N bytes] + [vector_norm: f32] + [quantization_error: f32]
+///
+/// The ADC correction factors (8 bytes) enable high-recall search:
+/// - Hamming distance: ~24% recall (multi-bit broken due to Gray code wraparound)
+/// - ADC distance: ~92% recall (preserves numeric ordering)
+pub struct BinaryCodes;
 
 /// BinaryCodes key: (embedding_code, vec_id)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct BinaryCodeCfKey(pub(crate) EmbeddingCode, pub(crate) VecId);
+pub struct BinaryCodeCfKey(pub EmbeddingCode, pub VecId);
 
-/// BinaryCodes value: RaBitQ quantized code
+/// BinaryCodes value: RaBitQ quantized code with ADC correction factors.
 #[derive(Debug, Clone)]
-pub(crate) struct BinaryCodeCfValue(pub(crate) RabitqCode);
+pub struct BinaryCodeCfValue {
+    /// Binary quantized code
+    pub code: RabitqCode,
+    /// ADC correction factors for distance estimation
+    pub correction: AdcCorrection,
+}
 
 impl ColumnFamily for BinaryCodes {
     const CF_NAME: &'static str = "vector/binary_codes";
@@ -391,14 +612,32 @@ impl BinaryCodes {
         Ok(BinaryCodeCfKey(embedding_code, vec_id))
     }
 
-    /// Serialize binary code value
+    /// Serialize binary code value with ADC correction.
+    ///
+    /// Format: [code bytes][vector_norm: f32 LE][quantization_error: f32 LE]
     pub fn value_to_bytes(value: &BinaryCodeCfValue) -> Vec<u8> {
-        value.0.clone()
+        let mut bytes = value.code.clone();
+        bytes.extend_from_slice(&value.correction.vector_norm.to_le_bytes());
+        bytes.extend_from_slice(&value.correction.quantization_error.to_le_bytes());
+        bytes
     }
 
-    /// Deserialize binary code value
+    /// Deserialize binary code value with ADC correction.
     pub fn value_from_bytes(bytes: &[u8]) -> Result<BinaryCodeCfValue> {
-        Ok(BinaryCodeCfValue(bytes.to_vec()))
+        if bytes.len() < 8 {
+            anyhow::bail!(
+                "Invalid BinaryCodeCfValue length: expected >= 8, got {}",
+                bytes.len()
+            );
+        }
+        let code_len = bytes.len() - 8;
+        let code = bytes[..code_len].to_vec();
+        let norm = f32::from_le_bytes(bytes[code_len..code_len + 4].try_into()?);
+        let qerr = f32::from_le_bytes(bytes[code_len + 4..].try_into()?);
+        Ok(BinaryCodeCfValue {
+            code,
+            correction: AdcCorrection::new(norm, qerr),
+        })
     }
 }
 
@@ -413,18 +652,293 @@ impl BinaryCodes {
 pub(crate) struct VecMeta;
 
 /// Domain struct for vector metadata.
+// ============================================================================
+// VecMetadata Flags Design
+// ============================================================================
+//
+// The `flags` field in VecMetadata uses a hybrid enum + bitmask design:
+//
+// ```
+// flags byte: 0bRRRRRRLL
+//             ││││││└┴── Lifecycle (2 bits): mutually exclusive states
+//             │││││└──── Reserved (bit 2)
+//             ││││└───── Reserved (bit 3)
+//             │││└────── Reserved (bit 4)
+//             ││└─────── Reserved (bit 5)
+//             │└──────── Reserved (bit 6)
+//             └───────── REPLICATED (bit 7) - FUTURE: not yet implemented
+// ```
+//
+// ## Lifecycle States (bits 0-1, mutually exclusive)
+//
+// The lower 2 bits represent the vector's lifecycle state as a type-safe enum:
+// - 0b00 = Indexed: fully in HNSW graph, searchable
+// - 0b01 = Deleted: soft-deleted, skip in search, awaiting cleanup
+// - 0b10 = Pending: stored but awaiting async graph construction
+// - 0b11 = PendingDeleted: deleted before graph construction completed
+//
+// ## Orthogonal Flags (bits 2-7, independent)
+//
+// Upper bits are reserved for future orthogonal capabilities that can be
+// combined with any lifecycle state:
+// - Bit 7 (REPLICATED): FUTURE capability for distributed replication.
+//   When implemented, indicates vector data has been replicated to another
+//   node in a distributed deployment. NOT YET IMPLEMENTED - reserved only.
+// - Bits 2-6: Reserved for future use.
+//
+// ## Backward Compatibility
+//
+// This design maintains wire compatibility with the original FLAG_DELETED=0x01
+// and FLAG_PENDING=0x02 constants:
+// - Old Indexed (flags=0x00) → VecLifecycle::Indexed (0b00)
+// - Old Deleted (flags=0x01) → VecLifecycle::Deleted (0b01)
+// - Old Pending (flags=0x02) → VecLifecycle::Pending (0b10)
+// - Old Pending+Deleted (flags=0x03) → VecLifecycle::PendingDeleted (0b11)
+//
+// ============================================================================
+
+/// Vector lifecycle states (mutually exclusive, occupies lower 2 bits of flags).
+///
+/// Represents the vector's position in its lifecycle state machine:
+/// ```text
+/// Insert(build_index=false) ──► Pending ──► Indexed
+///                                  │            │
+///                                  ▼            ▼
+///                            PendingDeleted  Deleted
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum VecLifecycle {
+    /// Vector is fully indexed in the HNSW graph and searchable.
+    Indexed = 0b00,
+    /// Vector has been soft-deleted. Skip in search, awaiting cleanup.
+    Deleted = 0b01,
+    /// Vector is stored but awaiting async HNSW graph construction.
+    /// Search should include via brute-force fallback if needed.
+    Pending = 0b10,
+    /// Vector was deleted before async graph construction completed.
+    /// Still needs removal from Pending queue, but skip in search.
+    PendingDeleted = 0b11,
+}
+
+impl VecLifecycle {
+    /// Bitmask for lifecycle bits (lower 2 bits).
+    const MASK: u8 = 0b0000_0011;
+
+    /// Extract lifecycle state from flags byte.
+    #[inline]
+    fn from_flags(flags: u8) -> Self {
+        match flags & Self::MASK {
+            0b00 => Self::Indexed,
+            0b01 => Self::Deleted,
+            0b10 => Self::Pending,
+            0b11 => Self::PendingDeleted,
+            _ => unreachable!(), // Only 4 possible values with 2-bit mask
+        }
+    }
+
+    /// Apply this lifecycle state to a flags byte, preserving orthogonal flags.
+    #[inline]
+    fn apply_to_flags(self, flags: u8) -> u8 {
+        (flags & !Self::MASK) | (self as u8)
+    }
+}
+
+/// Orthogonal flags for future capabilities (upper bits of flags byte).
+///
+/// These flags are independent of lifecycle state and can be combined with
+/// any VecLifecycle value.
+#[allow(non_snake_case)]
+pub(crate) mod VecFlags {
+    /// FUTURE CAPABILITY - NOT YET IMPLEMENTED.
+    ///
+    /// When implemented, this flag will indicate that the vector data has been
+    /// replicated to another node in a distributed deployment. This enables:
+    /// - Distributed search across multiple nodes
+    /// - Fault tolerance through data redundancy
+    /// - Geographic distribution for latency optimization
+    ///
+    /// Bit 7 is chosen to leave room for other orthogonal flags in bits 2-6.
+    ///
+    /// Usage (when implemented):
+    /// ```ignore
+    /// meta.set_replicated(true);  // Mark as replicated
+    /// if meta.is_replicated() { ... }  // Check replication status
+    /// ```
+    #[allow(dead_code)]
+    pub const REPLICATED: u8 = 0b1000_0000; // bit 7
+}
+
+/// Vector metadata stored in VecMeta column family.
 ///
 /// Rich struct with >2 fields, so defined separately per naming convention.
 /// Uses rkyv for zero-copy access during HNSW search (hot path reads max_layer).
+///
+/// See module-level documentation for flags byte layout.
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Debug, Clone)]
 #[archive(check_bytes)]
 pub(crate) struct VecMetadata {
-    /// Maximum HNSW layer this vector appears in
+    /// Maximum HNSW layer this vector appears in (0 if pending).
     pub(crate) max_layer: u8,
-    /// Flags (reserved for future use: deleted, etc.)
-    pub(crate) flags: u8,
-    /// Timestamp when vector was created (millis since epoch)
+    /// Combined lifecycle state (bits 0-1) and orthogonal flags (bits 2-7).
+    /// Use `lifecycle()`, `is_pending()`, etc. instead of direct access.
+    flags: u8,
+    /// Timestamp when vector was created (millis since epoch).
     pub(crate) created_at: u64,
+}
+
+impl VecMetadata {
+    /// Create metadata with specified max_layer and raw flags.
+    fn new(max_layer: u8, flags: u8) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        Self {
+            max_layer,
+            flags,
+            created_at,
+        }
+    }
+
+    /// Create metadata for a pending vector (awaiting async graph construction).
+    pub(crate) fn pending() -> Self {
+        Self::new(0, VecLifecycle::Pending as u8)
+    }
+
+    /// Create metadata for an indexed vector (in HNSW graph).
+    pub(crate) fn indexed(max_layer: u8) -> Self {
+        Self::new(max_layer, VecLifecycle::Indexed as u8)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Lifecycle State (mutually exclusive, type-safe enum)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Get the current lifecycle state as a type-safe enum.
+    #[inline]
+    pub(crate) fn lifecycle(&self) -> VecLifecycle {
+        VecLifecycle::from_flags(self.flags)
+    }
+
+    /// Set lifecycle state, preserving any orthogonal flags.
+    #[inline]
+    pub(crate) fn set_lifecycle(&mut self, state: VecLifecycle) {
+        self.flags = state.apply_to_flags(self.flags);
+    }
+
+    /// Check if vector is pending graph construction.
+    ///
+    /// Returns true for both `Pending` and `PendingDeleted` states,
+    /// as both require processing by the async graph updater.
+    #[inline]
+    pub(crate) fn is_pending(&self) -> bool {
+        matches!(
+            self.lifecycle(),
+            VecLifecycle::Pending | VecLifecycle::PendingDeleted
+        )
+    }
+
+    /// Check if vector is deleted (should skip in search).
+    ///
+    /// Returns true for both `Deleted` and `PendingDeleted` states.
+    #[inline]
+    pub(crate) fn is_deleted(&self) -> bool {
+        matches!(
+            self.lifecycle(),
+            VecLifecycle::Deleted | VecLifecycle::PendingDeleted
+        )
+    }
+
+    /// Check if vector is fully indexed and active.
+    #[inline]
+    pub(crate) fn is_indexed(&self) -> bool {
+        self.lifecycle() == VecLifecycle::Indexed
+    }
+
+    /// Mark as deleted, handling state transition correctly.
+    ///
+    /// State transitions:
+    /// - Indexed → Deleted
+    /// - Pending → PendingDeleted (still needs async updater cleanup)
+    /// - Deleted/PendingDeleted → unchanged
+    pub(crate) fn set_deleted(&mut self) {
+        let new_state = match self.lifecycle() {
+            VecLifecycle::Indexed => VecLifecycle::Deleted,
+            VecLifecycle::Pending => VecLifecycle::PendingDeleted,
+            other => other, // Already deleted
+        };
+        self.set_lifecycle(new_state);
+    }
+
+    /// Clear pending state (after graph construction completes).
+    ///
+    /// State transitions:
+    /// - Pending → Indexed
+    /// - PendingDeleted → Deleted
+    /// - Indexed/Deleted → unchanged
+    pub(crate) fn clear_pending(&mut self) {
+        let new_state = match self.lifecycle() {
+            VecLifecycle::Pending => VecLifecycle::Indexed,
+            VecLifecycle::PendingDeleted => VecLifecycle::Deleted,
+            other => other,
+        };
+        self.set_lifecycle(new_state);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Orthogonal Flags (FUTURE - not yet implemented)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// FUTURE CAPABILITY - NOT YET IMPLEMENTED.
+    ///
+    /// Check if vector has been replicated to another node.
+    /// Always returns false until distributed replication is implemented.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn is_replicated(&self) -> bool {
+        self.flags & VecFlags::REPLICATED != 0
+    }
+
+    /// FUTURE CAPABILITY - NOT YET IMPLEMENTED.
+    ///
+    /// Set the replicated flag. Has no effect until distributed
+    /// replication is implemented.
+    #[allow(dead_code)]
+    pub(crate) fn set_replicated(&mut self, replicated: bool) {
+        if replicated {
+            self.flags |= VecFlags::REPLICATED;
+        } else {
+            self.flags &= !VecFlags::REPLICATED;
+        }
+    }
+}
+
+impl ArchivedVecMetadata {
+    /// Get the current lifecycle state (zero-copy from archived data).
+    #[inline]
+    pub(crate) fn lifecycle(&self) -> VecLifecycle {
+        VecLifecycle::from_flags(self.flags)
+    }
+
+    /// Check if vector is deleted (zero-copy from archived data).
+    #[inline]
+    pub(crate) fn is_deleted(&self) -> bool {
+        matches!(
+            self.lifecycle(),
+            VecLifecycle::Deleted | VecLifecycle::PendingDeleted
+        )
+    }
+
+    /// Check if vector is pending graph construction (zero-copy from archived data).
+    #[inline]
+    pub(crate) fn is_pending(&self) -> bool {
+        matches!(
+            self.lifecycle(),
+            VecLifecycle::Pending | VecLifecycle::PendingDeleted
+        )
+    }
 }
 
 /// VecMeta key: (embedding_code, vec_id)
@@ -504,8 +1018,11 @@ pub(crate) enum GraphMetaField {
     MaxLevel(HnswLayer),
     /// Total vector count in this embedding space
     Count(u32),
-    /// Serialized HNSW configuration
+    /// Serialized HNSW configuration (deprecated - use EmbeddingSpec)
     Config(Vec<u8>),
+    /// Hash of EmbeddingSpec at index build time (for drift detection)
+    /// Set on first insert, validated on subsequent inserts and searches
+    SpecHash(u64),
 }
 
 impl GraphMetaField {
@@ -516,6 +1033,7 @@ impl GraphMetaField {
             Self::MaxLevel(_) => 1,
             Self::Count(_) => 2,
             Self::Config(_) => 3,
+            Self::SpecHash(_) => 4,
         }
     }
 }
@@ -543,6 +1061,11 @@ impl GraphMetaCfKey {
     /// Create key for config field
     pub fn config(embedding_code: EmbeddingCode) -> Self {
         Self(embedding_code, GraphMetaField::Config(Vec::new()))
+    }
+
+    /// Create key for spec_hash field
+    pub fn spec_hash(embedding_code: EmbeddingCode) -> Self {
+        Self(embedding_code, GraphMetaField::SpecHash(0))
     }
 }
 
@@ -592,6 +1115,7 @@ impl GraphMeta {
             1 => GraphMetaField::MaxLevel(0),
             2 => GraphMetaField::Count(0),
             3 => GraphMetaField::Config(Vec::new()),
+            4 => GraphMetaField::SpecHash(0),
             _ => anyhow::bail!("Unknown GraphMeta discriminant: {}", discriminant),
         };
         Ok(GraphMetaCfKey(embedding_code, field))
@@ -604,6 +1128,7 @@ impl GraphMeta {
             GraphMetaField::MaxLevel(v) => vec![*v],
             GraphMetaField::Count(v) => v.to_be_bytes().to_vec(),
             GraphMetaField::Config(v) => v.clone(),
+            GraphMetaField::SpecHash(v) => v.to_be_bytes().to_vec(),
         }
     }
 
@@ -628,8 +1153,12 @@ impl GraphMeta {
                 }
                 GraphMetaField::Count(u32::from_be_bytes(bytes.try_into()?))
             }
-            GraphMetaField::Config(_) => {
-                GraphMetaField::Config(bytes.to_vec())
+            GraphMetaField::Config(_) => GraphMetaField::Config(bytes.to_vec()),
+            GraphMetaField::SpecHash(_) => {
+                if bytes.len() != 8 {
+                    anyhow::bail!("Invalid SpecHash length: expected 8, got {}", bytes.len());
+                }
+                GraphMetaField::SpecHash(u64::from_be_bytes(bytes.try_into()?))
             }
         };
         Ok(GraphMetaCfValue(field))
@@ -898,9 +1427,7 @@ impl IdAlloc {
                 }
                 IdAllocField::NextId(u32::from_be_bytes(bytes.try_into()?))
             }
-            IdAllocField::FreeBitmap(_) => {
-                IdAllocField::FreeBitmap(bytes.to_vec())
-            }
+            IdAllocField::FreeBitmap(_) => IdAllocField::FreeBitmap(bytes.to_vec()),
         };
         Ok(IdAllocCfValue(field))
     }
@@ -918,7 +1445,11 @@ pub(crate) struct Pending;
 
 /// Pending key: (embedding_code, timestamp, vec_id)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct PendingCfKey(pub(crate) EmbeddingCode, pub(crate) TimestampMilli, pub(crate) VecId);
+pub(crate) struct PendingCfKey(
+    pub(crate) EmbeddingCode,
+    pub(crate) TimestampMilli,
+    pub(crate) VecId,
+);
 
 /// Pending value: empty (presence in CF indicates pending status)
 #[derive(Debug, Clone)]
@@ -944,10 +1475,30 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for Pending {
 }
 
 impl Pending {
+    /// Create a pending key with the current timestamp.
+    ///
+    /// Keys are ordered by (embedding, timestamp, vec_id) for FIFO processing
+    /// within each embedding. Use `prefix_for_embedding()` for iteration.
+    pub fn key_now(embedding: EmbeddingCode, vec_id: VecId) -> PendingCfKey {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        PendingCfKey(embedding, TimestampMilli(timestamp), vec_id)
+    }
+
+    /// Get the 8-byte prefix for iterating all pending items for an embedding.
+    ///
+    /// Use with RocksDB prefix iterator to scan pending queue per embedding.
+    pub fn prefix_for_embedding(embedding: EmbeddingCode) -> [u8; 8] {
+        embedding.to_be_bytes()
+    }
+
     pub fn key_to_bytes(key: &PendingCfKey) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(20);
         bytes.extend_from_slice(&key.0.to_be_bytes());
-        bytes.extend_from_slice(&key.1.0.to_be_bytes());
+        bytes.extend_from_slice(&key.1 .0.to_be_bytes());
         bytes.extend_from_slice(&key.2.to_be_bytes());
         bytes
     }
@@ -973,7 +1524,6 @@ impl Pending {
         Ok(PendingCfValue(()))
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1044,4 +1594,140 @@ mod tests {
         assert_eq!(parsed.2, 42);
     }
 
+    #[test]
+    fn test_pending_key_now() {
+        let embedding = 42u64;
+        let vec_id = 100u32;
+
+        let key1 = Pending::key_now(embedding, vec_id);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let key2 = Pending::key_now(embedding, vec_id + 1);
+
+        // Same embedding
+        assert_eq!(key1.0, embedding);
+        assert_eq!(key2.0, embedding);
+
+        // Timestamps should be increasing (FIFO order)
+        assert!(key2.1 .0 >= key1.1 .0, "timestamps should be monotonic");
+
+        // Vec IDs preserved
+        assert_eq!(key1.2, vec_id);
+        assert_eq!(key2.2, vec_id + 1);
+    }
+
+    #[test]
+    fn test_pending_prefix_for_embedding() {
+        let embedding = 0x0102030405060708u64;
+        let prefix = Pending::prefix_for_embedding(embedding);
+
+        // Prefix should be big-endian embedding bytes
+        assert_eq!(prefix, [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+
+        // Key should start with this prefix
+        let key = Pending::key_now(embedding, 42);
+        let key_bytes = Pending::key_to_bytes(&key);
+        assert_eq!(&key_bytes[0..8], &prefix);
+    }
+
+    // ========================================================================
+    // VecLifecycle and VecMetadata Tests
+    // ========================================================================
+
+    #[test]
+    fn test_vec_lifecycle_from_flags() {
+        // Verify backward compatibility with old FLAG_* constants
+        assert_eq!(VecLifecycle::from_flags(0b00), VecLifecycle::Indexed);
+        assert_eq!(VecLifecycle::from_flags(0b01), VecLifecycle::Deleted);
+        assert_eq!(VecLifecycle::from_flags(0b10), VecLifecycle::Pending);
+        assert_eq!(VecLifecycle::from_flags(0b11), VecLifecycle::PendingDeleted);
+
+        // Orthogonal flags in upper bits should not affect lifecycle
+        assert_eq!(VecLifecycle::from_flags(0b1000_0000), VecLifecycle::Indexed);
+        assert_eq!(VecLifecycle::from_flags(0b1000_0001), VecLifecycle::Deleted);
+        assert_eq!(VecLifecycle::from_flags(0b1000_0010), VecLifecycle::Pending);
+        assert_eq!(VecLifecycle::from_flags(0b1000_0011), VecLifecycle::PendingDeleted);
+    }
+
+    #[test]
+    fn test_vec_lifecycle_apply_to_flags() {
+        // Should preserve upper bits when changing lifecycle
+        let flags_with_replicated = 0b1000_0010; // Pending + REPLICATED
+        let new_flags = VecLifecycle::Indexed.apply_to_flags(flags_with_replicated);
+        assert_eq!(new_flags, 0b1000_0000); // Indexed + REPLICATED preserved
+    }
+
+    #[test]
+    fn test_vec_metadata_pending() {
+        let meta = VecMetadata::pending();
+        assert_eq!(meta.lifecycle(), VecLifecycle::Pending);
+        assert!(meta.is_pending());
+        assert!(!meta.is_deleted());
+        assert!(!meta.is_indexed());
+        assert_eq!(meta.max_layer, 0);
+    }
+
+    #[test]
+    fn test_vec_metadata_indexed() {
+        let meta = VecMetadata::indexed(5);
+        assert_eq!(meta.lifecycle(), VecLifecycle::Indexed);
+        assert!(!meta.is_pending());
+        assert!(!meta.is_deleted());
+        assert!(meta.is_indexed());
+        assert_eq!(meta.max_layer, 5);
+    }
+
+    #[test]
+    fn test_vec_metadata_state_transitions() {
+        // Pending → Indexed (normal async completion)
+        let mut meta = VecMetadata::pending();
+        meta.clear_pending();
+        assert_eq!(meta.lifecycle(), VecLifecycle::Indexed);
+
+        // Indexed → Deleted (normal delete)
+        meta.set_deleted();
+        assert_eq!(meta.lifecycle(), VecLifecycle::Deleted);
+
+        // Pending → PendingDeleted (delete before async completion)
+        let mut meta2 = VecMetadata::pending();
+        meta2.set_deleted();
+        assert_eq!(meta2.lifecycle(), VecLifecycle::PendingDeleted);
+        assert!(meta2.is_pending()); // Still needs async cleanup
+        assert!(meta2.is_deleted()); // But skip in search
+
+        // PendingDeleted → Deleted (async completes on deleted item)
+        meta2.clear_pending();
+        assert_eq!(meta2.lifecycle(), VecLifecycle::Deleted);
+        assert!(!meta2.is_pending());
+        assert!(meta2.is_deleted());
+    }
+
+    #[test]
+    fn test_vec_metadata_orthogonal_flags_preserved() {
+        let mut meta = VecMetadata::pending();
+
+        // Set future REPLICATED flag
+        meta.set_replicated(true);
+        assert!(meta.is_replicated());
+        assert_eq!(meta.lifecycle(), VecLifecycle::Pending); // Lifecycle unchanged
+
+        // Lifecycle transition should preserve REPLICATED
+        meta.clear_pending();
+        assert!(meta.is_replicated()); // Still replicated
+        assert_eq!(meta.lifecycle(), VecLifecycle::Indexed);
+
+        // Another transition
+        meta.set_deleted();
+        assert!(meta.is_replicated()); // Still replicated
+        assert_eq!(meta.lifecycle(), VecLifecycle::Deleted);
+    }
+
+    #[test]
+    fn test_vec_metadata_wire_compatibility() {
+        // Verify the enum values match old FLAG_* constants for wire compatibility
+        // Old: FLAG_DELETED=0x01, FLAG_PENDING=0x02
+        assert_eq!(VecLifecycle::Indexed as u8, 0x00);
+        assert_eq!(VecLifecycle::Deleted as u8, 0x01);
+        assert_eq!(VecLifecycle::Pending as u8, 0x02);
+        assert_eq!(VecLifecycle::PendingDeleted as u8, 0x03);
+    }
 }

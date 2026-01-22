@@ -5,13 +5,13 @@ This document defines the ground truth requirements for motlie_db vector search.
 ## Document References
 
 **Design Documents** (in `examples/vector/`):
-- **[POC.md](../../../../examples/vector/POC.md)** - Current implementation (Phase 1: schema, Flush API, Transaction API)
-- **[PERF.md](../../../../examples/vector/PERF.md)** - Benchmark results and performance analysis
-- **[HNSW2.md](../../../../examples/vector/HNSW2.md)** - HNSW optimization proposal (Phase 2)
-- **[HYBRID.md](../../../../examples/vector/HYBRID.md)** - Production architecture design (Phase 4)
-- **[ALTERNATIVES.md](../../../../examples/vector/ALTERNATIVES.md)** - Alternative architectures analysis (SPFresh, ScaNN, RaBitQ)
-- **[ISSUES.md](../../../../examples/vector/ISSUES.md)** - Known issues and solutions
-- **[SIMD.md](../../../../examples/vector/SIMD.md)** - SIMD acceleration design (implemented in `motlie_core::distance`)
+- **[POC.md](../../../../../examples/vector/POC.md)** - Current implementation (Phase 1: schema, Flush API, Transaction API)
+- **[PERF.md](../../../../../examples/vector/PERF.md)** - Benchmark results and performance analysis
+- **[HNSW2.md](../../../../../examples/vector/HNSW2.md)** - HNSW optimization proposal (Phase 2)
+- **[HYBRID.md](../../../../../examples/vector/HYBRID.md)** - Production architecture design (Phase 4)
+- **[ALTERNATIVES.md](../../../../../examples/vector/ALTERNATIVES.md)** - Alternative architectures analysis (SPFresh, ScaNN, RaBitQ)
+- **[ISSUES.md](../../../../../examples/vector/ISSUES.md)** - Known issues and solutions
+- **[SIMD.md](../../../../../examples/vector/SIMD.md)** - SIMD acceleration design (implemented in `motlie_core::distance`)
 
 **Implementation Roadmap**:
 - **[ROADMAP.md](./ROADMAP.md)** - Detailed implementation plan and task breakdown

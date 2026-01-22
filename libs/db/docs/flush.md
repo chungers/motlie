@@ -898,7 +898,7 @@ pub trait QueryExecutor: Send + Sync {
 ### HNSW Insert with Transaction (Example)
 
 ```rust
-impl HnswIndex {
+impl hnsw::Index {
     pub async fn insert(
         &mut self,
         writer: &Writer,

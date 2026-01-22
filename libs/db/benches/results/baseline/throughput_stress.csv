@@ -1,0 +1,3 @@
+scenario,insert_producers,search_producers,query_workers,duration_s,insert_count,search_count,error_count,insert_throughput,search_throughput,insert_p50_us,insert_p99_us,search_p50_us,search_p99_us
+stress_embedding_a,8,8,8,71.93,10000,2032,0,139.0,28.2,1,2,16384,524288
+stress_embedding_b,8,8,8,71.64,10000,2064,0,139.6,28.8,1,1,8192,524288

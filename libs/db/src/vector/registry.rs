@@ -156,6 +156,7 @@ impl EmbeddingRegistry {
                 spec.model.clone(),
                 spec.dim,
                 spec.distance,
+                spec.storage_type,
                 None,
             );
 
@@ -179,13 +180,57 @@ impl EmbeddingRegistry {
     // Registration
     // ─────────────────────────────────────────────────────────────
 
-    /// Register a new embedding space.
+    /// Register a new embedding space (standalone transaction).
     ///
     /// Idempotent: returns existing embedding if spec already registered.
+    /// Build parameters are only validated for NEW registrations.
+    ///
+    /// For atomic registration with other writes, use `register_in_txn()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if build parameters are invalid (new registration only):
+    /// - `hnsw_m < 2`: Invalid for `m_l = 1/ln(m)` computation
+    /// - `hnsw_ef_construction < 1`: Invalid HNSW config
+    /// - `rabitq_bits ∉ {1, 2, 4}`: Unsupported quantization level
     pub fn register(&self, builder: EmbeddingBuilder, db: &TransactionDB) -> Result<Embedding> {
+        let txn = db.transaction();
+        let embedding = self.register_in_txn(builder, &txn, db)?;
+        txn.commit()?;
+        Ok(embedding)
+    }
+
+    /// Register a new embedding space within an existing transaction.
+    ///
+    /// Idempotent: returns existing embedding if spec already registered.
+    /// Build parameters are only validated for NEW registrations.
+    ///
+    /// # Arguments
+    /// * `builder` - Embedding specification builder
+    /// * `txn` - Active transaction to write within
+    /// * `db` - TransactionDB for CF handle lookup
+    ///
+    /// # Returns
+    /// The registered `Embedding`. Caller must call `txn.commit()` to persist.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let txn = db.transaction();
+    /// let embedding = registry.register_in_txn(builder, &txn, &db)?;
+    /// // ... other writes to txn ...
+    /// txn.commit()?;
+    /// ```
+    pub fn register_in_txn(
+        &self,
+        builder: EmbeddingBuilder,
+        txn: &rocksdb::Transaction<'_, TransactionDB>,
+        db: &TransactionDB,
+    ) -> Result<Embedding> {
         let spec_key = (builder.model.clone(), builder.dim, builder.distance);
 
-        // Fast path: already registered
+        // Fast path: already registered (idempotent - no validation needed)
+        // This preserves idempotent behavior: caller can retrieve existing
+        // embedding even with invalid build params in the builder.
         if let Some(existing) = self.by_spec.get(&spec_key) {
             let mut emb = existing.clone();
             // Attach embedder if provided
@@ -198,10 +243,13 @@ impl EmbeddingRegistry {
             return Ok(emb);
         }
 
-        // Slow path: allocate new code and persist
+        // Slow path: new registration - validate build parameters
+        builder.validate()?;
+
+        // Allocate new code and persist
         let code = self.next_code.fetch_add(1, Ordering::SeqCst);
 
-        // Persist to RocksDB using ColumnFamilyRecord trait
+        // Get CF handle for embedding specs
         let cf = db
             .cf_handle(EmbeddingSpecs::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
@@ -211,10 +259,17 @@ impl EmbeddingRegistry {
             model: builder.model.clone(),
             dim: builder.dim,
             distance: builder.distance,
+            storage_type: super::schema::VectorElementType::default(), // F32 for backward compat
+            // Build parameters from EmbeddingBuilder (Phase 5.7c)
+            hnsw_m: builder.hnsw_m,
+            hnsw_ef_construction: builder.hnsw_ef_construction,
+            rabitq_bits: builder.rabitq_bits,
+            rabitq_seed: builder.rabitq_seed,
         };
         let (key_bytes, value_bytes) = add_op.to_cf_bytes()?;
 
-        db.put_cf(&cf, key_bytes, value_bytes)?;
+        // Write to transaction (caller commits)
+        txn.put_cf(&cf, key_bytes, value_bytes)?;
 
         // Create embedding
         let embedding = Embedding::new(
@@ -222,6 +277,7 @@ impl EmbeddingRegistry {
             builder.model,
             builder.dim,
             builder.distance,
+            super::schema::VectorElementType::default(), // F32 for backward compat
             builder.embedder,
         );
 
@@ -332,8 +388,15 @@ impl EmbeddingRegistry {
     ///
     /// This method is used by `vector::Storage` when pre-warming from
     /// read-only DB (where `prewarm(&TransactionDB)` isn't available).
-    pub(crate) fn register_from_db(&self, code: u64, model: &str, dim: u32, distance: Distance) {
-        let embedding = Embedding::new(code, model, dim, distance, None);
+    pub(crate) fn register_from_db(
+        &self,
+        code: u64,
+        model: &str,
+        dim: u32,
+        distance: Distance,
+        storage_type: super::schema::VectorElementType,
+    ) {
+        let embedding = Embedding::new(code, model, dim, distance, storage_type, None);
         let spec_key = (model.to_string(), dim, distance);
 
         self.by_spec.insert(spec_key, embedding.clone());
@@ -359,7 +422,7 @@ mod tests {
 
     #[test]
     fn test_embedding_filter() {
-        let emb = Embedding::new(1, "gemma", 768, Distance::Cosine, None);
+        let emb = Embedding::new(1, "gemma", 768, Distance::Cosine, crate::vector::schema::VectorElementType::default(), None);
 
         // Empty filter matches everything
         assert!(EmbeddingFilter::default().matches(&emb));

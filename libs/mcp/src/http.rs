@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn test_http_config_default() {
         let config = HttpConfig::default();
-        assert_eq!(config.addr, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.addr, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
         assert_eq!(config.sse_keep_alive, Some(Duration::from_secs(30)));
         assert_eq!(config.mcp_path, "/mcp");
         assert!(config.stateful_mode);
@@ -188,7 +188,7 @@ mod tests {
             .with_mcp_path("/api/mcp")
             .with_stateful_mode(false);
 
-        assert_eq!(config.addr, "0.0.0.0:9000".parse().unwrap());
+        assert_eq!(config.addr, "0.0.0.0:9000".parse::<SocketAddr>().unwrap());
         assert_eq!(config.sse_keep_alive, Some(Duration::from_secs(60)));
         assert_eq!(config.mcp_path, "/api/mcp");
         assert!(!config.stateful_mode);
