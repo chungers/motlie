@@ -57,6 +57,9 @@ enum Commands {
 
     /// List available datasets
     Datasets,
+
+    /// Administrative and diagnostic commands
+    Admin(commands::AdminArgs),
 }
 
 #[tokio::main]
@@ -77,5 +80,6 @@ async fn main() -> Result<()> {
         Commands::CheckDistribution(args) => commands::check_distribution(args),
         Commands::Embeddings(args) => commands::embeddings(args),
         Commands::Datasets => commands::list_datasets(),
+        Commands::Admin(args) => commands::admin(args),
     }
 }
