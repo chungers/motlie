@@ -42,6 +42,7 @@
 //! - `REQUIREMENTS.md` - Functional and architectural requirements
 
 // Flat modules - Core types
+pub mod admin;
 pub mod async_updater;
 pub mod config;
 pub mod distance;

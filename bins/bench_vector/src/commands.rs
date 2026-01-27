@@ -2315,3 +2315,422 @@ pub fn list_datasets() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// Admin Command
+// ============================================================================
+
+#[derive(Parser)]
+pub struct AdminArgs {
+    #[command(subcommand)]
+    pub command: AdminCommand,
+}
+
+#[derive(Parser)]
+pub enum AdminCommand {
+    /// Show storage statistics for embeddings
+    Stats(AdminStatsArgs),
+    /// Deep inspection of a specific embedding
+    Inspect(AdminInspectArgs),
+    /// Vector-level diagnostics
+    Vectors(AdminVectorsArgs),
+    /// Run consistency validation checks
+    Validate(AdminValidateArgs),
+    /// RocksDB-level diagnostics
+    Rocksdb(AdminRocksdbArgs),
+}
+
+#[derive(Parser)]
+pub struct AdminStatsArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code (optional, shows all if not specified)
+    #[arg(long)]
+    pub code: Option<u64>,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser)]
+pub struct AdminInspectArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code to inspect
+    #[arg(long)]
+    pub code: u64,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser)]
+pub struct AdminVectorsArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code
+    #[arg(long)]
+    pub code: u64,
+
+    /// Filter by lifecycle state: indexed, pending, deleted
+    #[arg(long)]
+    pub state: Option<String>,
+
+    /// Inspect specific vector ID
+    #[arg(long)]
+    pub vec_id: Option<u32>,
+
+    /// Sample random vectors (specify count)
+    #[arg(long)]
+    pub sample: Option<usize>,
+
+    /// Random seed for sampling
+    #[arg(long, default_value = "42")]
+    pub seed: u64,
+
+    /// Maximum results to return
+    #[arg(long, default_value = "20")]
+    pub limit: usize,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser)]
+pub struct AdminValidateArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code (optional, validates all if not specified)
+    #[arg(long)]
+    pub code: Option<u64>,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser)]
+pub struct AdminRocksdbArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+pub fn admin(args: AdminArgs) -> Result<()> {
+    match args.command {
+        AdminCommand::Stats(args) => admin_stats(args),
+        AdminCommand::Inspect(args) => admin_inspect(args),
+        AdminCommand::Vectors(args) => admin_vectors(args),
+        AdminCommand::Validate(args) => admin_validate(args),
+        AdminCommand::Rocksdb(args) => admin_rocksdb(args),
+    }
+}
+
+fn admin_stats(args: AdminStatsArgs) -> Result<()> {
+    use motlie_db::vector::admin;
+
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+
+    let stats = if let Some(code) = args.code {
+        vec![admin::get_embedding_stats(&storage, code)?]
+    } else {
+        admin::get_all_stats(&storage)?
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&stats)?);
+    } else {
+        print_stats(&stats);
+    }
+
+    Ok(())
+}
+
+fn print_stats(stats: &[motlie_db::vector::admin::EmbeddingStats]) {
+    if stats.is_empty() {
+        println!("No embeddings found.");
+        return;
+    }
+
+    println!("=== Vector Storage Statistics ===\n");
+
+    for stat in stats {
+        println!("Embedding {} ({}):", stat.code, stat.model);
+        println!("  Dimension: {}  Distance: {}  Storage: {}", stat.dim, stat.distance, stat.storage_type);
+        println!("  Vectors: {} total", stat.total_vectors);
+        println!("    Indexed:  {:>8} ({:.1}%)", stat.indexed_count,
+            if stat.total_vectors > 0 { stat.indexed_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
+        println!("    Pending:  {:>8} ({:.1}%)", stat.pending_count,
+            if stat.total_vectors > 0 { stat.pending_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
+        println!("    Deleted:  {:>8} ({:.1}%)", stat.deleted_count,
+            if stat.total_vectors > 0 { stat.deleted_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
+        println!("  HNSW Graph:");
+        println!("    Entry point: {:?}", stat.entry_point);
+        println!("    Max level: {}", stat.max_level);
+        println!("  Spec hash: {:?} (valid: {})", stat.spec_hash.map(|h| format!("0x{:016x}", h)), stat.spec_hash_valid);
+        println!("  ID Allocator:");
+        println!("    Next ID: {}", stat.next_id);
+        println!("    Free IDs: {}", stat.free_id_count);
+        println!();
+    }
+}
+
+fn admin_inspect(args: AdminInspectArgs) -> Result<()> {
+    use motlie_db::vector::admin;
+
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+
+    let inspection = admin::inspect_embedding(&storage, args.code)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&inspection)?);
+    } else {
+        print_inspection(&inspection);
+    }
+
+    Ok(())
+}
+
+fn print_inspection(inspection: &motlie_db::vector::admin::EmbeddingInspection) {
+    let stat = &inspection.stats;
+
+    println!("=== Embedding Inspection ===\n");
+    println!("Code: {}", stat.code);
+    println!("Model: {}", stat.model);
+    println!("Dimension: {}", stat.dim);
+    println!("Distance: {}", stat.distance);
+    println!("Storage type: {}", stat.storage_type);
+
+    println!("\nHNSW Configuration:");
+    println!("  M: {}", inspection.hnsw_m);
+    println!("  ef_construction: {}", inspection.hnsw_ef_construction);
+
+    println!("\nRaBitQ Configuration:");
+    println!("  Bits: {}", inspection.rabitq_bits);
+    println!("  Seed: {}", inspection.rabitq_seed);
+
+    println!("\nGraph Metadata:");
+    println!("  Entry point: {:?}", stat.entry_point);
+    println!("  Max level: {}", stat.max_level);
+    println!("  Count: {}", stat.total_vectors);
+    println!("  Spec hash: {:?} (valid: {})",
+        stat.spec_hash.map(|h| format!("0x{:016x}", h)),
+        if stat.spec_hash_valid { "✓" } else { "✗" });
+
+    println!("\nID Allocator:");
+    println!("  Next ID: {}", stat.next_id);
+    println!("  Free IDs: {}", stat.free_id_count);
+
+    println!("\nPending Queue:");
+    println!("  Depth: {} vectors", inspection.pending_queue_depth);
+    if let Some(ts) = inspection.oldest_pending_timestamp {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let age_secs = (now - ts) / 1000;
+        println!("  Oldest entry: {} seconds ago", age_secs);
+    }
+
+    println!("\nLayer Distribution:");
+    if inspection.layer_distribution.counts.is_empty() {
+        println!("  (no indexed vectors)");
+    } else {
+        for (layer, count) in inspection.layer_distribution.counts.iter().enumerate() {
+            println!("  L{}: {} vectors", layer, count);
+        }
+    }
+}
+
+fn admin_vectors(args: AdminVectorsArgs) -> Result<()> {
+    use motlie_db::vector::admin::{self, VecLifecycle};
+
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+
+    let vectors = if let Some(vec_id) = args.vec_id {
+        // Inspect specific vector
+        match admin::get_vector_info(&storage, args.code, vec_id)? {
+            Some(info) => vec![info],
+            None => {
+                println!("Vector {} not found in embedding {}", vec_id, args.code);
+                return Ok(());
+            }
+        }
+    } else if let Some(sample_count) = args.sample {
+        // Sample random vectors
+        admin::sample_vectors(&storage, args.code, sample_count, args.seed)?
+    } else if let Some(ref state_str) = args.state {
+        // Filter by state
+        let state = match state_str.to_lowercase().as_str() {
+            "indexed" => VecLifecycle::Indexed,
+            "pending" => VecLifecycle::Pending,
+            "deleted" => VecLifecycle::Deleted,
+            "pending_deleted" | "pendingdeleted" => VecLifecycle::PendingDeleted,
+            _ => anyhow::bail!("Unknown state: {}. Use: indexed, pending, deleted, pending_deleted", state_str),
+        };
+        admin::list_vectors_by_state(&storage, args.code, state, args.limit)?
+    } else {
+        // Default: sample a few vectors
+        admin::sample_vectors(&storage, args.code, args.limit, args.seed)?
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&vectors)?);
+    } else {
+        print_vectors(&vectors);
+    }
+
+    Ok(())
+}
+
+fn print_vectors(vectors: &[motlie_db::vector::admin::VectorInfo]) {
+    if vectors.is_empty() {
+        println!("No vectors found.");
+        return;
+    }
+
+    println!("=== Vector Information ===\n");
+    println!("{:>8}  {:>10}  {:>8}  {:>5}  {:>10}  {:>8}",
+        "vec_id", "lifecycle", "layer", "edges", "binary", "external_id");
+    println!("{}", "-".repeat(70));
+
+    for v in vectors {
+        let total_edges: usize = v.edge_counts.iter().sum();
+        println!("{:>8}  {:>10}  {:>8}  {:>5}  {:>10}  {}",
+            v.vec_id,
+            format!("{:?}", v.lifecycle).to_lowercase(),
+            v.max_layer,
+            total_edges,
+            if v.has_binary_code { "yes" } else { "no" },
+            v.external_id.as_deref().unwrap_or("-"));
+    }
+
+    println!("\nShowing {} vector(s).", vectors.len());
+}
+
+fn admin_validate(args: AdminValidateArgs) -> Result<()> {
+    use motlie_db::vector::admin::{self, ValidationStatus};
+
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+
+    let results = if let Some(code) = args.code {
+        vec![admin::validate_embedding(&storage, code)?]
+    } else {
+        admin::validate_all(&storage)?
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        print_validation_results(&results);
+    }
+
+    // Exit with error code if any check failed
+    let has_errors = results.iter()
+        .flat_map(|r| &r.checks)
+        .any(|c| c.status == ValidationStatus::Error);
+
+    if has_errors {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn print_validation_results(results: &[motlie_db::vector::admin::ValidationResult]) {
+    use motlie_db::vector::admin::ValidationStatus;
+
+    if results.is_empty() {
+        println!("No embeddings found.");
+        return;
+    }
+
+    println!("=== Validation Results ===\n");
+
+    for result in results {
+        println!("Embedding {} ({}):", result.code, result.model);
+
+        let mut pass_count = 0;
+        let mut warn_count = 0;
+        let mut error_count = 0;
+
+        for check in &result.checks {
+            let symbol = match check.status {
+                ValidationStatus::Pass => { pass_count += 1; "✓" }
+                ValidationStatus::Warning => { warn_count += 1; "⚠" }
+                ValidationStatus::Error => { error_count += 1; "✗" }
+            };
+            println!("  {} {}: {}", symbol, check.name, check.message);
+        }
+
+        println!("\n  Summary: {} passed, {} warnings, {} errors\n",
+            pass_count, warn_count, error_count);
+    }
+}
+
+fn admin_rocksdb(args: AdminRocksdbArgs) -> Result<()> {
+    use motlie_db::vector::admin;
+
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+
+    let stats = admin::get_rocksdb_stats(&storage)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&stats)?);
+    } else {
+        print_rocksdb_stats(&stats);
+    }
+
+    Ok(())
+}
+
+fn print_rocksdb_stats(stats: &motlie_db::vector::admin::RocksDbStats) {
+    println!("=== RocksDB Statistics ===\n");
+    println!("{:<30}  {:>12}  {:>12}", "Column Family", "Entries", "Size (est)");
+    println!("{}", "-".repeat(58));
+
+    for cf in &stats.column_families {
+        let size_str = format_size(cf.size_bytes);
+        let entry_str = if cf.entry_count >= 10000 {
+            format!("{}+", cf.entry_count)
+        } else {
+            format!("{}", cf.entry_count)
+        };
+        println!("{:<30}  {:>12}  {:>12}", cf.name, entry_str, size_str);
+    }
+
+    println!("{}", "-".repeat(58));
+    println!("{:<30}  {:>12}  {:>12}", "Total", "", format_size(stats.total_size_bytes));
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
