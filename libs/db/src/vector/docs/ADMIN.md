@@ -9,6 +9,12 @@ The admin command is a read-only diagnostics surface over the vector RocksDB
 column families. It focuses on embedding metadata, lifecycle counts, HNSW graph
 health, and consistency validation.
 
+## Requirements
+
+- **ADMIN-1:** Admin commands must provide a read-only option (secondary mode)
+  for use against live databases. Read-write access remains acceptable for
+  scheduled downtime.
+
 Primary entry points (CLI):
 
 - `bench_vector admin stats --db-path <path> [--code <embedding>] [--json] [--secondary]`
@@ -34,6 +40,9 @@ Admin pulls from these column families:
 
 - `admin stats` and `admin validate` iterate `EmbeddingSpecs` and then read
   other CFs per-embedding.
+- **GAP:** Most admin subcommands still open `Storage::readwrite` even though
+  they are logically read-only. This can contend with writers or require write
+  locks when running against a live DB.
 - **GAP:** `admin stats` does a full `VecMeta` scan per embedding for lifecycle
   counts (O(N) per embedding). This can be very expensive at 10M+ scale and
   blocks on TransactionDB reads unless `--secondary` is used.
@@ -125,5 +134,6 @@ Admin pulls from these column families:
 - **GAP:** Secondary mode uses a temporary directory under `/tmp` but does not
   clean up secondary DB files. This may accumulate on repeated runs.
 
-  **Status** (claude, 2025-01-27, FIXED): Secondary mode now cleans up temp
-  directory on drop using a wrapper that removes the directory when finished.
+  **Status** (claude, 2025-01-27, FIXED): Secondary mode now deletes the temp
+  directory explicitly after stats/rocksdb completes. There is no shared wrapper
+  for other subcommands yet.
