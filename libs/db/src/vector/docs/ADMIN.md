@@ -34,8 +34,13 @@ Admin pulls from these column families:
 
 - `admin stats` and `admin validate` iterate `EmbeddingSpecs` and then read
   other CFs per-embedding.
+- **GAP:** `admin stats` does a full `VecMeta` scan per embedding for lifecycle
+  counts (O(N) per embedding). This can be very expensive at 10M+ scale and
+  blocks on TransactionDB reads unless `--secondary` is used.
 - `admin validate` uses **sampling** for ID mapping and orphan detection
   (first 1000 entries). It can miss inconsistencies.
+- **GAP:** `admin validate --strict` is a full scan and can be long-running /
+  disruptive on large DBs; there is no progress reporting or early-exit flag.
 - `admin rocksdb` estimates entry counts and sizes by scanning the first
   10,000 entries per CF. Sizes are **sampled bytes only**, not full DB size.
   The CLI prints `10000+` to indicate partial counts and the column header
@@ -51,11 +56,10 @@ Admin pulls from these column families:
    **Fix**: Embedding registration is now deferred until after validation checks
    pass. See `commands.rs` index function with inline comment.
 
-2) **Docs/examples still show query without `--embedding-code`** ✅ FIXED
-   ~~The CLI now rejects implicit registration in `query`, but some examples still
-   show `bench_vector query` without `--embedding-code`.~~
-
-   **Fix**: CLI examples updated to show `--embedding-code` for query commands.
+2) **Docs/examples still show query without `--embedding-code`** ⚠️ PARTIAL
+   Some CLI examples are updated (`bench_vector datasets` output), but the README
+   still shows `bench_vector query` without `--embedding-code` in multiple places.
+   This can mislead users now that implicit registration is disallowed.
 
 3) **Validation count mismatch ambiguity** ✅ FIXED
    ~~`admin validate` compares `GraphMeta::Count` against
@@ -105,4 +109,5 @@ Admin pulls from these column families:
   - Note: This requires duplicating many internal helper functions to work with
     both `DB` and `TransactionDB`. The key benefit (non-blocking reads) is already
     available for `stats` and `rocksdb` commands.
-
+- **GAP:** Secondary mode uses a temporary directory under `/tmp` but does not
+  clean up secondary DB files. This may accumulate on repeated runs.
