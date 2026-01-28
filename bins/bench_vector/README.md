@@ -133,7 +133,7 @@ Use that code with `bench_vector embeddings inspect --code <CODE>` and `bench_ve
 Executes search queries against an existing index and reports recall/latency.
 
 ```bash
-bench_vector query --db-path ./bench_db --dataset laion --k 10 --ef-search 100
+bench_vector query --db-path ./bench_db --dataset laion --embedding-code <CODE> --k 10 --ef-search 100
 ```
 
 **Options:**
@@ -371,7 +371,7 @@ bench_vector sweep --dataset laion --num-vectors 100000 --rabitq \
 
 # Step 2: Test chosen config at full scale
 bench_vector index --dataset laion --num-vectors 1000000 --db-path ./prod_test_db
-bench_vector query --db-path ./prod_test_db --dataset laion --ef-search 200 --k 10
+bench_vector query --db-path ./prod_test_db --dataset laion --embedding-code <CODE> --ef-search 200 --k 10
 ```
 
 ### 3. SIMD Performance Comparison

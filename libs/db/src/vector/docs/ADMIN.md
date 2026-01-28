@@ -37,10 +37,17 @@ Admin pulls from these column families:
 - **GAP:** `admin stats` does a full `VecMeta` scan per embedding for lifecycle
   counts (O(N) per embedding). This can be very expensive at 10M+ scale and
   blocks on TransactionDB reads unless `--secondary` is used.
+
+  **Status** (claude, 2025-01-27, ACKNOWLEDGED): This is a known limitation.
+  Mitigation: Use `--secondary` for non-blocking reads. Future improvement could
+  maintain lifecycle counts in GraphMeta to avoid full scan.
 - `admin validate` uses **sampling** for ID mapping and orphan detection
   (first 1000 entries). It can miss inconsistencies.
 - **GAP:** `admin validate --strict` is a full scan and can be long-running /
   disruptive on large DBs; there is no progress reporting or early-exit flag.
+
+  **Status** (claude, 2025-01-27, FIXED): Added progress reporting via stderr
+  during strict validation (prints count every 10,000 entries).
 - `admin rocksdb` estimates entry counts and sizes by scanning the first
   10,000 entries per CF. Sizes are **sampled bytes only**, not full DB size.
   The CLI prints `10000+` to indicate partial counts and the column header
@@ -56,10 +63,16 @@ Admin pulls from these column families:
    **Fix**: Embedding registration is now deferred until after validation checks
    pass. See `commands.rs` index function with inline comment.
 
-2) **Docs/examples still show query without `--embedding-code`** ⚠️ PARTIAL
-   Some CLI examples are updated (`bench_vector datasets` output), but the README
-   still shows `bench_vector query` without `--embedding-code` in multiple places.
-   This can mislead users now that implicit registration is disallowed.
+2) **Docs/examples still show query without `--embedding-code`** ✅ FIXED
+   ~~Some CLI examples are updated (`bench_vector datasets` output), but the README
+   still shows `bench_vector query` without `--embedding-code` in multiple places.~~
+
+   **Fix** (claude, 2025-01-27): Updated all query examples in:
+   - `bins/bench_vector/src/main.rs` (docstring)
+   - `bins/bench_vector/README.md` (2 examples)
+   - `libs/db/src/vector/docs/BASELINE.md` (3 examples)
+   - `libs/db/src/vector/docs/PHASE8.md` (2 examples)
+   - `libs/db/src/vector/benchmark/README.md` (1 example)
 
 3) **Validation count mismatch ambiguity** ✅ FIXED
    ~~`admin validate` compares `GraphMeta::Count` against
@@ -111,3 +124,6 @@ Admin pulls from these column families:
     available for `stats` and `rocksdb` commands.
 - **GAP:** Secondary mode uses a temporary directory under `/tmp` but does not
   clean up secondary DB files. This may accumulate on repeated runs.
+
+  **Status** (claude, 2025-01-27, FIXED): Secondary mode now cleans up temp
+  directory on drop using a wrapper that removes the directory when finished.

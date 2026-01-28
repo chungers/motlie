@@ -428,6 +428,7 @@ cargo build --release --bin bench_vector
 
 ./target/release/bench_vector query \
     --db-path /tmp/bench_10k --dataset random \
+    --embedding-code <EMBEDDING_CODE> \
     --num-queries 1000 --k 10 --ef-search 100 \
     --skip-recall \
     --output /tmp/bench_10k_query.json
@@ -440,6 +441,7 @@ cargo build --release --bin bench_vector
 
 ./target/release/bench_vector query \
     --db-path /tmp/bench_100k --dataset random \
+    --embedding-code <EMBEDDING_CODE> \
     --num-queries 1000 --k 10 --ef-search 100 \
     --skip-recall \
     --output /tmp/bench_100k_query.json
