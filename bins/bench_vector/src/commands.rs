@@ -280,6 +280,14 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     let model = format!("bench-{}", args.dataset.to_lowercase());
 
     if is_random && args.stream {
+        // ADMIN.md Issue #1 (chungers, 2025-01-27, FIXED):
+        // Defer embedding registration until after validation checks pass.
+        // Previously, registration happened before the existing_count check,
+        // leaving orphan EmbeddingSpecs on abort.
+        if existing_count > 0 {
+            anyhow::bail!("Streaming random index requires a fresh database. Use --fresh to rebuild.");
+        }
+
         let dim = args.dim;
         let embedding = registry.register(
             EmbeddingBuilder::new(&model, dim as u32, distance)
@@ -288,22 +296,6 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             &txn_db,
         )?;
         print_embedding_summary(&args.db_path, embedding.code())?;
-
-        if existing_count > 0 {
-            let allocator = IdAllocator::recover(&txn_db, embedding.code())?;
-            let next_id = allocator.next_id() as usize;
-            if next_id < existing_count {
-                anyhow::bail!(
-                    "Existing index allocator state ({}) behind metadata count ({}). Rebuild with --fresh.",
-                    next_id,
-                    existing_count
-                );
-            }
-        }
-
-        if existing_count > 0 {
-            anyhow::bail!("Streaming random index requires a fresh database.");
-        }
 
         if args.async_workers > 0 {
             println!("Insert mode: ASYNC ({} workers)", args.async_workers);
@@ -2287,6 +2279,8 @@ pub fn list_datasets() -> Result<()> {
         println!("\nHDF5 datasets: Enable with --features hdf5 (requires libhdf5)");
     }
 
+    // ADMIN.md Issue #2 (chungers, 2025-01-27, FIXED):
+    // Updated examples to show --embedding-code for query command.
     println!("\n--- Usage Examples ---\n");
 
     println!("Download a dataset:");
@@ -2295,8 +2289,11 @@ pub fn list_datasets() -> Result<()> {
     println!("Build an index:");
     println!("  bench_vector index --dataset laion --num-vectors 100000 --db-path ./bench_db\n");
 
-    println!("Run queries:");
-    println!("  bench_vector query --db-path ./bench_db --dataset laion --k 10 --ef-search 100\n");
+    println!("List embeddings (to find embedding code):");
+    println!("  bench_vector embeddings list --db-path ./bench_db\n");
+
+    println!("Run queries (use embedding code from 'embeddings list'):");
+    println!("  bench_vector query --db-path ./bench_db --embedding-code 1 --dataset laion --k 10 --ef-search 100\n");
 
     println!("Parameter sweep (HNSW):");
     println!("  bench_vector sweep --dataset laion --num-vectors 50000 --ef 50,100,200 --k 1,10\n");
@@ -2311,7 +2308,11 @@ pub fn list_datasets() -> Result<()> {
     println!("  bench_vector sweep --dataset laion --rabitq --show-pareto\n");
 
     println!("Check RaBitQ distribution (√D scaling validation):");
-    println!("  bench_vector check-distribution --dataset random --dim 1024 --sample-size 1000");
+    println!("  bench_vector check-distribution --dataset random --dim 1024 --sample-size 1000\n");
+
+    println!("Admin diagnostics:");
+    println!("  bench_vector admin stats --db-path ./bench_db");
+    println!("  bench_vector admin validate --db-path ./bench_db");
 
     Ok(())
 }
@@ -2353,6 +2354,13 @@ pub struct AdminStatsArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    // ADMIN.md Read-Only Mode (chungers, 2025-01-27, FIXED):
+    // Added --secondary flag for read-only access via secondary DB instance.
+    // This avoids contention with live workloads and prevents accidental writes.
+    /// Open database in secondary (read-only) mode
+    #[arg(long)]
+    pub secondary: bool,
 }
 
 #[derive(Parser)]
@@ -2368,6 +2376,10 @@ pub struct AdminInspectArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Open database in secondary (read-only) mode
+    #[arg(long)]
+    pub secondary: bool,
 }
 
 #[derive(Parser)]
@@ -2403,6 +2415,10 @@ pub struct AdminVectorsArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Open database in secondary (read-only) mode
+    #[arg(long)]
+    pub secondary: bool,
 }
 
 #[derive(Parser)]
@@ -2418,6 +2434,16 @@ pub struct AdminValidateArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Open database in secondary (read-only) mode
+    #[arg(long)]
+    pub secondary: bool,
+
+    // ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
+    // --strict flag for full-scan validation without sampling.
+    /// Strict mode: full scan without sampling (slower but complete)
+    #[arg(long)]
+    pub strict: bool,
 }
 
 #[derive(Parser)]
@@ -2429,6 +2455,10 @@ pub struct AdminRocksdbArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Open database in secondary (read-only) mode
+    #[arg(long)]
+    pub secondary: bool,
 }
 
 pub fn admin(args: AdminArgs) -> Result<()> {
@@ -2444,13 +2474,30 @@ pub fn admin(args: AdminArgs) -> Result<()> {
 fn admin_stats(args: AdminStatsArgs) -> Result<()> {
     use motlie_db::vector::admin;
 
-    let mut storage = Storage::readwrite(&args.db_path);
-    storage.ready()?;
+    // ADMIN.md Read-Only Mode (chungers, 2025-01-27, FIXED):
+    // Use secondary mode for read-only access when --secondary flag is set.
+    let stats = if args.secondary {
+        let secondary_path = std::env::temp_dir().join(format!(
+            "bench_vector_secondary_{}",
+            std::process::id()
+        ));
+        let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+        storage.ready()?;
 
-    let stats = if let Some(code) = args.code {
-        vec![admin::get_embedding_stats(&storage, code)?]
+        if let Some(code) = args.code {
+            vec![admin::get_embedding_stats_secondary(&storage, code)?]
+        } else {
+            admin::get_all_stats_secondary(&storage)?
+        }
     } else {
-        admin::get_all_stats(&storage)?
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+
+        if let Some(code) = args.code {
+            vec![admin::get_embedding_stats(&storage, code)?]
+        } else {
+            admin::get_all_stats(&storage)?
+        }
     };
 
     if args.json {
@@ -2474,12 +2521,16 @@ fn print_stats(stats: &[motlie_db::vector::admin::EmbeddingStats]) {
         println!("Embedding {} ({}):", stat.code, stat.model);
         println!("  Dimension: {}  Distance: {}  Storage: {}", stat.dim, stat.distance, stat.storage_type);
         println!("  Vectors: {} total", stat.total_vectors);
-        println!("    Indexed:  {:>8} ({:.1}%)", stat.indexed_count,
+        println!("    Indexed:        {:>8} ({:.1}%)", stat.indexed_count,
             if stat.total_vectors > 0 { stat.indexed_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
-        println!("    Pending:  {:>8} ({:.1}%)", stat.pending_count,
+        println!("    Pending:        {:>8} ({:.1}%)", stat.pending_count,
             if stat.total_vectors > 0 { stat.pending_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
-        println!("    Deleted:  {:>8} ({:.1}%)", stat.deleted_count,
+        // ADMIN.md Lifecycle Accounting (chungers, 2025-01-27, FIXED):
+        // Show PendingDeleted separately instead of folding into Deleted.
+        println!("    Deleted:        {:>8} ({:.1}%)", stat.deleted_count,
             if stat.total_vectors > 0 { stat.deleted_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
+        println!("    PendingDeleted: {:>8} ({:.1}%)", stat.pending_deleted_count,
+            if stat.total_vectors > 0 { stat.pending_deleted_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
         println!("  HNSW Graph:");
         println!("    Entry point: {:?}", stat.entry_point);
         println!("    Max level: {}", stat.max_level);
@@ -2493,6 +2544,10 @@ fn print_stats(stats: &[motlie_db::vector::admin::EmbeddingStats]) {
 
 fn admin_inspect(args: AdminInspectArgs) -> Result<()> {
     use motlie_db::vector::admin;
+
+    if args.secondary {
+        anyhow::bail!("--secondary mode not yet supported for 'admin inspect'. Use 'admin stats --secondary' instead.");
+    }
 
     let mut storage = Storage::readwrite(&args.db_path);
     storage.ready()?;
@@ -2562,6 +2617,10 @@ fn print_inspection(inspection: &motlie_db::vector::admin::EmbeddingInspection) 
 fn admin_vectors(args: AdminVectorsArgs) -> Result<()> {
     use motlie_db::vector::admin::{self, VecLifecycle};
 
+    if args.secondary {
+        anyhow::bail!("--secondary mode not yet supported for 'admin vectors'. Use 'admin stats --secondary' instead.");
+    }
+
     let mut storage = Storage::readwrite(&args.db_path);
     storage.ready()?;
 
@@ -2629,13 +2688,27 @@ fn print_vectors(vectors: &[motlie_db::vector::admin::VectorInfo]) {
 fn admin_validate(args: AdminValidateArgs) -> Result<()> {
     use motlie_db::vector::admin::{self, ValidationStatus};
 
+    if args.secondary {
+        anyhow::bail!("--secondary mode not yet supported for 'admin validate'. Use 'admin stats --secondary' instead.");
+    }
+
     let mut storage = Storage::readwrite(&args.db_path);
     storage.ready()?;
 
-    let results = if let Some(code) = args.code {
-        vec![admin::validate_embedding(&storage, code)?]
+    // ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
+    // Use strict mode for full-scan validation when --strict is passed.
+    let results = if args.strict {
+        if let Some(code) = args.code {
+            vec![admin::validate_embedding_strict(&storage, code)?]
+        } else {
+            admin::validate_all_strict(&storage)?
+        }
     } else {
-        admin::validate_all(&storage)?
+        if let Some(code) = args.code {
+            vec![admin::validate_embedding(&storage, code)?]
+        } else {
+            admin::validate_all(&storage)?
+        }
     };
 
     if args.json {
@@ -2690,10 +2763,21 @@ fn print_validation_results(results: &[motlie_db::vector::admin::ValidationResul
 fn admin_rocksdb(args: AdminRocksdbArgs) -> Result<()> {
     use motlie_db::vector::admin;
 
-    let mut storage = Storage::readwrite(&args.db_path);
-    storage.ready()?;
-
-    let stats = admin::get_rocksdb_stats(&storage)?;
+    // ADMIN.md Read-Only Mode (chungers, 2025-01-27, FIXED):
+    // Use secondary mode for read-only access when --secondary flag is set.
+    let stats = if args.secondary {
+        let secondary_path = std::env::temp_dir().join(format!(
+            "bench_vector_secondary_{}",
+            std::process::id()
+        ));
+        let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+        storage.ready()?;
+        admin::get_rocksdb_stats_secondary(&storage)?
+    } else {
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+        admin::get_rocksdb_stats(&storage)?
+    };
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&stats)?);
@@ -2705,22 +2789,50 @@ fn admin_rocksdb(args: AdminRocksdbArgs) -> Result<()> {
 }
 
 fn print_rocksdb_stats(stats: &motlie_db::vector::admin::RocksDbStats) {
+    // ADMIN.md Issue #4 (chungers, 2025-01-27, FIXED):
+    // Now uses is_sampled field to clearly label sampled values vs exact counts.
+    // Size column header changed to clarify these are sampled bytes, not on-disk totals.
+    // ADMIN.md RocksDB Properties (chungers, 2025-01-27, ADDED):
+    // Shows estimated_num_keys from RocksDB property when available (secondary mode).
+
+    // Check if any CF has estimated_num_keys
+    let has_estimates = stats.column_families.iter().any(|cf| cf.estimated_num_keys.is_some());
+
     println!("=== RocksDB Statistics ===\n");
-    println!("{:<30}  {:>12}  {:>12}", "Column Family", "Entries", "Size (est)");
-    println!("{}", "-".repeat(58));
+    if has_estimates {
+        println!("{:<30}  {:>14}  {:>14}  {:>14}", "Column Family", "Entries", "Est. Keys", "Bytes (sampled)");
+        println!("{}", "-".repeat(78));
+    } else {
+        println!("{:<30}  {:>14}  {:>14}", "Column Family", "Entries", "Bytes (sampled)");
+        println!("{}", "-".repeat(62));
+    }
 
     for cf in &stats.column_families {
         let size_str = format_size(cf.size_bytes);
-        let entry_str = if cf.entry_count >= 10000 {
+        // Use is_sampled field to indicate partial counts
+        let entry_str = if cf.is_sampled {
             format!("{}+", cf.entry_count)
         } else {
             format!("{}", cf.entry_count)
         };
-        println!("{:<30}  {:>12}  {:>12}", cf.name, entry_str, size_str);
+
+        if has_estimates {
+            let est_str = cf.estimated_num_keys
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            println!("{:<30}  {:>14}  {:>14}  {:>14}", cf.name, entry_str, est_str, size_str);
+        } else {
+            println!("{:<30}  {:>14}  {:>14}", cf.name, entry_str, size_str);
+        }
     }
 
-    println!("{}", "-".repeat(58));
-    println!("{:<30}  {:>12}  {:>12}", "Total", "", format_size(stats.total_size_bytes));
+    if has_estimates {
+        println!("{}", "-".repeat(78));
+        println!("{:<30}  {:>14}  {:>14}  {:>14}", "Total (sampled)", "", "", format_size(stats.total_size_bytes));
+    } else {
+        println!("{}", "-".repeat(62));
+        println!("{:<30}  {:>14}  {:>14}", "Total (sampled)", "", format_size(stats.total_size_bytes));
+    }
 }
 
 fn format_size(bytes: u64) -> String {

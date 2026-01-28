@@ -16,6 +16,11 @@
 //!
 //! // Validate consistency
 //! let results = admin::validate_all(&storage)?;
+//!
+//! // Secondary (read-only) mode for non-blocking access:
+//! let mut storage = Storage::secondary("./db", "/tmp/secondary");
+//! storage.ready()?;
+//! let stats = admin::get_all_stats_secondary(&storage)?;
 //! ```
 
 use anyhow::Result;
@@ -32,6 +37,14 @@ use crate::vector::schema::{
 };
 use crate::vector::{EmbeddingSpec, Storage};
 use crate::Id;
+
+// ============================================================================
+// DB Access Abstraction (ADMIN.md Read-Only Mode)
+// ============================================================================
+
+// ADMIN.md Read-Only Mode (chungers, 2025-01-27, FIXED):
+// Secondary mode support added for read-only access without write contention.
+// Functions with _secondary suffix use DB (secondary instance) instead of TransactionDB.
 
 // ============================================================================
 // Public Data Structures
@@ -79,14 +92,18 @@ pub struct EmbeddingStats {
     pub storage_type: String,
 
     // Counts
+    // ADMIN.md Lifecycle Accounting (chungers, 2025-01-27, FIXED):
+    // PendingDeleted is now shown separately instead of folded into Deleted.
     /// Total vectors in this embedding.
     pub total_vectors: u32,
     /// Vectors fully indexed in HNSW graph.
     pub indexed_count: u32,
     /// Vectors awaiting async graph construction.
     pub pending_count: u32,
-    /// Soft-deleted vectors awaiting cleanup.
+    /// Soft-deleted indexed vectors awaiting GC cleanup.
     pub deleted_count: u32,
+    /// Vectors deleted before async graph construction completed.
+    pub pending_deleted_count: u32,
 
     // Graph metadata
     /// HNSW entry point (None if graph is empty).
@@ -183,13 +200,22 @@ pub struct ValidationResult {
 
 /// Per-column-family storage statistics.
 #[derive(Debug, Clone, Serialize)]
+/// ADMIN.md Issue #4 (chungers, 2025-01-27, FIXED):
+/// Added is_sampled field to indicate when values are from sampling vs full scan.
+/// ADMIN.md RocksDB Properties (chungers, 2025-01-27, ADDED):
+/// Added estimated_num_keys from RocksDB property when available.
 pub struct ColumnFamilyStats {
     /// Column family name.
     pub name: String,
-    /// Number of entries (estimated).
+    /// Number of entries (may be sampled if is_sampled=true).
     pub entry_count: u64,
-    /// Size in bytes (estimated from RocksDB).
+    /// Size in bytes (sampled key+value bytes, not on-disk size).
     pub size_bytes: u64,
+    /// True if entry_count hit the sample limit (10,000).
+    pub is_sampled: bool,
+    /// Estimated number of keys from RocksDB property (None if unavailable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_num_keys: Option<u64>,
 }
 
 /// RocksDB-level diagnostics.
@@ -217,7 +243,7 @@ pub fn get_embedding_stats(storage: &Storage, code: EmbeddingCode) -> Result<Emb
     let (entry_point, max_level, graph_count, spec_hash) = load_graph_meta(&txn_db, code)?;
 
     // Count vectors by lifecycle
-    let (indexed_count, pending_count, deleted_count) =
+    let (indexed_count, pending_count, deleted_count, pending_deleted_count) =
         count_vectors_by_lifecycle(&txn_db, code)?;
 
     // Load ID allocator state
@@ -229,7 +255,8 @@ pub fn get_embedding_stats(storage: &Storage, code: EmbeddingCode) -> Result<Emb
         None => true, // No hash stored yet is OK
     };
 
-    let total_vectors = graph_count.unwrap_or(indexed_count + pending_count + deleted_count);
+    let total_vectors = graph_count
+        .unwrap_or(indexed_count + pending_count + deleted_count + pending_deleted_count);
 
     Ok(EmbeddingStats {
         code,
@@ -241,6 +268,7 @@ pub fn get_embedding_stats(storage: &Storage, code: EmbeddingCode) -> Result<Emb
         indexed_count,
         pending_count,
         deleted_count,
+        pending_deleted_count,
         entry_point,
         max_level,
         spec_hash,
@@ -493,13 +521,35 @@ pub fn sample_vectors(
 }
 
 /// Run validation checks on an embedding.
+///
+/// Uses sampling (first 1000 entries) for performance. Use `validate_embedding_strict`
+/// for full-scan validation.
 pub fn validate_embedding(storage: &Storage, code: EmbeddingCode) -> Result<ValidationResult> {
+    validate_embedding_with_options(storage, code, false)
+}
+
+/// Run validation checks on an embedding with strict mode (no sampling).
+///
+/// ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
+/// Added --strict option for full-scan validation without sampling.
+pub fn validate_embedding_strict(storage: &Storage, code: EmbeddingCode) -> Result<ValidationResult> {
+    validate_embedding_with_options(storage, code, true)
+}
+
+fn validate_embedding_with_options(
+    storage: &Storage,
+    code: EmbeddingCode,
+    strict: bool,
+) -> Result<ValidationResult> {
     let txn_db = storage.transaction_db()?;
 
     let spec = load_embedding_spec(&txn_db, code)?
         .ok_or_else(|| anyhow::anyhow!("Embedding {} not found", code))?;
 
     let mut checks = Vec::new();
+
+    // Sample limit: None for strict mode (full scan), Some(1000) for normal mode
+    let sample_limit = if strict { None } else { Some(1000) };
 
     // 1. Spec hash validation
     let (_, _, _, spec_hash) = load_graph_meta(&txn_db, code)?;
@@ -508,7 +558,7 @@ pub fn validate_embedding(storage: &Storage, code: EmbeddingCode) -> Result<Vali
     // 2. Entry point validation
     checks.push(validate_entry_point(storage, code)?);
 
-    // 3. ID mapping consistency
+    // 3. ID mapping consistency (forward -> reverse)
     checks.push(validate_id_mappings(&txn_db, code)?);
 
     // 4. Count accuracy
@@ -520,6 +570,18 @@ pub fn validate_embedding(storage: &Storage, code: EmbeddingCode) -> Result<Vali
     // 6. Orphaned vectors check
     checks.push(validate_no_orphaned_vectors(&txn_db, code)?);
 
+    // ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
+    // Additional checks for data integrity.
+
+    // 7. Reverse ID mapping consistency (reverse -> forward)
+    checks.push(validate_reverse_id_mappings(&txn_db, code, sample_limit)?);
+
+    // 8. VecMeta presence for all IdReverse entries
+    checks.push(validate_vec_meta_presence(&txn_db, code, sample_limit)?);
+
+    // 9. Vector payload existence for indexed vectors
+    checks.push(validate_vector_payloads(&txn_db, code, sample_limit)?);
+
     Ok(ValidationResult {
         code,
         model: spec.model,
@@ -529,6 +591,15 @@ pub fn validate_embedding(storage: &Storage, code: EmbeddingCode) -> Result<Vali
 
 /// Run validation checks on all embeddings.
 pub fn validate_all(storage: &Storage) -> Result<Vec<ValidationResult>> {
+    validate_all_with_options(storage, false)
+}
+
+/// Run validation checks on all embeddings with strict mode (no sampling).
+pub fn validate_all_strict(storage: &Storage) -> Result<Vec<ValidationResult>> {
+    validate_all_with_options(storage, true)
+}
+
+fn validate_all_with_options(storage: &Storage, strict: bool) -> Result<Vec<ValidationResult>> {
     let txn_db = storage.transaction_db()?;
 
     let specs_cf = txn_db
@@ -542,7 +613,12 @@ pub fn validate_all(storage: &Storage) -> Result<Vec<ValidationResult>> {
         let (key_bytes, _) = item?;
         if key_bytes.len() == 8 {
             let code = u64::from_be_bytes(key_bytes[..].try_into()?);
-            match validate_embedding(storage, code) {
+            let result = if strict {
+                validate_embedding_strict(storage, code)
+            } else {
+                validate_embedding(storage, code)
+            };
+            match result {
                 Ok(r) => results.push(r),
                 Err(e) => {
                     tracing::warn!("Failed to validate embedding {}: {}", code, e);
@@ -556,8 +632,14 @@ pub fn validate_all(storage: &Storage) -> Result<Vec<ValidationResult>> {
 
 /// Get RocksDB-level statistics.
 ///
-/// Note: Entry counts are estimated by sampling the first portion of each CF.
-/// Size estimation is not available through TransactionDB, so sizes are set to 0.
+/// Note: Entry counts are obtained by scanning up to 10,000 entries per CF.
+/// If a CF has more than 10,000 entries, is_sampled will be true and counts
+/// represent the sample only. Size is the sum of sampled key+value bytes,
+/// not on-disk size.
+///
+/// ADMIN.md RocksDB Properties (chungers, 2025-01-27, ADDED):
+/// Use `get_rocksdb_stats_secondary` for RocksDB property-based estimates
+/// (property_int_value_cf only available on DB, not TransactionDB).
 pub fn get_rocksdb_stats(storage: &Storage) -> Result<RocksDbStats> {
     let txn_db = storage.transaction_db()?;
 
@@ -577,24 +659,21 @@ pub fn get_rocksdb_stats(storage: &Storage) -> Result<RocksDbStats> {
                     entry_count += 1;
                     size_bytes += key.len() as u64 + value.len() as u64;
                     if entry_count >= sample_limit {
-                        // Extrapolate from sample (rough estimate)
-                        // For now, just report the sample count with a marker
                         break;
                     }
                 }
             }
 
-            // If we hit the limit, mark as estimated
-            let is_estimated = entry_count >= sample_limit;
-            if is_estimated {
-                // We can't reliably estimate total without more info
-                // Just report what we sampled
-            }
+            let is_sampled = entry_count >= sample_limit;
 
+            // Note: property_int_value_cf not available on TransactionDB
+            // Use get_rocksdb_stats_secondary for RocksDB property estimates
             column_families.push(ColumnFamilyStats {
                 name: cf_name.to_string(),
                 entry_count,
                 size_bytes,
+                is_sampled,
+                estimated_num_keys: None,
             });
 
             total_size_bytes += size_bytes;
@@ -605,6 +684,310 @@ pub fn get_rocksdb_stats(storage: &Storage) -> Result<RocksDbStats> {
         column_families,
         total_size_bytes,
     })
+}
+
+// ============================================================================
+// Secondary Mode Functions (Read-Only Access)
+// ============================================================================
+
+// ADMIN.md Read-Only Mode (chungers, 2025-01-27, FIXED):
+// These functions use secondary DB mode for read-only access without
+// contention with live workloads.
+
+/// Get RocksDB-level statistics using secondary (read-only) mode.
+///
+/// Uses `storage.db()` instead of `storage.transaction_db()`.
+/// Get RocksDB-level statistics using secondary (read-only) mode.
+///
+/// ADMIN.md RocksDB Properties (chungers, 2025-01-27, ADDED):
+/// This version queries rocksdb.estimate-num-keys property for better estimates,
+/// which is only available on DB (secondary mode), not TransactionDB.
+pub fn get_rocksdb_stats_secondary(storage: &Storage) -> Result<RocksDbStats> {
+    let db = storage.db()?;
+
+    let mut column_families = Vec::new();
+    let mut total_size_bytes = 0u64;
+
+    for cf_name in ALL_COLUMN_FAMILIES {
+        if let Some(cf) = db.cf_handle(cf_name) {
+            // Get estimated key count from RocksDB property
+            let estimated_num_keys = db
+                .property_int_value_cf(&cf, "rocksdb.estimate-num-keys")
+                .ok()
+                .flatten();
+
+            let iter = db.iterator_cf(&cf, IteratorMode::Start);
+            let mut entry_count = 0u64;
+            let mut size_bytes = 0u64;
+            let sample_limit = 10000u64;
+
+            for item in iter {
+                if let Ok((key, value)) = item {
+                    entry_count += 1;
+                    size_bytes += key.len() as u64 + value.len() as u64;
+                    if entry_count >= sample_limit {
+                        break;
+                    }
+                }
+            }
+
+            let is_sampled = entry_count >= sample_limit;
+
+            column_families.push(ColumnFamilyStats {
+                name: cf_name.to_string(),
+                entry_count,
+                size_bytes,
+                is_sampled,
+                estimated_num_keys,
+            });
+
+            total_size_bytes += size_bytes;
+        }
+    }
+
+    Ok(RocksDbStats {
+        column_families,
+        total_size_bytes,
+    })
+}
+
+/// Get statistics for all embeddings using secondary (read-only) mode.
+pub fn get_all_stats_secondary(storage: &Storage) -> Result<Vec<EmbeddingStats>> {
+    let db = storage.db()?;
+
+    let specs_cf = db
+        .cf_handle(EmbeddingSpecs::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
+
+    let mut stats = Vec::new();
+    let iter = db.iterator_cf(&specs_cf, IteratorMode::Start);
+
+    for item in iter {
+        let (key_bytes, _) = item?;
+        if key_bytes.len() == 8 {
+            let code = u64::from_be_bytes(key_bytes[..].try_into()?);
+            match get_embedding_stats_with_db(db, code) {
+                Ok(s) => stats.push(s),
+                Err(e) => {
+                    tracing::warn!("Failed to get stats for embedding {}: {}", code, e);
+                }
+            }
+        }
+    }
+
+    Ok(stats)
+}
+
+/// Get stats for a single embedding using secondary (read-only) mode.
+pub fn get_embedding_stats_secondary(
+    storage: &Storage,
+    code: EmbeddingCode,
+) -> Result<EmbeddingStats> {
+    let db = storage.db()?;
+    get_embedding_stats_with_db(db, code)
+}
+
+// Helper that works with rocksdb::DB for secondary mode
+fn get_embedding_stats_with_db(db: &rocksdb::DB, code: EmbeddingCode) -> Result<EmbeddingStats> {
+    // Load embedding spec
+    let spec = load_embedding_spec_db(db, code)?
+        .ok_or_else(|| anyhow::anyhow!("Embedding {} not found", code))?;
+
+    // Load graph metadata
+    let (entry_point, max_level, graph_count, spec_hash) = load_graph_meta_db(db, code)?;
+
+    // Count vectors by lifecycle
+    let (indexed_count, pending_count, deleted_count, pending_deleted_count) =
+        count_vectors_by_lifecycle_db(db, code)?;
+
+    // Load ID allocator state
+    let (next_id, free_id_count) = load_id_alloc_state_db(db, code)?;
+
+    // Validate spec hash
+    let spec_hash_valid = match spec_hash {
+        Some(hash) => hash == spec.compute_spec_hash(),
+        None => true,
+    };
+
+    let total_vectors = graph_count
+        .unwrap_or(indexed_count + pending_count + deleted_count + pending_deleted_count);
+
+    Ok(EmbeddingStats {
+        code,
+        model: spec.model,
+        dim: spec.dim,
+        distance: format!("{:?}", spec.distance).to_lowercase(),
+        storage_type: format!("{:?}", spec.storage_type).to_lowercase(),
+        total_vectors,
+        indexed_count,
+        pending_count,
+        deleted_count,
+        pending_deleted_count,
+        entry_point,
+        max_level,
+        spec_hash,
+        spec_hash_valid,
+        next_id,
+        free_id_count,
+    })
+}
+
+// DB versions of internal helpers for secondary mode
+
+fn load_embedding_spec_db(
+    db: &rocksdb::DB,
+    code: EmbeddingCode,
+) -> Result<Option<EmbeddingSpec>> {
+    use crate::rocksdb::ColumnFamilySerde;
+
+    let cf = db
+        .cf_handle(EmbeddingSpecs::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
+
+    let key = EmbeddingSpecCfKey(code);
+    let key_bytes = EmbeddingSpecs::key_to_bytes(&key);
+
+    match db.get_cf(&cf, key_bytes)? {
+        Some(value_bytes) => {
+            let value = EmbeddingSpecs::value_from_bytes(&value_bytes)?;
+            Ok(Some(value.0))
+        }
+        None => Ok(None),
+    }
+}
+
+fn load_graph_meta_db(
+    db: &rocksdb::DB,
+    code: EmbeddingCode,
+) -> Result<(Option<VecId>, u8, Option<u32>, Option<u64>)> {
+    let cf = db
+        .cf_handle(GraphMeta::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", GraphMeta::CF_NAME))?;
+
+    // Entry point
+    let ep_key = GraphMetaCfKey::entry_point(code);
+    let entry_point = match db.get_cf(&cf, GraphMeta::key_to_bytes(&ep_key))? {
+        Some(bytes) => {
+            let val = GraphMeta::value_from_bytes(&ep_key, &bytes)?;
+            match val.0 {
+                GraphMetaField::EntryPoint(v) => Some(v),
+                _ => None,
+            }
+        }
+        None => None,
+    };
+
+    // Max level
+    let level_key = GraphMetaCfKey::max_level(code);
+    let max_level = match db.get_cf(&cf, GraphMeta::key_to_bytes(&level_key))? {
+        Some(bytes) => {
+            let val = GraphMeta::value_from_bytes(&level_key, &bytes)?;
+            match val.0 {
+                GraphMetaField::MaxLevel(v) => v,
+                _ => 0,
+            }
+        }
+        None => 0,
+    };
+
+    // Count
+    let count_key = GraphMetaCfKey::count(code);
+    let count = match db.get_cf(&cf, GraphMeta::key_to_bytes(&count_key))? {
+        Some(bytes) => {
+            let val = GraphMeta::value_from_bytes(&count_key, &bytes)?;
+            match val.0 {
+                GraphMetaField::Count(v) => Some(v),
+                _ => None,
+            }
+        }
+        None => None,
+    };
+
+    // Spec hash
+    let hash_key = GraphMetaCfKey::spec_hash(code);
+    let spec_hash = match db.get_cf(&cf, GraphMeta::key_to_bytes(&hash_key))? {
+        Some(bytes) => {
+            let val = GraphMeta::value_from_bytes(&hash_key, &bytes)?;
+            match val.0 {
+                GraphMetaField::SpecHash(v) => Some(v),
+                _ => None,
+            }
+        }
+        None => None,
+    };
+
+    Ok((entry_point, max_level, count, spec_hash))
+}
+
+fn count_vectors_by_lifecycle_db(
+    db: &rocksdb::DB,
+    code: EmbeddingCode,
+) -> Result<(u32, u32, u32, u32)> {
+    let cf = db
+        .cf_handle(VecMeta::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", VecMeta::CF_NAME))?;
+
+    let prefix = code.to_be_bytes();
+    let iter = db.iterator_cf(
+        &cf,
+        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+    );
+
+    let mut indexed = 0u32;
+    let mut pending = 0u32;
+    let mut deleted = 0u32;
+    let mut pending_deleted = 0u32;
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+
+        let meta_value = VecMeta::value_from_bytes(&value_bytes)?;
+        let meta = &meta_value.0;
+
+        match meta.lifecycle() {
+            crate::vector::schema::VecLifecycle::Indexed => indexed += 1,
+            crate::vector::schema::VecLifecycle::Pending => pending += 1,
+            crate::vector::schema::VecLifecycle::Deleted => deleted += 1,
+            crate::vector::schema::VecLifecycle::PendingDeleted => pending_deleted += 1,
+        }
+    }
+
+    Ok((indexed, pending, deleted, pending_deleted))
+}
+
+fn load_id_alloc_state_db(db: &rocksdb::DB, code: EmbeddingCode) -> Result<(u32, u64)> {
+    let cf = db
+        .cf_handle(IdAlloc::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdAlloc::CF_NAME))?;
+
+    // Next ID
+    let next_key = IdAllocCfKey::next_id(code);
+    let next_id = match db.get_cf(&cf, IdAlloc::key_to_bytes(&next_key))? {
+        Some(bytes) => {
+            let val = IdAlloc::value_from_bytes(&next_key, &bytes)?;
+            match val.0 {
+                IdAllocField::NextId(v) => v,
+                _ => 0,
+            }
+        }
+        None => 0,
+    };
+
+    // Free bitmap
+    let bitmap_key = IdAllocCfKey::free_bitmap(code);
+    let free_count = match db.get_cf(&cf, IdAlloc::key_to_bytes(&bitmap_key))? {
+        Some(bytes) => {
+            let bitmap = RoaringBitmap::deserialize_from(&bytes[..])?;
+            bitmap.len()
+        }
+        None => 0,
+    };
+
+    Ok((next_id, free_count))
 }
 
 // ============================================================================
@@ -696,10 +1079,12 @@ fn load_graph_meta(
     Ok((entry_point, max_level, count, spec_hash))
 }
 
+// ADMIN.md Lifecycle Accounting (chungers, 2025-01-27, FIXED):
+// Returns separate counts for all 4 lifecycle states instead of folding PendingDeleted into Deleted.
 fn count_vectors_by_lifecycle(
     txn_db: &rocksdb::TransactionDB,
     code: EmbeddingCode,
-) -> Result<(u32, u32, u32)> {
+) -> Result<(u32, u32, u32, u32)> {
     let cf = txn_db
         .cf_handle(VecMeta::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", VecMeta::CF_NAME))?;
@@ -713,6 +1098,7 @@ fn count_vectors_by_lifecycle(
     let mut indexed = 0u32;
     let mut pending = 0u32;
     let mut deleted = 0u32;
+    let mut pending_deleted = 0u32;
 
     for item in iter {
         let (key_bytes, value_bytes) = item?;
@@ -727,12 +1113,12 @@ fn count_vectors_by_lifecycle(
         match meta.lifecycle() {
             crate::vector::schema::VecLifecycle::Indexed => indexed += 1,
             crate::vector::schema::VecLifecycle::Pending => pending += 1,
-            crate::vector::schema::VecLifecycle::Deleted
-            | crate::vector::schema::VecLifecycle::PendingDeleted => deleted += 1,
+            crate::vector::schema::VecLifecycle::Deleted => deleted += 1,
+            crate::vector::schema::VecLifecycle::PendingDeleted => pending_deleted += 1,
         }
     }
 
-    Ok((indexed, pending, deleted))
+    Ok((indexed, pending, deleted, pending_deleted))
 }
 
 fn load_id_alloc_state(
@@ -1068,31 +1454,44 @@ fn validate_count_accuracy(
     txn_db: &rocksdb::TransactionDB,
     code: EmbeddingCode,
 ) -> Result<ValidationCheck> {
+    // ADMIN.md Issue #3 (chungers, 2025-01-27, FIXED):
+    // GraphMeta::Count tracks indexed vectors only. Compare against indexed count,
+    // not total (indexed + pending + deleted). Report pending/deleted separately.
     let (_, _, graph_count, _) = load_graph_meta(txn_db, code)?;
-    let (indexed, pending, deleted) = count_vectors_by_lifecycle(txn_db, code)?;
-
-    let actual_total = indexed + pending + deleted;
+    let (indexed, pending, deleted, pending_deleted) = count_vectors_by_lifecycle(txn_db, code)?;
 
     match graph_count {
-        Some(stored) if stored == actual_total => Ok(ValidationCheck {
+        Some(stored) if stored == indexed => Ok(ValidationCheck {
             name: "count_accuracy",
             status: ValidationStatus::Pass,
-            message: format!("Count accurate: {} vectors", stored),
-        }),
-        Some(stored) => Ok(ValidationCheck {
-            name: "count_accuracy",
-            status: ValidationStatus::Warning,
             message: format!(
-                "Count mismatch: stored={}, actual={} (indexed={}, pending={}, deleted={})",
-                stored, actual_total, indexed, pending, deleted
+                "Count accurate: {} indexed (pending={}, deleted={}, pending_deleted={})",
+                stored, pending, deleted, pending_deleted
             ),
         }),
+        Some(stored) => {
+            // Determine if mismatch is expected (pending vectors not yet indexed)
+            let status = if pending > 0 && stored < indexed {
+                // Pending might explain some discrepancy
+                ValidationStatus::Warning
+            } else {
+                ValidationStatus::Warning
+            };
+            Ok(ValidationCheck {
+                name: "count_accuracy",
+                status,
+                message: format!(
+                    "Count mismatch: GraphMeta::Count={}, actual indexed={} (pending={}, deleted={}, pending_deleted={})",
+                    stored, indexed, pending, deleted, pending_deleted
+                ),
+            })
+        }
         None => Ok(ValidationCheck {
             name: "count_accuracy",
             status: ValidationStatus::Warning,
             message: format!(
-                "No count stored, actual={} (indexed={}, pending={}, deleted={})",
-                actual_total, indexed, pending, deleted
+                "No GraphMeta::Count stored, indexed={} (pending={}, deleted={}, pending_deleted={})",
+                indexed, pending, deleted, pending_deleted
             ),
         }),
     }
@@ -1206,6 +1605,219 @@ fn validate_no_orphaned_vectors(
             message: format!(
                 "{} orphaned vectors (indexed but no edges) of {} checked",
                 orphaned, checked
+            ),
+        })
+    }
+}
+
+// ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
+// Additional validation checks for reverse mappings, VecMeta presence, and vector payloads.
+
+fn validate_reverse_id_mappings(
+    txn_db: &rocksdb::TransactionDB,
+    code: EmbeddingCode,
+    sample_limit: Option<u32>,
+) -> Result<ValidationCheck> {
+    use crate::vector::schema::{IdForwardCfKey, IdForwardCfValue};
+
+    let forward_cf = txn_db
+        .cf_handle(IdForward::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdForward::CF_NAME))?;
+
+    let reverse_cf = txn_db
+        .cf_handle(IdReverse::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdReverse::CF_NAME))?;
+
+    let prefix = code.to_be_bytes();
+
+    // Check reverse mappings point back to valid forward mappings
+    let reverse_iter = txn_db.iterator_cf(
+        &reverse_cf,
+        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+    );
+
+    let mut checked = 0u32;
+    let mut mismatches = 0u32;
+    let limit = sample_limit.unwrap_or(1000);
+
+    for item in reverse_iter {
+        let (key_bytes, value_bytes) = item?;
+
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+
+        let reverse_key = IdReverse::key_from_bytes(&key_bytes)?;
+        let reverse_val = IdReverse::value_from_bytes(&value_bytes)?;
+
+        // Check forward mapping exists and points back
+        let forward_key = IdForwardCfKey(code, reverse_val.0);
+        if let Some(forward_bytes) = txn_db.get_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))? {
+            let forward_val: IdForwardCfValue = IdForward::value_from_bytes(&forward_bytes)?;
+            if forward_val.0 != reverse_key.1 {
+                mismatches += 1;
+            }
+        } else {
+            mismatches += 1;
+        }
+
+        checked += 1;
+        if sample_limit.is_some() && checked >= limit {
+            break;
+        }
+    }
+
+    let sampled_note = if sample_limit.is_some() { " (sampled)" } else { "" };
+
+    if mismatches == 0 {
+        Ok(ValidationCheck {
+            name: "reverse_id_mappings",
+            status: ValidationStatus::Pass,
+            message: format!("Reverse ID mappings consistent ({} checked{})", checked, sampled_note),
+        })
+    } else {
+        Ok(ValidationCheck {
+            name: "reverse_id_mappings",
+            status: ValidationStatus::Error,
+            message: format!(
+                "Reverse ID mapping mismatches: {} of {} checked{}",
+                mismatches, checked, sampled_note
+            ),
+        })
+    }
+}
+
+fn validate_vec_meta_presence(
+    txn_db: &rocksdb::TransactionDB,
+    code: EmbeddingCode,
+    sample_limit: Option<u32>,
+) -> Result<ValidationCheck> {
+    let reverse_cf = txn_db
+        .cf_handle(IdReverse::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdReverse::CF_NAME))?;
+
+    let meta_cf = txn_db
+        .cf_handle(VecMeta::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", VecMeta::CF_NAME))?;
+
+    let prefix = code.to_be_bytes();
+
+    let reverse_iter = txn_db.iterator_cf(
+        &reverse_cf,
+        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+    );
+
+    let mut checked = 0u32;
+    let mut missing = 0u32;
+    let limit = sample_limit.unwrap_or(1000);
+
+    for item in reverse_iter {
+        let (key_bytes, _) = item?;
+
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+
+        let reverse_key = IdReverse::key_from_bytes(&key_bytes)?;
+        let vec_id = reverse_key.1;
+
+        // Check VecMeta exists for this vector
+        let meta_key = VecMetaCfKey(code, vec_id);
+        if txn_db.get_cf(&meta_cf, VecMeta::key_to_bytes(&meta_key))?.is_none() {
+            missing += 1;
+        }
+
+        checked += 1;
+        if sample_limit.is_some() && checked >= limit {
+            break;
+        }
+    }
+
+    let sampled_note = if sample_limit.is_some() { " (sampled)" } else { "" };
+
+    if missing == 0 {
+        Ok(ValidationCheck {
+            name: "vec_meta_presence",
+            status: ValidationStatus::Pass,
+            message: format!("VecMeta present for all IdReverse entries ({} checked{})", checked, sampled_note),
+        })
+    } else {
+        Ok(ValidationCheck {
+            name: "vec_meta_presence",
+            status: ValidationStatus::Error,
+            message: format!(
+                "Missing VecMeta: {} of {} IdReverse entries{}",
+                missing, checked, sampled_note
+            ),
+        })
+    }
+}
+
+fn validate_vector_payloads(
+    txn_db: &rocksdb::TransactionDB,
+    code: EmbeddingCode,
+    sample_limit: Option<u32>,
+) -> Result<ValidationCheck> {
+    use crate::vector::schema::{VectorCfKey, Vectors};
+
+    let meta_cf = txn_db
+        .cf_handle(VecMeta::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", VecMeta::CF_NAME))?;
+
+    let vectors_cf = txn_db
+        .cf_handle(Vectors::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", Vectors::CF_NAME))?;
+
+    let prefix = code.to_be_bytes();
+    let iter = txn_db.iterator_cf(
+        &meta_cf,
+        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+    );
+
+    let mut checked = 0u32;
+    let mut missing = 0u32;
+    let limit = sample_limit.unwrap_or(1000);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+
+        let key = VecMeta::key_from_bytes(&key_bytes)?;
+        let meta_value = VecMeta::value_from_bytes(&value_bytes)?;
+        let meta = &meta_value.0;
+
+        // Only check indexed vectors - they must have vector data
+        if meta.lifecycle() == crate::vector::schema::VecLifecycle::Indexed {
+            let vector_key = VectorCfKey(code, key.1);
+            if txn_db.get_cf(&vectors_cf, Vectors::key_to_bytes(&vector_key))?.is_none() {
+                missing += 1;
+            }
+            checked += 1;
+        }
+
+        if sample_limit.is_some() && checked >= limit {
+            break;
+        }
+    }
+
+    let sampled_note = if sample_limit.is_some() { " (sampled)" } else { "" };
+
+    if missing == 0 {
+        Ok(ValidationCheck {
+            name: "vector_payloads",
+            status: ValidationStatus::Pass,
+            message: format!("Vector data present for all indexed vectors ({} checked{})", checked, sampled_note),
+        })
+    } else {
+        Ok(ValidationCheck {
+            name: "vector_payloads",
+            status: ValidationStatus::Error,
+            message: format!(
+                "Missing vector data: {} of {} indexed vectors{}",
+                missing, checked, sampled_note
             ),
         })
     }
