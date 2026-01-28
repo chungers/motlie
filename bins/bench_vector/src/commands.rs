@@ -2476,19 +2476,26 @@ fn admin_stats(args: AdminStatsArgs) -> Result<()> {
 
     // ADMIN.md Read-Only Mode (chungers, 2025-01-27, FIXED):
     // Use secondary mode for read-only access when --secondary flag is set.
+    // ADMIN.md Secondary Cleanup (claude, 2025-01-27, FIXED):
+    // Clean up temp directory after use to avoid accumulation.
     let stats = if args.secondary {
         let secondary_path = std::env::temp_dir().join(format!(
             "bench_vector_secondary_{}",
             std::process::id()
         ));
-        let mut storage = Storage::secondary(&args.db_path, &secondary_path);
-        storage.ready()?;
+        let result = {
+            let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+            storage.ready()?;
 
-        if let Some(code) = args.code {
-            vec![admin::get_embedding_stats_secondary(&storage, code)?]
-        } else {
-            admin::get_all_stats_secondary(&storage)?
-        }
+            if let Some(code) = args.code {
+                vec![admin::get_embedding_stats_secondary(&storage, code)?]
+            } else {
+                admin::get_all_stats_secondary(&storage)?
+            }
+        };
+        // Clean up secondary DB files
+        let _ = std::fs::remove_dir_all(&secondary_path);
+        result
     } else {
         let mut storage = Storage::readwrite(&args.db_path);
         storage.ready()?;
@@ -2765,14 +2772,21 @@ fn admin_rocksdb(args: AdminRocksdbArgs) -> Result<()> {
 
     // ADMIN.md Read-Only Mode (chungers, 2025-01-27, FIXED):
     // Use secondary mode for read-only access when --secondary flag is set.
+    // ADMIN.md Secondary Cleanup (claude, 2025-01-27, FIXED):
+    // Clean up temp directory after use to avoid accumulation.
     let stats = if args.secondary {
         let secondary_path = std::env::temp_dir().join(format!(
             "bench_vector_secondary_{}",
             std::process::id()
         ));
-        let mut storage = Storage::secondary(&args.db_path, &secondary_path);
-        storage.ready()?;
-        admin::get_rocksdb_stats_secondary(&storage)?
+        let result = {
+            let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+            storage.ready()?;
+            admin::get_rocksdb_stats_secondary(&storage)?
+        };
+        // Clean up secondary DB files
+        let _ = std::fs::remove_dir_all(&secondary_path);
+        result
     } else {
         let mut storage = Storage::readwrite(&args.db_path);
         storage.ready()?;

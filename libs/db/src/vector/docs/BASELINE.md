@@ -723,6 +723,7 @@ Use `bench_vector index` + `bench_vector query` with the random streaming datase
 ./target/release/bench_vector query \
     --dataset random \
     --db-path /tmp/bench_10k \
+    --embedding-code <EMBEDDING_CODE> \
     --num-queries 100 \
     --skip-recall
 
@@ -739,6 +740,7 @@ Use `bench_vector index` + `bench_vector query` with the random streaming datase
 ./target/release/bench_vector query \
     --dataset random \
     --db-path /tmp/bench_100k \
+    --embedding-code <EMBEDDING_CODE> \
     --num-queries 500 \
     --skip-recall
 
@@ -841,6 +843,7 @@ For CI, run 1M scale benchmark and assert minimum thresholds:
 ./target/release/bench_vector query \
     --dataset random \
     --db-path /tmp/ci_bench_1m \
+    --embedding-code <EMBEDDING_CODE> \
     --num-queries 500 \
     --skip-recall
 

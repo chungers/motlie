@@ -11,8 +11,8 @@
 //! # Build index with checkpointing
 //! bench_vector index --dataset laion --num-vectors 100000 --db-path ./db
 //!
-//! # Run queries
-//! bench_vector query --db-path ./db --queries 1000 --k 10
+//! # Run queries (use embedding code from index output)
+//! bench_vector query --db-path ./db --embedding-code <CODE> --queries 1000 --k 10
 //!
 //! # Parameter sweep
 //! bench_vector sweep --dataset laion --bits 1,2,4 --ef 50,100,200 --rerank 1,4,10

@@ -1662,6 +1662,10 @@ fn validate_reverse_id_mappings(
         }
 
         checked += 1;
+        // Progress reporting for strict mode (full scan)
+        if sample_limit.is_none() && checked % 10_000 == 0 {
+            eprintln!("  [reverse_id_mappings] checked {} entries...", checked);
+        }
         if sample_limit.is_some() && checked >= limit {
             break;
         }
@@ -1728,6 +1732,10 @@ fn validate_vec_meta_presence(
         }
 
         checked += 1;
+        // Progress reporting for strict mode (full scan)
+        if sample_limit.is_none() && checked % 10_000 == 0 {
+            eprintln!("  [vec_meta_presence] checked {} entries...", checked);
+        }
         if sample_limit.is_some() && checked >= limit {
             break;
         }
@@ -1796,6 +1804,10 @@ fn validate_vector_payloads(
                 missing += 1;
             }
             checked += 1;
+            // Progress reporting for strict mode (full scan)
+            if sample_limit.is_none() && checked % 10_000 == 0 {
+                eprintln!("  [vector_payloads] checked {} indexed vectors...", checked);
+            }
         }
 
         if sample_limit.is_some() && checked >= limit {
