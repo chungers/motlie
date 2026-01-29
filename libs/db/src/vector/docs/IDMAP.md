@@ -48,6 +48,7 @@ their byte encodings and add a **type tag**.
 > - `EdgeFragmentCfKey` = 48 bytes (line 477) ✓
 > - `NodeFragmentCfKey` = 24 bytes (line 404) ✓
 > - All sizes in table are correct.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: accept verified sizes; keep as canonical and add size assertions in tests to catch drift.
 
 **Note:** `NodeSummary`/`EdgeSummary` are content-addressed. Multiple nodes/edges
 may share the same summary hash. If uniqueness is required, use `NodeId`/`Edge`.
@@ -59,6 +60,7 @@ single canonical `ExternalKey` and document/encode that choice at insert time.
 The reverse lookup always returns that canonical key.
 
 > **[claude, 2026-01-29, AGREE]** This 1:1 invariant is correct and simplifies the design. However, consider adding a task to document the "canonical key selection" strategy for callers who embed the same content under multiple key types.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: keep 1:1 invariant and add an explicit doc task to define canonical key selection guidance.
 
 **Lookup flow for summaries:** Summary embeddings are addressed by
 `SummaryHash`, not by `NodeId`/`Edge`. The vector layer treats `NodeSummary` and
@@ -112,6 +114,7 @@ serialization or `ExternalKey` storage.
 versioned at the graph/vector layer together.
 
 > **[claude, 2026-01-29, AGREE]** Sound risk analysis. The dependency on `HotColumnFamilyRecord` key encoders is the right approach - avoids duplication and ensures consistency.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: reuse graph key encoders as the single source of truth.
 
 ## Key Encoding
 
@@ -150,6 +153,7 @@ This preserves prefix locality on `embedding_code` for range scans and keeps
 reverse lookup O(1).
 
 > **[claude, 2026-01-29, AGREE]** Prefix locality design is correct. The 8-byte embedding_code prefix enables efficient per-embedding iteration which is critical for admin stats and GC operations.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: keep embedding_code prefix for forward/reverse keys.
 
 ## Column Families
 
@@ -180,8 +184,8 @@ pub enum ExternalKey {
 ```
 
 Changes:
-- `InsertVector` should accept `ExternalKey` instead of `Id` (with a helper
-  `ExternalKey::NodeId` for backward compatibility).
+- `InsertVector` should accept `ExternalKey` instead of `Id`. Use
+  `ExternalKey::NodeId` for node-only callers.
 - `DeleteVector` should accept `ExternalKey` instead of `Id`.
 - Search result should return `ExternalKey` (typed), not `Id` only.
 - Bench tools should use `ExternalKey::NodeId` for synthetic datasets.
@@ -225,20 +229,10 @@ Changes:
 
 Use a union type in the public API for polymorphic external keys.
 
-**New public type:**
-
 > **[claude, 2026-01-29, DISAGREE]** This is the duplicate definition mentioned in G2. Remove this block - the canonical definition is in the "API Changes" section above (lines 158-166).
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: remove duplicate definition; reference the `ExternalKey` enum defined in "API Changes".
 
-```rust
-pub enum ExternalKey {
-    NodeId(Id),
-    NodeFragment(Id, TimestampMilli),
-    Edge(Id, Id, NameHash),
-    EdgeFragment(Id, Id, NameHash, TimestampMilli),
-    NodeSummary(SummaryHash),
-    EdgeSummary(SummaryHash),
-}
-```
+**ExternalKey** is defined in **API Changes** above and is not redefined here.
 
 **Processor::search results:**
 
@@ -312,6 +306,7 @@ thrash at scale.
   block cache for IdForward/IdReverse or drop this tuning knob.
 
 > **[claude, 2026-01-29, DISAGREE]** RocksDB does not support per-CF cache quotas on a shared block cache. The "dedicated block cache" option is the only viable path. Recommend: (1) Start without this optimization, (2) Add dedicated cache only if profiling shows IdMap cache contention. Premature optimization risk.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: defer cache tuning; only add a dedicated IdMap cache if profiling shows contention.
 
 This should be adjustable in `VectorConfig` for deployments with heavy mapping
 traffic (e.g., many fragments per node/edge).
@@ -369,12 +364,12 @@ The following gaps and ambiguities have been identified during implementation re
 
 **Resolution:** Not needed during heavy development. No existing databases to version.
 
-### G2: Duplicate ExternalKey Definition (LOW)
+### G2: Duplicate ExternalKey Definition (RESOLVED)
 
-**Gap:** The `ExternalKey` enum is defined twice in the document (API Changes
-section and SearchKNN section). Should consolidate to a single definition.
+**Gap:** The `ExternalKey` enum was defined twice in the document (API Changes
+section and SearchKNN section).
 
-**Action:** Remove duplicate definition from SearchKNN section.
+**Resolution:** Removed duplicate definition from SearchKNN section.
 
 ### G3: Graph Schema Key Dependencies (MEDIUM)
 
@@ -388,10 +383,11 @@ or specify import paths.
 - `EdgeFragmentCfKey` (exists) → verify 48-byte encoding
 - `SummaryHash` → verify this type exists (may need to add)
 
-**Action:** Confirm byte sizes in `graph/schema.rs` before relying on the size
-table above. If sizes differ, update this document and the serialization tests.
+**Action:** Verified byte sizes in `graph/schema.rs`. Add size assertions in
+tests to guard against drift.
 
 > **[claude, 2026-01-29, AGREE]** This is critical. Recommend making T1.3 a **blocking prerequisite** for T1.1. The ExternalKey implementation depends on correct byte sizes.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: treat T1.3 as blocking; verified sizes and will add test assertions to guard drift.
 
 ### G4: Migration Tool Specification ~~(HIGH)~~ N/A
 
@@ -403,17 +399,17 @@ table above. If sizes differ, update this document and the serialization tests.
 
 **Gap:** No explicit error types for key deserialization failures.
 
-**Required error variants:**
+**Required error variants (simplified):**
 ```rust
 pub enum IdMapError {
     UnknownTag(u8),
     InvalidKeyLength { expected: usize, actual: usize },
-    KeyTypeMismatch { expected: &'static str, actual: &'static str },
     DecodeError(String),
 }
 ```
 
 > **[claude, 2026-01-29, DISAGREE]** `KeyTypeMismatch` may not be needed - the caller knows what type they're looking up. Consider simplifying to just `UnknownTag`, `InvalidKeyLength`, and a generic `DecodeError`. Also: should this be a separate enum or just use `anyhow::Error` with context? The current codebase uses `anyhow` pervasively.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: drop `KeyTypeMismatch`, keep a small `IdMapError` and wrap with `anyhow` at call sites as needed.
 
 ### G6: Test Coverage Matrix (MEDIUM)
 
@@ -445,6 +441,7 @@ For 1M vectors with 80% NodeId keys:
 - New: 800K × 17 + 200K × 25 (avg) = 18.6 MB (+16%)
 
 > **[claude, 2026-01-29, AGREE]** Math checks out. 16% overhead is acceptable. Note: this is **per-embedding** storage, and the overhead is in IdForward keys + IdReverse values. The actual vector data (Vectors CF) is unchanged.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: keep estimate as-is; note overhead is in mapping CFs only.
 
 ### G8: Rollback Strategy ~~(HIGH)~~ N/A
 
@@ -482,6 +479,9 @@ For 1M vectors with 80% NodeId keys:
 - Heavy fragment workload: 0.15-0.20
 - Add observability metric: `idmap_cache_hit_ratio`
 
+**Decision:** Defer cache tuning work until profiling shows contention; apply
+this guidance only if/when Phase 8 is activated.
+
 ### G11: Serde Strategy Mismatch (RESOLVED)
 
 **Concern:** Graph CFs use rkyv/rmp for values while IDMAP uses manual bytes.
@@ -505,7 +505,7 @@ event that must be versioned.
 
 - [ ] **T1.2**: Define `IdMapError` error type in `libs/db/src/vector/error.rs`
 
-- [ ] **T1.3**: Verify graph schema key imports
+- [ ] **T1.3**: Verify graph schema key imports (**blocking before T1.1**)
   - Confirm `NodeFragmentCfKey`, `ForwardEdgeCfKey`, `EdgeFragmentCfKey` exist
   - Add `SummaryHash` type if missing
 
@@ -526,10 +526,11 @@ event that must be versioned.
 ### Phase 3: API Changes
 
 - [ ] **T3.1**: Update `InsertVector` mutation to accept `ExternalKey`
-  - Add `ExternalKey::NodeId(id)` convenience constructor
-  - Preserve backward compatibility via `InsertVector::new_node()`
+  - Primary constructor takes `ExternalKey`
+  - Optional convenience: `InsertVector::new_node_id(...)`
 
 > **[claude, 2026-01-29, DISAGREE]** "Backward compatibility" is unnecessary in heavy dev. Recommend: just change `InsertVector::new()` to take `ExternalKey` directly. Callers wrap with `ExternalKey::NodeId(id)`. Simpler API, no legacy baggage.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: remove backward-compat framing; use `ExternalKey` in the primary constructor and keep a small convenience constructor if desired.
 
 - [ ] **T3.2**: Update `DeleteVector` mutation to accept `ExternalKey`
 
@@ -574,15 +575,16 @@ event that must be versioned.
 
 - [ ] **T7.2**: Add `--json` output for typed external keys
 
-### Phase 8: Cache Tuning
+### Phase 8: Cache Tuning (DEFERRED)
 
 > **[claude, 2026-01-29, DISAGREE]** Recommend deferring Phase 8 entirely. Per earlier note, RocksDB doesn't support per-CF cache quotas. These tasks should be marked as "DEFERRED - implement only if profiling shows cache contention". Premature optimization.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: defer Phase 8; only implement if profiling shows cache contention.
 
-- [ ] **T8.1**: Add `id_map_cache_fraction` to `VectorBlockCacheConfig`
+- [ ] **T8.1** (DEFERRED): Add `id_map_cache_fraction` to `VectorBlockCacheConfig`
 
-- [ ] **T8.2**: Apply cache fraction to IdForward/IdReverse CF options
+- [ ] **T8.2** (DEFERRED): Apply cache fraction to IdForward/IdReverse CF options
 
-- [ ] **T8.3**: Add `idmap_cache_hit_ratio` metric
+- [ ] **T8.3** (DEFERRED): Add `idmap_cache_hit_ratio` metric
 
 ### Phase 9: Tests
 
@@ -596,31 +598,36 @@ event that must be versioned.
 
 - [ ] **T9.5**: Performance benchmark: 1M key operations
 
+- [ ] **T9.6**: Size assertions for graph key encodings (e.g., Node/Edge keys)
+
 ### Phase 10: Documentation
 
 - [ ] **T10.1**: Update ROADMAP.md with new schema
 
 - [ ] **T10.2**: Update any other docs referencing IdForward/IdReverse
 
-- [ ] **T10.3**: Remove duplicate ExternalKey definition from this document
+- [x] **T10.3**: Remove duplicate ExternalKey definition from this document
+
+- [ ] **T10.4**: Document canonical `ExternalKey` selection strategy (when the
+  same content could be addressed by multiple key types)
 
 ---
 
 ## Dependencies
 
 ```
-T1.1 ─┬─► T2.1 ─┬─► T3.1 ─┬─► T4.2
-      │         │         │
-T1.2 ─┤   T2.2 ─┤   T3.2 ─┤   T4.3
-      │         │         │
-T1.3 ─┘   T2.3 ─┤   T3.3 ─┤   T4.4
-          T2.4 ─┘   T3.4 ─┤
-                    T3.5 ─┤
-                    T3.6 ─┘
+T1.3 ─► T1.1 ─┬─► T2.1 ─┬─► T3.1 ─┬─► T4.2
+             │         │         │
+T1.2 ────────┤   T2.2 ─┤   T3.2 ─┤   T4.3
+             │         │         │
+             └─► T2.3 ─┤   T3.3 ─┤   T4.4
+                  T2.4 ─┘   T3.4 ─┤
+                            T3.5 ─┤
+                            T3.6 ─┘
 
 T4.* ─► T6.* (admin needs updated processor)
 T4.* ─► T7.* (bench needs updated processor)
-T2.* ─► T8.* (cache config applies to CFs)
+T2.* ─► T8.* (DEFERRED; only if profiling shows contention)
 
 All ─► T9.* (tests after implementation)
 All ─► T10.* (docs after implementation)
@@ -637,10 +644,10 @@ All ─► T10.* (docs after implementation)
 | 5 - Migration | ~~5~~ 0 | ~~Large~~ N/A |
 | 6 - Admin | 3 | Small |
 | 7 - Bench | 2 | Small |
-| 8 - Cache | 3 | Small |
-| 9 - Tests | 4 | Medium |
-| 10 - Docs | 3 | Small |
-| **Total** | **32** | |
+| 8 - Cache | 3 | DEFERRED |
+| 9 - Tests | 6 | Medium |
+| 10 - Docs | 4 | Small |
+| **Total** | **35** | |
 
 ## Risk Assessment
 
@@ -648,11 +655,14 @@ All ─► T10.* (docs after implementation)
 |------|--------|------------|------------|
 | Performance regression | MEDIUM | MEDIUM | Benchmark before/after |
 | API breaking changes | LOW | HIGH | Expected in dev phase |
-| Cache thrash at scale | LOW | MEDIUM | Tunable cache fraction |
+| Cache thrash at scale | LOW | MEDIUM | Profile; add dedicated IdMap cache if needed |
+| Graph key encoding drift | HIGH | LOW | Add size assertions; coordinate schema changes |
 
 > **[claude, 2026-01-29, DISAGREE]** Missing risk: **Graph schema key encoding drift**. If graph/schema.rs key layouts change without coordinating with vector/schema.rs, data corruption occurs. Mitigation: Add compile-time size assertions in ExternalKey tests (e.g., `assert_eq!(size_of::<NodeCfKey>(), 16)`).
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: add explicit risk row and size-assertion tests to guard key layout drift.
 
 > **[claude, 2026-01-29, AGREE]** Overall risk assessment is reasonable for a dev-phase feature. The "API breaking changes" risk being LOW impact is correct given no production users.
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: keep overall risk assessment with the added key-encoding drift risk.
 
 ---
 
@@ -684,3 +694,5 @@ All ─► T10.* (docs after implementation)
 > 6. T9.* (tests) - include size assertions
 > 7. T6.*, T7.*, T10.* (admin, bench, docs)
 > 8. T8.* (cache tuning) - **DEFER until profiling shows need**
+>
+> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: accept overall assessment and incorporate the deferrals/simplifications above into the execution plan.
