@@ -19,7 +19,7 @@ entity key while preserving fast lookups and simple reverse resolution in search
 - Preserve **fast lookup** by embedding + external key → vec_id
 - Preserve **fast reverse mapping** vec_id → external key
 - Maintain **prefix locality** by embedding code for range scans
-- Provide **backward compatibility** for existing Node ID mappings
+- Maintain a clean model for **new databases** (no legacy format support)
 
 ## Non-Goals
 
@@ -43,6 +43,63 @@ their byte encodings and add a **type tag**.
 
 **Note:** `NodeSummary`/`EdgeSummary` are content-addressed. Multiple nodes/edges
 may share the same summary hash. If uniqueness is required, use `NodeId`/`Edge`.
+
+**Invariant:** Each vec_id must map to **exactly one** `ExternalKey`. This design
+does **not** support multi-map (one vec_id → many external keys). If you need
+both `NodeId` and `NodeSummary` to point to the same vector, you must choose a
+single canonical `ExternalKey` and document/encode that choice at insert time.
+The reverse lookup always returns that canonical key.
+
+**Lookup flow for summaries:** Summary embeddings are addressed by
+`SummaryHash`, not by `NodeId`/`Edge`. The vector layer treats `NodeSummary` and
+`EdgeSummary` as *independent* key types and does not traverse graph tables.
+Callers must perform the join explicitly:
+
+1) **Resolve summary hash** from graph storage (e.g., `NodeSummaryCf` /
+   `EdgeSummaryCf` or whatever table exposes the summary hash for a node/edge).
+2) **Construct ExternalKey** as `ExternalKey::NodeSummary(summary_hash)` or
+   `ExternalKey::EdgeSummary(summary_hash)`.
+3) **Query vector** using the summary external key.
+
+If a caller only has a `NodeId`/`Edge` and does not resolve the summary hash,
+the vector lookup will not find a mapping and must return a not-found error.
+
+**Encoding source of truth:** Vector key serialization will **reuse the
+`HotColumnFamilyRecord` implementations in `graph/schema.rs`** to
+encode/decode the corresponding `*CfKey` types. Canonical encoders/decoders:
+
+- `Nodes` → `NodeCfKey`
+  - `HotColumnFamilyRecord::key_to_bytes`
+  - `HotColumnFamilyRecord::key_from_bytes`
+- `NodeFragments` → `NodeFragmentCfKey`
+  - `HotColumnFamilyRecord::key_to_bytes`
+  - `HotColumnFamilyRecord::key_from_bytes`
+- `ForwardEdges` → `ForwardEdgeCfKey`
+  - `HotColumnFamilyRecord::key_to_bytes`
+  - `HotColumnFamilyRecord::key_from_bytes`
+- `EdgeFragments` → `EdgeFragmentCfKey`
+  - `HotColumnFamilyRecord::key_to_bytes`
+  - `HotColumnFamilyRecord::key_from_bytes`
+- `NodeSummaries` → `NodeSummaryCfKey`
+  - `HotColumnFamilyRecord::key_to_bytes`
+  - `HotColumnFamilyRecord::key_from_bytes`
+- `EdgeSummaries` → `EdgeSummaryCfKey`
+  - `HotColumnFamilyRecord::key_to_bytes`
+  - `HotColumnFamilyRecord::key_from_bytes`
+
+This keeps encoding canonical with the graph layer and avoids duplicating byte
+layouts.
+
+**Serde strategy note (non-risk):** Graph CFs use a mix of rkyv and rmp *for
+values*. The `HotColumnFamilyRecord` key helpers are **manual, fixed-layout
+encoders** and do **not** depend on the value serde. IDMAP will continue to use
+manual byte layouts (`[tag: u8] + payload`) for both forward and reverse
+entries. Therefore the rkyv/rmp split in graph **does not affect** IDMAP key
+serialization or `ExternalKey` storage.
+
+**Risk boundary:** The only coupling risk is if graph **key** layouts change
+(byte order/size). That is already a storage-breaking change and should be
+versioned at the graph/vector layer together.
 
 ## Key Encoding
 
@@ -233,8 +290,10 @@ thrash at scale.
 
 **Proposed config:**
 - `VectorBlockCacheConfig::id_map_cache_fraction` (default: `0.10`)
-- Applied to IdForward/IdReverse CF options to reserve a fraction of the shared
-  cache for ID mapping lookups.
+- If per-CF cache partitioning is available, apply to IdForward/IdReverse CFs to
+  reserve a fraction of the shared cache for ID mapping lookups.
+- If per-CF quotas are not supported, implement by allocating a **dedicated**
+  block cache for IdForward/IdReverse or drop this tuning knob.
 
 This should be adjustable in `VectorConfig` for deployments with heavy mapping
 traffic (e.g., many fragments per node/edge).
@@ -268,8 +327,9 @@ Add tests for:
 
 ## Migration Plan
 
-**Not applicable.** Heavy development phase - no existing databases to migrate.
-Simply implement the new `ExternalKey` format directly in IdForward/IdReverse.
+**Breaking change.** Existing databases using legacy `IdForward`/`IdReverse`
+must be migrated or rebuilt. For now, this is acceptable in heavy development:
+no compatibility guarantees are provided for legacy data.
 
 ## Open Questions
 
@@ -309,6 +369,9 @@ or specify import paths.
 - `ForwardEdgeCfKey` (exists) → verify 40-byte encoding
 - `EdgeFragmentCfKey` (exists) → verify 48-byte encoding
 - `SummaryHash` → verify this type exists (may need to add)
+
+**Action:** Confirm byte sizes in `graph/schema.rs` before relying on the size
+table above. If sizes differ, update this document and the serialization tests.
 
 ### G4: Migration Tool Specification ~~(HIGH)~~ N/A
 
@@ -394,6 +457,16 @@ For 1M vectors with 80% NodeId keys:
 - Mixed workload (fragments): 0.10 (default)
 - Heavy fragment workload: 0.15-0.20
 - Add observability metric: `idmap_cache_hit_ratio`
+
+### G11: Serde Strategy Mismatch (RESOLVED)
+
+**Concern:** Graph CFs use rkyv/rmp for values while IDMAP uses manual bytes.
+
+**Resolution:** IDMAP reuses only **key encoders** (`HotColumnFamilyRecord`
+`key_to_bytes` / `key_from_bytes`), which are fixed-layout and do not depend on
+value serde. IDMAP forward/reverse entries remain manual bytes. This is not a
+risk unless graph **key** layouts change, which is already a storage-breaking
+event that must be versioned.
 
 ---
 
