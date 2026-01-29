@@ -32,8 +32,8 @@ use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 use crate::vector::schema::{
     BinaryCodes, BinaryCodeCfKey, Edges, EdgeCfKey, EmbeddingCode, EmbeddingSpecCfKey,
     EmbeddingSpecs, GraphMeta, GraphMetaCfKey, GraphMetaField, IdAlloc, IdAllocCfKey,
-    IdAllocField, IdForward, IdReverse, IdReverseCfKey, Pending, VecId, VecMeta,
-    VecMetaCfKey, ALL_COLUMN_FAMILIES,
+    IdAllocField, IdForward, IdReverse, IdReverseCfKey, LifecycleCounts, LifecycleCountsCfKey,
+    LifecycleCountsValue, Pending, VecId, VecMeta, VecMetaCfKey, ALL_COLUMN_FAMILIES,
 };
 use crate::vector::{EmbeddingSpec, Storage};
 use crate::Id;
@@ -961,8 +961,105 @@ fn get_rocksdb_stats_impl(db: &dyn AdminDb) -> Result<RocksDbStats> {
 }
 
 // ============================================================================
+// Lifecycle Counter Migration
+// ============================================================================
+
+/// Result of migrating lifecycle counters for an embedding.
+#[derive(Debug, Clone, Serialize)]
+pub struct MigrateCountsResult {
+    /// Embedding code
+    pub code: EmbeddingCode,
+    /// Counted indexed vectors
+    pub indexed: u64,
+    /// Counted pending vectors
+    pub pending: u64,
+    /// Counted deleted vectors
+    pub deleted: u64,
+    /// Counted pending_deleted vectors
+    pub pending_deleted: u64,
+}
+
+/// Migrate lifecycle counters for a single embedding by scanning VecMeta and
+/// writing the counts to LifecycleCounts CF.
+///
+/// This is a one-time migration operation for existing databases that don't
+/// have lifecycle counters initialized. The counters enable O(1) stats queries.
+///
+/// Note: This must be run in readwrite mode (not secondary).
+pub fn migrate_lifecycle_counts(
+    storage: &Storage,
+    code: EmbeddingCode,
+) -> Result<MigrateCountsResult> {
+    let txn_db = storage.transaction_db()?;
+    migrate_lifecycle_counts_impl(txn_db, code)
+}
+
+/// Migrate lifecycle counters for all embeddings.
+pub fn migrate_all_lifecycle_counts(storage: &Storage) -> Result<Vec<MigrateCountsResult>> {
+    let txn_db = storage.transaction_db()?;
+    let codes = list_embedding_codes(txn_db)?;
+
+    let mut results = Vec::with_capacity(codes.len());
+    for code in codes {
+        results.push(migrate_lifecycle_counts_impl(txn_db, code)?);
+    }
+    Ok(results)
+}
+
+fn migrate_lifecycle_counts_impl(
+    txn_db: &rocksdb::TransactionDB,
+    code: EmbeddingCode,
+) -> Result<MigrateCountsResult> {
+    // Scan VecMeta to count vectors by lifecycle state
+    let (indexed, pending, deleted, pending_deleted) = count_vectors_by_lifecycle_scan(txn_db, code)?;
+
+    // Write counts to LifecycleCounts CF
+    let lifecycle_cf = txn_db
+        .cf_handle(LifecycleCounts::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("LifecycleCounts CF not found"))?;
+
+    let key = LifecycleCountsCfKey(code);
+    let value = LifecycleCountsValue {
+        indexed: indexed as u64,
+        pending: pending as u64,
+        deleted: deleted as u64,
+        pending_deleted: pending_deleted as u64,
+    };
+
+    txn_db.put_cf(&lifecycle_cf, LifecycleCounts::key_to_bytes(&key), value.to_bytes())?;
+
+    Ok(MigrateCountsResult {
+        code,
+        indexed: indexed as u64,
+        pending: pending as u64,
+        deleted: deleted as u64,
+        pending_deleted: pending_deleted as u64,
+    })
+}
+
+// ============================================================================
 // Internal Helpers
 // ============================================================================
+
+/// List all embedding codes by scanning EmbeddingSpecs CF.
+fn list_embedding_codes(db: &dyn AdminDb) -> Result<Vec<EmbeddingCode>> {
+    let specs_cf = db
+        .cf_handle(EmbeddingSpecs::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
+
+    let mut codes = Vec::new();
+    let iter = db.iterator_cf(&specs_cf, IteratorMode::Start);
+
+    for item in iter {
+        let (key_bytes, _) = item?;
+        if key_bytes.len() == 8 {
+            let code = u64::from_be_bytes(key_bytes[..].try_into()?);
+            codes.push(code);
+        }
+    }
+
+    Ok(codes)
+}
 
 fn load_embedding_spec(
     db: &dyn AdminDb,
@@ -1052,6 +1149,49 @@ fn load_graph_meta(
 // ADMIN.md Lifecycle Accounting (chungers, 2025-01-27, FIXED):
 // Returns separate counts for all 4 lifecycle states instead of folding PendingDeleted into Deleted.
 fn count_vectors_by_lifecycle(
+    db: &dyn AdminDb,
+    code: EmbeddingCode,
+) -> Result<(u32, u32, u32, u32)> {
+    // First try reading from LifecycleCounts CF (O(1))
+    if let Some(counts) = read_lifecycle_counts(db, code)? {
+        return Ok((
+            counts.indexed as u32,
+            counts.pending as u32,
+            counts.deleted as u32,
+            counts.pending_deleted as u32,
+        ));
+    }
+
+    // Fallback: Full VecMeta scan (O(N))
+    eprintln!(
+        "Warning: lifecycle counters not found for embedding {}. \
+         Falling back to VecMeta scan (O(N)). \
+         Run `admin migrate-lifecycle-counts` to initialize counters.",
+        code
+    );
+    count_vectors_by_lifecycle_scan(db, code)
+}
+
+/// Read lifecycle counts from the LifecycleCounts CF.
+/// Returns None if counters are not yet initialized for this embedding.
+fn read_lifecycle_counts(
+    db: &dyn AdminDb,
+    code: EmbeddingCode,
+) -> Result<Option<LifecycleCountsValue>> {
+    let cf = match db.cf_handle(LifecycleCounts::CF_NAME) {
+        Some(cf) => cf,
+        None => return Ok(None), // CF doesn't exist (old DB)
+    };
+
+    let key = LifecycleCountsCfKey(code);
+    match db.get_cf(&cf, &LifecycleCounts::key_to_bytes(&key))? {
+        Some(bytes) => Ok(Some(LifecycleCountsValue::from_bytes(&bytes)?)),
+        None => Ok(None),
+    }
+}
+
+/// Count vectors by scanning VecMeta (O(N) fallback).
+fn count_vectors_by_lifecycle_scan(
     db: &dyn AdminDb,
     code: EmbeddingCode,
 ) -> Result<(u32, u32, u32, u32)> {

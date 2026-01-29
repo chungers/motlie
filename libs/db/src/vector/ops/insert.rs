@@ -14,7 +14,8 @@ use crate::vector::processor::Processor;
 use crate::vector::schema::{
     AdcCorrection, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpecCfKey,
     EmbeddingSpecs, GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField, IdForward,
-    IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue, Pending, VecId,
+    IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue,
+    LifecycleCounts, LifecycleCountsCfKey, LifecycleCountsDelta, Pending, VecId,
     VecMeta, VecMetaCfKey, VecMetaCfValue, VecMetadata, VectorCfKey, Vectors,
 };
 use crate::Id;
@@ -285,6 +286,22 @@ pub fn vector(
         None
     };
 
+    // 12. Update lifecycle counters via merge operator
+    let lifecycle_cf = txn_db
+        .cf_handle(LifecycleCounts::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("LifecycleCounts CF not found"))?;
+    let lifecycle_key = LifecycleCountsCfKey(embedding);
+    let delta = if build_index {
+        LifecycleCountsDelta::inc_indexed()
+    } else {
+        LifecycleCountsDelta::inc_pending()
+    };
+    txn.merge_cf(
+        &lifecycle_cf,
+        LifecycleCounts::key_to_bytes(&lifecycle_key),
+        delta.to_bytes(),
+    )?;
+
     Ok(InsertResult {
         vec_id,
         nav_cache_update,
@@ -545,6 +562,23 @@ pub fn batch(
             txn.put_cf(&pending_cf, Pending::key_to_bytes(&pending_key), &[])?;
         }
     }
+
+    // 11. Update lifecycle counters via merge operator (once for entire batch)
+    let lifecycle_cf = txn_db
+        .cf_handle(LifecycleCounts::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("LifecycleCounts CF not found"))?;
+    let lifecycle_key = LifecycleCountsCfKey(embedding);
+    let count = vec_ids.len() as i64;
+    let delta = if build_index {
+        LifecycleCountsDelta { indexed: count, ..Default::default() }
+    } else {
+        LifecycleCountsDelta { pending: count, ..Default::default() }
+    };
+    txn.merge_cf(
+        &lifecycle_cf,
+        LifecycleCounts::key_to_bytes(&lifecycle_key),
+        delta.to_bytes(),
+    )?;
 
     Ok(InsertBatchResult {
         vec_ids,

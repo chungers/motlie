@@ -18,7 +18,8 @@ use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 use crate::vector::processor::Processor;
 use crate::vector::schema::{
     BinaryCodeCfKey, BinaryCodes, EmbeddingCode, IdForward, IdForwardCfKey, IdReverse,
-    IdReverseCfKey, Pending, VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
+    IdReverseCfKey, LifecycleCounts, LifecycleCountsCfKey, LifecycleCountsDelta,
+    Pending, VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
 };
 use crate::Id;
 
@@ -186,6 +187,32 @@ pub fn vector(
         let allocator = processor.get_or_create_allocator(embedding);
         allocator.free(txn, txn_db, embedding, vec_id)?;
     }
+
+    // 9. Update lifecycle counters via merge operator
+    // Soft delete: transition indexed->deleted or pending->pending_deleted
+    // Hard delete: decrement indexed or pending (vector fully removed)
+    let lifecycle_cf = txn_db
+        .cf_handle(LifecycleCounts::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("LifecycleCounts CF not found"))?;
+    let lifecycle_key = LifecycleCountsCfKey(embedding);
+    let delta = if hnsw_enabled {
+        // Soft delete: lifecycle transition
+        if was_pending {
+            LifecycleCountsDelta::pending_to_pending_deleted()
+        } else {
+            LifecycleCountsDelta::indexed_to_deleted()
+        }
+    } else {
+        // Hard delete: just decrement (assume indexed since async path typically uses HNSW)
+        // Note: If vector was pending without HNSW, this is still correct since
+        // pending vectors without HNSW are effectively indexed immediately.
+        LifecycleCountsDelta { indexed: -1, ..Default::default() }
+    };
+    txn.merge_cf(
+        &lifecycle_cf,
+        LifecycleCounts::key_to_bytes(&lifecycle_key),
+        delta.to_bytes(),
+    )?;
 
     Ok(DeleteResult::Deleted {
         vec_id,

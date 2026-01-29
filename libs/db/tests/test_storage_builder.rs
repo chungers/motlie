@@ -141,9 +141,10 @@ fn test_shared_storage_cf_names_list() {
     assert!(all_cfs.contains(&"vector/id_reverse"));
     assert!(all_cfs.contains(&"vector/id_alloc"));
     assert!(all_cfs.contains(&"vector/pending"));
+    assert!(all_cfs.contains(&"vector/lifecycle_counts"));
 
-    // Total: 18 CFs
-    assert_eq!(all_cfs.len(), 18);
+    // Total: 19 CFs (8 graph + 11 vector)
+    assert_eq!(all_cfs.len(), 19);
 }
 
 #[test]

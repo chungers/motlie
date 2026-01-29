@@ -27,6 +27,7 @@ Primary entry points (CLI):
 - `bench_vector admin vectors --db-path <path> --code <embedding> [--state ...] [--sample N] [--vec-id N] [--json] [--secondary]`
 - `bench_vector admin validate --db-path <path> [--code <embedding>] [--json] [--strict] [--secondary] [--sample-size N] [--max-errors N] [--max-entries N]`
 - `bench_vector admin rocksdb --db-path <path> [--json] [--secondary]`
+- `bench_vector admin migrate-lifecycle-counts --db-path <path> [--code <embedding>] [--json]`
 
 ## Data Sources
 
@@ -40,6 +41,7 @@ Admin pulls from these column families:
 - `Edges` (neighbor links by layer)
 - `BinaryCodes` (RaBitQ presence)
 - `Pending` (async index queue)
+- `LifecycleCounts` (indexed/pending/deleted/pending_deleted counters per embedding)
 
 ## Implementation Notes / Limitations
 
@@ -54,26 +56,25 @@ Admin pulls from these column families:
   Without `--secondary`, commands still use `Storage::readwrite` for backward
   compatibility. With `--secondary`, commands use `Storage::secondary` which
   opens a non-blocking read-only RocksDB secondary instance.
-- **GAP:** `admin stats` does a full `VecMeta` scan per embedding for lifecycle
+- ~~**GAP:** `admin stats` does a full `VecMeta` scan per embedding for lifecycle
   counts (O(N) per embedding). This can be very expensive at 10M+ scale and
-  blocks on TransactionDB reads unless `--secondary` is used.
+  blocks on TransactionDB reads unless `--secondary` is used.~~
 
-  **Status** (claude, 2025-01-27, ACKNOWLEDGED): This is a known limitation.
-  Mitigation: Use `--secondary` for non-blocking reads. Future improvement could
-  maintain lifecycle counts in GraphMeta to avoid full scan.
+  **Status** (claude, 2025-01-29, FIXED): Implemented `LifecycleCounts` CF with
+  merge operator for O(1) stats queries. Counter updates are applied atomically
+  during insert/delete/async transitions via RocksDB merge operations.
 
-  **Rationale:** `VecMeta` is the only authoritative lifecycle store today, so
-  counts require scanning every entry. This keeps correctness simple but makes
-  stats O(N) and potentially slow at high scale.
+  - New CF: `vector/lifecycle_counts` with key `[embedding_code: u64]`
+  - Value: `{indexed, pending, deleted, pending_deleted}` (4 x u64 = 32 bytes)
+  - Merge operator: `LifecycleCountsDelta` for atomic increment/decrement
+  - Migration: `admin migrate-lifecycle-counts` scans VecMeta and initializes counters
+  - Fallback: If counters not found, falls back to O(N) scan with warning
 
-  **Cost estimate @ 10M vectors:** If iteration yields ~50k–100k VecMeta entries/s,
-  a full scan takes ~100–200 seconds per embedding. This is why we recommend
-  `--secondary` for live DBs.
-
-  **Schema change required:** add persisted lifecycle counters keyed by embedding,
-  e.g. `GraphMetaField::LifecycleCounts { indexed, pending, deleted, pending_deleted }`
-  or a new CF `vector/lifecycle_counts` with key `[embedding_code]` and a compact
-  value struct. Updates must be applied on insert/delete/async transitions.
+  Counter updates integrated into:
+  - `ops::insert::vector` / `batch` (inc pending or indexed)
+  - `ops::delete::vector` (transition indexed→deleted or pending→pending_deleted)
+  - `async_updater::process_insert` (transition pending→indexed)
+  - `gc::cleanup_vector` (dec deleted or pending_deleted on purge)
 - `admin validate` uses **sampling** for ID mapping and orphan detection
   (configurable via `--sample-size`, default 1000). Sample size is reported in
   check messages.
@@ -180,13 +181,13 @@ Admin pulls from these column families:
 Admin is approaching production-readiness with configurable validation options
 and collision-safe secondary mode.
 
-1) **Lifecycle count scans**: `admin stats` does O(N) VecMeta scans.
+1) ~~**Lifecycle count scans**: `admin stats` does O(N) VecMeta scans.~~
 
-   **Status** (claude, 2025-01-29, ACKNOWLEDGED): This is an architectural
-   limitation. Persisting lifecycle counts in `GraphMeta` or a dedicated CF
-   would require schema changes and migration logic. Mitigation: Use `--secondary`
-   for non-blocking reads. Future improvement deferred until performance is a
-   demonstrated bottleneck at scale.
+   **Status** (claude, 2025-01-29, FIXED): Implemented `LifecycleCounts` CF with
+   merge operator for O(1) stats queries. All mutation paths (insert, delete,
+   async transition, GC purge) now update counters atomically. Migration command
+   `admin migrate-lifecycle-counts` available for existing databases. Falls back
+   to O(N) scan with warning if counters not initialized.
 
 2) ~~**Validation sampling**: Non-strict mode can miss inconsistencies. Consider
    configurable sample size and report sampling rate in output.~~

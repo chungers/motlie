@@ -57,7 +57,8 @@ use crate::vector::merge::EdgeOp;
 use crate::vector::registry::EmbeddingRegistry;
 use crate::vector::schema::{
     BinaryCodeCfKey, BinaryCodes, EmbeddingCode, Edges, EdgeCfKey, IdAlloc, IdAllocCfKey,
-    IdAllocCfValue, IdAllocField, VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
+    IdAllocCfValue, IdAllocField, LifecycleCounts, LifecycleCountsCfKey, LifecycleCountsDelta,
+    VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
 };
 use crate::vector::Storage;
 
@@ -546,14 +547,45 @@ impl GarbageCollector {
             }
         }
 
-        // 5. Delete VecMeta entry (marks cleanup complete)
+        // 5. Read VecMeta to determine lifecycle state, then delete it
         let meta_cf = txn_db
             .cf_handle(VecMeta::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("VecMeta CF not found"))?;
         let meta_key = VecMetaCfKey(embedding, vec_id);
-        txn.delete_cf(&meta_cf, VecMeta::key_to_bytes(&meta_key))?;
+        let meta_key_bytes = VecMeta::key_to_bytes(&meta_key);
 
-        // 6. Recycle VecId if enabled (Task 8.1.3)
+        // Read to determine if Deleted or PendingDeleted
+        // PendingDeleted = is_deleted() && is_pending() (both conditions true)
+        let was_pending_deleted = if let Some(meta_bytes) = txn.get_cf(&meta_cf, &meta_key_bytes)? {
+            if let Ok(archived) = VecMeta::value_archived(&meta_bytes) {
+                archived.0.is_deleted() && archived.0.is_pending()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Delete VecMeta entry
+        txn.delete_cf(&meta_cf, &meta_key_bytes)?;
+
+        // 6. Update lifecycle counters: purge deleted or pending_deleted
+        let lifecycle_cf = txn_db
+            .cf_handle(LifecycleCounts::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("LifecycleCounts CF not found"))?;
+        let lifecycle_key = LifecycleCountsCfKey(embedding);
+        let delta = if was_pending_deleted {
+            LifecycleCountsDelta::purge_pending_deleted()
+        } else {
+            LifecycleCountsDelta::purge_deleted()
+        };
+        txn.merge_cf(
+            &lifecycle_cf,
+            LifecycleCounts::key_to_bytes(&lifecycle_key),
+            delta.to_bytes(),
+        )?;
+
+        // 7. Recycle VecId if enabled (Task 8.1.3)
         // Note: We only reach here if fully_scanned==true (early return above handles incomplete)
         let id_recycled = if config.enable_id_recycling {
             Self::recycle_vec_id(&txn, txn_db, embedding, vec_id)?;

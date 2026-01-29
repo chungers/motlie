@@ -46,8 +46,8 @@ use crate::vector::cache::NavigationCache;
 use crate::vector::hnsw;
 use crate::vector::registry::EmbeddingRegistry;
 use crate::vector::schema::{
-    EmbeddingCode, EmbeddingSpecCfKey, EmbeddingSpecs, Pending, VecId, VecMeta, VecMetaCfKey,
-    VectorCfKey, Vectors,
+    EmbeddingCode, EmbeddingSpecCfKey, EmbeddingSpecs, LifecycleCounts, LifecycleCountsCfKey,
+    LifecycleCountsDelta, Pending, VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
 };
 use crate::vector::Storage;
 
@@ -795,7 +795,19 @@ impl AsyncGraphUpdater {
             .ok_or_else(|| anyhow::anyhow!("Pending CF not found"))?;
         txn.delete_cf(&pending_cf, pending_key)?;
 
-        // 5. Commit transaction (all operations atomic)
+        // 5. Update lifecycle counters: pending -> indexed
+        let lifecycle_cf = txn_db
+            .cf_handle(LifecycleCounts::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("LifecycleCounts CF not found"))?;
+        let lifecycle_key = LifecycleCountsCfKey(embedding);
+        let delta = LifecycleCountsDelta::pending_to_indexed();
+        txn.merge_cf(
+            &lifecycle_cf,
+            LifecycleCounts::key_to_bytes(&lifecycle_key),
+            delta.to_bytes(),
+        )?;
+
+        // 6. Commit transaction (all operations atomic)
         txn.commit()?;
 
         // 6. Apply cache update
