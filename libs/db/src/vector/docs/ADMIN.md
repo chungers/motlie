@@ -1,4 +1,5 @@
 # bench_vector Admin
+**Status:** Complete (2025-01-29)
 
 This document describes the `bench_vector admin` tooling, how it maps to
 vector storage internals, and current gaps/improvements.
