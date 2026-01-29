@@ -696,3 +696,15 @@ All ─► T10.* (docs after implementation)
 > 8. T8.* (cache tuning) - **DEFER until profiling shows need**
 >
 > **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: accept overall assessment and incorporate the deferrals/simplifications above into the execution plan.
+
+> **[claude, 2026-01-29, FINAL REVIEW]** All concerns addressed:
+> - ✓ G2 duplicate removed
+> - ✓ G5 IdMapError simplified (KeyTypeMismatch dropped)
+> - ✓ T1.3 now blocking T1.1
+> - ✓ T3.1 backward-compat framing removed
+> - ✓ Phase 8 deferred
+> - ✓ T9.6 size assertions added
+> - ✓ T10.4 canonical key selection doc added
+> - ✓ Risk table includes key encoding drift
+>
+> **Document status: APPROVED for implementation.**
