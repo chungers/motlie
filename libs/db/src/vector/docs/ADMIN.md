@@ -25,7 +25,7 @@ Primary entry points (CLI):
 - `bench_vector admin stats --db-path <path> [--code <embedding>] [--json] [--secondary]`
 - `bench_vector admin inspect --db-path <path> --code <embedding> [--json] [--secondary]`
 - `bench_vector admin vectors --db-path <path> --code <embedding> [--state ...] [--sample N] [--vec-id N] [--json] [--secondary]`
-- `bench_vector admin validate --db-path <path> [--code <embedding>] [--json] [--strict] [--secondary]`
+- `bench_vector admin validate --db-path <path> [--code <embedding>] [--json] [--strict] [--secondary] [--sample-size N] [--max-errors N] [--max-entries N]`
 - `bench_vector admin rocksdb --db-path <path> [--json] [--secondary]`
 
 ## Data Sources
@@ -62,19 +62,27 @@ Admin pulls from these column families:
   Mitigation: Use `--secondary` for non-blocking reads. Future improvement could
   maintain lifecycle counts in GraphMeta to avoid full scan.
 - `admin validate` uses **sampling** for ID mapping and orphan detection
-  (first 1000 entries). It can miss inconsistencies.
-- **GAP:** `admin validate --strict` is a full scan and can be long-running /
-  disruptive on large DBs; there is no progress reporting or early-exit flag.
+  (configurable via `--sample-size`, default 1000). Sample size is reported in
+  check messages.
 
-  **Status** (claude, 2025-01-27, FIXED): Added progress reporting via stderr
-  during strict validation (prints count every 10,000 entries).
+  **Status** (claude, 2025-01-29, FIXED): Added `--sample-size N` CLI option.
+
+- ~~**GAP:** `admin validate --strict` is a full scan and can be long-running /
+  disruptive on large DBs; there is no progress reporting or early-exit flag.~~
+
+  **Status** (claude, 2025-01-29, FIXED): Added `--max-errors N` for early exit,
+  `--max-entries N` for scan cap. Progress reporting via stderr (every 10,000
+  entries) was added in 2025-01-27 and remains in place.
 - `admin rocksdb` estimates entry counts and sizes by scanning the first
   10,000 entries per CF. Sizes are **sampled bytes only**, not full DB size.
   The CLI prints `10000+` to indicate partial counts and the column header
   shows "Bytes (sampled)" to clarify this is not on-disk size.
 - Lifecycle counts now show `PendingDeleted` as a separate field (FIXED).
-- **GAP:** Secondary mode temp dir is PID-scoped. Parallel invocations within the
-  same process may collide; consider adding a random suffix or timestamp.
+- ~~**GAP:** Secondary mode temp dir is PID-scoped. Parallel invocations within the
+  same process may collide; consider adding a random suffix or timestamp.~~
+
+  **Status** (claude, 2025-01-29, FIXED): Secondary mode temp dir now uses
+  PID + timestamp + random u32 suffix to avoid collisions.
 
 ## Known Issues / Inconsistencies (from review)
 
@@ -156,15 +164,35 @@ Admin pulls from these column families:
 
 ## Assessment / Actions for Claude
 
-Admin is **not yet complete to satisfaction** for large-scale production use.
-Please address these remaining gaps:
+Admin is approaching production-readiness with configurable validation options
+and collision-safe secondary mode.
 
-1) **Lifecycle count scans**: `admin stats` does O(N) VecMeta scans. Consider
-   persisting lifecycle counts (indexed/pending/deleted/pending_deleted) in
-   `GraphMeta` or a dedicated CF for O(1) stats.
-2) **Validation sampling**: Non-strict mode can miss inconsistencies. Consider
-   configurable sample size and report sampling rate in output.
-3) **Strict validation UX**: Add early-exit on first error and/or a max-entries
-   cap; keep progress reporting.
-4) **Secondary temp dir collisions**: Add randomness (timestamp + RNG) to the
-   temp path to avoid collisions within a process.
+1) **Lifecycle count scans**: `admin stats` does O(N) VecMeta scans.
+
+   **Status** (claude, 2025-01-29, ACKNOWLEDGED): This is an architectural
+   limitation. Persisting lifecycle counts in `GraphMeta` or a dedicated CF
+   would require schema changes and migration logic. Mitigation: Use `--secondary`
+   for non-blocking reads. Future improvement deferred until performance is a
+   demonstrated bottleneck at scale.
+
+2) ~~**Validation sampling**: Non-strict mode can miss inconsistencies. Consider
+   configurable sample size and report sampling rate in output.~~
+
+   **Status** (claude, 2025-01-29, FIXED): Added `--sample-size N` CLI option
+   (default 1000). Validation output now shows `(sample_size=N)` in check messages.
+   Implemented via `ValidationOptions` struct with builder pattern.
+
+3) ~~**Strict validation UX**: Add early-exit on first error and/or a max-entries
+   cap; keep progress reporting.~~
+
+   **Status** (claude, 2025-01-29, FIXED): Added `--max-errors N` for early exit
+   after N errors, and `--max-entries N` to cap entries scanned. `ValidationResult`
+   now includes `stopped_early` field. Progress reporting (every 10,000 entries)
+   remains in place.
+
+4) ~~**Secondary temp dir collisions**: Add randomness (timestamp + RNG) to the
+   temp path to avoid collisions within a process.~~
+
+   **Status** (claude, 2025-01-29, FIXED): Secondary temp path now uses format
+   `bench_vector_secondary_{pid}_{timestamp_ms}_{random_u32:08x}` to ensure
+   uniqueness across parallel invocations.

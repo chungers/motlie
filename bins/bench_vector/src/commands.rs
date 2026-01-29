@@ -2444,6 +2444,20 @@ pub struct AdminValidateArgs {
     /// Strict mode: full scan without sampling (slower but complete)
     #[arg(long)]
     pub strict: bool,
+
+    // ADMIN.md Validation UX (claude, 2025-01-29, ADDED):
+    // Configurable sample size, max errors, and max entries.
+    /// Sample size for non-strict validation (default 1000, 0 for no limit)
+    #[arg(long, default_value = "1000")]
+    pub sample_size: u32,
+
+    /// Maximum errors before stopping validation (0 = no limit)
+    #[arg(long, default_value = "0")]
+    pub max_errors: u32,
+
+    /// Maximum entries to check in strict mode (0 = no limit)
+    #[arg(long, default_value = "0")]
+    pub max_entries: u64,
 }
 
 #[derive(Parser)]
@@ -2480,8 +2494,13 @@ fn admin_stats(args: AdminStatsArgs) -> Result<()> {
     // Clean up temp directory after use to avoid accumulation.
     let stats = if args.secondary {
         let secondary_path = std::env::temp_dir().join(format!(
-            "bench_vector_secondary_{}",
-            std::process::id()
+            "bench_vector_secondary_{}_{}_{:08x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            rand::random::<u32>()
         ));
         let result = {
             let mut storage = Storage::secondary(&args.db_path, &secondary_path);
@@ -2556,8 +2575,13 @@ fn admin_inspect(args: AdminInspectArgs) -> Result<()> {
     // Secondary (read-only) mode now supported for inspect.
     let inspection = if args.secondary {
         let secondary_path = std::env::temp_dir().join(format!(
-            "bench_vector_secondary_{}",
-            std::process::id()
+            "bench_vector_secondary_{}_{}_{:08x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            rand::random::<u32>()
         ));
         let result = {
             let mut storage = Storage::secondary(&args.db_path, &secondary_path);
@@ -2639,8 +2663,13 @@ fn admin_vectors(args: AdminVectorsArgs) -> Result<()> {
     // Secondary (read-only) mode now supported for vectors.
     let vectors = if args.secondary {
         let secondary_path = std::env::temp_dir().join(format!(
-            "bench_vector_secondary_{}",
-            std::process::id()
+            "bench_vector_secondary_{}_{}_{:08x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            rand::random::<u32>()
         ));
         let result = {
             let mut storage = Storage::secondary(&args.db_path, &secondary_path);
@@ -2742,45 +2771,48 @@ fn admin_validate(args: AdminValidateArgs) -> Result<()> {
     // Use strict mode for full-scan validation when --strict is passed.
     let results = if args.secondary {
         let secondary_path = std::env::temp_dir().join(format!(
-            "bench_vector_secondary_{}",
-            std::process::id()
+            "bench_vector_secondary_{}_{}_{:08x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            rand::random::<u32>()
         ));
+        // Build validation options from CLI args
+        let opts = admin::ValidationOptions {
+            sample_size: if args.strict { 0 } else { args.sample_size },
+            max_errors: args.max_errors,
+            max_entries: args.max_entries,
+        };
+
         let result = {
             let mut storage = Storage::secondary(&args.db_path, &secondary_path);
             storage.ready()?;
 
-            if args.strict {
-                if let Some(code) = args.code {
-                    vec![admin::validate_embedding_strict_secondary(&storage, code)?]
-                } else {
-                    admin::validate_all_strict_secondary(&storage)?
-                }
+            if let Some(code) = args.code {
+                vec![admin::validate_embedding_secondary_with_opts(&storage, code, opts)?]
             } else {
-                if let Some(code) = args.code {
-                    vec![admin::validate_embedding_secondary(&storage, code)?]
-                } else {
-                    admin::validate_all_secondary(&storage)?
-                }
+                admin::validate_all_secondary_with_opts(&storage, opts)?
             }
         };
         let _ = std::fs::remove_dir_all(&secondary_path);
         result
     } else {
+        // Build validation options from CLI args
+        let opts = admin::ValidationOptions {
+            sample_size: if args.strict { 0 } else { args.sample_size },
+            max_errors: args.max_errors,
+            max_entries: args.max_entries,
+        };
+
         let mut storage = Storage::readwrite(&args.db_path);
         storage.ready()?;
 
-        if args.strict {
-            if let Some(code) = args.code {
-                vec![admin::validate_embedding_strict(&storage, code)?]
-            } else {
-                admin::validate_all_strict(&storage)?
-            }
+        if let Some(code) = args.code {
+            vec![admin::validate_embedding_with_opts(&storage, code, opts)?]
         } else {
-            if let Some(code) = args.code {
-                vec![admin::validate_embedding(&storage, code)?]
-            } else {
-                admin::validate_all(&storage)?
-            }
+            admin::validate_all_with_opts(&storage, opts)?
         }
     };
 
@@ -2842,8 +2874,13 @@ fn admin_rocksdb(args: AdminRocksdbArgs) -> Result<()> {
     // Clean up temp directory after use to avoid accumulation.
     let stats = if args.secondary {
         let secondary_path = std::env::temp_dir().join(format!(
-            "bench_vector_secondary_{}",
-            std::process::id()
+            "bench_vector_secondary_{}_{}_{:08x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            rand::random::<u32>()
         ));
         let result = {
             let mut storage = Storage::secondary(&args.db_path, &secondary_path);
