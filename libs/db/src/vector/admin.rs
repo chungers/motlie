@@ -264,6 +264,63 @@ pub struct ValidationResult {
     pub model: String,
     /// Individual check results.
     pub checks: Vec<ValidationCheck>,
+    /// Whether validation was stopped early due to max_errors limit.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stopped_early: bool,
+}
+
+/// Options for validation operations.
+///
+/// ADMIN.md Validation UX (claude, 2025-01-29, ADDED):
+/// Configurable sample size, max errors, and max entries for validation.
+#[derive(Debug, Clone, Default)]
+pub struct ValidationOptions {
+    /// Sample size for non-strict validation (default 1000).
+    /// Set to 0 for no limit (full scan).
+    pub sample_size: u32,
+    /// Maximum errors before stopping validation (0 = no limit).
+    pub max_errors: u32,
+    /// Maximum entries to check across all validations (0 = no limit).
+    /// Only applies to strict mode.
+    pub max_entries: u64,
+}
+
+impl ValidationOptions {
+    /// Default options for non-strict validation.
+    pub fn default_sampled() -> Self {
+        Self {
+            sample_size: 1000,
+            max_errors: 0,
+            max_entries: 0,
+        }
+    }
+
+    /// Default options for strict validation (full scan).
+    pub fn default_strict() -> Self {
+        Self {
+            sample_size: 0,
+            max_errors: 0,
+            max_entries: 0,
+        }
+    }
+
+    /// Builder: set sample size.
+    pub fn with_sample_size(mut self, size: u32) -> Self {
+        self.sample_size = size;
+        self
+    }
+
+    /// Builder: set max errors.
+    pub fn with_max_errors(mut self, max: u32) -> Self {
+        self.max_errors = max;
+        self
+    }
+
+    /// Builder: set max entries for strict mode.
+    pub fn with_max_entries(mut self, max: u64) -> Self {
+        self.max_entries = max;
+        self
+    }
 }
 
 /// Per-column-family storage statistics.
@@ -638,7 +695,7 @@ fn sample_vectors_impl(
 /// Uses sampling (first 1000 entries) for performance. Use `validate_embedding_strict`
 /// for full-scan validation.
 pub fn validate_embedding(storage: &Storage, code: EmbeddingCode) -> Result<ValidationResult> {
-    validate_embedding_with_options_impl(storage.transaction_db()?, code, false)
+    validate_embedding_with_opts(storage, code, ValidationOptions::default_sampled())
 }
 
 /// Run validation checks on an embedding with strict mode (no sampling).
@@ -646,91 +703,171 @@ pub fn validate_embedding(storage: &Storage, code: EmbeddingCode) -> Result<Vali
 /// ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
 /// Added --strict option for full-scan validation without sampling.
 pub fn validate_embedding_strict(storage: &Storage, code: EmbeddingCode) -> Result<ValidationResult> {
-    validate_embedding_with_options_impl(storage.transaction_db()?, code, true)
+    validate_embedding_with_opts(storage, code, ValidationOptions::default_strict())
 }
 
 /// Run validation checks using secondary (read-only) mode.
 pub fn validate_embedding_secondary(storage: &Storage, code: EmbeddingCode) -> Result<ValidationResult> {
-    validate_embedding_with_options_impl(storage.db()?, code, false)
+    validate_embedding_secondary_with_opts(storage, code, ValidationOptions::default_sampled())
 }
 
 /// Run strict validation checks using secondary (read-only) mode.
 pub fn validate_embedding_strict_secondary(storage: &Storage, code: EmbeddingCode) -> Result<ValidationResult> {
-    validate_embedding_with_options_impl(storage.db()?, code, true)
+    validate_embedding_secondary_with_opts(storage, code, ValidationOptions::default_strict())
+}
+
+/// Run validation checks with custom options.
+///
+/// ADMIN.md Validation UX (claude, 2025-01-29, ADDED):
+/// Configurable sample size, max errors, and max entries.
+pub fn validate_embedding_with_opts(
+    storage: &Storage,
+    code: EmbeddingCode,
+    opts: ValidationOptions,
+) -> Result<ValidationResult> {
+    validate_embedding_with_options_impl(storage.transaction_db()?, code, opts)
+}
+
+/// Run validation checks with custom options using secondary (read-only) mode.
+pub fn validate_embedding_secondary_with_opts(
+    storage: &Storage,
+    code: EmbeddingCode,
+    opts: ValidationOptions,
+) -> Result<ValidationResult> {
+    validate_embedding_with_options_impl(storage.db()?, code, opts)
 }
 
 fn validate_embedding_with_options_impl(
     db: &dyn AdminDb,
     code: EmbeddingCode,
-    strict: bool,
+    opts: ValidationOptions,
 ) -> Result<ValidationResult> {
     let spec = load_embedding_spec(db, code)?
         .ok_or_else(|| anyhow::anyhow!("Embedding {} not found", code))?;
 
     let mut checks = Vec::new();
+    let mut stopped_early = false;
+    let mut error_count = 0u32;
 
-    // Sample limit: None for strict mode (full scan), Some(1000) for normal mode
-    let sample_limit = if strict { None } else { Some(1000) };
+    // Sample limit: None for full scan (sample_size=0), Some(N) for sampling
+    let sample_limit = if opts.sample_size == 0 { None } else { Some(opts.sample_size) };
+
+    // Helper to check if we should stop early
+    let should_stop = |checks: &[ValidationCheck], error_count: &mut u32| -> bool {
+        if opts.max_errors > 0 {
+            for check in checks.iter() {
+                if check.status == ValidationStatus::Error {
+                    *error_count += 1;
+                }
+            }
+            *error_count >= opts.max_errors
+        } else {
+            false
+        }
+    };
 
     // 1. Spec hash validation
     let (_, _, _, spec_hash) = load_graph_meta(db, code)?;
     checks.push(validate_spec_hash(&spec, spec_hash));
+    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+        stopped_early = true;
+        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+    }
 
     // 2. Entry point validation
     checks.push(validate_entry_point(db, code)?);
+    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+        stopped_early = true;
+        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+    }
 
     // 3. ID mapping consistency (forward -> reverse)
     checks.push(validate_id_mappings(db, code)?);
+    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+        stopped_early = true;
+        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+    }
 
     // 4. Count accuracy
     checks.push(validate_count_accuracy(db, code)?);
+    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+        stopped_early = true;
+        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+    }
 
     // 5. Pending queue staleness
     checks.push(validate_pending_queue(db, code)?);
+    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+        stopped_early = true;
+        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+    }
 
     // 6. Orphaned vectors check
     checks.push(validate_no_orphaned_vectors(db, code)?);
+    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+        stopped_early = true;
+        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+    }
 
     // ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
     // Additional checks for data integrity.
 
     // 7. Reverse ID mapping consistency (reverse -> forward)
-    checks.push(validate_reverse_id_mappings(db, code, sample_limit)?);
+    checks.push(validate_reverse_id_mappings(db, code, sample_limit, opts.max_entries)?);
+    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+        stopped_early = true;
+        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+    }
 
     // 8. VecMeta presence for all IdReverse entries
-    checks.push(validate_vec_meta_presence(db, code, sample_limit)?);
+    checks.push(validate_vec_meta_presence(db, code, sample_limit, opts.max_entries)?);
+    if should_stop(&checks[checks.len()-1..], &mut error_count) {
+        stopped_early = true;
+        return Ok(ValidationResult { code, model: spec.model, checks, stopped_early });
+    }
 
     // 9. Vector payload existence for indexed vectors
-    checks.push(validate_vector_payloads(db, code, sample_limit)?);
+    checks.push(validate_vector_payloads(db, code, sample_limit, opts.max_entries)?);
 
     Ok(ValidationResult {
         code,
         model: spec.model,
         checks,
+        stopped_early,
     })
 }
 
 /// Run validation checks on all embeddings.
 pub fn validate_all(storage: &Storage) -> Result<Vec<ValidationResult>> {
-    validate_all_with_options_impl(storage.transaction_db()?, false)
+    validate_all_with_opts(storage, ValidationOptions::default_sampled())
 }
 
 /// Run validation checks on all embeddings with strict mode (no sampling).
 pub fn validate_all_strict(storage: &Storage) -> Result<Vec<ValidationResult>> {
-    validate_all_with_options_impl(storage.transaction_db()?, true)
+    validate_all_with_opts(storage, ValidationOptions::default_strict())
 }
 
 /// Run validation checks on all embeddings using secondary (read-only) mode.
 pub fn validate_all_secondary(storage: &Storage) -> Result<Vec<ValidationResult>> {
-    validate_all_with_options_impl(storage.db()?, false)
+    validate_all_secondary_with_opts(storage, ValidationOptions::default_sampled())
 }
 
 /// Run strict validation checks on all embeddings using secondary (read-only) mode.
 pub fn validate_all_strict_secondary(storage: &Storage) -> Result<Vec<ValidationResult>> {
-    validate_all_with_options_impl(storage.db()?, true)
+    validate_all_secondary_with_opts(storage, ValidationOptions::default_strict())
 }
 
-fn validate_all_with_options_impl(db: &dyn AdminDb, strict: bool) -> Result<Vec<ValidationResult>> {
+/// Run validation checks on all embeddings with custom options.
+pub fn validate_all_with_opts(storage: &Storage, opts: ValidationOptions) -> Result<Vec<ValidationResult>> {
+    validate_all_with_options_impl(storage.transaction_db()?, opts)
+}
+
+/// Run validation checks on all embeddings with custom options using secondary mode.
+pub fn validate_all_secondary_with_opts(storage: &Storage, opts: ValidationOptions) -> Result<Vec<ValidationResult>> {
+    validate_all_with_options_impl(storage.db()?, opts)
+}
+
+fn validate_all_with_options_impl(db: &dyn AdminDb, opts: ValidationOptions) -> Result<Vec<ValidationResult>> {
     let specs_cf = db
         .cf_handle(EmbeddingSpecs::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
@@ -742,7 +879,7 @@ fn validate_all_with_options_impl(db: &dyn AdminDb, strict: bool) -> Result<Vec<
         let (key_bytes, _) = item?;
         if key_bytes.len() == 8 {
             let code = u64::from_be_bytes(key_bytes[..].try_into()?);
-            match validate_embedding_with_options_impl(db, code, strict) {
+            match validate_embedding_with_options_impl(db, code, opts.clone()) {
                 Ok(r) => results.push(r),
                 Err(e) => {
                     tracing::warn!("Failed to validate embedding {}: {}", code, e);
@@ -1449,6 +1586,7 @@ fn validate_reverse_id_mappings(
     db: &dyn AdminDb,
     code: EmbeddingCode,
     sample_limit: Option<u32>,
+    max_entries: u64,
 ) -> Result<ValidationCheck> {
     use crate::vector::schema::{IdForwardCfKey, IdForwardCfValue};
 
@@ -1498,12 +1636,22 @@ fn validate_reverse_id_mappings(
         if sample_limit.is_none() && checked % 10_000 == 0 {
             eprintln!("  [reverse_id_mappings] checked {} entries...", checked);
         }
+        // Stop at sample limit or max entries
         if sample_limit.is_some() && checked >= limit {
+            break;
+        }
+        if max_entries > 0 && checked as u64 >= max_entries {
             break;
         }
     }
 
-    let sampled_note = if sample_limit.is_some() { " (sampled)" } else { "" };
+    let sampled_note = if sample_limit.is_some() {
+        format!(" (sample_size={})", limit)
+    } else if max_entries > 0 {
+        format!(" (max_entries={})", max_entries)
+    } else {
+        String::new()
+    };
 
     if mismatches == 0 {
         Ok(ValidationCheck {
@@ -1527,6 +1675,7 @@ fn validate_vec_meta_presence(
     db: &dyn AdminDb,
     code: EmbeddingCode,
     sample_limit: Option<u32>,
+    max_entries: u64,
 ) -> Result<ValidationCheck> {
     let reverse_cf = db
         .cf_handle(IdReverse::CF_NAME)
@@ -1568,12 +1717,22 @@ fn validate_vec_meta_presence(
         if sample_limit.is_none() && checked % 10_000 == 0 {
             eprintln!("  [vec_meta_presence] checked {} entries...", checked);
         }
+        // Stop at sample limit or max entries
         if sample_limit.is_some() && checked >= limit {
+            break;
+        }
+        if max_entries > 0 && checked as u64 >= max_entries {
             break;
         }
     }
 
-    let sampled_note = if sample_limit.is_some() { " (sampled)" } else { "" };
+    let sampled_note = if sample_limit.is_some() {
+        format!(" (sample_size={})", limit)
+    } else if max_entries > 0 {
+        format!(" (max_entries={})", max_entries)
+    } else {
+        String::new()
+    };
 
     if missing == 0 {
         Ok(ValidationCheck {
@@ -1597,6 +1756,7 @@ fn validate_vector_payloads(
     db: &dyn AdminDb,
     code: EmbeddingCode,
     sample_limit: Option<u32>,
+    max_entries: u64,
 ) -> Result<ValidationCheck> {
     use crate::vector::schema::{VectorCfKey, Vectors};
 
@@ -1642,12 +1802,22 @@ fn validate_vector_payloads(
             }
         }
 
+        // Stop at sample limit or max entries
         if sample_limit.is_some() && checked >= limit {
+            break;
+        }
+        if max_entries > 0 && checked as u64 >= max_entries {
             break;
         }
     }
 
-    let sampled_note = if sample_limit.is_some() { " (sampled)" } else { "" };
+    let sampled_note = if sample_limit.is_some() {
+        format!(" (sample_size={})", limit)
+    } else if max_entries > 0 {
+        format!(" (max_entries={})", max_entries)
+    } else {
+        String::new()
+    };
 
     if missing == 0 {
         Ok(ValidationCheck {
