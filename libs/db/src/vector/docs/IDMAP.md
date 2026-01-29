@@ -277,8 +277,8 @@ Add tests for:
 
 ## Open Questions
 
-- Should Edge mapping use **ForwardEdge** only, or also `ReverseEdge`?
-  (Forward is sufficient to identify edge; reverse is derivable.)
-- For content-addressed summaries, do we want to allow multiple embeddings for
-  the same summary hash, or enforce 1:1?
-  (Current map assumes 1:1 within an embedding.)
+**Decisions:**
+
+1) **Edge mapping**: use **ForwardEdge only**. Reverse edges are derivable.
+2) **Summary mapping**: keep **1:1 per embedding** (one ExternalKey per vec_id)
+   for simplicity and determinism within an embedding space.
