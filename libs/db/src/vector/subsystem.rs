@@ -408,6 +408,10 @@ impl Subsystem {
                 <schema::Pending as ColumnFamily>::CF_NAME,
                 <schema::Pending as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
             ),
+            ColumnFamilyDescriptor::new(
+                <schema::LifecycleCounts as ColumnFamily>::CF_NAME,
+                <schema::LifecycleCounts as ColumnFamilyConfig<VectorBlockCacheConfig>>::cf_options(block_cache, &vector_config),
+            ),
         ]
     }
 }

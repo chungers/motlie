@@ -2339,6 +2339,8 @@ pub enum AdminCommand {
     Validate(AdminValidateArgs),
     /// RocksDB-level diagnostics
     Rocksdb(AdminRocksdbArgs),
+    /// Migrate lifecycle counters from VecMeta scan (one-time upgrade)
+    MigrateLifecycleCounts(AdminMigrateCountsArgs),
 }
 
 #[derive(Parser)]
@@ -2475,6 +2477,21 @@ pub struct AdminRocksdbArgs {
     pub secondary: bool,
 }
 
+#[derive(Parser)]
+pub struct AdminMigrateCountsArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code (optional, migrates all if not specified)
+    #[arg(long)]
+    pub code: Option<u64>,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
 pub fn admin(args: AdminArgs) -> Result<()> {
     match args.command {
         AdminCommand::Stats(args) => admin_stats(args),
@@ -2482,6 +2499,7 @@ pub fn admin(args: AdminArgs) -> Result<()> {
         AdminCommand::Vectors(args) => admin_vectors(args),
         AdminCommand::Validate(args) => admin_validate(args),
         AdminCommand::Rocksdb(args) => admin_rocksdb(args),
+        AdminCommand::MigrateLifecycleCounts(args) => admin_migrate_lifecycle_counts(args),
     }
 }
 
@@ -2900,6 +2918,35 @@ fn admin_rocksdb(args: AdminRocksdbArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&stats)?);
     } else {
         print_rocksdb_stats(&stats);
+    }
+
+    Ok(())
+}
+
+fn admin_migrate_lifecycle_counts(args: AdminMigrateCountsArgs) -> Result<()> {
+    use motlie_db::vector::admin;
+
+    // Migration requires readwrite mode (not secondary)
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+
+    let results = if let Some(code) = args.code {
+        vec![admin::migrate_lifecycle_counts(&storage, code)?]
+    } else {
+        admin::migrate_all_lifecycle_counts(&storage)?
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        println!("=== Lifecycle Counter Migration ===\n");
+        for r in &results {
+            println!(
+                "Embedding {}: indexed={}, pending={}, deleted={}, pending_deleted={}",
+                r.code, r.indexed, r.pending, r.deleted, r.pending_deleted
+            );
+        }
+        println!("\nMigrated {} embedding(s).", results.len());
     }
 
     Ok(())

@@ -169,6 +169,7 @@ pub const ALL_COLUMN_FAMILIES: &[&str] = &[
     IdReverse::CF_NAME,
     IdAlloc::CF_NAME,
     Pending::CF_NAME,
+    LifecycleCounts::CF_NAME,
 ];
 
 // ============================================================================
@@ -1522,6 +1523,176 @@ impl Pending {
 
     pub fn value_from_bytes(_bytes: &[u8]) -> Result<PendingCfValue> {
         Ok(PendingCfValue(()))
+    }
+}
+
+// ============================================================================
+// LifecycleCounts CF
+// ============================================================================
+
+/// Lifecycle counters for O(1) stats queries.
+///
+/// This CF uses a merge operator for atomic counter updates, avoiding
+/// read-modify-write cycles during mutations. Counters track the number
+/// of vectors in each lifecycle state per embedding.
+///
+/// Key: [embedding: u64] = 8 bytes
+/// Value: [indexed: u64] + [pending: u64] + [deleted: u64] + [pending_deleted: u64] = 32 bytes
+///
+/// Values are merged using signed deltas during mutations and resolved
+/// to absolute counts during reads/compaction.
+pub struct LifecycleCounts;
+
+/// Lifecycle counts key: embedding_code
+#[derive(Debug, Clone)]
+pub struct LifecycleCountsCfKey(pub EmbeddingCode);
+
+/// Lifecycle counts value: counters for each lifecycle state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LifecycleCountsValue {
+    pub indexed: u64,
+    pub pending: u64,
+    pub deleted: u64,
+    pub pending_deleted: u64,
+}
+
+/// Lifecycle counts value wrapper.
+#[derive(Debug, Clone)]
+pub struct LifecycleCountsCfValue(pub LifecycleCountsValue);
+
+/// Delta operation for lifecycle counter updates via merge operator.
+///
+/// Each field represents a signed delta to apply to the corresponding counter.
+/// Positive values increment, negative values decrement (clamped to 0).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LifecycleCountsDelta {
+    pub indexed: i64,
+    pub pending: i64,
+    pub deleted: i64,
+    pub pending_deleted: i64,
+}
+
+impl LifecycleCountsDelta {
+    /// Create a delta that increments the pending counter.
+    pub fn inc_pending() -> Self {
+        Self { pending: 1, ..Default::default() }
+    }
+
+    /// Create a delta that increments the indexed counter.
+    pub fn inc_indexed() -> Self {
+        Self { indexed: 1, ..Default::default() }
+    }
+
+    /// Create a delta for transitioning from pending to indexed.
+    pub fn pending_to_indexed() -> Self {
+        Self { pending: -1, indexed: 1, ..Default::default() }
+    }
+
+    /// Create a delta for marking an indexed vector as deleted.
+    pub fn indexed_to_deleted() -> Self {
+        Self { indexed: -1, deleted: 1, ..Default::default() }
+    }
+
+    /// Create a delta for marking a pending vector as pending_deleted.
+    pub fn pending_to_pending_deleted() -> Self {
+        Self { pending: -1, pending_deleted: 1, ..Default::default() }
+    }
+
+    /// Create a delta for purging a deleted vector (GC).
+    pub fn purge_deleted() -> Self {
+        Self { deleted: -1, ..Default::default() }
+    }
+
+    /// Create a delta for purging a pending_deleted vector (GC).
+    pub fn purge_pending_deleted() -> Self {
+        Self { pending_deleted: -1, ..Default::default() }
+    }
+
+    /// Serialize to bytes for use as merge operand.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        rmp_serde::to_vec(self).expect("LifecycleCountsDelta serialization should never fail")
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        rmp_serde::from_slice(bytes).map_err(|e| anyhow::anyhow!("Failed to deserialize delta: {}", e))
+    }
+}
+
+impl LifecycleCountsValue {
+    /// Apply a delta to this counter set, clamping to 0.
+    pub fn apply_delta(&mut self, delta: &LifecycleCountsDelta) {
+        self.indexed = (self.indexed as i64 + delta.indexed).max(0) as u64;
+        self.pending = (self.pending as i64 + delta.pending).max(0) as u64;
+        self.deleted = (self.deleted as i64 + delta.deleted).max(0) as u64;
+        self.pending_deleted = (self.pending_deleted as i64 + delta.pending_deleted).max(0) as u64;
+    }
+
+    /// Serialize to bytes for storage.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(32);
+        bytes.extend_from_slice(&self.indexed.to_be_bytes());
+        bytes.extend_from_slice(&self.pending.to_be_bytes());
+        bytes.extend_from_slice(&self.deleted.to_be_bytes());
+        bytes.extend_from_slice(&self.pending_deleted.to_be_bytes());
+        bytes
+    }
+
+    /// Deserialize from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() != 32 {
+            anyhow::bail!("Invalid LifecycleCountsValue length: expected 32, got {}", bytes.len());
+        }
+        Ok(Self {
+            indexed: u64::from_be_bytes(bytes[0..8].try_into()?),
+            pending: u64::from_be_bytes(bytes[8..16].try_into()?),
+            deleted: u64::from_be_bytes(bytes[16..24].try_into()?),
+            pending_deleted: u64::from_be_bytes(bytes[24..32].try_into()?),
+        })
+    }
+}
+
+impl ColumnFamily for LifecycleCounts {
+    const CF_NAME: &'static str = "vector/lifecycle_counts";
+}
+
+impl ColumnFamilyConfig<VectorBlockCacheConfig> for LifecycleCounts {
+    fn cf_options(cache: &rocksdb::Cache, config: &VectorBlockCacheConfig) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.default_block_size);
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Configure merge operator for atomic counter updates
+        opts.set_merge_operator_associative(
+            super::merge::LIFECYCLE_MERGE_OPERATOR_NAME,
+            super::merge::lifecycle_full_merge,
+        );
+
+        opts
+    }
+}
+
+impl LifecycleCounts {
+    pub fn key_to_bytes(key: &LifecycleCountsCfKey) -> Vec<u8> {
+        key.0.to_be_bytes().to_vec()
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<LifecycleCountsCfKey> {
+        if bytes.len() != 8 {
+            anyhow::bail!("Invalid LifecycleCountsCfKey length: expected 8, got {}", bytes.len());
+        }
+        Ok(LifecycleCountsCfKey(u64::from_be_bytes(bytes.try_into()?)))
+    }
+
+    pub fn value_to_bytes(value: &LifecycleCountsCfValue) -> Vec<u8> {
+        value.0.to_bytes()
+    }
+
+    pub fn value_from_bytes(bytes: &[u8]) -> Result<LifecycleCountsCfValue> {
+        Ok(LifecycleCountsCfValue(LifecycleCountsValue::from_bytes(bytes)?))
     }
 }
 
