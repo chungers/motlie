@@ -82,15 +82,16 @@ reverse lookup O(1).
 
 ## Column Families
 
-**Option A (preferred):** replace `IdForward` and `IdReverse` schemas (breaking)
+**Option A (DECISION):** replace `IdForward` and `IdReverse` schemas (breaking)
 - Pros: no extra CFs, clean data model
-- Cons: migration required
+- Cons: **full migration required** (breaking change)
 
 **Option B:** add new CFs (`IdMapForward`, `IdMapReverse`) and deprecate old
 - Pros: migration can be lazy; easier rollback
 - Cons: additional CF complexity
 
-Recommendation: **Option B** for safe migration; remove old CFs in Phase 9.
+Decision: **Option A**. This is a breaking change and requires full migration
+of existing IdForward/IdReverse records.
 
 ## API Changes
 
@@ -224,6 +225,20 @@ Admin tools must:
 - Store mappings as `ExternalKey::NodeId` for the random dataset.
 - Print typed external keys in query results if `--json` is used.
 
+## Caching Considerations
+
+Mapping more entity types increases the number of IdForward/IdReverse records.
+Add a tuning parameter to the vector block cache configuration to avoid cache
+thrash at scale.
+
+**Proposed config:**
+- `VectorBlockCacheConfig::id_map_cache_fraction` (default: `0.10`)
+- Applied to IdForward/IdReverse CF options to reserve a fraction of the shared
+  cache for ID mapping lookups.
+
+This should be adjustable in `VectorConfig` for deployments with heavy mapping
+traffic (e.g., many fragments per node/edge).
+
 ## Tests
 
 Add tests for:
@@ -251,13 +266,14 @@ Add tests for:
 - `libs/db/tests/test_vector_*` (insert/delete/search mappings)
 - `bins/bench_vector` tests if present
 
-## Migration Plan (Option B)
+## Migration Plan (Option A, Breaking)
 
-1. Add new CFs `vector/id_map_forward` and `vector/id_map_reverse`.
-2. On insert, write both old and new mappings (dual-write).
-3. Update reads to prefer new CFs, fallback to old.
-4. Provide a background migration tool to backfill new CFs.
-5. Remove old CFs in a later phase after data migration.
+1. Add new `ExternalKey` encoding and update IdForward/IdReverse schemas in-place.
+2. Provide a one-time offline migration tool to rewrite all IdForward/IdReverse
+   keys/values to the new tagged format.
+3. Bump storage version and require migration on startup (fail fast if old format).
+4. Update all read/write paths to use the new format only.
+5. Remove any fallback logic after migration window closes.
 
 ## Open Questions
 
