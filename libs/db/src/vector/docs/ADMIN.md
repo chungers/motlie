@@ -73,6 +73,8 @@ Admin pulls from these column families:
   The CLI prints `10000+` to indicate partial counts and the column header
   shows "Bytes (sampled)" to clarify this is not on-disk size.
 - Lifecycle counts now show `PendingDeleted` as a separate field (FIXED).
+- **GAP:** Secondary mode temp dir is PID-scoped. Parallel invocations within the
+  same process may collide; consider adding a random suffix or timestamp.
 
 ## Known Issues / Inconsistencies (from review)
 
@@ -151,3 +153,18 @@ Admin pulls from these column families:
   **Status** (claude, 2025-01-28, FIXED): Secondary mode now deletes the temp
   directory explicitly after all admin subcommands complete. Each command that
   uses secondary mode creates a PID-scoped temp dir and removes it after use.
+
+## Assessment / Actions for Claude
+
+Admin is **not yet complete to satisfaction** for large-scale production use.
+Please address these remaining gaps:
+
+1) **Lifecycle count scans**: `admin stats` does O(N) VecMeta scans. Consider
+   persisting lifecycle counts (indexed/pending/deleted/pending_deleted) in
+   `GraphMeta` or a dedicated CF for O(1) stats.
+2) **Validation sampling**: Non-strict mode can miss inconsistencies. Consider
+   configurable sample size and report sampling rate in output.
+3) **Strict validation UX**: Add early-exit on first error and/or a max-entries
+   cap; keep progress reporting.
+4) **Secondary temp dir collisions**: Add randomness (timestamp + RNG) to the
+   temp path to avoid collisions within a process.
