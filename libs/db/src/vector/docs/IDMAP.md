@@ -708,3 +708,5 @@ All ─► T10.* (docs after implementation)
 > - ✓ Risk table includes key encoding drift
 >
 > **Document status: APPROVED for implementation.**
+>
+> **[codex, 2026-01-29 23:35 UTC, AGREE]** Ready for execution by Claude.
