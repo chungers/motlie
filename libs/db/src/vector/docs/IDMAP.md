@@ -266,14 +266,10 @@ Add tests for:
 - `libs/db/tests/test_vector_*` (insert/delete/search mappings)
 - `bins/bench_vector` tests if present
 
-## Migration Plan (Option A, Breaking)
+## Migration Plan
 
-1. Add new `ExternalKey` encoding and update IdForward/IdReverse schemas in-place.
-2. Provide a one-time offline migration tool to rewrite all IdForward/IdReverse
-   keys/values to the new tagged format.
-3. Bump storage version and require migration on startup (fail fast if old format).
-4. Update all read/write paths to use the new format only.
-5. Remove any fallback logic after migration window closes.
+**Not applicable.** Heavy development phase - no existing databases to migrate.
+Simply implement the new `ExternalKey` format directly in IdForward/IdReverse.
 
 ## Open Questions
 
@@ -282,3 +278,273 @@ Add tests for:
 1) **Edge mapping**: use **ForwardEdge only**. Reverse edges are derivable.
 2) **Summary mapping**: keep **1:1 per embedding** (one ExternalKey per vec_id)
    for simplicity and determinism within an embedding space.
+
+---
+
+## Gap Analysis
+
+The following gaps and ambiguities have been identified during implementation review:
+
+### G1: Storage Version Tracking ~~(HIGH)~~ N/A
+
+**Gap:** ~~Document mentions "bump storage version" but lacks specifics.~~
+
+**Resolution:** Not needed during heavy development. No existing databases to version.
+
+### G2: Duplicate ExternalKey Definition (LOW)
+
+**Gap:** The `ExternalKey` enum is defined twice in the document (API Changes
+section and SearchKNN section). Should consolidate to a single definition.
+
+**Action:** Remove duplicate definition from SearchKNN section.
+
+### G3: Graph Schema Key Dependencies (MEDIUM)
+
+**Gap:** Document references graph schema key types but doesn't verify they exist
+or specify import paths.
+
+**Required imports from `libs/db/src/graph/schema.rs`:**
+- `NodeCfKey` (exists) → verify encoding matches
+- `NodeFragmentCfKey` (exists) → verify encoding matches
+- `ForwardEdgeCfKey` (exists) → verify 40-byte encoding
+- `EdgeFragmentCfKey` (exists) → verify 48-byte encoding
+- `SummaryHash` → verify this type exists (may need to add)
+
+### G4: Migration Tool Specification ~~(HIGH)~~ N/A
+
+~~**Gap:** Migration tool is mentioned but lacks implementation details.~~
+
+**Resolution:** Not needed. Heavy development - no existing databases.
+
+### G5: Error Handling Types (MEDIUM)
+
+**Gap:** No explicit error types for key deserialization failures.
+
+**Required error variants:**
+```rust
+pub enum IdMapError {
+    UnknownTag(u8),
+    InvalidKeyLength { expected: usize, actual: usize },
+    KeyTypeMismatch { expected: &'static str, actual: &'static str },
+    DecodeError(String),
+}
+```
+
+### G6: Test Coverage Matrix (MEDIUM)
+
+**Gap:** Tests section lacks specific edge cases.
+
+**Additional tests needed:**
+- Negative: invalid tag byte (0xFF)
+- Negative: truncated key payloads
+- Boundary: maximum valid timestamp (u64::MAX)
+- Boundary: maximum valid NameHash
+- Performance: 1M key serialization/deserialization benchmark
+
+### G7: Memory Impact Estimation (LOW)
+
+**Gap:** No quantitative analysis of memory overhead.
+
+**Analysis:**
+| Type | Old Size | New Size | Overhead |
+|------|----------|----------|----------|
+| NodeId | 16 | 17 (+tag) | +6.25% |
+| NodeFragment | N/A | 25 | N/A |
+| Edge | N/A | 41 | N/A |
+| EdgeFragment | N/A | 49 | N/A |
+| NodeSummary | N/A | 9 | N/A |
+| EdgeSummary | N/A | 9 | N/A |
+
+For 1M vectors with 80% NodeId keys:
+- Old: 1M × 16 = 16 MB
+- New: 800K × 17 + 200K × 25 (avg) = 18.6 MB (+16%)
+
+### G8: Rollback Strategy ~~(HIGH)~~ N/A
+
+~~**Gap:** No explicit rollback plan if migration fails mid-way.~~
+
+**Resolution:** Not needed. Heavy development - no existing databases.
+
+### G9: Admin Stats Implementation (LOW)
+
+**Gap:** "Summary counts by external key type" mentioned but not detailed.
+
+**Specification:**
+```json
+{
+  "embedding_code": 12345,
+  "total_vectors": 100000,
+  "by_key_type": {
+    "NodeId": 80000,
+    "NodeFragment": 15000,
+    "Edge": 3000,
+    "EdgeFragment": 1500,
+    "NodeSummary": 300,
+    "EdgeSummary": 200
+  }
+}
+```
+
+### G10: Cache Fraction Tuning Guidance (LOW)
+
+**Gap:** Default 0.10 cache fraction mentioned but no tuning guidance.
+
+**Recommendation:**
+- Light workload (mostly NodeId): 0.05
+- Mixed workload (fragments): 0.10 (default)
+- Heavy fragment workload: 0.15-0.20
+- Add observability metric: `idmap_cache_hit_ratio`
+
+---
+
+## Implementation Tasks
+
+### Phase 1: Core Type Definitions
+
+- [ ] **T1.1**: Define `ExternalKey` enum in `libs/db/src/vector/schema.rs`
+  - Add tag constants (0x01-0x06)
+  - Implement `to_bytes()` / `from_bytes()`
+  - Add unit tests for round-trip serialization
+
+- [ ] **T1.2**: Define `IdMapError` error type in `libs/db/src/vector/error.rs`
+
+- [ ] **T1.3**: Verify graph schema key imports
+  - Confirm `NodeFragmentCfKey`, `ForwardEdgeCfKey`, `EdgeFragmentCfKey` exist
+  - Add `SummaryHash` type if missing
+
+- [x] ~~**T1.4**: Add `StorageVersion` field to `GraphMetaField` enum~~ N/A - no versioning needed
+
+### Phase 2: Schema Changes
+
+- [ ] **T2.1**: Update `IdForwardCfKey` to use `ExternalKey` instead of `Id`
+  - Key size changes from 24 to 8 + (1 + payload_size)
+
+- [ ] **T2.2**: Update `IdReverseCfValue` to store `ExternalKey` instead of `Id`
+  - Value size changes from 16 to (1 + payload_size)
+
+- [ ] **T2.3**: Update `IdForward::key_to_bytes()` / `key_from_bytes()`
+
+- [ ] **T2.4**: Update `IdReverse::value_to_bytes()` / `value_from_bytes()`
+
+### Phase 3: API Changes
+
+- [ ] **T3.1**: Update `InsertVector` mutation to accept `ExternalKey`
+  - Add `ExternalKey::NodeId(id)` convenience constructor
+  - Preserve backward compatibility via `InsertVector::new_node()`
+
+- [ ] **T3.2**: Update `DeleteVector` mutation to accept `ExternalKey`
+
+- [ ] **T3.3**: Update `SearchResult` to return `ExternalKey`
+  - Add `SearchResult::node_id()` convenience accessor
+
+- [ ] **T3.4**: Update `GetInternalId` query to accept `ExternalKey`
+
+- [ ] **T3.5**: Update `GetExternalId` query to return `ExternalKey`
+
+- [ ] **T3.6**: Update `ResolveIds` query to return `Vec<Option<ExternalKey>>`
+
+### Phase 4: Processor Updates
+
+- [ ] **T4.1**: Update `processor.rs` lookup helpers
+  - `vec_id_for_external(embedding, ExternalKey) -> VecId`
+  - `external_for_vec_id(embedding, VecId) -> ExternalKey`
+
+- [ ] **T4.2**: Update insert operation to write new key format
+
+- [ ] **T4.3**: Update delete operation to handle new key format
+
+- [ ] **T4.4**: Update search result resolution
+
+### Phase 5: Migration Tool - N/A
+
+~~No migration needed during heavy development. Implement new format directly.~~
+
+- [x] ~~**T5.1-T5.5**: All migration tasks~~ N/A
+
+### Phase 6: Admin & Validation
+
+- [ ] **T6.1**: Update `admin.rs` to display `ExternalKey` type in vector info
+
+- [ ] **T6.2**: Add `admin stats --by-key-type` for counts by ExternalKey variant
+
+- [ ] **T6.3**: Add validation for forward/reverse mapping consistency
+
+### Phase 7: Bench Tools
+
+- [ ] **T7.1**: Update `bench_vector` to use `ExternalKey::NodeId`
+
+- [ ] **T7.2**: Add `--json` output for typed external keys
+
+### Phase 8: Cache Tuning
+
+- [ ] **T8.1**: Add `id_map_cache_fraction` to `VectorBlockCacheConfig`
+
+- [ ] **T8.2**: Apply cache fraction to IdForward/IdReverse CF options
+
+- [ ] **T8.3**: Add `idmap_cache_hit_ratio` metric
+
+### Phase 9: Tests
+
+- [ ] **T9.1**: Unit tests for `ExternalKey` serialization (all variants)
+
+- [ ] **T9.2**: Integration tests for mixed key type operations
+
+- [x] ~~**T9.3**: Migration tests (old → new format)~~ N/A
+
+- [ ] **T9.4**: Negative tests (invalid tags, truncated payloads)
+
+- [ ] **T9.5**: Performance benchmark: 1M key operations
+
+### Phase 10: Documentation
+
+- [ ] **T10.1**: Update ROADMAP.md with new schema
+
+- [ ] **T10.2**: Update any other docs referencing IdForward/IdReverse
+
+- [ ] **T10.3**: Remove duplicate ExternalKey definition from this document
+
+---
+
+## Dependencies
+
+```
+T1.1 ─┬─► T2.1 ─┬─► T3.1 ─┬─► T4.2
+      │         │         │
+T1.2 ─┤   T2.2 ─┤   T3.2 ─┤   T4.3
+      │         │         │
+T1.3 ─┘   T2.3 ─┤   T3.3 ─┤   T4.4
+          T2.4 ─┘   T3.4 ─┤
+                    T3.5 ─┤
+                    T3.6 ─┘
+
+T4.* ─► T6.* (admin needs updated processor)
+T4.* ─► T7.* (bench needs updated processor)
+T2.* ─► T8.* (cache config applies to CFs)
+
+All ─► T9.* (tests after implementation)
+All ─► T10.* (docs after implementation)
+```
+
+## Estimated Effort
+
+| Phase | Tasks | Est. Effort |
+|-------|-------|-------------|
+| 1 - Core Types | 3 | Small |
+| 2 - Schema | 4 | Medium |
+| 3 - API | 6 | Medium |
+| 4 - Processor | 4 | Medium |
+| 5 - Migration | ~~5~~ 0 | ~~Large~~ N/A |
+| 6 - Admin | 3 | Small |
+| 7 - Bench | 2 | Small |
+| 8 - Cache | 3 | Small |
+| 9 - Tests | 4 | Medium |
+| 10 - Docs | 3 | Small |
+| **Total** | **32** | |
+
+## Risk Assessment
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Performance regression | MEDIUM | MEDIUM | Benchmark before/after |
+| API breaking changes | LOW | HIGH | Expected in dev phase |
+| Cache thrash at scale | LOW | MEDIUM | Tunable cache fraction |
