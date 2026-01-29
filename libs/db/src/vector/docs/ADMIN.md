@@ -61,6 +61,19 @@ Admin pulls from these column families:
   **Status** (claude, 2025-01-27, ACKNOWLEDGED): This is a known limitation.
   Mitigation: Use `--secondary` for non-blocking reads. Future improvement could
   maintain lifecycle counts in GraphMeta to avoid full scan.
+
+  **Rationale:** `VecMeta` is the only authoritative lifecycle store today, so
+  counts require scanning every entry. This keeps correctness simple but makes
+  stats O(N) and potentially slow at high scale.
+
+  **Cost estimate @ 10M vectors:** If iteration yields ~50k–100k VecMeta entries/s,
+  a full scan takes ~100–200 seconds per embedding. This is why we recommend
+  `--secondary` for live DBs.
+
+  **Schema change required:** add persisted lifecycle counters keyed by embedding,
+  e.g. `GraphMetaField::LifecycleCounts { indexed, pending, deleted, pending_deleted }`
+  or a new CF `vector/lifecycle_counts` with key `[embedding_code]` and a compact
+  value struct. Updates must be applied on insert/delete/async transitions.
 - `admin validate` uses **sampling** for ID mapping and orphan detection
   (configurable via `--sample-size`, default 1000). Sample size is reported in
   check messages.
