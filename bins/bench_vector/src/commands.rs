@@ -2552,14 +2552,25 @@ fn print_stats(stats: &[motlie_db::vector::admin::EmbeddingStats]) {
 fn admin_inspect(args: AdminInspectArgs) -> Result<()> {
     use motlie_db::vector::admin;
 
-    if args.secondary {
-        anyhow::bail!("--secondary mode not yet supported for 'admin inspect'. Use 'admin stats --secondary' instead.");
-    }
-
-    let mut storage = Storage::readwrite(&args.db_path);
-    storage.ready()?;
-
-    let inspection = admin::inspect_embedding(&storage, args.code)?;
+    // ADMIN.md ADMIN-1 (claude, 2025-01-28, FIXED):
+    // Secondary (read-only) mode now supported for inspect.
+    let inspection = if args.secondary {
+        let secondary_path = std::env::temp_dir().join(format!(
+            "bench_vector_secondary_{}",
+            std::process::id()
+        ));
+        let result = {
+            let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+            storage.ready()?;
+            admin::inspect_embedding_secondary(&storage, args.code)?
+        };
+        let _ = std::fs::remove_dir_all(&secondary_path);
+        result
+    } else {
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+        admin::inspect_embedding(&storage, args.code)?
+    };
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&inspection)?);
@@ -2624,38 +2635,68 @@ fn print_inspection(inspection: &motlie_db::vector::admin::EmbeddingInspection) 
 fn admin_vectors(args: AdminVectorsArgs) -> Result<()> {
     use motlie_db::vector::admin::{self, VecLifecycle};
 
-    if args.secondary {
-        anyhow::bail!("--secondary mode not yet supported for 'admin vectors'. Use 'admin stats --secondary' instead.");
-    }
+    // ADMIN.md ADMIN-1 (claude, 2025-01-28, FIXED):
+    // Secondary (read-only) mode now supported for vectors.
+    let vectors = if args.secondary {
+        let secondary_path = std::env::temp_dir().join(format!(
+            "bench_vector_secondary_{}",
+            std::process::id()
+        ));
+        let result = {
+            let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+            storage.ready()?;
 
-    let mut storage = Storage::readwrite(&args.db_path);
-    storage.ready()?;
-
-    let vectors = if let Some(vec_id) = args.vec_id {
-        // Inspect specific vector
-        match admin::get_vector_info(&storage, args.code, vec_id)? {
-            Some(info) => vec![info],
-            None => {
-                println!("Vector {} not found in embedding {}", vec_id, args.code);
-                return Ok(());
+            if let Some(vec_id) = args.vec_id {
+                match admin::get_vector_info_secondary(&storage, args.code, vec_id)? {
+                    Some(info) => vec![info],
+                    None => {
+                        println!("Vector {} not found in embedding {}", vec_id, args.code);
+                        return Ok(());
+                    }
+                }
+            } else if let Some(sample_count) = args.sample {
+                admin::sample_vectors_secondary(&storage, args.code, sample_count, args.seed)?
+            } else if let Some(ref state_str) = args.state {
+                let state = match state_str.to_lowercase().as_str() {
+                    "indexed" => VecLifecycle::Indexed,
+                    "pending" => VecLifecycle::Pending,
+                    "deleted" => VecLifecycle::Deleted,
+                    "pending_deleted" | "pendingdeleted" => VecLifecycle::PendingDeleted,
+                    _ => anyhow::bail!("Unknown state: {}. Use: indexed, pending, deleted, pending_deleted", state_str),
+                };
+                admin::list_vectors_by_state_secondary(&storage, args.code, state, args.limit)?
+            } else {
+                admin::sample_vectors_secondary(&storage, args.code, args.limit, args.seed)?
             }
-        }
-    } else if let Some(sample_count) = args.sample {
-        // Sample random vectors
-        admin::sample_vectors(&storage, args.code, sample_count, args.seed)?
-    } else if let Some(ref state_str) = args.state {
-        // Filter by state
-        let state = match state_str.to_lowercase().as_str() {
-            "indexed" => VecLifecycle::Indexed,
-            "pending" => VecLifecycle::Pending,
-            "deleted" => VecLifecycle::Deleted,
-            "pending_deleted" | "pendingdeleted" => VecLifecycle::PendingDeleted,
-            _ => anyhow::bail!("Unknown state: {}. Use: indexed, pending, deleted, pending_deleted", state_str),
         };
-        admin::list_vectors_by_state(&storage, args.code, state, args.limit)?
+        let _ = std::fs::remove_dir_all(&secondary_path);
+        result
     } else {
-        // Default: sample a few vectors
-        admin::sample_vectors(&storage, args.code, args.limit, args.seed)?
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+
+        if let Some(vec_id) = args.vec_id {
+            match admin::get_vector_info(&storage, args.code, vec_id)? {
+                Some(info) => vec![info],
+                None => {
+                    println!("Vector {} not found in embedding {}", vec_id, args.code);
+                    return Ok(());
+                }
+            }
+        } else if let Some(sample_count) = args.sample {
+            admin::sample_vectors(&storage, args.code, sample_count, args.seed)?
+        } else if let Some(ref state_str) = args.state {
+            let state = match state_str.to_lowercase().as_str() {
+                "indexed" => VecLifecycle::Indexed,
+                "pending" => VecLifecycle::Pending,
+                "deleted" => VecLifecycle::Deleted,
+                "pending_deleted" | "pendingdeleted" => VecLifecycle::PendingDeleted,
+                _ => anyhow::bail!("Unknown state: {}. Use: indexed, pending, deleted, pending_deleted", state_str),
+            };
+            admin::list_vectors_by_state(&storage, args.code, state, args.limit)?
+        } else {
+            admin::sample_vectors(&storage, args.code, args.limit, args.seed)?
+        }
     };
 
     if args.json {
@@ -2695,26 +2736,51 @@ fn print_vectors(vectors: &[motlie_db::vector::admin::VectorInfo]) {
 fn admin_validate(args: AdminValidateArgs) -> Result<()> {
     use motlie_db::vector::admin::{self, ValidationStatus};
 
-    if args.secondary {
-        anyhow::bail!("--secondary mode not yet supported for 'admin validate'. Use 'admin stats --secondary' instead.");
-    }
-
-    let mut storage = Storage::readwrite(&args.db_path);
-    storage.ready()?;
-
+    // ADMIN.md ADMIN-1 (claude, 2025-01-28, FIXED):
+    // Secondary (read-only) mode now supported for validate.
     // ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
     // Use strict mode for full-scan validation when --strict is passed.
-    let results = if args.strict {
-        if let Some(code) = args.code {
-            vec![admin::validate_embedding_strict(&storage, code)?]
-        } else {
-            admin::validate_all_strict(&storage)?
-        }
+    let results = if args.secondary {
+        let secondary_path = std::env::temp_dir().join(format!(
+            "bench_vector_secondary_{}",
+            std::process::id()
+        ));
+        let result = {
+            let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+            storage.ready()?;
+
+            if args.strict {
+                if let Some(code) = args.code {
+                    vec![admin::validate_embedding_strict_secondary(&storage, code)?]
+                } else {
+                    admin::validate_all_strict_secondary(&storage)?
+                }
+            } else {
+                if let Some(code) = args.code {
+                    vec![admin::validate_embedding_secondary(&storage, code)?]
+                } else {
+                    admin::validate_all_secondary(&storage)?
+                }
+            }
+        };
+        let _ = std::fs::remove_dir_all(&secondary_path);
+        result
     } else {
-        if let Some(code) = args.code {
-            vec![admin::validate_embedding(&storage, code)?]
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+
+        if args.strict {
+            if let Some(code) = args.code {
+                vec![admin::validate_embedding_strict(&storage, code)?]
+            } else {
+                admin::validate_all_strict(&storage)?
+            }
         } else {
-            admin::validate_all(&storage)?
+            if let Some(code) = args.code {
+                vec![admin::validate_embedding(&storage, code)?]
+            } else {
+                admin::validate_all(&storage)?
+            }
         }
     };
 

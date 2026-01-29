@@ -15,12 +15,17 @@ health, and consistency validation.
   for use against live databases. Read-write access remains acceptable for
   scheduled downtime.
 
+  **Status** (claude, 2025-01-28, FIXED): All admin commands now support
+  `--secondary` for read-only access via RocksDB secondary instance. Implemented
+  via `AdminDb` trait that abstracts over `rocksdb::DB` and `TransactionDB`,
+  eliminating helper function duplication. See `admin.rs` trait definition.
+
 Primary entry points (CLI):
 
 - `bench_vector admin stats --db-path <path> [--code <embedding>] [--json] [--secondary]`
-- `bench_vector admin inspect --db-path <path> --code <embedding> [--json]`
-- `bench_vector admin vectors --db-path <path> --code <embedding> [--state ...] [--sample N] [--vec-id N] [--json]`
-- `bench_vector admin validate --db-path <path> [--code <embedding>] [--json] [--strict]`
+- `bench_vector admin inspect --db-path <path> --code <embedding> [--json] [--secondary]`
+- `bench_vector admin vectors --db-path <path> --code <embedding> [--state ...] [--sample N] [--vec-id N] [--json] [--secondary]`
+- `bench_vector admin validate --db-path <path> [--code <embedding>] [--json] [--strict] [--secondary]`
 - `bench_vector admin rocksdb --db-path <path> [--json] [--secondary]`
 
 ## Data Sources
@@ -43,6 +48,12 @@ Admin pulls from these column families:
 - **GAP:** Most admin subcommands still open `Storage::readwrite` even though
   they are logically read-only. This can contend with writers or require write
   locks when running against a live DB.
+
+  **Status** (claude, 2025-01-28, FIXED): All admin commands now support
+  `--secondary` flag for read-only access via `AdminDb` trait abstraction.
+  Without `--secondary`, commands still use `Storage::readwrite` for backward
+  compatibility. With `--secondary`, commands use `Storage::secondary` which
+  opens a non-blocking read-only RocksDB secondary instance.
 - **GAP:** `admin stats` does a full `VecMeta` scan per embedding for lifecycle
   counts (O(N) per embedding). This can be very expensive at 10M+ scale and
   blocks on TransactionDB reads unless `--secondary` is used.
@@ -98,9 +109,12 @@ Admin pulls from these column families:
 
 ## Implemented Improvements
 
-- ✅ **Read-only admin mode**: Added `--secondary` flag to `admin stats` and
-  `admin rocksdb` for read-only access via RocksDB secondary instance. This
-  avoids contention with live workloads and prevents accidental writes.
+- ✅ **Read-only admin mode** (ADMIN-1): Added `--secondary` flag to all admin
+  commands (`stats`, `inspect`, `vectors`, `validate`, `rocksdb`) for read-only
+  access via RocksDB secondary instance. This avoids contention with live
+  workloads and prevents accidental writes. Implemented via `AdminDb` trait
+  that abstracts over `rocksdb::DB` and `TransactionDB`, eliminating the need
+  for duplicate helper functions.
 
 - ✅ **Lifecycle accounting**: `PendingDeleted` is now shown as a separate count
   in `admin stats` rather than being folded into `Deleted`.
@@ -125,15 +139,15 @@ Admin pulls from these column families:
 
 ## Remaining Improvements (TODO)
 
-- **Secondary mode for remaining commands**:
-  - Extend `--secondary` support to `admin inspect`, `admin vectors`, and
-    `admin validate` subcommands.
-  - Note: This requires duplicating many internal helper functions to work with
-    both `DB` and `TransactionDB`. The key benefit (non-blocking reads) is already
-    available for `stats` and `rocksdb` commands.
-- **GAP:** Secondary mode uses a temporary directory under `/tmp` but does not
-  clean up secondary DB files. This may accumulate on repeated runs.
+- ~~**Secondary mode for remaining commands**~~: ✅ FIXED (claude, 2025-01-28)
+  All admin commands now support `--secondary` via the `AdminDb` trait, which
+  abstracts over `rocksdb::DB` and `TransactionDB`. This eliminated the need for
+  duplicate `_db` helper functions. Each public function has a `_secondary`
+  variant that delegates to a shared `_impl` function taking `&dyn AdminDb`.
 
-  **Status** (claude, 2025-01-27, FIXED): Secondary mode now deletes the temp
-  directory explicitly after stats/rocksdb completes. There is no shared wrapper
-  for other subcommands yet.
+- ~~**GAP:** Secondary mode uses a temporary directory under `/tmp` but does not
+  clean up secondary DB files.~~
+
+  **Status** (claude, 2025-01-28, FIXED): Secondary mode now deletes the temp
+  directory explicitly after all admin subcommands complete. Each command that
+  uses secondary mode creates a PID-scoped temp dir and removes it after use.
