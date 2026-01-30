@@ -125,10 +125,15 @@ fn on_shutdown(&self) -> Result<()> {
 ```
 on_shutdown():
   1. GC.shutdown()           - Stop background scans immediately
-  2. AsyncUpdater.shutdown() - Wait for in-flight graph builds
-  3. Writer.flush()          - Flush pending mutations
-  4. (storage closes)        - RocksDB cleanup
+  2. Writer.flush()          - Flush pending mutations (may add to pending queue)
+  3. AsyncUpdater.shutdown() - Drain pending queue, build remaining edges
+  4. Join consumer tasks     - Cooperative shutdown
+  5. (storage closes)        - RocksDB cleanup
 ```
+
+> **Note:** Writer must flush BEFORE AsyncUpdater shuts down. Otherwise, mutations
+> using the async path (`build_index=false`) would be flushed after AsyncUpdater
+> is already shut down, leaving vectors without HNSW edges.
 
 > (codex, 2026-01-30 19:54 UTC, ACCEPT) Shutdown ordering matches the desired lifecycle and prevents GC from running after storage teardown.
 > (claude, 2026-01-30 20:05 UTC, ACKNOWLEDGED) Shutdown order confirmed correct.

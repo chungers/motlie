@@ -268,8 +268,8 @@ impl Subsystem {
     ///
     /// When `on_shutdown()` is called:
     /// 1. GC is shut down (stops background scans)
-    /// 2. Async graph updater is shut down gracefully (waits for in-flight batches)
-    /// 3. Writer flushes pending mutations (closes channel)
+    /// 2. Writer flushes pending mutations (may add to async pending queue)
+    /// 3. Async graph updater is shut down (drains pending queue, builds remaining edges)
     /// 4. Consumer tasks are joined (cooperative shutdown via channel close)
     ///
     /// This ensures all components shut down cleanly before storage closes.
@@ -505,15 +505,9 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
             tracing::debug!(subsystem = "vector", "Garbage collector shut down");
         }
 
-        // 2. Shutdown async graph updater (graceful - waits for in-flight batches)
-        // This must happen before flushing mutations to ensure all pending inserts are processed.
-        if let Some(updater) = self.async_updater.write().expect("async_updater lock poisoned").take() {
-            tracing::debug!(subsystem = "vector", "Shutting down async graph updater");
-            updater.shutdown();
-            tracing::debug!(subsystem = "vector", "Async graph updater shut down");
-        }
-
-        // 3. Flush pending mutations (closes channel, signals consumers to exit)
+        // 2. Flush pending mutations (closes channel, signals consumers to exit)
+        // This must happen BEFORE AsyncUpdater shutdown so that any mutations using
+        // the async path (build_index=false) are processed and added to pending queue.
         if let Some(writer) = self.writer.read().expect("writer lock poisoned").as_ref() {
             if !writer.is_closed() {
                 tracing::debug!(subsystem = "vector", "Flushing pending mutations");
@@ -541,6 +535,14 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
                     }
                 }
             }
+        }
+
+        // 3. Shutdown async graph updater (graceful - waits for in-flight batches)
+        // Now that all mutations are flushed, AsyncUpdater can drain the pending queue.
+        if let Some(updater) = self.async_updater.write().expect("async_updater lock poisoned").take() {
+            tracing::debug!(subsystem = "vector", "Shutting down async graph updater");
+            updater.shutdown();
+            tracing::debug!(subsystem = "vector", "Async graph updater shut down");
         }
 
         // 4. Join consumer tasks (cooperative shutdown - channels are closed)
