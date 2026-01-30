@@ -683,7 +683,7 @@ impl AsyncGraphUpdater {
         storage: &Storage,
         registry: &EmbeddingRegistry,
         nav_cache: &Arc<NavigationCache>,
-        config: &AsyncUpdaterConfig,
+        _config: &AsyncUpdaterConfig,
         pending_key: &[u8],
         embedding: EmbeddingCode,
         vec_id: VecId,
@@ -752,7 +752,7 @@ impl AsyncGraphUpdater {
         let vector = Vectors::value_from_bytes_typed(&vec_bytes, storage_type)?;
 
         // 3. Build HNSW index
-        // Get hnsw_m from persisted EmbeddingSpec (authoritative for build params)
+        // Get EmbeddingSpec from storage (single source of truth for HNSW params)
         let specs_cf = txn_db
             .cf_handle(EmbeddingSpecs::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
@@ -761,24 +761,13 @@ impl AsyncGraphUpdater {
             .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
             .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
         let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
-        let m = embedding_spec.hnsw_m as usize;
-        let hnsw_config = hnsw::Config {
-            enabled: true,
-            dim: emb.dim() as usize,
-            m,
-            m_max: m * 2,
-            m_max_0: m * 2,
-            ef_construction: config.ef_construction,
-            m_l: 1.0 / (m as f32).ln(),
-            max_level: None,
-            batch_threshold: 64, // Default, effectively disables batching
-        };
 
-        let index = hnsw::Index::with_storage_type(
+        // Create HNSW index using EmbeddingSpec as single source of truth
+        // All structural params (m, m_max, ef_construction) derived from spec
+        let index = hnsw::Index::from_spec(
             embedding,
-            emb.distance(),
-            storage_type,
-            hnsw_config,
+            &embedding_spec,
+            64, // batch_threshold: runtime knob, not persisted
             Arc::clone(nav_cache),
         );
 

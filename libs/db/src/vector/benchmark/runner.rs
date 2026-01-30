@@ -283,6 +283,7 @@ impl RabitqExperimentResult {
 }
 
 /// Run all experiments according to configuration.
+#[allow(deprecated)]
 pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentResult>> {
     // Load full dataset
     let max_vectors = *config.scales.iter().max().unwrap_or(&200_000);
@@ -388,6 +389,7 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
 }
 
 /// Build HNSW index from vectors.
+#[allow(deprecated)]
 pub fn build_hnsw_index(
     storage: &Storage,
     vectors: &[Vec<f32>],

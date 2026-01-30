@@ -487,6 +487,50 @@ impl EmbeddingSpec {
         self.rabitq_seed.hash(&mut hasher);
         hasher.finish()
     }
+
+    // =========================================================================
+    // HNSW Parameter Accessors (derived from persisted fields)
+    // =========================================================================
+
+    /// HNSW M parameter: number of bidirectional links per node.
+    ///
+    /// This is the persisted value from `hnsw_m`.
+    #[inline]
+    pub fn m(&self) -> usize {
+        self.hnsw_m as usize
+    }
+
+    /// Maximum links per node at layers > 0.
+    ///
+    /// Always `2 * M` per HNSW paper recommendation.
+    #[inline]
+    pub fn m_max(&self) -> usize {
+        2 * self.m()
+    }
+
+    /// Maximum links per node at layer 0.
+    ///
+    /// Always `2 * M` per HNSW paper recommendation.
+    #[inline]
+    pub fn m_max_0(&self) -> usize {
+        2 * self.m()
+    }
+
+    /// Layer probability multiplier for HNSW level assignment.
+    ///
+    /// Always `1.0 / ln(M)` per HNSW paper.
+    #[inline]
+    pub fn m_l(&self) -> f32 {
+        1.0 / (self.m() as f32).ln()
+    }
+
+    /// HNSW ef_construction: search beam width during index build.
+    ///
+    /// This is the persisted value from `hnsw_ef_construction`.
+    #[inline]
+    pub fn ef_construction(&self) -> usize {
+        self.hnsw_ef_construction as usize
+    }
 }
 
 /// EmbeddingSpecs key: the embedding space identifier (primary key)
@@ -2284,4 +2328,84 @@ mod tests {
     }
 
     // NOTE: ExternalKey 1M roundtrip benchmark is in `libs/db/benches/db_operations.rs`.
+
+    // ========================================================================
+    // EmbeddingSpec HNSW Helper Tests (CONFIG T1.2)
+    // ========================================================================
+
+    #[test]
+    fn test_embedding_spec_m_accessors() {
+        let spec = EmbeddingSpec {
+            model: "test".to_string(),
+            dim: 128,
+            distance: crate::vector::distance::Distance::L2,
+            storage_type: VectorElementType::F32,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        };
+
+        // m() returns persisted value
+        assert_eq!(spec.m(), 16);
+
+        // m_max() and m_max_0() are always 2 * m
+        assert_eq!(spec.m_max(), 32);
+        assert_eq!(spec.m_max_0(), 32);
+        assert_eq!(spec.m_max(), 2 * spec.m());
+        assert_eq!(spec.m_max_0(), 2 * spec.m());
+
+        // ef_construction() returns persisted value
+        assert_eq!(spec.ef_construction(), 200);
+    }
+
+    #[test]
+    fn test_embedding_spec_m_l_derivation() {
+        // Test m_l = 1.0 / ln(m) for various M values
+        for m in [8u16, 16, 32, 64] {
+            let spec = EmbeddingSpec {
+                model: "test".to_string(),
+                dim: 128,
+                distance: crate::vector::distance::Distance::L2,
+                storage_type: VectorElementType::F32,
+                hnsw_m: m,
+                hnsw_ef_construction: 200,
+                rabitq_bits: 1,
+                rabitq_seed: 42,
+            };
+
+            let expected_m_l = 1.0 / (m as f32).ln();
+            assert!(
+                (spec.m_l() - expected_m_l).abs() < 1e-6,
+                "m_l mismatch for M={}: got {}, expected {}",
+                m,
+                spec.m_l(),
+                expected_m_l
+            );
+        }
+    }
+
+    #[test]
+    fn test_embedding_spec_accessors_with_different_values() {
+        // Test with non-default values
+        let spec = EmbeddingSpec {
+            model: "custom".to_string(),
+            dim: 768,
+            distance: crate::vector::distance::Distance::Cosine,
+            storage_type: VectorElementType::F16,
+            hnsw_m: 32,
+            hnsw_ef_construction: 400,
+            rabitq_bits: 2,
+            rabitq_seed: 12345,
+        };
+
+        assert_eq!(spec.m(), 32);
+        assert_eq!(spec.m_max(), 64);
+        assert_eq!(spec.m_max_0(), 64);
+        assert_eq!(spec.ef_construction(), 400);
+
+        // Verify m_l for M=32
+        let expected_m_l = 1.0 / 32f32.ln();
+        assert!((spec.m_l() - expected_m_l).abs() < 1e-6);
+    }
 }

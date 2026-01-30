@@ -79,7 +79,48 @@ pub struct Index {
 }
 
 impl Index {
+    /// Create a new HNSW index from an EmbeddingSpec.
+    ///
+    /// This is the **preferred constructor** that derives all HNSW parameters
+    /// from the persisted EmbeddingSpec, ensuring no configuration drift across
+    /// process restarts.
+    ///
+    /// # Arguments
+    /// * `embedding` - The embedding space code
+    /// * `spec` - The embedding specification (source of truth for HNSW params)
+    /// * `batch_threshold` - Runtime performance knob for batch distance computation
+    /// * `nav_cache` - Navigation cache for fast layer traversal
+    pub fn from_spec(
+        embedding: EmbeddingCode,
+        spec: &crate::vector::schema::EmbeddingSpec,
+        batch_threshold: usize,
+        nav_cache: Arc<NavigationCache>,
+    ) -> Self {
+        let config = Config {
+            enabled: true, // Always enabled
+            dim: spec.dim as usize,
+            m: spec.m(),
+            m_max: spec.m_max(),
+            m_max_0: spec.m_max_0(),
+            ef_construction: spec.ef_construction(),
+            m_l: spec.m_l(),
+            max_level: None, // Always auto
+            batch_threshold,
+        };
+
+        Self {
+            embedding,
+            distance: spec.distance,
+            storage_type: spec.storage_type,
+            config,
+            nav_cache,
+        }
+    }
+
     /// Create a new HNSW index for an embedding space.
+    ///
+    /// **Deprecated:** Prefer `Index::from_spec()` which derives parameters from
+    /// the persisted EmbeddingSpec to prevent configuration drift.
     ///
     /// # Arguments
     /// * `embedding` - The embedding space code
@@ -102,6 +143,9 @@ impl Index {
     }
 
     /// Create a new HNSW index with specified storage type.
+    ///
+    /// **Deprecated:** Prefer `Index::from_spec()` which derives parameters from
+    /// the persisted EmbeddingSpec to prevent configuration drift.
     ///
     /// # Arguments
     /// * `embedding` - The embedding space code
