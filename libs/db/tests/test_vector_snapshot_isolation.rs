@@ -34,7 +34,8 @@ use motlie_db::vector::reader::{
 };
 use motlie_db::vector::{
     cache::NavigationCache, create_writer, spawn_mutation_consumer_with_storage_autoreg,
-    DeleteVector, Distance, EmbeddingBuilder, InsertVector, MutationRunnable, Storage, WriterConfig,
+    DeleteVector, Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, Storage,
+    WriterConfig,
 };
 use motlie_db::rocksdb::ColumnFamily;
 use motlie_db::Id;
@@ -172,7 +173,7 @@ fn test_snapshot_isolation_delete_during_search() {
     println!("Inserting {} vectors...", num_vectors);
     runtime.block_on(async {
         for (id, vector) in inserts {
-            InsertVector::new(&embedding, id, vector)
+            InsertVector::new(&embedding, ExternalKey::NodeId(id), vector)
                 .immediate()
                 .run(&writer)
                 .await
@@ -200,7 +201,7 @@ fn test_snapshot_isolation_delete_during_search() {
     let search_results = runtime.block_on(async {
         let delete_handle = tokio::spawn(async move {
             for id in delete_ids {
-                DeleteVector::new(&embedding_clone, id)
+                DeleteVector::new(&embedding_clone, ExternalKey::NodeId(id))
                     .run(&writer_clone)
                     .await
                     .expect("delete");
@@ -423,7 +424,7 @@ fn test_snapshot_isolation_insert_during_search_reader() {
 
     runtime.block_on(async {
         for (id, vector) in inserts {
-            InsertVector::new(&embedding, id, vector)
+            InsertVector::new(&embedding, ExternalKey::NodeId(id), vector)
                 .immediate()
                 .run(&writer)
                 .await
@@ -450,7 +451,7 @@ fn test_snapshot_isolation_insert_during_search_reader() {
         let insert_handle = tokio::spawn(async move {
             for seed in initial_count..(initial_count + 200) {
                 let vector = seeded_vector(DIM, seed as u64);
-                InsertVector::new(&embedding_clone, Id::new(), vector)
+                InsertVector::new(&embedding_clone, ExternalKey::NodeId(Id::new()), vector)
                     .immediate()
                     .run(&writer_clone)
                     .await

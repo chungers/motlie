@@ -11,8 +11,8 @@
 //! # Build index with checkpointing
 //! bench_vector index --dataset laion --num-vectors 100000 --db-path ./db
 //!
-//! # Run queries
-//! bench_vector query --db-path ./db --queries 1000 --k 10
+//! # Run queries (use embedding code from index output)
+//! bench_vector query --db-path ./db --embedding-code <CODE> --queries 1000 --k 10
 //!
 //! # Parameter sweep
 //! bench_vector sweep --dataset laion --bits 1,2,4 --ef 50,100,200 --rerank 1,4,10
@@ -49,10 +49,6 @@ enum Commands {
     /// Parameter sweep (grid search over bits, ef, rerank)
     Sweep(commands::SweepArgs),
 
-    /// Scale benchmark (deprecated: use index/query with --dataset random --stream)
-    #[command(hide = true)]
-    Scale(commands::ScaleArgs),
-
     /// Check RaBitQ rotation distribution (validates √D scaling)
     CheckDistribution(commands::CheckDistributionArgs),
 
@@ -61,6 +57,9 @@ enum Commands {
 
     /// List available datasets
     Datasets,
+
+    /// Administrative and diagnostic commands
+    Admin(commands::AdminArgs),
 }
 
 #[tokio::main]
@@ -78,9 +77,9 @@ async fn main() -> Result<()> {
         Commands::Index(args) => commands::index(args).await,
         Commands::Query(args) => commands::query(args).await,
         Commands::Sweep(args) => commands::sweep(args).await,
-        Commands::Scale(args) => commands::scale(args),
         Commands::CheckDistribution(args) => commands::check_distribution(args),
         Commands::Embeddings(args) => commands::embeddings(args),
         Commands::Datasets => commands::list_datasets(),
+        Commands::Admin(args) => commands::admin(args),
     }
 }

@@ -27,7 +27,7 @@ use motlie_db::vector::{
 };
 use motlie_db::rocksdb::{ColumnFamily, ColumnFamilySerde};
 use motlie_db::Id;
-use motlie_db::vector::schema::{EmbeddingSpec, EmbeddingSpecs};
+use motlie_db::vector::schema::{EmbeddingSpec, EmbeddingSpecs, ExternalKey};
 
 // ============================================================================
 // Download Command
@@ -280,6 +280,14 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     let model = format!("bench-{}", args.dataset.to_lowercase());
 
     if is_random && args.stream {
+        // ADMIN.md Issue #1 (chungers, 2025-01-27, FIXED):
+        // Defer embedding registration until after validation checks pass.
+        // Previously, registration happened before the existing_count check,
+        // leaving orphan EmbeddingSpecs on abort.
+        if existing_count > 0 {
+            anyhow::bail!("Streaming random index requires a fresh database. Use --fresh to rebuild.");
+        }
+
         let dim = args.dim;
         let embedding = registry.register(
             EmbeddingBuilder::new(&model, dim as u32, distance)
@@ -287,22 +295,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
                 .with_hnsw_ef_construction(args.ef_construction as u16),
             &txn_db,
         )?;
-
-        if existing_count > 0 {
-            let allocator = IdAllocator::recover(&txn_db, embedding.code())?;
-            let next_id = allocator.next_id() as usize;
-            if next_id < existing_count {
-                anyhow::bail!(
-                    "Existing index allocator state ({}) behind metadata count ({}). Rebuild with --fresh.",
-                    next_id,
-                    existing_count
-                );
-            }
-        }
-
-        if existing_count > 0 {
-            anyhow::bail!("Streaming random index requires a fresh database.");
-        }
+        print_embedding_summary(&args.db_path, embedding.code())?;
 
         if args.async_workers > 0 {
             println!("Insert mode: ASYNC ({} workers)", args.async_workers);
@@ -358,15 +351,13 @@ pub async fn index(args: IndexArgs) -> Result<()> {
 
             for (offset, vector) in batch.into_iter().enumerate() {
                 let id = Id::from_bytes(((batch_start + offset) as u128).to_be_bytes());
-                payload.push((id, vector));
+                // T7.1: Use ExternalKey::NodeId for polymorphic ID mapping
+                payload.push((ExternalKey::NodeId(id), vector));
             }
 
             let mutation = InsertVectorBatch::new(&embedding, payload);
             let mutation = if immediate { mutation.immediate() } else { mutation };
-            if let Err(err) = writer.send(vec![mutation.into()]).await {
-                errors += batch_len;
-                return Err(err);
-            }
+            writer.send(vec![mutation.into()]).await?;
             inserted += batch_len;
 
             if last_progress.elapsed() >= progress_interval {
@@ -469,6 +460,8 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
 
         if let Some(output_path) = args.output {
+            let (embedding_code, embedding_spec) =
+                resolve_embedding_spec(&args.db_path, Some(embedding.code()), None, None, None)?;
             let json = serde_json::json!({
                 "command": "index",
                 "config": {
@@ -483,6 +476,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
                     "async_workers": args.async_workers,
                     "stream": args.stream,
                 },
+                "embedding": embedding_spec_json(embedding_code, &embedding_spec),
                 "results": {
                     "vectors_inserted": inserted,
                     "errors": errors,
@@ -516,6 +510,7 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             .with_hnsw_ef_construction(args.ef_construction as u16),
         &txn_db,
     )?;
+    print_embedding_summary(&args.db_path, embedding.code())?;
 
     if existing_count > 0 {
         let allocator = IdAllocator::recover(&txn_db, embedding.code())?;
@@ -556,14 +551,12 @@ pub async fn index(args: IndexArgs) -> Result<()> {
 
         for (offset, vector) in batch.iter().enumerate() {
             let id = Id::from_bytes(((batch_start + offset) as u128).to_be_bytes());
-            payload.push((id, vector.clone()));
+            // T7.1: Use ExternalKey::NodeId for polymorphic ID mapping
+            payload.push((ExternalKey::NodeId(id), vector.clone()));
         }
 
         let mutation = InsertVectorBatch::new(&embedding, payload).immediate();
-        if let Err(err) = writer.send(vec![mutation.into()]).await {
-            errors += batch.len();
-            return Err(err);
-        }
+        writer.send(vec![mutation.into()]).await?;
         inserted += batch.len();
 
         if last_progress.elapsed() >= progress_interval || inserted == total {
@@ -628,27 +621,30 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     meta.checkpoint(&args.db_path)?;
     println!("Metadata saved: {:?}", BenchmarkMetadata::path(&args.db_path));
 
-    if let Some(output_path) = args.output {
-        let json = serde_json::json!({
-            "command": "index",
-            "config": {
-                "dataset": args.dataset,
-                "num_vectors": args.num_vectors,
+        if let Some(output_path) = args.output {
+            let (embedding_code, embedding_spec) =
+                resolve_embedding_spec(&args.db_path, Some(embedding.code()), None, None, None)?;
+            let json = serde_json::json!({
+                "command": "index",
+                "config": {
+                    "dataset": args.dataset,
+                    "num_vectors": args.num_vectors,
                 "dim": dim,
                 "hnsw_m": args.m,
                 "hnsw_ef_construction": args.ef_construction,
                 "batch_size": args.batch_size,
                 "seed": args.seed,
-                "distance": format!("{:?}", distance).to_lowercase(),
-                "async_workers": args.async_workers,
-                "stream": args.stream,
-            },
-            "results": {
-                "vectors_inserted": inserted,
-                "errors": errors,
-                "duration_secs": build_time,
-                "throughput_vec_per_sec": inserted as f64 / build_time.max(0.0001),
-                "peak_rss_bytes": peak_rss,
+                    "distance": format!("{:?}", distance).to_lowercase(),
+                    "async_workers": args.async_workers,
+                    "stream": args.stream,
+                },
+                "embedding": embedding_spec_json(embedding_code, &embedding_spec),
+                "results": {
+                    "vectors_inserted": inserted,
+                    "errors": errors,
+                    "duration_secs": build_time,
+                    "throughput_vec_per_sec": inserted as f64 / build_time.max(0.0001),
+                    "peak_rss_bytes": peak_rss,
             }
         });
 
@@ -669,6 +665,10 @@ pub struct QueryArgs {
     /// Database path
     #[arg(long)]
     pub db_path: PathBuf,
+
+    /// Embedding code to use (overrides dataset-based lookup)
+    #[arg(long)]
+    pub embedding_code: Option<u64>,
 
     /// Dataset for queries (to load test vectors)
     #[arg(long)]
@@ -743,7 +743,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     let is_random = args.dataset.to_lowercase() == "random";
     let dim = meta.dim;
 
-    let (queries, ground_truth, mut skip_recall, vector_seed, query_seed) = if is_random {
+    let (queries, ground_truth, skip_recall, vector_seed, query_seed) = if is_random {
         let seed = args.seed;
         let vector_seed = seed.or(args.vector_seed).unwrap_or(meta.vector_seed);
         let query_seed = seed.or(args.query_seed).unwrap_or(meta.query_seed);
@@ -779,19 +779,39 @@ pub async fn query(args: QueryArgs) -> Result<()> {
     storage.ready()?;
     let storage = Arc::new(storage);
 
-    // Ensure embedding spec exists for public query API
-    let txn_db = storage.transaction_db()?;
+    // Resolve embedding spec without mutating the registry/DB.
     let registry = storage.cache().clone();
     let model = format!("bench-{}", args.dataset.to_lowercase());
-    let embedding = match registry.get(&model, dim as u32, distance) {
-        Some(existing) => existing,
-        None => registry.register(
-            EmbeddingBuilder::new(&model, dim as u32, distance)
-                .with_hnsw_m(meta.hnsw_m as u16)
-                .with_hnsw_ef_construction(meta.hnsw_ef_construction as u16),
-            &txn_db,
-        )?,
+    let (embedding_code, embedding_spec) = if let Some(code) = args.embedding_code {
+        resolve_embedding_spec(&args.db_path, Some(code), None, None, None)?
+    } else {
+        resolve_embedding_spec(
+            &args.db_path,
+            None,
+            Some(&model),
+            Some(dim as u32),
+            Some(meta.distance.as_str()),
+        )?
     };
+
+    if embedding_spec.dim != dim as u32 || embedding_spec.distance != distance {
+        anyhow::bail!(
+            "Embedding spec mismatch for code {}: spec dim={} distance={:?}, metadata dim={} distance={:?}",
+            embedding_code,
+            embedding_spec.dim,
+            embedding_spec.distance,
+            dim,
+            distance
+        );
+    }
+
+    let txn_db = storage.transaction_db()?;
+    if registry.get_by_code(embedding_code).is_none() {
+        registry.prewarm(&txn_db)?;
+    }
+    let embedding = registry
+        .get_by_code(embedding_code)
+        .ok_or_else(|| anyhow::anyhow!("No embedding found for code {}", embedding_code))?;
 
     if args.stdin {
         let mut input = String::new();
@@ -826,10 +846,12 @@ pub async fn query(args: QueryArgs) -> Result<()> {
                     "ef_search": args.ef_search,
                     "stdin": true,
                 },
+                // T7.2: JSON output with typed external keys
                 "results": results.iter().map(|r| serde_json::json!({
                     "vec_id": r.vec_id,
                     "distance": r.distance,
-                    "id": r.id.as_str(),
+                    "external_key": r.external_key,
+                    "external_key_type": r.external_key.variant_name(),
                 })).collect::<Vec<_>>(),
             });
             std::fs::write(&output_path, serde_json::to_string_pretty(&json)?)
@@ -838,10 +860,11 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         } else {
             println!("Results:");
             for result in results {
+                // T7.1: Use external_key with Debug formatting (supports all ExternalKey variants)
                 println!(
-                    "  vec_id={} id={} distance={:.6}",
+                    "  vec_id={} external_key={:?} distance={:.6}",
                     result.vec_id,
-                    result.id.as_str(),
+                    result.external_key,
                     result.distance
                 );
             }
@@ -891,7 +914,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         for qi in 0..args.num_queries {
             let query = query_gen.generate_query();
             let start = Instant::now();
-            let results = SearchKNN::new(&embedding, query, args.k)
+            let _results = SearchKNN::new(&embedding, query, args.k)
                 .with_ef(args.ef_search)
                 .exact()
                 .run(&search_reader, timeout)
@@ -1045,7 +1068,10 @@ pub async fn query(args: QueryArgs) -> Result<()> {
                 "recall_sample_size": args.recall_sample_size,
                 "k": args.k,
                 "ef_search": args.ef_search,
+                "skip_recall": skip_recall,
+                "embedding_code": embedding_code,
             },
+            "embedding": embedding_spec_json(embedding_code, &embedding_spec),
             "results": {
                 "recall_at_k": recall_at_k,
                 "qps": stats.qps,
@@ -1452,6 +1478,40 @@ fn resolve_embedding_spec(
                 distance_str
             )
         })
+}
+
+fn embedding_spec_json(code: u64, spec: &EmbeddingSpec) -> serde_json::Value {
+    serde_json::json!({
+        "code": code,
+        "model": spec.model,
+        "dim": spec.dim,
+        "distance": format!("{:?}", spec.distance).to_lowercase(),
+        "storage_type": format!("{:?}", spec.storage_type).to_lowercase(),
+        "hnsw_m": spec.hnsw_m,
+        "hnsw_ef_construction": spec.hnsw_ef_construction,
+        "rabitq_bits": spec.rabitq_bits,
+        "rabitq_seed": spec.rabitq_seed,
+    })
+}
+
+fn print_embedding_summary(db_path: &PathBuf, code: u64) -> Result<()> {
+    let (code, spec) = resolve_embedding_spec(db_path, Some(code), None, None, None)?;
+    println!("\nEmbedding registered:");
+    println!("  Code: {}", code);
+    println!("  Model: {}", spec.model);
+    println!("  Dim: {}", spec.dim);
+    println!("  Distance: {:?}", spec.distance);
+    println!("  Storage: {:?}", spec.storage_type);
+    println!("  HNSW M: {}", spec.hnsw_m);
+    println!("  HNSW ef_construction: {}", spec.hnsw_ef_construction);
+    println!("  RaBitQ bits: {}", spec.rabitq_bits);
+    println!("  RaBitQ seed: {}", spec.rabitq_seed);
+    println!(
+        "  Inspect: bench_vector embeddings inspect --db-path {} --code {}",
+        db_path.display(),
+        code
+    );
+    Ok(())
 }
 
 /// Load vectors for an embedding using reservoir sampling.
@@ -2190,269 +2250,6 @@ fn embeddings_groundtruth(args: EmbeddingsGroundtruthArgs) -> Result<()> {
 // ============================================================================
 // Datasets Command
 // ============================================================================
-// Scale Command
-// ============================================================================
-
-#[derive(Parser)]
-pub struct ScaleArgs {
-    /// Number of vectors to insert
-    #[arg(long)]
-    pub num_vectors: usize,
-
-    /// Vector dimension
-    #[arg(long, default_value = "128")]
-    pub dim: usize,
-
-    /// Batch size for inserts
-    #[arg(long, default_value = "1000")]
-    pub batch_size: usize,
-
-    /// Number of search queries after insert
-    #[arg(long, default_value = "1000")]
-    pub num_queries: usize,
-
-    /// ef_search parameter
-    #[arg(long, default_value = "100")]
-    pub ef_search: usize,
-
-    /// k for top-k search
-    #[arg(long, default_value = "10")]
-    pub k: usize,
-
-    /// HNSW M parameter
-    #[arg(long, default_value = "16")]
-    pub m: usize,
-
-    /// HNSW ef_construction parameter
-    #[arg(long, default_value = "200")]
-    pub ef_construction: usize,
-
-    /// Random seed for reproducibility
-    #[arg(long, default_value = "42")]
-    pub seed: u64,
-
-    /// Distance metric: cosine, l2, dot
-    #[arg(long, default_value = "cosine")]
-    pub distance: String,
-
-    /// Progress reporting interval in seconds
-    #[arg(long, default_value = "10")]
-    pub progress_interval: u64,
-
-    /// Database path (required)
-    #[arg(long)]
-    pub db_path: PathBuf,
-
-    /// Output results to JSON file
-    #[arg(long)]
-    pub output: Option<PathBuf>,
-
-    /// Number of async workers (0 = sync inserts).
-    #[arg(long, default_value = "0")]
-    pub async_workers: usize,
-
-    /// Number of queries to sample for recall computation (0 to disable)
-    #[arg(long, default_value = "100")]
-    pub recall_sample_size: usize,
-
-    /// Rerank factor for search (candidates = k * rerank_factor)
-    #[arg(long, default_value = "4")]
-    pub rerank_factor: usize,
-}
-
-pub fn scale(args: ScaleArgs) -> Result<()> {
-    use motlie_db::vector::benchmark::{AsyncMetrics, ScaleBenchmark, ScaleConfig};
-    use motlie_db::vector::{AsyncGraphUpdater, AsyncUpdaterConfig, Distance, EmbeddingBuilder};
-    use std::time::Duration;
-
-    eprintln!(
-        "Warning: 'bench_vector scale' is deprecated. Use 'bench_vector index --dataset random --stream' \
-         and 'bench_vector query --dataset random' instead."
-    );
-
-    let distance = match args.distance.to_lowercase().as_str() {
-        "cosine" => Distance::Cosine,
-        "l2" | "euclidean" => Distance::L2,
-        "dot" | "dotproduct" => Distance::DotProduct,
-        _ => anyhow::bail!(
-            "Invalid distance: {} (use cosine, l2, or dot)",
-            args.distance
-        ),
-    };
-
-    println!("=== Scale Benchmark ===");
-    println!("Vectors: {}", args.num_vectors);
-    println!("Dimension: {}D", args.dim);
-    println!("HNSW: M={}, ef_construction={}", args.m, args.ef_construction);
-    println!("Distance: {:?}", distance);
-    println!("Batch size: {}", args.batch_size);
-    if args.async_workers > 0 {
-        println!("Insert mode: ASYNC ({} workers)", args.async_workers);
-    } else {
-        println!("Insert mode: SYNC (immediate indexing)");
-    }
-    println!("Database: {:?}", args.db_path);
-    println!();
-
-    // Delete existing DB if exists (fresh benchmark)
-    if args.db_path.exists() {
-        std::fs::remove_dir_all(&args.db_path)
-            .context("Failed to remove existing database")?;
-    }
-
-    let mut storage = motlie_db::vector::Storage::readwrite(&args.db_path);
-    storage.ready().context("Failed to initialize storage")?;
-    let storage = Arc::new(storage);
-
-    // Register embedding
-    let txn_db = storage.transaction_db().context("Failed to get transaction DB")?;
-    let embedding = storage
-        .cache()
-        .register(
-            EmbeddingBuilder::new("scale-bench", args.dim as u32, distance)
-                .with_hnsw_m(args.m as u16)
-                .with_hnsw_ef_construction(args.ef_construction as u16),
-            &txn_db,
-        )
-        .context("Failed to register embedding")?;
-
-    // Start async updater if async mode enabled (wrap in Arc for sharing)
-    let async_updater: Option<Arc<AsyncGraphUpdater>> = if args.async_workers > 0 {
-        let async_config = AsyncUpdaterConfig::new()
-            .with_num_workers(args.async_workers)
-            .with_batch_size(100)
-            .with_ef_construction(args.ef_construction)
-            .with_process_on_startup(false); // Don't drain on startup
-
-        let registry = storage.cache().clone();
-        let nav_cache = Arc::new(NavigationCache::new());
-
-        Some(Arc::new(AsyncGraphUpdater::start(
-            storage.clone(),
-            registry,
-            nav_cache,
-            async_config,
-        )))
-    } else {
-        None
-    };
-
-    // Build config
-    let config = ScaleConfig::new(args.num_vectors, args.dim)
-        .with_batch_size(args.batch_size)
-        .with_seed(args.seed)
-        .with_distance(distance)
-        .with_progress_interval(Duration::from_secs(args.progress_interval))
-        .with_num_queries(args.num_queries)
-        .with_ef_search(args.ef_search)
-        .with_k(args.k)
-        .with_hnsw_m(args.m)
-        .with_hnsw_ef_construction(args.ef_construction)
-        .with_immediate_index(args.async_workers == 0)
-        .with_recall_sample_size(args.recall_sample_size)
-        .with_rerank_factor(args.rerank_factor);
-
-    // Create async metrics callback if in async mode
-    let async_metrics = if let Some(ref updater) = async_updater {
-        // Clone Arc references for the closures
-        let updater_pending = Arc::clone(updater);
-        let updater_items = Arc::clone(updater);
-
-        Some(AsyncMetrics {
-            pending_queue_size: Box::new(move || updater_pending.pending_queue_size()),
-            items_processed: Box::new(move || updater_items.items_processed()),
-        })
-    } else {
-        None
-    };
-
-    // Run benchmark (inserts phase) with async metrics tracking
-    let result = ScaleBenchmark::run_with_async_metrics(&storage, &embedding, config, async_metrics)?;
-
-    // Wait for async workers to drain pending queue before reporting results
-    if let Some(updater) = async_updater {
-        println!("\nWaiting for async workers to drain pending queue...");
-        let drain_start = std::time::Instant::now();
-
-        // Poll until pending queue is empty
-        loop {
-            let pending = updater.pending_queue_size();
-            if pending == 0 {
-                break;
-            }
-            println!(
-                "  Pending: {} vectors, processed: {} items",
-                pending,
-                updater.items_processed()
-            );
-            std::thread::sleep(Duration::from_secs(2));
-        }
-
-        let items_processed = updater.items_processed();
-        println!(
-            "Async workers drained in {:.1}s ({} items processed)",
-            drain_start.elapsed().as_secs_f64(),
-            items_processed
-        );
-
-        // Shutdown workers - unwrap Arc to get ownership
-        match Arc::try_unwrap(updater) {
-            Ok(owned_updater) => owned_updater.shutdown(),
-            Err(_arc) => {
-                // Arc still has other references - just drop it
-                // Workers will be signaled to stop when Arc is dropped
-                println!("Note: Async workers still shutting down in background");
-            }
-        }
-    }
-
-    // Print results
-    println!("{}", result);
-
-    // Save to JSON if requested
-    if let Some(output_path) = args.output {
-        let json = serde_json::json!({
-            "config": {
-                "num_vectors": result.config.num_vectors,
-                "dim": result.config.dim,
-                "batch_size": result.config.batch_size,
-                "hnsw_m": result.config.hnsw_m,
-                "hnsw_ef_construction": result.config.hnsw_ef_construction,
-                "seed": result.config.seed,
-            },
-            "insert": {
-                "vectors_inserted": result.vectors_inserted,
-                "errors": result.insert_errors,
-                "duration_secs": result.insert_duration.as_secs_f64(),
-                "throughput_vec_per_sec": result.insert_throughput,
-            },
-            "search": {
-                "queries_executed": result.queries_executed,
-                "duration_secs": result.search_duration.as_secs_f64(),
-                "qps": result.search_qps,
-                "p50_ms": result.search_p50.as_secs_f64() * 1000.0,
-                "p99_ms": result.search_p99.as_secs_f64() * 1000.0,
-            },
-            "memory": {
-                "peak_rss_bytes": result.peak_memory_bytes,
-                "nav_cache_bytes": result.nav_cache_bytes,
-            },
-            "recall": {
-                "recall_at_k": result.recall_at_k,
-                "k": result.config.k,
-                "sample_queries": result.recall_queries,
-            }
-        });
-
-        std::fs::write(&output_path, serde_json::to_string_pretty(&json)?)
-            .context("Failed to write output file")?;
-        println!("\nResults saved to: {:?}", output_path);
-    }
-
-    Ok(())
-}
-
-// ============================================================================
 // List Datasets Command
 // ============================================================================
 
@@ -2487,6 +2284,8 @@ pub fn list_datasets() -> Result<()> {
         println!("\nHDF5 datasets: Enable with --features hdf5 (requires libhdf5)");
     }
 
+    // ADMIN.md Issue #2 (chungers, 2025-01-27, FIXED):
+    // Updated examples to show --embedding-code for query command.
     println!("\n--- Usage Examples ---\n");
 
     println!("Download a dataset:");
@@ -2495,8 +2294,11 @@ pub fn list_datasets() -> Result<()> {
     println!("Build an index:");
     println!("  bench_vector index --dataset laion --num-vectors 100000 --db-path ./bench_db\n");
 
-    println!("Run queries:");
-    println!("  bench_vector query --db-path ./bench_db --dataset laion --k 10 --ef-search 100\n");
+    println!("List embeddings (to find embedding code):");
+    println!("  bench_vector embeddings list --db-path ./bench_db\n");
+
+    println!("Run queries (use embedding code from 'embeddings list'):");
+    println!("  bench_vector query --db-path ./bench_db --embedding-code 1 --dataset laion --k 10 --ef-search 100\n");
 
     println!("Parameter sweep (HNSW):");
     println!("  bench_vector sweep --dataset laion --num-vectors 50000 --ef 50,100,200 --k 1,10\n");
@@ -2511,7 +2313,707 @@ pub fn list_datasets() -> Result<()> {
     println!("  bench_vector sweep --dataset laion --rabitq --show-pareto\n");
 
     println!("Check RaBitQ distribution (√D scaling validation):");
-    println!("  bench_vector check-distribution --dataset random --dim 1024 --sample-size 1000");
+    println!("  bench_vector check-distribution --dataset random --dim 1024 --sample-size 1000\n");
+
+    println!("Admin diagnostics:");
+    println!("  bench_vector admin stats --db-path ./bench_db");
+    println!("  bench_vector admin validate --db-path ./bench_db");
 
     Ok(())
+}
+
+// ============================================================================
+// Admin Command
+// ============================================================================
+
+#[derive(Parser)]
+pub struct AdminArgs {
+    #[command(subcommand)]
+    pub command: AdminCommand,
+}
+
+#[derive(Parser)]
+pub enum AdminCommand {
+    /// Show storage statistics for embeddings
+    Stats(AdminStatsArgs),
+    /// Deep inspection of a specific embedding
+    Inspect(AdminInspectArgs),
+    /// Vector-level diagnostics
+    Vectors(AdminVectorsArgs),
+    /// Run consistency validation checks
+    Validate(AdminValidateArgs),
+    /// RocksDB-level diagnostics
+    Rocksdb(AdminRocksdbArgs),
+    /// Migrate lifecycle counters from VecMeta scan (one-time upgrade)
+    MigrateLifecycleCounts(AdminMigrateCountsArgs),
+}
+
+#[derive(Parser)]
+pub struct AdminStatsArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code (optional, shows all if not specified)
+    #[arg(long)]
+    pub code: Option<u64>,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    // ADMIN.md Read-Only Mode (chungers, 2025-01-27, FIXED):
+    // Added --secondary flag for read-only access via secondary DB instance.
+    // This avoids contention with live workloads and prevents accidental writes.
+    /// Open database in secondary (read-only) mode
+    #[arg(long)]
+    pub secondary: bool,
+}
+
+#[derive(Parser)]
+pub struct AdminInspectArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code to inspect
+    #[arg(long)]
+    pub code: u64,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// Open database in secondary (read-only) mode
+    #[arg(long)]
+    pub secondary: bool,
+}
+
+#[derive(Parser)]
+pub struct AdminVectorsArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code
+    #[arg(long)]
+    pub code: u64,
+
+    /// Filter by lifecycle state: indexed, pending, deleted
+    #[arg(long)]
+    pub state: Option<String>,
+
+    /// Inspect specific vector ID
+    #[arg(long)]
+    pub vec_id: Option<u32>,
+
+    /// Sample random vectors (specify count)
+    #[arg(long)]
+    pub sample: Option<usize>,
+
+    /// Random seed for sampling
+    #[arg(long, default_value = "42")]
+    pub seed: u64,
+
+    /// Maximum results to return
+    #[arg(long, default_value = "20")]
+    pub limit: usize,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// Open database in secondary (read-only) mode
+    #[arg(long)]
+    pub secondary: bool,
+}
+
+#[derive(Parser)]
+pub struct AdminValidateArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code (optional, validates all if not specified)
+    #[arg(long)]
+    pub code: Option<u64>,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// Open database in secondary (read-only) mode
+    #[arg(long)]
+    pub secondary: bool,
+
+    // ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
+    // --strict flag for full-scan validation without sampling.
+    /// Strict mode: full scan without sampling (slower but complete)
+    #[arg(long)]
+    pub strict: bool,
+
+    // ADMIN.md Validation UX (claude, 2025-01-29, ADDED):
+    // Configurable sample size, max errors, and max entries.
+    /// Sample size for non-strict validation (default 1000, 0 for no limit)
+    #[arg(long, default_value = "1000")]
+    pub sample_size: u32,
+
+    /// Maximum errors before stopping validation (0 = no limit)
+    #[arg(long, default_value = "0")]
+    pub max_errors: u32,
+
+    /// Maximum entries to check in strict mode (0 = no limit)
+    #[arg(long, default_value = "0")]
+    pub max_entries: u64,
+}
+
+#[derive(Parser)]
+pub struct AdminRocksdbArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+
+    /// Open database in secondary (read-only) mode
+    #[arg(long)]
+    pub secondary: bool,
+}
+
+#[derive(Parser)]
+pub struct AdminMigrateCountsArgs {
+    /// Database path
+    #[arg(long)]
+    pub db_path: PathBuf,
+
+    /// Embedding code (optional, migrates all if not specified)
+    #[arg(long)]
+    pub code: Option<u64>,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+pub fn admin(args: AdminArgs) -> Result<()> {
+    match args.command {
+        AdminCommand::Stats(args) => admin_stats(args),
+        AdminCommand::Inspect(args) => admin_inspect(args),
+        AdminCommand::Vectors(args) => admin_vectors(args),
+        AdminCommand::Validate(args) => admin_validate(args),
+        AdminCommand::Rocksdb(args) => admin_rocksdb(args),
+        AdminCommand::MigrateLifecycleCounts(args) => admin_migrate_lifecycle_counts(args),
+    }
+}
+
+fn admin_stats(args: AdminStatsArgs) -> Result<()> {
+    use motlie_db::vector::admin;
+
+    // ADMIN.md Read-Only Mode (chungers, 2025-01-27, FIXED):
+    // Use secondary mode for read-only access when --secondary flag is set.
+    // ADMIN.md Secondary Cleanup (claude, 2025-01-27, FIXED):
+    // Clean up temp directory after use to avoid accumulation.
+    let stats = if args.secondary {
+        let secondary_path = std::env::temp_dir().join(format!(
+            "bench_vector_secondary_{}_{}_{:08x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            rand::random::<u32>()
+        ));
+        let result = {
+            let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+            storage.ready()?;
+
+            if let Some(code) = args.code {
+                vec![admin::get_embedding_stats_secondary(&storage, code)?]
+            } else {
+                admin::get_all_stats_secondary(&storage)?
+            }
+        };
+        // Clean up secondary DB files
+        let _ = std::fs::remove_dir_all(&secondary_path);
+        result
+    } else {
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+
+        if let Some(code) = args.code {
+            vec![admin::get_embedding_stats(&storage, code)?]
+        } else {
+            admin::get_all_stats(&storage)?
+        }
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&stats)?);
+    } else {
+        print_stats(&stats);
+    }
+
+    Ok(())
+}
+
+fn print_stats(stats: &[motlie_db::vector::admin::EmbeddingStats]) {
+    if stats.is_empty() {
+        println!("No embeddings found.");
+        return;
+    }
+
+    println!("=== Vector Storage Statistics ===\n");
+
+    for stat in stats {
+        println!("Embedding {} ({}):", stat.code, stat.model);
+        println!("  Dimension: {}  Distance: {}  Storage: {}", stat.dim, stat.distance, stat.storage_type);
+        println!("  Vectors: {} total", stat.total_vectors);
+        println!("    Indexed:        {:>8} ({:.1}%)", stat.indexed_count,
+            if stat.total_vectors > 0 { stat.indexed_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
+        println!("    Pending:        {:>8} ({:.1}%)", stat.pending_count,
+            if stat.total_vectors > 0 { stat.pending_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
+        // ADMIN.md Lifecycle Accounting (chungers, 2025-01-27, FIXED):
+        // Show PendingDeleted separately instead of folding into Deleted.
+        println!("    Deleted:        {:>8} ({:.1}%)", stat.deleted_count,
+            if stat.total_vectors > 0 { stat.deleted_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
+        println!("    PendingDeleted: {:>8} ({:.1}%)", stat.pending_deleted_count,
+            if stat.total_vectors > 0 { stat.pending_deleted_count as f64 / stat.total_vectors as f64 * 100.0 } else { 0.0 });
+        println!("  HNSW Graph:");
+        println!("    Entry point: {:?}", stat.entry_point);
+        println!("    Max level: {}", stat.max_level);
+        println!("  Spec hash: {:?} (valid: {})", stat.spec_hash.map(|h| format!("0x{:016x}", h)), stat.spec_hash_valid);
+        println!("  ID Allocator:");
+        println!("    Next ID: {}", stat.next_id);
+        println!("    Free IDs: {}", stat.free_id_count);
+        println!();
+    }
+}
+
+fn admin_inspect(args: AdminInspectArgs) -> Result<()> {
+    use motlie_db::vector::admin;
+
+    // ADMIN.md ADMIN-1 (claude, 2025-01-28, FIXED):
+    // Secondary (read-only) mode now supported for inspect.
+    let inspection = if args.secondary {
+        let secondary_path = std::env::temp_dir().join(format!(
+            "bench_vector_secondary_{}_{}_{:08x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            rand::random::<u32>()
+        ));
+        let result = {
+            let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+            storage.ready()?;
+            admin::inspect_embedding_secondary(&storage, args.code)?
+        };
+        let _ = std::fs::remove_dir_all(&secondary_path);
+        result
+    } else {
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+        admin::inspect_embedding(&storage, args.code)?
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&inspection)?);
+    } else {
+        print_inspection(&inspection);
+    }
+
+    Ok(())
+}
+
+fn print_inspection(inspection: &motlie_db::vector::admin::EmbeddingInspection) {
+    let stat = &inspection.stats;
+
+    println!("=== Embedding Inspection ===\n");
+    println!("Code: {}", stat.code);
+    println!("Model: {}", stat.model);
+    println!("Dimension: {}", stat.dim);
+    println!("Distance: {}", stat.distance);
+    println!("Storage type: {}", stat.storage_type);
+
+    println!("\nHNSW Configuration:");
+    println!("  M: {}", inspection.hnsw_m);
+    println!("  ef_construction: {}", inspection.hnsw_ef_construction);
+
+    println!("\nRaBitQ Configuration:");
+    println!("  Bits: {}", inspection.rabitq_bits);
+    println!("  Seed: {}", inspection.rabitq_seed);
+
+    println!("\nGraph Metadata:");
+    println!("  Entry point: {:?}", stat.entry_point);
+    println!("  Max level: {}", stat.max_level);
+    println!("  Count: {}", stat.total_vectors);
+    println!("  Spec hash: {:?} (valid: {})",
+        stat.spec_hash.map(|h| format!("0x{:016x}", h)),
+        if stat.spec_hash_valid { "✓" } else { "✗" });
+
+    println!("\nID Allocator:");
+    println!("  Next ID: {}", stat.next_id);
+    println!("  Free IDs: {}", stat.free_id_count);
+
+    println!("\nPending Queue:");
+    println!("  Depth: {} vectors", inspection.pending_queue_depth);
+    if let Some(ts) = inspection.oldest_pending_timestamp {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let age_secs = (now - ts) / 1000;
+        println!("  Oldest entry: {} seconds ago", age_secs);
+    }
+
+    println!("\nLayer Distribution:");
+    if inspection.layer_distribution.counts.is_empty() {
+        println!("  (no indexed vectors)");
+    } else {
+        for (layer, count) in inspection.layer_distribution.counts.iter().enumerate() {
+            println!("  L{}: {} vectors", layer, count);
+        }
+    }
+}
+
+fn admin_vectors(args: AdminVectorsArgs) -> Result<()> {
+    use motlie_db::vector::admin::{self, VecLifecycle};
+
+    // ADMIN.md ADMIN-1 (claude, 2025-01-28, FIXED):
+    // Secondary (read-only) mode now supported for vectors.
+    let vectors = if args.secondary {
+        let secondary_path = std::env::temp_dir().join(format!(
+            "bench_vector_secondary_{}_{}_{:08x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            rand::random::<u32>()
+        ));
+        let result = {
+            let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+            storage.ready()?;
+
+            if let Some(vec_id) = args.vec_id {
+                match admin::get_vector_info_secondary(&storage, args.code, vec_id)? {
+                    Some(info) => vec![info],
+                    None => {
+                        println!("Vector {} not found in embedding {}", vec_id, args.code);
+                        return Ok(());
+                    }
+                }
+            } else if let Some(sample_count) = args.sample {
+                admin::sample_vectors_secondary(&storage, args.code, sample_count, args.seed)?
+            } else if let Some(ref state_str) = args.state {
+                let state = match state_str.to_lowercase().as_str() {
+                    "indexed" => VecLifecycle::Indexed,
+                    "pending" => VecLifecycle::Pending,
+                    "deleted" => VecLifecycle::Deleted,
+                    "pending_deleted" | "pendingdeleted" => VecLifecycle::PendingDeleted,
+                    _ => anyhow::bail!("Unknown state: {}. Use: indexed, pending, deleted, pending_deleted", state_str),
+                };
+                admin::list_vectors_by_state_secondary(&storage, args.code, state, args.limit)?
+            } else {
+                admin::sample_vectors_secondary(&storage, args.code, args.limit, args.seed)?
+            }
+        };
+        let _ = std::fs::remove_dir_all(&secondary_path);
+        result
+    } else {
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+
+        if let Some(vec_id) = args.vec_id {
+            match admin::get_vector_info(&storage, args.code, vec_id)? {
+                Some(info) => vec![info],
+                None => {
+                    println!("Vector {} not found in embedding {}", vec_id, args.code);
+                    return Ok(());
+                }
+            }
+        } else if let Some(sample_count) = args.sample {
+            admin::sample_vectors(&storage, args.code, sample_count, args.seed)?
+        } else if let Some(ref state_str) = args.state {
+            let state = match state_str.to_lowercase().as_str() {
+                "indexed" => VecLifecycle::Indexed,
+                "pending" => VecLifecycle::Pending,
+                "deleted" => VecLifecycle::Deleted,
+                "pending_deleted" | "pendingdeleted" => VecLifecycle::PendingDeleted,
+                _ => anyhow::bail!("Unknown state: {}. Use: indexed, pending, deleted, pending_deleted", state_str),
+            };
+            admin::list_vectors_by_state(&storage, args.code, state, args.limit)?
+        } else {
+            admin::sample_vectors(&storage, args.code, args.limit, args.seed)?
+        }
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&vectors)?);
+    } else {
+        print_vectors(&vectors);
+    }
+
+    Ok(())
+}
+
+fn print_vectors(vectors: &[motlie_db::vector::admin::VectorInfo]) {
+    if vectors.is_empty() {
+        println!("No vectors found.");
+        return;
+    }
+
+    println!("=== Vector Information ===\n");
+    println!("{:>8}  {:>10}  {:>8}  {:>5}  {:>10}  {:>8}",
+        "vec_id", "lifecycle", "layer", "edges", "binary", "external_id");
+    println!("{}", "-".repeat(70));
+
+    for v in vectors {
+        let total_edges: usize = v.edge_counts.iter().sum();
+        // T6.1: VectorInfo now uses external_key_type: Option<String> for display
+        let key_display = v.external_key_type.as_deref().unwrap_or("-");
+        println!("{:>8}  {:>10}  {:>8}  {:>5}  {:>10}  {}",
+            v.vec_id,
+            format!("{:?}", v.lifecycle).to_lowercase(),
+            v.max_layer,
+            total_edges,
+            if v.has_binary_code { "yes" } else { "no" },
+            key_display);
+    }
+
+    println!("\nShowing {} vector(s).", vectors.len());
+}
+
+fn admin_validate(args: AdminValidateArgs) -> Result<()> {
+    use motlie_db::vector::admin::{self, ValidationStatus};
+
+    // ADMIN.md ADMIN-1 (claude, 2025-01-28, FIXED):
+    // Secondary (read-only) mode now supported for validate.
+    // ADMIN.md Stronger Validation (chungers, 2025-01-27, ADDED):
+    // Use strict mode for full-scan validation when --strict is passed.
+    let results = if args.secondary {
+        let secondary_path = std::env::temp_dir().join(format!(
+            "bench_vector_secondary_{}_{}_{:08x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            rand::random::<u32>()
+        ));
+        // Build validation options from CLI args
+        let opts = admin::ValidationOptions {
+            sample_size: if args.strict { 0 } else { args.sample_size },
+            max_errors: args.max_errors,
+            max_entries: args.max_entries,
+        };
+
+        let result = {
+            let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+            storage.ready()?;
+
+            if let Some(code) = args.code {
+                vec![admin::validate_embedding_secondary_with_opts(&storage, code, opts)?]
+            } else {
+                admin::validate_all_secondary_with_opts(&storage, opts)?
+            }
+        };
+        let _ = std::fs::remove_dir_all(&secondary_path);
+        result
+    } else {
+        // Build validation options from CLI args
+        let opts = admin::ValidationOptions {
+            sample_size: if args.strict { 0 } else { args.sample_size },
+            max_errors: args.max_errors,
+            max_entries: args.max_entries,
+        };
+
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+
+        if let Some(code) = args.code {
+            vec![admin::validate_embedding_with_opts(&storage, code, opts)?]
+        } else {
+            admin::validate_all_with_opts(&storage, opts)?
+        }
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        print_validation_results(&results);
+    }
+
+    // Exit with error code if any check failed
+    let has_errors = results.iter()
+        .flat_map(|r| &r.checks)
+        .any(|c| c.status == ValidationStatus::Error);
+
+    if has_errors {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn print_validation_results(results: &[motlie_db::vector::admin::ValidationResult]) {
+    use motlie_db::vector::admin::ValidationStatus;
+
+    if results.is_empty() {
+        println!("No embeddings found.");
+        return;
+    }
+
+    println!("=== Validation Results ===\n");
+
+    for result in results {
+        println!("Embedding {} ({}):", result.code, result.model);
+
+        let mut pass_count = 0;
+        let mut warn_count = 0;
+        let mut error_count = 0;
+
+        for check in &result.checks {
+            let symbol = match check.status {
+                ValidationStatus::Pass => { pass_count += 1; "✓" }
+                ValidationStatus::Warning => { warn_count += 1; "⚠" }
+                ValidationStatus::Error => { error_count += 1; "✗" }
+            };
+            println!("  {} {}: {}", symbol, check.name, check.message);
+        }
+
+        println!("\n  Summary: {} passed, {} warnings, {} errors\n",
+            pass_count, warn_count, error_count);
+    }
+}
+
+fn admin_rocksdb(args: AdminRocksdbArgs) -> Result<()> {
+    use motlie_db::vector::admin;
+
+    // ADMIN.md Read-Only Mode (chungers, 2025-01-27, FIXED):
+    // Use secondary mode for read-only access when --secondary flag is set.
+    // ADMIN.md Secondary Cleanup (claude, 2025-01-27, FIXED):
+    // Clean up temp directory after use to avoid accumulation.
+    let stats = if args.secondary {
+        let secondary_path = std::env::temp_dir().join(format!(
+            "bench_vector_secondary_{}_{}_{:08x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+            rand::random::<u32>()
+        ));
+        let result = {
+            let mut storage = Storage::secondary(&args.db_path, &secondary_path);
+            storage.ready()?;
+            admin::get_rocksdb_stats_secondary(&storage)?
+        };
+        // Clean up secondary DB files
+        let _ = std::fs::remove_dir_all(&secondary_path);
+        result
+    } else {
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+        admin::get_rocksdb_stats(&storage)?
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&stats)?);
+    } else {
+        print_rocksdb_stats(&stats);
+    }
+
+    Ok(())
+}
+
+fn admin_migrate_lifecycle_counts(args: AdminMigrateCountsArgs) -> Result<()> {
+    use motlie_db::vector::admin;
+
+    // Migration requires readwrite mode (not secondary)
+    let mut storage = Storage::readwrite(&args.db_path);
+    storage.ready()?;
+
+    let results = if let Some(code) = args.code {
+        vec![admin::migrate_lifecycle_counts(&storage, code)?]
+    } else {
+        admin::migrate_all_lifecycle_counts(&storage)?
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        println!("=== Lifecycle Counter Migration ===\n");
+        for r in &results {
+            println!(
+                "Embedding {}: indexed={}, pending={}, deleted={}, pending_deleted={}",
+                r.code, r.indexed, r.pending, r.deleted, r.pending_deleted
+            );
+        }
+        println!("\nMigrated {} embedding(s).", results.len());
+    }
+
+    Ok(())
+}
+
+fn print_rocksdb_stats(stats: &motlie_db::vector::admin::RocksDbStats) {
+    // ADMIN.md Issue #4 (chungers, 2025-01-27, FIXED):
+    // Now uses is_sampled field to clearly label sampled values vs exact counts.
+    // Size column header changed to clarify these are sampled bytes, not on-disk totals.
+    // ADMIN.md RocksDB Properties (chungers, 2025-01-27, ADDED):
+    // Shows estimated_num_keys from RocksDB property when available (secondary mode).
+
+    // Check if any CF has estimated_num_keys
+    let has_estimates = stats.column_families.iter().any(|cf| cf.estimated_num_keys.is_some());
+
+    println!("=== RocksDB Statistics ===\n");
+    if has_estimates {
+        println!("{:<30}  {:>14}  {:>14}  {:>14}", "Column Family", "Entries", "Est. Keys", "Bytes (sampled)");
+        println!("{}", "-".repeat(78));
+    } else {
+        println!("{:<30}  {:>14}  {:>14}", "Column Family", "Entries", "Bytes (sampled)");
+        println!("{}", "-".repeat(62));
+    }
+
+    for cf in &stats.column_families {
+        let size_str = format_size(cf.size_bytes);
+        // Use is_sampled field to indicate partial counts
+        let entry_str = if cf.is_sampled {
+            format!("{}+", cf.entry_count)
+        } else {
+            format!("{}", cf.entry_count)
+        };
+
+        if has_estimates {
+            let est_str = cf.estimated_num_keys
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            println!("{:<30}  {:>14}  {:>14}  {:>14}", cf.name, entry_str, est_str, size_str);
+        } else {
+            println!("{:<30}  {:>14}  {:>14}", cf.name, entry_str, size_str);
+        }
+    }
+
+    if has_estimates {
+        println!("{}", "-".repeat(78));
+        println!("{:<30}  {:>14}  {:>14}  {:>14}", "Total (sampled)", "", "", format_size(stats.total_size_bytes));
+    } else {
+        println!("{}", "-".repeat(62));
+        println!("{:<30}  {:>14}  {:>14}", "Total (sampled)", "", format_size(stats.total_size_bytes));
+    }
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
 }

@@ -159,6 +159,94 @@ pub fn edge_partial_merge(
 pub const EDGE_MERGE_OPERATOR_NAME: &str = "vector_edge_merge";
 
 // ============================================================================
+// Lifecycle Counts Merge Operator
+// ============================================================================
+
+use super::schema::{LifecycleCountsDelta, LifecycleCountsValue};
+
+/// Merge operator name for lifecycle counters.
+pub const LIFECYCLE_MERGE_OPERATOR_NAME: &str = "vector_lifecycle_merge";
+
+/// Full merge function for lifecycle counters.
+///
+/// This is called when RocksDB needs to combine an existing value with
+/// merge operands (deltas). Deltas are summed and applied to counters,
+/// with values clamped to 0.
+///
+/// # Arguments
+///
+/// * `_key` - The key being merged (unused)
+/// * `existing` - The existing counter value, if any
+/// * `operands` - Iterator over delta operands to apply
+///
+/// # Returns
+///
+/// The merged counter value serialized to bytes, or `None` on error.
+pub fn lifecycle_full_merge(
+    _key: &[u8],
+    existing: Option<&[u8]>,
+    operands: &rocksdb::MergeOperands,
+) -> Option<Vec<u8>> {
+    // Start with existing counters or zeros
+    let mut counts = match existing {
+        Some(bytes) => {
+            // Could be a counter value or a previously merged delta
+            if bytes.len() == 32 {
+                match LifecycleCountsValue::from_bytes(bytes) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to deserialize lifecycle counts");
+                        return None;
+                    }
+                }
+            } else {
+                // Try parsing as merged deltas (from partial merge)
+                match LifecycleCountsDelta::from_bytes(bytes) {
+                    Ok(delta) => {
+                        let mut v = LifecycleCountsValue::default();
+                        v.apply_delta(&delta);
+                        v
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to deserialize existing as delta or value");
+                        return None;
+                    }
+                }
+            }
+        }
+        None => LifecycleCountsValue::default(),
+    };
+
+    // Apply each delta operand
+    for operand in operands {
+        match LifecycleCountsDelta::from_bytes(operand) {
+            Ok(delta) => {
+                counts.apply_delta(&delta);
+            }
+            Err(_) => {
+                // Operand might be a LifecycleCountsValue from previous merge
+                if operand.len() == 32 {
+                    if let Ok(other) = LifecycleCountsValue::from_bytes(operand) {
+                        // Treat as additive (shouldn't happen in normal use)
+                        counts.indexed += other.indexed;
+                        counts.pending += other.pending;
+                        counts.deleted += other.deleted;
+                        counts.pending_deleted += other.pending_deleted;
+                    }
+                } else {
+                    tracing::warn!(
+                        "Failed to deserialize lifecycle operand, skipping (len={})",
+                        operand.len()
+                    );
+                }
+            }
+        }
+    }
+
+    Some(counts.to_bytes())
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

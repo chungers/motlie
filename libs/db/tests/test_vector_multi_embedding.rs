@@ -29,8 +29,8 @@ use motlie_db::vector::benchmark::{LAION_EMBEDDING_DIM, SIFT_EMBEDDING_DIM};
 use motlie_db::vector::{
     create_search_reader_with_storage, create_writer,
     spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
-    Distance, EmbeddingBuilder, InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN,
-    Storage, WriterConfig,
+    Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable,
+    SearchKNN, Storage, WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -163,7 +163,7 @@ async fn test_cosine_2bit_rabitq() {
         let id = Id::new();
         external_ids.push(id);
 
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -192,7 +192,7 @@ async fn test_cosine_2bit_rabitq() {
 
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -214,7 +214,7 @@ async fn test_cosine_2bit_rabitq() {
 
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -301,7 +301,7 @@ async fn test_cosine_4bit_rabitq() {
         let id = Id::new();
         external_ids.push(id);
 
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -330,7 +330,7 @@ async fn test_cosine_4bit_rabitq() {
 
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -352,7 +352,7 @@ async fn test_cosine_4bit_rabitq() {
 
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -512,7 +512,7 @@ async fn test_multi_embedding_non_interference() {
     for vector in &laion_db {
         let id = Id::new();
         laion_ids.push(id);
-        InsertVector::new(&laion_embedding, id, vector.clone())
+        InsertVector::new(&laion_embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -525,7 +525,7 @@ async fn test_multi_embedding_non_interference() {
     for vector in &sift_db {
         let id = Id::new();
         sift_ids.push(id);
-        InsertVector::new(&sift_embedding, id, vector.clone())
+        InsertVector::new(&sift_embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -538,7 +538,7 @@ async fn test_multi_embedding_non_interference() {
     for vector in &custom_db {
         let id = Id::new();
         custom_ids.push(id);
-        InsertVector::new(&custom_embedding, id, vector.clone())
+        InsertVector::new(&custom_embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -566,22 +566,22 @@ async fn test_multi_embedding_non_interference() {
 
         for result in &results {
             assert!(
-                laion_id_set.contains(&result.id),
+                laion_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: LAION search returned non-LAION ID {}",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
             assert!(
-                !sift_id_set.contains(&result.id),
+                !sift_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: LAION search returned SIFT ID {}",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
             assert!(
-                !custom_id_set.contains(&result.id),
+                !custom_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: LAION search returned Custom ID {}",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
         }
     }
@@ -601,22 +601,22 @@ async fn test_multi_embedding_non_interference() {
 
         for result in &results {
             assert!(
-                sift_id_set.contains(&result.id),
+                sift_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: SIFT search returned non-SIFT ID {}",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
             assert!(
-                !laion_id_set.contains(&result.id),
+                !laion_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: SIFT search returned LAION ID {}",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
             assert!(
-                !custom_id_set.contains(&result.id),
+                !custom_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: SIFT search returned Custom ID {}",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
         }
     }
@@ -635,22 +635,22 @@ async fn test_multi_embedding_non_interference() {
 
         for result in &results {
             assert!(
-                custom_id_set.contains(&result.id),
+                custom_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: Custom search returned non-Custom ID {}",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
             assert!(
-                !laion_id_set.contains(&result.id),
+                !laion_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: Custom search returned LAION ID {}",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
             assert!(
-                !sift_id_set.contains(&result.id),
+                !sift_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: Custom search returned SIFT ID {}",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
         }
     }
@@ -672,7 +672,7 @@ async fn test_multi_embedding_non_interference() {
             .expect("laion search");
         let indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| laion_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| laion_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
         laion_recall_sum += compute_recall(&laion_gt[qi], &indices);
     }
@@ -691,7 +691,7 @@ async fn test_multi_embedding_non_interference() {
             .expect("sift search");
         let indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| sift_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| sift_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
         sift_recall_sum += compute_recall(&sift_gt[qi], &indices);
     }
@@ -709,7 +709,7 @@ async fn test_multi_embedding_non_interference() {
             .expect("custom search");
         let indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| custom_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| custom_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
         custom_recall_sum += compute_recall(&custom_gt[qi], &indices);
     }
@@ -849,7 +849,7 @@ async fn test_exact_vs_rabitq_search_paths() {
     for vector in &db_vectors {
         let id = Id::new();
         ids.push(id);
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await

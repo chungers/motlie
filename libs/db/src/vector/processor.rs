@@ -33,13 +33,13 @@ use super::id::IdAllocator;
 use super::rabitq::RaBitQ;
 use super::registry::EmbeddingRegistry;
 use super::schema::{
-    EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, GraphMeta, GraphMetaCfKey,
-    GraphMetaField, IdReverse, IdReverseCfKey, Pending, VecId, VecMeta, VecMetaCfKey, VectorCfKey,
-    Vectors,
+    EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, ExternalKey, GraphMeta,
+    GraphMetaCfKey, GraphMetaField, IdForward, IdForwardCfKey, IdReverse, IdReverseCfKey, Pending,
+    VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
 };
 // These types are only used in tests
 #[cfg(test)]
-use super::schema::{GraphMetaCfValue, IdForward, IdForwardCfKey};
+use super::schema::GraphMetaCfValue;
 use super::search::{SearchConfig, SearchStrategy};
 use super::Storage;
 use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
@@ -49,17 +49,30 @@ use crate::Id;
 // SearchResult
 // ============================================================================
 
-/// Search result containing external ID, internal ID, and distance.
+/// Search result containing external key, internal ID, and distance.
 ///
 /// Returned by `Processor::search()` for each matched vector.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    /// External ID (ULID) for the vector
-    pub id: Id,
+    /// Typed external key for the vector (node, edge, fragment, summary, etc.)
+    pub external_key: ExternalKey,
     /// Internal vector ID (compact u32)
     pub vec_id: VecId,
     /// Distance from query vector (lower = more similar)
     pub distance: f32,
+}
+
+impl SearchResult {
+    /// Convenience accessor for NodeId external keys.
+    ///
+    /// Returns `Some(id)` if the external key is `ExternalKey::NodeId`,
+    /// otherwise returns `None`.
+    pub fn node_id(&self) -> Option<Id> {
+        match &self.external_key {
+            ExternalKey::NodeId(id) => Some(*id),
+            _ => None,
+        }
+    }
 }
 
 // ============================================================================
@@ -428,7 +441,7 @@ impl Processor {
     ///
     /// # Arguments
     /// * `embedding` - The embedding space code
-    /// * `id` - External ID (ULID) for the vector
+    /// * `external_key` - External key identifying the source entity
     /// * `vector` - The vector data (dimension must match embedding spec)
     /// * `build_index` - Whether to build HNSW graph connections
     ///
@@ -444,7 +457,7 @@ impl Processor {
     /// ```rust,ignore
     /// let vec_id = processor.insert_vector(
     ///     embedding_code,
-    ///     Id::new(),
+    ///     ExternalKey::NodeId(Id::new()),
     ///     &[0.1, 0.2, 0.3, ...],
     ///     true,  // build HNSW index
     /// )?;
@@ -452,7 +465,7 @@ impl Processor {
     pub fn insert_vector(
         &self,
         embedding: &Embedding,
-        id: Id,
+        external_key: ExternalKey,
         vector: &[f32],
         build_index: bool,
     ) -> Result<VecId> {
@@ -471,7 +484,7 @@ impl Processor {
             &txn_db,
             self,
             embedding_code,
-            id,
+            external_key,
             vector,
             build_index,
         )?;
@@ -512,8 +525,8 @@ impl Processor {
     ///
     /// # Example
     /// ```rust,ignore
-    /// let vectors: Vec<(Id, Vec<f32>)> = data.iter()
-    ///     .map(|v| (Id::new(), v.clone()))
+    /// let vectors: Vec<(ExternalKey, Vec<f32>)> = data.iter()
+    ///     .map(|v| (ExternalKey::NodeId(Id::new()), v.clone()))
     ///     .collect();
     ///
     /// let vec_ids = processor.insert_batch(
@@ -525,7 +538,7 @@ impl Processor {
     pub fn insert_batch(
         &self,
         embedding: &Embedding,
-        vectors: &[(Id, Vec<f32>)],
+        vectors: &[(ExternalKey, Vec<f32>)],
         build_index: bool,
     ) -> Result<Vec<VecId>> {
         // Fast path: empty input
@@ -580,7 +593,7 @@ impl Processor {
     ///
     /// # Arguments
     /// * `embedding` - The embedding space code
-    /// * `id` - External ID (ULID) of the vector to delete
+    /// * `external_key` - External key identifying the vector to delete
     ///
     /// # Returns
     /// - `Ok(Some(vec_id))` - Vector was deleted, returns the VecId
@@ -596,7 +609,7 @@ impl Processor {
     ///
     /// # Example
     /// ```rust,ignore
-    /// match processor.delete_vector(&embedding, id)? {
+    /// match processor.delete_vector(&embedding, ExternalKey::NodeId(id))? {
     ///     Some(vec_id) => println!("Deleted vector with internal ID {}", vec_id),
     ///     None => println!("Vector did not exist"),
     /// }
@@ -605,7 +618,7 @@ impl Processor {
     pub(crate) fn delete_vector(
         &self,
         embedding: &Embedding,
-        id: Id,
+        external_key: ExternalKey,
     ) -> Result<Option<VecId>> {
         let embedding_code = embedding.code();
 
@@ -617,13 +630,75 @@ impl Processor {
         let txn = txn_db.transaction();
 
         // Delegate to shared ops helper (soft-delete logic happens there)
-        let result = super::ops::delete::vector(&txn, &txn_db, self, embedding_code, id)?;
+        let result = super::ops::delete::vector(&txn, &txn_db, self, embedding_code, external_key)?;
 
         // Commit transaction
         txn.commit().context("Failed to commit delete transaction")?;
 
         // Return the vec_id if deletion occurred
         Ok(result.vec_id())
+    }
+
+    // =========================================================================
+    // ID Mapping Lookup Helpers
+    // =========================================================================
+
+    /// Look up internal vec_id for an external key.
+    ///
+    /// This is a low-level helper that performs a direct IdForward lookup.
+    /// Prefer using the query API (`GetInternalId`) for channel-based access.
+    ///
+    /// # Returns
+    /// - `Ok(Some(vec_id))` - External key is mapped to this internal ID
+    /// - `Ok(None)` - External key not found (not inserted or deleted)
+    /// - `Err(...)` - Storage error
+    pub fn vec_id_for_external(
+        &self,
+        embedding: &Embedding,
+        external_key: &ExternalKey,
+    ) -> Result<Option<VecId>> {
+        let embedding_code = embedding.code();
+        let txn_db = self.storage.transaction_db()?;
+        let forward_cf = txn_db
+            .cf_handle(IdForward::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
+
+        let forward_key = IdForwardCfKey(embedding_code, external_key.clone());
+        let key_bytes = IdForward::key_to_bytes(&forward_key);
+
+        match txn_db.get_cf(&forward_cf, &key_bytes)? {
+            Some(bytes) => Ok(Some(IdForward::value_from_bytes(&bytes)?.0)),
+            None => Ok(None),
+        }
+    }
+
+    /// Look up external key for an internal vec_id.
+    ///
+    /// This is a low-level helper that performs a direct IdReverse lookup.
+    /// Prefer using the query API (`GetExternalId`) for channel-based access.
+    ///
+    /// # Returns
+    /// - `Ok(Some(external_key))` - Vec_id maps to this external key
+    /// - `Ok(None)` - Vec_id not found (not allocated or recycled)
+    /// - `Err(...)` - Storage error
+    pub fn external_for_vec_id(
+        &self,
+        embedding: &Embedding,
+        vec_id: VecId,
+    ) -> Result<Option<ExternalKey>> {
+        let embedding_code = embedding.code();
+        let txn_db = self.storage.transaction_db()?;
+        let reverse_cf = txn_db
+            .cf_handle(IdReverse::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+
+        let reverse_key = IdReverseCfKey(embedding_code, vec_id);
+        let key_bytes = IdReverse::key_to_bytes(&reverse_key);
+
+        match txn_db.get_cf(&reverse_cf, &key_bytes)? {
+            Some(bytes) => Ok(Some(IdReverse::value_from_bytes(&bytes)?.0)),
+            None => Ok(None),
+        }
     }
 
     /// Search for nearest neighbors in an embedding space.
@@ -653,7 +728,7 @@ impl Processor {
     /// ```rust,ignore
     /// let results = processor.search(embedding_code, &query, 10, 100)?;
     /// for result in results {
-    ///     println!("ID: {}, distance: {}", result.id, result.distance);
+    ///     println!("Key: {:?}, distance: {}", result.external_key, result.distance);
     /// }
     /// ```
     pub fn search(
@@ -765,10 +840,10 @@ impl Processor {
                 break;
             }
             if let Ok(Some(bytes)) = value_result {
-                let id = IdReverse::value_from_bytes(&bytes)?.0;
+                let external_key = IdReverse::value_from_bytes(&bytes)?.0;
                 let (distance, vec_id) = raw_results[i];
                 results.push(SearchResult {
-                    id,
+                    external_key,
                     vec_id,
                     distance,
                 });
@@ -1000,10 +1075,10 @@ impl Processor {
                     }
                 }
 
-                let id = IdReverse::value_from_bytes(&bytes)?.0;
+                let external_key = IdReverse::value_from_bytes(&bytes)?.0;
                 let (distance, vec_id) = raw_results[i];
                 hnsw_results.push(SearchResult {
-                    id,
+                    external_key,
                     vec_id,
                     distance,
                 });
@@ -1025,10 +1100,10 @@ impl Processor {
                     hnsw_results.iter().map(|r| r.vec_id).collect();
 
                 // Add pending results that aren't duplicates
-                for (distance, vec_id, external_id) in pending_results {
+                for (distance, vec_id, external_key) in pending_results {
                     if !hnsw_vec_ids.contains(&vec_id) {
                         hnsw_results.push(SearchResult {
-                            id: external_id,
+                            external_key,
                             vec_id,
                             distance,
                         });
@@ -1062,13 +1137,13 @@ impl Processor {
     /// * `limit` - Maximum number of pending vectors to scan
     ///
     /// # Returns
-    /// Vector of (distance, vec_id, external_id) tuples, sorted by distance ascending.
+    /// Vector of (distance, vec_id, external_key) tuples, sorted by distance ascending.
     fn scan_pending_vectors(
         &self,
         embedding: &Embedding,
         query: &[f32],
         limit: usize,
-    ) -> Result<Vec<(f32, VecId, Id)>> {
+    ) -> Result<Vec<(f32, VecId, ExternalKey)>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1139,14 +1214,14 @@ impl Processor {
             // Compute exact distance
             let distance = embedding.compute_distance(query, &vector_data);
 
-            // Look up external ID via IdReverse
+            // Look up external key via IdReverse
             let reverse_key = IdReverseCfKey(embedding_code, vec_id);
-            let external_id = match txn_db.get_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))? {
+            let external_key = match txn_db.get_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))? {
                 Some(bytes) => IdReverse::value_from_bytes(&bytes)?.0,
-                None => continue, // No external ID mapping (deleted?), skip
+                None => continue, // No external key mapping (deleted?), skip
             };
 
-            results.push((distance, vec_id, external_id));
+            results.push((distance, vec_id, external_key));
         }
 
         // Sort by distance ascending
@@ -1244,7 +1319,7 @@ mod tests {
 
         // Insert without building index
         let vec_id = processor
-            .insert_vector(&embedding, id, &vector, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, false)
             .expect("Insert should succeed");
 
         assert_eq!(vec_id, 0, "First vector should get ID 0");
@@ -1253,7 +1328,7 @@ mod tests {
         let id2 = crate::Id::new();
         let vector2: Vec<f32> = (0..64).map(|i| (i + 1) as f32 / 64.0).collect();
         let vec_id2 = processor
-            .insert_vector(&embedding, id2, &vector2, true)
+            .insert_vector(&embedding, ExternalKey::NodeId(id2), &vector2, true)
             .expect("Insert with index should succeed");
 
         assert_eq!(vec_id2, 1, "Second vector should get ID 1");
@@ -1292,7 +1367,7 @@ mod tests {
         // Try to insert 128-dim vector into 64-dim embedding
         let wrong_dim_vector: Vec<f32> = (0..128).map(|i| i as f32).collect();
         let result =
-            processor.insert_vector(&embedding, crate::Id::new(), &wrong_dim_vector, false);
+            processor.insert_vector(&embedding, ExternalKey::NodeId(crate::Id::new()), &wrong_dim_vector, false);
 
         assert!(result.is_err(), "Should fail on dimension mismatch");
         assert!(
@@ -1330,12 +1405,12 @@ mod tests {
         let vector: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
         let id = crate::Id::new();
         processor
-            .insert_vector(&embedding, id, &vector, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, false)
             .expect("First insert should succeed");
 
         // Try to insert with same external ID
         let vector2: Vec<f32> = (0..64).map(|i| (i + 1) as f32 / 64.0).collect();
-        let result = processor.insert_vector(&embedding, id, &vector2, false);
+        let result = processor.insert_vector(&embedding, ExternalKey::NodeId(id), &vector2, false);
 
         assert!(result.is_err(), "Should fail on duplicate ID");
         assert!(
@@ -1370,14 +1445,14 @@ mod tests {
         let vector: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
         let id = crate::Id::new();
         let vec_id = processor
-            .insert_vector(&embedding, id, &vector, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, false)
             .expect("Insert should succeed");
 
         assert_eq!(vec_id, 0, "First vector should get ID 0");
 
         // Delete the vector
         let deleted = processor
-            .delete_vector(&embedding, id)
+            .delete_vector(&embedding, ExternalKey::NodeId(id))
             .expect("Delete should succeed");
 
         assert_eq!(deleted, Some(0), "Should return deleted VecId");
@@ -1386,7 +1461,7 @@ mod tests {
         let forward_cf = txn_db
             .cf_handle(IdForward::CF_NAME)
             .expect("CF should exist");
-        let forward_key = IdForwardCfKey(embedding_code, id);
+        let forward_key = IdForwardCfKey(embedding_code, ExternalKey::NodeId(id));
         let result = txn_db
             .get_cf(&forward_cf, IdForward::key_to_bytes(&forward_key))
             .expect("Read should succeed");
@@ -1418,7 +1493,7 @@ mod tests {
         // Try to delete non-existent vector (should be idempotent)
         let id = crate::Id::new();
         let result = processor
-            .delete_vector(&embedding, id)
+            .delete_vector(&embedding, ExternalKey::NodeId(id))
             .expect("Delete should not error");
 
         assert_eq!(result, None, "Should return None for non-existent vector");
@@ -1461,10 +1536,10 @@ mod tests {
         let id2 = crate::Id::new();
 
         let vec_id1 = processor
-            .insert_vector(&embedding, id1, &vector, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id1), &vector, false)
             .expect("Insert 1 should succeed");
         let vec_id2 = processor
-            .insert_vector(&embedding, id2, &vector, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id2), &vector, false)
             .expect("Insert 2 should succeed");
 
         assert_eq!(vec_id1, 0);
@@ -1472,13 +1547,13 @@ mod tests {
 
         // Delete first vector
         processor
-            .delete_vector(&embedding, id1)
+            .delete_vector(&embedding, ExternalKey::NodeId(id1))
             .expect("Delete should succeed");
 
         // Insert new vector - should reuse VecId 0
         let id3 = crate::Id::new();
         let vec_id3 = processor
-            .insert_vector(&embedding, id3, &vector, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id3), &vector, false)
             .expect("Insert 3 should succeed");
 
         assert_eq!(vec_id3, 0, "Should reuse freed VecId 0");
@@ -1486,7 +1561,7 @@ mod tests {
         // Next insert should get fresh ID
         let id4 = crate::Id::new();
         let vec_id4 = processor
-            .insert_vector(&embedding, id4, &vector, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id4), &vector, false)
             .expect("Insert 4 should succeed");
 
         assert_eq!(vec_id4, 2, "Should get next fresh ID");
@@ -1529,7 +1604,7 @@ mod tests {
             let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
             let id = crate::Id::new();
             processor
-                .insert_vector(&embedding, id, &vector, true)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
                 .expect("Insert should succeed");
             inserted_ids.push(id);
         }
@@ -1546,7 +1621,11 @@ mod tests {
 
         // First result should be closest to query
         let first = &results[0];
-        assert_eq!(first.id, inserted_ids[0], "First inserted vector should be closest");
+        assert_eq!(
+            first.node_id().expect("expected NodeId"),
+            inserted_ids[0],
+            "First inserted vector should be closest"
+        );
 
         // All results should have valid distances
         for (i, result) in results.iter().enumerate() {
@@ -1596,17 +1675,17 @@ mod tests {
             let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
             let id = crate::Id::new();
             processor
-                .insert_vector(&embedding, id, &vector, true)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
                 .expect("Insert should succeed");
             inserted_ids.push(id);
         }
 
         // Delete first two vectors (soft delete - mappings removed)
         processor
-            .delete_vector(&embedding, inserted_ids[0])
+            .delete_vector(&embedding, ExternalKey::NodeId(inserted_ids[0]))
             .expect("Delete should succeed");
         processor
-            .delete_vector(&embedding, inserted_ids[1])
+            .delete_vector(&embedding, ExternalKey::NodeId(inserted_ids[1]))
             .expect("Delete should succeed");
 
         // Search - deleted vectors should be filtered from results
@@ -1619,7 +1698,10 @@ mod tests {
         assert!(results.len() <= 3, "Should only return non-deleted vectors");
 
         // Verify deleted IDs are not in results
-        let result_ids: Vec<_> = results.iter().map(|r| r.id).collect();
+        let result_ids: Vec<_> = results
+            .iter()
+            .filter_map(|r| r.node_id())
+            .collect();
         assert!(
             !result_ids.contains(&inserted_ids[0]),
             "First deleted ID should not be in results"
@@ -1742,7 +1824,7 @@ mod tests {
             let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
             let id = crate::Id::new();
             processor
-                .insert_vector(&embedding, id, &vector, true)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
                 .expect("Insert should succeed");
             inserted_ids.push(id);
         }
@@ -1766,7 +1848,11 @@ mod tests {
 
         // First result should be closest to query
         let first = &results[0];
-        assert_eq!(first.id, inserted_ids[0], "First inserted vector should be closest");
+        assert_eq!(
+            first.node_id().expect("expected NodeId"),
+            inserted_ids[0],
+            "First inserted vector should be closest"
+        );
 
         // Results should be sorted by distance
         for (i, result) in results.iter().enumerate() {
@@ -1817,7 +1903,7 @@ mod tests {
             let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
             let id = crate::Id::new();
             processor
-                .insert_vector(&embedding, id, &vector, true)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
                 .expect("Insert should succeed");
             inserted_ids.push(id);
         }
@@ -1882,7 +1968,7 @@ mod tests {
         let vector: Vec<f32> = (0..64).map(|i| i as f32 / 100.0).collect();
         let id = crate::Id::new();
         processor
-            .insert_vector(&embedding, id, &vector, true)
+            .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
             .expect("insert");
 
         // Verify spec hash was stored
@@ -1930,7 +2016,7 @@ mod tests {
         let vector: Vec<f32> = (0..64).map(|i| i as f32 / 100.0).collect();
         let id1 = crate::Id::new();
         processor
-            .insert_vector(&embedding, id1, &vector, true)
+            .insert_vector(&embedding, ExternalKey::NodeId(id1), &vector, true)
             .expect("first insert");
 
         // Get the stored hash
@@ -1955,7 +2041,7 @@ mod tests {
 
         // Try to insert second vector - should fail due to hash mismatch
         let id2 = crate::Id::new();
-        let result = processor.insert_vector(&embedding, id2, &vector, true);
+        let result = processor.insert_vector(&embedding, ExternalKey::NodeId(id2), &vector, true);
         assert!(result.is_err(), "Should fail with hash mismatch");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1975,7 +2061,7 @@ mod tests {
 
         // Now insert should succeed
         processor
-            .insert_vector(&embedding, id2, &vector, true)
+            .insert_vector(&embedding, ExternalKey::NodeId(id2), &vector, true)
             .expect("second insert should succeed");
     }
 
@@ -2008,7 +2094,7 @@ mod tests {
             let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
             let id = crate::Id::new();
             processor
-                .insert_vector(&embedding, id, &vector, true)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
                 .expect("insert");
         }
 
@@ -2069,11 +2155,11 @@ mod tests {
         let processor = Processor::new(storage.clone(), registry);
 
         // Prepare batch of vectors
-        let vectors: Vec<(Id, Vec<f32>)> = (0..10)
+        let vectors: Vec<(ExternalKey, Vec<f32>)> = (0..10)
             .map(|i| {
                 let id = crate::Id::new();
                 let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
-                (id, vector)
+                (ExternalKey::NodeId(id), vector)
             })
             .collect();
 
@@ -2126,11 +2212,11 @@ mod tests {
         );
 
         // Prepare batch of vectors
-        let vectors: Vec<(Id, Vec<f32>)> = (0..20)
+        let vectors: Vec<(ExternalKey, Vec<f32>)> = (0..20)
             .map(|i| {
                 let id = crate::Id::new();
                 let vector: Vec<f32> = (0..64).map(|j| (i * 64 + j) as f32 / 1000.0).collect();
-                (id, vector)
+                (ExternalKey::NodeId(id), vector)
             })
             .collect();
 
@@ -2161,9 +2247,19 @@ mod tests {
         }
 
         // The first result should be among the inserted vectors
-        let inserted_ids: std::collections::HashSet<_> = vectors.iter().map(|(id, _)| *id).collect();
+        // Extract node IDs from ExternalKey::NodeId for comparison
+        let inserted_ids: std::collections::HashSet<_> = vectors
+            .iter()
+            .filter_map(|(key, _)| {
+                if let ExternalKey::NodeId(id) = key {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
         assert!(
-            inserted_ids.contains(&results[0].id),
+            inserted_ids.contains(&results[0].node_id().expect("expected NodeId")),
             "First result should be one of our inserted vectors"
         );
     }
@@ -2189,8 +2285,9 @@ mod tests {
         let processor = Processor::new(storage, registry);
 
         // Empty batch should return empty vec
+        let empty: Vec<(ExternalKey, Vec<f32>)> = vec![];
         let vec_ids = processor
-            .insert_batch(&embedding, &[], false)
+            .insert_batch(&embedding, &empty, false)
             .expect("empty batch should succeed");
 
         assert!(vec_ids.is_empty(), "Empty input should return empty output");
@@ -2217,10 +2314,10 @@ mod tests {
         let processor = Processor::new(storage, registry);
 
         // Create batch with one wrong dimension
-        let vectors: Vec<(Id, Vec<f32>)> = vec![
-            (crate::Id::new(), vec![0.0; 64]),  // Correct
-            (crate::Id::new(), vec![0.0; 128]), // Wrong dimension
-            (crate::Id::new(), vec![0.0; 64]),  // Correct
+        let vectors: Vec<(ExternalKey, Vec<f32>)> = vec![
+            (ExternalKey::NodeId(crate::Id::new()), vec![0.0; 64]),  // Correct
+            (ExternalKey::NodeId(crate::Id::new()), vec![0.0; 128]), // Wrong dimension
+            (ExternalKey::NodeId(crate::Id::new()), vec![0.0; 64]),  // Correct
         ];
 
         let result = processor.insert_batch(&embedding, &vectors, false);
@@ -2255,17 +2352,17 @@ mod tests {
 
         // Create batch with duplicate ID
         let duplicate_id = crate::Id::new();
-        let vectors: Vec<(Id, Vec<f32>)> = vec![
-            (crate::Id::new(), vec![0.0; 64]),
-            (duplicate_id, vec![0.0; 64]),
-            (duplicate_id, vec![0.0; 64]), // Duplicate!
+        let vectors: Vec<(ExternalKey, Vec<f32>)> = vec![
+            (ExternalKey::NodeId(crate::Id::new()), vec![0.0; 64]),
+            (ExternalKey::NodeId(duplicate_id), vec![0.0; 64]),
+            (ExternalKey::NodeId(duplicate_id), vec![0.0; 64]), // Duplicate!
         ];
 
         let result = processor.insert_batch(&embedding, &vectors, false);
         assert!(result.is_err(), "Should fail on duplicate ID in batch");
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Duplicate external ID"),
+            err.contains("Duplicate external key"),
             "Error should mention duplicate: {}",
             err
         );
@@ -2295,13 +2392,13 @@ mod tests {
         let existing_id = crate::Id::new();
         let vector: Vec<f32> = vec![0.0; 64];
         processor
-            .insert_vector(&embedding, existing_id, &vector, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(existing_id), &vector, false)
             .expect("initial insert");
 
         // Try batch with that existing ID
-        let vectors: Vec<(Id, Vec<f32>)> = vec![
-            (crate::Id::new(), vec![0.0; 64]),
-            (existing_id, vec![0.0; 64]), // Already exists!
+        let vectors: Vec<(ExternalKey, Vec<f32>)> = vec![
+            (ExternalKey::NodeId(crate::Id::new()), vec![0.0; 64]),
+            (ExternalKey::NodeId(existing_id), vec![0.0; 64]), // Already exists!
         ];
 
         let result = processor.insert_batch(&embedding, &vectors, false);
@@ -2340,17 +2437,17 @@ mod tests {
         // Insert a vector first
         let existing_id = crate::Id::new();
         processor
-            .insert_vector(&embedding, existing_id, &vec![0.0; 64], false)
+            .insert_vector(&embedding, ExternalKey::NodeId(existing_id), &vec![0.0; 64], false)
             .expect("initial insert");
 
         // Try batch where the LAST vector will fail (duplicate)
         // The first vectors should NOT be committed due to atomicity
         let new_id1 = crate::Id::new();
         let new_id2 = crate::Id::new();
-        let vectors: Vec<(Id, Vec<f32>)> = vec![
-            (new_id1, vec![1.0; 64]),
-            (new_id2, vec![2.0; 64]),
-            (existing_id, vec![3.0; 64]), // Will fail!
+        let vectors: Vec<(ExternalKey, Vec<f32>)> = vec![
+            (ExternalKey::NodeId(new_id1), vec![1.0; 64]),
+            (ExternalKey::NodeId(new_id2), vec![2.0; 64]),
+            (ExternalKey::NodeId(existing_id), vec![3.0; 64]), // Will fail!
         ];
 
         let result = processor.insert_batch(&embedding, &vectors, false);
@@ -2361,7 +2458,7 @@ mod tests {
             .cf_handle(IdForward::CF_NAME)
             .expect("CF should exist");
 
-        let key1 = IdForwardCfKey(embedding_code, new_id1);
+        let key1 = IdForwardCfKey(embedding_code, ExternalKey::NodeId(new_id1));
         let result1 = txn_db
             .get_cf(&forward_cf, IdForward::key_to_bytes(&key1))
             .expect("read");
@@ -2370,7 +2467,7 @@ mod tests {
             "new_id1 should NOT exist due to atomicity"
         );
 
-        let key2 = IdForwardCfKey(embedding_code, new_id2);
+        let key2 = IdForwardCfKey(embedding_code, ExternalKey::NodeId(new_id2));
         let result2 = txn_db
             .get_cf(&forward_cf, IdForward::key_to_bytes(&key2))
             .expect("read");

@@ -134,7 +134,7 @@ These parameters are persisted with the embedding spec and control how the index
 let builder = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
     .with_hnsw_m(32)              // HNSW connections per node (default: 16, min: 2)
     .with_hnsw_ef_construction(400) // Build-time beam width (default: 200)
-    .with_rabitq_bits(2)          // Binary quantization bits (default: 1, valid: 1, 2, 4)
+    .with_rabitq_bits(2)          // Binary quantization bits (default: 1, valid: 1, 2, 4, 8)
     .with_rabitq_seed(12345);     // RNG seed for rotation matrix (default: 42)
 
 let embedding = registry.register(builder, db)?;
@@ -144,7 +144,7 @@ let embedding = registry.register(builder, db)?;
 |-----------|---------|-------------|-------------|
 | `hnsw_m` | 16 | >= 2 | HNSW connections per node. Higher = better recall, more memory |
 | `hnsw_ef_construction` | 200 | > 0 | Build-time beam width. Higher = better graph quality |
-| `rabitq_bits` | 1 | 1, 2, 4 | Bits per dimension. Higher = better recall, larger codes |
+| `rabitq_bits` | 1 | 1, 2, 4, 8 | Bits per dimension. Higher = better recall, larger codes |
 | `rabitq_seed` | 42 | any u64 | Seed for rotation matrix. Same seed = reproducible codes |
 
 **⚠️ Important: SpecHash Timing**
@@ -186,10 +186,11 @@ let compact = hnsw::Config::compact(768);          // M=8, ef_construction=50
 
 // Custom configuration
 let config = hnsw::Config {
+    enabled: true,
     dim: 512,
-    m: 16,              // Connections per node (layer > 0)
-    m_max: 32,          // Max connections (layer > 0)
-    m_max_0: 64,        // Max connections (layer 0)
+    m: 16,                // Connections per node (layer > 0)
+    m_max: 32,            // Max connections (layer > 0)
+    m_max_0: 64,          // Max connections (layer 0)
     ef_construction: 100, // Build-time beam width
     ..Default::default()
 };
@@ -344,6 +345,7 @@ let results = index.search_with_rabitq_cached(
 | `bits_per_dim` | 1 | 32x compression, ~70% recall with ADC |
 | `bits_per_dim` | 2 | 16x compression, ~85% recall with ADC |
 | `bits_per_dim` | 4 | 8x compression, **recommended** - ~92-99% recall with ADC |
+| `bits_per_dim` | 8 | 4x compression, highest recall, largest codes |
 | `rerank_factor` | 4-20 | Higher = better recall, more I/O |
 
 > **Note:** The implementation uses ADC (Asymmetric Distance Computation), NOT symmetric
@@ -552,7 +554,7 @@ When `DeleteVector` is executed:
 use motlie_db::vector::{DeleteVector, MutationRunnable};
 
 // Delete via mutation channel
-DeleteVector::new(&embedding, external_id)
+DeleteVector::new(&embedding, ExternalKey::NodeId(external_id))
     .run(&writer)
     .await?;
 writer.flush().await?;
@@ -1063,6 +1065,7 @@ impl Embedding {
     pub fn model(&self) -> &str;
     pub fn dim(&self) -> u32;
     pub fn distance(&self) -> Distance;
+    pub fn storage_type(&self) -> VectorElementType;
     pub fn has_embedder(&self) -> bool;
     pub fn embed(&self, document: &str) -> Result<Vec<f32>>;
     pub fn embed_batch(&self, documents: &[&str]) -> Result<Vec<Vec<f32>>>;
@@ -1075,6 +1078,10 @@ pub struct EmbeddingBuilder { /* private */ }
 impl EmbeddingBuilder {
     pub fn new(model: impl Into<String>, dim: u32, distance: Distance) -> Self;
     pub fn with_embedder(self, embedder: Arc<dyn Embedder>) -> Self;
+    pub fn with_hnsw_m(self, m: u16) -> Self;
+    pub fn with_hnsw_ef_construction(self, ef_construction: u16) -> Self;
+    pub fn with_rabitq_bits(self, bits: u8) -> Self;
+    pub fn with_rabitq_seed(self, seed: u64) -> Self;
     pub fn model(&self) -> &str;
     pub fn dim(&self) -> u32;
     pub fn distance(&self) -> Distance;
@@ -1086,6 +1093,12 @@ impl EmbeddingRegistry {
     pub fn new() -> Self;
     pub fn prewarm(&self, db: &TransactionDB) -> Result<usize>;
     pub fn register(&self, builder: EmbeddingBuilder, db: &TransactionDB) -> Result<Embedding>;
+    pub fn register_in_txn(
+        &self,
+        builder: EmbeddingBuilder,
+        txn: &Transaction<'_, TransactionDB>,
+        db: &TransactionDB,
+    ) -> Result<Embedding>;
     pub fn get(&self, model: &str, dim: u32, distance: Distance) -> Option<Embedding>;
     pub fn get_by_code(&self, code: u64) -> Option<Embedding>;
     pub fn set_embedder(&self, code: u64, embedder: Arc<dyn Embedder>) -> Result<()>;
@@ -1108,17 +1121,40 @@ impl EmbeddingFilter {
 }
 ```
 
+### ExternalKey (Polymorphic External ID)
+
+```rust
+pub enum ExternalKey {
+    NodeId(Id),
+    NodeFragment(Id, TimestampMilli),
+    Edge(Id, Id, NameHash),
+    EdgeFragment(Id, Id, NameHash, TimestampMilli),
+    NodeSummary(SummaryHash),
+    EdgeSummary(SummaryHash),
+}
+
+impl ExternalKey {
+    pub fn to_bytes(&self) -> Vec<u8>;
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self>;
+    pub fn variant_name(&self) -> &'static str;
+    pub fn node_id(&self) -> Option<Id>;
+}
+```
+
 ### Configuration Types
 
 ```rust
 // HNSW index configuration: vector::hnsw::Config
 pub mod hnsw {
     pub struct Config {
+        pub enabled: bool,
         pub dim: usize,
         pub m: usize,
         pub m_max: usize,
         pub m_max_0: usize,
         pub ef_construction: usize,
+        pub m_l: f32,
+        pub max_level: Option<u8>,
         pub batch_threshold: usize,
     }
     impl Config {
@@ -1146,7 +1182,7 @@ impl RaBitQConfig {
 // Combined configuration
 pub struct VectorConfig {
     pub hnsw: hnsw::Config,
-    pub rabitq: Option<RaBitQConfig>,
+    pub rabitq: RaBitQConfig,
 }
 impl VectorConfig {
     pub fn dim_128() -> Self;
@@ -1199,8 +1235,8 @@ impl Index {
         &self,
         storage: &Storage,
         query: &[f32],
-        ef: usize,
         k: usize,
+        ef: usize,
     ) -> Result<Vec<(f32, VecId)>>;
 
     // Search - RaBitQ (Cosine only)
@@ -1225,6 +1261,201 @@ impl Index {
 }
 ```
 
+### Processor (Internal API)
+
+`Processor` is the internal execution engine used by mutation/query consumers.
+It is exposed for internal integrations and test helpers.
+
+```rust
+pub struct Processor { /* private */ }
+impl Processor {
+    pub fn new(storage: Arc<Storage>, registry: Arc<EmbeddingRegistry>) -> Self;
+    pub fn new_with_nav_cache(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        nav_cache: Arc<NavigationCache>,
+    ) -> Self;
+    pub fn with_rabitq_config(self, config: RaBitQConfig) -> Self;
+    pub fn with_config(self, config: VectorConfig) -> Self;
+    pub fn with_config_and_nav_cache(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        config: VectorConfig,
+        nav_cache: Arc<NavigationCache>,
+    ) -> Self;
+
+    // Observability / control
+    pub fn set_async_backpressure_threshold(&self, threshold: usize);
+    pub fn async_backpressure_threshold(&self) -> usize;
+    pub fn pending_queue_size(&self) -> usize;
+
+    // Storage/registry accessors
+    pub fn storage(&self) -> &Storage;
+    pub fn storage_arc(&self) -> &Arc<Storage>;
+    pub fn registry(&self) -> &EmbeddingRegistry;
+    pub fn registry_arc(&self) -> &Arc<EmbeddingRegistry>;
+
+    // Vector ops
+    pub fn insert_vector(
+        &self,
+        embedding: &Embedding,
+        external_key: ExternalKey,
+        vector: &[f32],
+        build_index: bool,
+    ) -> Result<VecId>;
+
+    pub fn insert_batch(
+        &self,
+        embedding: &Embedding,
+        vectors: &[(ExternalKey, Vec<f32>)],
+        build_index: bool,
+    ) -> Result<Vec<VecId>>;
+
+    pub(crate) fn delete_vector(
+        &self,
+        embedding: &Embedding,
+        external_key: ExternalKey,
+    ) -> Result<super::ops::delete::DeleteResult>;
+
+    pub fn search(
+        &self,
+        embedding: &Embedding,
+        query: &[f32],
+        k: usize,
+        ef_search: usize,
+        exact: bool,
+    ) -> Result<Vec<SearchResult>>;
+
+    pub fn search_with_config(
+        &self,
+        config: &SearchConfig,
+        query: &[f32],
+    ) -> Result<Vec<SearchResult>>;
+}
+```
+
+### MPSC / Channel API (Public)
+
+The async API uses channels for mutations (MPSC) and queries (MPMC).
+
+```rust
+// Mutations (Writer - MPSC)
+pub struct Writer { /* mpsc::Sender<Vec<Mutation>> */ }
+impl Writer {
+    pub async fn send(&self, mutations: Vec<Mutation>) -> Result<()>;
+    pub async fn send_sync(&self, mutations: Vec<Mutation>) -> Result<()>;
+    pub async fn flush(&self) -> Result<()>;
+    pub fn is_closed(&self) -> bool;
+}
+
+pub struct WriterConfig { pub channel_buffer_size: usize }
+pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutation>>);
+pub fn spawn_mutation_consumer(consumer: MutationConsumer) -> tokio::task::JoinHandle<Result<()>>;
+pub fn spawn_mutation_consumer_with_storage(
+    receiver: mpsc::Receiver<Vec<Mutation>>,
+    config: WriterConfig,
+    storage: Arc<Storage>,
+) -> tokio::task::JoinHandle<Result<()>>;
+pub fn spawn_mutation_consumer_with_storage_autoreg(
+    receiver: mpsc::Receiver<Vec<Mutation>>,
+    config: WriterConfig,
+    storage: Arc<Storage>,
+) -> tokio::task::JoinHandle<Result<()>>;
+
+// Queries (Reader - MPMC / flume)
+pub struct Reader { /* flume::Sender<Query> */ }
+impl Reader {
+    pub async fn send_query(&self, query: Query) -> Result<()>;
+    pub fn is_closed(&self) -> bool;
+}
+
+pub struct ReaderConfig { pub channel_buffer_size: usize }
+pub fn create_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Query>);
+pub fn spawn_query_consumer(consumer: QueryConsumer) -> tokio::task::JoinHandle<Result<()>>;
+pub fn spawn_query_consumer_with_processor(
+    consumer: ProcessorQueryConsumer,
+) -> tokio::task::JoinHandle<Result<()>>;
+pub fn spawn_query_consumers(
+    receiver: flume::Receiver<Query>,
+    config: ReaderConfig,
+    storage: Arc<Storage>,
+    count: usize,
+) -> Vec<tokio::task::JoinHandle<Result<()>>>;
+pub fn spawn_query_consumers_with_processor(
+    receiver: flume::Receiver<Query>,
+    config: ReaderConfig,
+    processor: Arc<Processor>,
+    count: usize,
+) -> Vec<tokio::task::JoinHandle<Result<()>>>;
+pub fn spawn_query_consumers_with_storage(
+    receiver: flume::Receiver<Query>,
+    config: ReaderConfig,
+    storage: Arc<Storage>,
+    registry: Arc<EmbeddingRegistry>,
+    count: usize,
+) -> Vec<tokio::task::JoinHandle<Result<()>>>;
+pub fn spawn_query_consumers_with_storage_autoreg(
+    receiver: flume::Receiver<Query>,
+    config: ReaderConfig,
+    storage: Arc<Storage>,
+    count: usize,
+) -> Vec<tokio::task::JoinHandle<Result<()>>>;
+
+// SearchReader (bundles Reader + Processor)
+pub struct SearchReader { /* reader + processor */ }
+impl SearchReader {
+    pub async fn search_knn(
+        &self,
+        embedding: &Embedding,
+        query: Vec<f32>,
+        k: usize,
+        ef: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>>;
+
+    pub async fn search_knn_exact(
+        &self,
+        embedding: &Embedding,
+        query: Vec<f32>,
+        k: usize,
+        ef: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>>;
+
+    pub fn reader(&self) -> &Reader;
+    pub fn processor(&self) -> &Arc<Processor>;
+    pub fn is_closed(&self) -> bool;
+}
+
+pub fn create_search_reader(
+    config: ReaderConfig,
+    processor: Arc<Processor>,
+) -> (SearchReader, flume::Receiver<Query>);
+
+pub fn create_search_reader_with_storage(
+    config: ReaderConfig,
+    storage: Arc<Storage>,
+) -> (SearchReader, flume::Receiver<Query>);
+```
+
+**Runnable helpers:**
+
+```rust
+// Mutations: use MutationRunnable (alias from mutation module)
+InsertVector::new(&embedding, ExternalKey::NodeId(id), vec![...])
+    .run(&writer)
+    .await?;
+
+// Queries: use Runnable<Reader> or Runnable<SearchReader>
+let result = GetVector::new(embedding.code(), id)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+let results = SearchKNN::new(&embedding, query, 10)
+    .run(&search_reader, Duration::from_secs(5))
+    .await?;
+```
+
 ### Search Configuration
 
 ```rust
@@ -1238,6 +1469,7 @@ impl SearchStrategy {
 }
 
 pub const DEFAULT_PARALLEL_RERANK_THRESHOLD: usize = 3200;
+pub const DEFAULT_PENDING_SCAN_LIMIT: usize = 1000;
 
 pub struct SearchConfig { /* private */ }
 impl SearchConfig {
@@ -1253,6 +1485,8 @@ impl SearchConfig {
     pub fn with_rerank_factor(self, factor: usize) -> Self;
     pub fn with_k(self, k: usize) -> Self;
     pub fn with_parallel_rerank_threshold(self, threshold: usize) -> Self;
+    pub fn with_pending_scan_limit(self, limit: usize) -> Self;
+    pub fn no_pending_fallback(self) -> Self;
 
     // Accessors
     pub fn embedding(&self) -> &Embedding;
@@ -1261,6 +1495,7 @@ impl SearchConfig {
     pub fn ef(&self) -> usize;
     pub fn rerank_factor(&self) -> usize;
     pub fn parallel_rerank_threshold(&self) -> usize;
+    pub fn pending_scan_limit(&self) -> usize;
     pub fn should_use_parallel_rerank(&self, candidate_count: usize) -> bool;
     pub fn distance(&self) -> Distance;
     pub fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32;
