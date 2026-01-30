@@ -8610,7 +8610,7 @@ Use this for evaluating ergonomics and design consistency.
 pub use hnsw::ConfigWarning;                   // HNSW config warnings
 pub use config::{RaBitQConfig, RaBitQConfigWarning, VectorConfig};
 pub use distance::Distance;                    // Cosine, L2, DotProduct
-// Note: HNSW configuration is at hnsw::Config (not re-exported as HnswConfig)
+// Note: hnsw::Config has been deleted. HNSW params come from EmbeddingSpec.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Embedding Types (identity + behavior)

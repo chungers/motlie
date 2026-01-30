@@ -190,47 +190,6 @@ impl Processor {
         )
     }
 
-    /// Create a Processor with custom RaBitQ and HNSW configurations.
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use with_batch_threshold() - structural params derived from EmbeddingSpec"
-    )]
-    pub fn with_config(
-        storage: Arc<Storage>,
-        registry: Arc<EmbeddingRegistry>,
-        rabitq_config: RaBitQConfig,
-        hnsw_config: hnsw::Config,
-    ) -> Self {
-        Self::with_rabitq_config_and_batch_threshold(
-            storage,
-            registry,
-            rabitq_config,
-            hnsw_config.batch_threshold,
-            Arc::new(NavigationCache::new()),
-        )
-    }
-
-    /// Create a Processor with custom configurations and shared navigation cache.
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use with_rabitq_config_and_batch_threshold() - structural params derived from EmbeddingSpec"
-    )]
-    pub fn with_config_and_nav_cache(
-        storage: Arc<Storage>,
-        registry: Arc<EmbeddingRegistry>,
-        rabitq_config: RaBitQConfig,
-        hnsw_config: hnsw::Config,
-        nav_cache: Arc<NavigationCache>,
-    ) -> Self {
-        Self::with_rabitq_config_and_batch_threshold(
-            storage,
-            registry,
-            rabitq_config,
-            hnsw_config.batch_threshold,
-            nav_cache,
-        )
-    }
-
     /// Create a Processor with full configuration options.
     ///
     /// This is the canonical constructor that all other constructors delegate to.

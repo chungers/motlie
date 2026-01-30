@@ -26,8 +26,8 @@ mod tests {
     use crate::vector::hnsw::{self, insert};
     use crate::vector::id::IdAllocator;
     use crate::vector::schema::{
-        EmbeddingCode, GraphMeta, GraphMetaCfKey, GraphMetaField, IdForward, IdForwardCfKey,
-        VecId, VectorCfKey, Vectors,
+        EmbeddingCode, EmbeddingSpec, GraphMeta, GraphMetaCfKey, GraphMetaField, IdForward,
+        IdForwardCfKey, VecId, VectorCfKey, VectorElementType, Vectors,
     };
     use crate::vector::{Distance, Storage};
 
@@ -44,6 +44,20 @@ mod tests {
         use rand_chacha::ChaCha20Rng;
         let mut rng = ChaCha20Rng::seed_from_u64(seed);
         (0..dim).map(|_| rng.gen::<f32>()).collect()
+    }
+
+    /// Helper: Create test EmbeddingSpec with default HNSW parameters
+    fn make_test_spec(dim: usize, distance: Distance) -> EmbeddingSpec {
+        EmbeddingSpec {
+            model: "test".to_string(),
+            dim: dim as u32,
+            distance,
+            storage_type: VectorElementType::F32,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        }
     }
 
     // =========================================================================
@@ -285,8 +299,8 @@ mod tests {
 
             // Now build HNSW index
             let nav_cache = Arc::new(NavigationCache::new());
-            let config = hnsw::Config::for_dim(dim);
-            let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache.clone());
+            let spec = make_test_spec(dim, Distance::L2);
+            let index = hnsw::Index::from_spec(embedding, &spec, 64, nav_cache.clone());
 
             for (i, vector) in vectors.iter().enumerate() {
                 let txn = txn_db.transaction();
@@ -313,8 +327,8 @@ mod tests {
                 "Fresh cache should be empty"
             );
 
-            let config = hnsw::Config::for_dim(dim);
-            let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache);
+            let spec = make_test_spec(dim, Distance::L2);
+            let index = hnsw::Index::from_spec(embedding, &spec, 64, nav_cache);
 
             // Search should work - it loads navigation info from storage
             let results = index
@@ -359,8 +373,8 @@ mod tests {
 
             // Build HNSW index
             let nav_cache = Arc::new(NavigationCache::new());
-            let config = hnsw::Config::for_dim(64);
-            let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache.clone());
+            let spec = make_test_spec(64, Distance::L2);
+            let index = hnsw::Index::from_spec(embedding, &spec, 64, nav_cache.clone());
 
             let txn = txn_db.transaction();
             let cache_update = insert(&index, &txn, &txn_db, &storage, 0, &vector)
@@ -445,13 +459,8 @@ mod tests {
 
             // Build HNSW
             let nav_cache = Arc::new(NavigationCache::new());
-            let config = hnsw::Config {
-                dim,
-                m: 16,
-                ef_construction: 100,
-                ..Default::default()
-            };
-            let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache);
+            let spec = make_test_spec(dim, Distance::L2);
+            let index = hnsw::Index::from_spec(embedding, &spec, 64, nav_cache);
 
             for (i, vector) in vectors.iter().enumerate() {
                 let txn = txn_db.transaction();
@@ -467,14 +476,8 @@ mod tests {
         {
             let storage = create_test_storage(temp_dir.path());
             let nav_cache = Arc::new(NavigationCache::new());
-
-            let config = hnsw::Config {
-                dim,
-                m: 16,
-                ef_construction: 100,
-                ..Default::default()
-            };
-            let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache.clone());
+            let spec = make_test_spec(dim, Distance::L2);
+            let index = hnsw::Index::from_spec(embedding, &spec, 64, nav_cache.clone());
 
             // Search for the first vector (should find itself)
             let results = index
@@ -520,8 +523,8 @@ mod tests {
 
             // Now insert into HNSW using transaction API
             let nav_cache = Arc::new(NavigationCache::new());
-            let config = hnsw::Config::for_dim(dim);
-            let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache.clone());
+            let spec = make_test_spec(dim, Distance::L2);
+            let index = hnsw::Index::from_spec(embedding, &spec, 64, nav_cache.clone());
 
             let txn = txn_db.transaction();
             let cache_update =
@@ -538,8 +541,8 @@ mod tests {
         {
             let storage = create_test_storage(temp_dir.path());
             let nav_cache = Arc::new(NavigationCache::new());
-            let config = hnsw::Config::for_dim(dim);
-            let index = hnsw::Index::new(embedding, Distance::L2, config, nav_cache);
+            let spec = make_test_spec(dim, Distance::L2);
+            let index = hnsw::Index::from_spec(embedding, &spec, 64, nav_cache);
 
             // Search should find the vector
             let results = index

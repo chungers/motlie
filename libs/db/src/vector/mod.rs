@@ -11,7 +11,7 @@
 //!
 //! ### Core Types (flat)
 //! - `config.rs` - Configuration types (RaBitQConfig, VectorConfig)
-//! - `hnsw/config.rs` - HNSW configuration (`hnsw::Config`)
+//! - `hnsw/config.rs` - HNSW configuration warnings (`hnsw::ConfigWarning`)
 //! - `distance.rs` - Distance metrics (Cosine, L2, DotProduct)
 //! - `embedding.rs` - Embedding type and Embedder trait
 //! - `registry.rs` - EmbeddingRegistry for managing embedding spaces
@@ -202,37 +202,6 @@ mod tests {
                 cf_name
             );
         }
-    }
-
-    #[test]
-    fn test_hnsw_config_presets() {
-        let default = hnsw::Config::default();
-        assert_eq!(default.dim, 128);
-        assert_eq!(default.m, 16);
-
-        let high_recall = hnsw::Config::high_recall(768);
-        assert_eq!(high_recall.dim, 768);
-        assert_eq!(high_recall.m, 32);
-
-        let compact = hnsw::Config::compact(768);
-        assert_eq!(compact.dim, 768);
-        assert_eq!(compact.m, 8);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_vector_config_presets() {
-        let c128 = VectorConfig::dim_128();
-        assert_eq!(c128.hnsw.dim, 128);
-
-        let c768 = VectorConfig::dim_768();
-        assert_eq!(c768.hnsw.dim, 768);
-
-        let c1024 = VectorConfig::dim_1024();
-        assert_eq!(c1024.hnsw.dim, 1024);
-
-        let c1536 = VectorConfig::dim_1536();
-        assert_eq!(c1536.hnsw.dim, 1536);
     }
 
     #[test]

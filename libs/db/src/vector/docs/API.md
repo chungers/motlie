@@ -169,40 +169,45 @@ processor.insert_vector(...)?;  // SpecHash set here
 
 ### HNSW Configuration
 
-HNSW (Hierarchical Navigable Small World) is a graph-based ANN algorithm. Key parameters:
+HNSW (Hierarchical Navigable Small World) is a graph-based ANN algorithm. HNSW parameters
+are now configured through `EmbeddingSpec`, which is the single source of truth:
 
 ```rust
-use motlie_db::vector::hnsw;
+use motlie_db::vector::{Distance, EmbeddingSpec, VectorElementType, hnsw};
+use motlie_db::vector::cache::NavigationCache;
+use std::sync::Arc;
 
-// Default configuration (dim=128, M=16)
-let config = hnsw::Config::default();
-
-// Auto-tuned for specific dimension
-let config = hnsw::Config::for_dim(512);
-
-// Presets
-let high_recall = hnsw::Config::high_recall(768);  // M=32, ef_construction=200
-let compact = hnsw::Config::compact(768);          // M=8, ef_construction=50
-
-// Custom configuration
-let config = hnsw::Config {
-    enabled: true,
+// Create EmbeddingSpec with HNSW parameters
+let spec = EmbeddingSpec {
+    model: "openai-ada".to_string(),
     dim: 512,
-    m: 16,                // Connections per node (layer > 0)
-    m_max: 32,            // Max connections (layer > 0)
-    m_max_0: 64,          // Max connections (layer 0)
-    ef_construction: 100, // Build-time beam width
-    ..Default::default()
+    distance: Distance::Cosine,
+    storage_type: VectorElementType::F32,
+    hnsw_m: 16,                // Connections per node
+    hnsw_ef_construction: 100, // Build-time beam width
+    rabitq_bits: 1,
+    rabitq_seed: 42,
 };
 
-// Validate configuration
-let warnings = config.validate();
-if !warnings.is_empty() {
-    for w in warnings {
-        println!("Warning: {:?}", w);
-    }
-}
+// Create HNSW index from spec (the only constructor)
+let nav_cache = Arc::new(NavigationCache::new());
+let index = hnsw::Index::from_spec(
+    1, // embedding_code
+    &spec,
+    64, // batch_threshold (runtime knob)
+    nav_cache,
+);
+
+// Derived values are computed from EmbeddingSpec:
+// - m_max = 2 * hnsw_m (always)
+// - m_max_0 = 2 * hnsw_m (always)
+// - m_l = 1.0 / ln(hnsw_m)
+assert_eq!(spec.m(), 16);
+assert_eq!(spec.m_max(), 32);
+assert_eq!(spec.ef_construction(), 100);
 ```
+
+> **Note**: `hnsw::Config` has been deleted. All HNSW parameters come from `EmbeddingSpec`.
 
 **Parameter Impact:**
 
@@ -224,28 +229,30 @@ if !warnings.is_empty() {
 
 ```rust
 use motlie_db::vector::{
-    hnsw, NavigationCache, Distance, VectorElementType,
+    hnsw, NavigationCache, Distance, EmbeddingSpec, VectorElementType,
 };
 use std::sync::Arc;
 
 // Create navigation cache (required for HNSW traversal)
 let nav_cache = Arc::new(NavigationCache::new());
 
-// Create HNSW index
-let config = hnsw::Config::for_dim(512);
-let index = hnsw::Index::new(
-    embedding.code(),      // From registered embedding
-    Distance::Cosine,
-    config,
-    nav_cache.clone(),
-);
+// Define embedding spec with HNSW parameters
+let spec = EmbeddingSpec {
+    model: "clip".to_string(),
+    dim: 512,
+    distance: Distance::Cosine,
+    storage_type: VectorElementType::F16,  // F16 saves 50% memory
+    hnsw_m: 16,
+    hnsw_ef_construction: 100,
+    rabitq_bits: 1,
+    rabitq_seed: 42,
+};
 
-// Or with explicit storage type (F16 saves 50% memory)
-let index = hnsw::Index::with_storage_type(
-    embedding.code(),
-    Distance::Cosine,
-    VectorElementType::F16,  // or F32 (default)
-    config,
+// Create HNSW index from spec (the only constructor)
+let index = hnsw::Index::from_spec(
+    embedding.code(),  // From registered embedding
+    &spec,
+    64,                // batch_threshold (runtime knob)
     nav_cache.clone(),
 );
 
@@ -909,19 +916,23 @@ let embedding = registry.register(
     storage.transaction_db()?,
 )?;
 
-// 3. Create HNSW index
+// 3. Create HNSW index (parameters from EmbeddingSpec)
 let nav_cache = Arc::new(NavigationCache::new());
-let config = hnsw::Config {
+let spec = EmbeddingSpec {
+    model: "sift".to_string(),
     dim: 128,
-    m: 16,
-    ef_construction: 100,
-    ..Default::default()
+    distance: Distance::L2,
+    storage_type: VectorElementType::F32,
+    hnsw_m: 16,
+    hnsw_ef_construction: 100,
+    rabitq_bits: 1,
+    rabitq_seed: 42,
 };
 
-let index = hnsw::Index::new(
+let index = hnsw::Index::from_spec(
     embedding.code(),
-    Distance::L2,
-    config,
+    &spec,
+    64, // batch_threshold
     nav_cache,
 );
 
@@ -960,13 +971,21 @@ let embedding = registry.register(
 
 // 3. Create HNSW index with F16 storage (50% smaller)
 let nav_cache = Arc::new(NavigationCache::new());
-let config = hnsw::Config::high_recall(512);
+let spec = EmbeddingSpec {
+    model: "clip-vit-b32".to_string(),
+    dim: 512,
+    distance: Distance::Cosine,
+    storage_type: VectorElementType::F16,  // 50% smaller
+    hnsw_m: 32,                // High recall settings
+    hnsw_ef_construction: 200, // High recall settings
+    rabitq_bits: 1,
+    rabitq_seed: 42,
+};
 
-let index = hnsw::Index::with_storage_type(
+let index = hnsw::Index::from_spec(
     embedding.code(),
-    Distance::Cosine,
-    VectorElementType::F16,
-    config,
+    &spec,
+    64, // batch_threshold
     nav_cache,
 );
 
@@ -1144,34 +1163,44 @@ impl ExternalKey {
 ### Configuration Types
 
 ```rust
-// HNSW index configuration: vector::hnsw::Config
+// EmbeddingSpec is the single source of truth for HNSW parameters
+pub struct EmbeddingSpec {
+    pub model: String,
+    pub dim: u32,
+    pub distance: Distance,
+    pub storage_type: VectorElementType,
+    pub hnsw_m: u16,                 // HNSW M parameter
+    pub hnsw_ef_construction: u16,   // HNSW build beam width
+    pub rabitq_bits: u8,
+    pub rabitq_seed: u64,
+}
+impl EmbeddingSpec {
+    // Derived HNSW values (always computed, never stored)
+    pub fn m(&self) -> usize;              // hnsw_m as usize
+    pub fn m_max(&self) -> usize;          // 2 * m()
+    pub fn m_max_0(&self) -> usize;        // 2 * m()
+    pub fn m_l(&self) -> f32;              // 1.0 / ln(m())
+    pub fn ef_construction(&self) -> usize; // hnsw_ef_construction as usize
+}
+
+// HNSW ConfigWarning for validation
 pub mod hnsw {
-    pub struct Config {
-        pub enabled: bool,
-        pub dim: usize,
-        pub m: usize,
-        pub m_max: usize,
-        pub m_max_0: usize,
-        pub ef_construction: usize,
-        pub m_l: f32,
-        pub max_level: Option<u8>,
-        pub batch_threshold: usize,
+    pub enum ConfigWarning {
+        LowM(usize),
+        HighM(usize),
+        LowEfConstruction { ef_construction: usize, recommended: usize },
+        HighEfConstruction(usize),
+        LowDimension(usize),
+        HighDimension(usize),
     }
-    impl Config {
-        pub fn default() -> Self;            // dim=128, m=16
-        pub fn for_dim(dim: usize) -> Self;  // Auto-tuned
-        pub fn high_recall(dim: usize) -> Self;  // m=32, ef_construction=200
-        pub fn compact(dim: usize) -> Self;      // m=8, ef_construction=50
-        pub fn validate(&self) -> Vec<ConfigWarning>;
-        pub fn is_valid(&self) -> bool;
-    }
-    pub enum ConfigWarning { LowM, HighM, LowEfConstruction, ... }
 }
 
 // RaBitQ configuration
 pub struct RaBitQConfig {
     pub bits_per_dim: u8,
-    pub seed: u64,
+    pub rotation_seed: u64,
+    pub enabled: bool,
+    pub use_simd_dot: bool,
 }
 impl RaBitQConfig {
     pub fn code_size(&self, dim: usize) -> usize;
@@ -1179,16 +1208,9 @@ impl RaBitQConfig {
     pub fn is_valid(&self) -> bool;
 }
 
-// Combined configuration
+// VectorConfig only contains RaBitQ config (HNSW params in EmbeddingSpec)
 pub struct VectorConfig {
-    pub hnsw: hnsw::Config,
     pub rabitq: RaBitQConfig,
-}
-impl VectorConfig {
-    pub fn dim_128() -> Self;
-    pub fn dim_768() -> Self;
-    pub fn dim_1024() -> Self;
-    pub fn dim_1536() -> Self;
 }
 
 // Vector storage precision
@@ -1204,28 +1226,24 @@ pub enum VectorElementType {
 // Access via hnsw::Index
 pub struct Index { /* private */ }
 impl Index {
-    // Construction
-    pub fn new(
+    // Construction (the only constructor)
+    pub fn from_spec(
         embedding: EmbeddingCode,
-        distance: Distance,
-        config: hnsw::Config,
-        nav_cache: Arc<NavigationCache>,
-    ) -> Self;
-
-    pub fn with_storage_type(
-        embedding: EmbeddingCode,
-        distance: Distance,
-        storage_type: VectorElementType,
-        config: hnsw::Config,
+        spec: &EmbeddingSpec,
+        batch_threshold: usize,  // Runtime knob for neighbor fetching
         nav_cache: Arc<NavigationCache>,
     ) -> Self;
 
     // Accessors
     pub fn embedding(&self) -> EmbeddingCode;
     pub fn storage_type(&self) -> VectorElementType;
-    pub fn config(&self) -> &hnsw::Config;
     pub fn distance_metric(&self) -> Distance;
     pub fn nav_cache(&self) -> &Arc<NavigationCache>;
+    pub fn dim(&self) -> usize;
+    pub fn m(&self) -> usize;
+    pub fn ef_construction(&self) -> usize;
+    pub fn m_l(&self) -> f32;
+    pub fn batch_threshold(&self) -> usize;
 
     // Insert
     pub fn insert(&self, storage: &Storage, vec_id: VecId, vector: &[f32]) -> Result<()>;
