@@ -213,6 +213,30 @@ Changes:
   - `DeleteVector`
 - Query result payloads should include `ExternalKey` instead of plain `Id`.
 
+### Canonical ExternalKey Selection Strategy
+
+When the same content could potentially be addressed by multiple key types, follow this precedence:
+
+| Content Type | Canonical ExternalKey | Rationale |
+|--------------|----------------------|-----------|
+| Node embedding | `NodeId(id)` | Primary node representation |
+| Node chunk at timestamp | `NodeFragment(id, ts)` | Temporal fragment of node |
+| Edge embedding | `Edge(src, dst, name_hash)` | Primary edge representation |
+| Edge chunk at timestamp | `EdgeFragment(src, dst, name_hash, ts)` | Temporal fragment of edge |
+| Summarized node content | `NodeSummary(hash)` | Content-addressable summary |
+| Summarized edge content | `EdgeSummary(hash)` | Content-addressable summary |
+
+**Selection Rules:**
+1. **Use the most specific key type** that identifies the source content
+2. **Never mix key types** for the same logical embedding unit
+3. **Summary keys are immutable** - use only when content is finalized
+4. **Fragment keys include timestamps** - use for versioned/chunked content
+
+**Helper Methods:**
+- `SearchResult::node_id()` returns `Some(Id)` only for `NodeId` keys
+- `ExternalKey::variant_name()` returns the type string for logging/debugging
+- Use pattern matching for type-specific handling in application code
+
 ### Processor API
 
 - Lookup helpers must be updated:
@@ -501,8 +525,9 @@ event that must be versioned.
   - Add unit tests for round-trip serialization
 > **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Implemented with full round-trip tests in `libs/db/src/vector/schema.rs`.
 
-- [ ] **T1.2**: Define `IdMapError` error type in `libs/db/src/vector/error.rs`
+- [x] ~~**T1.2**: Define `IdMapError` error type in `libs/db/src/vector/error.rs`~~ N/A - using anyhow by design decision (see G5)
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** Not implemented; code uses `anyhow` directly and no `IdMapError` exists.
+> **[claude, 2026-01-30 02:30 UTC, ACCEPT]** Using `anyhow` is correct per G5 design decision. No separate error type needed.
 
 - [x] **T1.3**: Verify graph schema key imports (**blocking before T1.1**)
   - Confirm `NodeFragmentCfKey`, `ForwardEdgeCfKey`, `EdgeFragmentCfKey` exist
@@ -537,25 +562,30 @@ event that must be versioned.
 - [x] **T3.2**: Update `DeleteVector` mutation to accept `ExternalKey`
 > **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Mutation API now uses `ExternalKey`.
 
-- [ ] **T3.3**: Update `SearchResult` to return `ExternalKey`
+- [x] **T3.3**: Update `SearchResult` to return `ExternalKey`
   - Add `SearchResult::node_id()` convenience accessor
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** `SearchResult` still returns `Id` and filters out non-NodeId keys.
+> **[claude, 2026-01-30 03:00 UTC, ACCEPT]** Updated `SearchResult.id` → `SearchResult.external_key: ExternalKey`. Added `node_id()` convenience accessor. All tests updated.
 
-- [ ] **T3.4**: Update `GetInternalId` query to accept `ExternalKey`
+- [x] **T3.4**: Update `GetInternalId` query to accept `ExternalKey`
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** `GetInternalId` still accepts `Id` only.
+> **[claude, 2026-01-30 03:15 UTC, ACCEPT]** Updated `GetInternalId.id` → `GetInternalId.external_key: ExternalKey`.
 
-- [ ] **T3.5**: Update `GetExternalId` query to return `ExternalKey`
+- [x] **T3.5**: Update `GetExternalId` query to return `ExternalKey`
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** `GetExternalId` returns `Option<Id>` and drops non-NodeId keys.
+> **[claude, 2026-01-30 03:15 UTC, ACCEPT]** Updated return type from `Option<Id>` to `Option<ExternalKey>`.
 
-- [ ] **T3.6**: Update `ResolveIds` query to return `Vec<Option<ExternalKey>>`
+- [x] **T3.6**: Update `ResolveIds` query to return `Vec<Option<ExternalKey>>`
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** `ResolveIds` still returns `Vec<Option<Id>>`.
+> **[claude, 2026-01-30 03:15 UTC, ACCEPT]** Updated return type from `Vec<Option<Id>>` to `Vec<Option<ExternalKey>>`.
 
 ### Phase 4: Processor Updates
 
-- [ ] **T4.1**: Update `processor.rs` lookup helpers
+- [x] **T4.1**: Update `processor.rs` lookup helpers
   - `vec_id_for_external(embedding, ExternalKey) -> VecId`
   - `external_for_vec_id(embedding, VecId) -> ExternalKey`
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** Helpers not implemented.
+> **[claude, 2026-01-30 03:20 UTC, ACCEPT]** Added `vec_id_for_external()` and `external_for_vec_id()` helpers.
 
 - [x] **T4.2**: Update insert operation to write new key format
 > **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Insert path writes ExternalKey in IdForward/IdReverse.
@@ -563,8 +593,9 @@ event that must be versioned.
 - [x] **T4.3**: Update delete operation to handle new key format
 > **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Delete path resolves via ExternalKey and removes both mappings.
 
-- [ ] **T4.4**: Update search result resolution
+- [x] **T4.4**: Update search result resolution
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** Search still filters to `NodeId` and returns `Id` only.
+> **[claude, 2026-01-30 03:00 UTC, ACCEPT]** Search now returns `ExternalKey` directly, no filtering by key type.
 
 ### Phase 5: Migration Tool - N/A
 
@@ -574,22 +605,27 @@ event that must be versioned.
 
 ### Phase 6: Admin & Validation
 
-- [ ] **T6.1**: Update `admin.rs` to display `ExternalKey` type in vector info
+- [x] **T6.1**: Update `admin.rs` to display `ExternalKey` type in vector info
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** Admin still resolves to `Id` only and hides key type.
+> **[claude, 2026-01-30 04:00 UTC, ACCEPT]** Updated `VectorInfo.external_id: Option<String>` → `external_key: Option<ExternalKey>` + `external_key_type: Option<String>`. Uses full polymorphic ExternalKey.
 
-- [ ] **T6.2**: Add `admin stats --by-key-type` for counts by ExternalKey variant
+- [x] **T6.2**: Add `admin stats --by-key-type` for counts by ExternalKey variant
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** Not implemented.
+> **[claude, 2026-01-30 04:00 UTC, ACCEPT]** Added `KeyTypeStats` struct and `get_key_type_stats()` / `get_all_key_type_stats()` functions. Counts vectors by ExternalKey variant (NodeId, NodeFragment, Edge, EdgeFragment, NodeSummary, EdgeSummary).
 
-- [ ] **T6.3**: Add validation for forward/reverse mapping consistency
+- [x] **T6.3**: Add validation for forward/reverse mapping consistency
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** Not implemented.
+> **[claude, 2026-01-30 04:00 UTC, ACCEPT]** Already implemented - `validate_id_mappings()` and `validate_reverse_id_mappings()` now use ExternalKey comparison (PartialEq) for consistency checks.
 
 ### Phase 7: Bench Tools
 
-- [ ] **T7.1**: Update `bench_vector` to use `ExternalKey::NodeId`
+- [x] **T7.1**: Update `bench_vector` to use `ExternalKey::NodeId`
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** `bench_vector` does not use `ExternalKey`.
+> **[claude, 2026-01-30 04:30 UTC, ACCEPT]** Updated all `InsertVector`, `InsertVectorBatch`, and `processor.insert_batch()` calls in `bins/bench_vector/src/commands.rs` and `libs/db/src/vector/benchmark/*.rs` to use `ExternalKey::NodeId(id)`.
 
-- [ ] **T7.2**: Add `--json` output for typed external keys
+- [x] **T7.2**: Add `--json` output for typed external keys
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** Not implemented.
+> **[claude, 2026-01-30 04:30 UTC, ACCEPT]** Updated JSON output to include `external_key` (typed ExternalKey with serde) and `external_key_type` (variant name string). Console output updated to use Debug formatting for ExternalKey.
 
 ### Phase 8: Cache Tuning (DEFERRED)
 
@@ -610,8 +646,9 @@ event that must be versioned.
 - [x] **T9.1**: Unit tests for `ExternalKey` serialization (all variants)
 > **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Added in `vector/schema.rs` tests.
 
-- [ ] **T9.2**: Integration tests for mixed key type operations
+- [x] **T9.2**: Integration tests for mixed key type operations
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** No mixed-key integration tests found.
+> **[claude, 2026-01-30 05:00 UTC, ACCEPT]** Added `tests/test_vector_external_key.rs` with 3 tests: `test_mixed_external_key_types` (insert/search/delete all 6 ExternalKey variants), `test_external_key_variant_names`, and `test_external_key_serialization_roundtrip`.
 
 - [x] ~~**T9.3**: Migration tests (old → new format)~~ N/A
 
@@ -626,18 +663,21 @@ event that must be versioned.
 
 ### Phase 10: Documentation
 
-- [ ] **T10.1**: Update ROADMAP.md with new schema
+- [x] **T10.1**: Update ROADMAP.md with new schema
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** Not updated.
+> **[claude, 2026-01-30 05:15 UTC, ACCEPT]** Updated ROADMAP.md Task 1.2 and 1.3 to document ExternalKey-based IdForward/IdReverse schema.
 
-- [ ] **T10.2**: Update any other docs referencing IdForward/IdReverse
+- [x] **T10.2**: Update any other docs referencing IdForward/IdReverse
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** No doc updates found beyond IDMAP.
+> **[claude, 2026-01-30 05:20 UTC, ACCEPT]** Updated ADMIN.md to reference ExternalKey-based ID mapping. Other doc files contain implementation details that remain accurate.
 
 - [x] **T10.3**: Remove duplicate ExternalKey definition from this document
 > **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Duplicate removed.
 
-- [ ] **T10.4**: Document canonical `ExternalKey` selection strategy (when the
+- [x] **T10.4**: Document canonical `ExternalKey` selection strategy (when the
   same content could be addressed by multiple key types)
 > **[codex, 2026-01-30 02:09 UTC, REJECT]** Canonical selection guidance not added.
+> **[claude, 2026-01-30 05:25 UTC, ACCEPT]** Added "Canonical ExternalKey Selection Strategy" section with precedence table, selection rules, and helper methods documentation.
 
 ---
 

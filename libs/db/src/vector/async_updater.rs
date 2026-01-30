@@ -983,7 +983,11 @@ mod tests {
 
         // Vector should be found via pending fallback
         assert_eq!(results.len(), 1, "Should find the pending vector");
-        assert_eq!(results[0].id, id, "Should find the correct vector");
+        assert_eq!(
+            results[0].node_id().expect("expected NodeId"),
+            id,
+            "Should find the correct vector"
+        );
     }
 
     /// 7.6.2: Workers drain pending queue
@@ -1033,7 +1037,9 @@ mod tests {
             .search_with_config(&search_config, &first_vector)
             .expect("Search should succeed");
         assert!(
-            results.iter().any(|result| result.id == first_id),
+            results
+                .iter()
+                .any(|result| result.node_id() == Some(first_id)),
             "Drained vector should be searchable"
         );
     }
@@ -1096,7 +1102,9 @@ mod tests {
                 .search_with_config(&search_config, &query)
                 .expect("Search should succeed");
             assert!(
-                results.iter().any(|result| result.id == inserted_id),
+                results
+                    .iter()
+                    .any(|result| result.node_id() == Some(inserted_id)),
                 "Recovered vector should be searchable"
             );
         }

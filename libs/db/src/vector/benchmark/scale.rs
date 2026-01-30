@@ -30,6 +30,7 @@ use anyhow::Result;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
+use crate::vector::schema::ExternalKey;
 use crate::vector::{Distance, Embedding, Processor, Storage};
 use crate::Id;
 
@@ -643,10 +644,11 @@ impl ScaleBenchmark {
         let mut last_items_processed: u64 = 0;
 
         while let Some(batch) = generator.next_batch(config.batch_size) {
-            // Convert to (Id, Vec<f32>) format for processor
-            let vectors: Vec<(Id, Vec<f32>)> = batch
+            // Convert to (ExternalKey, Vec<f32>) format for processor
+            // T7.1: Use ExternalKey::NodeId for polymorphic ID mapping
+            let vectors: Vec<(ExternalKey, Vec<f32>)> = batch
                 .into_iter()
-                .map(|v| (Id::new(), v))
+                .map(|v| (ExternalKey::NodeId(Id::new()), v))
                 .collect();
 
             let batch_len = vectors.len();

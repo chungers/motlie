@@ -90,7 +90,7 @@ impl std::fmt::Display for Query {
                 write!(f, "GetVector: embedding={}, id={}", q.params.embedding, q.params.id)
             }
             Query::GetInternalId(q) => {
-                write!(f, "GetInternalId: embedding={}, id={}", q.params.embedding, q.params.id)
+                write!(f, "GetInternalId: embedding={}, key={:?}", q.params.embedding, q.params.external_key)
             }
             Query::GetExternalId(q) => write!(
                 f,
@@ -302,22 +302,22 @@ impl QueryProcessor for GetVectorDispatch {
 // GetInternalId - Resolve external ID to internal vec_id
 // ============================================================================
 
-/// Get internal vec_id for external ID.
+/// Get internal vec_id for external key.
 ///
-/// This query resolves an external document ID to its internal u32 vector ID
+/// This query resolves an external key to its internal u32 vector ID
 /// used for HNSW graph operations.
 #[derive(Debug, Clone)]
 pub struct GetInternalId {
     /// Embedding space code
     pub embedding: EmbeddingCode,
-    /// External document ID
-    pub id: Id,
+    /// External key (node, edge, fragment, summary, etc.)
+    pub external_key: ExternalKey,
 }
 
 impl GetInternalId {
     /// Create a new GetInternalId query.
-    pub fn new(embedding: EmbeddingCode, id: Id) -> Self {
-        Self { embedding, id }
+    pub fn new(embedding: EmbeddingCode, external_key: ExternalKey) -> Self {
+        Self { embedding, external_key }
     }
 }
 
@@ -341,7 +341,7 @@ impl QueryExecutor for GetInternalId {
     type Output = Option<VecId>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let forward_key = IdForwardCfKey(self.embedding, ExternalKey::NodeId(self.id));
+        let forward_key = IdForwardCfKey(self.embedding, self.external_key.clone());
         let forward_key_bytes = IdForward::key_to_bytes(&forward_key);
 
         let txn_db = storage.transaction_db()?;
@@ -396,19 +396,19 @@ impl GetExternalId {
 pub(crate) struct GetExternalIdDispatch {
     pub(crate) params: GetExternalId,
     pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Option<Id>>>,
+    pub(crate) result_tx: oneshot::Sender<Result<Option<ExternalKey>>>,
 }
 
 impl GetExternalIdDispatch {
     /// Send the result back to the caller.
-    pub fn send_result(self, result: Result<Option<Id>>) {
+    pub fn send_result(self, result: Result<Option<ExternalKey>>) {
         let _ = self.result_tx.send(result);
     }
 }
 
 #[async_trait::async_trait]
 impl QueryExecutor for GetExternalId {
-    type Output = Option<Id>;
+    type Output = Option<ExternalKey>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         let reverse_key = IdReverseCfKey(self.embedding, self.vec_id);
@@ -422,8 +422,7 @@ impl QueryExecutor for GetExternalId {
         match txn_db.get_cf(&reverse_cf, &reverse_key_bytes)? {
             Some(bytes) => {
                 let external_key = IdReverse::value_from_bytes(&bytes)?.0;
-                // Extract Id from ExternalKey (backward compatibility)
-                Ok(external_key.node_id())
+                Ok(Some(external_key))
             }
             None => Ok(None),
         }
@@ -470,19 +469,19 @@ impl ResolveIds {
 pub(crate) struct ResolveIdsDispatch {
     pub(crate) params: ResolveIds,
     pub(crate) timeout: Duration,
-    pub(crate) result_tx: oneshot::Sender<Result<Vec<Option<Id>>>>,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<Option<ExternalKey>>>>,
 }
 
 impl ResolveIdsDispatch {
     /// Send the result back to the caller.
-    pub fn send_result(self, result: Result<Vec<Option<Id>>>) {
+    pub fn send_result(self, result: Result<Vec<Option<ExternalKey>>>) {
         let _ = self.result_tx.send(result);
     }
 }
 
 #[async_trait::async_trait]
 impl QueryExecutor for ResolveIds {
-    type Output = Vec<Option<Id>>;
+    type Output = Vec<Option<ExternalKey>>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         if self.vec_ids.is_empty() {
@@ -509,18 +508,13 @@ impl QueryExecutor for ResolveIds {
             txn_db.multi_get_cf(keys.iter().map(|k| (&reverse_cf, k.as_slice())));
 
         // Parse results, converting RocksDB errors to None
-        // Extract Id from ExternalKey (backward compatibility)
-        let resolved: Vec<Option<Id>> = results
+        let resolved: Vec<Option<ExternalKey>> = results
             .into_iter()
             .map(|result| {
                 result
                     .ok()
                     .flatten()
-                    .and_then(|bytes| {
-                        IdReverse::value_from_bytes(&bytes)
-                            .ok()
-                            .and_then(|v| v.0.node_id())
-                    })
+                    .and_then(|bytes| IdReverse::value_from_bytes(&bytes).ok().map(|v| v.0))
             })
             .collect();
 
@@ -981,7 +975,7 @@ impl crate::reader::Runnable<super::reader::Reader> for GetInternalId {
 /// ```
 #[async_trait::async_trait]
 impl crate::reader::Runnable<super::reader::Reader> for GetExternalId {
-    type Output = Option<Id>;
+    type Output = Option<ExternalKey>;
 
     async fn run(
         self,
@@ -1018,7 +1012,7 @@ impl crate::reader::Runnable<super::reader::Reader> for GetExternalId {
 /// ```
 #[async_trait::async_trait]
 impl crate::reader::Runnable<super::reader::Reader> for ResolveIds {
-    type Output = Vec<Option<Id>>;
+    type Output = Vec<Option<ExternalKey>>;
 
     async fn run(
         self,
@@ -1157,9 +1151,9 @@ mod tests {
     #[test]
     fn test_get_internal_id_query() {
         let id = Id::new();
-        let query = GetInternalId::new(42, id);
+        let query = GetInternalId::new(42, ExternalKey::NodeId(id));
         assert_eq!(query.embedding, 42);
-        assert_eq!(query.id, id);
+        assert_eq!(query.external_key, ExternalKey::NodeId(id));
     }
 
     #[test]
@@ -1195,7 +1189,7 @@ mod tests {
         // Test GetInternalId display
         let (tx, _rx) = oneshot::channel();
         let query = Query::GetInternalId(GetInternalIdDispatch {
-            params: GetInternalId::new(2, id),
+            params: GetInternalId::new(2, ExternalKey::NodeId(id)),
             timeout: Duration::from_secs(5),
             result_tx: tx,
         });
@@ -1231,7 +1225,7 @@ mod tests {
         let query = GetVector::new(1, Id::new());
         assert_eq!(QueryExecutor::timeout(&query), Duration::from_secs(5));
 
-        let query = GetInternalId::new(1, Id::new());
+        let query = GetInternalId::new(1, ExternalKey::NodeId(Id::new()));
         assert_eq!(QueryExecutor::timeout(&query), Duration::from_secs(5));
 
         let query = GetExternalId::new(1, 0);

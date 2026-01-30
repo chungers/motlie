@@ -37,7 +37,7 @@ Admin pulls from these column families:
 - `EmbeddingSpecs` (specs, model/dim/distance/storage)
 - `GraphMeta` (entry point, max level, count, spec hash)
 - `VecMeta` (lifecycle, max layer, created_at)
-- `IdForward` / `IdReverse` (ID mapping)
+- `IdForward` / `IdReverse` (ExternalKey ↔ VecId mapping)
 - `IdAlloc` (next ID, free bitmap)
 - `Edges` (neighbor links by layer)
 - `BinaryCodes` (RaBitQ presence)

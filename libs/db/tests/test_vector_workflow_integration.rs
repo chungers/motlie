@@ -197,7 +197,7 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
         // Convert results to indices via external_ids
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -206,7 +206,7 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
         if qi == 0 {
             println!("  Query 0 top-{} results:", K);
             for (i, r) in results.iter().take(5).enumerate() {
-                println!("    {}. id={}, distance={:.4}", i + 1, r.id, r.distance);
+                println!("    {}. id={}, distance={:.4}", i + 1, r.node_id().expect("expected NodeId"), r.distance);
             }
         }
     }
@@ -237,7 +237,7 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
 
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
 
         let recall = compute_recall(&ground_truth[qi], &result_indices);
@@ -246,7 +246,7 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
         if qi == 0 {
             println!("  Query 0 top-{} results:", K);
             for (i, r) in results.iter().take(5).enumerate() {
-                println!("    {}. id={}, distance={:.4}", i + 1, r.id, r.distance);
+                println!("    {}. id={}, distance={:.4}", i + 1, r.node_id().expect("expected NodeId"), r.distance);
             }
         }
     }
@@ -309,10 +309,10 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
 
         for result in &results {
             assert!(
-                !deleted_id_set.contains(&result.id),
+                !deleted_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: Deleted ID {} should not appear in exact search results",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
         }
 
@@ -326,10 +326,10 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
 
         for result in &results {
             assert!(
-                !deleted_id_set.contains(&result.id),
+                !deleted_id_set.contains(&result.node_id().expect("expected NodeId")),
                 "Query {}: Deleted ID {} should not appear in RaBitQ search results",
                 qi,
-                result.id
+                result.node_id().expect("expected NodeId")
             );
         }
     }

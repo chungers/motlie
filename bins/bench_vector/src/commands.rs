@@ -27,7 +27,7 @@ use motlie_db::vector::{
 };
 use motlie_db::rocksdb::{ColumnFamily, ColumnFamilySerde};
 use motlie_db::Id;
-use motlie_db::vector::schema::{EmbeddingSpec, EmbeddingSpecs};
+use motlie_db::vector::schema::{EmbeddingSpec, EmbeddingSpecs, ExternalKey};
 
 // ============================================================================
 // Download Command
@@ -351,7 +351,8 @@ pub async fn index(args: IndexArgs) -> Result<()> {
 
             for (offset, vector) in batch.into_iter().enumerate() {
                 let id = Id::from_bytes(((batch_start + offset) as u128).to_be_bytes());
-                payload.push((id, vector));
+                // T7.1: Use ExternalKey::NodeId for polymorphic ID mapping
+                payload.push((ExternalKey::NodeId(id), vector));
             }
 
             let mutation = InsertVectorBatch::new(&embedding, payload);
@@ -550,7 +551,8 @@ pub async fn index(args: IndexArgs) -> Result<()> {
 
         for (offset, vector) in batch.iter().enumerate() {
             let id = Id::from_bytes(((batch_start + offset) as u128).to_be_bytes());
-            payload.push((id, vector.clone()));
+            // T7.1: Use ExternalKey::NodeId for polymorphic ID mapping
+            payload.push((ExternalKey::NodeId(id), vector.clone()));
         }
 
         let mutation = InsertVectorBatch::new(&embedding, payload).immediate();
@@ -844,10 +846,12 @@ pub async fn query(args: QueryArgs) -> Result<()> {
                     "ef_search": args.ef_search,
                     "stdin": true,
                 },
+                // T7.2: JSON output with typed external keys
                 "results": results.iter().map(|r| serde_json::json!({
                     "vec_id": r.vec_id,
                     "distance": r.distance,
-                    "id": r.id.as_str(),
+                    "external_key": r.external_key,
+                    "external_key_type": r.external_key.variant_name(),
                 })).collect::<Vec<_>>(),
             });
             std::fs::write(&output_path, serde_json::to_string_pretty(&json)?)
@@ -856,10 +860,11 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         } else {
             println!("Results:");
             for result in results {
+                // T7.1: Use external_key with Debug formatting (supports all ExternalKey variants)
                 println!(
-                    "  vec_id={} id={} distance={:.6}",
+                    "  vec_id={} external_key={:?} distance={:.6}",
                     result.vec_id,
-                    result.id.as_str(),
+                    result.external_key,
                     result.distance
                 );
             }
@@ -2768,13 +2773,15 @@ fn print_vectors(vectors: &[motlie_db::vector::admin::VectorInfo]) {
 
     for v in vectors {
         let total_edges: usize = v.edge_counts.iter().sum();
+        // T6.1: VectorInfo now uses external_key_type: Option<String> for display
+        let key_display = v.external_key_type.as_deref().unwrap_or("-");
         println!("{:>8}  {:>10}  {:>8}  {:>5}  {:>10}  {}",
             v.vec_id,
             format!("{:?}", v.lifecycle).to_lowercase(),
             v.max_layer,
             total_edges,
             if v.has_binary_code { "yes" } else { "no" },
-            v.external_id.as_deref().unwrap_or("-"));
+            key_display);
     }
 
     println!("\nShowing {} vector(s).", vectors.len());
