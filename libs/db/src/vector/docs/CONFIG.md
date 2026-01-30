@@ -73,6 +73,7 @@ This creates maintenance burden and potential for silent behavior drift.
 Since `hnsw::Config` is fully derivable from `EmbeddingSpec`, eliminate it entirely.
 
 > (codex, 2026-01-30 05:37 UTC, ACCEPT) This solves the cross-process drift risk by making persisted `EmbeddingSpec` the only source for structure-affecting params; OK as long as any remaining runtime knobs (e.g., batch sizing, caches) are explicitly separated and never fed into structural HNSW construction.
+> (codex, 2026-01-30 06:31 UTC, PARTIAL) Implementation keeps `hnsw::Config` and deprecated constructors/exports, so drift is still possible for callers who bypass `Index::from_spec()`; internal Processor/AsyncUpdater path is aligned, but the doc should acknowledge this residual risk.
 
 ### Design Principles
 
@@ -130,6 +131,8 @@ Since `hnsw::Config` is fully derivable from `EmbeddingSpec`, eliminate it entir
 | `hnsw::Config::batch_threshold` | **MOVE** - to `Processor.batch_threshold` |
 | `Processor.hnsw_config` field | **DELETE** |
 | `VectorConfig.hnsw` field | **DELETE** or simplify |
+
+> (codex, 2026-01-30 06:31 UTC, REJECT) Current code did not delete `hnsw::Config` or `VectorConfig.hnsw`; both remain (deprecated). This section is not accurate as written.
 
 ### What Gets Added
 
@@ -300,6 +303,7 @@ impl Processor {
   - File: `libs/db/src/vector/async_updater.rs`
   - Uses `Index::from_spec()` for HNSW index creation
   - Reads EmbeddingSpec from storage (single source of truth)
+  > (codex, 2026-01-30 06:31 UTC, PARTIAL) `AsyncUpdaterConfig.ef_construction` is now unused (index builds from spec). Either remove the knob or route it into spec-driven building; otherwise this is an API no-op.
 
 - [x] **T4.2**: Update `VectorConfig`
   - File: `libs/db/src/vector/config.rs`
@@ -359,6 +363,8 @@ After implementation, verify:
 2. Verify: Zero references (struct deleted)
 3. Verify: All HNSW code uses `EmbeddingSpec` methods
 
+> (codex, 2026-01-30 06:31 UTC, REJECT) `hnsw::Config` is still referenced across code/tests/docs (grep shows multiple hits); this scenario is not satisfied.
+
 ---
 
 ## Risk Assessment
@@ -385,6 +391,8 @@ truth. Move `batch_threshold` to `Processor` as a simple runtime knob.
 - Simpler codebase (one config type, not two)
 - Clear separation: `EmbeddingSpec` = persisted truth, `batch_threshold` = runtime knob
 - Tests use explicit helper instead of config flag
+
+> (codex, 2026-01-30 06:31 UTC, PARTIAL) Drift risk is eliminated only for Processor/AsyncUpdater paths; deprecated `hnsw::Config` and `Index::new()` still allow drift if used externally.
 
 **Estimated effort:** Medium (1-2 days) - touches many files but changes are mechanical.
 
