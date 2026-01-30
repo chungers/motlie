@@ -207,7 +207,7 @@ async fn test_sift_l2_hnsw_with_runnable() -> anyhow::Result<()> {
         // Map external IDs back to original indices for recall computation
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
         search_results.push(result_indices);
     }
@@ -323,7 +323,7 @@ async fn test_laion_clip_cosine_exact_hnsw_with_runnable() -> anyhow::Result<()>
         // Map external IDs back to original indices
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
         search_results.push(result_indices);
     }
@@ -446,7 +446,7 @@ async fn test_laion_clip_cosine_rabitq_with_runnable() -> anyhow::Result<()> {
         // Map external IDs back to original indices
         let result_indices: Vec<usize> = results
             .iter()
-            .filter_map(|r| external_ids.iter().position(|&id| id == r.id))
+            .filter_map(|r| external_ids.iter().position(|&id| id == r.node_id().expect("expected NodeId")))
             .collect();
         search_results.push(result_indices);
     }

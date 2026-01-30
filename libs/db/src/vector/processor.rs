@@ -34,12 +34,12 @@ use super::rabitq::RaBitQ;
 use super::registry::EmbeddingRegistry;
 use super::schema::{
     EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, ExternalKey, GraphMeta,
-    GraphMetaCfKey, GraphMetaField, IdReverse, IdReverseCfKey, Pending, VecId, VecMeta,
-    VecMetaCfKey, VectorCfKey, Vectors,
+    GraphMetaCfKey, GraphMetaField, IdForward, IdForwardCfKey, IdReverse, IdReverseCfKey, Pending,
+    VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
 };
 // These types are only used in tests
 #[cfg(test)]
-use super::schema::{GraphMetaCfValue, IdForward, IdForwardCfKey};
+use super::schema::GraphMetaCfValue;
 use super::search::{SearchConfig, SearchStrategy};
 use super::Storage;
 use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
@@ -49,17 +49,30 @@ use crate::Id;
 // SearchResult
 // ============================================================================
 
-/// Search result containing external ID, internal ID, and distance.
+/// Search result containing external key, internal ID, and distance.
 ///
 /// Returned by `Processor::search()` for each matched vector.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    /// External ID (ULID) for the vector
-    pub id: Id,
+    /// Typed external key for the vector (node, edge, fragment, summary, etc.)
+    pub external_key: ExternalKey,
     /// Internal vector ID (compact u32)
     pub vec_id: VecId,
     /// Distance from query vector (lower = more similar)
     pub distance: f32,
+}
+
+impl SearchResult {
+    /// Convenience accessor for NodeId external keys.
+    ///
+    /// Returns `Some(id)` if the external key is `ExternalKey::NodeId`,
+    /// otherwise returns `None`.
+    pub fn node_id(&self) -> Option<Id> {
+        match &self.external_key {
+            ExternalKey::NodeId(id) => Some(*id),
+            _ => None,
+        }
+    }
 }
 
 // ============================================================================
@@ -626,6 +639,68 @@ impl Processor {
         Ok(result.vec_id())
     }
 
+    // =========================================================================
+    // ID Mapping Lookup Helpers
+    // =========================================================================
+
+    /// Look up internal vec_id for an external key.
+    ///
+    /// This is a low-level helper that performs a direct IdForward lookup.
+    /// Prefer using the query API (`GetInternalId`) for channel-based access.
+    ///
+    /// # Returns
+    /// - `Ok(Some(vec_id))` - External key is mapped to this internal ID
+    /// - `Ok(None)` - External key not found (not inserted or deleted)
+    /// - `Err(...)` - Storage error
+    pub fn vec_id_for_external(
+        &self,
+        embedding: &Embedding,
+        external_key: &ExternalKey,
+    ) -> Result<Option<VecId>> {
+        let embedding_code = embedding.code();
+        let txn_db = self.storage.transaction_db()?;
+        let forward_cf = txn_db
+            .cf_handle(IdForward::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
+
+        let forward_key = IdForwardCfKey(embedding_code, external_key.clone());
+        let key_bytes = IdForward::key_to_bytes(&forward_key);
+
+        match txn_db.get_cf(&forward_cf, &key_bytes)? {
+            Some(bytes) => Ok(Some(IdForward::value_from_bytes(&bytes)?.0)),
+            None => Ok(None),
+        }
+    }
+
+    /// Look up external key for an internal vec_id.
+    ///
+    /// This is a low-level helper that performs a direct IdReverse lookup.
+    /// Prefer using the query API (`GetExternalId`) for channel-based access.
+    ///
+    /// # Returns
+    /// - `Ok(Some(external_key))` - Vec_id maps to this external key
+    /// - `Ok(None)` - Vec_id not found (not allocated or recycled)
+    /// - `Err(...)` - Storage error
+    pub fn external_for_vec_id(
+        &self,
+        embedding: &Embedding,
+        vec_id: VecId,
+    ) -> Result<Option<ExternalKey>> {
+        let embedding_code = embedding.code();
+        let txn_db = self.storage.transaction_db()?;
+        let reverse_cf = txn_db
+            .cf_handle(IdReverse::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
+
+        let reverse_key = IdReverseCfKey(embedding_code, vec_id);
+        let key_bytes = IdReverse::key_to_bytes(&reverse_key);
+
+        match txn_db.get_cf(&reverse_cf, &key_bytes)? {
+            Some(bytes) => Ok(Some(IdReverse::value_from_bytes(&bytes)?.0)),
+            None => Ok(None),
+        }
+    }
+
     /// Search for nearest neighbors in an embedding space.
     ///
     /// Performs HNSW approximate nearest neighbor search and returns results
@@ -653,7 +728,7 @@ impl Processor {
     /// ```rust,ignore
     /// let results = processor.search(embedding_code, &query, 10, 100)?;
     /// for result in results {
-    ///     println!("ID: {}, distance: {}", result.id, result.distance);
+    ///     println!("Key: {:?}, distance: {}", result.external_key, result.distance);
     /// }
     /// ```
     pub fn search(
@@ -766,17 +841,14 @@ impl Processor {
             }
             if let Ok(Some(bytes)) = value_result {
                 let external_key = IdReverse::value_from_bytes(&bytes)?.0;
-                // Extract Id from ExternalKey (backward compatibility)
-                if let Some(id) = external_key.node_id() {
-                    let (distance, vec_id) = raw_results[i];
-                    results.push(SearchResult {
-                        id,
-                        vec_id,
-                        distance,
-                    });
-                }
+                let (distance, vec_id) = raw_results[i];
+                results.push(SearchResult {
+                    external_key,
+                    vec_id,
+                    distance,
+                });
             }
-            // Skip deleted vectors (IdReverse missing or error) or non-NodeId keys
+            // Skip deleted vectors (IdReverse missing or error)
         }
 
         Ok(results)
@@ -1004,15 +1076,12 @@ impl Processor {
                 }
 
                 let external_key = IdReverse::value_from_bytes(&bytes)?.0;
-                // Extract Id from ExternalKey (backward compatibility)
-                if let Some(id) = external_key.node_id() {
-                    let (distance, vec_id) = raw_results[i];
-                    hnsw_results.push(SearchResult {
-                        id,
-                        vec_id,
-                        distance,
-                    });
-                }
+                let (distance, vec_id) = raw_results[i];
+                hnsw_results.push(SearchResult {
+                    external_key,
+                    vec_id,
+                    distance,
+                });
             }
         }
 
@@ -1031,10 +1100,10 @@ impl Processor {
                     hnsw_results.iter().map(|r| r.vec_id).collect();
 
                 // Add pending results that aren't duplicates
-                for (distance, vec_id, external_id) in pending_results {
+                for (distance, vec_id, external_key) in pending_results {
                     if !hnsw_vec_ids.contains(&vec_id) {
                         hnsw_results.push(SearchResult {
-                            id: external_id,
+                            external_key,
                             vec_id,
                             distance,
                         });
@@ -1068,13 +1137,13 @@ impl Processor {
     /// * `limit` - Maximum number of pending vectors to scan
     ///
     /// # Returns
-    /// Vector of (distance, vec_id, external_id) tuples, sorted by distance ascending.
+    /// Vector of (distance, vec_id, external_key) tuples, sorted by distance ascending.
     fn scan_pending_vectors(
         &self,
         embedding: &Embedding,
         query: &[f32],
         limit: usize,
-    ) -> Result<Vec<(f32, VecId, Id)>> {
+    ) -> Result<Vec<(f32, VecId, ExternalKey)>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1145,20 +1214,14 @@ impl Processor {
             // Compute exact distance
             let distance = embedding.compute_distance(query, &vector_data);
 
-            // Look up external ID via IdReverse
+            // Look up external key via IdReverse
             let reverse_key = IdReverseCfKey(embedding_code, vec_id);
             let external_key = match txn_db.get_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))? {
                 Some(bytes) => IdReverse::value_from_bytes(&bytes)?.0,
-                None => continue, // No external ID mapping (deleted?), skip
+                None => continue, // No external key mapping (deleted?), skip
             };
 
-            // Extract Id from ExternalKey (backward compatibility)
-            let external_id = match external_key.node_id() {
-                Some(id) => id,
-                None => continue, // Skip non-NodeId keys for now
-            };
-
-            results.push((distance, vec_id, external_id));
+            results.push((distance, vec_id, external_key));
         }
 
         // Sort by distance ascending
@@ -1558,7 +1621,11 @@ mod tests {
 
         // First result should be closest to query
         let first = &results[0];
-        assert_eq!(first.id, inserted_ids[0], "First inserted vector should be closest");
+        assert_eq!(
+            first.node_id().expect("expected NodeId"),
+            inserted_ids[0],
+            "First inserted vector should be closest"
+        );
 
         // All results should have valid distances
         for (i, result) in results.iter().enumerate() {
@@ -1631,7 +1698,10 @@ mod tests {
         assert!(results.len() <= 3, "Should only return non-deleted vectors");
 
         // Verify deleted IDs are not in results
-        let result_ids: Vec<_> = results.iter().map(|r| r.id).collect();
+        let result_ids: Vec<_> = results
+            .iter()
+            .filter_map(|r| r.node_id())
+            .collect();
         assert!(
             !result_ids.contains(&inserted_ids[0]),
             "First deleted ID should not be in results"
@@ -1778,7 +1848,11 @@ mod tests {
 
         // First result should be closest to query
         let first = &results[0];
-        assert_eq!(first.id, inserted_ids[0], "First inserted vector should be closest");
+        assert_eq!(
+            first.node_id().expect("expected NodeId"),
+            inserted_ids[0],
+            "First inserted vector should be closest"
+        );
 
         // Results should be sorted by distance
         for (i, result) in results.iter().enumerate() {
@@ -2185,7 +2259,7 @@ mod tests {
             })
             .collect();
         assert!(
-            inserted_ids.contains(&results[0].id),
+            inserted_ids.contains(&results[0].node_id().expect("expected NodeId")),
             "First result should be one of our inserted vectors"
         );
     }

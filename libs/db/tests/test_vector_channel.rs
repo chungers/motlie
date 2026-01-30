@@ -129,7 +129,7 @@ async fn test_mutation_via_writer_consumer() {
     // The query vector should match itself (index 0)
     assert!(!results.is_empty(), "Should find results after insert");
     assert_eq!(
-        results[0].id, ids[0],
+        results[0].node_id().expect("expected NodeId"), ids[0],
         "First result should be the query vector itself"
     );
 }
@@ -449,7 +449,7 @@ async fn test_writer_flush_semantics() {
         .expect("search after flush");
 
     assert!(!results.is_empty(), "Vector should be visible after flush");
-    assert_eq!(results[0].id, id, "Should find the inserted vector");
+    assert_eq!(results[0].node_id().expect("expected NodeId"), id, "Should find the inserted vector");
 }
 
 // ============================================================================
@@ -631,7 +631,7 @@ async fn test_concurrent_deletes_vs_searches() {
                     // Note: During the delete window, deleted IDs may still appear
                     // until the delete is fully committed and flushed
                     for result in &results {
-                        if deleted_ids.contains(&result.id) {
+                        if deleted_ids.contains(&result.node_id().expect("expected NodeId")) {
                             found_deleted.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -667,16 +667,16 @@ async fn test_concurrent_deletes_vs_searches() {
         .expect("post-delete search");
 
     // Count how many deleted IDs are in final results
-    let deleted_in_final: Vec<&Id> = post_delete_results
+    let deleted_in_final: Vec<Id> = post_delete_results
         .iter()
-        .filter(|r| ids_to_delete.contains(&r.id))
-        .map(|r| &r.id)
+        .filter_map(|r| r.node_id())
+        .filter(|id| ids_to_delete.contains(id))
         .collect();
 
-    let kept_in_final: Vec<&Id> = post_delete_results
+    let kept_in_final: Vec<Id> = post_delete_results
         .iter()
-        .filter(|r| ids_to_keep.contains(&r.id))
-        .map(|r| &r.id)
+        .filter_map(|r| r.node_id())
+        .filter(|id| ids_to_keep.contains(id))
         .collect();
 
     println!("\n=== test_concurrent_deletes_vs_searches Results ===");

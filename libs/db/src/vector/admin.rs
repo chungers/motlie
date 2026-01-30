@@ -31,12 +31,11 @@ use serde::Serialize;
 use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 use crate::vector::schema::{
     BinaryCodes, BinaryCodeCfKey, Edges, EdgeCfKey, EmbeddingCode, EmbeddingSpecCfKey,
-    EmbeddingSpecs, GraphMeta, GraphMetaCfKey, GraphMetaField, IdAlloc, IdAllocCfKey,
+    EmbeddingSpecs, ExternalKey, GraphMeta, GraphMetaCfKey, GraphMetaField, IdAlloc, IdAllocCfKey,
     IdAllocField, IdForward, IdReverse, IdReverseCfKey, LifecycleCounts, LifecycleCountsCfKey,
     LifecycleCountsValue, Pending, VecId, VecMeta, VecMetaCfKey, ALL_COLUMN_FAMILIES,
 };
 use crate::vector::{EmbeddingSpec, Storage};
-use crate::Id;
 
 // ============================================================================
 // DB Access Abstraction (ADMIN.md ADMIN-1 / Read-Only Mode)
@@ -190,6 +189,28 @@ pub struct EmbeddingStats {
     pub free_id_count: u64,
 }
 
+/// Statistics grouped by external key type.
+/// IDMAP T6.2: Counts of vectors by ExternalKey variant.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct KeyTypeStats {
+    /// Embedding code (primary key).
+    pub code: EmbeddingCode,
+    /// Total vectors in this embedding.
+    pub total_vectors: u64,
+    /// Count of NodeId keys.
+    pub node_id: u64,
+    /// Count of NodeFragment keys.
+    pub node_fragment: u64,
+    /// Count of Edge keys.
+    pub edge: u64,
+    /// Count of EdgeFragment keys.
+    pub edge_fragment: u64,
+    /// Count of NodeSummary keys.
+    pub node_summary: u64,
+    /// Count of EdgeSummary keys.
+    pub edge_summary: u64,
+}
+
 /// Layer distribution in HNSW graph.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct LayerDistribution {
@@ -221,8 +242,11 @@ pub struct EmbeddingInspection {
 pub struct VectorInfo {
     /// Internal vector ID.
     pub vec_id: VecId,
-    /// External ULID (if resolved).
-    pub external_id: Option<String>,
+    /// External key (typed polymorphic ID).
+    /// IDMAP T6.1: Changed from `external_id: Option<String>` to full ExternalKey.
+    pub external_key: Option<ExternalKey>,
+    /// External key type name (for display convenience).
+    pub external_key_type: Option<String>,
     /// Lifecycle state.
     pub lifecycle: VecLifecycle,
     /// Maximum HNSW layer this vector appears in.
@@ -440,6 +464,91 @@ fn get_all_stats_impl(db: &dyn AdminDb) -> Result<Vec<EmbeddingStats>> {
     Ok(stats)
 }
 
+/// Get statistics grouped by external key type for a single embedding.
+/// IDMAP T6.2: Counts vectors by ExternalKey variant.
+pub fn get_key_type_stats(storage: &Storage, code: EmbeddingCode) -> Result<KeyTypeStats> {
+    get_key_type_stats_impl(storage.transaction_db()?, code)
+}
+
+/// Get key type statistics using secondary (read-only) mode.
+pub fn get_key_type_stats_secondary(storage: &Storage, code: EmbeddingCode) -> Result<KeyTypeStats> {
+    get_key_type_stats_impl(storage.db()?, code)
+}
+
+fn get_key_type_stats_impl(db: &dyn AdminDb, code: EmbeddingCode) -> Result<KeyTypeStats> {
+    let reverse_cf = db
+        .cf_handle(IdReverse::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdReverse::CF_NAME))?;
+
+    let prefix = code.to_be_bytes();
+    let iter = db.iterator_cf(
+        &reverse_cf,
+        IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+    );
+
+    let mut stats = KeyTypeStats {
+        code,
+        ..Default::default()
+    };
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+
+        let external_key = IdReverse::value_from_bytes(&value_bytes)?;
+        stats.total_vectors += 1;
+
+        match external_key.0.variant_name() {
+            "NodeId" => stats.node_id += 1,
+            "NodeFragment" => stats.node_fragment += 1,
+            "Edge" => stats.edge += 1,
+            "EdgeFragment" => stats.edge_fragment += 1,
+            "NodeSummary" => stats.node_summary += 1,
+            "EdgeSummary" => stats.edge_summary += 1,
+            _ => {} // Unknown variant (should not happen)
+        }
+    }
+
+    Ok(stats)
+}
+
+/// Get key type statistics for all embeddings.
+pub fn get_all_key_type_stats(storage: &Storage) -> Result<Vec<KeyTypeStats>> {
+    get_all_key_type_stats_impl(storage.transaction_db()?)
+}
+
+/// Get key type statistics for all embeddings using secondary (read-only) mode.
+pub fn get_all_key_type_stats_secondary(storage: &Storage) -> Result<Vec<KeyTypeStats>> {
+    get_all_key_type_stats_impl(storage.db()?)
+}
+
+fn get_all_key_type_stats_impl(db: &dyn AdminDb) -> Result<Vec<KeyTypeStats>> {
+    let specs_cf = db
+        .cf_handle(EmbeddingSpecs::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
+
+    let mut stats = Vec::new();
+    let iter = db.iterator_cf(&specs_cf, IteratorMode::Start);
+
+    for item in iter {
+        let (key_bytes, _) = item?;
+        if key_bytes.len() == 8 {
+            let code = u64::from_be_bytes(key_bytes[..].try_into()?);
+            match get_key_type_stats_impl(db, code) {
+                Ok(s) => stats.push(s),
+                Err(e) => {
+                    tracing::warn!("Failed to get key type stats for embedding {}: {}", code, e);
+                }
+            }
+        }
+    }
+
+    Ok(stats)
+}
+
 /// Deep inspection of an embedding (includes layer distribution, pending queue).
 pub fn inspect_embedding(storage: &Storage, code: EmbeddingCode) -> Result<EmbeddingInspection> {
     inspect_embedding_impl(storage.transaction_db()?, code)
@@ -500,13 +609,15 @@ fn get_vector_info_impl(db: &dyn AdminDb, code: EmbeddingCode, vec_id: VecId) ->
     let meta_value = VecMeta::value_from_bytes(&meta_bytes)?;
     let meta = &meta_value.0;
 
-    let external_id = resolve_external_id(db, code, vec_id)?;
+    let external_key = resolve_external_key(db, code, vec_id)?;
+    let external_key_type = external_key.as_ref().map(|k| k.variant_name().to_string());
     let edge_counts = count_edges_per_layer(db, code, vec_id, meta.max_layer)?;
     let has_binary_code = has_binary_code(db, code, vec_id)?;
 
     Ok(Some(VectorInfo {
         vec_id,
-        external_id: external_id.map(|id| id.to_string()),
+        external_key,
+        external_key_type,
         lifecycle: meta.lifecycle().into(),
         max_layer: meta.max_layer,
         created_at: Some(meta.created_at),
@@ -576,13 +687,15 @@ fn list_vectors_by_state_impl(
         let meta = &meta_value.0;
 
         if meta.lifecycle() == target_state {
-            let external_id = resolve_external_id(db, code, key.1)?;
+            let external_key = resolve_external_key(db, code, key.1)?;
+            let external_key_type = external_key.as_ref().map(|k| k.variant_name().to_string());
             let edge_counts = count_edges_per_layer(db, code, key.1, meta.max_layer)?;
             let has_binary_code = has_binary_code(db, code, key.1)?;
 
             results.push(VectorInfo {
                 vec_id: key.1,
-                external_id: external_id.map(|id| id.to_string()),
+                external_key,
+                external_key_type,
                 lifecycle: meta.lifecycle().into(),
                 max_layer: meta.max_layer,
                 created_at: Some(meta.created_at),
@@ -672,13 +785,15 @@ fn sample_vectors_impl(
 
     let mut results = Vec::with_capacity(reservoir.len());
     for (vec_id, max_layer, lifecycle, created_at) in reservoir {
-        let external_id = resolve_external_id(db, code, vec_id)?;
+        let external_key = resolve_external_key(db, code, vec_id)?;
+        let external_key_type = external_key.as_ref().map(|k| k.variant_name().to_string());
         let edge_counts = count_edges_per_layer(db, code, vec_id, max_layer)?;
         let has_binary_code = has_binary_code(db, code, vec_id)?;
 
         results.push(VectorInfo {
             vec_id,
-            external_id: external_id.map(|id| id.to_string()),
+            external_key,
+            external_key_type,
             lifecycle: lifecycle.into(),
             max_layer,
             created_at: Some(created_at),
@@ -1349,11 +1464,13 @@ fn get_pending_queue_info(
     Ok((count, oldest_timestamp))
 }
 
-fn resolve_external_id(
+/// Resolve the external key for a vector.
+/// IDMAP T6.1: Returns full ExternalKey instead of just Id.
+fn resolve_external_key(
     db: &dyn AdminDb,
     code: EmbeddingCode,
     vec_id: VecId,
-) -> Result<Option<Id>> {
+) -> Result<Option<ExternalKey>> {
     let cf = db
         .cf_handle(IdReverse::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("CF {} not found", IdReverse::CF_NAME))?;
@@ -1362,8 +1479,7 @@ fn resolve_external_id(
     match db.get_cf(&cf, &IdReverse::key_to_bytes(&key))? {
         Some(bytes) => {
             let val = IdReverse::value_from_bytes(&bytes)?;
-            // Extract Id from ExternalKey for backward compatibility
-            Ok(val.0.node_id())
+            Ok(Some(val.0))
         }
         None => Ok(None),
     }

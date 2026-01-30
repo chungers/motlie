@@ -1231,13 +1231,14 @@ Both `graph::schema` and `vector::schema` modules follow the same patterns:
 - [ ] Free IDs are reused before allocating new ones
 - [ ] Thread-safe concurrent allocation
 
-### Task 1.2: Forward Mapping (ULID -> u32)
+### Task 1.2: Forward Mapping (ExternalKey -> u32)
 
-**Status:** ✅ COMPLETE (2026-01-04) - Schema in `schema.rs::IdForward`, integrated in `writer.rs`
+**Status:** ✅ COMPLETE (2026-01-04, updated 2026-01-30 for ExternalKey) - Schema in `schema.rs::IdForward`, integrated in `writer.rs`
 
-The `IdForward` CF is implemented with:
-- Key: `IdForwardCfKey(EmbeddingCode, Id)` = 24 bytes
+The `IdForward` CF is implemented with polymorphic `ExternalKey` support:
+- Key: `IdForwardCfKey(EmbeddingCode, ExternalKey)` = 8 + [1 tag + variable payload] bytes
 - Value: `IdForwardCfValue(VecId)` = 4 bytes
+- Supports all 6 ExternalKey variants: NodeId, NodeFragment, Edge, EdgeFragment, NodeSummary, EdgeSummary
 - All serialization methods (`key_to_bytes`, `key_from_bytes`, `value_to_bytes`, `value_from_bytes`)
 - Integration with `InsertVector` and `DeleteVector` mutations in `writer.rs`
 
@@ -1245,16 +1246,17 @@ The `IdForward` CF is implemented with:
 - [ ] Insert stores ULID -> u32 mapping
 - [ ] Lookup returns Option<u32>
 
-### Task 1.3: Reverse Mapping (u32 -> ULID)
+### Task 1.3: Reverse Mapping (u32 -> ExternalKey)
 
-**Status:** ✅ COMPLETE (2026-01-04) - Schema in `schema.rs::IdReverse`, queries in `query.rs`
+**Status:** ✅ COMPLETE (2026-01-04, updated 2026-01-30 for ExternalKey) - Schema in `schema.rs::IdReverse`, queries in `query.rs`
 
-This is the hot path during search. The `IdReverse` CF is implemented with:
+This is the hot path during search. The `IdReverse` CF is implemented with polymorphic `ExternalKey` support:
 - Key: `IdReverseCfKey(EmbeddingCode, VecId)` = 12 bytes
-- Value: `IdReverseCfValue(Id)` = 16 bytes (raw ULID bytes, not rkyv)
+- Value: `IdReverseCfValue(ExternalKey)` = [1 tag + variable payload] bytes
+- Returns full typed `ExternalKey` (not just Id), allowing callers to determine key type
 - All serialization methods
-- `GetExternalId` query for single lookups
-- `ResolveIds` query for batch lookups
+- `GetExternalId` query for single lookups (returns `Option<ExternalKey>`)
+- `ResolveIds` query for batch lookups (returns `Vec<Option<ExternalKey>>`)
 
 | Approach | Memory at 1B | Lookup | Implementation |
 |----------|--------------|--------|----------------|
