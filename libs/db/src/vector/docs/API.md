@@ -1317,18 +1317,6 @@ impl Processor {
         nav_cache: Arc<NavigationCache>,
     ) -> Self;
 
-    // DEPRECATED: Use constructors above instead
-    // HNSW structural params should come from EmbeddingSpec, not VectorConfig
-    #[deprecated]
-    pub fn with_config(self, config: VectorConfig) -> Self;
-    #[deprecated]
-    pub fn with_config_and_nav_cache(
-        storage: Arc<Storage>,
-        registry: Arc<EmbeddingRegistry>,
-        config: VectorConfig,
-        nav_cache: Arc<NavigationCache>,
-    ) -> Self;
-
     // Observability / control
     pub fn set_async_backpressure_threshold(&self, threshold: usize);
     pub fn async_backpressure_threshold(&self) -> usize;
