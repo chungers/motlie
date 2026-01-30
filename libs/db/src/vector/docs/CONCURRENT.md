@@ -200,8 +200,8 @@ Edges CF:       (embedding_code, vec_id, layer)    → HNSW neighbors
 BinaryCodes CF: (embedding_code, vec_id)           → RaBitQ codes
 VecMeta CF:     (embedding_code, vec_id)           → layer assignment
 GraphMeta CF:   (embedding_code, field)            → entry points, max_layer
-IdForward CF:   (embedding_code, ulid)             → ULID → VecId
-IdReverse CF:   (embedding_code, vec_id)           → VecId → ULID
+IdForward CF:   (embedding_code, external_key)     → ExternalKey → VecId
+IdReverse CF:   (embedding_code, vec_id)           → VecId → ExternalKey
 IdAlloc CF:     (embedding_code, field)            → next_id, free bitmap
 ```
 
