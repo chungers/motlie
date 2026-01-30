@@ -13,6 +13,9 @@
 - [`PHASE8.md`](./PHASE8.md) - Production Hardening (30 subtasks)
   <!-- ADDRESSED (Claude, 2026-01-19): Updated count from 29 to 30 after adding 8.1.11 -->
 
+**Note:** Many historical sections refer to ULIDs as external IDs. As of IDMAP,
+external IDs are `ExternalKey` (ULID corresponds to `ExternalKey::NodeId`).
+
 ---
 
 ## Executive Summary
@@ -73,7 +76,7 @@ dedicated vector databases or custom storage engines.
 | Phase | Description | Status |
 |-------|-------------|--------|
 | [Phase 0](#phase-0-foundation) | Foundation (Schema, CFs, Distance) | ✅ Complete |
-| [Phase 1](#phase-1-id-management) | ID Management (ULID ↔ u32 mapping) | ✅ Complete |
+| [Phase 1](#phase-1-id-management) | ID Management (ExternalKey ↔ u32 mapping) | ✅ Complete |
 | [Phase 2](#phase-2-hnsw2-core--navigation-layer--core-complete) | HNSW2 Core + Navigation Layer | ✅ Complete |
 | [Phase 3](#phase-3-batch-operations--deferred-items) | Batch Operations + Deferred Items | ✅ Complete |
 | [Phase 4](#phase-4-rabitq-compression) | RaBitQ Compression + Optimization | ✅ Complete |
@@ -227,7 +230,7 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  └── Files: mod.rs, config.rs, distance.rs, embedding.rs, registry.rs      │
 │                                                                              │
 │  Phase 1: ID Management [COMPLETE]                                          │
-│  ├── 1.1-1.5 u32 allocator, ULID mapping, persistence ✓                    │
+│  ├── 1.1-1.5 u32 allocator, ExternalKey mapping, persistence ✓             │
 │  └── Files: id.rs, schema.rs (IdForward, IdReverse, IdAlloc CFs)           │
 │                                                                              │
 │  Phase 2: HNSW2 Core + Navigation [COMPLETE]                                │
@@ -450,17 +453,17 @@ let matches = registry.find(
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/id_forward                                                   │ │
-│  │ Key:   [embedding: u64] + [ulid: 16] = 24 bytes                        │ │
+│  │ Key:   [embedding: u64] + [external_key: 1 + payload]                  │ │
 │  │ Value: [vec_id: u32] = 4 bytes                                        │ │
-│  │ Purpose: (embedding, ULID) -> internal u32 mapping (insert path)       │ │
+│  │ Purpose: (embedding, ExternalKey) -> internal u32 mapping (insert path)│ │
 │  │ Note: Embedding prefix required per FUNC-7 (multi-embedding support)   │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/id_reverse                                                   │ │
 │  │ Key:   [embedding: u64] + [vec_id: u32] = 12 bytes                    │ │
-│  │ Value: [ulid: 16] = 16 bytes                                           │ │
-│  │ Purpose: (embedding, vec_id) -> ULID mapping (search path, hot)       │ │
+│  │ Value: [external_key: 1 + payload]                                     │ │
+│  │ Purpose: (embedding, vec_id) -> ExternalKey mapping (search path, hot) │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
@@ -488,7 +491,7 @@ let matches = registry.find(
 | edges | 37 bytes | 13 bytes | 24 bytes | 72 GB (3 layers avg) |
 | binary_codes | 36 bytes | 12 bytes | 24 bytes | 24 GB |
 | vec_meta | 36 bytes | 12 bytes | 24 bytes | 24 GB |
-| id_forward | 48 bytes | 24 bytes | 24 bytes | 24 GB |
+| id_forward | 48 bytes | 8 + (1 + payload) | variable | variable |
 | id_reverse | 36 bytes | 12 bytes | 24 bytes | 24 GB |
 | **Total** | | | | **~192 GB** |
 
@@ -502,8 +505,8 @@ let matches = registry.find(
 | binary_codes | `[emb: u64] + [vec_id: u32]` | 12 | u8[code_size] | RaBitQ codes |
 | vec_meta | `[emb: u64] + [vec_id: u32]` | 12 | {layer, flags} | Per-vector metadata |
 | graph_meta | `[emb: u64] + [field: u8]` | 9 | varies | Entry point, stats |
-| id_forward | `[emb: u64] + [ulid: 16]` | 24 | vec_id (u32) | ULID → vec_id |
-| id_reverse | `[emb: u64] + [vec_id: u32]` | 12 | ulid (16) | vec_id → ULID |
+| id_forward | `[emb: u64] + [external_key: 1 + payload]` | variable | vec_id (u32) | ExternalKey → vec_id |
+| id_reverse | `[emb: u64] + [vec_id: u32]` | 12 | external_key | vec_id → ExternalKey |
 | id_alloc | `[emb: u64] + [field: u8]` | 9 | u32 / bitmap | ID allocator state |
 | pending | `[emb: u64] + [ts: u64] + [vec_id: u32]` | 20 | empty | Async insert queue |
 
@@ -513,7 +516,7 @@ let matches = registry.find(
 |----------|--------|-----------|
 | Embedding ID | u64 (8 bytes) | Register-aligned, sufficient for <1000 models (ARCH-14) |
 | Vec ID | u32 (4 bytes) | RoaringBitmap constraint, 4B vectors/space (ARCH-15) |
-| ULID | 16 bytes | External doc ID, globally unique |
+| ExternalKey | 1 + payload | Typed external ID (NodeId, Edge, Fragment, Summary) |
 | Embedding in id_forward/id_reverse | **Yes** | Required for multi-embedding (FUNC-7, ARCH-16) |
 
 ### Edge Storage Design
@@ -531,7 +534,7 @@ Edge value: RoaringBitmap{3, 7, 12, 45, ...}
 
 ### Why Embedding Prefix in id_forward/id_reverse?
 
-Per FUNC-7 (multi-embedding support), the same document (ULID) can exist in multiple embedding spaces:
+Per FUNC-7 (multi-embedding support), the same document (ExternalKey::NodeId / legacy ULID) can exist in multiple embedding spaces:
 
 ```
 Document ULID_abc:
@@ -539,7 +542,7 @@ Document ULID_abc:
   - In "gemma" space: vec_id = 1000
 ```
 
-Without embedding prefix, we couldn't distinguish which vec_id belongs to which space. The id_forward lookup is: "Given this ULID **in this embedding space**, what's its vec_id?"
+Without embedding prefix, we couldn't distinguish which vec_id belongs to which space. The id_forward lookup is: "Given this ExternalKey::NodeId **in this embedding space**, what's its vec_id?"
 
 ### Multi-Embedding Example
 
@@ -1166,8 +1169,8 @@ Both `graph::schema` and `vector::schema` modules follow the same patterns:
 | `vector/binary_codes` | (code, vec_id) | binary | RaBitQ quantized vectors |
 | `vector/vec_meta` | (code, vec_id) | (layer, flags) | Per-vector metadata |
 | `vector/graph_meta` | code (u64) | (entry, stats) | Per-graph metadata |
-| `vector/id_forward` | (code, emb_id) | vec_id | ULID → u32 mapping |
-| `vector/id_reverse` | (code, vec_id) | emb_id | u32 → ULID mapping |
+| `vector/id_forward` | (code, external_key) | vec_id | ExternalKey → u32 mapping |
+| `vector/id_reverse` | (code, vec_id) | external_key | u32 → ExternalKey mapping |
 | `vector/id_alloc` | code (u64) | (next_id, free_bitmap) | ID allocation state |
 | `vector/pending` | (code, emb_id, ts) | operation | Async update queue |
 
@@ -1559,7 +1562,7 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 
 **Mutation Execution:** [`writer.rs`](writer.rs) `Consumer::execute_single()` - Executes mutations within RocksDB transactions:
 1. Allocates vec_id via IdAllocator
-2. Stores ULID ↔ vec_id mappings (IdForward, IdReverse CFs)
+2. Stores ExternalKey ↔ vec_id mappings (IdForward, IdReverse CFs)
 3. Stores raw vector (Vectors CF)
 4. Handles flush markers after commit
 
@@ -1574,9 +1577,9 @@ fn bench_allocation_throughput(b: &mut Bencher) {
 
 **Query Structs (Phase 1 - Implemented):**
 - `GetVector` - Get vector by external ID
-- `GetInternalId` - ULID → VecId lookup
-- `GetExternalId` - VecId → ULID lookup
-- `ResolveIds` - Batch VecId → ULID resolution
+- `GetInternalId` - ExternalKey → VecId lookup
+- `GetExternalId` - VecId → ExternalKey lookup
+- `ResolveIds` - Batch VecId → ExternalKey resolution
 
 **QueryExecutor Trait:**
 - `execute(&self, storage: &Storage) -> Result<Self::Output>` - Execute query against storage
@@ -3188,20 +3191,20 @@ impl VectorStorage {
 
 **Impact:** Significant re-ranking speedup (100-200 vectors per search)
 
-### Task 3.4: Batch ULID Resolution ✅
+### Task 3.4: Batch ExternalKey Resolution ✅
 
 **Status:** ✅ COMPLETED (2026-01-07)
 
 **Implementation:** `ResolveIds` in `query.rs` uses `multi_get_cf()` for batch ID resolution.
 
-Batch resolve internal IDs to ULIDs for search results:
+Batch resolve internal IDs to ExternalKey for search results:
 
 ```rust
 // libs/db/src/vector/id.rs
 
 impl VectorStorage {
-    /// Batch resolve internal u32 IDs to ULIDs
-    pub fn resolve_ulids_batch(
+    /// Batch resolve internal u32 IDs to ExternalKey
+    pub fn resolve_external_keys_batch(
         &self,
         code: &Embedding,
         internal_ids: &[u32],

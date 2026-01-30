@@ -2282,4 +2282,6 @@ mod tests {
         let summary_key = ExternalKey::NodeSummary(SummaryHash::from_summary(&content).unwrap());
         assert_eq!(summary_key.node_id(), None);
     }
+
+    // NOTE: ExternalKey 1M roundtrip benchmark is in `libs/db/benches/db_operations.rs`.
 }

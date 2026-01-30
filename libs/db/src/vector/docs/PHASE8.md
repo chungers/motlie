@@ -1,5 +1,8 @@
 # Phase 8: Production Hardening
 
+**Note:** Historical references to ULID in this document correspond to
+`ExternalKey::NodeId` after IDMAP. ID mappings are now ExternalKey ↔ VecId.
+
 **Status:** In Progress (8.1, 8.2 Complete; 8.3 Pending)
 **Date:** January 18, 2026 (Updated: January 19, 2026)
 **Prerequisite:** Phase 7 (Async Graph Updater) - Complete
@@ -371,8 +374,8 @@ Per-vector memory usage (current):
 | Binary code | 64B (512D/8) | RaBitQ |
 | HNSW edges | ~128B avg | M=16, ~8 layers avg |
 | VecMeta | 16B | Lifecycle + layer |
-| IdForward | 24B | ULID + vec_id |
-| IdReverse | 24B | vec_id + ULID |
+| IdForward | 8 + (1 + payload) | ExternalKey + vec_id |
+| IdReverse | 12 + (1 + payload) | vec_id + ExternalKey |
 | **Total** | ~1.8KB/vector | For 512D f16 |
 
 Scale projections:

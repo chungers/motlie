@@ -137,7 +137,7 @@ This document defines the ground truth requirements for motlie_db vector search.
 | <a id="func-6"></a>**FUNC-6** | Filtered search | Not started | P2 |
 | <a id="func-7"></a>**FUNC-7** | Multi-embedding support | Not started | P0 |
 
-**FUNC-7 Details**: A single document (ULID) may be embedded in multiple embedding spaces simultaneously (e.g., "qwen3", "gemma", "openai-ada-002"). Each embedding space maintains its own HNSW graph, and the same document will have different internal vec_ids and graph positions in each space. This is required to support:
+**FUNC-7 Details**: A single document (ExternalKey::NodeId / legacy ULID) may be embedded in multiple embedding spaces simultaneously (e.g., "qwen3", "gemma", "openai-ada-002"). Each embedding space maintains its own HNSW graph, and the same document will have different internal vec_ids and graph positions in each space. This is required to support:
 - Embedding model migration (run old and new models in parallel)
 - Multi-modal embeddings (text + image for same document)
 - A/B testing of embedding strategies
@@ -328,14 +328,14 @@ Vector Search (ef=200) -> ID Mapping -> Temporal Filter (Graph) -> Re-rank -> To
 | ID | Assumption | Rationale |
 |----|------------|-----------|
 | <a id="arch-4"></a>**ARCH-4** | Vector IDs are **internal** (similar to Tantivy `doc_id`) | Memory efficiency, roaring bitmap compatibility |
-| <a id="arch-5"></a>**ARCH-5** | Bi-directional mapping: internal u32 <-> ULID | Required for graph integration |
-| <a id="arch-6"></a>**ARCH-6** | Reverse mapping (u32 -> ULID) is hot path | Optimized via dense array or mmap |
+| <a id="arch-5"></a>**ARCH-5** | Bi-directional mapping: internal u32 <-> ExternalKey | Required for graph integration |
+| <a id="arch-6"></a>**ARCH-6** | Reverse mapping (u32 -> ExternalKey) is hot path | Optimized via RocksDB + cache |
 
 **Implications:**
 - Vector index uses 4-byte u32 IDs internally (required for RoaringBitmap)
-- API accepts/returns ULIDs; translation is internal
-- Forward mapping (ULID -> u32): RocksDB-backed, insert path
-- Reverse mapping (u32 -> ULID): Memory-mapped dense array, search path
+- API accepts/returns ExternalKey; translation is internal
+- Forward mapping (ExternalKey -> u32): RocksDB-backed, insert path
+- Reverse mapping (u32 -> ExternalKey): RocksDB-backed, search path
 
 ### 10.3 Hardware Requirements
 
@@ -373,7 +373,7 @@ Vector Search (ef=200) -> ID Mapping -> Temporal Filter (Graph) -> Re-rank -> To
 | <a id="arch-13"></a>**ARCH-13** | Documents may exist in **multiple embedding spaces** simultaneously | Model migration, multi-modal, A/B testing |
 | <a id="arch-14"></a>**ARCH-14** | Embedding namespace uses **u64** (8 bytes) identifier | Register-aligned, <1000 embeddings expected |
 | <a id="arch-15"></a>**ARCH-15** | Internal vec_ids use **u32** per embedding space | RoaringBitmap edge storage requires u32 |
-| <a id="arch-16"></a>**ARCH-16** | ID mappings require embedding prefix: `[embedding: 8] + [ulid: 16]` | Same ULID maps to different vec_ids per space |
+| <a id="arch-16"></a>**ARCH-16** | ID mappings require embedding prefix: `[embedding: 8] + [external_key: 1 + payload]` | Same ExternalKey value maps to different vec_ids per space |
 | <a id="arch-17"></a>**ARCH-17** | `Embedding` is a **rich struct** with model, dim, distance, embedder | Direct field access without registry lookup; self-describing |
 | <a id="arch-18"></a>**ARCH-18** | `Embedder` trait enables **document-to-vector compute** | Optional behavior; supports Ollama, OpenAI, local models |
 
@@ -383,7 +383,7 @@ Vector Search (ef=200) -> ID Mapping -> Temporal Filter (Graph) -> Re-rank -> To
 |----|------------|------|
 | vectors | `[embedding: 8] + [vec_id: 4]` | 12 bytes |
 | edges | `[embedding: 8] + [vec_id: 4] + [layer: 1]` | 13 bytes |
-| id_forward | `[embedding: 8] + [ulid: 16]` | 24 bytes |
+| id_forward | `[embedding: 8] + [external_key: 1 + payload]` | variable |
 | id_reverse | `[embedding: 8] + [vec_id: 4]` | 12 bytes |
 
 **Why u32 for vec_id**: RoaringBitmap (used for compressed edge storage) only supports u32 values. This limits each embedding space to 4B vectors, which is acceptable given SCALE-1 target of 1B vectors total.
