@@ -3,7 +3,7 @@
 **Author:** David Chung + Claude
 **Date:** January 2, 2026 (Updated: January 16, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
-**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 Complete (Tasks 5.0-5.11), Phase 6 Complete, Phase 7 Complete, Phase 8 Planned
+**Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 Complete (Tasks 5.0-5.11), Phase 6 Complete, Phase 7 Complete, Phase 8 In Progress (8.1-8.2 complete; 8.3 in progress)
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
@@ -84,7 +84,7 @@ dedicated vector databases or custom storage engines.
 | [Phase 5](#phase-5-internal-mutationquery-api) | Internal Mutation/Query API | ✅ Complete |
 | [Phase 6](#phase-6-mpscmpmc-public-api) | MPSC/MPMC Public API | ✅ Complete |
 | [Phase 7](#phase-7-async-graph-updater) | Async Graph Updater | ✅ Complete |
-| [Phase 8](#phase-8-production-hardening) | Production Hardening | 📋 Planned |
+| [Phase 8](#phase-8-production-hardening) | Production Hardening | 🚧 In Progress |
 
 ### Phase 4 Tasks
 
@@ -266,7 +266,7 @@ This is configurable via `bits_per_dim` in Phase 4 without code changes.
 │  ├── 7.1-7.7 Pending queue, async workers, crash recovery, integration ✓   │
 │  └── Goal: Online updates without blocking search                          │
 │                                                                              │
-│  Phase 8: Production Hardening [NOT STARTED]                                 │
+│  Phase 8: Production Hardening [IN PROGRESS]                                 │
 │  ├── 8.1-8.3 Delete refinement, concurrency, 1B validation                 │
 │  └── Goal: Production-ready at scale                                        │
 │                                                                              │
@@ -8156,13 +8156,13 @@ mod async_updater_tests {
 
 ## Phase 8: Production Hardening
 
-**Status:** 📋 Planned
+**Status:** 🚧 In Progress (8.1-8.2 complete; 8.3 in progress)
 **Goal:** Production-ready vector search with full feature set.
 **Detailed Plan:** See [`PHASE8.md`](./PHASE8.md) for comprehensive task breakdown (29 subtasks)
 COMMENT (CODEX, 2026-01-18): PHASE8 now lists 8.1.10, 8.2.9, 8.3.10; update the "26 subtasks" count if it changes.
 RESPONSE (2026-01-18): Updated to 29 subtasks (8.1: 10, 8.2: 9, 8.3: 10).
 
-### Task 8.1: Delete Refinement
+### Task 8.1: Delete Refinement (✅ Complete)
 
 Refine delete implementation from Phase 5 and Phase 7:
 - Proper edge cleanup strategy
@@ -8171,7 +8171,7 @@ Refine delete implementation from Phase 5 and Phase 7:
 
 **Effort:** 1-2 days
 
-### Task 8.2: Concurrent Access [CON-3]
+### Task 8.2: Concurrent Access [CON-3] (✅ Complete)
 
 - Use RocksDB snapshot isolation for reads
 - Write serialization via transaction API
@@ -8179,12 +8179,19 @@ Refine delete implementation from Phase 5 and Phase 7:
 
 **Effort:** 2-3 days
 
-### Task 8.3: 1B Scale Validation
+### Task 8.3: 1B Scale Validation (🚧 In Progress)
 
 - Benchmark at 10M, 100M, 1B scales
 - Validate memory constraints
 - Performance profiling
 - Document scaling characteristics
+
+**Backlog (per PHASE8.md):**
+- 8.3.3: Benchmark 10M scale (insert/search/memory)
+- 8.3.4: Generate or source 100M dataset
+- 8.3.5: Benchmark 100M scale
+- 8.3.6: Validate 1B feasibility (sampling)
+- 8.3.9: Add CI gate for 1M regression detection
 
 **Effort:** 1-2 weeks
 
@@ -8268,8 +8275,8 @@ mod production_tests {
 | **Total** | | **2-3 weeks** |
 
 **Acceptance Criteria:**
-- [ ] Delete removes vectors from search results
-- [ ] Concurrent read/write stress tests pass
+- [x] Delete removes vectors from search results (tests added in `test_vector_delete.rs`)
+- [x] Concurrent read/write stress tests pass (tests in `test_vector_concurrent.rs`)
 - [ ] 10M scale benchmark completed (primary target)
 - [ ] Memory usage within 64GB budget at 10M scale
 - [ ] 100M scale benchmark completed (secondary target, 128GB RAM)
