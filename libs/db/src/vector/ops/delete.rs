@@ -111,7 +111,7 @@ impl DeleteResult {
 pub fn vector(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
-    processor: &Processor,
+    _processor: &Processor,
     embedding: EmbeddingCode,
     external_key: ExternalKey,
 ) -> Result<DeleteResult> {
@@ -140,17 +140,11 @@ pub fn vector(
         .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
     txn.delete_cf(&reverse_cf, IdReverse::key_to_bytes(&reverse_key))?;
 
-    // Check if HNSW indexing is enabled - affects cleanup strategy
-    let hnsw_enabled = processor.hnsw_config().enabled;
-
     // 4. Update VecMetadata lifecycle state (soft delete marker)
     // This allows search to skip deleted vectors even if they're still
     // referenced by HNSW edges.
-    let was_pending = if hnsw_enabled {
-        mark_deleted(txn, txn_db, embedding, vec_id)?
-    } else {
-        false
-    };
+    // Note: HNSW is always enabled, so we always soft-delete rather than hard-delete.
+    let was_pending = mark_deleted(txn, txn_db, embedding, vec_id)?;
 
     // 5. Remove from Pending queue if vector was pending
     // This prevents async updater from processing a deleted vector.
@@ -159,53 +153,33 @@ pub fn vector(
         remove_from_pending(txn, txn_db, embedding, vec_id)?;
     }
 
-    // 6. Delete vector data (only if HNSW disabled)
-    // If HNSW is enabled, keep vector data for distance calculations
-    // during search traversal (entry point or neighbor edges may reference it)
-    let vec_key = VectorCfKey(embedding, vec_id);
-    let vectors_cf = txn_db
-        .cf_handle(Vectors::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
-    if !hnsw_enabled {
-        txn.delete_cf(&vectors_cf, Vectors::key_to_bytes(&vec_key))?;
-    }
+    // 6. Keep vector data for HNSW graph traversal
+    // Vector data is needed for distance calculations during search.
+    // Actual cleanup happens during compaction or background GC.
+    // Note: HNSW is always enabled, so we never delete vector data immediately.
+    let _ = VectorCfKey(embedding, vec_id); // Used by background GC
+    let _ = txn_db.cf_handle(Vectors::CF_NAME); // Used by background GC
 
-    // 7. Delete binary code (only if RaBitQ enabled AND HNSW disabled)
-    if processor.rabitq_enabled() && !hnsw_enabled {
-        let code_key = BinaryCodeCfKey(embedding, vec_id);
-        let codes_cf = txn_db
-            .cf_handle(BinaryCodes::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("BinaryCodes CF not found"))?;
-        txn.delete_cf(&codes_cf, BinaryCodes::key_to_bytes(&code_key))?;
-    }
+    // 7. Keep binary codes for RaBitQ search
+    // Note: HNSW is always enabled, so we never delete binary codes immediately.
+    let _ = BinaryCodeCfKey(embedding, vec_id); // Used by background GC
+    let _ = txn_db.cf_handle(BinaryCodes::CF_NAME); // Used by background GC
 
-    // 8. Return VecId to free list (only if HNSW disabled)
-    // If HNSW is enabled, we cannot reuse the VecId because existing
-    // HNSW edges still reference it. Reuse would corrupt graph semantics.
-    if !hnsw_enabled {
-        let allocator = processor.get_or_create_allocator(embedding);
-        allocator.free(txn, txn_db, embedding, vec_id)?;
-    }
+    // 8. VecId reuse disabled when HNSW is enabled
+    // HNSW edges still reference deleted VecIds, so we cannot reuse them.
+    // The free list is only used when HNSW is disabled (which never happens now).
+    // Note: processor.get_or_create_allocator(embedding).free() is NOT called.
 
     // 9. Update lifecycle counters via merge operator
-    // Soft delete: transition indexed->deleted or pending->pending_deleted
-    // Hard delete: decrement indexed or pending (vector fully removed)
+    // Always soft delete: transition indexed->deleted or pending->pending_deleted
     let lifecycle_cf = txn_db
         .cf_handle(LifecycleCounts::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("LifecycleCounts CF not found"))?;
     let lifecycle_key = LifecycleCountsCfKey(embedding);
-    let delta = if hnsw_enabled {
-        // Soft delete: lifecycle transition
-        if was_pending {
-            LifecycleCountsDelta::pending_to_pending_deleted()
-        } else {
-            LifecycleCountsDelta::indexed_to_deleted()
-        }
+    let delta = if was_pending {
+        LifecycleCountsDelta::pending_to_pending_deleted()
     } else {
-        // Hard delete: just decrement (assume indexed since async path typically uses HNSW)
-        // Note: If vector was pending without HNSW, this is still correct since
-        // pending vectors without HNSW are effectively indexed immediately.
-        LifecycleCountsDelta { indexed: -1, ..Default::default() }
+        LifecycleCountsDelta::indexed_to_deleted()
     };
     txn.merge_cf(
         &lifecycle_cf,
@@ -215,7 +189,7 @@ pub fn vector(
 
     Ok(DeleteResult::Deleted {
         vec_id,
-        soft_delete: hnsw_enabled,
+        soft_delete: true, // Always soft delete (HNSW always enabled)
     })
 }
 

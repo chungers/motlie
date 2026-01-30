@@ -220,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_vector_config_presets() {
         let c128 = VectorConfig::dim_128();
         assert_eq!(c128.hnsw.dim, 128);

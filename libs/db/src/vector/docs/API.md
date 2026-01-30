@@ -1266,17 +1266,44 @@ impl Index {
 `Processor` is the internal execution engine used by mutation/query consumers.
 It is exposed for internal integrations and test helpers.
 
+**Note:** HNSW structural parameters (m, ef_construction, etc.) are derived from
+`EmbeddingSpec` which is persisted in RocksDB and protected by SpecHash. Only
+`batch_threshold` is a runtime knob that can vary per process without affecting
+index integrity. See `docs/CONFIG.md` for the design rationale.
+
 ```rust
 pub struct Processor { /* private */ }
 impl Processor {
+    // Preferred constructors (HNSW params derived from EmbeddingSpec)
     pub fn new(storage: Arc<Storage>, registry: Arc<EmbeddingRegistry>) -> Self;
+    pub fn with_batch_threshold(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        batch_threshold: usize,
+    ) -> Self;
     pub fn new_with_nav_cache(
         storage: Arc<Storage>,
         registry: Arc<EmbeddingRegistry>,
         nav_cache: Arc<NavigationCache>,
     ) -> Self;
-    pub fn with_rabitq_config(self, config: RaBitQConfig) -> Self;
+    pub fn with_rabitq_config(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        rabitq_config: RaBitQConfig,
+    ) -> Self;
+    pub fn with_rabitq_config_and_batch_threshold(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        rabitq_config: RaBitQConfig,
+        batch_threshold: usize,
+        nav_cache: Arc<NavigationCache>,
+    ) -> Self;
+
+    // DEPRECATED: Use constructors above instead
+    // HNSW structural params should come from EmbeddingSpec, not VectorConfig
+    #[deprecated]
     pub fn with_config(self, config: VectorConfig) -> Self;
+    #[deprecated]
     pub fn with_config_and_nav_cache(
         storage: Arc<Storage>,
         registry: Arc<EmbeddingRegistry>,
