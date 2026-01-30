@@ -56,7 +56,7 @@ use tokio::task::JoinHandle;
 
 use crate::reader::Runnable as QueryRunnable;
 use crate::vector::benchmark::dataset::LAION_EMBEDDING_DIM;
-use crate::vector::schema::EmbeddingCode;
+use crate::vector::schema::{EmbeddingCode, ExternalKey};
 use crate::vector::writer::{create_writer, spawn_mutation_consumer_with_storage_autoreg, WriterConfig};
 use crate::vector::reader::{create_search_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig};
 use crate::vector::{
@@ -956,7 +956,8 @@ async fn insert_producer_workload(
     let mut rng = StdRng::seed_from_u64(producer_id as u64 + 1000);
 
     let batch_size = batch_size.max(1);
-    let mut batch: Vec<(Id, Vec<f32>)> = Vec::with_capacity(batch_size);
+    // T7.1: Use ExternalKey for polymorphic ID mapping
+    let mut batch: Vec<(ExternalKey, Vec<f32>)> = Vec::with_capacity(batch_size);
 
     for _i in 0..max_vectors {
         if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
@@ -969,7 +970,8 @@ async fn insert_producer_workload(
 
         if batch_size == 1 {
             let op_start = Instant::now();
-            let result = InsertVector::new(&embedding, id, vector)
+            // T7.1: Use ExternalKey::NodeId for polymorphic ID mapping
+            let result = InsertVector::new(&embedding, ExternalKey::NodeId(id), vector)
                 .immediate()
                 .run(&writer)
                 .await;
@@ -981,7 +983,8 @@ async fn insert_producer_workload(
             continue;
         }
 
-        batch.push((id, vector));
+        // T7.1: Use ExternalKey::NodeId for polymorphic ID mapping
+        batch.push((ExternalKey::NodeId(id), vector));
         if batch.len() >= batch_size {
             let current = std::mem::take(&mut batch);
             let batch_len = current.len();
@@ -1180,7 +1183,8 @@ pub async fn compare_sync_async_latency(
         let id = Id::new();
 
         let op_start = Instant::now();
-        InsertVector::new(&embedding, id, vector)
+        // T7.1: Use ExternalKey::NodeId for polymorphic ID mapping
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector)
             .immediate() // build_index = true (sync)
             .run(&writer)
             .await?;
@@ -1200,7 +1204,8 @@ pub async fn compare_sync_async_latency(
 
         let op_start = Instant::now();
         // Default is immediate_index=false (async - defers graph build)
-        InsertVector::new(&embedding, id, vector)
+        // T7.1: Use ExternalKey::NodeId for polymorphic ID mapping
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector)
             .run(&writer)
             .await?;
         async_metrics.record_insert(op_start.elapsed());
@@ -1398,7 +1403,8 @@ pub async fn measure_backpressure_impact(
                     let id = Id::new();
 
                     let op_start = Instant::now();
-                    let result = InsertVector::new(&embedding, id, vector)
+                    // T7.1: Use ExternalKey::NodeId for polymorphic ID mapping
+                    let result = InsertVector::new(&embedding, ExternalKey::NodeId(id), vector)
                         .immediate()
                         .run(&writer)
                         .await;

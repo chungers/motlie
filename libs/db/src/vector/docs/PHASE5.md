@@ -1,5 +1,8 @@
 # Phase 5: Internal Mutation/Query API
 
+**Note:** Historical references to ULID in this document correspond to
+`ExternalKey::NodeId` after IDMAP. ID mappings are now ExternalKey ↔ VecId.
+
 **CODEX Certification:** ✅ Phase 5 complete as of 2026-01-17 (commit `f9dda759c9acec446f41b22b01958cc9a9b6b67f`).
 
 **Status:** ✅ Complete (All Tasks 5.0-5.11)

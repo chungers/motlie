@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::hnsw::CacheUpdate;
 use super::mutation::{FlushMarker, Mutation};
@@ -308,7 +308,8 @@ impl Writer {
     /// Returns when all mutations sent before this call are committed
     /// to RocksDB and visible to readers.
     pub async fn flush(&self) -> Result<()> {
-        let (marker, rx) = FlushMarker::new();
+        let (tx, rx) = oneshot::channel();
+        let marker = FlushMarker::new(tx);
 
         // Send flush marker through the same channel as mutations
         self.sender
@@ -414,7 +415,7 @@ impl Consumer {
                 Mutation::InsertVector(args) => {
                     tracing::debug!(
                         embedding = args.embedding,
-                        id = %args.id,
+                        external_key = ?args.external_key,
                         dim = args.vector.len(),
                         "Processing InsertVector"
                     );
@@ -422,7 +423,7 @@ impl Consumer {
                 Mutation::DeleteVector(args) => {
                     tracing::debug!(
                         embedding = args.embedding,
-                        id = %args.id,
+                        external_key = ?args.external_key,
                         "Processing DeleteVector"
                     );
                 }
@@ -443,9 +444,13 @@ impl Consumer {
         self.execute_mutations(&mutations).await?;
 
         // Signal completion for any flush markers
-        for mutation in mutations {
+        for mutation in &mutations {
             if let Mutation::Flush(marker) = mutation {
-                marker.complete();
+                if let Some(completion) = marker.take_completion() {
+                    // Signal that flush is complete - ignore send errors
+                    // (receiver may have been dropped if caller timed out)
+                    let _ = completion.send(());
+                }
             }
         }
 
@@ -467,10 +472,10 @@ impl Consumer {
             // Expand batch mutations into individual operations
             // This ensures we collect cache updates from each vector
             if let Mutation::InsertVectorBatch(batch) = mutation {
-                for (id, vector) in &batch.vectors {
+                for (external_key, vector) in &batch.vectors {
                     let single = super::mutation::InsertVector {
                         embedding: batch.embedding,
-                        id: *id,
+                        external_key: external_key.clone(),
                         vector: vector.clone(),
                         immediate_index: batch.immediate_index,
                     };
@@ -598,6 +603,7 @@ pub fn spawn_mutation_consumer_with_storage_autoreg(
 ///
 /// This function is `pub(crate)` to encourage use of the storage-based API
 /// which hides the Processor abstraction.
+#[allow(dead_code)] // Available for advanced use cases requiring custom processors
 pub(crate) fn spawn_mutation_consumer_with_processor(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
@@ -631,7 +637,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_mutations() {
         use super::super::embedding::Embedding;
-        use super::super::schema::VectorElementType;
+        use super::super::schema::{ExternalKey, VectorElementType};
         use super::super::Distance;
 
         let (writer, mut receiver) = create_writer(WriterConfig::default());
@@ -639,7 +645,7 @@ mod tests {
         // Send a mutation
         let id = crate::Id::new();
         let embedding = Embedding::new(1, "test", 128, Distance::Cosine, VectorElementType::F32, None);
-        let mutation = super::super::mutation::InsertVector::new(&embedding, id, vec![1.0, 2.0, 3.0]);
+        let mutation = super::super::mutation::InsertVector::new(&embedding, ExternalKey::NodeId(id), vec![1.0, 2.0, 3.0]);
         writer.send(vec![mutation.into()]).await.unwrap();
 
         // Should receive it

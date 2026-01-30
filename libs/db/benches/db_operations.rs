@@ -56,6 +56,7 @@ use motlie_db::reader::Runnable as QueryRunnable;
 use motlie_db::graph::reader::{create_query_reader, spawn_query_consumer, ReaderConfig};
 use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
+use motlie_db::vector::schema::ExternalKey;
 use motlie_db::{Id, TimestampMilli};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -733,6 +734,30 @@ fn bench_write_throughput_by_size(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark 11: ExternalKey roundtrip (1M ops)
+///
+/// Measures encode+decode cost for ExternalKey (NodeId variant).
+fn bench_external_key_roundtrip_1m(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vector_external_key");
+    group.measurement_time(Duration::from_secs(5));
+
+    let key = ExternalKey::NodeId(Id::new());
+    group.bench_function("external_key_roundtrip_1m", |b| {
+        b.iter_custom(|_| {
+            let start = std::time::Instant::now();
+            let mut bytes = Vec::new();
+            for _ in 0..1_000_000 {
+                bytes = key.to_bytes();
+                let parsed = ExternalKey::from_bytes(black_box(&bytes)).unwrap();
+                black_box(parsed);
+            }
+            start.elapsed()
+        });
+    });
+
+    group.finish();
+}
+
 // ============================================================================
 // Criterion Configuration
 // ============================================================================
@@ -756,7 +781,8 @@ criterion_group!(
         bench_value_size_impact,
         bench_transaction_vs_channel,
         bench_batch_scan_throughput,
-        bench_write_throughput_by_size
+        bench_write_throughput_by_size,
+        bench_external_key_roundtrip_1m
 );
 
 criterion_main!(baseline_benches, optimization_benches);

@@ -38,7 +38,7 @@ async fn test_insert_unknown_embedding_fails() {
     // (Normal usage goes through InsertVector::new(&embedding, ...) which ensures validity)
     let mutation = InsertVector {
         embedding: 42, // Unknown embedding code
-        id: Id::new(),
+        external_key: motlie_db::vector::schema::ExternalKey::NodeId(Id::new()),
         vector: vec![1.0, 2.0, 3.0],
         immediate_index: false,
     };

@@ -781,9 +781,10 @@ bench_vector sweep \
     --ef 50,100,200 \
     --output results/cohere_sweep.json
 
-# Query-only benchmark
+# Query-only benchmark (use embedding code from index output)
 bench_vector query \
     --db-path /data/gist_bench \
+    --embedding-code <CODE> \
     --num-queries 1000 \
     --ef 100 \
     --k 10

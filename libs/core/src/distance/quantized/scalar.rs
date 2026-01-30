@@ -3,6 +3,8 @@
 //! These functions compute dot products between high-precision float vectors
 //! and low-precision packed binary codes. Used as fallback when SIMD is unavailable.
 
+#![allow(dead_code)] // Fallback implementations - may be unused when SIMD is available
+
 /// Decode Gray code to binary.
 ///
 /// Gray code is used in RaBitQ to ensure adjacent quantization levels differ by

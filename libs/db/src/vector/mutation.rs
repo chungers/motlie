@@ -11,17 +11,19 @@
 //! Mutations implement `MutationCodec` to marshal themselves to CF key-value pairs.
 //! This keeps marshaling logic with the mutation definitions rather than in schema.
 
+use std::sync::Mutex;
+
 use anyhow::Result;
 use tokio::sync::oneshot;
 
 use crate::rocksdb::MutationCodec;
-use crate::Id;
 
 use super::distance::Distance;
 use super::embedding::Embedding;
 use super::processor::Processor;
 use super::schema::{
     EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecCfValue, EmbeddingSpecs,
+    ExternalKey,
 };
 use super::writer::{MutationCacheUpdate, MutationExecutor};
 
@@ -37,7 +39,7 @@ use super::writer::{MutationCacheUpdate, MutationExecutor};
 /// **Note on graph repair:** HNSW graph operations (edge updates, metadata)
 /// are handled internally during InsertVector. There is no public API for
 /// partial graph repair - repair requires full rebuild.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Mutation {
     // ─────────────────────────────────────────────────────────────
     // Embedding Space Management
@@ -149,8 +151,8 @@ impl MutationCodec for AddEmbeddingSpec {
 pub struct InsertVector {
     /// Embedding space to insert into
     pub embedding: EmbeddingCode,
-    /// External document ID
-    pub id: Id,
+    /// External key identifying the source entity
+    pub external_key: ExternalKey,
     /// Vector data (must match embedding dimension)
     pub vector: Vec<f32>,
     /// Whether to index immediately or queue for async processing
@@ -158,16 +160,16 @@ pub struct InsertVector {
 }
 
 impl InsertVector {
-    /// Create a new InsertVector mutation.
+    /// Create a new InsertVector mutation with an ExternalKey.
     ///
     /// # Arguments
     /// * `embedding` - Reference to embedding space (code extracted internally)
-    /// * `id` - External document ID
+    /// * `external_key` - External key identifying the source entity
     /// * `vector` - Vector data (must match embedding dimension)
-    pub fn new(embedding: &Embedding, id: Id, vector: Vec<f32>) -> Self {
+    pub fn new(embedding: &Embedding, external_key: ExternalKey, vector: Vec<f32>) -> Self {
         Self {
             embedding: embedding.code(),
-            id,
+            external_key,
             vector,
             immediate_index: false,
         }
@@ -193,8 +195,8 @@ impl From<InsertVector> for Mutation {
 /// Delete a vector from an embedding space.
 ///
 /// This mutation:
-/// 1. Looks up the vec_id from the ULID
-/// 2. Removes the ULID ↔ vec_id mappings
+/// 1. Looks up the vec_id from the ExternalKey
+/// 2. Removes the ExternalKey ↔ vec_id mappings
 /// 3. Removes the vector data
 /// 4. Removes vector metadata
 /// 5. Returns the vec_id to the free list
@@ -203,20 +205,20 @@ impl From<InsertVector> for Mutation {
 pub struct DeleteVector {
     /// Embedding space
     pub embedding: EmbeddingCode,
-    /// External document ID
-    pub id: Id,
+    /// External key identifying the source entity
+    pub external_key: ExternalKey,
 }
 
 impl DeleteVector {
-    /// Create a new DeleteVector mutation.
+    /// Create a new DeleteVector mutation with an ExternalKey.
     ///
     /// # Arguments
     /// * `embedding` - Reference to embedding space (code extracted internally)
-    /// * `id` - External document ID to delete
-    pub fn new(embedding: &Embedding, id: Id) -> Self {
+    /// * `external_key` - External key identifying the entity to delete
+    pub fn new(embedding: &Embedding, external_key: ExternalKey) -> Self {
         Self {
             embedding: embedding.code(),
-            id,
+            external_key,
         }
     }
 }
@@ -239,19 +241,19 @@ impl From<DeleteVector> for Mutation {
 pub struct InsertVectorBatch {
     /// Embedding space
     pub embedding: EmbeddingCode,
-    /// Batch of (id, vector) pairs
-    pub vectors: Vec<(Id, Vec<f32>)>,
+    /// Batch of (external_key, vector) pairs
+    pub vectors: Vec<(ExternalKey, Vec<f32>)>,
     /// Whether to index immediately
     pub immediate_index: bool,
 }
 
 impl InsertVectorBatch {
-    /// Create a new batch insert mutation.
+    /// Create a new batch insert mutation with ExternalKeys.
     ///
     /// # Arguments
     /// * `embedding` - Reference to embedding space (code extracted internally)
-    /// * `vectors` - Batch of (id, vector) pairs
-    pub fn new(embedding: &Embedding, vectors: Vec<(Id, Vec<f32>)>) -> Self {
+    /// * `vectors` - Batch of (external_key, vector) pairs
+    pub fn new(embedding: &Embedding, vectors: Vec<(ExternalKey, Vec<f32>)>) -> Self {
         Self {
             embedding: embedding.code(),
             vectors,
@@ -277,23 +279,57 @@ impl From<InsertVectorBatch> for Mutation {
 // ============================================================================
 
 /// Synchronization marker for flush semantics.
+/// Marker for flush synchronization.
+///
+/// Contains a oneshot sender that signals when the flush completes.
+/// Uses `Mutex<Option<...>>` to allow taking ownership from a shared reference,
+/// since `process_batch` may receive `&[Mutation]`.
 ///
 /// When a FlushMarker is processed by the consumer, it signals the
 /// oneshot channel to indicate that all prior mutations have been committed.
 /// This enables the `Writer::flush()` and `Writer::send_sync()` methods.
-#[derive(Debug)]
-pub struct FlushMarker(pub(crate) oneshot::Sender<()>);
+pub struct FlushMarker {
+    completion: Mutex<Option<oneshot::Sender<()>>>,
+}
 
 impl FlushMarker {
-    /// Create a new flush marker with a oneshot channel.
-    pub fn new() -> (Self, oneshot::Receiver<()>) {
-        let (tx, rx) = oneshot::channel();
-        (Self(tx), rx)
+    /// Create a new flush marker with completion channel.
+    pub fn new(completion: oneshot::Sender<()>) -> Self {
+        Self {
+            completion: Mutex::new(Some(completion)),
+        }
     }
 
-    /// Signal that flush is complete.
-    pub fn complete(self) {
-        let _ = self.0.send(());
+    /// Take the completion sender (can only be called once).
+    ///
+    /// Returns `None` if already taken or if the mutex is poisoned.
+    pub fn take_completion(&self) -> Option<oneshot::Sender<()>> {
+        self.completion.lock().ok()?.take()
+    }
+}
+
+impl std::fmt::Debug for FlushMarker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let has_completion = self
+            .completion
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false);
+        f.debug_struct("FlushMarker")
+            .field("has_completion", &has_completion)
+            .finish()
+    }
+}
+
+// FlushMarker cannot be Clone since oneshot::Sender is not Clone
+// We implement a manual Clone that creates an "empty" marker
+impl Clone for FlushMarker {
+    fn clone(&self) -> Self {
+        // Cloning a FlushMarker creates an empty one (no completion channel)
+        // This is intentional - only the original can signal completion
+        Self {
+            completion: Mutex::new(None),
+        }
     }
 }
 
@@ -361,7 +397,7 @@ impl MutationExecutor for InsertVector {
             txn_db,
             processor,
             self.embedding,
-            self.id,
+            self.external_key.clone(),
             &self.vector,
             self.immediate_index,
         )?;
@@ -385,7 +421,7 @@ impl MutationExecutor for DeleteVector {
     ) -> Result<Option<MutationCacheUpdate>> {
         // Delegate to shared ops helper (handles soft-delete when HNSW enabled)
         let result =
-            super::ops::delete::vector(txn, txn_db, processor, self.embedding, self.id)?;
+            super::ops::delete::vector(txn, txn_db, processor, self.embedding, self.external_key.clone())?;
 
         // Log soft-delete if it occurred
         if result.is_soft_delete() {
@@ -547,6 +583,7 @@ impl Runnable for MutationBatch {
 mod tests {
     use super::*;
     use crate::vector::schema::VectorElementType;
+    use crate::Id;
 
     /// Create a test embedding for unit tests.
     fn test_embedding(code: EmbeddingCode) -> Embedding {
@@ -556,7 +593,7 @@ mod tests {
     #[test]
     fn test_insert_vector_builder() {
         let embedding = test_embedding(1);
-        let mutation = InsertVector::new(&embedding, Id::new(), vec![1.0, 2.0, 3.0]);
+        let mutation = InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vec![1.0, 2.0, 3.0]);
         assert_eq!(mutation.embedding, 1);
         assert!(!mutation.immediate_index);
 
@@ -568,17 +605,17 @@ mod tests {
     fn test_delete_vector() {
         let embedding = test_embedding(42);
         let id = Id::new();
-        let mutation = DeleteVector::new(&embedding, id);
+        let mutation = DeleteVector::new(&embedding, ExternalKey::NodeId(id));
         assert_eq!(mutation.embedding, 42);
-        assert_eq!(mutation.id, id);
+        assert_eq!(mutation.external_key, ExternalKey::NodeId(id));
     }
 
     #[test]
     fn test_insert_batch() {
         let embedding = test_embedding(1);
-        let vectors = vec![
-            (Id::new(), vec![1.0, 2.0]),
-            (Id::new(), vec![3.0, 4.0]),
+        let vectors: Vec<(ExternalKey, Vec<f32>)> = vec![
+            (ExternalKey::NodeId(Id::new()), vec![1.0, 2.0]),
+            (ExternalKey::NodeId(Id::new()), vec![3.0, 4.0]),
         ];
         let mutation = InsertVectorBatch::new(&embedding, vectors.clone());
         assert_eq!(mutation.embedding, 1);
@@ -589,21 +626,42 @@ mod tests {
     #[test]
     fn test_mutation_from_conversions() {
         let embedding = test_embedding(1);
-        let insert = InsertVector::new(&embedding, Id::new(), vec![1.0]);
+        let insert = InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vec![1.0]);
         let _: Mutation = insert.into();
 
-        let delete = DeleteVector::new(&embedding, Id::new());
+        let delete = DeleteVector::new(&embedding, ExternalKey::NodeId(Id::new()));
         let _: Mutation = delete.into();
 
-        let batch = InsertVectorBatch::new(&embedding, vec![(Id::new(), vec![1.0])]);
+        let batch = InsertVectorBatch::new(&embedding, vec![(ExternalKey::NodeId(Id::new()), vec![1.0])]);
         let _: Mutation = batch.into();
     }
 
     #[test]
     fn test_flush_marker() {
-        let (marker, mut rx) = FlushMarker::new();
-        marker.complete();
-        // Should not panic - receiver gets the signal
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let marker = FlushMarker::new(tx);
+
+        // Take completion and signal
+        let completion = marker.take_completion().expect("should have completion");
+        completion.send(()).expect("should send");
+
+        // Receiver gets the signal
         assert!(rx.try_recv().is_ok());
+
+        // Second take returns None
+        assert!(marker.take_completion().is_none());
+    }
+
+    #[test]
+    fn test_flush_marker_clone() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let marker = FlushMarker::new(tx);
+
+        // Clone creates empty marker
+        let cloned = marker.clone();
+        assert!(cloned.take_completion().is_none());
+
+        // Original still has completion
+        assert!(marker.take_completion().is_some());
     }
 }
