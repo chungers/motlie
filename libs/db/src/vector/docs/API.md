@@ -35,8 +35,13 @@
    - [Performance Characteristics](#performance-characteristics)
    - [Failure Recovery](#failure-recovery)
    - [Best Practices for Concurrency](#best-practices-for-concurrency)
-7. [Complete Usage Flow](#complete-usage-flow)
-8. [Public API Reference](#public-api-reference)
+7. [Part 6: Subsystem Lifecycle Management](#part-6-subsystem-lifecycle-management)
+   - [Subsystem Overview](#subsystem-overview)
+   - [Starting the Subsystem](#starting-the-subsystem)
+   - [Shutdown Order](#shutdown-order)
+   - [Best Practices](#best-practices-for-lifecycle)
+8. [Complete Usage Flow](#complete-usage-flow)
+9. [Public API Reference](#public-api-reference)
 
 ---
 
@@ -889,6 +894,135 @@ The system handles failures gracefully:
 4. **Monitor contention**: Track `errors` in metrics for timeout/conflict rates
 5. **Size NavigationCache**: Larger cache reduces storage reads under load
 6. **Test under load**: Run concurrent stress tests before production
+
+---
+
+## Part 6: Subsystem Lifecycle Management
+
+### Subsystem Overview
+
+The `Subsystem` struct manages the complete lifecycle of the vector storage system, including:
+- Storage and column family initialization
+- Embedding registry pre-warming
+- Writer and reader consumers
+- Async graph updater (optional)
+- Garbage collector (optional)
+
+### Starting the Subsystem
+
+Use `start()` for simple usage or `start_with_async()` for full control:
+
+```rust
+use motlie_db::vector::{
+    Subsystem, WriterConfig, ReaderConfig, AsyncUpdaterConfig, GcConfig,
+};
+use std::sync::Arc;
+use std::time::Duration;
+
+// Create and initialize subsystem
+let subsystem = Arc::new(Subsystem::new());
+let storage = StorageBuilder::new(path)
+    .with_rocksdb(subsystem.clone())
+    .build()?;
+
+// Simple start (no async updater, no GC)
+let (writer, search_reader) = subsystem.start(
+    storage.vector_storage().clone(),
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,  // query workers
+);
+
+// Or: Full control with async updater and GC
+let async_config = AsyncUpdaterConfig::default()
+    .with_num_workers(4)
+    .with_batch_size(200);
+
+let gc_config = GcConfig::default()
+    .with_interval(Duration::from_secs(60))
+    .with_batch_size(100);
+
+let (writer, search_reader) = subsystem.start_with_async(
+    storage.vector_storage().clone(),
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,
+    Some(async_config),  // Enable async graph updates
+    Some(gc_config),     // Enable garbage collection
+);
+```
+
+### Shutdown Order
+
+When `storage.shutdown()` is called, the subsystem shuts down components in this order:
+
+```
+on_shutdown():
+  1. GC.shutdown()           - Stop background scans immediately
+  2. AsyncUpdater.shutdown() - Wait for in-flight graph builds
+  3. Writer.flush()          - Flush pending mutations (closes channel)
+  4. Join consumer tasks     - Wait for consumers to exit
+  5. (storage closes)        - RocksDB cleanup
+```
+
+```
+  ┌─────────────────────────────────────────────────────────┐
+  │                    Shutdown Timeline                     │
+  ├─────────────────────────────────────────────────────────┤
+  │                                                          │
+  │  shutdown()                                              │
+  │      │                                                   │
+  │      ▼                                                   │
+  │  ┌────────────────┐                                      │
+  │  │ GC.shutdown()  │  Stop background delete cleanup      │
+  │  └───────┬────────┘                                      │
+  │          │                                               │
+  │          ▼                                               │
+  │  ┌────────────────────────┐                              │
+  │  │ AsyncUpdater.shutdown()│  Wait for pending graph ops  │
+  │  └───────┬────────────────┘                              │
+  │          │                                               │
+  │          ▼                                               │
+  │  ┌────────────────┐                                      │
+  │  │ Writer.flush() │  Drain + close mutation channel      │
+  │  └───────┬────────┘                                      │
+  │          │                                               │
+  │          ▼                                               │
+  │  ┌──────────────────────┐                                │
+  │  │ Join consumer tasks  │  Consumers exit, join handles  │
+  │  └───────┬──────────────┘                                │
+  │          │                                               │
+  │          ▼                                               │
+  │     (RocksDB closes)                                     │
+  │                                                          │
+  └─────────────────────────────────────────────────────────┘
+```
+
+**Why this order matters:**
+
+1. **GC first**: Prevents GC from accessing storage after other components stop
+2. **AsyncUpdater second**: Ensures all pending graph builds complete
+3. **Writer flush**: Drains pending mutations, closes channel
+4. **Join consumers**: Cooperative shutdown - consumers exit when channel closes
+
+### Best Practices for Lifecycle
+
+1. **Always use `Subsystem.start()` or `start_with_async()`**: These methods manage consumer handles and ensure proper shutdown
+
+2. **Enable GC for long-running applications**:
+   ```rust
+   let gc_config = GcConfig::default()
+       .with_interval(Duration::from_secs(60));
+   ```
+
+3. **Call `storage.shutdown()` on application exit**: This triggers the proper shutdown sequence
+
+4. **Don't manually manage consumers**: Let `Subsystem` handle spawning and joining
+
+5. **Monitor GC metrics** for operational visibility:
+   ```rust
+   // Note: GC is managed by Subsystem, metrics available via storage telemetry
+   ```
 
 ---
 

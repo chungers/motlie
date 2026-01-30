@@ -13,6 +13,7 @@ use motlie_core::telemetry::SubsystemInfo;
 
 use super::async_updater::{AsyncGraphUpdater, AsyncUpdaterConfig};
 use super::cache::NavigationCache;
+use super::gc::{GarbageCollector, GcConfig};
 use super::processor::Processor;
 use super::reader::{create_search_reader, ReaderConfig, SearchReader, spawn_consumers_with_processor};
 use super::registry::EmbeddingRegistry;
@@ -57,6 +58,12 @@ pub struct Subsystem {
     /// Navigation cache for HNSW operations.
     /// Shared between Processor and AsyncGraphUpdater.
     nav_cache: Arc<NavigationCache>,
+    /// Optional garbage collector for deleted vector cleanup.
+    /// Started via `start_with_async()` when GcConfig provided.
+    gc: RwLock<Option<GarbageCollector>>,
+    /// Consumer task handles for graceful shutdown.
+    /// Joined after writer channel closes to ensure clean exit.
+    consumer_handles: RwLock<Vec<tokio::task::JoinHandle<anyhow::Result<()>>>>,
 }
 
 impl Subsystem {
@@ -68,6 +75,8 @@ impl Subsystem {
             writer: RwLock::new(None),
             async_updater: RwLock::new(None),
             nav_cache: Arc::new(NavigationCache::default()),
+            gc: RwLock::new(None),
+            consumer_handles: RwLock::new(Vec::new()),
         }
     }
 
@@ -190,13 +199,14 @@ impl Subsystem {
         reader_config: ReaderConfig,
         num_query_workers: usize,
     ) -> (Writer, SearchReader) {
-        self.start_with_async(storage, writer_config, reader_config, num_query_workers, None)
+        self.start_with_async(storage, writer_config, reader_config, num_query_workers, None, None)
     }
 
     /// Start the vector subsystem with async graph updater for two-phase inserts.
     ///
     /// This extends [`start`] with an optional async graph updater that enables
-    /// low-latency inserts by decoupling vector storage from HNSW graph construction.
+    /// low-latency inserts by decoupling vector storage from HNSW graph construction,
+    /// and an optional garbage collector for deleted vector cleanup.
     ///
     /// ## Two-Phase Insert Pattern
     ///
@@ -207,6 +217,11 @@ impl Subsystem {
     /// Vectors are immediately searchable via brute-force fallback on the pending
     /// queue, then transition to HNSW search once graph edges are built.
     ///
+    /// ## Garbage Collection
+    ///
+    /// When GC is enabled, a background worker periodically scans for soft-deleted
+    /// vectors and cleans them up (removes edges, deletes data, optionally recycles IDs).
+    ///
     /// # Arguments
     ///
     /// * `storage` - Vector storage instance
@@ -214,6 +229,7 @@ impl Subsystem {
     /// * `reader_config` - Configuration for query reader
     /// * `num_query_workers` - Number of parallel query workers
     /// * `async_config` - Optional async updater config; None disables async updates
+    /// * `gc_config` - Optional GC config; None disables garbage collection
     ///
     /// # Returns
     ///
@@ -222,12 +238,16 @@ impl Subsystem {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use motlie_db::vector::{Subsystem, WriterConfig, ReaderConfig, AsyncUpdaterConfig};
+    /// use motlie_db::vector::{Subsystem, WriterConfig, ReaderConfig, AsyncUpdaterConfig, GcConfig};
     ///
-    /// // Start with async graph updater for low-latency inserts
+    /// // Start with async graph updater and garbage collector
     /// let async_config = AsyncUpdaterConfig::default()
     ///     .with_num_workers(4)
     ///     .with_batch_size(200);
+    ///
+    /// let gc_config = GcConfig::default()
+    ///     .with_interval(Duration::from_secs(60))
+    ///     .with_batch_size(100);
     ///
     /// let (writer, search_reader) = subsystem.start_with_async(
     ///     storage.clone(),
@@ -235,6 +255,7 @@ impl Subsystem {
     ///     ReaderConfig::default(),
     ///     4,
     ///     Some(async_config),
+    ///     Some(gc_config),
     /// );
     ///
     /// // Inserts now use two-phase pattern (fast sync + async graph build)
@@ -246,10 +267,12 @@ impl Subsystem {
     /// # Lifecycle
     ///
     /// When `on_shutdown()` is called:
-    /// 1. Async graph updater is shut down gracefully (waits for in-flight batches)
-    /// 2. Pending mutations are flushed
+    /// 1. GC is shut down (stops background scans)
+    /// 2. Async graph updater is shut down gracefully (waits for in-flight batches)
+    /// 3. Writer flushes pending mutations (closes channel)
+    /// 4. Consumer tasks are joined (cooperative shutdown via channel close)
     ///
-    /// This ensures all pending graph updates complete before storage closes.
+    /// This ensures all components shut down cleanly before storage closes.
     pub fn start_with_async(
         &self,
         storage: Arc<super::Storage>,
@@ -257,6 +280,7 @@ impl Subsystem {
         reader_config: ReaderConfig,
         num_query_workers: usize,
         async_config: Option<AsyncUpdaterConfig>,
+        gc_config: Option<GcConfig>,
     ) -> (Writer, SearchReader) {
         // Create processor (shared by mutation consumer and query consumers)
         // Processor uses the shared nav_cache for HNSW operations
@@ -272,16 +296,23 @@ impl Subsystem {
         // Create and spawn mutation consumer
         let (writer, mutation_receiver) = create_writer(writer_config.clone());
         let mutation_consumer = Consumer::new(mutation_receiver, writer_config, processor.clone());
-        let _mutation_handle = spawn_consumer(mutation_consumer);
+        let mutation_handle = spawn_consumer(mutation_consumer);
 
         // Create and spawn query consumers
         let (search_reader, query_receiver) = create_search_reader(reader_config.clone(), processor.clone());
-        let _query_handles = spawn_consumers_with_processor(
+        let query_handles = spawn_consumers_with_processor(
             query_receiver,
             reader_config,
             processor,
             num_query_workers,
         );
+
+        // Store consumer handles for graceful shutdown
+        {
+            let mut handles = self.consumer_handles.write().expect("consumer_handles lock poisoned");
+            handles.push(mutation_handle);
+            handles.extend(query_handles);
+        }
 
         // Register writer for shutdown flush
         self.set_writer(writer.clone());
@@ -289,12 +320,22 @@ impl Subsystem {
         // Start async graph updater if configured
         if let Some(config) = async_config {
             let updater = AsyncGraphUpdater::start(
-                storage,
+                storage.clone(),
                 self.cache.clone(),
                 self.nav_cache.clone(),
                 config,
             );
             *self.async_updater.write().expect("async_updater lock poisoned") = Some(updater);
+        }
+
+        // Start garbage collector if configured
+        if let Some(config) = gc_config {
+            let gc = GarbageCollector::start(
+                storage,
+                self.cache.clone(),
+                config,
+            );
+            *self.gc.write().expect("gc lock poisoned") = Some(gc);
         }
 
         (writer, search_reader)
@@ -457,7 +498,14 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
     fn on_shutdown(&self) -> Result<()> {
         tracing::info!(subsystem = "vector", "Shutting down");
 
-        // Shutdown async graph updater first (graceful - waits for in-flight batches)
+        // 1. Shutdown GC first (stops background scans immediately)
+        if let Some(gc) = self.gc.write().expect("gc lock poisoned").take() {
+            tracing::debug!(subsystem = "vector", "Shutting down garbage collector");
+            gc.shutdown();
+            tracing::debug!(subsystem = "vector", "Garbage collector shut down");
+        }
+
+        // 2. Shutdown async graph updater (graceful - waits for in-flight batches)
         // This must happen before flushing mutations to ensure all pending inserts are processed.
         if let Some(updater) = self.async_updater.write().expect("async_updater lock poisoned").take() {
             tracing::debug!(subsystem = "vector", "Shutting down async graph updater");
@@ -465,7 +513,7 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
             tracing::debug!(subsystem = "vector", "Async graph updater shut down");
         }
 
-        // Best-effort flush of pending mutations
+        // 3. Flush pending mutations (closes channel, signals consumers to exit)
         if let Some(writer) = self.writer.read().expect("writer lock poisoned").as_ref() {
             if !writer.is_closed() {
                 tracing::debug!(subsystem = "vector", "Flushing pending mutations");
@@ -491,6 +539,30 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
                             "No tokio runtime available for shutdown flush (best effort)"
                         );
                     }
+                }
+            }
+        }
+
+        // 4. Join consumer tasks (cooperative shutdown - channels are closed)
+        // Consumers exit naturally when recv() returns None, so joins should complete quickly.
+        let handles = std::mem::take(&mut *self.consumer_handles.write().expect("consumer_handles lock poisoned"));
+        if !handles.is_empty() {
+            tracing::debug!(subsystem = "vector", count = handles.len(), "Joining consumer tasks");
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime_handle) => {
+                    for (i, handle) in handles.into_iter().enumerate() {
+                        match runtime_handle.block_on(handle) {
+                            Ok(Ok(())) => tracing::debug!(subsystem = "vector", consumer = i, "Consumer joined"),
+                            Ok(Err(e)) => tracing::warn!(subsystem = "vector", consumer = i, error = %e, "Consumer returned error"),
+                            Err(_) => tracing::warn!(subsystem = "vector", consumer = i, "Consumer task panicked"),
+                        }
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        subsystem = "vector",
+                        "No tokio runtime available for joining consumer tasks"
+                    );
                 }
             }
         }

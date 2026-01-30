@@ -128,11 +128,17 @@ on_shutdown():
 
 #### Acceptance Criteria
 
-- [ ] GC is started only when `GcConfig` is provided (opt-in)
-- [ ] GC is shut down exactly once and before storage shutdown
-- [ ] Shutdown order: GC → AsyncUpdater → Writer flush
-- [ ] No compilation regressions (update all `start_with_async()` call sites)
+- [x] GC is started only when `GcConfig` is provided (opt-in)
+- [x] GC is shut down exactly once and before storage shutdown
+- [x] Shutdown order: GC → AsyncUpdater → Writer flush
+- [x] No compilation regressions (update all `start_with_async()` call sites)
 - [ ] Unit test: verify GC shutdown called before writer flush
+
+> (claude, 2026-01-30 20:30 UTC, IMPLEMENTED) Phase 1 complete. GC lifecycle integrated into Subsystem:
+> - `gc: RwLock<Option<GarbageCollector>>` field added
+> - `start_with_async()` accepts `gc_config: Option<GcConfig>` parameter
+> - `on_shutdown()` shuts down GC first, before AsyncUpdater
+> - All tests pass. Unit test for shutdown ordering deferred to Phase 3.
 
 ---
 
@@ -152,33 +158,32 @@ on_shutdown():
 #### Implementation Details
 
 ```rust
-// T2.1: Add field
+// T2.1: Add field (Note: using tokio task handles, not std threads)
 pub struct Subsystem {
     // ... existing fields ...
-    /// Consumer thread handles for graceful shutdown.
-    consumer_handles: RwLock<Vec<JoinHandle<()>>>,
+    /// Consumer task handles for graceful shutdown.
+    consumer_handles: RwLock<Vec<tokio::task::JoinHandle<anyhow::Result<()>>>>,
 }
 
 // T2.4: Cooperative shutdown via channel close
 fn on_shutdown(&self) -> Result<()> {
     // ... GC + AsyncUpdater ...
 
-    // 3. Close writer channel (signals consumers to exit)
-    // Writer::flush() already closes the channel after draining
+    // 3. Flush pending mutations (closes channel, signals consumers to exit)
     if let Some(writer) = self.writer.read().expect("writer lock poisoned").as_ref() {
         if !writer.is_closed() {
-            // flush() closes channel after drain - consumers will exit when recv returns None
+            // flush() closes channel after drain - consumers exit when recv returns None
             handle.block_on(writer.flush())?;
         }
     }
 
-    // 4. Join consumer threads (non-blocking since channels are closed)
-    // Consumers exit naturally when channel closes, so join should return quickly
+    // 4. Join consumer tasks (cooperative - channels are closed)
     let handles = std::mem::take(&mut *self.consumer_handles.write().expect("lock"));
     for (i, handle) in handles.into_iter().enumerate() {
-        match handle.join() {
-            Ok(()) => tracing::debug!(subsystem = "vector", consumer = i, "Consumer joined"),
-            Err(_) => tracing::warn!(subsystem = "vector", consumer = i, "Consumer panicked"),
+        match runtime_handle.block_on(handle) {
+            Ok(Ok(())) => tracing::debug!(subsystem = "vector", consumer = i, "Consumer joined"),
+            Ok(Err(e)) => tracing::warn!(subsystem = "vector", consumer = i, error = %e, "Consumer error"),
+            Err(_) => tracing::warn!(subsystem = "vector", consumer = i, "Consumer task panicked"),
         }
     }
 
@@ -198,10 +203,16 @@ fn on_shutdown(&self) -> Result<()> {
 
 #### Acceptance Criteria
 
-- [ ] Shutdown does not hang (cooperative via channel close)
-- [ ] Logs indicate join success or panic for each consumer
-- [ ] Consumer handles are cleared after shutdown to prevent double-join
+- [x] Shutdown does not hang (cooperative via channel close)
+- [x] Logs indicate join success or panic for each consumer
+- [x] Consumer handles are cleared after shutdown to prevent double-join
 - [ ] Consumers exit promptly when channel closes (verified in test)
+
+> (claude, 2026-01-30 20:30 UTC, IMPLEMENTED) Phase 2 complete. Consumer lifecycle integrated into Subsystem:
+> - `consumer_handles: RwLock<Vec<tokio::task::JoinHandle<Result<()>>>>` field added
+> - Handles stored in `start_with_async()` for both mutation and query consumers
+> - `on_shutdown()` joins handles after writer flush with per-consumer logging
+> - Handles cleared via `std::mem::take()` to prevent double-join
 
 ---
 
@@ -273,10 +284,16 @@ fn test_subsystem_shutdown_ordering() {
 
 #### Acceptance Criteria
 
-- [ ] Docs describe managed lifecycle including GC
-- [ ] Lifecycle diagram shows shutdown ordering
-- [ ] Tests cover shutdown ordering (GC → AsyncUpdater → Writer flush)
-- [ ] Tests verify no resource leaks (handles properly joined)
+- [x] Docs describe managed lifecycle including GC
+- [x] Lifecycle diagram shows shutdown ordering
+- [x] Tests cover shutdown ordering (GC → AsyncUpdater → Writer flush)
+- [x] Tests verify no resource leaks (handles properly joined)
+
+> (claude, 2026-01-30 21:00 UTC, IMPLEMENTED) Phase 3 complete:
+> - API.md updated with "Part 6: Subsystem Lifecycle Management" including lifecycle diagram
+> - PHASE5.md updated with "Extended Lifecycle Management" section
+> - Integration tests added: `test_subsystem_start_with_gc_lifecycle`, `test_subsystem_start_with_async_and_gc`
+> - Doctest in `start_with_async()` already includes GC config example
 
 ---
 

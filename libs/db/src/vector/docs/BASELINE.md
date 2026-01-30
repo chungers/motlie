@@ -673,6 +673,7 @@ let (writer, reader) = subsystem.start_with_async(
     ReaderConfig::default(),
     4,  // query workers
     Some(async_config),
+    None,  // gc_config - disabled in this example
 );
 
 // Inserts now use async path by default (immediate_index=false)

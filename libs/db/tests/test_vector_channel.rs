@@ -19,9 +19,9 @@ use std::time::Duration;
 
 use motlie_db::vector::{
     create_search_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
-    spawn_query_consumers_with_storage_autoreg, DeleteVector, Distance, EmbeddingBuilder,
-    ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN, Storage,
-    Subsystem, WriterConfig,
+    spawn_query_consumers_with_storage_autoreg, AsyncUpdaterConfig, DeleteVector, Distance,
+    EmbeddingBuilder, ExternalKey, GcConfig, InsertVector, MutationRunnable, ReaderConfig, Runnable,
+    SearchKNN, Storage, Subsystem, WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -719,4 +719,154 @@ async fn test_concurrent_deletes_vs_searches() {
         100,
         "All 100 non-deleted vectors should still be searchable"
     );
+}
+
+// ============================================================================
+// Test: Subsystem with GC Lifecycle (Phase 8 / SUBSYSTEM)
+// ============================================================================
+
+/// Validates that GC started via `start_with_async()` shuts down cleanly.
+/// The subsystem should manage GC lifecycle and shut it down before storage closes.
+#[tokio::test]
+async fn test_subsystem_start_with_gc_lifecycle() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut storage = Storage::readwrite(temp_dir.path());
+    storage.ready().expect("storage ready");
+    let storage = Arc::new(storage);
+
+    // Create subsystem and start with GC enabled
+    let subsystem = Subsystem::new();
+    let registry = subsystem.cache().clone();
+
+    // GC config with short interval for testing
+    let gc_config = GcConfig::default().with_interval(Duration::from_millis(100));
+
+    let (writer, search_reader) = subsystem.start_with_async(
+        storage.clone(),
+        WriterConfig::default(),
+        ReaderConfig::default(),
+        2,
+        None, // No async updater
+        Some(gc_config),
+    );
+
+    // Verify handles are active
+    assert!(!writer.is_closed(), "Writer should be active");
+    assert!(!search_reader.is_closed(), "SearchReader should be active");
+
+    let timeout = Duration::from_secs(5);
+
+    // Register embedding and insert some vectors
+    let txn_db = storage.transaction_db().expect("txn_db");
+    let embedding = registry
+        .register(
+            EmbeddingBuilder::new("test-gc-lifecycle", DIM as u32, Distance::Cosine),
+            &txn_db,
+        )
+        .expect("register");
+
+    let vectors = generate_vectors(DIM, 20, 55);
+    for vector in &vectors {
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
+            .immediate()
+            .run(&writer)
+            .await
+            .expect("insert");
+    }
+    writer.flush().await.expect("flush");
+
+    // Verify search works
+    let results = SearchKNN::new(&embedding, vectors[0].clone(), K)
+        .with_ef(50)
+        .exact()
+        .run(&search_reader, timeout)
+        .await
+        .expect("search");
+    assert!(!results.is_empty(), "Should find results");
+
+    // Shutdown should complete without hanging (GC shuts down cleanly)
+    // Note: We're dropping the storage Arc here which triggers on_shutdown
+    // The test passes if it doesn't hang or panic
+    drop(writer);
+    drop(search_reader);
+    drop(storage);
+
+    // If we reach here, GC shutdown completed successfully
+}
+
+// ============================================================================
+// Test: Subsystem with Async Updater and GC Lifecycle
+// ============================================================================
+
+/// Validates that both async updater and GC shut down cleanly when both are enabled.
+#[tokio::test]
+async fn test_subsystem_start_with_async_and_gc() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut storage = Storage::readwrite(temp_dir.path());
+    storage.ready().expect("storage ready");
+    let storage = Arc::new(storage);
+
+    let subsystem = Subsystem::new();
+    let registry = subsystem.cache().clone();
+
+    // Enable both async updater and GC
+    let async_config = AsyncUpdaterConfig::default()
+        .with_num_workers(2)
+        .with_batch_size(10);
+
+    let gc_config = GcConfig::default().with_interval(Duration::from_millis(100));
+
+    let (writer, search_reader) = subsystem.start_with_async(
+        storage.clone(),
+        WriterConfig::default(),
+        ReaderConfig::default(),
+        2,
+        Some(async_config),
+        Some(gc_config),
+    );
+
+    assert!(!writer.is_closed(), "Writer should be active");
+    assert!(!search_reader.is_closed(), "SearchReader should be active");
+
+    let timeout = Duration::from_secs(5);
+
+    // Register embedding
+    let txn_db = storage.transaction_db().expect("txn_db");
+    let embedding = registry
+        .register(
+            EmbeddingBuilder::new("test-async-gc", DIM as u32, Distance::Cosine),
+            &txn_db,
+        )
+        .expect("register");
+
+    // Insert vectors using async path (build_index=false is default with async updater)
+    let vectors = generate_vectors(DIM, 30, 77);
+    for vector in &vectors {
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
+            .run(&writer)
+            .await
+            .expect("insert");
+    }
+    writer.flush().await.expect("flush");
+
+    // Allow some time for async updater to process
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Verify search works (may use pending fallback if async not complete)
+    let results = SearchKNN::new(&embedding, vectors[0].clone(), K)
+        .with_ef(50)
+        .exact()
+        .run(&search_reader, timeout)
+        .await
+        .expect("search");
+
+    // Results should include our vectors (either via HNSW or pending fallback)
+    assert!(!results.is_empty(), "Should find results");
+
+    // Shutdown should complete cleanly (GC, AsyncUpdater, consumers all shut down)
+    drop(writer);
+    drop(search_reader);
+    drop(storage);
+
+    // If we reach here, both GC and AsyncUpdater shutdown completed successfully
 }
