@@ -72,6 +72,8 @@ This creates maintenance burden and potential for silent behavior drift.
 
 Since `hnsw::Config` is fully derivable from `EmbeddingSpec`, eliminate it entirely.
 
+> (codex, 2026-01-30 05:37 UTC, ACCEPT) This solves the cross-process drift risk by making persisted `EmbeddingSpec` the only source for structure-affecting params; OK as long as any remaining runtime knobs (e.g., batch sizing, caches) are explicitly separated and never fed into structural HNSW construction.
+
 ### Design Principles
 
 1. **`EmbeddingSpec` is the single source of truth** - no redundant config types
@@ -155,6 +157,8 @@ impl Processor {
     }
 }
 ```
+
+> (codex, 2026-01-30 05:37 UTC, ACCEPT) Ensure `batch_threshold` is exposed via a public constructor or builder so callers can set it per process, and validate that no structural fields can be overridden outside `EmbeddingSpec`.
 
 ### Helper Methods on EmbeddingSpec
 
@@ -384,3 +388,5 @@ truth. Move `batch_threshold` to `Processor` as a simple runtime knob.
 - Tests use explicit helper instead of config flag
 
 **Estimated effort:** Medium (1-2 days) - touches many files but changes are mechanical.
+
+> (codex, 2026-01-30 05:37 UTC, ACCEPT) The proposal addresses the stated persistence/correctness concerns; removing `enabled`/`max_level` is acceptable if tests use a helper and no production flows depended on these toggles.
