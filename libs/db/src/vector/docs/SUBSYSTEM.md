@@ -301,48 +301,7 @@ Rationale:
 
 ---
 
-## Migration Impact
+## Notes
 
-### Breaking Changes
-
-- `start_with_async()` gains new `gc_config: Option<GcConfig>` parameter
-- Existing callers must add `, None` for no GC (or update to enable GC)
-
-### Migration Path
-
-```rust
-// Before
-let (writer, reader) = subsystem.start_with_async(
-    storage, writer_config, reader_config, 4, Some(async_config)
-);
-
-// After
-let (writer, reader) = subsystem.start_with_async(
-    storage, writer_config, reader_config, 4, Some(async_config), None  // No GC
-);
-
-// Or enable GC
-let (writer, reader) = subsystem.start_with_async(
-    storage, writer_config, reader_config, 4, Some(async_config), Some(GcConfig::default())
-);
-```
-
-### Backward Compatibility Alternative
-
-Could add `start_with_gc()` method instead of modifying `start_with_async()`:
-
-```rust
-pub fn start_with_gc(
-    &self,
-    storage: Arc<super::Storage>,
-    writer_config: WriterConfig,
-    reader_config: ReaderConfig,
-    num_query_workers: usize,
-    async_config: Option<AsyncUpdaterConfig>,
-    gc_config: GcConfig,  // Required, not optional
-) -> (Writer, SearchReader)
-```
-
-**Decision**: Prefer single method with optional parameter for simplicity.
-
-> (claude, 2026-01-30 16:00 UTC, DESIGN CHOICE) Single `start_with_async()` with `gc_config: Option<GcConfig>`. Breaking change is acceptable for internal API.
+- Breaking changes are acceptable; no migration path or backward compatibility required.
+- All callers of `start_with_async()` will be updated directly.
