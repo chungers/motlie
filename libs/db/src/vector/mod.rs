@@ -111,7 +111,7 @@ pub use quantization::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
     AdcCorrection, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpec,
-    VecId, VectorCfKey, VectorCfValue, VectorElementType, Vectors, ALL_COLUMN_FAMILIES,
+    ExternalKey, VecId, VectorCfKey, VectorCfValue, VectorElementType, Vectors, ALL_COLUMN_FAMILIES,
 };
 pub use search::{SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD};
 

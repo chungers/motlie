@@ -29,7 +29,7 @@ use tokio::sync::oneshot;
 use super::embedding::Embedding;
 use super::processor::{Processor, SearchResult};
 use super::schema::{
-    EmbeddingCode, IdForward, IdForwardCfKey, IdReverse, IdReverseCfKey, VecId, VectorCfKey,
+    EmbeddingCode, ExternalKey, IdForward, IdForwardCfKey, IdReverse, IdReverseCfKey, VecId, VectorCfKey,
     Vectors,
 };
 use super::search::SearchConfig;
@@ -255,7 +255,7 @@ impl QueryExecutor for GetVector {
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         // 1. Look up the internal vec_id from the external ID
-        let forward_key = IdForwardCfKey(self.embedding, self.id);
+        let forward_key = IdForwardCfKey(self.embedding, ExternalKey::NodeId(self.id));
         let forward_key_bytes = IdForward::key_to_bytes(&forward_key);
 
         let txn_db = storage.transaction_db()?;
@@ -341,7 +341,7 @@ impl QueryExecutor for GetInternalId {
     type Output = Option<VecId>;
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
-        let forward_key = IdForwardCfKey(self.embedding, self.id);
+        let forward_key = IdForwardCfKey(self.embedding, ExternalKey::NodeId(self.id));
         let forward_key_bytes = IdForward::key_to_bytes(&forward_key);
 
         let txn_db = storage.transaction_db()?;
@@ -420,7 +420,11 @@ impl QueryExecutor for GetExternalId {
             .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
 
         match txn_db.get_cf(&reverse_cf, &reverse_key_bytes)? {
-            Some(bytes) => Ok(Some(IdReverse::value_from_bytes(&bytes)?.0)),
+            Some(bytes) => {
+                let external_key = IdReverse::value_from_bytes(&bytes)?.0;
+                // Extract Id from ExternalKey (backward compatibility)
+                Ok(external_key.node_id())
+            }
             None => Ok(None),
         }
     }
@@ -505,13 +509,18 @@ impl QueryExecutor for ResolveIds {
             txn_db.multi_get_cf(keys.iter().map(|k| (&reverse_cf, k.as_slice())));
 
         // Parse results, converting RocksDB errors to None
+        // Extract Id from ExternalKey (backward compatibility)
         let resolved: Vec<Option<Id>> = results
             .into_iter()
             .map(|result| {
                 result
                     .ok()
                     .flatten()
-                    .and_then(|bytes| IdReverse::value_from_bytes(&bytes).ok().map(|v| v.0))
+                    .and_then(|bytes| {
+                        IdReverse::value_from_bytes(&bytes)
+                            .ok()
+                            .and_then(|v| v.0.node_id())
+                    })
             })
             .collect();
 

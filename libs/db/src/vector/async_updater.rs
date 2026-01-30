@@ -857,6 +857,7 @@ mod tests {
     use super::*;
     use crate::vector::embedding::EmbeddingBuilder;
     use crate::vector::processor::Processor;
+    use crate::vector::schema::ExternalKey;
     use crate::vector::search::SearchConfig;
     use crate::vector::Distance;
     use tempfile::TempDir;
@@ -971,7 +972,7 @@ mod tests {
         let id = crate::Id::new();
         let vector = test_vector(64, 42);
         let _vec_id = processor
-            .insert_vector(&embedding, id, &vector, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, false)
             .expect("Insert should succeed");
 
         // Search with pending fallback enabled (default)
@@ -1004,7 +1005,7 @@ mod tests {
             let id = crate::Id::new();
             let vector = test_vector(64, i);
             processor
-                .insert_vector(&embedding, id, &vector, false)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, false)
                 .expect("Insert should succeed");
             if first.is_none() {
                 first = Some((id, vector));
@@ -1054,7 +1055,7 @@ mod tests {
             inserted_id = crate::Id::new();
             let vector = test_vector(64, 42);
             processor
-                .insert_vector(&embedding, inserted_id, &vector, false)
+                .insert_vector(&embedding, ExternalKey::NodeId(inserted_id), &vector, false)
                 .expect("Insert should succeed");
 
             // Verify pending item exists
@@ -1117,7 +1118,7 @@ mod tests {
         let id = crate::Id::new();
         let vector = test_vector(64, 42);
         processor
-            .insert_vector(&embedding, id, &vector, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, false)
             .expect("Insert should succeed");
 
         // Verify pending item exists
@@ -1126,7 +1127,7 @@ mod tests {
 
         // Delete the vector
         processor
-            .delete_vector(&embedding, id)
+            .delete_vector(&embedding, ExternalKey::NodeId(id))
             .expect("Delete should succeed");
 
         // Verify pending queue is cleared
@@ -1169,7 +1170,7 @@ mod tests {
                 let id = crate::Id::new();
                 let vector = test_vector(64, i);
                 processor_clone
-                    .insert_vector(&embedding_clone, id, &vector, false)
+                    .insert_vector(&embedding_clone, ExternalKey::NodeId(id), &vector, false)
                     .expect("Insert should succeed");
             }
         });
@@ -1212,7 +1213,7 @@ mod tests {
             let id = crate::Id::new();
             let vector = test_vector(64, i);
             processor
-                .insert_vector(&embedding, id, &vector, false)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, false)
                 .expect("Insert should succeed");
         }
         let pending_initial = count_pending_items(&storage, embedding.code());
@@ -1276,7 +1277,7 @@ mod tests {
             let id = crate::Id::new();
             let vector = test_vector(64, i);
             processor
-                .insert_vector(&embedding, id, &vector, false)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, false)
                 .expect("Insert should succeed");
             ids.push(id);
         }
@@ -1316,7 +1317,7 @@ mod tests {
             let id = crate::Id::new();
             let vector = test_vector(64, i);
             processor
-                .insert_vector(&embedding, id, &vector, false)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, false)
                 .expect("Insert should succeed");
         }
 
@@ -1360,14 +1361,14 @@ mod tests {
         let id1 = crate::Id::new();
         let vector1 = test_vector(64, 1);
         processor
-            .insert_vector(&embedding, id1, &vector1, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id1), &vector1, false)
             .expect("First async insert should succeed");
 
         // Second async insert should be blocked by backpressure
         let id2 = crate::Id::new();
         let vector2 = test_vector(64, 2);
         let err = processor
-            .insert_vector(&embedding, id2, &vector2, false)
+            .insert_vector(&embedding, ExternalKey::NodeId(id2), &vector2, false)
             .expect_err("Second async insert should fail due to backpressure");
         assert!(
             err.to_string().to_lowercase().contains("backpressure"),
@@ -1432,7 +1433,7 @@ mod tests {
 
             let start = Instant::now();
             processor
-                .insert_vector(&embedding, id, &vector, true) // SYNC
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true) // SYNC
                 .expect("Sync insert should succeed");
             sync_latencies.push(start.elapsed());
         }
@@ -1445,7 +1446,7 @@ mod tests {
 
             let start = Instant::now();
             processor
-                .insert_vector(&embedding, id, &vector, false) // ASYNC
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, false) // ASYNC
                 .expect("Async insert should succeed");
             async_latencies.push(start.elapsed());
         }

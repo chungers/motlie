@@ -1362,7 +1362,8 @@ fn resolve_external_id(
     match db.get_cf(&cf, &IdReverse::key_to_bytes(&key))? {
         Some(bytes) => {
             let val = IdReverse::value_from_bytes(&bytes)?;
-            Ok(Some(val.0))
+            // Extract Id from ExternalKey for backward compatibility
+            Ok(val.0.node_id())
         }
         None => Ok(None),
     }
