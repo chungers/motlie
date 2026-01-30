@@ -29,6 +29,7 @@ garbage collection.
 | Consumer handles not retained | ✅ VERIFIED | `subsystem.rs:275` uses `let _mutation_handle`, line 279 uses `let _query_handles` |
 
 > (claude, 2026-01-30 16:00 UTC, VALIDATED) All claims verified against code. The gaps identified are accurate.
+> (codex, 2026-01-30 19:54 UTC, ACCEPT) Claims and evidence align with `subsystem.rs`; no discrepancies found in current wiring.
 
 ## Risks / Impact
 
@@ -53,6 +54,8 @@ garbage collection.
 | T1.4 | In `on_shutdown()`, call `gc.shutdown()` before writer flush | `subsystem.rs` | Low |
 | T1.5 | Add `gc_config()` accessor method | `subsystem.rs` | Low |
 | T1.6 | Re-export `GcConfig` from `subsystem.rs` for convenience | `mod.rs` | Low |
+
+> (codex, 2026-01-30 19:54 UTC, PARTIAL) T1.5 needs a stored config (e.g., `gc_config: Option<GcConfig>`) to return; otherwise drop the accessor or store a clone alongside the handle.
 
 #### Implementation Details
 
@@ -116,6 +119,8 @@ on_shutdown():
   3. Writer.flush()          - Flush pending mutations
   4. (storage closes)        - RocksDB cleanup
 ```
+
+> (codex, 2026-01-30 19:54 UTC, ACCEPT) Shutdown ordering matches the desired lifecycle and prevents GC from running after storage teardown.
 
 #### Acceptance Criteria
 
@@ -182,6 +187,8 @@ fn on_shutdown(&self) -> Result<()> {
 }
 ```
 
+> (codex, 2026-01-30 19:54 UTC, REJECT) The timeout approach is incorrect: `std::thread::JoinHandle::join()` blocks with no timeout. Implement timeout via cooperative shutdown or join in a helper thread with `recv_timeout`.
+
 #### Acceptance Criteria
 
 - [ ] Shutdown does not hang (joins are time-bounded)
@@ -240,6 +247,8 @@ fn test_subsystem_shutdown_ordering() {
 }
 ```
 
+> (codex, 2026-01-30 19:54 UTC, PARTIAL) Log-order assertions are brittle; prefer explicit test hooks/counters to assert shutdown ordering deterministically.
+
 #### Acceptance Criteria
 
 - [ ] Docs describe managed lifecycle including GC
@@ -262,6 +271,7 @@ Rationale:
 - Users can set `gc_config: Some(GcConfig::default())` for defaults
 
 > (claude, 2026-01-30 16:00 UTC, RECOMMENDATION) Opt-in via `gc_config: Option<GcConfig>` parameter. Matches existing pattern for `async_config`.
+> (codex, 2026-01-30 19:54 UTC, DECISION) GC config remains runtime-only and is not persisted. Operators can change it across restarts via flags or config.
 
 ### Q2: Should GC share a cache with Processor/AsyncUpdater?
 
@@ -287,6 +297,7 @@ Rationale:
 - Log warnings on timeout so users know cleanup was incomplete
 
 > (claude, 2026-01-30 16:00 UTC, RECOMMENDATION) Timeout-bounded with `shutdown_timeout: Duration` field. Default 5s. Log warnings on timeout.
+> (codex, 2026-01-30 19:54 UTC, DECISION) Do not persist GC config; treat `enable_id_recycling` as a policy knob with clear operator guidance. Runtime changes across restarts are correctness-safe, with the caveat that ID reuse policy must align with product expectations.
 
 ---
 
@@ -298,6 +309,8 @@ Rationale:
 | Phase 2 | 6 | Low-Medium | 0.5 day |
 | Phase 3 | 6 | Low-Medium | 0.5 day |
 | **Total** | **18** | | **1.5 days** |
+
+> (codex, 2026-01-30 19:54 UTC, PARTIAL) Plan is close; fix Phase 2 timeout approach and clarify GC config storage before execution.
 
 ---
 
