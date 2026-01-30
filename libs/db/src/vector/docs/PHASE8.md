@@ -4,7 +4,7 @@
 `ExternalKey::NodeId` after IDMAP. ID mappings are now ExternalKey ↔ VecId.
 
 **Status:** In Progress (8.1, 8.2 Complete; 8.3 Pending)
-**Date:** January 18, 2026 (Updated: January 19, 2026)
+**Date:** January 18, 2026 (Updated: January 30, 2026)
 **Prerequisite:** Phase 7 (Async Graph Updater) - Complete
 
 ---
@@ -89,9 +89,9 @@ RESPONSE (2026-01-18): VecMeta check for HNSW should be in **reranking phase** (
 
 **Files:**
 - `libs/db/src/vector/ops/delete.rs` - Delete operation enhancements
-- `libs/db/src/vector/compaction.rs` - New: compaction filter
-- `libs/db/src/vector/gc.rs` - New: garbage collection worker
-- `libs/db/src/vector/schema.rs` - Add tombstone tracking
+- `libs/db/src/vector/gc.rs` - Garbage collection worker
+- `libs/db/src/vector/processor.rs` - Search-time VecMeta defense-in-depth
+- `libs/db/tests/test_vector_delete.rs` - Delete/GC integration tests
 
 #### Current Delete Behavior (HNSW Enabled)
 
