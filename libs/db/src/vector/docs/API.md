@@ -958,16 +958,19 @@ When `storage.shutdown()` is called, the subsystem shuts down components in this
 
 ```
 on_shutdown():
-  1. GC.shutdown()           - Stop background scans immediately
-  2. Writer.flush()          - Flush pending mutations (may add to pending queue)
-  3. AsyncUpdater.shutdown() - Drain pending queue, build remaining edges
-  4. Join consumer tasks     - Wait for consumers to exit
+  1. Writer.flush()          - Flush pending mutations (may add to pending queue)
+  2. AsyncUpdater.shutdown() - Drain pending queue, build remaining edges
+  3. Join consumer tasks     - Wait for consumers to exit
+  4. GC.shutdown()           - Stop background cleanup (last)
   5. (storage closes)        - RocksDB cleanup
 ```
 
 > **Note:** Writer must flush BEFORE AsyncUpdater shuts down. Otherwise, mutations
 > using the async path (`build_index=false`) would be flushed after AsyncUpdater
 > is already shut down, leaving vectors without HNSW edges.
+>
+> GC shuts down last because it has no dependencies on Writer/AsyncUpdater and can
+> continue cleaning deleted vectors while other components shut down.
 
 ```
   ┌─────────────────────────────────────────────────────────┐
@@ -977,11 +980,6 @@ on_shutdown():
   │  shutdown()                                              │
   │      │                                                   │
   │      ▼                                                   │
-  │  ┌────────────────┐                                      │
-  │  │ GC.shutdown()  │  Stop background delete cleanup      │
-  │  └───────┬────────┘                                      │
-  │          │                                               │
-  │          ▼                                               │
   │  ┌────────────────┐                                      │
   │  │ Writer.flush() │  Drain + close mutation channel      │
   │  └───────┬────────┘  (may add to async pending queue)    │
@@ -995,6 +993,11 @@ on_shutdown():
   │  ┌──────────────────────┐                                │
   │  │ Join consumer tasks  │  Consumers exit, join handles  │
   │  └───────┬──────────────┘                                │
+  │          │                                               │
+  │          ▼                                               │
+  │  ┌────────────────┐                                      │
+  │  │ GC.shutdown()  │  Stop background cleanup (last)      │
+  │  └───────┬────────┘                                      │
   │          │                                               │
   │          ▼                                               │
   │     (RocksDB closes)                                     │
