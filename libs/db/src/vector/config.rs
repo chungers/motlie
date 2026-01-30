@@ -2,20 +2,15 @@
 //!
 //! ## Design Note
 //!
-//! HNSW structural parameters (m, ef_construction, etc.) should come from
-//! `EmbeddingSpec` which is persisted and protected by SpecHash. The hnsw
-//! field in `VectorConfig` is deprecated - use `EmbeddingSpec` as the single
-//! source of truth for HNSW configuration.
+//! HNSW structural parameters (m, ef_construction, etc.) come from
+//! `EmbeddingSpec` which is persisted and protected by SpecHash. The
+//! only runtime configuration here is RaBitQ compression settings.
 //!
 //! References:
 //! - RaBitQ paper: https://arxiv.org/abs/2405.12497
 //! - motlie design: libs/db/src/vector/ROADMAP.md
 
 use serde::{Deserialize, Serialize};
-
-// Re-export Config from hnsw module for VectorConfig (deprecated)
-#[allow(deprecated)]
-pub(crate) use crate::vector::hnsw::Config;
 
 /// RaBitQ binary quantization parameters.
 ///
@@ -124,74 +119,13 @@ impl RaBitQConfig {
 
 /// Complete vector storage configuration.
 ///
-/// ## Deprecation Note
-///
-/// The `hnsw` field is deprecated. HNSW structural parameters should be set
-/// via `EmbeddingSpec` (the persisted source of truth). Only `rabitq` config
-/// is still relevant here for runtime compression settings.
+/// Contains runtime configuration for vector storage. HNSW structural
+/// parameters (m, ef_construction, etc.) are derived from the persisted
+/// `EmbeddingSpec` - not from this config.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VectorConfig {
-    /// DEPRECATED: Use EmbeddingSpec for HNSW parameters instead.
-    /// This field is kept for backward compatibility but will be removed.
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use EmbeddingSpec for HNSW parameters - this is the persisted source of truth"
-    )]
-    #[allow(deprecated)]
-    pub hnsw: Config,
     /// RaBitQ compression configuration.
     pub rabitq: RaBitQConfig,
-}
-
-#[allow(deprecated)]
-impl VectorConfig {
-    /// Configuration for 128-dimensional embeddings (e.g., SIFT).
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use EmbeddingSpec for HNSW parameters instead"
-    )]
-    pub fn dim_128() -> Self {
-        Self {
-            hnsw: Config::for_dim(128),
-            ..Default::default()
-        }
-    }
-
-    /// Configuration for 768-dimensional embeddings (e.g., BERT, Gemma).
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use EmbeddingSpec for HNSW parameters instead"
-    )]
-    pub fn dim_768() -> Self {
-        Self {
-            hnsw: Config::for_dim(768),
-            ..Default::default()
-        }
-    }
-
-    /// Configuration for 1024-dimensional embeddings (e.g., Qwen3).
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use EmbeddingSpec for HNSW parameters instead"
-    )]
-    pub fn dim_1024() -> Self {
-        Self {
-            hnsw: Config::for_dim(1024),
-            ..Default::default()
-        }
-    }
-
-    /// Configuration for 1536-dimensional embeddings (e.g., OpenAI ada-002).
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use EmbeddingSpec for HNSW parameters instead"
-    )]
-    pub fn dim_1536() -> Self {
-        Self {
-            hnsw: Config::for_dim(1536),
-            ..Default::default()
-        }
-    }
 }
 
 #[cfg(test)]
@@ -212,19 +146,6 @@ mod tests {
         };
         // 128 dims * 2 bits = 256 bits = 32 bytes
         assert_eq!(config_2bit.code_size(128), 32);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_vector_config_presets() {
-        let c128 = VectorConfig::dim_128();
-        assert_eq!(c128.hnsw.dim, 128);
-
-        let c768 = VectorConfig::dim_768();
-        assert_eq!(c768.hnsw.dim, 768);
-
-        let c1536 = VectorConfig::dim_1536();
-        assert_eq!(c1536.hnsw.dim, 1536);
     }
 
     #[test]

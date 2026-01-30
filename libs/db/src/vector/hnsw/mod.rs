@@ -23,7 +23,7 @@
 //! # Module Structure
 //!
 //! - `mod.rs` - Index struct and public API
-//! - `config.rs` - HNSW configuration (`Config`, `ConfigWarning`)
+//! - `config.rs` - HNSW configuration warnings (`ConfigWarning`)
 //! - `insert.rs` - Insert algorithm implementation
 //! - `search.rs` - Search algorithms (standard and RaBitQ)
 //! - `graph.rs` - Graph operations (neighbors, distances, batch)
@@ -38,8 +38,8 @@ mod graph;
 mod insert;
 mod search;
 
-// Re-export Config for public API as vector::hnsw::Config
-pub use config::{Config, ConfigWarning};
+// Re-export ConfigWarning for public API
+pub use config::ConfigWarning;
 
 use std::sync::Arc;
 
@@ -64,6 +64,8 @@ pub use insert::{insert, insert_for_batch, CacheUpdate};
 /// HNSW index for a single embedding space.
 ///
 /// Provides insert and search operations backed by RocksDB storage.
+/// All structural HNSW parameters are derived from the persisted EmbeddingSpec
+/// to prevent configuration drift.
 #[derive(Clone)]
 pub struct Index {
     /// The embedding space code this index manages
@@ -72,18 +74,31 @@ pub struct Index {
     distance: Distance,
     /// Storage type for vectors (F32 or F16)
     storage_type: VectorElementType,
-    /// HNSW configuration (M, ef_construction, etc.)
-    config: Config,
     /// Navigation cache for fast layer traversal
     nav_cache: Arc<NavigationCache>,
+
+    // HNSW parameters (derived from EmbeddingSpec)
+    /// Vector dimensionality
+    dim: usize,
+    /// Number of bidirectional links per node (M parameter)
+    m: usize,
+    /// Maximum links per node at layers > 0 (typically 2*M)
+    m_max: usize,
+    /// Maximum links per node at layer 0 (typically 2*M)
+    m_max_0: usize,
+    /// Search beam width during index construction
+    ef_construction: usize,
+    /// Probability multiplier for layer assignment: P(layer = L) = exp(-L * m_l)
+    m_l: f32,
+    /// Minimum neighbor set size to trigger batch distance computation
+    batch_threshold: usize,
 }
 
 impl Index {
     /// Create a new HNSW index from an EmbeddingSpec.
     ///
-    /// This is the **preferred constructor** that derives all HNSW parameters
-    /// from the persisted EmbeddingSpec, ensuring no configuration drift across
-    /// process restarts.
+    /// All HNSW structural parameters are derived from the persisted EmbeddingSpec,
+    /// ensuring no configuration drift across process restarts.
     ///
     /// # Arguments
     /// * `embedding` - The embedding space code
@@ -96,76 +111,18 @@ impl Index {
         batch_threshold: usize,
         nav_cache: Arc<NavigationCache>,
     ) -> Self {
-        let config = Config {
-            enabled: true, // Always enabled
+        Self {
+            embedding,
+            distance: spec.distance,
+            storage_type: spec.storage_type,
+            nav_cache,
             dim: spec.dim as usize,
             m: spec.m(),
             m_max: spec.m_max(),
             m_max_0: spec.m_max_0(),
             ef_construction: spec.ef_construction(),
             m_l: spec.m_l(),
-            max_level: None, // Always auto
             batch_threshold,
-        };
-
-        Self {
-            embedding,
-            distance: spec.distance,
-            storage_type: spec.storage_type,
-            config,
-            nav_cache,
-        }
-    }
-
-    /// Create a new HNSW index for an embedding space.
-    ///
-    /// **Deprecated:** Prefer `Index::from_spec()` which derives parameters from
-    /// the persisted EmbeddingSpec to prevent configuration drift.
-    ///
-    /// # Arguments
-    /// * `embedding` - The embedding space code
-    /// * `distance` - Distance metric to use (Cosine, L2, DotProduct)
-    /// * `config` - HNSW configuration
-    /// * `nav_cache` - Navigation cache for fast layer traversal
-    pub fn new(
-        embedding: EmbeddingCode,
-        distance: Distance,
-        config: Config,
-        nav_cache: Arc<NavigationCache>,
-    ) -> Self {
-        Self {
-            embedding,
-            distance,
-            storage_type: VectorElementType::default(), // F32 by default
-            config,
-            nav_cache,
-        }
-    }
-
-    /// Create a new HNSW index with specified storage type.
-    ///
-    /// **Deprecated:** Prefer `Index::from_spec()` which derives parameters from
-    /// the persisted EmbeddingSpec to prevent configuration drift.
-    ///
-    /// # Arguments
-    /// * `embedding` - The embedding space code
-    /// * `distance` - Distance metric to use (Cosine, L2, DotProduct)
-    /// * `storage_type` - Storage type for vectors (F32 or F16)
-    /// * `config` - HNSW configuration
-    /// * `nav_cache` - Navigation cache for fast layer traversal
-    pub fn with_storage_type(
-        embedding: EmbeddingCode,
-        distance: Distance,
-        storage_type: VectorElementType,
-        config: Config,
-        nav_cache: Arc<NavigationCache>,
-    ) -> Self {
-        Self {
-            embedding,
-            distance,
-            storage_type,
-            config,
-            nav_cache,
         }
     }
 
@@ -179,11 +136,6 @@ impl Index {
         self.storage_type
     }
 
-    /// Get the configuration.
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
     /// Get the distance metric.
     pub fn distance_metric(&self) -> Distance {
         self.distance
@@ -192,6 +144,31 @@ impl Index {
     /// Get a reference to the navigation cache.
     pub fn nav_cache(&self) -> &Arc<NavigationCache> {
         &self.nav_cache
+    }
+
+    /// Get the vector dimensionality.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Get the M parameter (bidirectional links per node).
+    pub fn m(&self) -> usize {
+        self.m
+    }
+
+    /// Get the ef_construction parameter.
+    pub fn ef_construction(&self) -> usize {
+        self.ef_construction
+    }
+
+    /// Get the m_l parameter (layer assignment probability multiplier).
+    pub fn m_l(&self) -> f32 {
+        self.m_l
+    }
+
+    /// Get the batch threshold for distance computation.
+    pub fn batch_threshold(&self) -> usize {
+        self.batch_threshold
     }
 
     // =========================================================================
@@ -336,6 +313,7 @@ impl Index {
 mod tests {
     use super::*;
     use crate::rocksdb::ColumnFamily;
+    use crate::vector::schema::{EmbeddingSpec, VectorElementType};
     use crate::vector::{Distance, Embedding, SearchConfig, VectorCfKey, VectorCfValue, Vectors};
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha20Rng;
@@ -353,14 +331,33 @@ mod tests {
         assert!((l2_distance(&c, &d) - 3.0).abs() < 0.0001);
     }
 
+    /// Helper: Create an EmbeddingSpec for testing with customizable HNSW parameters
+    fn make_test_spec(dim: usize, m: u16, ef_construction: u16, distance: Distance) -> EmbeddingSpec {
+        EmbeddingSpec {
+            model: "test".to_string(),
+            dim: dim as u32,
+            distance,
+            storage_type: VectorElementType::F32,
+            hnsw_m: m,
+            hnsw_ef_construction: ef_construction,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        }
+    }
+
+    /// Helper: Create a default EmbeddingSpec for testing (dim, m=16, ef_construction=200, L2)
+    fn make_default_spec(dim: usize) -> EmbeddingSpec {
+        make_test_spec(dim, 16, 200, Distance::L2)
+    }
+
     #[test]
     fn test_hnsw_index_creation() {
-        let config = Config::default();
+        let spec = make_default_spec(128);
         let nav_cache = Arc::new(NavigationCache::new());
-        let index = Index::new(1, Distance::L2, config.clone(), nav_cache);
+        let index = Index::from_spec(1, &spec, 64, nav_cache);
 
         assert_eq!(index.embedding(), 1);
-        assert_eq!(index.config().m, config.m);
+        assert_eq!(index.m(), 16);
     }
 
     // =========================================================================
@@ -429,20 +426,19 @@ mod tests {
         txn.commit().expect("Failed to commit vectors");
     }
 
-    /// Helper: Build HNSW index with vectors
+    /// Helper: Build HNSW index with vectors using EmbeddingSpec
     fn build_index(
         storage: &Storage,
-        embedding: EmbeddingCode,
-        distance: Distance,
+        embedding_code: EmbeddingCode,
         vectors: &[Vec<f32>],
-        config: &Config,
+        spec: &EmbeddingSpec,
     ) -> Index {
         // First, store vectors in RocksDB so HNSW can access them
-        store_vectors(storage, embedding, vectors);
+        store_vectors(storage, embedding_code, vectors);
 
-        // Now build the HNSW index
+        // Now build the HNSW index using from_spec
         let nav_cache = Arc::new(NavigationCache::new());
-        let index = Index::new(embedding, distance, config.clone(), nav_cache);
+        let index = Index::from_spec(embedding_code, spec, 64, nav_cache);
 
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         for (i, vector) in vectors.iter().enumerate() {
@@ -467,16 +463,8 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = Config {
-            dim,
-            m: 16,
-            m_max: 32,
-            m_max_0: 32,
-            ef_construction: 100,
-            ..Default::default()
-        };
-
-        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
+        let spec = make_test_spec(dim, 16, 100, Distance::L2);
+        let index = build_index(&storage, 1, &vectors, &spec);
 
         // Test recall over multiple queries
         let mut total_recall = 0.0;
@@ -507,16 +495,8 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = Config {
-            dim,
-            m: 16,
-            m_max: 32,
-            m_max_0: 32,
-            ef_construction: 200,
-            ..Default::default()
-        };
-
-        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
+        let spec = make_test_spec(dim, 16, 200, Distance::L2);
+        let index = build_index(&storage, 1, &vectors, &spec);
 
         let mut total_recall = 0.0;
         for query in &queries {
@@ -549,16 +529,8 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = Config {
-            dim,
-            m: 16,
-            m_max: 32,
-            m_max_0: 32,
-            ef_construction: 100,
-            ..Default::default()
-        };
-
-        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
+        let spec = make_test_spec(dim, 16, 100, Distance::L2);
+        let index = build_index(&storage, 1, &vectors, &spec);
 
         // Test different ef values
         let ef_values = [10, 20, 50, 100];
@@ -592,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_recall_high_recall_config() {
-        // Test the high_recall configuration preset
+        // Test the high_recall configuration preset (M=32, ef_construction=400)
         let (_temp_dir, storage) = create_test_storage();
         let dim = 64;
         let n_vectors = 500;
@@ -602,8 +574,8 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = Config::high_recall(dim);
-        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
+        let spec = make_test_spec(dim, 32, 400, Distance::L2);
+        let index = build_index(&storage, 1, &vectors, &spec);
 
         let mut total_recall = 0.0;
         for query in &queries {
@@ -624,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_recall_compact_config() {
-        // Test the compact (memory-optimized) configuration
+        // Test the compact (memory-optimized) configuration (M=8, ef_construction=100)
         let (_temp_dir, storage) = create_test_storage();
         let dim = 32;
         let n_vectors = 500;
@@ -634,8 +606,8 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = Config::compact(dim);
-        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
+        let spec = make_test_spec(dim, 8, 100, Distance::L2);
+        let index = build_index(&storage, 1, &vectors, &spec);
 
         let mut total_recall = 0.0;
         for query in &queries {
@@ -667,16 +639,8 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = Config {
-            dim,
-            m: 16,
-            m_max: 32,
-            m_max_0: 32,
-            ef_construction: 100,
-            ..Default::default()
-        };
-
-        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
+        let spec = make_test_spec(dim, 16, 100, Distance::L2);
+        let index = build_index(&storage, 1, &vectors, &spec);
 
         let k_values = [1, 5, 10, 20];
         for &k in &k_values {
@@ -733,16 +697,8 @@ mod tests {
 
         let queries = generate_random_vectors(n_queries, dim, 123);
 
-        let config = Config {
-            dim,
-            m: 16,
-            m_max: 32,
-            m_max_0: 32,
-            ef_construction: 200,
-            ..Default::default()
-        };
-
-        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
+        let spec = make_test_spec(dim, 16, 200, Distance::L2);
+        let index = build_index(&storage, 1, &vectors, &spec);
 
         let mut total_recall = 0.0;
         for query in &queries {
@@ -792,16 +748,8 @@ mod tests {
         println!("|---|-----------|----------|");
 
         for &m in &m_values {
-            let config = Config {
-                dim,
-                m,
-                m_max: 2 * m,
-                m_max_0: 2 * m,
-                ef_construction: 200,
-                ..Default::default()
-            };
-
-            let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
+            let spec = make_test_spec(dim, m as u16, 200, Distance::L2);
+            let index = build_index(&storage, 1, &vectors, &spec);
 
             for &ef in &ef_values {
                 let mut total_recall = 0.0;
@@ -1000,23 +948,8 @@ mod tests {
 
         // Create embedding with L2 distance
         let embedding = make_test_embedding(1, dim as u32, Distance::L2);
-
-        let config = Config {
-            dim,
-            m: 16,
-            m_max: 32,
-            m_max_0: 32,
-            ef_construction: 200,
-            ..Default::default()
-        };
-
-        let index = build_index(
-            &storage,
-            embedding.code(),
-            embedding.distance(),
-            &vectors,
-            &config,
-        );
+        let spec = make_test_spec(dim, 16, 200, Distance::L2);
+        let index = build_index(&storage, embedding.code(), &vectors, &spec);
 
         // Create SearchConfig - should auto-select Exact for L2
         let search_config = SearchConfig::new(embedding.clone(), k).with_ef(100);
@@ -1062,23 +995,8 @@ mod tests {
 
         // Create embedding with Cosine distance
         let embedding = make_test_embedding(1, dim as u32, Distance::Cosine);
-
-        let config = Config {
-            dim,
-            m: 16,
-            m_max: 32,
-            m_max_0: 32,
-            ef_construction: 200,
-            ..Default::default()
-        };
-
-        let index = build_index(
-            &storage,
-            embedding.code(),
-            embedding.distance(),
-            &vectors,
-            &config,
-        );
+        let spec = make_test_spec(dim, 16, 200, Distance::Cosine);
+        let index = build_index(&storage, embedding.code(), &vectors, &spec);
 
         // Create SearchConfig - should auto-select RaBitQ for Cosine
         let search_config = SearchConfig::new(embedding.clone(), k).with_ef(100);
@@ -1126,8 +1044,8 @@ mod tests {
         let vectors = generate_random_vectors(n_vectors, dim, 42);
 
         // Create index with embedding code 1
-        let config = Config::for_dim(dim);
-        let index = build_index(&storage, 1, Distance::L2, &vectors, &config);
+        let spec = make_default_spec(dim);
+        let index = build_index(&storage, 1, &vectors, &spec);
 
         // Create SearchConfig with different embedding code (2)
         let wrong_embedding = make_test_embedding(2, dim as u32, Distance::L2);
@@ -1167,20 +1085,8 @@ mod tests {
         let queries = generate_sift_like_vectors(n_queries, 123);
 
         let embedding = make_test_embedding(1, dim as u32, Distance::L2);
-        let hnsw_config = Config {
-            dim,
-            m: 16,
-            ef_construction: 200,
-            ..Default::default()
-        };
-
-        let index = build_index(
-            &storage,
-            embedding.code(),
-            embedding.distance(),
-            &vectors,
-            &hnsw_config,
-        );
+        let spec = make_test_spec(dim, 16, 200, Distance::L2);
+        let index = build_index(&storage, embedding.code(), &vectors, &spec);
 
         // Test different k values
         for k in [1, 5, 10, 20] {

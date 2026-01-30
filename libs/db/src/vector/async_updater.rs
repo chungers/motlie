@@ -68,9 +68,6 @@ use crate::vector::Storage;
 /// - **`num_workers`**: More workers improve throughput but compete for locks.
 ///   Typically 2-4 workers is optimal. Scale with CPU cores.
 ///
-/// - **`ef_construction`**: Higher values improve graph quality but slow down
-///   edge building. Match your HNSW index config (typically 100-200).
-///
 /// - **`process_on_startup`**: Enable to drain any pending items from a previous
 ///   crash. Disable only for testing or if you handle recovery elsewhere.
 ///
@@ -98,11 +95,6 @@ pub struct AsyncUpdaterConfig {
     /// Each worker processes batches independently with round-robin
     /// embedding selection for fairness. Default: 2
     pub num_workers: usize,
-
-    /// ef_construction parameter for greedy search during edge building.
-    ///
-    /// Higher values improve recall but slow down processing. Default: 200
-    pub ef_construction: usize,
 
     /// Whether to drain pending queue on startup.
     ///
@@ -136,7 +128,6 @@ impl Default for AsyncUpdaterConfig {
             batch_size: 100,
             batch_timeout: Duration::from_millis(100),
             num_workers: 2,
-            ef_construction: 200,
             process_on_startup: true,
             idle_sleep: Duration::from_millis(10),
             backpressure_threshold: 10000,
@@ -166,12 +157,6 @@ impl AsyncUpdaterConfig {
     /// Set number of background worker threads.
     pub fn with_num_workers(mut self, num_workers: usize) -> Self {
         self.num_workers = num_workers;
-        self
-    }
-
-    /// Set ef_construction for greedy search.
-    pub fn with_ef_construction(mut self, ef: usize) -> Self {
-        self.ef_construction = ef;
         self
     }
 
@@ -861,7 +846,6 @@ mod tests {
         assert_eq!(config.batch_size, 100);
         assert_eq!(config.batch_timeout, Duration::from_millis(100));
         assert_eq!(config.num_workers, 2);
-        assert_eq!(config.ef_construction, 200);
         assert!(config.process_on_startup);
         assert_eq!(config.idle_sleep, Duration::from_millis(10));
         // Task 7.8: Backpressure and metrics
@@ -875,7 +859,6 @@ mod tests {
             .with_batch_size(200)
             .with_batch_timeout(Duration::from_millis(50))
             .with_num_workers(4)
-            .with_ef_construction(100)
             .with_process_on_startup(false)
             .with_idle_sleep(Duration::from_millis(5))
             .with_backpressure_threshold(5000)
@@ -884,7 +867,6 @@ mod tests {
         assert_eq!(config.batch_size, 200);
         assert_eq!(config.batch_timeout, Duration::from_millis(50));
         assert_eq!(config.num_workers, 4);
-        assert_eq!(config.ef_construction, 100);
         assert!(!config.process_on_startup);
         assert_eq!(config.idle_sleep, Duration::from_millis(5));
         // Task 7.8: Backpressure and metrics builder
