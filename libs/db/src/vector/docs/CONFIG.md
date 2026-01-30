@@ -2,235 +2,385 @@
 
 ## Problem
 
-The vector subsystem currently accepts in-memory configuration (e.g., `hnsw::Config`,
-`VectorConfig`) that **is not fully persisted**. On process restart, the registry
-is prewarmed from `EmbeddingSpecs`, but runtime HNSW config can diverge if callers
-reconstruct it differently. This creates silent behavior drift:
+The vector subsystem has configuration drift risk across process boundaries:
 
-- Inserts after restart may use different HNSW parameters than the index was built with.
-- Search behavior can change without any stored signal or validation.
+1. **Redundant config types**: `hnsw::Config` duplicates fields from `EmbeddingSpec`
+2. **Runtime fields with no purpose**: `enabled` and `max_level` are always the same
+3. **Scattered derivation logic**: `m_max = 2*m` computed in multiple places
 
-Some drift is prevented by `SpecHash`, but it only covers fields already stored
-in `EmbeddingSpecs`.
+This creates maintenance burden and potential for silent behavior drift.
 
-## What is Persisted Today
+## What is Persisted (Source of Truth)
 
-Stored in `EmbeddingSpecs` (and protected by `SpecHash` in `GraphMeta`):
+`EmbeddingSpec` in `EmbeddingSpecs` CF (protected by `SpecHash`):
 
-- `model`
-- `dim`
-- `distance`
-- `storage_type`
-- `hnsw_m`
-- `hnsw_ef_construction`
-- `rabitq_bits`
-- `rabitq_seed`
+| Field | Purpose | Used By |
+|-------|---------|---------|
+| `model` | Embedding model name | Identification |
+| `dim` | Vector dimensionality | HNSW, RaBitQ, storage |
+| `distance` | Distance metric | HNSW search |
+| `storage_type` | F16/F32 | Vector serialization |
+| `hnsw_m` | HNSW M parameter | Graph connectivity |
+| `hnsw_ef_construction` | Build beam width | Graph quality |
+| `rabitq_bits` | Quantization bits | Compression |
+| `rabitq_seed` | Rotation seed | Deterministic encoding |
 
-These fields are stable across process boundaries and already validated at insert/search.
+**This is the single source of truth.** All HNSW parameters should derive from here.
 
-## What is Not Persisted (Problematic)
+## Current Problem: Redundant `hnsw::Config`
 
-Runtime HNSW/Vector config fields (currently in `hnsw::Config` or `VectorConfig`)
-are not stored, and can drift across processes:
+`hnsw::Config` exists as a separate type with these fields:
 
-- `enabled` (HNSW on/off)
-- `m_max`, `m_max_0` (derived but not stored)
-- `m_l` (derived but not stored)
-- `max_level` (runtime override)
-- `batch_threshold` (runtime optimization knob)
+| Field | Source | Status |
+|-------|--------|--------|
+| `enabled` | Runtime | ❌ **Useless** - always `true` in production |
+| `dim` | `spec.dim` | ❌ **Redundant** - already in EmbeddingSpec |
+| `m` | `spec.hnsw_m` | ❌ **Redundant** - already in EmbeddingSpec |
+| `m_max` | `2 * m` | ❌ **Derived** - compute inline |
+| `m_max_0` | `2 * m` | ❌ **Derived** - compute inline |
+| `ef_construction` | `spec.hnsw_ef_construction` | ❌ **Redundant** - already in EmbeddingSpec |
+| `m_l` | `1.0 / ln(m)` | ❌ **Derived** - compute inline |
+| `max_level` | Runtime | ❌ **Useless** - always `None` (auto) |
+| `batch_threshold` | Runtime | ✅ **Valid** - performance knob |
 
-Because these are not persisted, a new process can build a `Processor` using
-different values than the process that built the index.
+**8 of 9 fields are redundant or useless.** Only `batch_threshold` serves a purpose.
 
-## Required Fix
+## Analysis of `enabled` and `max_level`
 
-The runtime config should be **fully derivable** from persisted spec, or else
-persisted alongside it.
+### `enabled` Field
 
-### Option A (Preferred): Derive from EmbeddingSpec
+**Current usage:**
+- `processor.rs:753,976` - Returns error if false during search
+- `ops/delete.rs:144` - Skips HNSW cleanup if false
+- Tests set `false` to isolate non-HNSW code paths
 
-Define a deterministic conversion from `EmbeddingSpec` → `hnsw::Config`:
+**Reality:** Production always has `enabled = true`. The field exists only for tests.
 
-- `enabled`: per-embedding, must be persisted if you want to disable indexing
-- `dim`: from `EmbeddingSpec.dim`
-- `m`: from `EmbeddingSpec.hnsw_m`
-- `m_max`: `2 * m`
-- `m_max_0`: `2 * m`
-- `ef_construction`: from `EmbeddingSpec.hnsw_ef_construction`
-- `m_l`: `1.0 / ln(m)`
-- `max_level`: `None` (auto)
-- `batch_threshold`: fixed default (e.g., 64) or derived from a global config
+**Problem:** If we "fix drift" by hardcoding `true`, the field serves no purpose.
 
-This ensures all processes compute the same HNSW runtime config from persisted spec.
+### `max_level` Field
 
-### Option B: Expand EmbeddingSpec (Persist Additional Fields)
+**Two different concepts with same name:**
+- `hnsw::Config.max_level: Option<u8>` = Runtime **cap** on layers
+- `GraphMeta::MaxLevel` = Persisted **actual** max layer in graph
 
-If per-embedding overrides are required, expand `EmbeddingSpec` with:
+**Reality:** Config's `max_level` is always `None` (auto) in all presets and production.
 
-- `hnsw_enabled: bool`
-- `hnsw_m_max: u16` (optional override)
-- `hnsw_m_max_0: u16` (optional override)
-- `hnsw_max_level: Option<u8>`
+**Problem:** If we "fix drift" by hardcoding `None`, the field serves no purpose.
 
-These must be:
-1) persisted in `EmbeddingSpecs` CF,
-2) included in `SpecHash`,
-3) validated in `Processor::search_with_config` and insert path.
+## Solution: Eliminate `hnsw::Config`
 
-## Required Code Changes (Option A)
+Since `hnsw::Config` is fully derivable from `EmbeddingSpec`, eliminate it entirely.
 
-1) **Centralize config derivation**
-   - Add a helper:
-     ```rust
-     impl EmbeddingSpec {
-         pub fn to_hnsw_config(&self) -> hnsw::Config { ... }
-     }
-     ```
-2) **Use spec-derived config in all index creation**
-   - `Processor::get_or_create_index`
-   - `AsyncUpdater` HNSW index creation
-   - Any benchmark/index builders
+### Design Principles
 
-3) **Persist or derive structural HNSW fields**
-   - Structural fields that must be stable across restarts:
-     - `enabled`, `m`, `m_max`, `m_max_0`, `ef_construction`, `max_level`
-   - Derived field (do not persist): `m_l`
-   - Performance-only (do not persist): `batch_threshold`
+1. **`EmbeddingSpec` is the single source of truth** - no redundant config types
+2. **Derive values where needed** - compute `m_max`, `m_l` inline
+3. **Remove useless fields** - `enabled` and `max_level` serve no purpose
+4. **Keep runtime knobs at `Processor` level** - `batch_threshold` is process config
 
-4) **Remove or de-emphasize ad-hoc `VectorConfig` for per-embedding HNSW**
-   - If `VectorConfig` remains, it should only wrap **global** knobs (e.g. batch_threshold)
-     or be applied consistently on startup and stored in `GraphMeta`.
+### Target Architecture
 
-## Required Code Changes (Option B)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        EmbeddingSpec                            │
+│  (persisted, protected by SpecHash)                             │
+│                                                                 │
+│  model, dim, distance, storage_type,                            │
+│  hnsw_m, hnsw_ef_construction, rabitq_bits, rabitq_seed         │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         Processor                               │
+│  (runtime, not persisted)                                       │
+│                                                                 │
+│  batch_threshold: usize  // Only runtime knob                   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      HNSW Algorithm                             │
+│  (uses EmbeddingSpec directly, derives m_max/m_l inline)        │
+│                                                                 │
+│  fn insert(spec: &EmbeddingSpec, ...) {                         │
+│      let m = spec.hnsw_m as usize;                              │
+│      let m_max = 2 * m;                                         │
+│      let m_l = 1.0 / (m as f32).ln();                           │
+│      // ... use values directly                                 │
+│  }                                                              │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-1) Expand `EmbeddingSpec` and builder (`EmbeddingBuilder`) to accept new fields.
-2) Include new fields in spec hashing.
-3) Ensure registry prewarm loads these fields.
-4) Replace any in-memory HNSW config creation with `spec.to_hnsw_config()`.
+### What Gets Removed
 
-## Recommendation
+| Component | Action |
+|-----------|--------|
+| `hnsw::Config` struct | **DELETE** |
+| `hnsw::Config::enabled` | **DELETE** - always true |
+| `hnsw::Config::max_level` | **DELETE** - always None (auto) |
+| `hnsw::Config::dim` | **DELETE** - use `spec.dim` |
+| `hnsw::Config::m` | **DELETE** - use `spec.hnsw_m` |
+| `hnsw::Config::m_max` | **DELETE** - compute `2 * m` inline |
+| `hnsw::Config::m_max_0` | **DELETE** - compute `2 * m` inline |
+| `hnsw::Config::ef_construction` | **DELETE** - use `spec.hnsw_ef_construction` |
+| `hnsw::Config::m_l` | **DELETE** - compute `1.0 / ln(m)` inline |
+| `hnsw::Config::batch_threshold` | **MOVE** - to `Processor.batch_threshold` |
+| `Processor.hnsw_config` field | **DELETE** |
+| `VectorConfig.hnsw` field | **DELETE** or simplify |
 
-**Option A** is strongly preferred. It minimizes persisted surface area and ensures
-deterministic config reconstruction from persisted spec fields. Only structural
-HNSW parameters should be persisted; performance knobs like `batch_threshold`
-remain global per process.
-
-## Design: User-Mutable Runtime Knobs (Batch Threshold)
-
-To allow user-tunable performance knobs **without** breaking structural
-consistency across restarts, construct HNSW config from persisted spec and then
-apply a small, explicit runtime override.
-
-### Proposed Builder Pattern
+### What Gets Added
 
 ```rust
-pub struct HnswConfigBuilder {
-    base: hnsw::Config,   // derived from EmbeddingSpec
+// In Processor
+pub struct Processor {
+    // ... existing fields ...
+
+    /// Batch threshold for HNSW neighbor fetching.
+    /// Performance knob - can vary per process without affecting index integrity.
+    batch_threshold: usize,
 }
 
-impl HnswConfigBuilder {
-    pub fn from_spec(spec: &EmbeddingSpec) -> Self {
-        Self { base: spec.to_hnsw_config() }
+impl Processor {
+    pub fn new(storage: Arc<Storage>, registry: Arc<EmbeddingRegistry>) -> Self {
+        Self::with_batch_threshold(storage, registry, 64) // Default
     }
 
-    // Runtime-only knobs (safe to vary per process)
-    pub fn with_batch_threshold(mut self, threshold: usize) -> Self {
-        self.base.batch_threshold = threshold;
-        self
-    }
-
-    pub fn build(self) -> hnsw::Config {
-        self.base
+    pub fn with_batch_threshold(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        batch_threshold: usize,
+    ) -> Self {
+        // ...
     }
 }
 ```
 
-### Usage
+### Helper Methods on EmbeddingSpec
+
+Add convenience methods for derived values:
 
 ```rust
-let cfg = HnswConfigBuilder::from_spec(&spec)
-    .with_batch_threshold(8)
-    .build();
-```
-
-### Guarantees
-
-- **Structural fields** always come from `EmbeddingSpec` and remain stable.
-- **Performance fields** are explicitly overridden per process.
-- No hidden drift across restarts.
-
-If desired, the override can be plumbed through `VectorConfig` as a **global**
-runtime setting applied uniformly at startup.
-
-## Structural vs Runtime Types (Recommended)
-
-To make drift impossible, separate **persisted structural config** from
-**process-local runtime config** with explicit types and a deterministic merge.
-
-### Structural Types (Derived from EmbeddingSpec)
-
-```rust
-pub struct StructuralHnswConfig {
-    pub enabled: bool,
-    pub dim: usize,
-    pub m: usize,
-    pub m_max: usize,
-    pub m_max_0: usize,
-    pub ef_construction: usize,
-    pub max_level: Option<u8>,
-}
-
 impl EmbeddingSpec {
-    pub fn structural_hnsw(&self) -> StructuralHnswConfig {
-        let m = self.hnsw_m as usize;
-        StructuralHnswConfig {
-            enabled: self.hnsw_enabled,
-            dim: self.dim as usize,
-            m,
-            m_max: (self.hnsw_m_max.unwrap_or((2 * self.hnsw_m) as u16)) as usize,
-            m_max_0: (self.hnsw_m_max_0.unwrap_or((2 * self.hnsw_m) as u16)) as usize,
-            ef_construction: self.hnsw_ef_construction as usize,
-            max_level: self.hnsw_max_level,
+    /// HNSW M parameter (number of bidirectional links per node)
+    pub fn m(&self) -> usize {
+        self.hnsw_m as usize
+    }
+
+    /// Maximum links per node at layers > 0 (always 2*M)
+    pub fn m_max(&self) -> usize {
+        2 * self.m()
+    }
+
+    /// Maximum links at layer 0 (always 2*M)
+    pub fn m_max_0(&self) -> usize {
+        2 * self.m()
+    }
+
+    /// Layer probability multiplier (always 1/ln(M))
+    pub fn m_l(&self) -> f32 {
+        1.0 / (self.m() as f32).ln()
+    }
+
+    /// ef_construction parameter
+    pub fn ef_construction(&self) -> usize {
+        self.hnsw_ef_construction as usize
+    }
+}
+```
+
+### Test-Only HNSW Disable
+
+For tests that need to skip HNSW, add a test helper instead of a config field:
+
+```rust
+#[cfg(test)]
+impl Processor {
+    /// Create processor that skips HNSW operations (test-only).
+    ///
+    /// Use this to test non-HNSW code paths in isolation.
+    pub fn new_without_hnsw_for_testing(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+    ) -> Self {
+        Self {
+            skip_hnsw_for_testing: true,
+            ..Self::new(storage, registry)
         }
     }
 }
 ```
 
-### Runtime Types (Process-Local)
+## Impact on Existing Code
 
-```rust
-pub struct HnswRuntimeConfig {
-    pub batch_threshold: usize,
-}
+### Files to Modify
 
-pub struct RabitqRuntimeConfig {
-    pub use_cache: bool,
-}
-```
+| File | Change |
+|------|--------|
+| `hnsw/config.rs` | Delete `Config` struct, keep `ConfigWarning` for validation |
+| `hnsw/mod.rs` | Remove `Config` from public exports |
+| `hnsw/index.rs` | Change constructor to take `&EmbeddingSpec` + `batch_threshold` |
+| `hnsw/insert.rs` | Use `spec.m()`, `spec.m_max()`, etc. directly |
+| `hnsw/search.rs` | Use `spec.ef_construction()` directly |
+| `config.rs` | Remove `hnsw` field from `VectorConfig` |
+| `processor.rs` | Replace `hnsw_config: hnsw::Config` with `batch_threshold: usize` |
+| `processor.rs` | Update `get_or_create_index()` to pass spec directly |
+| `async_updater.rs` | Update HNSW index creation |
+| `benchmark/*.rs` | Update to new API |
 
-### Merge (Deterministic Composition)
+### Migration Path
 
-```rust
-impl StructuralHnswConfig {
-    pub fn to_hnsw_config(self, runtime: HnswRuntimeConfig) -> hnsw::Config {
-        let m_l = 1.0 / (self.m as f32).ln();
-        hnsw::Config {
-            enabled: self.enabled,
-            dim: self.dim,
-            m: self.m,
-            m_max: self.m_max,
-            m_max_0: self.m_max_0,
-            ef_construction: self.ef_construction,
-            m_l,
-            max_level: self.max_level,
-            batch_threshold: runtime.batch_threshold,
-        }
-    }
-}
-```
+1. Add helper methods to `EmbeddingSpec` (`m()`, `m_max()`, etc.)
+2. Update HNSW code to use `EmbeddingSpec` directly
+3. Update `Processor` to hold `batch_threshold` instead of `hnsw_config`
+4. Delete `hnsw::Config` struct
+5. Update tests to use `new_without_hnsw_for_testing()` helper
 
-### Notes
+---
 
-- Structural fields are **persisted** (via `EmbeddingSpec`) and protected by `SpecHash`.
-- Runtime fields are **not persisted** and are explicitly applied per process.
-- The merge is deterministic and keeps index integrity stable across restarts.
+## Implementation Tasks
+
+### Phase 1: Add EmbeddingSpec Helper Methods
+
+- [ ] **T1.1**: Add derived value methods to `EmbeddingSpec`
+  - File: `libs/db/src/vector/schema.rs`
+  - Add: `m()`, `m_max()`, `m_max_0()`, `m_l()`, `ef_construction()`
+  - These replace inline derivation scattered across codebase
+
+- [ ] **T1.2**: Add unit tests for derived methods
+  - Verify `m_max() == 2 * m()`
+  - Verify `m_l() == 1.0 / ln(m())`
+
+### Phase 2: Update HNSW Module
+
+- [ ] **T2.1**: Update `hnsw::Index` to take `&EmbeddingSpec` + `batch_threshold`
+  - File: `libs/db/src/vector/hnsw/index.rs`
+  - Change: `Index::new(spec: &EmbeddingSpec, batch_threshold: usize, ...)`
+  - Use `spec.m()`, `spec.m_max()`, etc. internally
+
+- [ ] **T2.2**: Update `hnsw::insert` to use spec methods
+  - File: `libs/db/src/vector/hnsw/insert.rs`
+  - Replace: `config.m` → `spec.m()`
+  - Replace: `config.m_max` → `spec.m_max()`
+  - etc.
+
+- [ ] **T2.3**: Update `hnsw::search` to use spec methods
+  - File: `libs/db/src/vector/hnsw/search.rs`
+  - Replace all `config.*` references with `spec.*` calls
+
+- [ ] **T2.4**: Delete `hnsw::Config` struct
+  - File: `libs/db/src/vector/hnsw/config.rs`
+  - Keep: `ConfigWarning` enum (still useful for validation)
+  - Delete: `Config` struct and its impls
+  - Update: `hnsw/mod.rs` exports
+
+### Phase 3: Update Processor
+
+- [ ] **T3.1**: Replace `hnsw_config` field with `batch_threshold`
+  - File: `libs/db/src/vector/processor.rs`
+  - Change: `hnsw_config: hnsw::Config` → `batch_threshold: usize`
+  - Update constructors: `new()`, `with_config()`, etc.
+
+- [ ] **T3.2**: Update `get_or_create_index()` to pass spec
+  - Pass `&EmbeddingSpec` to `hnsw::Index::new()`
+  - Pass `self.batch_threshold` as runtime knob
+
+- [ ] **T3.3**: Remove HNSW enabled checks
+  - Delete: `if !self.hnsw_config.enabled` checks
+  - HNSW is always enabled - no runtime toggle
+
+- [ ] **T3.4**: Add test helper for disabled-HNSW scenarios
+  - Add: `#[cfg(test)] fn new_without_hnsw_for_testing()`
+  - Update existing tests that set `enabled = false`
+
+### Phase 4: Update Related Code
+
+- [ ] **T4.1**: Update `AsyncUpdater`
+  - File: `libs/db/src/vector/async_updater.rs`
+  - Update HNSW index creation to new API
+
+- [ ] **T4.2**: Update `VectorConfig`
+  - File: `libs/db/src/vector/config.rs`
+  - Remove or simplify `hnsw` field
+  - Keep `rabitq` config as-is
+
+- [ ] **T4.3**: Update benchmarks
+  - Files: `libs/db/src/vector/benchmark/*.rs`
+  - Update to new API
+
+- [ ] **T4.4**: Update `ops/delete.rs`
+  - Remove: `let hnsw_enabled = processor.hnsw_config().enabled`
+  - HNSW cleanup always happens
+
+### Phase 5: Documentation
+
+- [ ] **T5.1**: Update API.md
+  - Document new `Processor` constructor signatures
+  - Document removal of `hnsw::Config`
+
+- [ ] **T5.2**: Update this document
+  - Mark tasks complete
+  - Add final review notes
+
+---
+
+## Verification Checklist
+
+After implementation, verify:
+
+### Scenario 1: Process Restart
+
+1. Start Process A, insert 1000 vectors
+2. Kill Process A
+3. Start Process B (same binary)
+4. Verify: Search returns same results
+5. Verify: New inserts work correctly
+
+### Scenario 2: Different batch_threshold
+
+1. Process A with `batch_threshold = 64`, insert vectors
+2. Restart as Process B with `batch_threshold = 8`
+3. Verify: Search results identical (structural params from EmbeddingSpec)
+4. Verify: Only performance differs (expected)
+
+### Scenario 3: SpecHash Validation
+
+1. Insert vectors with `hnsw_m = 16`
+2. Corrupt DB: change `EmbeddingSpec.hnsw_m` to `32`
+3. Attempt insert
+4. Verify: Fails with SpecHash mismatch
+
+### Scenario 4: No hnsw::Config Usage
+
+1. Grep codebase for `hnsw::Config`
+2. Verify: Zero references (struct deleted)
+3. Verify: All HNSW code uses `EmbeddingSpec` methods
+
+---
+
+## Risk Assessment
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| API breakage | MEDIUM | HIGH | Update all callers; breaking change is intentional |
+| Test breakage | LOW | HIGH | Add `new_without_hnsw_for_testing()` helper |
+| HNSW module changes | MEDIUM | MEDIUM | Careful refactoring; maintain behavior |
+| Benchmark updates | LOW | HIGH | Straightforward signature changes |
+
+---
+
+## Summary
+
+**Problem:** `hnsw::Config` is redundant - all fields are derived from `EmbeddingSpec`
+or serve no purpose (`enabled`, `max_level`).
+
+**Solution:** Delete `hnsw::Config`. Use `EmbeddingSpec` directly as the source of
+truth. Move `batch_threshold` to `Processor` as a simple runtime knob.
+
+**Benefits:**
+- Zero configuration drift risk (impossible by design)
+- Simpler codebase (one config type, not two)
+- Clear separation: `EmbeddingSpec` = persisted truth, `batch_threshold` = runtime knob
+- Tests use explicit helper instead of config flag
+
+**Estimated effort:** Medium (1-2 days) - touches many files but changes are mechanical.
