@@ -1,9 +1,11 @@
 # Vector Search Implementation Roadmap
 
 **Author:** David Chung + Claude
-**Date:** January 2, 2026 (Updated: January 16, 2026)
+**Date:** January 2, 2026 (Updated: January 30, 2026)
 **Scope:** `libs/db/src/vector` - Vector Search Module
 **Status:** Phase 4 Complete, Phase 4.5 Complete, Phase 5 Complete (Tasks 5.0-5.11), Phase 6 Complete, Phase 7 Complete, Phase 8 In Progress (8.1-8.2 complete; 8.3 in progress)
+
+**Latest Assessment (codex, 2026-01-30 20:56 UTC, EVAL):** ROADMAP reflects all known feature/correctness gaps. There are **no missing features or correctness concerns beyond what is explicitly listed** (Phase 8.3 backlog + Phase 8 acceptance criteria). Phase 7 functional requirements are implemented, but performance acceptance items (P99 insert, pending drain timing) are not formally validated; those remain as checklist items. Historical Phase 0–4 validation checklists are largely stale and should be treated as historical verification notes rather than active backlog.
 
 **Documentation:**
 - [`API.md`](./API.md) - Public API reference, usage flows, and tuning guide
@@ -8192,6 +8194,13 @@ Refine delete implementation from Phase 5 and Phase 7:
 - 8.3.5: Benchmark 100M scale
 - 8.3.6: Validate 1B feasibility (sampling)
 - 8.3.9: Add CI gate for 1M regression detection
+
+### Assessment Notes (2026-01-30)
+
+- **Delete refinement (8.1) implemented:** GC worker + edge pruning + recycling guardrails live in `libs/db/src/vector/gc.rs`; delete/GC integration tests in `libs/db/tests/test_vector_delete.rs`. See `PHASE8.md` Task 8.1.
+- **Concurrent access hardening (8.2) implemented:** stress + snapshot isolation tests in `libs/db/tests/test_vector_concurrent.rs` and `libs/db/tests/test_vector_snapshot_isolation.rs`; benchmark support in `libs/db/src/vector/benchmark/concurrent.rs`. See `PHASE8.md` Task 8.2.
+- **Scale validation (8.3) outstanding:** backlog items listed above and tracked in `PHASE8.md` Task 8.3.
+- **Phase 7 acceptance criteria:** functional requirements are implemented, but performance criteria (insert P99, pending drain timing) are not explicitly validated in tests; ROADMAP checkboxes remain open for these items.
 
 **Effort:** 1-2 weeks
 
