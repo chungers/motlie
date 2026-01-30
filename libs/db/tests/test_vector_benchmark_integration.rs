@@ -28,8 +28,8 @@ use motlie_db::vector::search::rerank_adaptive;
 use motlie_db::vector::{
     create_search_reader_with_storage, create_writer,
     spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
-    Distance, EmbeddingBuilder, InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN,
-    Storage, VecId, WriterConfig,
+    Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable,
+    SearchKNN, Storage, VecId, WriterConfig,
 };
 use motlie_db::Id;
 
@@ -180,7 +180,7 @@ async fn test_sift_l2_hnsw_with_runnable() -> anyhow::Result<()> {
     for (i, vector) in subset.db_vectors.iter().enumerate() {
         let id = Id::new();
         external_ids.push(id);
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await?;
@@ -297,7 +297,7 @@ async fn test_laion_clip_cosine_exact_hnsw_with_runnable() -> anyhow::Result<()>
     for (i, vector) in subset.db_vectors.iter().enumerate() {
         let id = Id::new();
         external_ids.push(id);
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await?;
@@ -418,7 +418,7 @@ async fn test_laion_clip_cosine_rabitq_with_runnable() -> anyhow::Result<()> {
     for (i, vector) in subset.db_vectors.iter().enumerate() {
         let id = Id::new();
         external_ids.push(id);
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await?;

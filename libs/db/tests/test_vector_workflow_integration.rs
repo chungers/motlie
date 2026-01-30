@@ -27,8 +27,8 @@ use motlie_db::vector::benchmark::LAION_EMBEDDING_DIM;
 use motlie_db::vector::{
     create_search_reader_with_storage, create_writer,
     spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
-    DeleteVector, Distance, EmbeddingBuilder, InsertVector, MutationRunnable, ReaderConfig,
-    Runnable, SearchKNN, Storage, WriterConfig,
+    DeleteVector, Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable,
+    ReaderConfig, Runnable, SearchKNN, Storage, WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -159,7 +159,7 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
         let id = Id::new();
         external_ids.push(id);
 
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -280,7 +280,7 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
     let deleted_ids: Vec<Id> = external_ids[..delete_count].to_vec();
 
     for (i, &id) in deleted_ids.iter().enumerate() {
-        DeleteVector::new(&embedding, id)
+        DeleteVector::new(&embedding, ExternalKey::NodeId(id))
             .run(&writer)
             .await
             .expect("delete vector");
@@ -392,7 +392,7 @@ async fn test_vector_batch_insert_workflow() {
     // Insert via InsertVector::run()
     println!("Inserting 500 vectors via InsertVector::run()...");
     for vector in &vectors {
-        InsertVector::new(&embedding, Id::new(), vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -461,7 +461,7 @@ async fn test_search_reader_strategy_selection() {
     println!("Inserting 200 test vectors...");
     let vectors = generate_laion_vectors(200, 42);
     for (i, vector) in vectors.iter().enumerate() {
-        InsertVector::new(&embedding, Id::new(), vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
             .immediate()
             .run(&writer)
             .await

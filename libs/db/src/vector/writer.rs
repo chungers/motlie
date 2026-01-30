@@ -415,7 +415,7 @@ impl Consumer {
                 Mutation::InsertVector(args) => {
                     tracing::debug!(
                         embedding = args.embedding,
-                        id = %args.id,
+                        external_key = ?args.external_key,
                         dim = args.vector.len(),
                         "Processing InsertVector"
                     );
@@ -423,7 +423,7 @@ impl Consumer {
                 Mutation::DeleteVector(args) => {
                     tracing::debug!(
                         embedding = args.embedding,
-                        id = %args.id,
+                        external_key = ?args.external_key,
                         "Processing DeleteVector"
                     );
                 }
@@ -472,10 +472,10 @@ impl Consumer {
             // Expand batch mutations into individual operations
             // This ensures we collect cache updates from each vector
             if let Mutation::InsertVectorBatch(batch) = mutation {
-                for (id, vector) in &batch.vectors {
+                for (external_key, vector) in &batch.vectors {
                     let single = super::mutation::InsertVector {
                         embedding: batch.embedding,
-                        id: *id,
+                        external_key: external_key.clone(),
                         vector: vector.clone(),
                         immediate_index: batch.immediate_index,
                     };
@@ -637,7 +637,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_mutations() {
         use super::super::embedding::Embedding;
-        use super::super::schema::VectorElementType;
+        use super::super::schema::{ExternalKey, VectorElementType};
         use super::super::Distance;
 
         let (writer, mut receiver) = create_writer(WriterConfig::default());
@@ -645,7 +645,7 @@ mod tests {
         // Send a mutation
         let id = crate::Id::new();
         let embedding = Embedding::new(1, "test", 128, Distance::Cosine, VectorElementType::F32, None);
-        let mutation = super::super::mutation::InsertVector::new(&embedding, id, vec![1.0, 2.0, 3.0]);
+        let mutation = super::super::mutation::InsertVector::new(&embedding, ExternalKey::NodeId(id), vec![1.0, 2.0, 3.0]);
         writer.send(vec![mutation.into()]).await.unwrap();
 
         // Should receive it

@@ -770,6 +770,7 @@ mod tests {
     use super::*;
     use crate::vector::embedding::EmbeddingBuilder;
     use crate::vector::processor::Processor;
+    use crate::vector::schema::ExternalKey;
     use crate::vector::Distance;
     use tempfile::TempDir;
 
@@ -855,7 +856,7 @@ mod tests {
             let id = crate::Id::new();
             let vector = test_vector(64, i);
             processor
-                .insert_vector(&embedding, id, &vector, true)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
                 .expect("Insert should succeed");
             ids.push(id);
         }
@@ -863,7 +864,7 @@ mod tests {
         // Delete some vectors
         for id in &ids[0..3] {
             processor
-                .delete_vector(&embedding, *id)
+                .delete_vector(&embedding, ExternalKey::NodeId(*id))
                 .expect("Delete should succeed");
         }
 
@@ -887,12 +888,12 @@ mod tests {
         let id = crate::Id::new();
         let vector = test_vector(64, 42);
         let vec_id = processor
-            .insert_vector(&embedding, id, &vector, true)
+            .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
             .expect("Insert should succeed");
 
         // Delete it (soft delete)
         processor
-            .delete_vector(&embedding, id)
+            .delete_vector(&embedding, ExternalKey::NodeId(id))
             .expect("Delete should succeed");
 
         // Verify vector data still exists (soft delete keeps it)
@@ -946,14 +947,14 @@ mod tests {
             let id = crate::Id::new();
             let vector = test_vector(64, i);
             processor
-                .insert_vector(&embedding, id, &vector, true)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
                 .expect("Insert should succeed");
             ids.push(id);
         }
 
         // Delete one vector
         let deleted_result = processor
-            .delete_vector(&embedding, ids[5])
+            .delete_vector(&embedding, ExternalKey::NodeId(ids[5]))
             .expect("Delete should succeed");
         let deleted_vec_id = deleted_result.unwrap();
 
@@ -1023,10 +1024,10 @@ mod tests {
             let id = crate::Id::new();
             let vector = test_vector(64, i);
             processor
-                .insert_vector(&embedding, id, &vector, true)
+                .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
                 .expect("Insert should succeed");
             processor
-                .delete_vector(&embedding, id)
+                .delete_vector(&embedding, ExternalKey::NodeId(id))
                 .expect("Delete should succeed");
         }
 
@@ -1059,12 +1060,12 @@ mod tests {
         let id = crate::Id::new();
         let vector = test_vector(64, 42);
         let vec_id = processor
-            .insert_vector(&embedding, id, &vector, true)
+            .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
             .expect("Insert should succeed");
 
         // Delete it (soft delete)
         processor
-            .delete_vector(&embedding, id)
+            .delete_vector(&embedding, ExternalKey::NodeId(id))
             .expect("Delete should succeed");
 
         // Run GC with ID recycling enabled
@@ -1121,10 +1122,10 @@ mod tests {
         let id = crate::Id::new();
         let vector = test_vector(64, 42);
         let vec_id = processor
-            .insert_vector(&embedding, id, &vector, true)
+            .insert_vector(&embedding, ExternalKey::NodeId(id), &vector, true)
             .expect("Insert should succeed");
         processor
-            .delete_vector(&embedding, id)
+            .delete_vector(&embedding, ExternalKey::NodeId(id))
             .expect("Delete should succeed");
 
         // Run GC with default config (ID recycling disabled)

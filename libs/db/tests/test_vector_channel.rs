@@ -20,8 +20,8 @@ use std::time::Duration;
 use motlie_db::vector::{
     create_search_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
     spawn_query_consumers_with_storage_autoreg, DeleteVector, Distance, EmbeddingBuilder,
-    InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN, Storage, Subsystem,
-    WriterConfig,
+    ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN, Storage,
+    Subsystem, WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -107,7 +107,7 @@ async fn test_mutation_via_writer_consumer() {
         let id = Id::new();
         ids.push(id);
 
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -183,7 +183,7 @@ async fn test_query_via_reader_pool() {
     // Insert test data
     let vectors = generate_vectors(DIM, 50, 99);
     for vector in &vectors {
-        InsertVector::new(&embedding, Id::new(), vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -252,7 +252,7 @@ async fn test_concurrent_queries_mpmc() {
     // Insert vectors
     let vectors = generate_vectors(DIM, 200, 77);
     for vector in &vectors {
-        InsertVector::new(&embedding, Id::new(), vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -368,7 +368,7 @@ async fn test_subsystem_start_lifecycle() {
     // Insert via Writer
     let vectors = generate_vectors(DIM, 10, 33);
     for vector in &vectors {
-        InsertVector::new(&embedding, Id::new(), vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -431,7 +431,7 @@ async fn test_writer_flush_semantics() {
     let id = Id::new();
 
     // Insert without flush
-    InsertVector::new(&embedding, id, vectors[0].clone())
+    InsertVector::new(&embedding, ExternalKey::NodeId(id), vectors[0].clone())
         .immediate()
         .run(&writer)
         .await
@@ -551,7 +551,7 @@ async fn test_concurrent_deletes_vs_searches() {
         let id = Id::new();
         ids.push(id);
 
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -589,7 +589,7 @@ async fn test_concurrent_deletes_vs_searches() {
     let deleted_counter = Arc::clone(&deleted_count);
     let delete_handle = tokio::spawn(async move {
         for id in delete_ids {
-            DeleteVector::new(&delete_embedding, id)
+            DeleteVector::new(&delete_embedding, ExternalKey::NodeId(id))
                 .run(&delete_writer)
                 .await
                 .expect("delete");

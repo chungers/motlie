@@ -17,11 +17,10 @@ use anyhow::Result;
 use crate::rocksdb::{ColumnFamily, HotColumnFamilyRecord};
 use crate::vector::processor::Processor;
 use crate::vector::schema::{
-    BinaryCodeCfKey, BinaryCodes, EmbeddingCode, IdForward, IdForwardCfKey, IdReverse,
+    BinaryCodeCfKey, BinaryCodes, EmbeddingCode, ExternalKey, IdForward, IdForwardCfKey, IdReverse,
     IdReverseCfKey, LifecycleCounts, LifecycleCountsCfKey, LifecycleCountsDelta,
     Pending, VecId, VecMeta, VecMetaCfKey, VectorCfKey, Vectors,
 };
-use crate::Id;
 
 // ============================================================================
 // DeleteResult
@@ -105,7 +104,7 @@ impl DeleteResult {
 /// * `txn_db` - Transaction DB for CF handles
 /// * `processor` - Processor for allocators and config
 /// * `embedding` - Embedding space code
-/// * `id` - External ID (ULID) to delete
+/// * `external_key` - External key to delete
 ///
 /// # Returns
 /// `DeleteResult` indicating whether deletion occurred and if it was soft.
@@ -114,13 +113,13 @@ pub fn vector(
     txn_db: &rocksdb::TransactionDB,
     processor: &Processor,
     embedding: EmbeddingCode,
-    id: Id,
+    external_key: ExternalKey,
 ) -> Result<DeleteResult> {
-    // 1. Look up VecId from external Id (with lock to prevent races)
+    // 1. Look up VecId from external key (with lock to prevent races)
     let forward_cf = txn_db
         .cf_handle(IdForward::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
-    let forward_key = IdForwardCfKey(embedding, id);
+    let forward_key = IdForwardCfKey(embedding, external_key);
 
     let vec_id = match txn.get_for_update_cf(
         &forward_cf,

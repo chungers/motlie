@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use motlie_db::vector::{
     create_writer, spawn_mutation_consumer_with_storage_autoreg, AsyncGraphUpdater,
-    AsyncUpdaterConfig, DeleteVector, Distance, EmbeddingBuilder, GarbageCollector, GcConfig,
-    InsertVector, MutationRunnable, NavigationCache, Storage, VecId, WriterConfig,
+    AsyncUpdaterConfig, DeleteVector, Distance, EmbeddingBuilder, ExternalKey, GarbageCollector,
+    GcConfig, InsertVector, MutationRunnable, NavigationCache, Storage, VecId, WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -99,7 +99,7 @@ async fn test_delete_edge_cleanup() {
 
     for vector in &vectors {
         let id = Id::new();
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate() // Build HNSW index immediately
             .run(&writer)
             .await
@@ -112,7 +112,7 @@ async fn test_delete_edge_cleanup() {
 
     // Delete 20 vectors (indices 10-29)
     for id in &ids[10..30] {
-        DeleteVector::new(&embedding, *id)
+        DeleteVector::new(&embedding, ExternalKey::NodeId(*id))
             .run(&writer)
             .await
             .expect("delete");
@@ -201,7 +201,7 @@ async fn test_delete_id_recycling() {
 
     for vector in &vectors {
         let id = Id::new();
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -212,7 +212,7 @@ async fn test_delete_id_recycling() {
 
     // Delete all
     for id in &ids {
-        DeleteVector::new(&embedding, *id)
+        DeleteVector::new(&embedding, ExternalKey::NodeId(*id))
             .run(&writer)
             .await
             .expect("delete");
@@ -282,7 +282,7 @@ async fn test_delete_storage_reclamation() {
 
     for vector in &vectors {
         let id = Id::new();
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -302,7 +302,7 @@ async fn test_delete_storage_reclamation() {
 
     // Delete all vectors
     for id in &ids {
-        DeleteVector::new(&embedding, *id)
+        DeleteVector::new(&embedding, ExternalKey::NodeId(*id))
             .run(&writer)
             .await
             .expect("delete");
@@ -386,7 +386,7 @@ async fn test_async_updater_delete_race() {
 
     for vector in &vectors {
         let id = Id::new();
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .run(&writer)
             .await
             .expect("insert");
@@ -398,9 +398,12 @@ async fn test_async_updater_delete_race() {
     let id_forward_cf = txn_db.cf_handle("vector/id_forward").expect("id_forward cf");
     let mut vec_ids = Vec::new();
     for id in &ids {
-        let mut key = Vec::with_capacity(24);
+        // Key format: [embedding: u64] + [ExternalKey bytes]
+        // ExternalKey::NodeId bytes = [tag: 0x01] + [id: 16 bytes]
+        let external_bytes = ExternalKey::NodeId(*id).to_bytes();
+        let mut key = Vec::with_capacity(8 + external_bytes.len());
         key.extend_from_slice(&embedding.code().to_be_bytes());
-        key.extend_from_slice(id.as_bytes());
+        key.extend_from_slice(&external_bytes);
         let bytes = txn_db
             .get_cf(&id_forward_cf, &key)
             .expect("read")
@@ -412,7 +415,7 @@ async fn test_async_updater_delete_race() {
 
     // Delete half before async updater runs (indices 0-9)
     for id in &ids[0..10] {
-        DeleteVector::new(&embedding, *id)
+        DeleteVector::new(&embedding, ExternalKey::NodeId(*id))
             .run(&writer)
             .await
             .expect("delete");
@@ -474,10 +477,11 @@ async fn test_async_updater_delete_race() {
     // Check that deleted ids (0-9) have no IdForward mapping
     let mut deleted_found_in_forward = 0;
     for id in &ids[0..10] {
-        // IdForward key format: [embedding_code: u64 BE][external_id: 16 bytes]
-        let mut key = Vec::with_capacity(24);
+        // IdForward key format: [embedding_code: u64 BE][ExternalKey bytes]
+        let external_bytes = ExternalKey::NodeId(*id).to_bytes();
+        let mut key = Vec::with_capacity(8 + external_bytes.len());
         key.extend_from_slice(&embedding.code().to_be_bytes());
-        key.extend_from_slice(id.as_bytes());
+        key.extend_from_slice(&external_bytes);
         if txn_db.get_cf(&id_forward_cf, &key).expect("read").is_some() {
             deleted_found_in_forward += 1;
         }
@@ -490,9 +494,10 @@ async fn test_async_updater_delete_race() {
     // Check that non-deleted ids (10-19) still have IdForward mapping
     let mut live_found_in_forward = 0;
     for id in &ids[10..20] {
-        let mut key = Vec::with_capacity(24);
+        let external_bytes = ExternalKey::NodeId(*id).to_bytes();
+        let mut key = Vec::with_capacity(8 + external_bytes.len());
         key.extend_from_slice(&embedding.code().to_be_bytes());
-        key.extend_from_slice(id.as_bytes());
+        key.extend_from_slice(&external_bytes);
         if txn_db.get_cf(&id_forward_cf, &key).expect("read").is_some() {
             live_found_in_forward += 1;
         }
@@ -594,14 +599,14 @@ async fn test_gc_idempotent() {
     let id = Id::new();
     let vector = generate_vectors(DIM, 1, 111)[0].clone();
 
-    InsertVector::new(&embedding, id, vector)
+    InsertVector::new(&embedding, ExternalKey::NodeId(id), vector)
         .immediate()
         .run(&writer)
         .await
         .expect("insert");
     writer.flush().await.expect("flush");
 
-    DeleteVector::new(&embedding, id)
+    DeleteVector::new(&embedding, ExternalKey::NodeId(id))
         .run(&writer)
         .await
         .expect("delete");

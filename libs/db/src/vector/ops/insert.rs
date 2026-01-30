@@ -13,12 +13,11 @@ use crate::vector::hnsw::{self, CacheUpdate};
 use crate::vector::processor::Processor;
 use crate::vector::schema::{
     AdcCorrection, BinaryCodeCfKey, BinaryCodeCfValue, BinaryCodes, EmbeddingCode, EmbeddingSpecCfKey,
-    EmbeddingSpecs, GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField, IdForward,
+    EmbeddingSpecs, ExternalKey, GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField, IdForward,
     IdForwardCfKey, IdForwardCfValue, IdReverse, IdReverseCfKey, IdReverseCfValue,
     LifecycleCounts, LifecycleCountsCfKey, LifecycleCountsDelta, Pending, VecId,
     VecMeta, VecMetaCfKey, VecMetaCfValue, VecMetadata, VectorCfKey, Vectors,
 };
-use crate::Id;
 
 // ============================================================================
 // InsertResult
@@ -119,7 +118,7 @@ impl InsertBatchResult {
 /// * `txn_db` - Transaction DB for CF handles
 /// * `processor` - Processor for allocators, encoders, indices
 /// * `embedding` - Embedding space code
-/// * `id` - External ID (ULID)
+/// * `external_key` - External key identifying the source entity
 /// * `vector` - Vector data
 /// * `build_index` - Whether to build HNSW graph connections
 ///
@@ -130,7 +129,7 @@ pub fn vector(
     txn_db: &rocksdb::TransactionDB,
     processor: &Processor,
     embedding: EmbeddingCode,
-    id: Id,
+    external_key: ExternalKey,
     vector: &[f32],
     build_index: bool,
 ) -> Result<InsertResult> {
@@ -151,19 +150,19 @@ pub fn vector(
 
     let storage_type = spec.storage_type();
 
-    // 3. Check if external ID already exists (avoid duplicates)
+    // 3. Check if external key already exists (avoid duplicates)
     // Use get_for_update_cf() to acquire a lock on the key
     let forward_cf = txn_db
         .cf_handle(IdForward::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("IdForward CF not found"))?;
-    let forward_key = IdForwardCfKey(embedding, id);
+    let forward_key = IdForwardCfKey(embedding, external_key.clone());
     if txn
         .get_for_update_cf(&forward_cf, IdForward::key_to_bytes(&forward_key), true)?
         .is_some()
     {
         return Err(anyhow::anyhow!(
-            "External ID {} already exists in embedding space {}",
-            id,
+            "External key {:?} already exists in embedding space {}",
+            external_key,
             embedding
         ));
     }
@@ -197,9 +196,9 @@ pub fn vector(
         IdForward::value_to_bytes(&forward_value),
     )?;
 
-    // 7. Store VecId -> Id mapping (IdReverse)
+    // 7. Store VecId -> ExternalKey mapping (IdReverse)
     let reverse_key = IdReverseCfKey(embedding, vec_id);
-    let reverse_value = IdReverseCfValue(id);
+    let reverse_value = IdReverseCfValue(external_key);
     let reverse_cf = txn_db
         .cf_handle(IdReverse::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("IdReverse CF not found"))?;
@@ -331,8 +330,8 @@ pub fn vector(
 /// # Validation
 /// - Embedding exists in registry
 /// - All dimensions match spec
-/// - No duplicate IDs within batch
-/// - No duplicate IDs against existing (with locks)
+/// - No duplicate external keys within batch
+/// - No duplicate external keys against existing (with locks)
 /// - Spec hash drift detection
 ///
 /// # Arguments
@@ -340,7 +339,7 @@ pub fn vector(
 /// * `txn_db` - Transaction DB for CF handles
 /// * `processor` - Processor for allocators, encoders, indices
 /// * `embedding` - Embedding space code
-/// * `vectors` - Slice of (external_id, vector_data) pairs
+/// * `vectors` - Slice of (external_key, vector_data) pairs
 /// * `build_index` - Whether to build HNSW graph connections
 ///
 /// # Returns
@@ -350,7 +349,7 @@ pub fn batch(
     txn_db: &rocksdb::TransactionDB,
     processor: &Processor,
     embedding: EmbeddingCode,
-    vectors: &[(Id, Vec<f32>)],
+    vectors: &[(ExternalKey, Vec<f32>)],
     build_index: bool,
 ) -> Result<InsertBatchResult> {
     // Fast path: empty input
@@ -372,24 +371,25 @@ pub fn batch(
     let storage_type = spec.storage_type();
 
     // 2. Validate all dimensions upfront (fail fast)
-    for (i, (id, vector)) in vectors.iter().enumerate() {
+    for (i, (external_key, vector)) in vectors.iter().enumerate() {
         if vector.len() != expected_dim {
             return Err(anyhow::anyhow!(
-                "Dimension mismatch for vector {} (id {}): expected {}, got {}",
+                "Dimension mismatch for vector {} ({:?}): expected {}, got {}",
                 i,
-                id,
+                external_key,
                 expected_dim,
                 vector.len()
             ));
         }
     }
 
-    // 3. Check for duplicate IDs within the batch
+    // 3. Check for duplicate external keys within the batch
     {
-        let mut seen: HashSet<Id> = HashSet::with_capacity(vectors.len());
-        for (id, _) in vectors {
-            if !seen.insert(*id) {
-                return Err(anyhow::anyhow!("Duplicate external ID {} in batch", id));
+        let mut seen: HashSet<Vec<u8>> = HashSet::with_capacity(vectors.len());
+        for (external_key, _) in vectors {
+            let key_bytes = external_key.to_bytes();
+            if !seen.insert(key_bytes) {
+                return Err(anyhow::anyhow!("Duplicate external key {:?} in batch", external_key));
             }
         }
     }
@@ -422,16 +422,16 @@ pub fn batch(
         .cf_handle(Vectors::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Vectors CF not found"))?;
 
-    // 6. Check for existing external IDs (acquire locks to prevent races)
-    for (id, _) in vectors {
-        let forward_key = IdForwardCfKey(embedding, *id);
+    // 6. Check for existing external keys (acquire locks to prevent races)
+    for (external_key, _) in vectors {
+        let forward_key = IdForwardCfKey(embedding, external_key.clone());
         if txn
             .get_for_update_cf(&forward_cf, IdForward::key_to_bytes(&forward_key), true)?
             .is_some()
         {
             return Err(anyhow::anyhow!(
-                "External ID {} already exists in embedding space {}",
-                id,
+                "External key {:?} already exists in embedding space {}",
+                external_key,
                 embedding
             ));
         }
@@ -447,7 +447,7 @@ pub fn batch(
     let mut vec_ids = Vec::with_capacity(vectors.len());
     let mut code_cache_updates = Vec::with_capacity(vectors.len());
 
-    for (id, vector) in vectors {
+    for (external_key, vector) in vectors {
         // Allocate internal ID
         let vec_id = {
             let allocator = processor.get_or_create_allocator(embedding);
@@ -455,8 +455,8 @@ pub fn batch(
         };
         vec_ids.push(vec_id);
 
-        // Store Id -> VecId mapping (IdForward)
-        let forward_key = IdForwardCfKey(embedding, *id);
+        // Store ExternalKey -> VecId mapping (IdForward)
+        let forward_key = IdForwardCfKey(embedding, external_key.clone());
         let forward_value = IdForwardCfValue(vec_id);
         txn.put_cf(
             &forward_cf,
@@ -464,9 +464,9 @@ pub fn batch(
             IdForward::value_to_bytes(&forward_value),
         )?;
 
-        // Store VecId -> Id mapping (IdReverse)
+        // Store VecId -> ExternalKey mapping (IdReverse)
         let reverse_key = IdReverseCfKey(embedding, vec_id);
-        let reverse_value = IdReverseCfValue(*id);
+        let reverse_value = IdReverseCfValue(external_key.clone());
         txn.put_cf(
             &reverse_cf,
             IdReverse::key_to_bytes(&reverse_key),

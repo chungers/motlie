@@ -212,9 +212,6 @@ Changes:
   - `InsertVector`, `InsertVectorBatch`
   - `DeleteVector`
 - Query result payloads should include `ExternalKey` instead of plain `Id`.
-- Provide convenience constructors for node-only use:
-  - `InsertVector::new_node_id(...)`
-  - `DeleteVector::new_node_id(...)`
 
 ### Processor API
 
@@ -525,12 +522,9 @@ event that must be versioned.
 
 ### Phase 3: API Changes
 
-- [ ] **T3.1**: Update `InsertVector` mutation to accept `ExternalKey`
-  - Primary constructor takes `ExternalKey`
-  - Optional convenience: `InsertVector::new_node_id(...)`
-
-> **[claude, 2026-01-29, DISAGREE]** "Backward compatibility" is unnecessary in heavy dev. Recommend: just change `InsertVector::new()` to take `ExternalKey` directly. Callers wrap with `ExternalKey::NodeId(id)`. Simpler API, no legacy baggage.
-> **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: remove backward-compat framing; use `ExternalKey` in the primary constructor and keep a small convenience constructor if desired.
+- [x] **T3.1**: Update `InsertVector` mutation to accept `ExternalKey`
+  - Primary constructor takes `ExternalKey` directly
+  - Callers wrap with `ExternalKey::NodeId(id)` for node IDs
 
 - [ ] **T3.2**: Update `DeleteVector` mutation to accept `ExternalKey`
 

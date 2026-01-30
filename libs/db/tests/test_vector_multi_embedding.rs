@@ -29,8 +29,8 @@ use motlie_db::vector::benchmark::{LAION_EMBEDDING_DIM, SIFT_EMBEDDING_DIM};
 use motlie_db::vector::{
     create_search_reader_with_storage, create_writer,
     spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
-    Distance, EmbeddingBuilder, InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN,
-    Storage, WriterConfig,
+    Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable,
+    SearchKNN, Storage, WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -163,7 +163,7 @@ async fn test_cosine_2bit_rabitq() {
         let id = Id::new();
         external_ids.push(id);
 
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -301,7 +301,7 @@ async fn test_cosine_4bit_rabitq() {
         let id = Id::new();
         external_ids.push(id);
 
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -512,7 +512,7 @@ async fn test_multi_embedding_non_interference() {
     for vector in &laion_db {
         let id = Id::new();
         laion_ids.push(id);
-        InsertVector::new(&laion_embedding, id, vector.clone())
+        InsertVector::new(&laion_embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -525,7 +525,7 @@ async fn test_multi_embedding_non_interference() {
     for vector in &sift_db {
         let id = Id::new();
         sift_ids.push(id);
-        InsertVector::new(&sift_embedding, id, vector.clone())
+        InsertVector::new(&sift_embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -538,7 +538,7 @@ async fn test_multi_embedding_non_interference() {
     for vector in &custom_db {
         let id = Id::new();
         custom_ids.push(id);
-        InsertVector::new(&custom_embedding, id, vector.clone())
+        InsertVector::new(&custom_embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await
@@ -849,7 +849,7 @@ async fn test_exact_vs_rabitq_search_paths() {
     for vector in &db_vectors {
         let id = Id::new();
         ids.push(id);
-        InsertVector::new(&embedding, id, vector.clone())
+        InsertVector::new(&embedding, ExternalKey::NodeId(id), vector.clone())
             .immediate()
             .run(&writer)
             .await

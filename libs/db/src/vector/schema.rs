@@ -44,6 +44,8 @@
 //!
 //! See ROADMAP.md for complete schema documentation.
 
+use crate::graph::name_hash::NameHash;
+use crate::graph::summary_hash::SummaryHash;
 use crate::rocksdb::{ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde, HotColumnFamilyRecord};
 use crate::{Id, TimestampMilli};
 use anyhow::Result;
@@ -88,6 +90,228 @@ pub(crate) type RoaringBitmapBytes = Vec<u8>;
 /// Size depends on vector dimensionality (e.g., 16 bytes for 128-dim 1-bit RaBitQ).
 /// Type alias for RaBitQ binary code
 pub type RabitqCode = Vec<u8>;
+
+// ============================================================================
+// ExternalKey - Polymorphic External ID for Vector Mappings
+// ============================================================================
+
+/// Polymorphic external key for vector ID mappings.
+///
+/// Associates a vector with any graph entity key while preserving type information.
+/// Used by IdForward/IdReverse CFs to map between vec_id and external identifiers.
+///
+/// ## Wire Format
+///
+/// ```text
+/// [tag: u8] + [payload: N bytes]
+/// ```
+///
+/// Tags are stable and must not be renumbered:
+/// - 0x01: NodeId (16 bytes)
+/// - 0x02: NodeFragment (24 bytes)
+/// - 0x03: Edge (40 bytes)
+/// - 0x04: EdgeFragment (48 bytes)
+/// - 0x05: NodeSummary (8 bytes)
+/// - 0x06: EdgeSummary (8 bytes)
+///
+/// ## Invariant
+///
+/// Each vec_id maps to exactly one ExternalKey (1:1, not multi-map).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExternalKey {
+    /// Node identity: 16-byte ULID
+    NodeId(Id),
+    /// Node fragment: ULID + timestamp
+    NodeFragment(Id, TimestampMilli),
+    /// Forward edge: src_id + dst_id + name_hash
+    Edge(Id, Id, NameHash),
+    /// Edge fragment: src_id + dst_id + name_hash + timestamp
+    EdgeFragment(Id, Id, NameHash, TimestampMilli),
+    /// Node summary: content-addressed by hash
+    NodeSummary(SummaryHash),
+    /// Edge summary: content-addressed by hash
+    EdgeSummary(SummaryHash),
+}
+
+impl ExternalKey {
+    // Tag constants (stable, do not renumber)
+    const TAG_NODE_ID: u8 = 0x01;
+    const TAG_NODE_FRAGMENT: u8 = 0x02;
+    const TAG_EDGE: u8 = 0x03;
+    const TAG_EDGE_FRAGMENT: u8 = 0x04;
+    const TAG_NODE_SUMMARY: u8 = 0x05;
+    const TAG_EDGE_SUMMARY: u8 = 0x06;
+
+    /// Serialize to bytes: [tag: u8] + [payload]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            ExternalKey::NodeId(id) => {
+                let mut bytes = Vec::with_capacity(17);
+                bytes.push(Self::TAG_NODE_ID);
+                bytes.extend_from_slice(id.as_bytes());
+                bytes
+            }
+            ExternalKey::NodeFragment(id, ts) => {
+                let mut bytes = Vec::with_capacity(25);
+                bytes.push(Self::TAG_NODE_FRAGMENT);
+                bytes.extend_from_slice(id.as_bytes());
+                bytes.extend_from_slice(&ts.0.to_be_bytes());
+                bytes
+            }
+            ExternalKey::Edge(src, dst, name_hash) => {
+                let mut bytes = Vec::with_capacity(41);
+                bytes.push(Self::TAG_EDGE);
+                bytes.extend_from_slice(src.as_bytes());
+                bytes.extend_from_slice(dst.as_bytes());
+                bytes.extend_from_slice(name_hash.as_bytes());
+                bytes
+            }
+            ExternalKey::EdgeFragment(src, dst, name_hash, ts) => {
+                let mut bytes = Vec::with_capacity(49);
+                bytes.push(Self::TAG_EDGE_FRAGMENT);
+                bytes.extend_from_slice(src.as_bytes());
+                bytes.extend_from_slice(dst.as_bytes());
+                bytes.extend_from_slice(name_hash.as_bytes());
+                bytes.extend_from_slice(&ts.0.to_be_bytes());
+                bytes
+            }
+            ExternalKey::NodeSummary(hash) => {
+                let mut bytes = Vec::with_capacity(9);
+                bytes.push(Self::TAG_NODE_SUMMARY);
+                bytes.extend_from_slice(hash.as_bytes());
+                bytes
+            }
+            ExternalKey::EdgeSummary(hash) => {
+                let mut bytes = Vec::with_capacity(9);
+                bytes.push(Self::TAG_EDGE_SUMMARY);
+                bytes.extend_from_slice(hash.as_bytes());
+                bytes
+            }
+        }
+    }
+
+    /// Deserialize from bytes: [tag: u8] + [payload]
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        if bytes.is_empty() {
+            anyhow::bail!("ExternalKey: empty bytes");
+        }
+
+        let tag = bytes[0];
+        let payload = &bytes[1..];
+
+        match tag {
+            Self::TAG_NODE_ID => {
+                if payload.len() != 16 {
+                    anyhow::bail!(
+                        "ExternalKey::NodeId: expected 16 bytes, got {}",
+                        payload.len()
+                    );
+                }
+                let mut id_bytes = [0u8; 16];
+                id_bytes.copy_from_slice(payload);
+                Ok(ExternalKey::NodeId(Id::from_bytes(id_bytes)))
+            }
+            Self::TAG_NODE_FRAGMENT => {
+                if payload.len() != 24 {
+                    anyhow::bail!(
+                        "ExternalKey::NodeFragment: expected 24 bytes, got {}",
+                        payload.len()
+                    );
+                }
+                let mut id_bytes = [0u8; 16];
+                id_bytes.copy_from_slice(&payload[0..16]);
+                let ts = u64::from_be_bytes(payload[16..24].try_into()?);
+                Ok(ExternalKey::NodeFragment(
+                    Id::from_bytes(id_bytes),
+                    TimestampMilli(ts),
+                ))
+            }
+            Self::TAG_EDGE => {
+                if payload.len() != 40 {
+                    anyhow::bail!(
+                        "ExternalKey::Edge: expected 40 bytes, got {}",
+                        payload.len()
+                    );
+                }
+                let mut src_bytes = [0u8; 16];
+                let mut dst_bytes = [0u8; 16];
+                let mut name_bytes = [0u8; 8];
+                src_bytes.copy_from_slice(&payload[0..16]);
+                dst_bytes.copy_from_slice(&payload[16..32]);
+                name_bytes.copy_from_slice(&payload[32..40]);
+                Ok(ExternalKey::Edge(
+                    Id::from_bytes(src_bytes),
+                    Id::from_bytes(dst_bytes),
+                    NameHash::from_bytes(name_bytes),
+                ))
+            }
+            Self::TAG_EDGE_FRAGMENT => {
+                if payload.len() != 48 {
+                    anyhow::bail!(
+                        "ExternalKey::EdgeFragment: expected 48 bytes, got {}",
+                        payload.len()
+                    );
+                }
+                let mut src_bytes = [0u8; 16];
+                let mut dst_bytes = [0u8; 16];
+                let mut name_bytes = [0u8; 8];
+                src_bytes.copy_from_slice(&payload[0..16]);
+                dst_bytes.copy_from_slice(&payload[16..32]);
+                name_bytes.copy_from_slice(&payload[32..40]);
+                let ts = u64::from_be_bytes(payload[40..48].try_into()?);
+                Ok(ExternalKey::EdgeFragment(
+                    Id::from_bytes(src_bytes),
+                    Id::from_bytes(dst_bytes),
+                    NameHash::from_bytes(name_bytes),
+                    TimestampMilli(ts),
+                ))
+            }
+            Self::TAG_NODE_SUMMARY => {
+                if payload.len() != 8 {
+                    anyhow::bail!(
+                        "ExternalKey::NodeSummary: expected 8 bytes, got {}",
+                        payload.len()
+                    );
+                }
+                let mut hash_bytes = [0u8; 8];
+                hash_bytes.copy_from_slice(payload);
+                Ok(ExternalKey::NodeSummary(SummaryHash::from_bytes(hash_bytes)))
+            }
+            Self::TAG_EDGE_SUMMARY => {
+                if payload.len() != 8 {
+                    anyhow::bail!(
+                        "ExternalKey::EdgeSummary: expected 8 bytes, got {}",
+                        payload.len()
+                    );
+                }
+                let mut hash_bytes = [0u8; 8];
+                hash_bytes.copy_from_slice(payload);
+                Ok(ExternalKey::EdgeSummary(SummaryHash::from_bytes(hash_bytes)))
+            }
+            _ => anyhow::bail!("ExternalKey: unknown tag 0x{:02x}", tag),
+        }
+    }
+
+    /// Get the variant name as a static string (for admin/stats).
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            ExternalKey::NodeId(_) => "NodeId",
+            ExternalKey::NodeFragment(_, _) => "NodeFragment",
+            ExternalKey::Edge(_, _, _) => "Edge",
+            ExternalKey::EdgeFragment(_, _, _, _) => "EdgeFragment",
+            ExternalKey::NodeSummary(_) => "NodeSummary",
+            ExternalKey::EdgeSummary(_) => "EdgeSummary",
+        }
+    }
+
+    /// Extract node ID if this is a NodeId variant.
+    pub fn node_id(&self) -> Option<Id> {
+        match self {
+            ExternalKey::NodeId(id) => Some(*id),
+            _ => None,
+        }
+    }
+}
 
 /// ADC (Asymmetric Distance Computation) corrective factors.
 ///
@@ -1170,15 +1394,18 @@ impl GraphMeta {
 // IdForward CF
 // ============================================================================
 
-/// Forward ID mapping: ULID -> vec_id.
+/// Forward ID mapping: ExternalKey -> vec_id.
 ///
-/// Key: [embedding: u64] + [ulid: 16] = 24 bytes
+/// Key: [embedding: u64] + [ExternalKey bytes] = 8 + (1 + payload_size) bytes
 /// Value: [vec_id: u32] = 4 bytes
+///
+/// Supports polymorphic external keys (NodeId, NodeFragment, Edge, etc.)
+/// for mapping graph entities to vector IDs.
 pub(crate) struct IdForward;
 
-/// IdForward key: (embedding_code, id)
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct IdForwardCfKey(pub(crate) EmbeddingCode, pub(crate) Id);
+/// IdForward key: (embedding_code, external_key)
+#[derive(Debug, Clone)]
+pub(crate) struct IdForwardCfKey(pub(crate) EmbeddingCode, pub(crate) ExternalKey);
 
 /// IdForward value: vec_id mapping
 #[derive(Debug, Clone)]
@@ -1198,6 +1425,7 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for IdForward {
         block_opts.set_bloom_filter(10.0, false);
         block_opts.set_block_cache(cache);
         block_opts.set_block_size(config.default_block_size);
+        // Prefix is embedding_code (8 bytes) for per-embedding iteration
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
         opts.set_block_based_table_factory(&block_opts);
         opts
@@ -1206,23 +1434,23 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for IdForward {
 
 impl IdForward {
     pub fn key_to_bytes(key: &IdForwardCfKey) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(24);
+        let external_bytes = key.1.to_bytes();
+        let mut bytes = Vec::with_capacity(8 + external_bytes.len());
         bytes.extend_from_slice(&key.0.to_be_bytes());
-        bytes.extend_from_slice(key.1.as_bytes());
+        bytes.extend_from_slice(&external_bytes);
         bytes
     }
 
     pub fn key_from_bytes(bytes: &[u8]) -> Result<IdForwardCfKey> {
-        if bytes.len() != 24 {
+        if bytes.len() < 9 {
             anyhow::bail!(
-                "Invalid IdForwardCfKey length: expected 24, got {}",
+                "Invalid IdForwardCfKey length: expected >= 9, got {}",
                 bytes.len()
             );
         }
         let embedding_code = u64::from_be_bytes(bytes[0..8].try_into()?);
-        let mut ulid_bytes = [0u8; 16];
-        ulid_bytes.copy_from_slice(&bytes[8..24]);
-        Ok(IdForwardCfKey(embedding_code, Id::from_bytes(ulid_bytes)))
+        let external_key = ExternalKey::from_bytes(&bytes[8..])?;
+        Ok(IdForwardCfKey(embedding_code, external_key))
     }
 
     pub fn value_to_bytes(value: &IdForwardCfValue) -> Vec<u8> {
@@ -1244,19 +1472,21 @@ impl IdForward {
 // IdReverse CF
 // ============================================================================
 
-/// Reverse ID mapping: vec_id -> ULID.
+/// Reverse ID mapping: vec_id -> ExternalKey.
 ///
 /// Key: [embedding: u64] + [vec_id: u32] = 12 bytes
-/// Value: [ulid: 16] = 16 bytes
+/// Value: [ExternalKey bytes] = (1 + payload_size) bytes
+///
+/// Enables resolving vec_ids back to typed external keys in search results.
 pub(crate) struct IdReverse;
 
 /// IdReverse key: (embedding_code, vec_id)
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct IdReverseCfKey(pub(crate) EmbeddingCode, pub(crate) VecId);
 
-/// IdReverse value: ULID mapping
+/// IdReverse value: ExternalKey mapping
 #[derive(Debug, Clone)]
-pub(crate) struct IdReverseCfValue(pub(crate) Id);
+pub(crate) struct IdReverseCfValue(pub(crate) ExternalKey);
 
 impl ColumnFamily for IdReverse {
     const CF_NAME: &'static str = "vector/id_reverse";
@@ -1271,6 +1501,7 @@ impl ColumnFamilyConfig<VectorBlockCacheConfig> for IdReverse {
 
         block_opts.set_block_cache(cache);
         block_opts.set_block_size(config.default_block_size);
+        // Prefix is embedding_code (8 bytes) for per-embedding iteration
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
         opts.set_block_based_table_factory(&block_opts);
         opts
@@ -1298,19 +1529,15 @@ impl IdReverse {
     }
 
     pub fn value_to_bytes(value: &IdReverseCfValue) -> Vec<u8> {
-        value.0.as_bytes().to_vec()
+        value.0.to_bytes()
     }
 
     pub fn value_from_bytes(bytes: &[u8]) -> Result<IdReverseCfValue> {
-        if bytes.len() != 16 {
-            anyhow::bail!(
-                "Invalid IdReverseCfValue length: expected 16, got {}",
-                bytes.len()
-            );
+        if bytes.is_empty() {
+            anyhow::bail!("Invalid IdReverseCfValue: empty bytes");
         }
-        let mut ulid_bytes = [0u8; 16];
-        ulid_bytes.copy_from_slice(bytes);
-        Ok(IdReverseCfValue(Id::from_bytes(ulid_bytes)))
+        let external_key = ExternalKey::from_bytes(bytes)?;
+        Ok(IdReverseCfValue(external_key))
     }
 }
 
@@ -1745,12 +1972,13 @@ mod tests {
     #[test]
     fn test_id_forward_key_roundtrip() {
         let ulid = Id::new();
-        let key = IdForwardCfKey(5, ulid);
+        let key = IdForwardCfKey(5, ExternalKey::NodeId(ulid));
         let bytes = IdForward::key_to_bytes(&key);
-        assert_eq!(bytes.len(), 24);
+        // 8 (embedding) + 1 (tag) + 16 (ulid) = 25 bytes
+        assert_eq!(bytes.len(), 25);
         let parsed = IdForward::key_from_bytes(&bytes).unwrap();
         assert_eq!(parsed.0, 5);
-        assert_eq!(parsed.1, ulid);
+        assert_eq!(parsed.1, ExternalKey::NodeId(ulid));
     }
 
     #[test]
@@ -1900,5 +2128,158 @@ mod tests {
         assert_eq!(VecLifecycle::Deleted as u8, 0x01);
         assert_eq!(VecLifecycle::Pending as u8, 0x02);
         assert_eq!(VecLifecycle::PendingDeleted as u8, 0x03);
+    }
+
+    // ========================================================================
+    // ExternalKey Tests (T1.1, T9.1, T9.4, T9.6)
+    // ========================================================================
+
+    #[test]
+    fn test_external_key_node_id_roundtrip() {
+        let id = Id::new();
+        let key = ExternalKey::NodeId(id);
+        let bytes = key.to_bytes();
+        assert_eq!(bytes.len(), 17); // 1 tag + 16 payload
+        assert_eq!(bytes[0], 0x01); // TAG_NODE_ID
+        let parsed = ExternalKey::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, key);
+        assert_eq!(parsed.node_id(), Some(id));
+    }
+
+    #[test]
+    fn test_external_key_node_fragment_roundtrip() {
+        let id = Id::new();
+        let ts = TimestampMilli(1234567890123);
+        let key = ExternalKey::NodeFragment(id, ts);
+        let bytes = key.to_bytes();
+        assert_eq!(bytes.len(), 25); // 1 tag + 16 id + 8 ts
+        assert_eq!(bytes[0], 0x02); // TAG_NODE_FRAGMENT
+        let parsed = ExternalKey::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, key);
+        assert_eq!(parsed.variant_name(), "NodeFragment");
+    }
+
+    #[test]
+    fn test_external_key_edge_roundtrip() {
+        let src = Id::new();
+        let dst = Id::new();
+        let name_hash = NameHash::from_name("test_edge");
+        let key = ExternalKey::Edge(src, dst, name_hash);
+        let bytes = key.to_bytes();
+        assert_eq!(bytes.len(), 41); // 1 tag + 16 + 16 + 8
+        assert_eq!(bytes[0], 0x03); // TAG_EDGE
+        let parsed = ExternalKey::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, key);
+        assert_eq!(parsed.variant_name(), "Edge");
+    }
+
+    #[test]
+    fn test_external_key_edge_fragment_roundtrip() {
+        let src = Id::new();
+        let dst = Id::new();
+        let name_hash = NameHash::from_name("test_edge_frag");
+        let ts = TimestampMilli(9999999999999);
+        let key = ExternalKey::EdgeFragment(src, dst, name_hash, ts);
+        let bytes = key.to_bytes();
+        assert_eq!(bytes.len(), 49); // 1 tag + 16 + 16 + 8 + 8
+        assert_eq!(bytes[0], 0x04); // TAG_EDGE_FRAGMENT
+        let parsed = ExternalKey::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, key);
+        assert_eq!(parsed.variant_name(), "EdgeFragment");
+    }
+
+    #[test]
+    fn test_external_key_node_summary_roundtrip() {
+        let content = "test summary content".to_string();
+        let hash = SummaryHash::from_summary(&content).unwrap();
+        let key = ExternalKey::NodeSummary(hash);
+        let bytes = key.to_bytes();
+        assert_eq!(bytes.len(), 9); // 1 tag + 8 hash
+        assert_eq!(bytes[0], 0x05); // TAG_NODE_SUMMARY
+        let parsed = ExternalKey::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, key);
+        assert_eq!(parsed.variant_name(), "NodeSummary");
+    }
+
+    #[test]
+    fn test_external_key_edge_summary_roundtrip() {
+        let content = "edge summary content".to_string();
+        let hash = SummaryHash::from_summary(&content).unwrap();
+        let key = ExternalKey::EdgeSummary(hash);
+        let bytes = key.to_bytes();
+        assert_eq!(bytes.len(), 9); // 1 tag + 8 hash
+        assert_eq!(bytes[0], 0x06); // TAG_EDGE_SUMMARY
+        let parsed = ExternalKey::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, key);
+        assert_eq!(parsed.variant_name(), "EdgeSummary");
+    }
+
+    #[test]
+    fn test_external_key_unknown_tag() {
+        let bytes = [0xFF, 0x00, 0x01, 0x02];
+        let result = ExternalKey::from_bytes(&bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown tag 0xff"));
+    }
+
+    #[test]
+    fn test_external_key_truncated_payload() {
+        // NodeId needs 16 bytes but we only provide 8
+        let bytes = [0x01, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+        let result = ExternalKey::from_bytes(&bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected 16 bytes"));
+    }
+
+    #[test]
+    fn test_external_key_empty_bytes() {
+        let result = ExternalKey::from_bytes(&[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty bytes"));
+    }
+
+    #[test]
+    fn test_external_key_boundary_timestamps() {
+        // Maximum timestamp
+        let id = Id::new();
+        let max_ts = TimestampMilli(u64::MAX);
+        let key = ExternalKey::NodeFragment(id, max_ts);
+        let bytes = key.to_bytes();
+        let parsed = ExternalKey::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, key);
+
+        // Zero timestamp
+        let zero_ts = TimestampMilli(0);
+        let key2 = ExternalKey::NodeFragment(id, zero_ts);
+        let bytes2 = key2.to_bytes();
+        let parsed2 = ExternalKey::from_bytes(&bytes2).unwrap();
+        assert_eq!(parsed2, key2);
+    }
+
+    #[test]
+    fn test_external_key_size_assertions() {
+        // T9.6: Size assertions to guard against graph schema drift
+        // These sizes must match the IDMAP document
+        assert_eq!(std::mem::size_of::<Id>(), 16, "Id size changed");
+        assert_eq!(NameHash::SIZE, 8, "NameHash::SIZE changed");
+        assert_eq!(SummaryHash::SIZE, 8, "SummaryHash::SIZE changed");
+        assert_eq!(std::mem::size_of::<TimestampMilli>(), 8, "TimestampMilli size changed");
+    }
+
+    #[test]
+    fn test_external_key_node_id_accessor() {
+        let id = Id::new();
+
+        // NodeId variant should return Some
+        let node_key = ExternalKey::NodeId(id);
+        assert_eq!(node_key.node_id(), Some(id));
+
+        // Other variants should return None
+        let frag_key = ExternalKey::NodeFragment(id, TimestampMilli(0));
+        assert_eq!(frag_key.node_id(), None);
+
+        let content = "x".to_string();
+        let summary_key = ExternalKey::NodeSummary(SummaryHash::from_summary(&content).unwrap());
+        assert_eq!(summary_key.node_id(), None);
     }
 }
