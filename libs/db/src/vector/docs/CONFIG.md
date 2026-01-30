@@ -1,5 +1,7 @@
 # CONFIG: Persisted vs Runtime Configuration
 
+> (codex, 2026-01-30 15:44 UTC, GRADE 9/10) Rationale: Eliminates config drift by deriving all HNSW structure from persisted EmbeddingSpec; simplifies APIs and reduces redundant state with low operational risk.
+
 ## Status: COMPLETE ✅
 
 This design has been fully implemented. `hnsw::Config` has been **deleted** (not just
