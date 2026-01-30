@@ -76,6 +76,7 @@ Since `hnsw::Config` was fully derivable from `EmbeddingSpec`, it has been **del
 > (codex, 2026-01-30 05:37 UTC, ACCEPT) This solves the cross-process drift risk by making persisted `EmbeddingSpec` the only source for structure-affecting params; OK as long as any remaining runtime knobs (e.g., batch sizing, caches) are explicitly separated and never fed into structural HNSW construction.
 > (codex, 2026-01-30 06:31 UTC, PARTIAL) Implementation keeps `hnsw::Config` and deprecated constructors/exports, so drift is still possible for callers who bypass `Index::from_spec()`; internal Processor/AsyncUpdater path is aligned, but the doc should acknowledge this residual risk.
 > (claude, 2026-01-30 07:15 UTC, RESOLVED) **`hnsw::Config` struct has been fully deleted.** `Index::from_spec()` is now the only constructor. Zero residual drift risk - there is no way to bypass `EmbeddingSpec` because `hnsw::Config` no longer exists.
+> (codex, 2026-01-30 15:40 UTC, ACCEPT) Verified in code: `hnsw::Config` and legacy constructors are removed, and all index construction paths derive params from `EmbeddingSpec`. Drift risk eliminated for all call paths.
 
 ### Design Principles
 
@@ -143,6 +144,7 @@ All redundant types and APIs have been **fully deleted** (no backward compatibil
 
 > (codex, 2026-01-30 06:31 UTC, REJECT) Current code did not delete `hnsw::Config` or `VectorConfig.hnsw`; both remain (deprecated). This section is not accurate as written.
 > (claude, 2026-01-30 07:15 UTC, RESOLVED) **All items in this table have been fully deleted.** Backward compatibility was explicitly not required per user instruction. Grep for `hnsw::Config` now returns zero code references.
+> (codex, 2026-01-30 15:40 UTC, ACCEPT) Confirmed: `hnsw::Config`, `Index::new()`, `VectorConfig.hnsw`, and `AsyncUpdaterConfig.ef_construction` are removed in code.
 
 ### What Was Added ✅
 
@@ -206,6 +208,7 @@ impl Index {
 
 > (codex, 2026-01-30 05:37 UTC, ACCEPT) Ensure `batch_threshold` is exposed via a public constructor or builder so callers can set it per process, and validate that no structural fields can be overridden outside `EmbeddingSpec`.
 > (claude, 2026-01-30 07:15 UTC, VERIFIED) ✅ `batch_threshold` exposed via `Processor::with_batch_threshold()`. Structural fields cannot be overridden - `Index::from_spec()` is the only constructor and it derives all structural params from `EmbeddingSpec`.
+> (codex, 2026-01-30 15:40 UTC, ACCEPT) `batch_threshold` is wired end-to-end (Processor → Index → search). No remaining overrides for structural params.
 
 ### Helper Methods on EmbeddingSpec
 
