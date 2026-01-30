@@ -959,11 +959,15 @@ When `storage.shutdown()` is called, the subsystem shuts down components in this
 ```
 on_shutdown():
   1. GC.shutdown()           - Stop background scans immediately
-  2. AsyncUpdater.shutdown() - Wait for in-flight graph builds
-  3. Writer.flush()          - Flush pending mutations (closes channel)
+  2. Writer.flush()          - Flush pending mutations (may add to pending queue)
+  3. AsyncUpdater.shutdown() - Drain pending queue, build remaining edges
   4. Join consumer tasks     - Wait for consumers to exit
   5. (storage closes)        - RocksDB cleanup
 ```
+
+> **Note:** Writer must flush BEFORE AsyncUpdater shuts down. Otherwise, mutations
+> using the async path (`build_index=false`) would be flushed after AsyncUpdater
+> is already shut down, leaving vectors without HNSW edges.
 
 ```
   ┌─────────────────────────────────────────────────────────┐
@@ -978,14 +982,14 @@ on_shutdown():
   │  └───────┬────────┘                                      │
   │          │                                               │
   │          ▼                                               │
-  │  ┌────────────────────────┐                              │
-  │  │ AsyncUpdater.shutdown()│  Wait for pending graph ops  │
-  │  └───────┬────────────────┘                              │
-  │          │                                               │
-  │          ▼                                               │
   │  ┌────────────────┐                                      │
   │  │ Writer.flush() │  Drain + close mutation channel      │
-  │  └───────┬────────┘                                      │
+  │  └───────┬────────┘  (may add to async pending queue)    │
+  │          │                                               │
+  │          ▼                                               │
+  │  ┌────────────────────────┐                              │
+  │  │ AsyncUpdater.shutdown()│  Drain pending, build edges  │
+  │  └───────┬────────────────┘                              │
   │          │                                               │
   │          ▼                                               │
   │  ┌──────────────────────┐                                │

@@ -2431,11 +2431,14 @@ let (writer, reader) = subsystem.start_with_async(
 ```
 on_shutdown():
   1. GC.shutdown()           - Stop background scans immediately
-  2. AsyncUpdater.shutdown() - Wait for in-flight graph builds
-  3. Writer.flush()          - Flush pending mutations (closes channel)
+  2. Writer.flush()          - Flush pending mutations (may add to pending queue)
+  3. AsyncUpdater.shutdown() - Drain pending queue, build remaining edges
   4. Join consumer tasks     - Cooperative shutdown via channel close
   5. (storage closes)        - RocksDB cleanup
 ```
+
+> **Note:** Writer must flush BEFORE AsyncUpdater shuts down. Otherwise, mutations
+> using the async path would be flushed after AsyncUpdater is shut down.
 
 **New fields in `Subsystem`:**
 - `gc: RwLock<Option<GarbageCollector>>` - GC handle for lifecycle management
