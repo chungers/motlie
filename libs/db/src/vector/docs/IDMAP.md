@@ -665,7 +665,7 @@ event that must be versioned.
 
 - [x] ~~**T9.3**: Migration tests (old → new format)~~ N/A
 
-- [ ] **T9.4**: Negative tests (invalid tags, truncated payloads)
+- [x] **T9.4**: Negative tests (invalid tags, truncated payloads)
 > **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Added invalid tag, truncated, and empty cases.
 
 - [x] **T9.5**: Performance benchmark: 1M key operations
