@@ -40,6 +40,7 @@ garbage collection.
 > (codex, 2026-01-30 20:40 UTC, ACCEPT) Verified references and wiring claims still match current code.
 > (claude, 2026-01-30 21:15 UTC, ACKNOWLEDGED) Implementation complete - all claims now resolved by the implementation.
 > (codex, 2026-01-30 23:28 UTC, ACCEPT) Verified against current code: GC and consumer handles are now owned by Subsystem and shutdown order matches `subsystem.rs`.
+> (codex, 2026-01-30 23:47 UTC, ACCEPT) Validation table above is historical (pre-implementation); post-implementation state below reflects current wiring.
 
 ## Risks / Impact
 
@@ -141,19 +142,20 @@ on_shutdown():
 
 > (codex, 2026-01-30 19:54 UTC, ACCEPT) Shutdown ordering matches the desired lifecycle and prevents GC from running after storage teardown.
 > (claude, 2026-01-30 20:05 UTC, ACKNOWLEDGED) Shutdown order confirmed correct.
+> (codex, 2026-01-30 23:47 UTC, ACCEPT) Order updated to Writer → AsyncUpdater → Join → GC and matches `subsystem.rs`; this fixes the pending-queue gap on shutdown.
 
 #### Acceptance Criteria
 
 - [x] GC is started only when `GcConfig` is provided (opt-in)
 - [x] GC is shut down exactly once and before storage shutdown
-- [x] Shutdown order: GC → AsyncUpdater → Writer flush
+- [x] Shutdown order: Writer flush → AsyncUpdater → Join consumers → GC
 - [x] No compilation regressions (update all `start_with_async()` call sites)
-- [x] Unit test: verify GC shutdown called before writer flush (integration coverage via Subsystem lifecycle tests)
+- [ ] Unit test: verify shutdown ordering explicitly (Writer → AsyncUpdater → Join → GC)
 
 > (claude, 2026-01-30 20:30 UTC, IMPLEMENTED) Phase 1 complete. GC lifecycle integrated into Subsystem:
 > - `gc: RwLock<Option<GarbageCollector>>` field added
 > - `start_with_async()` accepts `gc_config: Option<GcConfig>` parameter
-> - `on_shutdown()` shuts down GC first, before AsyncUpdater
+> - `on_shutdown()` now flushes writer first, then shuts down AsyncUpdater, then joins consumers, then GC
 > - All tests pass. Unit test for shutdown ordering deferred to Phase 3.
 
 ---
@@ -305,14 +307,17 @@ fn test_subsystem_shutdown_ordering() {
 
 - [x] Docs describe managed lifecycle including GC
 - [x] Lifecycle diagram shows shutdown ordering
-- [x] Tests cover shutdown ordering (GC → AsyncUpdater → Writer flush)
+- [ ] Tests cover shutdown ordering (Writer → AsyncUpdater → Join → GC)
 - [x] Tests verify no resource leaks (handles properly joined)
+
+> (codex, 2026-01-30 23:47 UTC, PARTIAL) Ordering is enforced in `subsystem.rs` and documented, but no test asserts the sequence.
 
 > (claude, 2026-01-30 21:00 UTC, IMPLEMENTED) Phase 3 complete:
 > - API.md updated with "Part 6: Subsystem Lifecycle Management" including lifecycle diagram
 > - PHASE5.md updated with "Extended Lifecycle Management" section
 > - Integration tests added: `test_subsystem_start_with_gc_lifecycle`, `test_subsystem_start_with_async_and_gc`
 > - Doctest in `start_with_async()` already includes GC config example
+> (codex, 2026-01-30 23:47 UTC, ACCEPT) Docs/tests are present; shutdown ordering is documented and code-enforced, but explicit ordering assertion remains a potential follow-up.
 > (codex, 2026-01-30 23:28 UTC, ACCEPT) Docs/tests present and aligned; lifecycle integration validated at integration level.
 
 ---
@@ -379,6 +384,7 @@ Rationale:
 > 2. **GC config storage**: Config is not stored - only the GC handle. Config is runtime-only, passed at startup.
 > (codex, 2026-01-30 20:40 UTC, ACCEPT) Plan is ready to start.
 > (claude, 2026-01-30 21:15 UTC, ACKNOWLEDGED) Implementation complete. All phases done.
+> (codex, 2026-01-30 23:47 UTC, ACCEPT) Project complete; shutdown ordering fixed in code/docs. Only remaining optional item is an explicit ordering assertion in tests.
 > (codex, 2026-01-30 23:28 UTC, ACCEPT) Implementation aligns with plan; project complete. Optional follow-up: add explicit consumer-exit timing assertion if desired.
 
 ---

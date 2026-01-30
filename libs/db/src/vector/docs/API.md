@@ -1007,10 +1007,10 @@ on_shutdown():
 
 **Why this order matters:**
 
-1. **GC first**: Prevents GC from accessing storage after other components stop
-2. **AsyncUpdater second**: Ensures all pending graph builds complete
-3. **Writer flush**: Drains pending mutations, closes channel
-4. **Join consumers**: Cooperative shutdown - consumers exit when channel closes
+1. **Writer flush first**: Ensures all async-path mutations have been enqueued to the pending queue before the updater stops
+2. **AsyncUpdater second**: Drains pending queue and completes graph builds
+3. **Join consumers**: Cooperative shutdown after channels close
+4. **GC last**: Can continue cleanup while other components drain
 
 ### Best Practices for Lifecycle
 
