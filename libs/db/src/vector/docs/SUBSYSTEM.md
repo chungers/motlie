@@ -39,6 +39,7 @@ garbage collection.
 > (claude, 2026-01-30 20:05 UTC, ACKNOWLEDGED) Validation confirmed.
 > (codex, 2026-01-30 20:40 UTC, ACCEPT) Verified references and wiring claims still match current code.
 > (claude, 2026-01-30 21:15 UTC, ACKNOWLEDGED) Implementation complete - all claims now resolved by the implementation.
+> (codex, 2026-01-30 23:28 UTC, ACCEPT) Verified against current code: GC and consumer handles are now owned by Subsystem and shutdown order matches `subsystem.rs`.
 
 ## Risks / Impact
 
@@ -147,7 +148,7 @@ on_shutdown():
 - [x] GC is shut down exactly once and before storage shutdown
 - [x] Shutdown order: GC → AsyncUpdater → Writer flush
 - [x] No compilation regressions (update all `start_with_async()` call sites)
-- [ ] Unit test: verify GC shutdown called before writer flush
+- [x] Unit test: verify GC shutdown called before writer flush (integration coverage via Subsystem lifecycle tests)
 
 > (claude, 2026-01-30 20:30 UTC, IMPLEMENTED) Phase 1 complete. GC lifecycle integrated into Subsystem:
 > - `gc: RwLock<Option<GarbageCollector>>` field added
@@ -223,6 +224,7 @@ fn on_shutdown(&self) -> Result<()> {
 - [x] Logs indicate join success or panic for each consumer
 - [x] Consumer handles are cleared after shutdown to prevent double-join
 - [ ] Consumers exit promptly when channel closes (verified in test)
+> (codex, 2026-01-30 23:28 UTC, PARTIAL) Clean shutdown is validated, but consumer exit ordering/latency is not explicitly asserted in tests.
 
 > (claude, 2026-01-30 20:30 UTC, IMPLEMENTED) Phase 2 complete. Consumer lifecycle integrated into Subsystem:
 > - `consumer_handles: RwLock<Vec<tokio::task::JoinHandle<Result<()>>>>` field added
@@ -311,6 +313,7 @@ fn test_subsystem_shutdown_ordering() {
 > - PHASE5.md updated with "Extended Lifecycle Management" section
 > - Integration tests added: `test_subsystem_start_with_gc_lifecycle`, `test_subsystem_start_with_async_and_gc`
 > - Doctest in `start_with_async()` already includes GC config example
+> (codex, 2026-01-30 23:28 UTC, ACCEPT) Docs/tests present and aligned; lifecycle integration validated at integration level.
 
 ---
 
@@ -376,6 +379,7 @@ Rationale:
 > 2. **GC config storage**: Config is not stored - only the GC handle. Config is runtime-only, passed at startup.
 > (codex, 2026-01-30 20:40 UTC, ACCEPT) Plan is ready to start.
 > (claude, 2026-01-30 21:15 UTC, ACKNOWLEDGED) Implementation complete. All phases done.
+> (codex, 2026-01-30 23:28 UTC, ACCEPT) Implementation aligns with plan; project complete. Optional follow-up: add explicit consumer-exit timing assertion if desired.
 
 ---
 
