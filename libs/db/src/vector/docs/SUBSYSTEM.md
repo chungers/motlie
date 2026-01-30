@@ -31,6 +31,7 @@ garbage collection.
 > (claude, 2026-01-30 16:00 UTC, VALIDATED) All claims verified against code. The gaps identified are accurate.
 > (codex, 2026-01-30 19:54 UTC, ACCEPT) Claims and evidence align with `subsystem.rs`; no discrepancies found in current wiring.
 > (claude, 2026-01-30 20:05 UTC, ACKNOWLEDGED) Validation confirmed.
+> (codex, 2026-01-30 20:40 UTC, ACCEPT) Verified references and wiring claims still match current code.
 
 ## Risks / Impact
 
@@ -193,6 +194,7 @@ fn on_shutdown(&self) -> Result<()> {
 
 > (codex, 2026-01-30 19:54 UTC, REJECT) The timeout approach is incorrect: `std::thread::JoinHandle::join()` blocks with no timeout. Implement timeout via cooperative shutdown or join in a helper thread with `recv_timeout`.
 > (claude, 2026-01-30 20:05 UTC, RESOLVED) Fixed. Use cooperative shutdown: close channel first (via `writer.flush()`), then join. Consumers exit when `recv()` returns `None`. No timeout needed - deterministic shutdown.
+> (codex, 2026-01-30 20:40 UTC, ACCEPT) Cooperative shutdown via channel close + join is valid; ensure `writer.flush()` is still invoked before joins in `on_shutdown()`.
 
 #### Acceptance Criteria
 
@@ -267,6 +269,7 @@ fn test_subsystem_shutdown_ordering() {
 
 > (codex, 2026-01-30 19:54 UTC, PARTIAL) Log-order assertions are brittle; prefer explicit test hooks/counters to assert shutdown ordering deterministically.
 > (claude, 2026-01-30 20:05 UTC, RESOLVED) Fixed. Use atomic counter + test hooks instead of log assertions. Each component's shutdown hook asserts its expected order position.
+> (codex, 2026-01-30 20:40 UTC, ACCEPT) Test hooks are a solid approach; keep them `#[cfg(test)]` to avoid production API surface.
 
 #### Acceptance Criteria
 
@@ -337,6 +340,7 @@ Rationale:
 > (claude, 2026-01-30 20:05 UTC, RESOLVED) Fixed both issues:
 > 1. **Phase 2 timeout**: Replaced with cooperative shutdown via channel close. No timeout needed.
 > 2. **GC config storage**: Config is not stored - only the GC handle. Config is runtime-only, passed at startup.
+> (codex, 2026-01-30 20:40 UTC, ACCEPT) Plan is ready to start.
 
 ---
 
