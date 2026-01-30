@@ -2411,6 +2411,40 @@ spawn_mutation_consumer_with_storage(...);
 
 ---
 
+### Update: Extended Lifecycle Management (January 2026)
+
+The `Subsystem::start_with_async()` method now supports additional lifecycle components:
+
+```rust
+let (writer, reader) = subsystem.start_with_async(
+    storage,
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,
+    Some(async_config),  // Optional async graph updater
+    Some(gc_config),     // Optional garbage collector
+);
+```
+
+**Shutdown Order:**
+
+```
+on_shutdown():
+  1. GC.shutdown()           - Stop background scans immediately
+  2. AsyncUpdater.shutdown() - Wait for in-flight graph builds
+  3. Writer.flush()          - Flush pending mutations (closes channel)
+  4. Join consumer tasks     - Cooperative shutdown via channel close
+  5. (storage closes)        - RocksDB cleanup
+```
+
+**New fields in `Subsystem`:**
+- `gc: RwLock<Option<GarbageCollector>>` - GC handle for lifecycle management
+- `consumer_handles: RwLock<Vec<tokio::task::JoinHandle<Result<()>>>>` - Consumer task handles
+
+See `docs/SUBSYSTEM.md` for the full implementation plan and acceptance criteria.
+
+---
+
 ## Task 5.8: Migrate Benchmark Integration Tests (COMPLETE)
 
 **Date:** January 15, 2026
