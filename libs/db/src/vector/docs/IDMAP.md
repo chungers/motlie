@@ -495,59 +495,76 @@ event that must be versioned.
 
 ### Phase 1: Core Type Definitions
 
-- [ ] **T1.1**: Define `ExternalKey` enum in `libs/db/src/vector/schema.rs`
+- [x] **T1.1**: Define `ExternalKey` enum in `libs/db/src/vector/schema.rs`
   - Add tag constants (0x01-0x06)
   - Implement `to_bytes()` / `from_bytes()`
   - Add unit tests for round-trip serialization
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Implemented with full round-trip tests in `libs/db/src/vector/schema.rs`.
 
 - [ ] **T1.2**: Define `IdMapError` error type in `libs/db/src/vector/error.rs`
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** Not implemented; code uses `anyhow` directly and no `IdMapError` exists.
 
-- [ ] **T1.3**: Verify graph schema key imports (**blocking before T1.1**)
+- [x] **T1.3**: Verify graph schema key imports (**blocking before T1.1**)
   - Confirm `NodeFragmentCfKey`, `ForwardEdgeCfKey`, `EdgeFragmentCfKey` exist
   - Add `SummaryHash` type if missing
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Sizes verified via tests, but encoding uses manual bytes (not `HotColumnFamilyRecord`); align doc/code.
 
 - [x] ~~**T1.4**: Add `StorageVersion` field to `GraphMetaField` enum~~ N/A - no versioning needed
 
 ### Phase 2: Schema Changes
 
-- [ ] **T2.1**: Update `IdForwardCfKey` to use `ExternalKey` instead of `Id`
+- [x] **T2.1**: Update `IdForwardCfKey` to use `ExternalKey` instead of `Id`
   - Key size changes from 24 to 8 + (1 + payload_size)
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** `IdForwardCfKey` now stores `ExternalKey` and uses tagged bytes.
 
-- [ ] **T2.2**: Update `IdReverseCfValue` to store `ExternalKey` instead of `Id`
+- [x] **T2.2**: Update `IdReverseCfValue` to store `ExternalKey` instead of `Id`
   - Value size changes from 16 to (1 + payload_size)
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** `IdReverseCfValue` now stores `ExternalKey`.
 
-- [ ] **T2.3**: Update `IdForward::key_to_bytes()` / `key_from_bytes()`
+- [x] **T2.3**: Update `IdForward::key_to_bytes()` / `key_from_bytes()`
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Updated to parse tagged ExternalKey bytes.
 
-- [ ] **T2.4**: Update `IdReverse::value_to_bytes()` / `value_from_bytes()`
+- [x] **T2.4**: Update `IdReverse::value_to_bytes()` / `value_from_bytes()`
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Updated to serialize/deserialize ExternalKey bytes.
 
 ### Phase 3: API Changes
 
 - [x] **T3.1**: Update `InsertVector` mutation to accept `ExternalKey`
   - Primary constructor takes `ExternalKey` directly
   - Callers wrap with `ExternalKey::NodeId(id)` for node IDs
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Mutation API now uses `ExternalKey`.
 
-- [ ] **T3.2**: Update `DeleteVector` mutation to accept `ExternalKey`
+- [x] **T3.2**: Update `DeleteVector` mutation to accept `ExternalKey`
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Mutation API now uses `ExternalKey`.
 
 - [ ] **T3.3**: Update `SearchResult` to return `ExternalKey`
   - Add `SearchResult::node_id()` convenience accessor
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** `SearchResult` still returns `Id` and filters out non-NodeId keys.
 
 - [ ] **T3.4**: Update `GetInternalId` query to accept `ExternalKey`
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** `GetInternalId` still accepts `Id` only.
 
 - [ ] **T3.5**: Update `GetExternalId` query to return `ExternalKey`
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** `GetExternalId` returns `Option<Id>` and drops non-NodeId keys.
 
 - [ ] **T3.6**: Update `ResolveIds` query to return `Vec<Option<ExternalKey>>`
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** `ResolveIds` still returns `Vec<Option<Id>>`.
 
 ### Phase 4: Processor Updates
 
 - [ ] **T4.1**: Update `processor.rs` lookup helpers
   - `vec_id_for_external(embedding, ExternalKey) -> VecId`
   - `external_for_vec_id(embedding, VecId) -> ExternalKey`
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** Helpers not implemented.
 
-- [ ] **T4.2**: Update insert operation to write new key format
+- [x] **T4.2**: Update insert operation to write new key format
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Insert path writes ExternalKey in IdForward/IdReverse.
 
-- [ ] **T4.3**: Update delete operation to handle new key format
+- [x] **T4.3**: Update delete operation to handle new key format
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Delete path resolves via ExternalKey and removes both mappings.
 
 - [ ] **T4.4**: Update search result resolution
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** Search still filters to `NodeId` and returns `Id` only.
 
 ### Phase 5: Migration Tool - N/A
 
@@ -558,16 +575,21 @@ event that must be versioned.
 ### Phase 6: Admin & Validation
 
 - [ ] **T6.1**: Update `admin.rs` to display `ExternalKey` type in vector info
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** Admin still resolves to `Id` only and hides key type.
 
 - [ ] **T6.2**: Add `admin stats --by-key-type` for counts by ExternalKey variant
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** Not implemented.
 
 - [ ] **T6.3**: Add validation for forward/reverse mapping consistency
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** Not implemented.
 
 ### Phase 7: Bench Tools
 
 - [ ] **T7.1**: Update `bench_vector` to use `ExternalKey::NodeId`
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** `bench_vector` does not use `ExternalKey`.
 
 - [ ] **T7.2**: Add `--json` output for typed external keys
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** Not implemented.
 
 ### Phase 8: Cache Tuning (DEFERRED)
 
@@ -575,35 +597,47 @@ event that must be versioned.
 > **[codex, 2026-01-29 23:20 UTC, AGREE]** Decision: defer Phase 8; only implement if profiling shows cache contention.
 
 - [ ] **T8.1** (DEFERRED): Add `id_map_cache_fraction` to `VectorBlockCacheConfig`
+> **[codex, 2026-01-30 02:09 UTC, DEFERRED]** Not implemented by design.
 
 - [ ] **T8.2** (DEFERRED): Apply cache fraction to IdForward/IdReverse CF options
+> **[codex, 2026-01-30 02:09 UTC, DEFERRED]** Not implemented by design.
 
 - [ ] **T8.3** (DEFERRED): Add `idmap_cache_hit_ratio` metric
+> **[codex, 2026-01-30 02:09 UTC, DEFERRED]** Not implemented by design.
 
 ### Phase 9: Tests
 
-- [ ] **T9.1**: Unit tests for `ExternalKey` serialization (all variants)
+- [x] **T9.1**: Unit tests for `ExternalKey` serialization (all variants)
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Added in `vector/schema.rs` tests.
 
 - [ ] **T9.2**: Integration tests for mixed key type operations
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** No mixed-key integration tests found.
 
 - [x] ~~**T9.3**: Migration tests (old → new format)~~ N/A
 
 - [ ] **T9.4**: Negative tests (invalid tags, truncated payloads)
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Added invalid tag, truncated, and empty cases.
 
 - [ ] **T9.5**: Performance benchmark: 1M key operations
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** No benchmark added.
 
-- [ ] **T9.6**: Size assertions for graph key encodings (e.g., Node/Edge keys)
+- [x] **T9.6**: Size assertions for graph key encodings (e.g., Node/Edge keys)
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Added size assertions for Id/NameHash/SummaryHash/Timestamp.
 
 ### Phase 10: Documentation
 
 - [ ] **T10.1**: Update ROADMAP.md with new schema
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** Not updated.
 
 - [ ] **T10.2**: Update any other docs referencing IdForward/IdReverse
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** No doc updates found beyond IDMAP.
 
 - [x] **T10.3**: Remove duplicate ExternalKey definition from this document
+> **[codex, 2026-01-30 02:09 UTC, ACCEPT]** Duplicate removed.
 
 - [ ] **T10.4**: Document canonical `ExternalKey` selection strategy (when the
   same content could be addressed by multiple key types)
+> **[codex, 2026-01-30 02:09 UTC, REJECT]** Canonical selection guidance not added.
 
 ---
 
