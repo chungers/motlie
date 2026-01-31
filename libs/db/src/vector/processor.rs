@@ -49,11 +49,13 @@ use crate::Id;
 // SearchResult
 // ============================================================================
 
-/// Search result containing external key, internal ID, and distance.
+/// Search result containing external key, internal ID, distance, and embedding code.
 ///
 /// Returned by `Processor::search()` for each matched vector.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
+    /// Embedding space code this result belongs to
+    pub embedding_code: EmbeddingCode,
     /// Typed external key for the vector (node, edge, fragment, summary, etc.)
     pub external_key: ExternalKey,
     /// Internal vector ID (compact u32)
@@ -865,6 +867,7 @@ impl Processor {
                 let external_key = IdReverse::value_from_bytes(&bytes)?.0;
                 let (distance, vec_id) = raw_results[i];
                 results.push(SearchResult {
+                    embedding_code,
                     external_key,
                     vec_id,
                     distance,
@@ -1099,6 +1102,7 @@ impl Processor {
                 let external_key = IdReverse::value_from_bytes(&bytes)?.0;
                 let (distance, vec_id) = raw_results[i];
                 hnsw_results.push(SearchResult {
+                    embedding_code,
                     external_key,
                     vec_id,
                     distance,
@@ -1124,6 +1128,7 @@ impl Processor {
                 for (distance, vec_id, external_key) in pending_results {
                     if !hnsw_vec_ids.contains(&vec_id) {
                         hnsw_results.push(SearchResult {
+                            embedding_code,
                             external_key,
                             vec_id,
                             distance,

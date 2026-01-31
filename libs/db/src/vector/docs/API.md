@@ -1706,9 +1706,10 @@ let results = SearchKNN::new(&embedding, query_vec, 10)
 **Returns:** `Vec<SearchResult>` where:
 ```rust
 pub struct SearchResult {
-    pub external_key: ExternalKey,  // Typed external key
-    pub vec_id: VecId,              // Internal vector ID (u32)
-    pub distance: f32,              // Distance from query (lower = more similar)
+    pub embedding_code: EmbeddingCode, // Embedding space this result belongs to
+    pub external_key: ExternalKey,     // Typed external key
+    pub vec_id: VecId,                 // Internal vector ID (u32)
+    pub distance: f32,                 // Distance from query (lower = more similar)
 }
 ```
 
