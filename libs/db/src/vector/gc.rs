@@ -81,7 +81,7 @@ use crate::vector::Storage;
 ///
 /// - **`edge_scan_limit`**: Maximum edges to scan when looking for references
 ///   to a deleted vector. Prevents runaway scans. Default: 10000
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GcConfig {
     /// Interval between GC cycles.
     ///
@@ -115,8 +115,25 @@ pub struct GcConfig {
     /// but wastes ID space).
     /// Default: false (conservative - defer ID recycling)
     pub enable_id_recycling: bool,
+
+    /// Test-only shutdown hook for verifying shutdown ordering.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub shutdown_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
+impl std::fmt::Debug for GcConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GcConfig")
+            .field("interval", &self.interval)
+            .field("batch_size", &self.batch_size)
+            .field("process_on_startup", &self.process_on_startup)
+            .field("edge_scan_limit", &self.edge_scan_limit)
+            .field("enable_id_recycling", &self.enable_id_recycling)
+            .finish()
+    }
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
@@ -125,6 +142,20 @@ impl Default for GcConfig {
             process_on_startup: true,
             edge_scan_limit: 10000,
             enable_id_recycling: false, // Conservative default
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Default for GcConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(60),
+            batch_size: 100,
+            process_on_startup: true,
+            edge_scan_limit: 10000,
+            enable_id_recycling: false, // Conservative default
+            shutdown_hook: None,
         }
     }
 }
@@ -162,6 +193,16 @@ impl GcConfig {
     /// Enable VecId recycling after edge cleanup.
     pub fn with_id_recycling(mut self, enable: bool) -> Self {
         self.enable_id_recycling = enable;
+        self
+    }
+
+    /// Set shutdown hook for testing shutdown ordering.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn with_shutdown_hook<F>(mut self, hook: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.shutdown_hook = Some(Arc::new(hook));
         self
     }
 }
@@ -297,6 +338,12 @@ impl GarbageCollector {
             if let Err(e) = worker.join() {
                 error!("GC worker thread panicked: {:?}", e);
             }
+        }
+
+        // Call test shutdown hook if configured
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(hook) = &self.config.shutdown_hook {
+            hook();
         }
 
         info!(

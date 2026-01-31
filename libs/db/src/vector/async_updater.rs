@@ -76,7 +76,7 @@ use crate::vector::Storage;
 ///
 /// - **`metrics_interval`**: How often to log backlog depth and drain rate.
 ///   Set to None to disable periodic logging. Default: 10s
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AsyncUpdaterConfig {
     /// Maximum vectors per worker batch.
     ///
@@ -120,8 +120,27 @@ pub struct AsyncUpdaterConfig {
     /// Workers log pending queue size and processing rate at this interval.
     /// Set to None to disable periodic logging. Default: Some(10s)
     pub metrics_interval: Option<Duration>,
+
+    /// Test-only shutdown hook for verifying shutdown ordering.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub shutdown_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
+impl std::fmt::Debug for AsyncUpdaterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncUpdaterConfig")
+            .field("batch_size", &self.batch_size)
+            .field("batch_timeout", &self.batch_timeout)
+            .field("num_workers", &self.num_workers)
+            .field("process_on_startup", &self.process_on_startup)
+            .field("idle_sleep", &self.idle_sleep)
+            .field("backpressure_threshold", &self.backpressure_threshold)
+            .field("metrics_interval", &self.metrics_interval)
+            .finish()
+    }
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
 impl Default for AsyncUpdaterConfig {
     fn default() -> Self {
         Self {
@@ -132,6 +151,22 @@ impl Default for AsyncUpdaterConfig {
             idle_sleep: Duration::from_millis(10),
             backpressure_threshold: 10000,
             metrics_interval: Some(Duration::from_secs(10)),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Default for AsyncUpdaterConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 100,
+            batch_timeout: Duration::from_millis(100),
+            num_workers: 2,
+            process_on_startup: true,
+            idle_sleep: Duration::from_millis(10),
+            backpressure_threshold: 10000,
+            metrics_interval: Some(Duration::from_secs(10)),
+            shutdown_hook: None,
         }
     }
 }
@@ -198,6 +233,16 @@ impl AsyncUpdaterConfig {
     /// Disable periodic metrics logging.
     pub fn no_metrics_logging(mut self) -> Self {
         self.metrics_interval = None;
+        self
+    }
+
+    /// Set shutdown hook for testing shutdown ordering.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn with_shutdown_hook<F>(mut self, hook: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.shutdown_hook = Some(Arc::new(hook));
         self
     }
 }
@@ -321,6 +366,12 @@ impl AsyncGraphUpdater {
             if let Err(e) = worker.join() {
                 error!(worker_id = i, "Worker thread panicked: {:?}", e);
             }
+        }
+
+        // Call test shutdown hook if configured
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(hook) = &self.config.shutdown_hook {
+            hook();
         }
 
         info!(
