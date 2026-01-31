@@ -110,7 +110,7 @@ Binary quantization for fast filtering + exact rerank of top candidates.
 SearchMode::RaBitQ { bits: 2 }  // 2-bit quantization
 SearchMode::RaBitQ { bits: 4 }  // 4-bit quantization
 ```
-CODEX: RaBitQ quality measurement is now covered by `bench_vector sweep --rabitq`; `test_vector_baseline.rs` was removed and no longer exists.
+CODEX: RaBitQ quality measurement is now covered by `bench_vector sweep --rabitq`; `test_vector_baseline.rs` now contains only smoke tests, not quality baselines.
 
 - **Distance metric**: Cosine only (ADC approximates angular distance)
 - **Recall**: Depends on bits and rerank factor
@@ -289,7 +289,7 @@ cargo run --release --bin bench_vector -- sweep \
 
 #### Deprecated: Test-based Baselines
 
-> **⚠️ DEPRECATED:** There is no `tests/test_vector_baseline.rs` in the current codebase. Quality baselines are CLI-only via `bench_vector sweep`. Throughput baselines remain in `test_vector_concurrent.rs` as ignored tests.
+> **⚠️ DEPRECATED:** `tests/test_vector_baseline.rs` now contains only smoke tests for LAION data loading, not quality baselines. Quality baselines are CLI-only via `bench_vector sweep`. Throughput baselines remain in `test_vector_concurrent.rs` as ignored tests.
 
 ```bash
 # Concurrent throughput baselines (random vectors)
@@ -872,7 +872,7 @@ For CI, run 1M scale benchmark and assert minimum thresholds:
 
 ### Tests (Deprecated for quality baselines)
 
-- (removed) `tests/test_vector_baseline.rs` - LAION recall baseline tests (superseded by `bench_vector sweep`)
+- [tests/test_vector_baseline.rs](../../../tests/test_vector_baseline.rs) - LAION smoke tests (quality baselines moved to `bench_vector sweep`)
 - [tests/test_vector_concurrent.rs](../../../tests/test_vector_concurrent.rs) - Throughput baseline tests
 
 ### Baseline Artifacts
