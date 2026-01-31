@@ -161,6 +161,53 @@ let external_key = ExternalKey::NodeId(Id::new());
 let _vec_id = processor.insert_vector(&embedding, external_key, &vector, true)?;
 ```
 
+**Lookup by code + insert:**
+
+When you have an existing embedding code (e.g., from a saved configuration or admin tool),
+use `get_spec_by_code()` to retrieve the full specification and `get_by_code()` for the
+lightweight handle:
+
+```rust
+use motlie_db::vector::{
+    Distance, EmbeddingRegistry, ExternalKey, Processor, Storage,
+};
+use motlie_db::Id;
+use std::path::Path;
+use std::sync::Arc;
+
+// Open storage + registry
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
+
+// Known embedding code (e.g., from CLI `embeddings list` or saved config)
+let embedding_code: u64 = 12345;
+
+// Get full spec to inspect build parameters (hnsw_m, ef_construction, etc.)
+let spec = registry
+    .get_spec_by_code(embedding_code)?
+    .ok_or_else(|| anyhow::anyhow!("Embedding code {} not found", embedding_code))?;
+println!(
+    "Found embedding: model={}, dim={}, distance={:?}, hnsw_m={}, ef_construction={}",
+    spec.model, spec.dim, spec.distance, spec.hnsw_m, spec.hnsw_ef_construction
+);
+
+// Get lightweight Embedding handle for operations
+let embedding = registry
+    .get_by_code(embedding_code)
+    .ok_or_else(|| anyhow::anyhow!("Embedding code {} not in cache", embedding_code))?;
+
+// Insert vectors using Processor
+let processor = Processor::new(storage.clone(), registry.clone());
+let vector: Vec<f32> = vec![0.1; spec.dim as usize];  // Use spec.dim to match dimension
+let external_key = ExternalKey::NodeId(Id::new());
+let vec_id = processor.insert_vector(&embedding, external_key, &vector, true)?;
+
+println!("Inserted vector with vec_id={}", vec_id);
+```
+
 **Insert-time validation (Processor/ops):**
 
 - **Embedding exists**: lookup by code via registry
@@ -1226,7 +1273,11 @@ impl EmbeddingRegistry {
         txn: &Transaction<'_, TransactionDB>,
     ) -> Result<Embedding>;
     pub fn get(&self, model: &str, dim: u32, distance: Distance) -> Option<Embedding>;
+    // Returns lightweight Embedding handle (code, model, dim, distance, storage_type)
     pub fn get_by_code(&self, code: u64) -> Option<Embedding>;
+    // Returns full EmbeddingSpec from storage (includes hnsw_m, hnsw_ef_construction,
+    // rabitq_bits, rabitq_seed for inspecting build parameters)
+    pub fn get_spec_by_code(&self, code: u64) -> Result<Option<EmbeddingSpec>>;
     pub fn set_embedder(&self, code: u64, embedder: Arc<dyn Embedder>) -> Result<()>;
     pub fn list_all(&self) -> Vec<Embedding>;
     pub fn find_by_model(&self, model: &str) -> Vec<Embedding>;
