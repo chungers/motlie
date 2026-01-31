@@ -147,7 +147,7 @@ pub(super) fn beam_search(
 
         // Compute distances - use batch for larger sets
         // Threshold is configurable - default 64 effectively disables batching
-        let distances: Vec<(VecId, f32)> = if unvisited.len() >= index.config().batch_threshold {
+        let distances: Vec<(VecId, f32)> = if unvisited.len() >= index.batch_threshold() {
             super::graph::batch_distances(index, storage, query, &unvisited)?
         } else {
             unvisited

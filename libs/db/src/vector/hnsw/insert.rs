@@ -131,7 +131,7 @@ pub fn insert(
             vec_id,
             node_layer,
             is_new_entry_point: true,
-            m: index.config().m,
+            m: index.m(),
         });
     }
 
@@ -157,16 +157,16 @@ pub fn insert(
             storage,
             vector,
             current,
-            index.config().ef_construction,
+            index.ef_construction(),
             layer,
             false,
         )?;
 
         // Select M neighbors (simple heuristic: take closest)
         let m = if layer == 0 {
-            index.config().m * 2
+            index.m() * 2
         } else {
-            index.config().m
+            index.m()
         };
         let selected: Vec<_> = neighbors.into_iter().take(m as usize).collect();
 
@@ -195,7 +195,7 @@ pub fn insert(
         vec_id,
         node_layer,
         is_new_entry_point,
-        m: index.config().m,
+        m: index.m(),
     })
 }
 
@@ -250,7 +250,7 @@ pub fn insert_for_batch(
             vec_id,
             node_layer,
             is_new_entry_point: true,
-            m: index.config().m,
+            m: index.m(),
         });
     }
 
@@ -281,16 +281,16 @@ pub fn insert_for_batch(
             storage,
             vector,
             current,
-            index.config().ef_construction,
+            index.ef_construction(),
             layer,
             batch_cache,
         )?;
 
         // Select M neighbors (simple heuristic: take closest)
         let m = if layer == 0 {
-            index.config().m * 2
+            index.m() * 2
         } else {
-            index.config().m
+            index.m()
         };
         let selected: Vec<_> = neighbors.into_iter().take(m as usize).collect();
 
@@ -323,7 +323,7 @@ pub fn insert_for_batch(
         vec_id,
         node_layer,
         is_new_entry_point,
-        m: index.config().m,
+        m: index.m(),
     })
 }
 
@@ -405,7 +405,7 @@ pub(super) fn get_or_init_navigation(index: &Index, storage: &Storage) -> Result
     }
 
     // Initialize empty
-    let info = NavigationLayerInfo::new(index.config().m);
+    let info = NavigationLayerInfo::new(index.m());
     index.nav_cache().put(index.embedding(), info.clone());
     Ok(info)
 }
@@ -440,7 +440,7 @@ pub(super) fn load_navigation(index: &Index, storage: &Storage) -> Result<Naviga
     };
 
     // Build navigation info
-    let mut info = NavigationLayerInfo::new(index.config().m);
+    let mut info = NavigationLayerInfo::new(index.m());
     for _ in 0..=max_layer {
         info.entry_points.push(entry_point);
         info.layer_counts.push(0); // Counts not persisted yet

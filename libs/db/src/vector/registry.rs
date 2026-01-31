@@ -4,6 +4,7 @@
 //! - Registry allocates unique codes for embedding spaces
 //! - Provides queryable discovery API
 //! - Pre-warms from RocksDB on startup (following NameCache pattern)
+//! - Stores storage reference to prevent DB misuse across calls
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use dashmap::DashMap;
 use rocksdb::{IteratorMode, TransactionDB};
+use std::sync::OnceLock;
 
 use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, MutationCodec};
 use super::distance::Distance;
@@ -92,19 +94,21 @@ type SpecKey = (String, u32, Distance);
 
 /// Thread-safe registry for embedding spaces.
 ///
+/// Stores a reference to storage to ensure consistent DB usage across all
+/// operations (prevents footgun of using different DBs for prewarm vs register).
+///
 /// Pre-warms from RocksDB on startup following the NameCache pattern
 /// from `graph/name_hash.rs`.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let registry = EmbeddingRegistry::new();
-/// registry.prewarm(&db)?;
+/// let registry = EmbeddingRegistry::new(storage.clone());
+/// registry.prewarm()?;
 ///
 /// // Register new embedding space
 /// let gemma = registry.register(
 ///     EmbeddingBuilder::new("gemma", 768, Distance::Cosine),
-///     &db
 /// )?;
 ///
 /// // Query existing spaces
@@ -117,23 +121,69 @@ pub struct EmbeddingRegistry {
     by_code: DashMap<u64, Embedding>,
     /// Next code to allocate
     next_code: AtomicU64,
+    /// Storage reference (set once via set_storage or new)
+    storage: OnceLock<Arc<super::Storage>>,
 }
 
 impl EmbeddingRegistry {
-    /// Create a new empty registry.
-    pub fn new() -> Self {
+    /// Create a new registry with storage reference.
+    ///
+    /// The storage is used for all DB operations (prewarm, register).
+    pub fn new(storage: Arc<super::Storage>) -> Self {
+        let cell = OnceLock::new();
+        let _ = cell.set(storage);
         Self {
             by_spec: DashMap::new(),
             by_code: DashMap::new(),
             next_code: AtomicU64::new(1), // Start at 1 (0 is reserved)
+            storage: cell,
         }
+    }
+
+    /// Create an empty registry without storage.
+    ///
+    /// Storage must be set via `set_storage()` before calling `prewarm()` or `register()`.
+    /// This is primarily for use with Subsystem where storage isn't available at construction.
+    pub fn new_without_storage() -> Self {
+        Self {
+            by_spec: DashMap::new(),
+            by_code: DashMap::new(),
+            next_code: AtomicU64::new(1), // Start at 1 (0 is reserved)
+            storage: OnceLock::new(),
+        }
+    }
+
+    /// Set the storage reference (can only be set once).
+    ///
+    /// Returns error if storage was already set.
+    pub fn set_storage(&self, storage: Arc<super::Storage>) -> Result<()> {
+        self.storage
+            .set(storage)
+            .map_err(|_| anyhow::anyhow!("Storage already set"))
+    }
+
+    /// Get the storage reference, or error if not set.
+    fn storage(&self) -> Result<&Arc<super::Storage>> {
+        self.storage
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("Storage not set - call set_storage() first"))
+    }
+
+    /// Get a transaction from the stored storage.
+    pub fn transaction(&self) -> Result<rocksdb::Transaction<'_, TransactionDB>> {
+        let storage = self.storage()?;
+        let db = storage.transaction_db()?;
+        Ok(db.transaction())
     }
 
     /// Pre-warm the registry by loading all entries from RocksDB.
     ///
     /// Unlike NameCache (which limits to N entries), we load everything
     /// since we expect <1000 embeddings total.
-    pub fn prewarm(&self, db: &TransactionDB) -> Result<usize> {
+    pub fn prewarm(&self) -> Result<usize> {
+        let storage = self.storage()?;
+        let db = storage.transaction_db()?;
+
         let cf = db
             .cf_handle(EmbeddingSpecs::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
@@ -193,9 +243,9 @@ impl EmbeddingRegistry {
     /// - `hnsw_m < 2`: Invalid for `m_l = 1/ln(m)` computation
     /// - `hnsw_ef_construction < 1`: Invalid HNSW config
     /// - `rabitq_bits ∉ {1, 2, 4}`: Unsupported quantization level
-    pub fn register(&self, builder: EmbeddingBuilder, db: &TransactionDB) -> Result<Embedding> {
-        let txn = db.transaction();
-        let embedding = self.register_in_txn(builder, &txn, db)?;
+    pub fn register(&self, builder: EmbeddingBuilder) -> Result<Embedding> {
+        let txn = self.transaction()?;
+        let embedding = self.register_in_txn(builder, &txn)?;
         txn.commit()?;
         Ok(embedding)
     }
@@ -208,15 +258,14 @@ impl EmbeddingRegistry {
     /// # Arguments
     /// * `builder` - Embedding specification builder
     /// * `txn` - Active transaction to write within
-    /// * `db` - TransactionDB for CF handle lookup
     ///
     /// # Returns
     /// The registered `Embedding`. Caller must call `txn.commit()` to persist.
     ///
     /// # Example
     /// ```rust,ignore
-    /// let txn = db.transaction();
-    /// let embedding = registry.register_in_txn(builder, &txn, &db)?;
+    /// let txn = registry.transaction()?;
+    /// let embedding = registry.register_in_txn(builder, &txn)?;
     /// // ... other writes to txn ...
     /// txn.commit()?;
     /// ```
@@ -224,8 +273,9 @@ impl EmbeddingRegistry {
         &self,
         builder: EmbeddingBuilder,
         txn: &rocksdb::Transaction<'_, TransactionDB>,
-        db: &TransactionDB,
     ) -> Result<Embedding> {
+        let storage = self.storage()?;
+        let db = storage.transaction_db()?;
         let spec_key = (builder.model.clone(), builder.dim, builder.distance);
 
         // Fast path: already registered (idempotent - no validation needed)
@@ -412,7 +462,7 @@ impl EmbeddingRegistry {
 
 impl Default for EmbeddingRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::new_without_storage()
     }
 }
 
@@ -453,8 +503,8 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_new() {
-        let registry = EmbeddingRegistry::new();
+    fn test_registry_new_without_storage() {
+        let registry = EmbeddingRegistry::new_without_storage();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
     }

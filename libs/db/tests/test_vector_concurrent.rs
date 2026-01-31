@@ -61,13 +61,37 @@ use motlie_db::rocksdb::ColumnFamily;
 use motlie_db::vector::benchmark::{
     save_benchmark_results_csv, BenchConfig, BenchResult, ConcurrentBenchmark, ConcurrentMetrics,
 };
-use motlie_db::vector::hnsw::{self, Config as HnswConfig};
-use motlie_db::vector::schema::{EmbeddingCode, VectorCfKey, VectorCfValue, Vectors};
-use motlie_db::vector::{cache::NavigationCache, Distance, Storage};
+use motlie_db::vector::hnsw;
+use motlie_db::vector::schema::{EmbeddingCode, EmbeddingSpec, VectorCfKey, VectorCfValue, Vectors};
+use motlie_db::vector::{cache::NavigationCache, Distance, Storage, VectorElementType};
 use rand::prelude::*;
 use tempfile::TempDir;
 
 const DIM: usize = 64;
+
+/// Helper: Create test EmbeddingSpec for HNSW index
+fn make_test_spec(dim: usize, m: usize, ef_construction: usize) -> EmbeddingSpec {
+    make_test_spec_with_distance(dim, m, ef_construction, Distance::L2)
+}
+
+/// Helper: Create test EmbeddingSpec with custom distance metric
+fn make_test_spec_with_distance(
+    dim: usize,
+    m: usize,
+    ef_construction: usize,
+    distance: Distance,
+) -> EmbeddingSpec {
+    EmbeddingSpec {
+        model: "test".to_string(),
+        dim: dim as u32,
+        distance,
+        storage_type: VectorElementType::F32,
+        hnsw_m: m as u16,
+        hnsw_ef_construction: ef_construction as u16,
+        rabitq_bits: 1,
+        rabitq_seed: 42,
+    }
+}
 const TEST_EMBEDDING: EmbeddingCode = 1;
 /// Maximum vec_id value to prevent overflow in thread-partitioned ID generation.
 /// With `(thread_id << 16) | i`, this allows 65,536 vectors per thread.
@@ -162,18 +186,11 @@ fn test_concurrent_insert_search() {
 
     // Create HNSW index
     let nav_cache = Arc::new(NavigationCache::new());
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
-    let index = Arc::new(hnsw::Index::new(
+    let spec = make_test_spec(DIM, 16, 100);
+    let index = Arc::new(hnsw::Index::from_spec(
         TEST_EMBEDDING,
-        Distance::L2,
-        hnsw_config,
+        &spec,
+        64, // batch_threshold
         nav_cache,
     ));
 
@@ -308,18 +325,11 @@ fn test_concurrent_batch_insert() {
 
     // Create HNSW index
     let nav_cache = Arc::new(NavigationCache::new());
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
-    let index = Arc::new(hnsw::Index::new(
+    let spec = make_test_spec(DIM, 16, 100);
+    let index = Arc::new(hnsw::Index::from_spec(
         TEST_EMBEDDING,
-        Distance::L2,
-        hnsw_config,
+        &spec,
+        64, // batch_threshold
         nav_cache,
     ));
 
@@ -424,18 +434,11 @@ fn test_high_thread_count_stress() {
 
     // Create HNSW index
     let nav_cache = Arc::new(NavigationCache::new());
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
-    let index = Arc::new(hnsw::Index::new(
+    let spec = make_test_spec(DIM, 16, 100);
+    let index = Arc::new(hnsw::Index::from_spec(
         TEST_EMBEDDING,
-        Distance::L2,
-        hnsw_config,
+        &spec,
+        64, // batch_threshold
         nav_cache,
     ));
 
@@ -585,18 +588,11 @@ fn test_writer_contention() {
 
     // Create HNSW index
     let nav_cache = Arc::new(NavigationCache::new());
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
-    let index = Arc::new(hnsw::Index::new(
+    let spec = make_test_spec(DIM, 16, 100);
+    let index = Arc::new(hnsw::Index::from_spec(
         TEST_EMBEDDING,
-        Distance::L2,
-        hnsw_config,
+        &spec,
+        64, // batch_threshold
         nav_cache,
     ));
 
@@ -709,31 +705,25 @@ fn test_multi_embedding_concurrent_access() {
 
     // Create separate HNSW indices for each embedding (shared nav_cache)
     let nav_cache = Arc::new(NavigationCache::new());
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
+    let spec_l2 = make_test_spec(DIM, 16, 100);
+    let spec_cosine = make_test_spec_with_distance(DIM, 16, 100, Distance::Cosine);
 
-    let index_a = Arc::new(hnsw::Index::new(
+    let index_a = Arc::new(hnsw::Index::from_spec(
         EMBEDDING_A,
-        Distance::L2,
-        hnsw_config.clone(),
+        &spec_l2,
+        64, // batch_threshold
         Arc::clone(&nav_cache),
     ));
-    let index_b = Arc::new(hnsw::Index::new(
+    let index_b = Arc::new(hnsw::Index::from_spec(
         EMBEDDING_B,
-        Distance::Cosine,
-        hnsw_config.clone(),
+        &spec_cosine,
+        64, // batch_threshold
         Arc::clone(&nav_cache),
     ));
-    let index_c = Arc::new(hnsw::Index::new(
+    let index_c = Arc::new(hnsw::Index::from_spec(
         EMBEDDING_C,
-        Distance::L2,
-        hnsw_config,
+        &spec_l2,
+        64, // batch_threshold
         Arc::clone(&nav_cache),
     ));
 
@@ -883,27 +873,20 @@ fn test_cache_isolation_under_load() {
 
     // Shared caches (keyed by EmbeddingCode)
     let nav_cache = Arc::new(NavigationCache::new());
-
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
+    let spec_l2 = make_test_spec(DIM, 16, 100);
+    let spec_cosine = make_test_spec_with_distance(DIM, 16, 100, Distance::Cosine);
 
     // Create indices sharing the same cache
-    let index_a = Arc::new(hnsw::Index::new(
+    let index_a = Arc::new(hnsw::Index::from_spec(
         EMBEDDING_A,
-        Distance::L2,
-        hnsw_config.clone(),
+        &spec_l2,
+        64, // batch_threshold
         Arc::clone(&nav_cache),
     ));
-    let index_b = Arc::new(hnsw::Index::new(
+    let index_b = Arc::new(hnsw::Index::from_spec(
         EMBEDDING_B,
-        Distance::Cosine,
-        hnsw_config,
+        &spec_cosine,
+        64, // batch_threshold
         Arc::clone(&nav_cache),
     ));
 
@@ -1345,18 +1328,11 @@ fn test_mixed_search_strategy_concurrent() {
 
     // Create HNSW index with Cosine distance (required for RaBitQ)
     let nav_cache = Arc::new(NavigationCache::new());
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
-    let index = Arc::new(hnsw::Index::new(
+    let spec = make_test_spec_with_distance(DIM, 16, 100, Distance::Cosine); // Required for RaBitQ
+    let index = Arc::new(hnsw::Index::from_spec(
         TEST_EMBEDDING,
-        Distance::Cosine, // Required for RaBitQ
-        hnsw_config,
+        &spec,
+        64, // batch_threshold
         nav_cache,
     ));
 
@@ -1497,18 +1473,11 @@ fn test_failure_injection_writer_crash() {
     let crash_trigger = Arc::new(AtomicU32::new(0));
 
     let nav_cache = Arc::new(NavigationCache::new());
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
-    let index = Arc::new(hnsw::Index::new(
+    let spec = make_test_spec(DIM, 16, 100);
+    let index = Arc::new(hnsw::Index::from_spec(
         TEST_EMBEDDING,
-        Distance::L2,
-        hnsw_config,
+        &spec,
+        64, // batch_threshold
         nav_cache,
     ));
 
@@ -1649,18 +1618,11 @@ fn test_soak_one_hour() {
     let test_duration = Duration::from_secs(3600); // 1 hour
 
     let nav_cache = Arc::new(NavigationCache::new());
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
-    let index = Arc::new(hnsw::Index::new(
+    let spec = make_test_spec(DIM, 16, 100);
+    let index = Arc::new(hnsw::Index::from_spec(
         TEST_EMBEDDING,
-        Distance::L2,
-        hnsw_config,
+        &spec,
+        64, // batch_threshold
         nav_cache,
     ));
 
