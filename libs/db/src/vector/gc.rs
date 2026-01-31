@@ -827,19 +827,17 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         (storage, registry)
     }
 
     fn register_embedding(
-        storage: &Storage,
         registry: &EmbeddingRegistry,
         dim: u32,
     ) -> crate::vector::embedding::Embedding {
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", dim, Distance::L2);
         registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register embedding")
     }
 
@@ -880,7 +878,7 @@ mod tests {
     fn test_find_deleted_vectors_empty() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let (storage, registry) = setup_test_env(&temp_dir);
-        let _embedding = register_embedding(&storage, &registry, 64);
+        let _embedding = register_embedding(&registry, 64);
 
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let deleted = GarbageCollector::find_deleted_vectors(&txn_db, 100)
@@ -893,7 +891,7 @@ mod tests {
     fn test_gc_finds_deleted_vectors() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let (storage, registry) = setup_test_env(&temp_dir);
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         let processor = Processor::new(storage.clone(), registry.clone());
 
@@ -927,7 +925,7 @@ mod tests {
     fn test_gc_cleanup_removes_vector_data() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let (storage, registry) = setup_test_env(&temp_dir);
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         let processor = Processor::new(storage.clone(), registry.clone());
 
@@ -984,7 +982,7 @@ mod tests {
     fn test_gc_edge_pruning() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let (storage, registry) = setup_test_env(&temp_dir);
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         let processor = Processor::new(storage.clone(), registry.clone());
 
@@ -1062,7 +1060,7 @@ mod tests {
     fn test_gc_metrics() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let (storage, registry) = setup_test_env(&temp_dir);
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         let processor = Processor::new(storage.clone(), registry.clone());
 
@@ -1099,7 +1097,7 @@ mod tests {
     fn test_gc_id_recycling() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let (storage, registry) = setup_test_env(&temp_dir);
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         let processor = Processor::new(storage.clone(), registry.clone());
 
@@ -1161,7 +1159,7 @@ mod tests {
     fn test_gc_id_recycling_disabled_by_default() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let (storage, registry) = setup_test_env(&temp_dir);
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         let processor = Processor::new(storage.clone(), registry.clone());
 

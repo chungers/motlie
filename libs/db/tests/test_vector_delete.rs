@@ -60,14 +60,11 @@ async fn setup_test_env(
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register embedding
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-delete", DIM as u32, Distance::L2),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-delete", DIM as u32, Distance::L2))
         .expect("register");
 
     // Create writer and consumer
@@ -363,14 +360,11 @@ async fn test_async_updater_delete_race() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register embedding
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-race", DIM as u32, Distance::L2),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-race", DIM as u32, Distance::L2))
         .expect("register");
 
     // Create writer with async inserts (InsertVector defaults to immediate_index=false)
@@ -393,6 +387,9 @@ async fn test_async_updater_delete_race() {
         ids.push(id);
     }
     writer.flush().await.expect("flush");
+
+    // Get txn_db for database reads
+    let txn_db = storage.transaction_db().expect("txn_db");
 
     // Capture vec_ids via IdForward before deletes (IdForward removed on delete)
     let id_forward_cf = txn_db.cf_handle("vector/id_forward").expect("id_forward cf");

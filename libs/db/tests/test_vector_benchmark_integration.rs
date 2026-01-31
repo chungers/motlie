@@ -150,11 +150,11 @@ async fn test_sift_l2_hnsw_with_runnable() -> anyhow::Result<()> {
 
     // Register embedding
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db()?;
+    registry.set_storage(storage.clone())?;
     let builder = EmbeddingBuilder::new("sift-test", SIFT_EMBEDDING_DIM as u32, Distance::L2)
         .with_hnsw_m(16)
         .with_hnsw_ef_construction(100);
-    let embedding = registry.register(builder, &txn_db)?;
+    let embedding = registry.register(builder)?;
 
     // Create writer and spawn mutation consumer
     let (writer, writer_rx) = create_writer(WriterConfig::default());
@@ -263,12 +263,12 @@ async fn test_laion_clip_cosine_exact_hnsw_with_runnable() -> anyhow::Result<()>
 
     // Register embedding with higher M and ef_construction for 512D
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db()?;
+    registry.set_storage(storage.clone())?;
     let builder =
         EmbeddingBuilder::new("laion-clip-test", LAION_EMBEDDING_DIM as u32, Distance::Cosine)
             .with_hnsw_m(32)
             .with_hnsw_ef_construction(200);
-    let embedding = registry.register(builder, &txn_db)?;
+    let embedding = registry.register(builder)?;
 
     // Create writer and spawn mutation consumer
     let (writer, writer_rx) = create_writer(WriterConfig::default());
@@ -381,7 +381,7 @@ async fn test_laion_clip_cosine_rabitq_with_runnable() -> anyhow::Result<()> {
 
     // Register embedding
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db()?;
+    registry.set_storage(storage.clone())?;
     let builder = EmbeddingBuilder::new(
         "laion-clip-rabitq-test",
         LAION_EMBEDDING_DIM as u32,
@@ -389,7 +389,7 @@ async fn test_laion_clip_cosine_rabitq_with_runnable() -> anyhow::Result<()> {
     )
     .with_hnsw_m(16)
     .with_hnsw_ef_construction(100);
-    let embedding = registry.register(builder, &txn_db)?;
+    let embedding = registry.register(builder)?;
 
     // Create writer and spawn mutation consumer
     let (writer, writer_rx) = create_writer(WriterConfig::default());

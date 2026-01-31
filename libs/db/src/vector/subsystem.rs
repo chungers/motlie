@@ -70,7 +70,7 @@ impl Subsystem {
     /// Create a new vector subsystem with default configuration.
     pub fn new() -> Self {
         Self {
-            cache: Arc::new(EmbeddingRegistry::new()),
+            cache: Arc::new(EmbeddingRegistry::new_without_storage()),
             prewarm_config: EmbeddingRegistryConfig::default(),
             writer: RwLock::new(None),
             async_updater: RwLock::new(None),
@@ -282,6 +282,10 @@ impl Subsystem {
         async_config: Option<AsyncUpdaterConfig>,
         gc_config: Option<GcConfig>,
     ) -> (Writer, SearchReader) {
+        // Set storage on registry (enables register() calls)
+        // This is safe to call multiple times - subsequent calls are no-ops
+        let _ = self.cache.set_storage(storage.clone());
+
         // Create processor (shared by mutation consumer and query consumers)
         // Processor uses the shared nav_cache for HNSW operations
         let processor = Arc::new(Processor::new_with_nav_cache(
@@ -607,7 +611,7 @@ impl StorageSubsystem for Subsystem {
     type Cache = EmbeddingRegistry;
 
     fn create_cache() -> Arc<Self::Cache> {
-        Arc::new(EmbeddingRegistry::new())
+        Arc::new(EmbeddingRegistry::new_without_storage())
     }
 
     fn cf_descriptors(

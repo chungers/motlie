@@ -947,7 +947,7 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let nav_cache = Arc::new(NavigationCache::new());
 
         (storage, registry, nav_cache)
@@ -955,14 +955,12 @@ mod tests {
 
     /// Register a test embedding
     fn register_embedding(
-        storage: &Storage,
         registry: &EmbeddingRegistry,
         dim: u32,
     ) -> crate::vector::embedding::Embedding {
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", dim, Distance::L2);
         registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register embedding")
     }
 
@@ -985,7 +983,7 @@ mod tests {
         let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor (default config)
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1019,7 +1017,7 @@ mod tests {
         let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1076,7 +1074,7 @@ mod tests {
         // Phase 1: Insert vector, then "crash" (drop storage without draining)
         {
             let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
-            let embedding = register_embedding(&storage, &registry, 64);
+            let embedding = register_embedding(&registry, 64);
             embedding_code = embedding.code();
 
             let processor = Processor::new(storage.clone(), registry.clone());
@@ -1098,8 +1096,7 @@ mod tests {
             let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
             // Re-load embeddings from storage (needed after restart)
-            let txn_db = storage.transaction_db().expect("Failed to get txn_db");
-            registry.prewarm(&txn_db).expect("Failed to prewarm registry");
+            registry.prewarm().expect("Failed to prewarm registry");
             let embedding = registry
                 .get_by_code(embedding_code)
                 .expect("Embedding should exist after restart");
@@ -1139,7 +1136,7 @@ mod tests {
         let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1179,7 +1176,7 @@ mod tests {
         let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor
         let processor = Arc::new(Processor::new(storage.clone(), registry.clone()));
@@ -1235,7 +1232,7 @@ mod tests {
         let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor and insert some vectors
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1298,7 +1295,7 @@ mod tests {
         let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor and insert vectors
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1339,7 +1336,7 @@ mod tests {
         let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor and insert many vectors (more than default limit)
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1381,7 +1378,7 @@ mod tests {
         let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor with backpressure threshold of 1
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1450,7 +1447,7 @@ mod tests {
         let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding (64 dimensions for faster test)
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
         let processor = Processor::new(storage.clone(), registry.clone());
 
         const NUM_VECTORS: usize = 100;

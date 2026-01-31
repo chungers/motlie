@@ -118,12 +118,12 @@ async fn test_cosine_2bit_rabitq() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register LAION-style embedding (Cosine for RaBitQ)
     let builder = EmbeddingBuilder::new("laion-2bit", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
     let embedding = registry
-        .register(builder, &txn_db)
+        .register(builder)
         .expect("register embedding");
 
     println!(
@@ -256,12 +256,12 @@ async fn test_cosine_4bit_rabitq() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register LAION-style embedding
     let builder = EmbeddingBuilder::new("laion-4bit", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
     let embedding = registry
-        .register(builder, &txn_db)
+        .register(builder)
         .expect("register embedding");
 
     println!(
@@ -402,7 +402,7 @@ async fn test_multi_embedding_non_interference() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // =========================================================================
     // Register three different embeddings
@@ -412,7 +412,7 @@ async fn test_multi_embedding_non_interference() {
     let laion_builder =
         EmbeddingBuilder::new("laion-clip-vit-b32", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
     let laion_embedding = registry
-        .register(laion_builder, &txn_db)
+        .register(laion_builder)
         .expect("register laion");
     println!(
         "Registered LAION: code={}, model={}, dim={}, distance={:?}",
@@ -426,7 +426,7 @@ async fn test_multi_embedding_non_interference() {
     let sift_builder =
         EmbeddingBuilder::new("sift-descriptors", SIFT_EMBEDDING_DIM as u32, Distance::L2);
     let sift_embedding = registry
-        .register(sift_builder, &txn_db)
+        .register(sift_builder)
         .expect("register sift");
     println!(
         "Registered SIFT: code={}, model={}, dim={}, distance={:?}",
@@ -439,7 +439,7 @@ async fn test_multi_embedding_non_interference() {
     // Embedding 3: Custom 768D (like BERT, Cosine)
     let custom_builder = EmbeddingBuilder::new("bert-base-uncased", 768, Distance::Cosine);
     let custom_embedding = registry
-        .register(custom_builder, &txn_db)
+        .register(custom_builder)
         .expect("register custom");
     println!(
         "Registered Custom: code={}, model={}, dim={}, distance={:?}",
@@ -756,14 +756,14 @@ async fn test_embedding_registration_idempotent() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register same embedding multiple times
     let builder1 = EmbeddingBuilder::new("test-model", 256, Distance::Cosine);
-    let embedding1 = registry.register(builder1, &txn_db).expect("register 1");
+    let embedding1 = registry.register(builder1).expect("register 1");
 
     let builder2 = EmbeddingBuilder::new("test-model", 256, Distance::Cosine);
-    let embedding2 = registry.register(builder2, &txn_db).expect("register 2");
+    let embedding2 = registry.register(builder2).expect("register 2");
 
     // Should get same code
     assert_eq!(
@@ -781,7 +781,7 @@ async fn test_embedding_registration_idempotent() {
 
     // Register different model - should get different code
     let builder3 = EmbeddingBuilder::new("different-model", 256, Distance::Cosine);
-    let embedding3 = registry.register(builder3, &txn_db).expect("register 3");
+    let embedding3 = registry.register(builder3).expect("register 3");
 
     assert_ne!(
         embedding1.code(),
@@ -818,11 +818,11 @@ async fn test_exact_vs_rabitq_search_paths() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register Cosine embedding (RaBitQ eligible)
     let builder = EmbeddingBuilder::new("search-path-test", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
-    let embedding = registry.register(builder, &txn_db).expect("register");
+    let embedding = registry.register(builder).expect("register");
 
     // Create writer and reader
     let (writer, writer_rx) = create_writer(WriterConfig::default());
