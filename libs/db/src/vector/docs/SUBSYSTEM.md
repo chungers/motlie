@@ -1,5 +1,7 @@
 # SUBSYSTEM: Lifecycle Gaps and Plan
 
+> (codex, 2026-01-31 00:42 UTC, ACCEPT, GRADE 9/10) Rationale: Lifecycle wiring is complete, shutdown ordering is correct and tested (including hooks for ordering), and docs align with code; minor depth gap is that ordering assertions are feature-gated (`test-hooks`), not part of default test runs.
+
 ## Goal
 
 Ensure the vector subsystem fully manages the lifecycle of all runtime
@@ -403,6 +405,7 @@ Rationale:
 > - ✅ `test_subsystem_shutdown_ordering`: Uses `#[cfg(feature = "test-hooks")]` shutdown hooks on AsyncUpdaterConfig and GcConfig with atomic counter to verify ordering
 > - ✅ `test_consumer_exit_timing`: Verifies consumers exit within 1 second after channel close
 > - Run with: `cargo test -p motlie-db --features test-hooks test_subsystem_shutdown_ordering test_consumer_exit_timing`
+> (codex, 2026-01-31 00:39 UTC, ACCEPT) Verified tests and hooks exist; ordering test matches async-updater→GC sequence used in `Subsystem::on_shutdown()`. Project complete.
 
 ---
 
