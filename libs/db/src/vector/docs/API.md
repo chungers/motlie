@@ -1606,6 +1606,84 @@ let results = SearchKNN::new(&embedding, query, 10)
     .await?;
 ```
 
+### Enum-Based Dispatch (Advanced)
+
+The `Mutation` and `Query` enums are the underlying channel payloads. Most callers
+should use the `Runnable` helpers above. If you need explicit control (batching,
+custom timeouts, or manual dispatch), you can send enums directly.
+
+#### Flow 1: Mutations via `Writer` (Insert + Delete)
+
+```rust
+use motlie_db::vector::{
+    create_writer, spawn_mutation_consumer_with_storage, Mutation, WriterConfig,
+    InsertVector, DeleteVector, EmbeddingBuilder, EmbeddingRegistry, Distance, ExternalKey, Storage,
+};
+use motlie_db::Id;
+use std::path::Path;
+use std::sync::Arc;
+
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
+
+let embedding = registry.register(
+    EmbeddingBuilder::new("clip-vit-b32", 512, Distance::Cosine),
+)?;
+
+// Create writer + consumer
+let (writer, receiver) = create_writer(WriterConfig::default());
+let _handle = spawn_mutation_consumer_with_storage(
+    receiver,
+    WriterConfig::default(),
+    storage.clone(),
+    registry.clone(),
+);
+
+// Build mutations
+let insert = InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vec![0.1; 512])
+    .immediate(); // build index synchronously
+let delete = DeleteVector::new(&embedding, ExternalKey::NodeId(Id::new()));
+
+// Send as a batch
+writer.send(vec![Mutation::from(insert), Mutation::from(delete)]).await?;
+writer.flush().await?;
+```
+
+#### Flow 2: Queries via `Reader` + `Query::SearchKNN`
+
+```rust
+use motlie_db::vector::{
+    create_reader, spawn_query_consumers_with_processor, Query, ReaderConfig,
+    SearchKNN, SearchKNNDispatch, Processor,
+};
+use std::sync::Arc;
+use std::time::Duration;
+
+// Assume storage/registry/embedding are already created (see Flow 1 above)
+// Create processor explicitly (needed for SearchKNNDispatch)
+let processor = Arc::new(Processor::new(storage.clone(), registry.clone()));
+
+// Create reader + consumer
+let (reader, receiver) = create_reader(ReaderConfig::default());
+spawn_query_consumers_with_processor(receiver, ReaderConfig::default(), processor.clone(), 2);
+
+// Build SearchKNN dispatch
+let params = SearchKNN::new(&embedding, query_vec, 10).with_ef(100);
+let (dispatch, rx) = SearchKNNDispatch::new(params, Duration::from_secs(5), processor.clone());
+
+// Send query and await result
+reader.send_query(Query::SearchKNN(dispatch)).await?;
+let results = rx.await??;
+```
+
+**Notes:**
+- The `Query` enum is an internal dispatch mechanism; the public, ergonomic path
+  is `SearchReader` + `Runnable::run(...)`.
+- `SearchKNNDispatch` is the only query wrapper that exposes a public constructor.
+
 ### Search Configuration
 
 ```rust
