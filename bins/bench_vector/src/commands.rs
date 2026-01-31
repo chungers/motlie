@@ -275,8 +275,8 @@ pub async fn index(args: IndexArgs) -> Result<()> {
     }
 
     // Prepare embedding registry
-    let txn_db = storage.transaction_db()?;
     let registry = storage.cache().clone();
+    registry.set_storage(storage.clone())?;
     let model = format!("bench-{}", args.dataset.to_lowercase());
 
     if is_random && args.stream {
@@ -293,7 +293,6 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             EmbeddingBuilder::new(&model, dim as u32, distance)
                 .with_hnsw_m(args.m as u16)
                 .with_hnsw_ef_construction(args.ef_construction as u16),
-            &txn_db,
         )?;
         print_embedding_summary(&args.db_path, embedding.code())?;
 
@@ -508,11 +507,11 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         EmbeddingBuilder::new(&model, dim as u32, distance)
             .with_hnsw_m(args.m as u16)
             .with_hnsw_ef_construction(args.ef_construction as u16),
-        &txn_db,
     )?;
     print_embedding_summary(&args.db_path, embedding.code())?;
 
     if existing_count > 0 {
+        let txn_db = storage.transaction_db()?;
         let allocator = IdAllocator::recover(&txn_db, embedding.code())?;
         let next_id = allocator.next_id() as usize;
         if next_id < existing_count {
@@ -781,6 +780,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
 
     // Resolve embedding spec without mutating the registry/DB.
     let registry = storage.cache().clone();
+    registry.set_storage(storage.clone())?;
     let model = format!("bench-{}", args.dataset.to_lowercase());
     let (embedding_code, embedding_spec) = if let Some(code) = args.embedding_code {
         resolve_embedding_spec(&args.db_path, Some(code), None, None, None)?
@@ -805,9 +805,8 @@ pub async fn query(args: QueryArgs) -> Result<()> {
         );
     }
 
-    let txn_db = storage.transaction_db()?;
     if registry.get_by_code(embedding_code).is_none() {
-        registry.prewarm(&txn_db)?;
+        registry.prewarm()?;
     }
     let embedding = registry
         .get_by_code(embedding_code)

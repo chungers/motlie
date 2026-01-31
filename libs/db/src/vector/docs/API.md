@@ -35,8 +35,13 @@
    - [Performance Characteristics](#performance-characteristics)
    - [Failure Recovery](#failure-recovery)
    - [Best Practices for Concurrency](#best-practices-for-concurrency)
-7. [Complete Usage Flow](#complete-usage-flow)
-8. [Public API Reference](#public-api-reference)
+7. [Part 6: Subsystem Lifecycle Management](#part-6-subsystem-lifecycle-management)
+   - [Subsystem Overview](#subsystem-overview)
+   - [Starting the Subsystem](#starting-the-subsystem)
+   - [Shutdown Order](#shutdown-order)
+   - [Best Practices](#best-practices-for-lifecycle)
+8. [Complete Usage Flow](#complete-usage-flow)
+9. [Public API Reference](#public-api-reference)
 
 ---
 
@@ -86,28 +91,30 @@ Distance::DotProduct  // -a·b (negated), for unnormalized embeddings
 
 ### Embedding Registration
 
-An `Embedding` represents a registered embedding space with a unique code, model name, dimensionality, and distance metric. The `EmbeddingRegistry` manages all registered embeddings.
+An `Embedding` represents a registered embedding space with a unique code, model name, dimensionality, and distance metric. The `EmbeddingRegistry` manages all registered embeddings and owns a storage reference to prevent cross-DB misuse.
 
 ```rust
 use motlie_db::vector::{
     EmbeddingBuilder, EmbeddingRegistry, Distance, Storage,
 };
+use std::path::Path;
 use std::sync::Arc;
 
 // Initialize storage
-let mut storage = Storage::readwrite(&db_path);
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
 storage.ready()?;
+let storage = Arc::new(storage);
 
-// Create registry
-let registry = EmbeddingRegistry::new();
+// Create registry (storage is captured once inside the registry)
+let registry = EmbeddingRegistry::new(storage.clone());
 
 // Pre-warm from existing DB (loads previously registered embeddings)
-let count = registry.prewarm(storage.transaction_db()?)?;
+let count = registry.prewarm()?;
 println!("Loaded {} existing embeddings", count);
 
 // Register a new embedding space
 let builder = EmbeddingBuilder::new("openai-ada-002", 1536, Distance::Cosine);
-let embedding = registry.register(builder, storage.transaction_db()?)?;
+let embedding = registry.register(builder)?;
 
 println!("Registered embedding: code={}, dim={}",
          embedding.code(), embedding.dim());
@@ -117,6 +124,52 @@ let all = registry.list_all();
 let cosine_embeddings = registry.find_by_distance(Distance::Cosine);
 let by_model = registry.find_by_model("openai");
 ```
+
+**Subsystem note:** When storage isn’t available at construction (e.g., Subsystem pattern),
+use `EmbeddingRegistry::new_without_storage()` and call `set_storage(storage)` once before
+`prewarm()` or `register()`.
+
+**Lookup + insert using registry filters:**
+
+```rust
+use motlie_db::vector::{Distance, EmbeddingFilter, EmbeddingRegistry, ExternalKey, Processor, Storage};
+use motlie_db::Id;
+use std::path::Path;
+use std::sync::Arc;
+
+// Open storage + registry
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
+
+// Find an existing embedding by model/dim/distance
+let filter = EmbeddingFilter::default()
+    .model("clip-vit-b32")
+    .dim(512)
+    .distance(Distance::Cosine);
+let embedding = registry
+    .find(&filter)
+    .into_iter()
+    .next()
+    .ok_or_else(|| anyhow::anyhow!("Embedding not found"))?;
+
+// Insert vectors using Processor (it loads EmbeddingSpec from storage internally)
+let processor = Processor::new(storage.clone(), registry.clone());
+let external_key = ExternalKey::NodeId(Id::new());
+let _vec_id = processor.insert_vector(&embedding, external_key, &vector, true)?;
+```
+
+**Insert-time validation (Processor/ops):**
+
+- **Embedding exists**: lookup by code via registry
+- **Dimension match**: `vector.len() == spec.dim()`
+- **External key uniqueness**: IdForward is checked for duplicates
+- **SpecHash consistency**: on first insert, the spec hash is stored; later inserts
+  must match the stored hash or they fail with “EmbeddingSpec changed…”
+- **Storage type**: vectors are encoded using the persisted `EmbeddingSpec.storage_type`
+  (F32/F16). Input is always `&[f32]`; conversion happens at write time.
 
 **EmbeddingBuilder Fields:**
 
@@ -134,17 +187,17 @@ These parameters are persisted with the embedding spec and control how the index
 let builder = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
     .with_hnsw_m(32)              // HNSW connections per node (default: 16, min: 2)
     .with_hnsw_ef_construction(400) // Build-time beam width (default: 200)
-    .with_rabitq_bits(2)          // Binary quantization bits (default: 1, valid: 1, 2, 4, 8)
+    .with_rabitq_bits(2)          // Binary quantization bits (default: 1, valid: 1, 2, 4)
     .with_rabitq_seed(12345);     // RNG seed for rotation matrix (default: 42)
 
-let embedding = registry.register(builder, db)?;
+let embedding = registry.register(builder)?;
 ```
 
 | Parameter | Default | Valid Range | Description |
 |-----------|---------|-------------|-------------|
 | `hnsw_m` | 16 | >= 2 | HNSW connections per node. Higher = better recall, more memory |
 | `hnsw_ef_construction` | 200 | > 0 | Build-time beam width. Higher = better graph quality |
-| `rabitq_bits` | 1 | 1, 2, 4, 8 | Bits per dimension. Higher = better recall, larger codes |
+| `rabitq_bits` | 1 | 1, 2, 4 | Bits per dimension. Higher = better recall, larger codes |
 | `rabitq_seed` | 42 | any u64 | Seed for rotation matrix. Same seed = reproducible codes |
 
 **⚠️ Important: SpecHash Timing**
@@ -159,7 +212,7 @@ Build parameters are **immutable after the first vector insert**. When the first
 // ✅ CORRECT: Set parameters before inserting vectors
 let builder = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
     .with_hnsw_m(32);
-let embedding = registry.register(builder, db)?;
+let embedding = registry.register(builder)?;
 processor.insert_vector(...)?;  // SpecHash set here
 
 // ❌ ERROR: Cannot change parameters after data exists
@@ -169,40 +222,42 @@ processor.insert_vector(...)?;  // SpecHash set here
 
 ### HNSW Configuration
 
-HNSW (Hierarchical Navigable Small World) is a graph-based ANN algorithm. Key parameters:
+HNSW (Hierarchical Navigable Small World) is a graph-based ANN algorithm. HNSW parameters
+are configured at registration time via `EmbeddingBuilder` and persisted in the registry
+as an `EmbeddingSpec`. `EmbeddingSpec` is the single source of truth used to construct
+HNSW indexes after restart; you should not manually instantiate it in normal usage.
 
 ```rust
-use motlie_db::vector::hnsw;
+use motlie_db::vector::{EmbeddingBuilder, EmbeddingRegistry, Distance, Processor, Storage};
+use std::path::Path;
+use std::sync::Arc;
 
-// Default configuration (dim=128, M=16)
-let config = hnsw::Config::default();
+// Register embedding with HNSW parameters via builder
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = EmbeddingRegistry::new(storage.clone());
+registry.prewarm()?;
 
-// Auto-tuned for specific dimension
-let config = hnsw::Config::for_dim(512);
+let embedding = registry.register(
+    EmbeddingBuilder::new("openai-ada", 512, Distance::Cosine)
+        .with_hnsw_m(16)                // Connections per node
+        .with_hnsw_ef_construction(100) // Build-time beam width
+        .with_rabitq_bits(1)
+        .with_rabitq_seed(42),
+)?;
 
-// Presets
-let high_recall = hnsw::Config::high_recall(768);  // M=32, ef_construction=200
-let compact = hnsw::Config::compact(768);          // M=8, ef_construction=50
+// In normal usage, let Processor construct HNSW indices from the persisted spec
+let _processor = Processor::new(storage.clone(), Arc::new(registry));
 
-// Custom configuration
-let config = hnsw::Config {
-    enabled: true,
-    dim: 512,
-    m: 16,                // Connections per node (layer > 0)
-    m_max: 32,            // Max connections (layer > 0)
-    m_max_0: 64,          // Max connections (layer 0)
-    ef_construction: 100, // Build-time beam width
-    ..Default::default()
-};
-
-// Validate configuration
-let warnings = config.validate();
-if !warnings.is_empty() {
-    for w in warnings {
-        println!("Warning: {:?}", w);
-    }
-}
+// Derived values are computed from EmbeddingSpec at index construction:
+// - m_max = 2 * hnsw_m (always)
+// - m_max_0 = 2 * hnsw_m (always)
+// - m_l = 1.0 / ln(hnsw_m)
 ```
+
+> **Note**: `hnsw::Config` has been deleted. All HNSW parameters come from
+> the persisted `EmbeddingSpec` created during registration.
 
 **Parameter Impact:**
 
@@ -223,40 +278,34 @@ if !warnings.is_empty() {
 ### Building the Index
 
 ```rust
-use motlie_db::vector::{
-    hnsw, NavigationCache, Distance, VectorElementType,
-};
+use motlie_db::vector::{EmbeddingBuilder, EmbeddingRegistry, ExternalKey, Processor, Storage, Distance};
+use motlie_db::Id;
 use std::sync::Arc;
+use std::path::Path;
 
-// Create navigation cache (required for HNSW traversal)
-let nav_cache = Arc::new(NavigationCache::new());
+// Initialize storage and registry
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
 
-// Create HNSW index
-let config = hnsw::Config::for_dim(512);
-let index = hnsw::Index::new(
-    embedding.code(),      // From registered embedding
-    Distance::Cosine,
-    config,
-    nav_cache.clone(),
-);
+// Register embedding space (build parameters persisted in EmbeddingSpec)
+let embedding = registry.register(
+    EmbeddingBuilder::new("clip", 512, Distance::Cosine)
+        .with_hnsw_m(16)
+        .with_hnsw_ef_construction(100)
+        .with_rabitq_bits(1)
+        .with_rabitq_seed(42),
+)?;
 
-// Or with explicit storage type (F16 saves 50% memory)
-let index = hnsw::Index::with_storage_type(
-    embedding.code(),
-    Distance::Cosine,
-    VectorElementType::F16,  // or F32 (default)
-    config,
-    nav_cache.clone(),
-);
+// Create processor (manages transactions, HNSW, caches)
+let processor = Processor::new(storage.clone(), registry.clone());
 
-// Insert vectors (using transaction)
-let txn_db = storage.transaction_db()?;
+// Insert vectors (atomic insert + optional HNSW build)
 for (id, vector) in vectors.iter().enumerate() {
-    let vec_id = id as u32;
-    let txn = txn_db.transaction();
-    let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, vector)?;
-    txn.commit()?;
-    cache_update.apply(index.nav_cache());
+    let external_key = ExternalKey::NodeId(Id::new());
+    let _vec_id = processor.insert_vector(&embedding, external_key, vector, true)?;
 }
 ```
 
@@ -282,11 +331,15 @@ let ef_search = 100;  // Beam width (higher = better recall, slower)
 let k = 10;           // Number of results
 
 // Perform search
-let results = index.search(&storage, &query, ef_search, k)?;
+let results = processor.search(&embedding, &query, k, ef_search)?;
 
-// Results are (distance, vec_id) pairs, sorted by distance ascending
-for (distance, vec_id) in results {
-    println!("vec_id={}, distance={:.4}", vec_id, distance);
+// Results are SearchResult structs, sorted by distance ascending
+for result in results {
+    println!(
+        "vec_id={}, distance={:.4}",
+        result.vec_id,
+        result.distance
+    );
 }
 ```
 
@@ -307,35 +360,15 @@ RaBitQ uses binary quantization with ADC (Asymmetric Distance Computation) for f
 3. L2 on unnormalized data would lose magnitude information
 
 ```rust
-use motlie_db::vector::{RaBitQ, BinaryCodeCache};
-
-// Initialize RaBitQ encoder
-let rabitq = RaBitQ::new(
-    512,  // dimension
-    4,    // bits per dimension (1, 2, or 4) - 4-bit recommended with ADC
-    42,   // seed for rotation matrix
-);
-
-// Build binary code cache (in-memory for speed)
-let binary_cache = BinaryCodeCache::new();
-
-// Encode all vectors with ADC correction factors
-for (id, vector) in vectors.iter().enumerate() {
-    let vec_id = id as u32;
-    let (code, correction) = rabitq.encode_with_correction(vector);
-    binary_cache.put(embedding.code(), vec_id, code, correction);
-}
+use motlie_db::vector::SearchConfig;
 
 // Two-phase search: ADC navigation → exact reranking
-let results = index.search_with_rabitq_cached(
-    &storage,
-    &query,
-    &rabitq,
-    &binary_cache,
-    k,              // top-k results
-    ef_search,      // beam width for ADC search
-    rerank_factor,  // candidates to rerank = k * rerank_factor
-)?;
+let config = SearchConfig::new(embedding.clone(), k)
+    .rabitq()?  // Err if distance != Cosine
+    .with_ef(ef_search)
+    .with_rerank_factor(rerank_factor);
+
+let results = processor.search_with_config(&config, &query)?;
 ```
 
 **RaBitQ Parameters:**
@@ -345,7 +378,6 @@ let results = index.search_with_rabitq_cached(
 | `bits_per_dim` | 1 | 32x compression, ~70% recall with ADC |
 | `bits_per_dim` | 2 | 16x compression, ~85% recall with ADC |
 | `bits_per_dim` | 4 | 8x compression, **recommended** - ~92-99% recall with ADC |
-| `bits_per_dim` | 8 | 4x compression, highest recall, largest codes |
 | `rerank_factor` | 4-20 | Higher = better recall, more I/O |
 
 > **Note:** The implementation uses ADC (Asymmetric Distance Computation), NOT symmetric
@@ -681,31 +713,37 @@ The vector module is designed for concurrent multi-threaded access. This section
 | `hnsw::Index` | Thread-safe | Immutable config, Arc-wrapped caches |
 | `NavigationCache` | Thread-safe | Internal DashMap, atomic counters |
 | `BinaryCodeCache` | Thread-safe | Internal DashMap |
-| `EmbeddingRegistry` | Thread-safe | Internal RwLock |
+| `EmbeddingRegistry` | Thread-safe | Internal DashMap + OnceLock |
 
 **Usage pattern:**
 
 ```rust
+use motlie_db::vector::{EmbeddingRegistry, ExternalKey, Processor, Storage};
+use motlie_db::Id;
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 
-let storage = Arc::new(Storage::readwrite("./db")?);
-let index = Arc::new(hnsw::Index::new(...));
+let mut storage = Storage::readwrite(Path::new("./db"))?;
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
+let processor = Arc::new(Processor::new(storage.clone(), registry.clone()));
 
 // Spawn multiple reader threads
 let handles: Vec<_> = (0..4).map(|_| {
-    let storage = storage.clone();
-    let index = index.clone();
+    let processor = processor.clone();
+    let embedding = embedding.clone();
     thread::spawn(move || {
-        index.search(&storage, &query, 100, 10)
+        processor.search(&embedding, &query, 10, 100)
     })
 }).collect();
 
 // Writer thread (separate)
-let storage_w = storage.clone();
-let index_w = index.clone();
+let processor_w = processor.clone();
 thread::spawn(move || {
-    insert_vector_atomic(&storage_w, &index_w, embedding, vec_id, &vector)
+    let _ = processor_w.insert_vector(&embedding, ExternalKey::NodeId(Id::new()), &vector, true);
 });
 ```
 
@@ -715,16 +753,10 @@ RocksDB TransactionDB provides **snapshot isolation** for reads and **pessimisti
 
 **Snapshot Isolation (Readers):**
 
-```rust
-// Reader sees consistent point-in-time view
-let snapshot = storage.transaction_db()?.snapshot();
-
-// Concurrent writer deletes vectors...
-// But reader's snapshot is unaffected
-
-let results = index.search_with_snapshot(&snapshot, &query, 100, 10)?;
-// results reflect state at snapshot creation time
-```
+The vector APIs use TransactionDB internally, which provides snapshot isolation.
+`Processor::search()` and the query channel create their own transactions and
+operate on a consistent snapshot per call. Custom snapshot APIs are not currently
+exposed on the public vector API.
 
 **Key guarantees:**
 
@@ -759,7 +791,7 @@ txn1.commit()?;  // Releases lock
 | Lock held, timeout not reached | Block and wait |
 | Lock held, timeout reached | `Operation timed out` error |
 
-Default lock timeout is 1 second. For high-contention workloads, consider:
+Lock timeout is determined by RocksDB `TransactionDBOptions` (defaults unless overridden). For high-contention workloads, consider:
 - Batching operations to reduce lock frequency
 - Using shorter transactions
 - Partitioning data across embedding spaces
@@ -809,24 +841,21 @@ High contention may produce these errors:
 
 ```rust
 fn insert_with_retry(
-    storage: &Storage,
-    index: &hnsw::Index,
-    vec_id: VecId,
+    processor: &Processor,
+    embedding: &Embedding,
+    external_key: ExternalKey,
     vector: &[f32],
     max_retries: usize,
-) -> Result<()> {
+) -> Result<VecId> {
     for attempt in 0..max_retries {
-        match insert_vector_atomic(storage, index, embedding, vec_id, vector) {
-            InsertResult::Success(cache_update) => {
-                cache_update.apply(index.nav_cache());
-                return Ok(());
-            }
-            InsertResult::TransactionConflict => {
-                // Exponential backoff
+        match processor.insert_vector(embedding, external_key.clone(), vector, true) {
+            Ok(vec_id) => return Ok(vec_id),
+            Err(_) if attempt + 1 < max_retries => {
+                // Exponential backoff for transient conflicts
                 std::thread::sleep(Duration::from_millis(10 << attempt));
                 continue;
             }
-            InsertResult::Error(e) => return Err(e),
+            Err(e) => return Err(e),
         }
     }
     Err(anyhow!("Max retries exceeded"))
@@ -876,12 +905,148 @@ The system handles failures gracefully:
 
 ### Best Practices for Concurrency
 
-1. **Use atomic insert functions**: `insert_vector_atomic()` handles transaction lifecycle
+1. **Use Processor inserts**: `Processor::insert_vector()` and `Processor::insert_batch()` handle transactions and cache updates
 2. **Keep transactions short**: Long-held locks reduce concurrency
-3. **Batch operations**: Use `BenchConfig::with_batch_size()` for bulk inserts
+3. **Batch operations**: Use `Processor::insert_batch()` or `InsertVectorBatch` mutations for bulk inserts
 4. **Monitor contention**: Track `errors` in metrics for timeout/conflict rates
 5. **Size NavigationCache**: Larger cache reduces storage reads under load
 6. **Test under load**: Run concurrent stress tests before production
+
+---
+
+## Part 6: Subsystem Lifecycle Management
+
+### Subsystem Overview
+
+The `Subsystem` struct manages the complete lifecycle of the vector storage system, including:
+- Storage and column family initialization
+- Embedding registry pre-warming
+- Writer and reader consumers
+- Async graph updater (optional)
+- Garbage collector (optional)
+
+### Starting the Subsystem
+
+Use `start()` for simple usage or `start_with_async()` for full control:
+
+```rust
+use motlie_db::vector::{
+    Subsystem, WriterConfig, ReaderConfig, AsyncUpdaterConfig, GcConfig,
+};
+use std::sync::Arc;
+use std::time::Duration;
+
+// Create and initialize subsystem
+let subsystem = Arc::new(Subsystem::new());
+let storage = StorageBuilder::new(path)
+    .with_rocksdb(subsystem.clone())
+    .build()?;
+
+// Simple start (no async updater, no GC)
+let (writer, search_reader) = subsystem.start(
+    storage.vector_storage().clone(),
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,  // query workers
+);
+
+// Or: Full control with async updater and GC
+let async_config = AsyncUpdaterConfig::default()
+    .with_num_workers(4)
+    .with_batch_size(200);
+
+let gc_config = GcConfig::default()
+    .with_interval(Duration::from_secs(60))
+    .with_batch_size(100);
+
+let (writer, search_reader) = subsystem.start_with_async(
+    storage.vector_storage().clone(),
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,
+    Some(async_config),  // Enable async graph updates
+    Some(gc_config),     // Enable garbage collection
+);
+```
+
+### Shutdown Order
+
+When `storage.shutdown()` is called, the subsystem shuts down components in this order:
+
+```
+on_shutdown():
+  1. Writer.flush()          - Flush pending mutations (may add to pending queue)
+  2. AsyncUpdater.shutdown() - Drain pending queue, build remaining edges
+  3. Join consumer tasks     - Wait for consumers to exit
+  4. GC.shutdown()           - Stop background cleanup (last)
+  5. (storage closes)        - RocksDB cleanup
+```
+
+> **Note:** Writer must flush BEFORE AsyncUpdater shuts down. Otherwise, mutations
+> using the async path (`build_index=false`) would be flushed after AsyncUpdater
+> is already shut down, leaving vectors without HNSW edges.
+>
+> GC shuts down last because it has no dependencies on Writer/AsyncUpdater and can
+> continue cleaning deleted vectors while other components shut down.
+
+```
+  ┌─────────────────────────────────────────────────────────┐
+  │                    Shutdown Timeline                     │
+  ├─────────────────────────────────────────────────────────┤
+  │                                                          │
+  │  shutdown()                                              │
+  │      │                                                   │
+  │      ▼                                                   │
+  │  ┌────────────────┐                                      │
+  │  │ Writer.flush() │  Drain + close mutation channel      │
+  │  └───────┬────────┘  (may add to async pending queue)    │
+  │          │                                               │
+  │          ▼                                               │
+  │  ┌────────────────────────┐                              │
+  │  │ AsyncUpdater.shutdown()│  Drain pending, build edges  │
+  │  └───────┬────────────────┘                              │
+  │          │                                               │
+  │          ▼                                               │
+  │  ┌──────────────────────┐                                │
+  │  │ Join consumer tasks  │  Consumers exit, join handles  │
+  │  └───────┬──────────────┘                                │
+  │          │                                               │
+  │          ▼                                               │
+  │  ┌────────────────┐                                      │
+  │  │ GC.shutdown()  │  Stop background cleanup (last)      │
+  │  └───────┬────────┘                                      │
+  │          │                                               │
+  │          ▼                                               │
+  │     (RocksDB closes)                                     │
+  │                                                          │
+  └─────────────────────────────────────────────────────────┘
+```
+
+**Why this order matters:**
+
+1. **Writer flush first**: Ensures all async-path mutations have been enqueued to the pending queue before the updater stops
+2. **AsyncUpdater second**: Drains pending queue and completes graph builds
+3. **Join consumers**: Cooperative shutdown after channels close
+4. **GC last**: Can continue cleanup while other components drain
+
+### Best Practices for Lifecycle
+
+1. **Always use `Subsystem.start()` or `start_with_async()`**: These methods manage consumer handles and ensure proper shutdown
+
+2. **Enable GC for long-running applications**:
+   ```rust
+   let gc_config = GcConfig::default()
+       .with_interval(Duration::from_secs(60));
+   ```
+
+3. **Call `storage.shutdown()` on application exit**: This triggers the proper shutdown sequence
+
+4. **Don't manually manage consumers**: Let `Subsystem` handle spawning and joining
+
+5. **Monitor GC metrics** for operational visibility:
+   ```rust
+   // Note: GC is managed by Subsystem, metrics available via storage telemetry
+   ```
 
 ---
 
@@ -891,49 +1056,38 @@ The system handles failures gracefully:
 
 ```rust
 use motlie_db::vector::{
-    Storage, EmbeddingRegistry, EmbeddingBuilder, Distance,
-    hnsw, NavigationCache, VectorElementType,
+    Storage, EmbeddingRegistry, EmbeddingBuilder, Distance, Processor, ExternalKey,
 };
+use motlie_db::Id;
 use std::sync::Arc;
+use std::path::Path;
 
 // 1. Initialize storage
-let mut storage = Storage::readwrite("./vector_db");
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
 storage.ready()?;
+let storage = Arc::new(storage);
 
 // 2. Register embedding space
-let registry = EmbeddingRegistry::new();
-registry.prewarm(storage.transaction_db()?)?;
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
 
 let embedding = registry.register(
     EmbeddingBuilder::new("sift", 128, Distance::L2),
-    storage.transaction_db()?,
 )?;
 
-// 3. Create HNSW index
-let nav_cache = Arc::new(NavigationCache::new());
-let config = hnsw::Config {
-    dim: 128,
-    m: 16,
-    ef_construction: 100,
-    ..Default::default()
-};
-
-let index = hnsw::Index::new(
-    embedding.code(),
-    Distance::L2,
-    config,
-    nav_cache,
-);
+// 3. Create Processor (handles index + cache)
+let processor = Processor::new(storage.clone(), registry.clone());
 
 // 4. Insert vectors
 for (i, vector) in base_vectors.iter().enumerate() {
-    index.insert(&storage, i as u32, vector)?;
+    let external_key = ExternalKey::NodeId(Id::new());
+    let _vec_id = processor.insert_vector(&embedding, external_key, vector, true)?;
 }
 
 // 5. Search
-let results = index.search(&storage, &query, 100, 10)?;
-for (dist, id) in results {
-    println!("ID: {}, L2 Distance: {:.4}", id, dist);
+let results = processor.search(&embedding, &query, 10, 100)?;
+for result in results {
+    println!("Key: {:?}, L2 Distance: {:.4}", result.external_key, result.distance);
 }
 ```
 
@@ -942,72 +1096,43 @@ for (dist, id) in results {
 ```rust
 use motlie_db::vector::{
     Storage, EmbeddingRegistry, EmbeddingBuilder, Distance,
-    hnsw, NavigationCache, VectorElementType,
-    RaBitQ, BinaryCodeCache,
+    Processor, ExternalKey, SearchConfig,
 };
+use motlie_db::Id;
 use std::sync::Arc;
+use std::path::Path;
 
 // 1. Initialize storage
-let mut storage = Storage::readwrite("./vector_db");
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
 storage.ready()?;
+let storage = Arc::new(storage);
 
 // 2. Register embedding (MUST be Cosine for RaBitQ)
-let registry = EmbeddingRegistry::new();
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
 let embedding = registry.register(
     EmbeddingBuilder::new("clip-vit-b32", 512, Distance::Cosine),
-    storage.transaction_db()?,
 )?;
 
-// 3. Create HNSW index with F16 storage (50% smaller)
-let nav_cache = Arc::new(NavigationCache::new());
-let config = hnsw::Config::high_recall(512);
+// 3. Create Processor (manages HNSW + RaBitQ cache)
+let processor = Processor::new(storage.clone(), registry.clone());
 
-let index = hnsw::Index::with_storage_type(
-    embedding.code(),
-    Distance::Cosine,
-    VectorElementType::F16,
-    config,
-    nav_cache,
-);
-
-// 4. Initialize RaBitQ encoder and cache
-let rabitq = RaBitQ::new(512, 1, 42);  // 1-bit quantization
-let binary_cache = BinaryCodeCache::new();
-
-// 5. Insert vectors and build binary cache (using transaction)
-let txn_db = storage.transaction_db()?;
+// 4. Insert vectors (binary codes cached on insert)
 for (i, vector) in base_vectors.iter().enumerate() {
-    let vec_id = i as u32;
-
-    // Insert into HNSW (transactional)
-    let txn = txn_db.transaction();
-    let cache_update = hnsw::insert(&index, &txn, &txn_db, &storage, vec_id, vector)?;
-    txn.commit()?;
-    cache_update.apply(index.nav_cache());
-
-    // Encode and cache binary code
-    let code = rabitq.encode(vector);
-    binary_cache.put(embedding.code(), vec_id, code);
+    let external_key = ExternalKey::NodeId(Id::new());
+    let _vec_id = processor.insert_vector(&embedding, external_key, vector, true)?;
 }
 
-// 6. Two-phase search: ADC pre-filter → exact rerank
-let results = index.search_with_rabitq_cached(
-    &storage,
-    &query,
-    &rabitq,
-    &binary_cache,
-    10,     // k
-    100,    // ef_search
-    10,     // rerank_factor (rerank top 100 candidates)
-)?;
+// 5. Two-phase search: ADC pre-filter → exact rerank
+let config = SearchConfig::new(embedding.clone(), 10)
+    .rabitq()?
+    .with_ef(100)
+    .with_rerank_factor(10);
+let results = processor.search_with_config(&config, &query)?;
 
-for (dist, id) in results {
-    println!("ID: {}, Cosine Distance: {:.4}", id, dist);
+for result in results {
+    println!("Key: {:?}, Cosine Distance: {:.4}", result.external_key, result.distance);
 }
-
-// 7. Check cache stats
-let (count, bytes) = binary_cache.stats();
-println!("Binary cache: {} codes, {} bytes", count, bytes);
 ```
 
 ### Flow 3: Using SearchConfig Builder
@@ -1090,14 +1215,15 @@ impl EmbeddingBuilder {
 // Registry for managing embedding spaces
 pub struct EmbeddingRegistry { /* private */ }
 impl EmbeddingRegistry {
-    pub fn new() -> Self;
-    pub fn prewarm(&self, db: &TransactionDB) -> Result<usize>;
-    pub fn register(&self, builder: EmbeddingBuilder, db: &TransactionDB) -> Result<Embedding>;
+    pub fn new(storage: Arc<Storage>) -> Self;
+    pub fn new_without_storage() -> Self;
+    pub fn set_storage(&self, storage: Arc<Storage>) -> Result<()>;
+    pub fn prewarm(&self) -> Result<usize>;
+    pub fn register(&self, builder: EmbeddingBuilder) -> Result<Embedding>;
     pub fn register_in_txn(
         &self,
         builder: EmbeddingBuilder,
         txn: &Transaction<'_, TransactionDB>,
-        db: &TransactionDB,
     ) -> Result<Embedding>;
     pub fn get(&self, model: &str, dim: u32, distance: Distance) -> Option<Embedding>;
     pub fn get_by_code(&self, code: u64) -> Option<Embedding>;
@@ -1144,34 +1270,44 @@ impl ExternalKey {
 ### Configuration Types
 
 ```rust
-// HNSW index configuration: vector::hnsw::Config
+// EmbeddingSpec is the single source of truth for HNSW parameters
+pub struct EmbeddingSpec {
+    pub model: String,
+    pub dim: u32,
+    pub distance: Distance,
+    pub storage_type: VectorElementType,
+    pub hnsw_m: u16,                 // HNSW M parameter
+    pub hnsw_ef_construction: u16,   // HNSW build beam width
+    pub rabitq_bits: u8,
+    pub rabitq_seed: u64,
+}
+impl EmbeddingSpec {
+    // Derived HNSW values (always computed, never stored)
+    pub fn m(&self) -> usize;              // hnsw_m as usize
+    pub fn m_max(&self) -> usize;          // 2 * m()
+    pub fn m_max_0(&self) -> usize;        // 2 * m()
+    pub fn m_l(&self) -> f32;              // 1.0 / ln(m())
+    pub fn ef_construction(&self) -> usize; // hnsw_ef_construction as usize
+}
+
+// HNSW ConfigWarning for validation
 pub mod hnsw {
-    pub struct Config {
-        pub enabled: bool,
-        pub dim: usize,
-        pub m: usize,
-        pub m_max: usize,
-        pub m_max_0: usize,
-        pub ef_construction: usize,
-        pub m_l: f32,
-        pub max_level: Option<u8>,
-        pub batch_threshold: usize,
+    pub enum ConfigWarning {
+        LowM(usize),
+        HighM(usize),
+        LowEfConstruction { ef_construction: usize, recommended: usize },
+        HighEfConstruction(usize),
+        LowDimension(usize),
+        HighDimension(usize),
     }
-    impl Config {
-        pub fn default() -> Self;            // dim=128, m=16
-        pub fn for_dim(dim: usize) -> Self;  // Auto-tuned
-        pub fn high_recall(dim: usize) -> Self;  // m=32, ef_construction=200
-        pub fn compact(dim: usize) -> Self;      // m=8, ef_construction=50
-        pub fn validate(&self) -> Vec<ConfigWarning>;
-        pub fn is_valid(&self) -> bool;
-    }
-    pub enum ConfigWarning { LowM, HighM, LowEfConstruction, ... }
 }
 
 // RaBitQ configuration
 pub struct RaBitQConfig {
     pub bits_per_dim: u8,
-    pub seed: u64,
+    pub rotation_seed: u64,
+    pub enabled: bool,
+    pub use_simd_dot: bool,
 }
 impl RaBitQConfig {
     pub fn code_size(&self, dim: usize) -> usize;
@@ -1179,16 +1315,9 @@ impl RaBitQConfig {
     pub fn is_valid(&self) -> bool;
 }
 
-// Combined configuration
+// VectorConfig only contains RaBitQ config (HNSW params in EmbeddingSpec)
 pub struct VectorConfig {
-    pub hnsw: hnsw::Config,
     pub rabitq: RaBitQConfig,
-}
-impl VectorConfig {
-    pub fn dim_128() -> Self;
-    pub fn dim_768() -> Self;
-    pub fn dim_1024() -> Self;
-    pub fn dim_1536() -> Self;
 }
 
 // Vector storage precision
@@ -1204,31 +1333,24 @@ pub enum VectorElementType {
 // Access via hnsw::Index
 pub struct Index { /* private */ }
 impl Index {
-    // Construction
-    pub fn new(
+    // Construction (the only constructor)
+    pub fn from_spec(
         embedding: EmbeddingCode,
-        distance: Distance,
-        config: hnsw::Config,
-        nav_cache: Arc<NavigationCache>,
-    ) -> Self;
-
-    pub fn with_storage_type(
-        embedding: EmbeddingCode,
-        distance: Distance,
-        storage_type: VectorElementType,
-        config: hnsw::Config,
+        spec: &EmbeddingSpec,
+        batch_threshold: usize,  // Runtime knob for neighbor fetching
         nav_cache: Arc<NavigationCache>,
     ) -> Self;
 
     // Accessors
     pub fn embedding(&self) -> EmbeddingCode;
     pub fn storage_type(&self) -> VectorElementType;
-    pub fn config(&self) -> &hnsw::Config;
     pub fn distance_metric(&self) -> Distance;
     pub fn nav_cache(&self) -> &Arc<NavigationCache>;
-
-    // Insert
-    pub fn insert(&self, storage: &Storage, vec_id: VecId, vector: &[f32]) -> Result<()>;
+    pub fn dim(&self) -> usize;
+    pub fn m(&self) -> usize;
+    pub fn ef_construction(&self) -> usize;
+    pub fn m_l(&self) -> f32;
+    pub fn batch_threshold(&self) -> usize;
 
     // Search - Exact (all distance metrics)
     pub fn search(
@@ -1254,11 +1376,31 @@ impl Index {
     // Batch operations
     pub fn get_vectors_batch(&self, storage: &Storage, vec_ids: &[VecId]) -> Result<Vec<Option<Vec<f32>>>>;
     pub fn batch_distances(&self, storage: &Storage, query: &[f32], vec_ids: &[VecId]) -> Result<Vec<(VecId, f32)>>;
-    pub fn get_neighbors_batch(&self, storage: &Storage, vec_id: VecId, layers: &[u8]) -> Result<Vec<Vec<VecId>>>;
+    pub fn get_neighbors_batch(
+        &self,
+        storage: &Storage,
+        vec_ids: &[VecId],
+        layer: u8,
+    ) -> Result<Vec<(VecId, roaring::RoaringBitmap)>>;
     pub fn get_neighbor_count(&self, storage: &Storage, vec_id: VecId, layer: u8) -> Result<u64>;
     pub fn get_binary_code(&self, storage: &Storage, vec_id: VecId) -> Result<Option<Vec<u8>>>;
     pub fn get_binary_codes_batch(&self, storage: &Storage, vec_ids: &[VecId]) -> Result<Vec<Option<Vec<u8>>>>;
 }
+
+// Transaction-aware insert API (free functions in hnsw module)
+pub struct CacheUpdate { /* public fields */ }
+impl CacheUpdate {
+    pub fn apply(self, nav_cache: &NavigationCache);
+}
+
+pub fn insert(
+    index: &Index,
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    storage: &Storage,
+    vec_id: VecId,
+    vector: &[f32],
+) -> Result<CacheUpdate>;
 ```
 
 ### Processor (Internal API)
@@ -1266,21 +1408,36 @@ impl Index {
 `Processor` is the internal execution engine used by mutation/query consumers.
 It is exposed for internal integrations and test helpers.
 
+**Note:** HNSW structural parameters (m, ef_construction, etc.) are derived from
+`EmbeddingSpec` which is persisted in RocksDB and protected by SpecHash. Only
+`batch_threshold` is a runtime knob that can vary per process without affecting
+index integrity. See `docs/CONFIG.md` for the design rationale.
+
 ```rust
 pub struct Processor { /* private */ }
 impl Processor {
+    // Preferred constructors (HNSW params derived from EmbeddingSpec)
     pub fn new(storage: Arc<Storage>, registry: Arc<EmbeddingRegistry>) -> Self;
+    pub fn with_batch_threshold(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        batch_threshold: usize,
+    ) -> Self;
     pub fn new_with_nav_cache(
         storage: Arc<Storage>,
         registry: Arc<EmbeddingRegistry>,
         nav_cache: Arc<NavigationCache>,
     ) -> Self;
-    pub fn with_rabitq_config(self, config: RaBitQConfig) -> Self;
-    pub fn with_config(self, config: VectorConfig) -> Self;
-    pub fn with_config_and_nav_cache(
+    pub fn with_rabitq_config(
         storage: Arc<Storage>,
         registry: Arc<EmbeddingRegistry>,
-        config: VectorConfig,
+        rabitq_config: RaBitQConfig,
+    ) -> Self;
+    pub fn with_rabitq_config_and_batch_threshold(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        rabitq_config: RaBitQConfig,
+        batch_threshold: usize,
         nav_cache: Arc<NavigationCache>,
     ) -> Self;
 
@@ -1311,19 +1468,12 @@ impl Processor {
         build_index: bool,
     ) -> Result<Vec<VecId>>;
 
-    pub(crate) fn delete_vector(
-        &self,
-        embedding: &Embedding,
-        external_key: ExternalKey,
-    ) -> Result<super::ops::delete::DeleteResult>;
-
     pub fn search(
         &self,
         embedding: &Embedding,
         query: &[f32],
         k: usize,
         ef_search: usize,
-        exact: bool,
     ) -> Result<Vec<SearchResult>>;
 
     pub fn search_with_config(
@@ -1332,6 +1482,310 @@ impl Processor {
         query: &[f32],
     ) -> Result<Vec<SearchResult>>;
 }
+```
+
+### Mutation Types
+
+The `Mutation` enum represents all write operations. Each variant has a corresponding
+struct with builder methods for ergonomic construction.
+
+```rust
+/// All write operations dispatched through the Writer channel.
+pub enum Mutation {
+    AddEmbeddingSpec(AddEmbeddingSpec),  // Register new embedding space
+    InsertVector(InsertVector),           // Insert single vector
+    DeleteVector(DeleteVector),           // Delete vector by external key
+    InsertVectorBatch(InsertVectorBatch), // Batch insert (optimization)
+    Flush(FlushMarker),                   // Internal: sync marker
+}
+```
+
+#### InsertVector
+
+Insert a single vector into an embedding space.
+
+```rust
+pub struct InsertVector {
+    /// Embedding space code (from Embedding::code())
+    pub embedding: EmbeddingCode,
+    /// External key identifying the source entity (node, edge, fragment, summary)
+    pub external_key: ExternalKey,
+    /// Vector data (must match embedding dimension)
+    pub vector: Vec<f32>,
+    /// If true, builds HNSW index synchronously; if false, queues for async processing
+    pub immediate_index: bool,
+}
+
+impl InsertVector {
+    /// Create with async indexing (default, recommended for throughput)
+    pub fn new(embedding: &Embedding, external_key: ExternalKey, vector: Vec<f32>) -> Self;
+    /// Enable synchronous HNSW indexing (use for latency-sensitive single inserts)
+    pub fn immediate(self) -> Self;
+}
+```
+
+**Example:**
+```rust
+let insert = InsertVector::new(&embedding, ExternalKey::NodeId(node_id), vec![0.1; 512])
+    .immediate();  // Optional: force sync indexing
+insert.run(&writer).await?;
+```
+
+#### DeleteVector
+
+Delete a vector by its external key.
+
+```rust
+pub struct DeleteVector {
+    /// Embedding space code
+    pub embedding: EmbeddingCode,
+    /// External key of the vector to delete
+    pub external_key: ExternalKey,
+}
+
+impl DeleteVector {
+    pub fn new(embedding: &Embedding, external_key: ExternalKey) -> Self;
+}
+```
+
+**Behavior:** Removes ID mappings, vector data, metadata, and marks HNSW edges for
+lazy cleanup by the garbage collector.
+
+#### InsertVectorBatch
+
+Efficiently insert multiple vectors in a single operation.
+
+```rust
+pub struct InsertVectorBatch {
+    /// Embedding space code
+    pub embedding: EmbeddingCode,
+    /// Batch of (external_key, vector) pairs
+    pub vectors: Vec<(ExternalKey, Vec<f32>)>,
+    /// If true, builds HNSW index synchronously for all vectors
+    pub immediate_index: bool,
+}
+
+impl InsertVectorBatch {
+    pub fn new(embedding: &Embedding, vectors: Vec<(ExternalKey, Vec<f32>)>) -> Self;
+    pub fn immediate(self) -> Self;
+}
+```
+
+**Performance:** More efficient than individual InsertVector for bulk loading
+(amortizes transaction overhead, enables batch HNSW construction).
+
+#### AddEmbeddingSpec
+
+Register a new embedding space (typically done via EmbeddingRegistry::register).
+
+```rust
+pub struct AddEmbeddingSpec {
+    pub code: EmbeddingCode,           // Allocated code (primary key)
+    pub model: String,                 // Model name (e.g., "gemma", "ada-002")
+    pub dim: u32,                      // Vector dimensionality
+    pub distance: Distance,            // Similarity metric
+    pub storage_type: VectorElementType, // F32 or F16
+    pub hnsw_m: u16,                   // HNSW M parameter (default: 16)
+    pub hnsw_ef_construction: u16,     // HNSW build beam width (default: 200)
+    pub rabitq_bits: u8,               // RaBitQ bits per dim (default: 1)
+    pub rabitq_seed: u64,              // RaBitQ rotation seed (default: 42)
+}
+```
+
+### Query Types
+
+The `Query` enum represents all read operations. Each variant has a corresponding
+struct that implements `QueryExecutor` for direct execution or can be dispatched
+through the Reader channel.
+
+```rust
+pub enum Query {
+    // Point Lookups
+    GetVector(GetVectorDispatch),       // Get raw vector by external ID
+    GetInternalId(GetInternalIdDispatch), // External key → internal vec_id
+    GetExternalId(GetExternalIdDispatch), // Internal vec_id → external key
+    ResolveIds(ResolveIdsDispatch),     // Batch resolve vec_ids → external keys
+
+    // Registry Queries
+    ListEmbeddings(ListEmbeddingsDispatch),  // List all embedding spaces
+    FindEmbeddings(FindEmbeddingsDispatch),  // Filter by model/dim/distance
+
+    // Search Operations
+    SearchKNN(SearchKNNDispatch),       // K-nearest neighbor search
+}
+```
+
+#### SearchKNN
+
+K-nearest neighbor search using HNSW + optional RaBitQ acceleration.
+
+```rust
+pub struct SearchKNN {
+    /// Embedding space to search
+    pub embedding: Embedding,
+    /// Query vector (must match embedding dimension)
+    pub query: Vec<f32>,
+    /// Number of results to return
+    pub k: usize,
+    /// Search expansion factor (higher = better recall, slower). Default: 100
+    pub ef: usize,
+    /// Force exact distance computation (bypass RaBitQ). Default: false
+    pub exact: bool,
+    /// Re-rank factor for RaBitQ mode (k * rerank_factor candidates). Default: 10
+    pub rerank_factor: usize,
+}
+
+impl SearchKNN {
+    pub fn new(embedding: &Embedding, query: Vec<f32>, k: usize) -> Self;
+    pub fn with_ef(self, ef: usize) -> Self;
+    pub fn exact(self) -> Self;
+    pub fn with_rerank_factor(self, factor: usize) -> Self;
+}
+```
+
+**Example:**
+```rust
+let results = SearchKNN::new(&embedding, query_vec, 10)
+    .with_ef(200)           // Higher ef for better recall
+    .with_rerank_factor(20) // More candidates for re-ranking
+    .run(&search_reader, Duration::from_secs(5))
+    .await?;
+```
+
+**Returns:** `Vec<SearchResult>` where:
+```rust
+pub struct SearchResult {
+    pub external_key: ExternalKey,  // Typed external key
+    pub vec_id: VecId,              // Internal vector ID (u32)
+    pub distance: f32,              // Distance from query (lower = more similar)
+}
+```
+
+#### GetVector
+
+Retrieve raw vector data by external ID.
+
+```rust
+pub struct GetVector {
+    pub embedding: EmbeddingCode,
+    pub id: Id,  // External document ID (ULID)
+}
+// Returns: Option<Vec<f32>>
+```
+
+#### GetInternalId / GetExternalId
+
+Resolve between external keys and internal vector IDs.
+
+```rust
+pub struct GetInternalId {
+    pub embedding: EmbeddingCode,
+    pub external_key: ExternalKey,
+}
+// Returns: Option<VecId>
+
+pub struct GetExternalId {
+    pub embedding: EmbeddingCode,
+    pub vec_id: VecId,
+}
+// Returns: Option<ExternalKey>
+```
+
+#### ResolveIds
+
+Batch resolve internal vec_ids to external keys (used after SearchKNN).
+
+```rust
+pub struct ResolveIds {
+    pub embedding: EmbeddingCode,
+    pub vec_ids: Vec<VecId>,
+}
+// Returns: Vec<Option<ExternalKey>>
+```
+
+### Runnable Traits
+
+Two `Runnable` traits provide ergonomic execution patterns:
+
+#### MutationRunnable (for mutations)
+
+```rust
+// Re-exported as: pub use mutation::Runnable as MutationRunnable;
+#[async_trait]
+pub trait MutationRunnable {
+    /// Execute this mutation against the writer (fire-and-forget).
+    /// Use Writer::flush() after for confirmation.
+    async fn run(self, writer: &Writer) -> Result<()>;
+}
+
+// Implemented for:
+impl MutationRunnable for InsertVector { ... }
+impl MutationRunnable for InsertVectorBatch { ... }
+impl MutationRunnable for DeleteVector { ... }
+impl MutationRunnable for AddEmbeddingSpec { ... }
+impl MutationRunnable for MutationBatch { ... }
+```
+
+**Example:**
+```rust
+use motlie_db::vector::{InsertVector, MutationRunnable};
+
+InsertVector::new(&embedding, key, vector).run(&writer).await?;
+writer.flush().await?;  // Wait for commit confirmation
+```
+
+#### Runnable<R> (for queries)
+
+```rust
+// Generic over reader type (Reader or SearchReader)
+#[async_trait]
+pub trait Runnable<R> {
+    type Output: Send + 'static;
+    async fn run(self, reader: &R, timeout: Duration) -> Result<Self::Output>;
+}
+
+// SearchKNN implements Runnable for both Reader and SearchReader
+impl Runnable<Reader> for SearchKNN { type Output = Vec<SearchResult>; ... }
+impl Runnable<SearchReader> for SearchKNN { type Output = Vec<SearchResult>; ... }
+```
+
+**Example:**
+```rust
+use motlie_db::vector::{SearchKNN, Runnable};
+
+let results: Vec<SearchResult> = SearchKNN::new(&embedding, query, 10)
+    .with_ef(100)
+    .run(&search_reader, Duration::from_secs(5))
+    .await?;
+```
+
+### MutationBatch Helper
+
+Batch multiple mutations into a single channel send for efficiency.
+
+```rust
+pub struct MutationBatch(pub Vec<Mutation>);
+
+impl MutationBatch {
+    pub fn new() -> Self;
+    pub fn push<M: Into<Mutation>>(mut self, mutation: M) -> Self;
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+}
+
+impl MutationRunnable for MutationBatch {
+    async fn run(self, writer: &Writer) -> Result<()>;
+}
+```
+
+**Example:**
+```rust
+MutationBatch::new()
+    .push(InsertVector::new(&embedding, key1, vec1))
+    .push(InsertVector::new(&embedding, key2, vec2))
+    .push(DeleteVector::new(&embedding, old_key))
+    .run(&writer)
+    .await?;
 ```
 
 ### MPSC / Channel API (Public)
@@ -1349,12 +1803,14 @@ impl Writer {
 }
 
 pub struct WriterConfig { pub channel_buffer_size: usize }
+pub struct MutationConsumer { /* receiver, config, processor */ }
 pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutation>>);
 pub fn spawn_mutation_consumer(consumer: MutationConsumer) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_mutation_consumer_with_storage(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     storage: Arc<Storage>,
+    registry: Arc<EmbeddingRegistry>,
 ) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_mutation_consumer_with_storage_autoreg(
     receiver: mpsc::Receiver<Vec<Mutation>>,
@@ -1370,6 +1826,8 @@ impl Reader {
 }
 
 pub struct ReaderConfig { pub channel_buffer_size: usize }
+pub struct QueryConsumer { /* receiver, config, storage */ }
+pub struct ProcessorQueryConsumer { /* receiver, config, processor */ }
 pub fn create_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Query>);
 pub fn spawn_query_consumer(consumer: QueryConsumer) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_query_consumer_with_processor(
@@ -1456,6 +1914,119 @@ let results = SearchKNN::new(&embedding, query, 10)
     .await?;
 ```
 
+### Channel API with Runnable Helpers
+
+The channel APIs are designed to be used through `Runnable` helpers for both
+mutations and queries. These helpers build the correct enum variants and handle
+timeouts ergonomically.
+
+#### Flow 1: Mutations via `Writer` (Insert + Delete)
+
+```rust
+use motlie_db::vector::{
+    create_writer, spawn_mutation_consumer_with_storage, WriterConfig,
+    InsertVector, DeleteVector, MutationBatch, EmbeddingBuilder, EmbeddingRegistry, Distance, ExternalKey, Storage,
+};
+use motlie_db::Id;
+use std::path::Path;
+use std::sync::Arc;
+
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
+
+let embedding = registry.register(
+    EmbeddingBuilder::new("clip-vit-b32", 512, Distance::Cosine),
+)?;
+
+// Create writer + consumer
+let (writer, receiver) = create_writer(WriterConfig::default());
+let _handle = spawn_mutation_consumer_with_storage(
+    receiver,
+    WriterConfig::default(),
+    storage.clone(),
+    registry.clone(),
+);
+
+// Build mutations
+let insert = InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vec![0.1; 512])
+    .immediate(); // build index synchronously
+let delete = DeleteVector::new(&embedding, ExternalKey::NodeId(Id::new()));
+
+// Runnable helpers
+insert.run(&writer).await?;
+delete.run(&writer).await?;
+writer.flush().await?;
+
+// Batch helper (sends Vec<Mutation> under the hood)
+MutationBatch::new()
+    .push(insert)
+    .push(delete)
+    .run(&writer)
+    .await?;
+```
+
+#### Flow 2: Queries via `Reader` (SearchKNN)
+
+```rust
+use motlie_db::vector::{
+    create_reader, spawn_query_consumers_with_processor, ReaderConfig,
+    SearchKNN, Processor,
+};
+use std::sync::Arc;
+use std::time::Duration;
+
+// Assume storage/registry/embedding are already created (see Flow 1 above)
+// Create processor explicitly (needed for SearchKNNDispatch)
+let processor = Arc::new(Processor::new(storage.clone(), registry.clone()));
+
+// Create reader + consumer
+let (reader, receiver) = create_reader(ReaderConfig::default());
+spawn_query_consumers_with_processor(receiver, ReaderConfig::default(), processor.clone(), 2);
+
+// Runnable helper (SearchKNN implements Runnable for Reader/SearchReader)
+let results = SearchKNN::new(&embedding, query_vec, 10)
+    .with_ef(100)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Assume embedding_cosine uses Distance::Cosine, embedding_l2 uses Distance::L2
+
+// Example: Cosine embedding (auto-selects RaBitQ) with higher rerank factor
+let results = SearchKNN::new(&embedding_cosine, query_vec, 10)
+    .with_ef(200)
+    .with_rerank_factor(20) // k * 20 candidates re-ranked
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Example: Exact L2 search (forces exact even if Cosine is available)
+let results = SearchKNN::new(&embedding_l2, query_vec, 10)
+    .with_ef(100)
+    .exact()
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Inspect ExternalKey variants in SearchResult
+for result in results {
+    match result.external_key {
+        ExternalKey::NodeId(id) => println!("NodeId: {id}"),
+        ExternalKey::NodeFragment(id, ts) => println!("NodeFragment: {id} @ {ts:?}"),
+        ExternalKey::Edge(src, dst, name) => println!("Edge: {src} -> {dst} ({name:?})"),
+        ExternalKey::EdgeFragment(src, dst, name, ts) => {
+            println!("EdgeFragment: {src} -> {dst} ({name:?}) @ {ts:?}")
+        }
+        ExternalKey::NodeSummary(hash) => println!("NodeSummary: {hash:?}"),
+        ExternalKey::EdgeSummary(hash) => println!("EdgeSummary: {hash:?}"),
+    }
+}
+```
+
+**Notes:**
+- The `Query` enum is an internal dispatch mechanism; the public, ergonomic path
+  is `SearchReader` or `Reader` + `Runnable::run(...)`.
+
 ### Search Configuration
 
 ```rust
@@ -1517,7 +2088,13 @@ impl NavigationCache {
     pub fn remove(&self, embedding: EmbeddingCode) -> Option<NavigationLayerInfo>;
     pub fn config(&self) -> &NavigationCacheConfig;
     pub fn should_cache_layer(&self, layer: HnswLayer) -> bool;
-    pub fn get_neighbors_cached<F, E>(&self, embedding: EmbeddingCode, vec_id: VecId, layer: HnswLayer, fetch_fn: F) -> Result<Vec<VecId>, E>;
+    pub fn get_neighbors_cached<F, E>(
+        &self,
+        embedding: EmbeddingCode,
+        vec_id: VecId,
+        layer: HnswLayer,
+        fetch_fn: F,
+    ) -> Result<roaring::RoaringBitmap, E>;
     pub fn invalidate_edges(&self, embedding: EmbeddingCode, vec_id: VecId, layer: HnswLayer);
     pub fn edge_cache_stats(&self) -> (usize, usize);
     pub fn hot_cache_stats(&self) -> usize;
@@ -1536,11 +2113,15 @@ impl NavigationLayerInfo {
 
 // Binary code cache for RaBitQ
 pub struct BinaryCodeCache { /* private */ }
+pub struct BinaryCodeEntry {
+    pub code: Vec<u8>,
+    pub correction: AdcCorrection,
+}
 impl BinaryCodeCache {
     pub fn new() -> Self;
-    pub fn put(&self, embedding: EmbeddingCode, vec_id: VecId, code: Vec<u8>);
-    pub fn get(&self, embedding: EmbeddingCode, vec_id: VecId) -> Option<Vec<u8>>;
-    pub fn get_batch(&self, embedding: EmbeddingCode, vec_ids: &[VecId]) -> Vec<Option<Vec<u8>>>;
+    pub fn put(&self, embedding: EmbeddingCode, vec_id: VecId, code: Vec<u8>, correction: AdcCorrection);
+    pub fn get(&self, embedding: EmbeddingCode, vec_id: VecId) -> Option<Arc<BinaryCodeEntry>>;
+    pub fn get_batch(&self, embedding: EmbeddingCode, vec_ids: &[VecId]) -> Vec<Option<Arc<BinaryCodeEntry>>>;
     pub fn contains(&self, embedding: EmbeddingCode, vec_id: VecId) -> bool;
     pub fn stats(&self) -> (usize, usize);  // (count, bytes)
     pub fn clear(&self);
@@ -1611,5 +2192,5 @@ pub fn distances_from_vectors_parallel<F>(query: &[f32], vectors: &[(VecId, Vec<
 pub type EmbeddingCode = u64;
 pub type VecId = u32;
 pub type HnswLayer = u8;
-pub type Storage = rocksdb::Storage<Subsystem>;
+pub type Storage = crate::rocksdb::Storage<Subsystem>;
 ```

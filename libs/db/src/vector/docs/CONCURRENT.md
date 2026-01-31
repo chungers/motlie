@@ -119,12 +119,12 @@ in the 4-8ms range. This trade-off allows lock-free updates without storing indi
 
 ### Benchmark Scenarios
 
-| Scenario | Writers | Readers | Duration | Purpose |
-|----------|---------|---------|----------|---------|
-| Read-heavy | 1 | 8 | 30s | CDN/cache workload |
-| Write-heavy | 8 | 1 | 30s | Ingestion workload |
-| Balanced | 4 | 4 | 30s | Mixed workload baseline |
-| Stress | 16 | 16 | 60s | Find bottlenecks |
+| Scenario | Insert Producers | Search Producers | Query Workers | Duration | Purpose |
+|----------|------------------|------------------|---------------|----------|---------|
+| Read-heavy | 1 | 8 | 4 | 30s | CDN/cache workload |
+| Write-heavy | 4 | 1 | 1 | 30s | Ingestion workload |
+| Balanced | 4 | 4 | 4 | 30s | Mixed workload baseline |
+| Stress | 8 | 8 | 8 | 60s | Find bottlenecks |
 
 ### Implementation
 
@@ -132,10 +132,10 @@ in the 4-8ms range. This trade-off allows lock-free updates without storing indi
 
 Implemented:
 - `BenchConfig` with preset configurations:
-  - `read_heavy()` - 1 writer, 8 readers
-  - `write_heavy()` - 8 writers, 1 reader
-  - `balanced()` - 4 writers, 4 readers
-  - `stress()` - 16 writers, 16 readers
+  - `read_heavy()` - 1 insert producer, 8 search producers, 4 query workers
+  - `write_heavy()` - 4 insert producers, 1 search producer, 1 query worker
+  - `balanced()` - 4 insert producers, 4 search producers, 4 query workers
+  - `stress()` - 8 insert producers, 8 search producers, 8 query workers
 - `ConcurrentBenchmark::run()` - Spawns writer/reader threads, collects metrics
 - `BenchResult` - Throughput, latencies (p50/p95/p99), error counts
 
@@ -215,9 +215,12 @@ pub struct Processor {
     registry: Arc<EmbeddingRegistry>,                   // Shared
     id_allocators: DashMap<EmbeddingCode, IdAllocator>, // Per-embedding
     rabitq_encoders: DashMap<EmbeddingCode, Arc<RaBitQ>>, // Per-embedding
+    rabitq_config: RaBitQConfig,                        // Shared config
     hnsw_indices: DashMap<EmbeddingCode, hnsw::Index>,  // Per-embedding
     nav_cache: Arc<NavigationCache>,                    // Shared (embedding-keyed)
     code_cache: Arc<BinaryCodeCache>,                   // Shared (embedding-keyed)
+    batch_threshold: usize,                             // Performance tuning
+    async_backpressure_threshold: AtomicUsize,          // Async insert backpressure
 }
 ```
 

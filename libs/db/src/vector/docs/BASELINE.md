@@ -1,7 +1,7 @@
 # Vector Subsystem Baseline Benchmarks
 
 **Status:** Active
-**Date:** January 17, 2026
+**Date:** January 17, 2026 (Updated: January 31, 2026)
 **Purpose:** Establish reproducible performance baselines with recall measurement
 
 ---
@@ -41,8 +41,7 @@ Throughput baselines may omit recall, but must be labeled throughput-only.
 **Note on Targets vs CI Gates:**
 - **Production targets** (>90% @10, >95% @100) are aspirational goals for deployed systems
 - **CI gate threshold** is set at 80% to catch regressions while allowing headroom for HNSW approximation
-- RaBitQ with reranking achieves 100% recall, meeting production targets
-- Pure HNSW achieves ~83-85% recall, which is expected for approximate search without reranking
+- **Recorded runs (see "Recorded Baselines" below):** RaBitQ with reranking reached 100% recall on the last LAION sweep; Pure HNSW achieved ~83–85% recall. These are run-specific and not universal guarantees.
 
 ### Latency Metrics
 
@@ -111,7 +110,7 @@ Binary quantization for fast filtering + exact rerank of top candidates.
 SearchMode::RaBitQ { bits: 2 }  // 2-bit quantization
 SearchMode::RaBitQ { bits: 4 }  // 4-bit quantization
 ```
-CODEX: RaBitQ quality measurement is now covered by `bench_vector sweep --rabitq`; `test_vector_baseline.rs` no longer measures recall.
+CODEX: RaBitQ quality measurement is now covered by `bench_vector sweep --rabitq`; `test_vector_baseline.rs` now contains only smoke tests, not quality baselines.
 
 - **Distance metric**: Cosine only (ADC approximates angular distance)
 - **Recall**: Depends on bits and rerank factor
@@ -147,14 +146,14 @@ Insert vectors using the channel API:
 
 ```rust
 let config = BenchConfig::balanced()
-    .with_dataset(DatasetSource::Laion { data_dir })
-    .with_search_mode(SearchMode::Exact)  // or RaBitQ { bits }
+    .with_dataset(DatasetSource::Random { seed: 42 })  // Random for throughput
     .with_vectors_per_producer(10000);
 
 let bench = ConcurrentBenchmark::new(config);
 let result = bench.run(storage, embedding_code).await?;
 ```
-CODEX: `ConcurrentBenchmark` remains throughput-only; quality baselines live in the CLI.
+
+> **⚠️ NOTE:** `ConcurrentBenchmark` measures **throughput only** using exact search. The `search_mode` config field is validated but not used during search execution. For RaBitQ quality measurement, use `bench_vector sweep --rabitq`.
 
 ### Phase 3: Search Quality Measurement
 
@@ -247,8 +246,8 @@ BenchConfig {
 | Test | Dataset | Search Mode | Distance | Recall Required |
 |------|---------|-------------|----------|-----------------|
 | `bench_vector sweep --assert-recall 0.80` | LAION | Exact (HNSW) | Cosine | Yes (>80%, typically 83%) |
-| `bench_vector sweep --rabitq --bits 2` | LAION | RaBitQ-2bit | Cosine | Yes (>80%, measured 100% on current run) |
-| `bench_vector sweep --rabitq --bits 4` | LAION | RaBitQ-4bit | Cosine | Yes (>80%, measured 100% on current run) |
+| `bench_vector sweep --rabitq --bits 2` | LAION | RaBitQ-2bit | Cosine | Yes (>80%, last recorded run reached 100%) |
+| `bench_vector sweep --rabitq --bits 4` | LAION | RaBitQ-4bit | Cosine | Yes (>80%, last recorded run reached 100%) |
 | `baseline_concurrent_balanced` | Random | Exact | L2 | No (throughput only) |
 | `baseline_concurrent_stress` | Random | Exact | L2 | No (throughput only) |
 
@@ -288,14 +287,11 @@ cargo run --release --bin bench_vector -- sweep \
     --assert-recall 0.80
 ```
 
-#### Deprecated: Test-based Benchmarks
+#### Deprecated: Test-based Baselines
 
-> **⚠️ DEPRECATED:** `tests/test_vector_baseline.rs` now contains only smoke tests; use the CLI approach above for quality baselines.
+> **⚠️ DEPRECATED:** `tests/test_vector_baseline.rs` now contains only smoke tests for LAION data loading, not quality baselines. Quality baselines are CLI-only via `bench_vector sweep`. Throughput baselines remain in `test_vector_concurrent.rs` as ignored tests.
 
 ```bash
-# LAION quality baselines (requires LAION data)
-cargo test -p motlie-db --release --test test_vector_baseline baseline_laion -- --ignored --nocapture
-
 # Concurrent throughput baselines (random vectors)
 cargo test -p motlie-db --release --test test_vector_concurrent baseline_full -- --ignored --nocapture
 ```
@@ -594,7 +590,10 @@ Potential additions:
 
 ### Concurrent Benchmark Recall
 
-Currently, concurrent benchmarks (`test_vector_concurrent.rs`) measure throughput only.
+Currently, `ConcurrentBenchmark` and `test_vector_concurrent.rs` measure **throughput only**.
+The benchmark always returns `recall_at_k = None`. For recall measurement, use
+`bench_vector sweep --dataset laion --assert-recall`.
+
 Future work could add recall tracking to concurrent workloads, but this requires
 careful design to avoid measuring concurrency effects on recall accuracy.
 
@@ -673,15 +672,16 @@ let (writer, reader) = subsystem.start_with_async(
     ReaderConfig::default(),
     4,  // query workers
     Some(async_config),
+    None,  // gc_config - disabled in this example
 );
 
 // Inserts now use async path by default (immediate_index=false)
-InsertVector::new(&embedding, id, vector)
+InsertVector::new(&embedding, external_key, vector)
     .run(&writer)
     .await?;
 
 // Use .immediate() for sync path when needed
-InsertVector::new(&embedding, id, vector)
+InsertVector::new(&embedding, external_key, vector)
     .immediate()  // Forces sync graph build
     .run(&writer)
     .await?;
@@ -700,7 +700,7 @@ See [PHASE7.md](./PHASE7.md) for complete design documentation.
 
 ## Scale Benchmarks (Phase 8.3)
 
-**Status:** In Progress (January 2026)
+**Status:** Complete for 10K-1M scales (January 2026); 10M+ pending
 
 Phase 8.3 validates scalability from 10K to 1B vectors using synthetic workloads
 with reproducible random vector generation.
@@ -875,7 +875,7 @@ For CI, run 1M scale benchmark and assert minimum thresholds:
 
 ### Tests (Deprecated for quality baselines)
 
-- [tests/test_vector_baseline.rs](../../../tests/test_vector_baseline.rs) - LAION recall baseline tests ⚠️ *deprecated in favor of bench_vector*
+- [tests/test_vector_baseline.rs](../../../tests/test_vector_baseline.rs) - LAION smoke tests (quality baselines moved to `bench_vector sweep`)
 - [tests/test_vector_concurrent.rs](../../../tests/test_vector_concurrent.rs) - Throughput baseline tests
 
 ### Baseline Artifacts

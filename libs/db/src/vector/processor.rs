@@ -113,22 +113,47 @@ pub struct Processor {
     hnsw_indices: DashMap<EmbeddingCode, hnsw::Index>,
     /// Shared navigation cache for all HNSW indices
     nav_cache: Arc<NavigationCache>,
-    /// HNSW configuration (shared across all embeddings)
-    hnsw_config: hnsw::Config,
+    /// Batch threshold for HNSW neighbor fetching.
+    /// Performance knob - can vary per process without affecting index integrity.
+    batch_threshold: usize,
     /// Shared binary code cache for RaBitQ search
     code_cache: Arc<BinaryCodeCache>,
     /// Backpressure threshold for async inserts (0 disables).
     async_backpressure_threshold: AtomicUsize,
+    /// Skip HNSW operations for testing (test-only flag).
+    #[cfg(test)]
+    skip_hnsw_for_testing: bool,
 }
+
+/// Default batch threshold for HNSW neighbor fetching.
+const DEFAULT_BATCH_THRESHOLD: usize = 64;
 
 impl Processor {
     /// Create a new Processor with the given storage and registry.
+    ///
+    /// HNSW structural parameters (m, m_max, ef_construction) are derived from
+    /// `EmbeddingSpec` - the single source of truth. Only runtime knobs like
+    /// `batch_threshold` can vary per process.
     pub fn new(storage: Arc<Storage>, registry: Arc<EmbeddingRegistry>) -> Self {
-        Self::with_config(
+        Self::with_batch_threshold(storage, registry, DEFAULT_BATCH_THRESHOLD)
+    }
+
+    /// Create a Processor with custom batch threshold for HNSW neighbor fetching.
+    ///
+    /// The batch threshold controls when neighbor fetching switches from
+    /// individual lookups to batched operations. Higher values improve
+    /// throughput but increase memory usage.
+    pub fn with_batch_threshold(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+        batch_threshold: usize,
+    ) -> Self {
+        Self::with_rabitq_config_and_batch_threshold(
             storage,
             registry,
             RaBitQConfig::default(),
-            hnsw::Config::default(),
+            batch_threshold,
+            Arc::new(NavigationCache::new()),
         )
     }
 
@@ -141,11 +166,11 @@ impl Processor {
         registry: Arc<EmbeddingRegistry>,
         nav_cache: Arc<NavigationCache>,
     ) -> Self {
-        Self::with_config_and_nav_cache(
+        Self::with_rabitq_config_and_batch_threshold(
             storage,
             registry,
             RaBitQConfig::default(),
-            hnsw::Config::default(),
+            DEFAULT_BATCH_THRESHOLD,
             nav_cache,
         )
     }
@@ -156,31 +181,23 @@ impl Processor {
         registry: Arc<EmbeddingRegistry>,
         rabitq_config: RaBitQConfig,
     ) -> Self {
-        Self::with_config(storage, registry, rabitq_config, hnsw::Config::default())
-    }
-
-    /// Create a Processor with custom RaBitQ and HNSW configurations.
-    pub fn with_config(
-        storage: Arc<Storage>,
-        registry: Arc<EmbeddingRegistry>,
-        rabitq_config: RaBitQConfig,
-        hnsw_config: hnsw::Config,
-    ) -> Self {
-        Self::with_config_and_nav_cache(
+        Self::with_rabitq_config_and_batch_threshold(
             storage,
             registry,
             rabitq_config,
-            hnsw_config,
+            DEFAULT_BATCH_THRESHOLD,
             Arc::new(NavigationCache::new()),
         )
     }
 
-    /// Create a Processor with custom configurations and shared navigation cache.
-    pub fn with_config_and_nav_cache(
+    /// Create a Processor with full configuration options.
+    ///
+    /// This is the canonical constructor that all other constructors delegate to.
+    pub fn with_rabitq_config_and_batch_threshold(
         storage: Arc<Storage>,
         registry: Arc<EmbeddingRegistry>,
         rabitq_config: RaBitQConfig,
-        hnsw_config: hnsw::Config,
+        batch_threshold: usize,
         nav_cache: Arc<NavigationCache>,
     ) -> Self {
         Self {
@@ -191,9 +208,34 @@ impl Processor {
             rabitq_config,
             hnsw_indices: DashMap::new(),
             nav_cache,
-            hnsw_config,
+            batch_threshold,
             code_cache: Arc::new(BinaryCodeCache::new()),
             async_backpressure_threshold: AtomicUsize::new(0),
+            #[cfg(test)]
+            skip_hnsw_for_testing: false,
+        }
+    }
+
+    /// Create processor that skips HNSW operations (test-only).
+    ///
+    /// Use this to test non-HNSW code paths in isolation.
+    #[cfg(test)]
+    pub fn new_without_hnsw_for_testing(
+        storage: Arc<Storage>,
+        registry: Arc<EmbeddingRegistry>,
+    ) -> Self {
+        Self {
+            storage,
+            registry,
+            id_allocators: DashMap::new(),
+            rabitq_encoders: DashMap::new(),
+            rabitq_config: RaBitQConfig::default(),
+            hnsw_indices: DashMap::new(),
+            nav_cache: Arc::new(NavigationCache::new()),
+            batch_threshold: DEFAULT_BATCH_THRESHOLD,
+            code_cache: Arc::new(BinaryCodeCache::new()),
+            async_backpressure_threshold: AtomicUsize::new(0),
+            skip_hnsw_for_testing: true,
         }
     }
 
@@ -363,8 +405,9 @@ impl Processor {
     /// - Embedding is not found in registry
     /// - EmbeddingSpec not found in storage (can't determine build params)
     ///
-    /// **IMPORTANT:** Uses persisted EmbeddingSpec build parameters (hnsw_m, hnsw_ef_construction)
-    /// rather than self.hnsw_config. This ensures consistency with stored SpecHash.
+    /// **IMPORTANT:** Uses persisted EmbeddingSpec as the single source of truth.
+    /// HNSW structural parameters (m, m_max, ef_construction, etc.) are derived
+    /// from the spec, ensuring consistency with stored SpecHash.
     ///
     /// Indices are cached per embedding space for efficiency.
     pub fn get_or_create_index(&self, embedding: EmbeddingCode) -> Option<hnsw::Index> {
@@ -373,36 +416,14 @@ impl Processor {
             return Some(index.clone());
         }
 
-        // Look up embedding to get distance metric and storage type
-        let emb = self.registry.get_by_code(embedding)?;
-        let distance = emb.distance();
-        let storage_type = emb.storage_type();
-        let dim = emb.dim() as usize;
-
-        // Read persisted EmbeddingSpec to get build params
+        // Read persisted EmbeddingSpec - single source of truth for HNSW params
         let spec = self.get_embedding_spec(embedding)?;
 
-        // Build HNSW config using EmbeddingSpec params (not self.hnsw_config)
-        // This ensures the index matches the stored SpecHash
-        let m = spec.hnsw_m as usize;
-        let config = hnsw::Config {
-            enabled: self.hnsw_config.enabled,
-            dim,
-            m,
-            m_max: 2 * m,
-            m_max_0: 2 * m,
-            ef_construction: spec.hnsw_ef_construction as usize,
-            m_l: 1.0 / (m as f32).ln(),
-            max_level: self.hnsw_config.max_level,
-            batch_threshold: self.hnsw_config.batch_threshold,
-        };
-
-        // Create index with shared navigation cache
-        let index = hnsw::Index::with_storage_type(
+        // Create index using EmbeddingSpec (derives m, m_max, m_l, ef_construction)
+        let index = hnsw::Index::from_spec(
             embedding,
-            distance,
-            storage_type,
-            config,
+            &spec,
+            self.batch_threshold,
             Arc::clone(&self.nav_cache),
         );
 
@@ -420,9 +441,11 @@ impl Processor {
         &self.code_cache
     }
 
-    /// Get the HNSW configuration.
-    pub fn hnsw_config(&self) -> &hnsw::Config {
-        &self.hnsw_config
+    /// Get the HNSW batch threshold.
+    ///
+    /// This is a runtime performance knob that doesn't affect index structure.
+    pub fn batch_threshold(&self) -> usize {
+        self.batch_threshold
     }
 
     /// Get the number of cached HNSW indices.
@@ -749,11 +772,10 @@ impl Processor {
             ));
         }
 
-        // 2. Check HNSW is enabled
-        if !self.hnsw_config.enabled {
-            return Err(anyhow::anyhow!(
-                "HNSW indexing is disabled - search not available"
-            ));
+        // 2. Check HNSW is enabled (test-only: can be disabled for testing)
+        #[cfg(test)]
+        if self.skip_hnsw_for_testing {
+            return Err(anyhow::anyhow!("HNSW disabled for testing"));
         }
 
         // 3. Validate SpecHash (drift detection)
@@ -972,11 +994,10 @@ impl Processor {
             ));
         }
 
-        // 4. Check HNSW is enabled
-        if !self.hnsw_config.enabled {
-            return Err(anyhow::anyhow!(
-                "HNSW indexing is disabled - search not available"
-            ));
+        // 4. Check HNSW is enabled (test-only: can be disabled for testing)
+        #[cfg(test)]
+        if self.skip_hnsw_for_testing {
+            return Err(anyhow::anyhow!("HNSW disabled for testing"));
         }
 
         // 5. Get HNSW index
@@ -1302,11 +1323,11 @@ mod tests {
         let storage = Arc::new(storage);
 
         // Create registry with an embedding spec
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register embedding");
         let embedding_code = embedding.code();
 
@@ -1354,11 +1375,11 @@ mod tests {
         let storage = Arc::new(storage);
 
         // Create registry with 64-dim embedding
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
@@ -1391,11 +1412,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
@@ -1431,11 +1452,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
@@ -1480,11 +1501,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
@@ -1500,11 +1521,10 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_vector_id_reuse() {
+    fn test_delete_vector_soft_delete() {
         use tempfile::TempDir;
 
         use crate::vector::embedding::EmbeddingBuilder;
-        use crate::vector::RaBitQConfig;
         use crate::vector::Distance;
 
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -1512,23 +1532,16 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
-        let embedding_code = embedding.code();
 
-        // Create processor with HNSW disabled to test full delete with ID reuse
-        let mut hnsw_config = hnsw::Config::default();
-        hnsw_config.enabled = false;
-        let processor = Processor::with_config(
-            storage,
-            registry,
-            RaBitQConfig::default(),
-            hnsw_config,
-        );
+        // HNSW is always enabled - soft-delete is used, VecIds are NOT reused
+        // (to prevent HNSW graph corruption from VecId reuse)
+        let processor = Processor::new(storage, registry);
 
         // Insert two vectors
         let vector: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
@@ -1545,26 +1558,34 @@ mod tests {
         assert_eq!(vec_id1, 0);
         assert_eq!(vec_id2, 1);
 
-        // Delete first vector
+        // Delete first vector (soft delete - VecId not freed)
         processor
             .delete_vector(&embedding, ExternalKey::NodeId(id1))
             .expect("Delete should succeed");
 
-        // Insert new vector - should reuse VecId 0
+        // Insert new vector - should get fresh VecId (no reuse with HNSW)
         let id3 = crate::Id::new();
         let vec_id3 = processor
             .insert_vector(&embedding, ExternalKey::NodeId(id3), &vector, false)
             .expect("Insert 3 should succeed");
 
-        assert_eq!(vec_id3, 0, "Should reuse freed VecId 0");
+        assert_eq!(vec_id3, 2, "Should get fresh VecId (no reuse with HNSW enabled)");
 
-        // Next insert should get fresh ID
+        // Next insert should continue with fresh IDs
         let id4 = crate::Id::new();
         let vec_id4 = processor
             .insert_vector(&embedding, ExternalKey::NodeId(id4), &vector, false)
             .expect("Insert 4 should succeed");
 
-        assert_eq!(vec_id4, 2, "Should get next fresh ID");
+        assert_eq!(vec_id4, 3, "Should get next fresh ID");
+
+        // Verify deleted vector is unreachable by external ID
+        // (re-insert with same external key should succeed with new VecId)
+        let vec_id1_new = processor
+            .insert_vector(&embedding, ExternalKey::NodeId(id1), &vector, false)
+            .expect("Re-insert should succeed");
+
+        assert_eq!(vec_id1_new, 4, "Re-insert gets fresh ID, not the deleted one");
     }
 
     #[test]
@@ -1579,24 +1600,15 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
-        let embedding_code = embedding.code();
 
-        // Create processor with HNSW enabled
-        let mut hnsw_config = hnsw::Config::default();
-        hnsw_config.enabled = true;
-        hnsw_config.dim = 64;
-        let processor = Processor::with_config(
-            storage,
-            registry,
-            RaBitQConfig::default(),
-            hnsw_config,
-        );
+        // Create processor (HNSW always enabled, params derived from EmbeddingSpec)
+        let processor = Processor::new(storage, registry);
 
         // Insert several vectors (with index building)
         let mut inserted_ids = Vec::new();
@@ -1650,24 +1662,15 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
-        let embedding_code = embedding.code();
 
-        // Create processor with HNSW enabled
-        let mut hnsw_config = hnsw::Config::default();
-        hnsw_config.enabled = true;
-        hnsw_config.dim = 64;
-        let processor = Processor::with_config(
-            storage,
-            registry,
-            RaBitQConfig::default(),
-            hnsw_config,
-        );
+        // Create processor (HNSW always enabled, params derived from EmbeddingSpec)
+        let processor = Processor::new(storage, registry);
 
         // Insert 5 vectors
         let mut inserted_ids = Vec::new();
@@ -1724,11 +1727,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
@@ -1757,23 +1760,15 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
-        let embedding_code = embedding.code();
 
-        // Create processor with HNSW disabled
-        let mut hnsw_config = hnsw::Config::default();
-        hnsw_config.enabled = false;
-        let processor = Processor::with_config(
-            storage,
-            registry,
-            RaBitQConfig::default(),
-            hnsw_config,
-        );
+        // Create processor with HNSW disabled for testing
+        let processor = Processor::new_without_hnsw_for_testing(storage, registry);
 
         // Try to search when HNSW is disabled
         let query: Vec<f32> = (0..64).map(|i| i as f32 / 64.0).collect();
@@ -1781,7 +1776,7 @@ mod tests {
 
         assert!(result.is_err(), "Should fail when HNSW disabled");
         assert!(
-            result.unwrap_err().to_string().contains("HNSW indexing is disabled"),
+            result.unwrap_err().to_string().contains("HNSW disabled for testing"),
             "Error should mention HNSW disabled"
         );
     }
@@ -1798,25 +1793,16 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         // Use L2 distance - will get Exact strategy (not RaBitQ)
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
-        let embedding_code = embedding.code();
 
-        // Create processor with HNSW enabled
-        let mut hnsw_config = hnsw::Config::default();
-        hnsw_config.enabled = true;
-        hnsw_config.dim = 64;
-        let processor = Processor::with_config(
-            storage,
-            registry,
-            RaBitQConfig::default(),
-            hnsw_config,
-        );
+        // Create processor (HNSW always enabled, params derived from EmbeddingSpec)
+        let processor = Processor::new(storage, registry);
 
         // Insert several vectors
         let mut inserted_ids = Vec::new();
@@ -1877,25 +1863,16 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         // Use Cosine distance - will get RaBitQ strategy
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::Cosine);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
-        let embedding_code = embedding.code();
 
-        // Create processor with HNSW enabled
-        let mut hnsw_config = hnsw::Config::default();
-        hnsw_config.enabled = true;
-        hnsw_config.dim = 64;
-        let processor = Processor::with_config(
-            storage,
-            registry,
-            RaBitQConfig::default(),
-            hnsw_config,
-        );
+        // Create processor (HNSW always enabled, params derived from EmbeddingSpec)
+        let processor = Processor::new(storage, registry);
 
         // Insert several vectors
         let mut inserted_ids = Vec::new();
@@ -1953,12 +1930,12 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         // Create processor
@@ -2001,12 +1978,12 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         // Create processor
@@ -2078,12 +2055,12 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         // Create processor
@@ -2144,12 +2121,12 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage.clone(), registry);
@@ -2192,24 +2169,15 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
-        let embedding_code = embedding.code();
+        let embedding = registry.register(builder).expect("register");
 
-        // Create processor with HNSW enabled
-        let mut hnsw_config = hnsw::Config::default();
-        hnsw_config.enabled = true;
-        hnsw_config.dim = 64;
-        let processor = Processor::with_config(
-            storage.clone(),
-            registry,
-            RaBitQConfig::default(),
-            hnsw_config,
-        );
+        // Create processor (HNSW always enabled, params derived from EmbeddingSpec)
+        let processor = Processor::new(storage.clone(), registry);
 
         // Prepare batch of vectors
         let vectors: Vec<(ExternalKey, Vec<f32>)> = (0..20)
@@ -2275,11 +2243,11 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
@@ -2304,11 +2272,11 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
@@ -2341,11 +2309,11 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
@@ -2379,11 +2347,11 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
@@ -2425,11 +2393,11 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage.clone(), registry);

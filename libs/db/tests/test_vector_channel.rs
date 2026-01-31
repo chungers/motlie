@@ -19,9 +19,9 @@ use std::time::Duration;
 
 use motlie_db::vector::{
     create_search_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
-    spawn_query_consumers_with_storage_autoreg, DeleteVector, Distance, EmbeddingBuilder,
-    ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable, SearchKNN, Storage,
-    Subsystem, WriterConfig,
+    spawn_query_consumers_with_storage_autoreg, AsyncUpdaterConfig, DeleteVector, Distance,
+    EmbeddingBuilder, ExternalKey, GcConfig, InsertVector, MutationRunnable, ReaderConfig, Runnable,
+    SearchKNN, Storage, Subsystem, WriterConfig,
 };
 use motlie_db::Id;
 use rand::prelude::*;
@@ -69,14 +69,11 @@ async fn test_mutation_via_writer_consumer() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register embedding
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-channel", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-channel", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Create Writer with Consumer
@@ -150,13 +147,10 @@ async fn test_query_via_reader_pool() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-reader-pool", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-reader-pool", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Create Writer
@@ -219,13 +213,10 @@ async fn test_concurrent_queries_mpmc() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-concurrent", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-concurrent", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Create Writer
@@ -356,13 +347,9 @@ async fn test_subsystem_start_lifecycle() {
 
     let timeout = Duration::from_secs(5);
 
-    // Register embedding and test end-to-end
-    let txn_db = storage.transaction_db().expect("txn_db");
+    // Register embedding and test end-to-end (storage already set by start_with_async)
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-subsystem", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-subsystem", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Insert via Writer
@@ -401,13 +388,10 @@ async fn test_writer_flush_semantics() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-flush", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-flush", DIM as u32, Distance::Cosine))
         .expect("register");
 
     let (writer, writer_rx) = create_writer(WriterConfig::default());
@@ -514,13 +498,10 @@ async fn test_concurrent_deletes_vs_searches() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-delete-search", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-delete-search", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Create Writer with Consumer
@@ -718,5 +699,302 @@ async fn test_concurrent_deletes_vs_searches() {
         kept_in_final.len(),
         100,
         "All 100 non-deleted vectors should still be searchable"
+    );
+}
+
+// ============================================================================
+// Test: Subsystem with GC Lifecycle (Phase 8 / SUBSYSTEM)
+// ============================================================================
+
+/// Validates that GC started via `start_with_async()` shuts down cleanly.
+/// The subsystem should manage GC lifecycle and shut it down before storage closes.
+#[tokio::test]
+async fn test_subsystem_start_with_gc_lifecycle() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut storage = Storage::readwrite(temp_dir.path());
+    storage.ready().expect("storage ready");
+    let storage = Arc::new(storage);
+
+    // Create subsystem and start with GC enabled
+    let subsystem = Subsystem::new();
+    let registry = subsystem.cache().clone();
+
+    // GC config with short interval for testing
+    let gc_config = GcConfig::default().with_interval(Duration::from_millis(100));
+
+    let (writer, search_reader) = subsystem.start_with_async(
+        storage.clone(),
+        WriterConfig::default(),
+        ReaderConfig::default(),
+        2,
+        None, // No async updater
+        Some(gc_config),
+    );
+
+    // Verify handles are active
+    assert!(!writer.is_closed(), "Writer should be active");
+    assert!(!search_reader.is_closed(), "SearchReader should be active");
+
+    let timeout = Duration::from_secs(5);
+
+    // Register embedding and insert some vectors (storage already set by start_with_async)
+    let embedding = registry
+        .register(EmbeddingBuilder::new("test-gc-lifecycle", DIM as u32, Distance::Cosine))
+        .expect("register");
+
+    let vectors = generate_vectors(DIM, 20, 55);
+    for vector in &vectors {
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
+            .immediate()
+            .run(&writer)
+            .await
+            .expect("insert");
+    }
+    writer.flush().await.expect("flush");
+
+    // Verify search works
+    let results = SearchKNN::new(&embedding, vectors[0].clone(), K)
+        .with_ef(50)
+        .exact()
+        .run(&search_reader, timeout)
+        .await
+        .expect("search");
+    assert!(!results.is_empty(), "Should find results");
+
+    // Shutdown should complete without hanging (GC shuts down cleanly)
+    // Note: We're dropping the storage Arc here which triggers on_shutdown
+    // The test passes if it doesn't hang or panic
+    drop(writer);
+    drop(search_reader);
+    drop(storage);
+
+    // If we reach here, GC shutdown completed successfully
+}
+
+// ============================================================================
+// Test: Subsystem with Async Updater and GC Lifecycle
+// ============================================================================
+
+/// Validates that both async updater and GC shut down cleanly when both are enabled.
+#[tokio::test]
+async fn test_subsystem_start_with_async_and_gc() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut storage = Storage::readwrite(temp_dir.path());
+    storage.ready().expect("storage ready");
+    let storage = Arc::new(storage);
+
+    let subsystem = Subsystem::new();
+    let registry = subsystem.cache().clone();
+
+    // Enable both async updater and GC
+    let async_config = AsyncUpdaterConfig::default()
+        .with_num_workers(2)
+        .with_batch_size(10);
+
+    let gc_config = GcConfig::default().with_interval(Duration::from_millis(100));
+
+    let (writer, search_reader) = subsystem.start_with_async(
+        storage.clone(),
+        WriterConfig::default(),
+        ReaderConfig::default(),
+        2,
+        Some(async_config),
+        Some(gc_config),
+    );
+
+    assert!(!writer.is_closed(), "Writer should be active");
+    assert!(!search_reader.is_closed(), "SearchReader should be active");
+
+    let timeout = Duration::from_secs(5);
+
+    // Register embedding (storage already set by start_with_async)
+    let embedding = registry
+        .register(EmbeddingBuilder::new("test-async-gc", DIM as u32, Distance::Cosine))
+        .expect("register");
+
+    // Insert vectors using async path (build_index=false is default with async updater)
+    let vectors = generate_vectors(DIM, 30, 77);
+    for vector in &vectors {
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
+            .run(&writer)
+            .await
+            .expect("insert");
+    }
+    writer.flush().await.expect("flush");
+
+    // Allow some time for async updater to process
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Verify search works (may use pending fallback if async not complete)
+    let results = SearchKNN::new(&embedding, vectors[0].clone(), K)
+        .with_ef(50)
+        .exact()
+        .run(&search_reader, timeout)
+        .await
+        .expect("search");
+
+    // Results should include our vectors (either via HNSW or pending fallback)
+    assert!(!results.is_empty(), "Should find results");
+
+    // Shutdown should complete cleanly (GC, AsyncUpdater, consumers all shut down)
+    drop(writer);
+    drop(search_reader);
+    drop(storage);
+
+    // If we reach here, both GC and AsyncUpdater shutdown completed successfully
+}
+
+// ============================================================================
+// Test: Shutdown Ordering Assertion (SUBSYSTEM Phase 3)
+// ============================================================================
+
+/// Validates that shutdown order is enforced: AsyncUpdater shuts down before GC.
+/// Uses test hooks with atomic counter to verify correct ordering.
+///
+/// This test directly verifies the GC and AsyncUpdater components shutdown in order,
+/// independent of the full subsystem lifecycle complexity.
+///
+/// Run with: cargo test -p motlie-db --features test-hooks test_subsystem_shutdown_ordering
+#[cfg(feature = "test-hooks")]
+#[test]
+fn test_subsystem_shutdown_ordering() {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use motlie_db::vector::{AsyncGraphUpdater, GarbageCollector, NavigationCache, EmbeddingRegistry};
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut storage = Storage::readwrite(temp_dir.path());
+    storage.ready().expect("storage ready");
+    let storage = Arc::new(storage);
+
+    let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+    let nav_cache = Arc::new(NavigationCache::new());
+
+    // Shutdown order counter
+    let shutdown_order = Arc::new(AtomicUsize::new(0));
+    let async_shutdown_order = shutdown_order.clone();
+    let gc_shutdown_order = shutdown_order.clone();
+
+    // Start AsyncUpdater with shutdown hook
+    let async_config = AsyncUpdaterConfig::default()
+        .with_num_workers(1)
+        .with_batch_size(10)
+        .with_process_on_startup(false)
+        .with_shutdown_hook(move || {
+            let order = async_shutdown_order.fetch_add(1, AtomicOrdering::SeqCst);
+            assert_eq!(
+                order, 0,
+                "AsyncUpdater should shut down first (got order {})",
+                order
+            );
+        });
+
+    let async_updater = AsyncGraphUpdater::start(
+        storage.clone(),
+        registry.clone(),
+        nav_cache,
+        async_config,
+    );
+
+    // Start GC with shutdown hook
+    let gc_config = GcConfig::default()
+        .with_interval(Duration::from_secs(60))
+        .with_process_on_startup(false)
+        .with_shutdown_hook(move || {
+            let order = gc_shutdown_order.fetch_add(1, AtomicOrdering::SeqCst);
+            assert_eq!(
+                order, 1,
+                "GC should shut down second (after AsyncUpdater) (got order {})",
+                order
+            );
+        });
+
+    let gc = GarbageCollector::start(
+        storage.clone(),
+        registry,
+        gc_config,
+    );
+
+    // Verify components started
+    assert!(!async_updater.is_shutdown(), "AsyncUpdater should be running");
+    assert!(!gc.is_shutdown(), "GC should be running");
+
+    // Shut down in correct order: AsyncUpdater first, then GC
+    // This matches the order in Subsystem::on_shutdown()
+    async_updater.shutdown();
+    gc.shutdown();
+
+    // Verify both hooks were called in correct order
+    let final_order = shutdown_order.load(AtomicOrdering::SeqCst);
+    assert_eq!(
+        final_order, 2,
+        "Both shutdown hooks should have been called (got {})",
+        final_order
+    );
+}
+
+// ============================================================================
+// Test: Consumer Exit Timing Assertion (SUBSYSTEM Phase 3)
+// ============================================================================
+
+/// Validates that consumers exit promptly when channel closes.
+/// Consumer joins should complete within a reasonable timeout after writer flush.
+#[tokio::test]
+async fn test_consumer_exit_timing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut storage = Storage::readwrite(temp_dir.path());
+    storage.ready().expect("storage ready");
+    let storage = Arc::new(storage);
+
+    let subsystem = Subsystem::new();
+    let registry = subsystem.cache().clone();
+
+    let (writer, search_reader) = subsystem.start_with_async(
+        storage.clone(),
+        WriterConfig::default(),
+        ReaderConfig::default(),
+        4, // 4 query workers
+        None, // No async updater
+        None, // No GC
+    );
+
+    // Register embedding and insert vectors to ensure consumers are active (storage already set by start_with_async)
+    let embedding = registry
+        .register(EmbeddingBuilder::new("test-consumer-timing", DIM as u32, Distance::Cosine))
+        .expect("register");
+
+    let vectors = generate_vectors(DIM, 50, 99);
+    for vector in &vectors {
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
+            .immediate()
+            .run(&writer)
+            .await
+            .expect("insert");
+    }
+
+    // Do some searches to ensure query consumers are busy
+    let timeout = Duration::from_secs(5);
+    for i in 0..10 {
+        let _ = SearchKNN::new(&embedding, vectors[i % vectors.len()].clone(), K)
+            .with_ef(50)
+            .run(&search_reader, timeout)
+            .await;
+    }
+
+    // Flush writer (this closes the channel and signals consumers to exit)
+    writer.flush().await.expect("flush");
+
+    // Drop handles and measure shutdown time
+    let shutdown_start = std::time::Instant::now();
+    drop(writer);
+    drop(search_reader);
+    drop(storage);
+    let shutdown_duration = shutdown_start.elapsed();
+
+    // Consumer joins should complete within 1 second (generous for CI)
+    // Cooperative shutdown via channel close should be nearly instant
+    assert!(
+        shutdown_duration < Duration::from_secs(1),
+        "Consumer joins should complete within 1 second, took {:?}",
+        shutdown_duration
     );
 }

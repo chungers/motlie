@@ -27,15 +27,15 @@ use std::thread;
 use std::time::Instant;
 
 use motlie_db::vector::benchmark::ConcurrentMetrics;
-use motlie_db::vector::hnsw::{self, Config as HnswConfig};
-use motlie_db::vector::schema::{EmbeddingCode, VectorCfKey, VectorCfValue, Vectors};
+use motlie_db::vector::hnsw;
+use motlie_db::vector::schema::{EmbeddingCode, EmbeddingSpec, VectorCfKey, VectorCfValue, Vectors};
 use motlie_db::vector::reader::{
     create_search_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig,
 };
 use motlie_db::vector::{
     cache::NavigationCache, create_writer, spawn_mutation_consumer_with_storage_autoreg,
     DeleteVector, Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, Storage,
-    WriterConfig,
+    VectorElementType, WriterConfig,
 };
 use motlie_db::rocksdb::ColumnFamily;
 use motlie_db::Id;
@@ -43,6 +43,20 @@ use rand::prelude::*;
 use tempfile::TempDir;
 
 const DIM: usize = 64;
+
+/// Helper: Create test EmbeddingSpec for HNSW index
+fn make_test_spec(dim: usize, m: usize, ef_construction: usize) -> EmbeddingSpec {
+    EmbeddingSpec {
+        model: "test".to_string(),
+        dim: dim as u32,
+        distance: Distance::L2,
+        storage_type: VectorElementType::F32,
+        hnsw_m: m as u16,
+        hnsw_ef_construction: ef_construction as u16,
+        rabitq_bits: 1,
+        rabitq_seed: 42,
+    }
+}
 const TEST_EMBEDDING: EmbeddingCode = 1;
 const ID_REVERSE_CF: &str = "vector/id_reverse";
 
@@ -296,18 +310,11 @@ fn test_snapshot_isolation_insert_during_search() {
 
     // Create HNSW index
     let nav_cache = Arc::new(NavigationCache::new());
-    let hnsw_config = HnswConfig {
-        dim: DIM,
-        m: 16,
-        m_max: 32,
-        m_max_0: 32,
-        ef_construction: 100,
-        ..Default::default()
-    };
-    let index = Arc::new(hnsw::Index::new(
+    let spec = make_test_spec(DIM, 16, 100);
+    let index = Arc::new(hnsw::Index::from_spec(
         TEST_EMBEDDING,
-        Distance::L2,
-        hnsw_config,
+        &spec,
+        64, // batch_threshold
         nav_cache,
     ));
 

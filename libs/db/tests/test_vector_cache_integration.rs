@@ -16,7 +16,7 @@ use motlie_db::vector::benchmark::{compute_recall, LaionSubset, LAION_EMBEDDING_
 use motlie_db::vector::quantization::RaBitQ;
 use motlie_db::vector::schema::Vectors;
 use motlie_db::vector::{
-    hnsw, BinaryCodeCache, Distance, NavigationCache, Storage, VecId,
+    hnsw, BinaryCodeCache, Distance, EmbeddingSpec, NavigationCache, Storage, VecId,
     VectorElementType,
 };
 use motlie_db::vector::hnsw::insert;
@@ -81,20 +81,21 @@ fn build_index_with_navigation(
     let nav_cache = Arc::new(NavigationCache::new());
     let embedding_code = 1;
 
-    let config = hnsw::Config {
-        dim,
-        m,
-        m_max: m * 2,
-        m_max_0: m * 2,
-        ef_construction,
-        ..Default::default()
-    };
-
-    let index = hnsw::Index::with_storage_type(
-        embedding_code,
+    let spec = EmbeddingSpec {
+        model: "test".to_string(),
+        dim: dim as u32,
         distance,
         storage_type,
-        config,
+        hnsw_m: m as u16,
+        hnsw_ef_construction: ef_construction as u16,
+        rabitq_bits: 1,
+        rabitq_seed: 42,
+    };
+
+    let index = hnsw::Index::from_spec(
+        embedding_code,
+        &spec,
+        64, // batch_threshold
         nav_cache.clone(),
     );
 

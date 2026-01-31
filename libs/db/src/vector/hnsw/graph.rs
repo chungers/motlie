@@ -380,7 +380,7 @@ pub fn greedy_search_layer(
 
         // Use batch for larger neighbor sets, individual for small
         // Threshold is configurable - default 64 effectively disables batching
-        if neighbors.len() as u64 >= index.config().batch_threshold as u64 {
+        if neighbors.len() as u64 >= index.batch_threshold() as u64 {
             let neighbor_ids: Vec<VecId> = neighbors.iter().collect();
             let distances = batch_distances(index, storage, query, &neighbor_ids)?;
             for (neighbor, dist) in distances {

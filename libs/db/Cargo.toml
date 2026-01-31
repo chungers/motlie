@@ -19,6 +19,8 @@ parquet = ["dep:parquet", "dep:arrow"]
 hdf5 = ["dep:hdf5"]
 # All benchmark formats including HDF5 (requires system libhdf5-dev)
 benchmark-full = ["benchmark", "hdf5"]
+# Test hooks for integration tests (shutdown ordering, etc.)
+test-hooks = []
 
 [dependencies]
 motlie-core = { path = "../core" }

@@ -68,9 +68,6 @@ use crate::vector::Storage;
 /// - **`num_workers`**: More workers improve throughput but compete for locks.
 ///   Typically 2-4 workers is optimal. Scale with CPU cores.
 ///
-/// - **`ef_construction`**: Higher values improve graph quality but slow down
-///   edge building. Match your HNSW index config (typically 100-200).
-///
 /// - **`process_on_startup`**: Enable to drain any pending items from a previous
 ///   crash. Disable only for testing or if you handle recovery elsewhere.
 ///
@@ -79,7 +76,7 @@ use crate::vector::Storage;
 ///
 /// - **`metrics_interval`**: How often to log backlog depth and drain rate.
 ///   Set to None to disable periodic logging. Default: 10s
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AsyncUpdaterConfig {
     /// Maximum vectors per worker batch.
     ///
@@ -98,11 +95,6 @@ pub struct AsyncUpdaterConfig {
     /// Each worker processes batches independently with round-robin
     /// embedding selection for fairness. Default: 2
     pub num_workers: usize,
-
-    /// ef_construction parameter for greedy search during edge building.
-    ///
-    /// Higher values improve recall but slow down processing. Default: 200
-    pub ef_construction: usize,
 
     /// Whether to drain pending queue on startup.
     ///
@@ -128,19 +120,53 @@ pub struct AsyncUpdaterConfig {
     /// Workers log pending queue size and processing rate at this interval.
     /// Set to None to disable periodic logging. Default: Some(10s)
     pub metrics_interval: Option<Duration>,
+
+    /// Test-only shutdown hook for verifying shutdown ordering.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub shutdown_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
+impl std::fmt::Debug for AsyncUpdaterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncUpdaterConfig")
+            .field("batch_size", &self.batch_size)
+            .field("batch_timeout", &self.batch_timeout)
+            .field("num_workers", &self.num_workers)
+            .field("process_on_startup", &self.process_on_startup)
+            .field("idle_sleep", &self.idle_sleep)
+            .field("backpressure_threshold", &self.backpressure_threshold)
+            .field("metrics_interval", &self.metrics_interval)
+            .finish()
+    }
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
 impl Default for AsyncUpdaterConfig {
     fn default() -> Self {
         Self {
             batch_size: 100,
             batch_timeout: Duration::from_millis(100),
             num_workers: 2,
-            ef_construction: 200,
             process_on_startup: true,
             idle_sleep: Duration::from_millis(10),
             backpressure_threshold: 10000,
             metrics_interval: Some(Duration::from_secs(10)),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Default for AsyncUpdaterConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 100,
+            batch_timeout: Duration::from_millis(100),
+            num_workers: 2,
+            process_on_startup: true,
+            idle_sleep: Duration::from_millis(10),
+            backpressure_threshold: 10000,
+            metrics_interval: Some(Duration::from_secs(10)),
+            shutdown_hook: None,
         }
     }
 }
@@ -166,12 +192,6 @@ impl AsyncUpdaterConfig {
     /// Set number of background worker threads.
     pub fn with_num_workers(mut self, num_workers: usize) -> Self {
         self.num_workers = num_workers;
-        self
-    }
-
-    /// Set ef_construction for greedy search.
-    pub fn with_ef_construction(mut self, ef: usize) -> Self {
-        self.ef_construction = ef;
         self
     }
 
@@ -213,6 +233,16 @@ impl AsyncUpdaterConfig {
     /// Disable periodic metrics logging.
     pub fn no_metrics_logging(mut self) -> Self {
         self.metrics_interval = None;
+        self
+    }
+
+    /// Set shutdown hook for testing shutdown ordering.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn with_shutdown_hook<F>(mut self, hook: F) -> Self
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.shutdown_hook = Some(Arc::new(hook));
         self
     }
 }
@@ -336,6 +366,12 @@ impl AsyncGraphUpdater {
             if let Err(e) = worker.join() {
                 error!(worker_id = i, "Worker thread panicked: {:?}", e);
             }
+        }
+
+        // Call test shutdown hook if configured
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(hook) = &self.config.shutdown_hook {
+            hook();
         }
 
         info!(
@@ -683,7 +719,7 @@ impl AsyncGraphUpdater {
         storage: &Storage,
         registry: &EmbeddingRegistry,
         nav_cache: &Arc<NavigationCache>,
-        config: &AsyncUpdaterConfig,
+        _config: &AsyncUpdaterConfig,
         pending_key: &[u8],
         embedding: EmbeddingCode,
         vec_id: VecId,
@@ -752,7 +788,7 @@ impl AsyncGraphUpdater {
         let vector = Vectors::value_from_bytes_typed(&vec_bytes, storage_type)?;
 
         // 3. Build HNSW index
-        // Get hnsw_m from persisted EmbeddingSpec (authoritative for build params)
+        // Get EmbeddingSpec from storage (single source of truth for HNSW params)
         let specs_cf = txn_db
             .cf_handle(EmbeddingSpecs::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("EmbeddingSpecs CF not found"))?;
@@ -761,24 +797,13 @@ impl AsyncGraphUpdater {
             .get_cf(&specs_cf, EmbeddingSpecs::key_to_bytes(&spec_key))?
             .ok_or_else(|| anyhow::anyhow!("EmbeddingSpec not found for {}", embedding))?;
         let embedding_spec = EmbeddingSpecs::value_from_bytes(&spec_bytes)?.0;
-        let m = embedding_spec.hnsw_m as usize;
-        let hnsw_config = hnsw::Config {
-            enabled: true,
-            dim: emb.dim() as usize,
-            m,
-            m_max: m * 2,
-            m_max_0: m * 2,
-            ef_construction: config.ef_construction,
-            m_l: 1.0 / (m as f32).ln(),
-            max_level: None,
-            batch_threshold: 64, // Default, effectively disables batching
-        };
 
-        let index = hnsw::Index::with_storage_type(
+        // Create HNSW index using EmbeddingSpec as single source of truth
+        // All structural params (m, m_max, ef_construction) derived from spec
+        let index = hnsw::Index::from_spec(
             embedding,
-            emb.distance(),
-            storage_type,
-            hnsw_config,
+            &embedding_spec,
+            64, // batch_threshold: runtime knob, not persisted
             Arc::clone(nav_cache),
         );
 
@@ -872,7 +897,6 @@ mod tests {
         assert_eq!(config.batch_size, 100);
         assert_eq!(config.batch_timeout, Duration::from_millis(100));
         assert_eq!(config.num_workers, 2);
-        assert_eq!(config.ef_construction, 200);
         assert!(config.process_on_startup);
         assert_eq!(config.idle_sleep, Duration::from_millis(10));
         // Task 7.8: Backpressure and metrics
@@ -886,7 +910,6 @@ mod tests {
             .with_batch_size(200)
             .with_batch_timeout(Duration::from_millis(50))
             .with_num_workers(4)
-            .with_ef_construction(100)
             .with_process_on_startup(false)
             .with_idle_sleep(Duration::from_millis(5))
             .with_backpressure_threshold(5000)
@@ -895,7 +918,6 @@ mod tests {
         assert_eq!(config.batch_size, 200);
         assert_eq!(config.batch_timeout, Duration::from_millis(50));
         assert_eq!(config.num_workers, 4);
-        assert_eq!(config.ef_construction, 100);
         assert!(!config.process_on_startup);
         assert_eq!(config.idle_sleep, Duration::from_millis(5));
         // Task 7.8: Backpressure and metrics builder
@@ -925,7 +947,7 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let nav_cache = Arc::new(NavigationCache::new());
 
         (storage, registry, nav_cache)
@@ -933,14 +955,12 @@ mod tests {
 
     /// Register a test embedding
     fn register_embedding(
-        storage: &Storage,
         registry: &EmbeddingRegistry,
         dim: u32,
     ) -> crate::vector::embedding::Embedding {
-        let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", dim, Distance::L2);
         registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register embedding")
     }
 
@@ -963,7 +983,7 @@ mod tests {
         let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor (default config)
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -997,7 +1017,7 @@ mod tests {
         let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1054,7 +1074,7 @@ mod tests {
         // Phase 1: Insert vector, then "crash" (drop storage without draining)
         {
             let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
-            let embedding = register_embedding(&storage, &registry, 64);
+            let embedding = register_embedding(&registry, 64);
             embedding_code = embedding.code();
 
             let processor = Processor::new(storage.clone(), registry.clone());
@@ -1076,8 +1096,7 @@ mod tests {
             let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
             // Re-load embeddings from storage (needed after restart)
-            let txn_db = storage.transaction_db().expect("Failed to get txn_db");
-            registry.prewarm(&txn_db).expect("Failed to prewarm registry");
+            registry.prewarm().expect("Failed to prewarm registry");
             let embedding = registry
                 .get_by_code(embedding_code)
                 .expect("Embedding should exist after restart");
@@ -1117,7 +1136,7 @@ mod tests {
         let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1157,7 +1176,7 @@ mod tests {
         let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor
         let processor = Arc::new(Processor::new(storage.clone(), registry.clone()));
@@ -1213,7 +1232,7 @@ mod tests {
         let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor and insert some vectors
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1276,7 +1295,7 @@ mod tests {
         let (storage, registry, nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor and insert vectors
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1317,7 +1336,7 @@ mod tests {
         let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor and insert many vectors (more than default limit)
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1359,7 +1378,7 @@ mod tests {
         let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
 
         // Create processor with backpressure threshold of 1
         let processor = Processor::new(storage.clone(), registry.clone());
@@ -1428,7 +1447,7 @@ mod tests {
         let (storage, registry, _nav_cache) = setup_test_env(&temp_dir);
 
         // Register embedding (64 dimensions for faster test)
-        let embedding = register_embedding(&storage, &registry, 64);
+        let embedding = register_embedding(&registry, 64);
         let processor = Processor::new(storage.clone(), registry.clone());
 
         const NUM_VECTORS: usize = 100;

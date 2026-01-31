@@ -34,7 +34,7 @@ All column families use the `vector/` prefix. Keys use direct byte serialization
 
 ### Common Types
 
-```rust
+```rust,ignore
 pub(crate) type EmbeddingCode = u64;         // FK to EmbeddingSpecs (primary key)
 pub(crate) type VecId = u32;                 // Internal vector index
 pub(crate) type HnswLayer = u8;              // HNSW layer index (0 = base)
@@ -69,7 +69,7 @@ For a domain entity `Foo`:
 
 ## Usage
 
-```rust
+```rust,ignore
 use motlie_db::vector::{Storage, EmbeddingBuilder, Distance};
 
 // Create storage
@@ -95,7 +95,7 @@ Some column families store multiple field types under a single embedding space, 
 
 Traditional approach with magic constants:
 
-```rust
+```rust,ignore
 // Magic constants that must stay in sync
 pub mod graph_meta_field {
     pub const ENTRY_POINT: u8 = 0;
@@ -124,7 +124,7 @@ Issues:
 
 Single enum type used for both key discrimination and value storage:
 
-```rust
+```rust,ignore
 /// Single enum for both key discrimination and value storage.
 ///
 /// For keys: variant determines which field, inner value is ignored.
@@ -163,7 +163,7 @@ pub(crate) struct GraphMetaCfValue(pub(crate) GraphMetaValue);
 
 Helper methods hide placeholder values used in keys:
 
-```rust
+```rust,ignore
 impl GraphMetaCfKey {
     pub fn entry_point(embedding_code: EmbeddingCode) -> Self {
         Self(embedding_code, GraphMetaField::EntryPoint(0)) // placeholder
@@ -187,7 +187,7 @@ impl GraphMetaCfKey {
 
 Key serialization extracts only the discriminant:
 
-```rust
+```rust,ignore
 pub fn key_to_bytes(key: &GraphMetaCfKey) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(9);
     bytes.extend_from_slice(&key.0.to_be_bytes());
@@ -212,7 +212,7 @@ pub fn key_from_bytes(bytes: &[u8]) -> Result<GraphMetaCfKey> {
 
 Value deserialization uses the key's variant for type info:
 
-```rust
+```rust,ignore
 pub fn value_from_bytes(key: &GraphMetaCfKey, bytes: &[u8]) -> Result<GraphMetaCfValue> {
     let field = match &key.1 {
         GraphMetaField::EntryPoint(_) => {
@@ -231,7 +231,7 @@ pub fn value_from_bytes(key: &GraphMetaCfKey, bytes: &[u8]) -> Result<GraphMetaC
 
 **Writing a value:**
 
-```rust
+```rust,ignore
 let key = GraphMetaCfKey::entry_point(embedding_code);
 let value = GraphMetaCfValue(GraphMetaField::EntryPoint(42)); // actual vec_id
 
@@ -242,7 +242,7 @@ db.put_cf(&cf, key_bytes, value_bytes)?;
 
 **Reading a value:**
 
-```rust
+```rust,ignore
 let key = GraphMetaCfKey::entry_point(embedding_code);
 let key_bytes = GraphMeta::key_to_bytes(&key);
 
@@ -257,7 +257,7 @@ if let Some(value_bytes) = db.get_cf(&cf, &key_bytes)? {
 
 **Iterating all fields for an embedding:**
 
-```rust
+```rust,ignore
 let prefix = embedding_code.to_be_bytes();
 for (key_bytes, value_bytes) in db.prefix_iterator_cf(&cf, &prefix) {
     let key = GraphMeta::key_from_bytes(&key_bytes)?;

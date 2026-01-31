@@ -99,13 +99,13 @@ async fn test_vector_workflow_with_laion_clip_style_data() {
 
     // Get registry from storage cache
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register embedding with Cosine distance (required for RaBitQ)
     let builder =
         EmbeddingBuilder::new("clip-vit-b32", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
     let embedding = registry
-        .register(builder, &txn_db)
+        .register(builder)
         .expect("register embedding");
 
     println!(
@@ -361,12 +361,12 @@ async fn test_vector_batch_insert_workflow() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register embedding
     let builder =
         EmbeddingBuilder::new("clip-vit-b32", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
-    let embedding = registry.register(builder, &txn_db).expect("register");
+    let embedding = registry.register(builder).expect("register");
 
     // Create writer and spawn mutation consumer
     let (writer, writer_rx) = create_writer(WriterConfig::default());
@@ -430,12 +430,12 @@ async fn test_search_reader_strategy_selection() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register Cosine embedding (required for RaBitQ)
     let builder =
         EmbeddingBuilder::new("clip-vit-b32", LAION_EMBEDDING_DIM as u32, Distance::Cosine);
-    let embedding = registry.register(builder, &txn_db).expect("register");
+    let embedding = registry.register(builder).expect("register");
 
     // Create writer and spawn mutation consumer
     let (writer, writer_rx) = create_writer(WriterConfig::default());

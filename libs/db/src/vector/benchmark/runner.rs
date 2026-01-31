@@ -15,8 +15,8 @@ use super::dataset::{LaionDataset, LaionSubset, LAION_EMBEDDING_DIM};
 use super::metrics::{compute_recall, percentile, LatencyStats};
 use crate::rocksdb::ColumnFamily;
 use crate::vector::{
-    hnsw, BinaryCodeCache, Distance, EmbeddingCode, NavigationCache, RaBitQ, Storage, VecId,
-    VectorCfKey, VectorElementType, Vectors,
+    hnsw, schema::EmbeddingSpec, BinaryCodeCache, Distance, EmbeddingCode, NavigationCache, RaBitQ,
+    Storage, VecId, VectorCfKey, VectorElementType, Vectors,
 };
 
 /// Experiment configuration.
@@ -283,6 +283,7 @@ impl RabitqExperimentResult {
 }
 
 /// Run all experiments according to configuration.
+#[allow(deprecated)]
 pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentResult>> {
     // Load full dataset
     let max_vectors = *config.scales.iter().max().unwrap_or(&200_000);
@@ -327,18 +328,12 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
             "\nBuilding HNSW index (M={}, ef_construction={})...",
             config.m, config.ef_construction
         );
-        let hnsw_config = hnsw::Config {
-            dim: config.dim,
-            m: config.m,
-            m_max: config.m * 2,
-            m_max_0: config.m * 2,
-            ef_construction: config.ef_construction,
-            ..Default::default()
-        };
         let (index, build_time) = build_hnsw_index(
             &storage,
             &subset.db_vectors,
-            hnsw_config,
+            config.dim,
+            config.m,
+            config.ef_construction,
             config.distance,
             config.storage_type,
         )?;
@@ -391,20 +386,28 @@ pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentRe
 pub fn build_hnsw_index(
     storage: &Storage,
     vectors: &[Vec<f32>],
-    hnsw_config: hnsw::Config,
+    dim: usize,
+    m: usize,
+    ef_construction: usize,
     distance: Distance,
     storage_type: VectorElementType,
 ) -> Result<(hnsw::Index, f64)> {
     let nav_cache = Arc::new(NavigationCache::new());
     let embedding_code: EmbeddingCode = 1;
 
-    let index = hnsw::Index::with_storage_type(
-        embedding_code,
+    // Create EmbeddingSpec with HNSW parameters
+    let spec = EmbeddingSpec {
+        model: "benchmark".to_string(),
+        dim: dim as u32,
         distance,
         storage_type,
-        hnsw_config,
-        nav_cache,
-    );
+        hnsw_m: m as u16,
+        hnsw_ef_construction: ef_construction as u16,
+        rabitq_bits: 1,
+        rabitq_seed: 42,
+    };
+
+    let index = hnsw::Index::from_spec(embedding_code, &spec, 64, nav_cache);
 
     // Store vectors in RocksDB using transaction
     let txn_db = storage.transaction_db()?;

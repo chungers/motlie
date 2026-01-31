@@ -3,6 +3,10 @@
 **Note:** Historical references to ULID in this document correspond to
 `ExternalKey::NodeId` after IDMAP. ID mappings are now ExternalKey ↔ VecId.
 
+**API Note (2026-01-30):** `hnsw::Config` has been deleted. All HNSW parameters
+are now derived from `EmbeddingSpec`. See [CONFIG.md](./CONFIG.md) for details.
+References to `hnsw::Config` in this document are historical.
+
 **CODEX Certification:** ✅ Phase 5 complete as of 2026-01-17 (commit `f9dda759c9acec446f41b22b01958cc9a9b6b67f`).
 
 **Status:** ✅ Complete (All Tasks 5.0-5.11)
@@ -2404,6 +2408,43 @@ spawn_mutation_consumer_with_storage(...);
 ---
 
 **Review Note:** Start-managed lifecycle wiring looks correct. Writer is registered for shutdown flush and consumers are spawned with a shared Processor. No correctness issues found in this addition.
+
+---
+
+### Update: Extended Lifecycle Management (January 2026)
+
+The `Subsystem::start_with_async()` method now supports additional lifecycle components:
+
+```rust
+let (writer, reader) = subsystem.start_with_async(
+    storage,
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,
+    Some(async_config),  // Optional async graph updater
+    Some(gc_config),     // Optional garbage collector
+);
+```
+
+**Shutdown Order:**
+
+```
+on_shutdown():
+  1. Writer.flush()          - Flush pending mutations (may add to pending queue)
+  2. AsyncUpdater.shutdown() - Drain pending queue, build remaining edges
+  3. Join consumer tasks     - Cooperative shutdown via channel close
+  4. GC.shutdown()           - Stop background cleanup (last)
+  5. (storage closes)        - RocksDB cleanup
+```
+
+> **Note:** Writer must flush BEFORE AsyncUpdater shuts down. GC shuts down last
+> since it has no dependencies on other components and can continue cleaning.
+
+**New fields in `Subsystem`:**
+- `gc: RwLock<Option<GarbageCollector>>` - GC handle for lifecycle management
+- `consumer_handles: RwLock<Vec<tokio::task::JoinHandle<Result<()>>>>` - Consumer task handles
+
+See `docs/SUBSYSTEM.md` for the full implementation plan and acceptance criteria.
 
 ---
 
