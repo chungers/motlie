@@ -866,7 +866,7 @@ fn test_subsystem_shutdown_ordering() {
     storage.ready().expect("storage ready");
     let storage = Arc::new(storage);
 
-    let registry = Arc::new(EmbeddingRegistry::new());
+    let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
     let nav_cache = Arc::new(NavigationCache::new());
 
     // Shutdown order counter

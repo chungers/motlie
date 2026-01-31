@@ -66,7 +66,7 @@ garbage collection.
 | T1.1 | Add `gc: RwLock<Option<GarbageCollector>>` field to `Subsystem` | `subsystem.rs` | Low |
 | T1.2 | Add `GcConfig` parameter to `start_with_async()` signature | `subsystem.rs` | Low |
 | T1.3 | Start GC when config provided, store handle in subsystem | `subsystem.rs` | Medium |
-| T1.4 | In `on_shutdown()`, call `gc.shutdown()` before writer flush | `subsystem.rs` | Low |
+| T1.4 | In `on_shutdown()`, call `gc.shutdown()` as part of shutdown ordering (after AsyncUpdater/join) | `subsystem.rs` | Low |
 | ~~T1.5~~ | ~~Add `gc_config()` accessor method~~ | ~~`subsystem.rs`~~ | ~~DROPPED~~ |
 | T1.5 | Re-export `GcConfig` from `subsystem.rs` for convenience | `mod.rs` | Low |
 
@@ -155,7 +155,9 @@ on_shutdown():
 - [x] GC is shut down exactly once and before storage shutdown
 - [x] Shutdown order: Writer flush → AsyncUpdater → Join consumers → GC
 - [x] No compilation regressions (update all `start_with_async()` call sites)
-- [x] Unit test: verify shutdown ordering explicitly (Writer → AsyncUpdater → Join → GC)
+- [x] Unit test: verify shutdown ordering explicitly (AsyncUpdater → GC via test hooks)
+
+> (codex, 2026-01-31 00:39 UTC, PARTIAL) Ordering test currently asserts AsyncUpdater → GC only; it does not validate writer flush or consumer-join ordering. Consider narrowing the checklist or adding explicit hooks if full ordering is required.
 
 > (claude, 2026-01-30 20:30 UTC, IMPLEMENTED) Phase 1 complete. GC lifecycle integrated into Subsystem:
 > - `gc: RwLock<Option<GarbageCollector>>` field added
@@ -406,6 +408,7 @@ Rationale:
 > - ✅ `test_consumer_exit_timing`: Verifies consumers exit within 1 second after channel close
 > - Run with: `cargo test -p motlie-db --features test-hooks test_subsystem_shutdown_ordering test_consumer_exit_timing`
 > (codex, 2026-01-31 00:39 UTC, ACCEPT) Verified tests and hooks exist; ordering test matches async-updater→GC sequence used in `Subsystem::on_shutdown()`. Project complete.
+> (codex, 2026-01-31 00:39 UTC, ACCEPT) Project complete; code, docs, and tests are aligned after storage-in-registry refactor and shutdown-order fixes.
 
 ---
 
