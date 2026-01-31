@@ -1683,6 +1683,22 @@ let results = SearchKNN::new(&embedding, query_vec, 10)
     .with_ef(100)
     .run(&reader, Duration::from_secs(5))
     .await?;
+
+// Assume embedding_cosine uses Distance::Cosine, embedding_l2 uses Distance::L2
+
+// Example: Cosine embedding (auto-selects RaBitQ) with higher rerank factor
+let results = SearchKNN::new(&embedding_cosine, query_vec, 10)
+    .with_ef(200)
+    .with_rerank_factor(20) // k * 20 candidates re-ranked
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Example: Exact L2 search (forces exact even if Cosine is available)
+let results = SearchKNN::new(&embedding_l2, query_vec, 10)
+    .with_ef(100)
+    .exact()
+    .run(&reader, Duration::from_secs(5))
+    .await?;
 ```
 
 **Notes:**
