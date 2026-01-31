@@ -21,9 +21,9 @@ use motlie_db::vector::benchmark::{
 use motlie_db::vector::{
     create_search_reader_with_storage, create_writer, hnsw, spawn_mutation_consumer_with_storage_autoreg,
     spawn_query_consumers_with_storage_autoreg, AsyncGraphUpdater, AsyncUpdaterConfig,
-    BinaryCodeCache, Distance, EmbeddingBuilder, EmbeddingCode, IdAllocator, InsertVectorBatch,
-    NavigationCache, RaBitQ, ReaderConfig, Runnable, SearchKNN, Storage, VecId, VectorCfKey,
-    VectorElementType, Vectors, WriterConfig,
+    BinaryCodeCache, Distance, EmbeddingBuilder, EmbeddingCode, EmbeddingRegistry, IdAllocator,
+    InsertVectorBatch, NavigationCache, RaBitQ, ReaderConfig, Runnable, SearchKNN, Storage, VecId,
+    VectorCfKey, VectorElementType, Vectors, WriterConfig,
 };
 use motlie_db::rocksdb::{ColumnFamily, ColumnFamilySerde};
 use motlie_db::Id;
@@ -249,7 +249,6 @@ pub async fn index(args: IndexArgs) -> Result<()> {
         let async_config = AsyncUpdaterConfig::new()
             .with_num_workers(args.async_workers)
             .with_batch_size(args.batch_size)
-            .with_ef_construction(args.ef_construction)
             .with_process_on_startup(true);
         let registry = storage.cache().clone();
         let nav_cache = Arc::new(NavigationCache::new());
@@ -304,7 +303,6 @@ pub async fn index(args: IndexArgs) -> Result<()> {
             let async_config = AsyncUpdaterConfig::new()
                 .with_num_workers(args.async_workers)
                 .with_batch_size(100)
-                .with_ef_construction(args.ef_construction)
                 .with_process_on_startup(false);
             let registry = storage.cache().clone();
             let nav_cache = Arc::new(NavigationCache::new());
@@ -1248,20 +1246,21 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
     let embedding_code: EmbeddingCode = 1;
     let storage_type = VectorElementType::F16;
 
-    let hnsw_config = hnsw::Config {
-        dim,
-        m: args.m,
-        m_max: args.m * 2,
-        m_max_0: args.m * 2,
-        ef_construction: args.ef_construction,
-        ..Default::default()
-    };
-
-    let index = hnsw::Index::with_storage_type(
-        embedding_code,
+    let spec = EmbeddingSpec {
+        model: "bench".to_string(),
+        dim: dim as u32,
         distance,
         storage_type,
-        hnsw_config.clone(),
+        hnsw_m: args.m as u16,
+        hnsw_ef_construction: args.ef_construction as u16,
+        rabitq_bits: 1,
+        rabitq_seed: 42,
+    };
+
+    let index = hnsw::Index::from_spec(
+        embedding_code,
+        &spec,
+        1000, // batch_threshold
         nav_cache.clone(),
     );
 
@@ -2130,13 +2129,25 @@ fn embeddings_list(args: EmbeddingsListArgs) -> Result<()> {
 }
 
 fn embeddings_inspect(args: EmbeddingsInspectArgs) -> Result<()> {
-    let (code, spec) = resolve_embedding_spec(
-        &args.db_path,
-        args.code,
-        args.model.as_deref(),
-        args.dim,
-        args.distance.as_deref(),
-    )?;
+    // Use registry point lookup when --code is provided for efficiency
+    let (code, spec) = if let Some(code) = args.code {
+        let mut storage = Storage::readwrite(&args.db_path);
+        storage.ready()?;
+        let registry = EmbeddingRegistry::new(Arc::new(storage));
+        let spec = registry
+            .get_spec_by_code(code)?
+            .ok_or_else(|| anyhow::anyhow!("No embedding found for code {}", code))?;
+        (code, spec)
+    } else {
+        // Fall back to resolve_embedding_spec for model/dim/distance lookups
+        resolve_embedding_spec(
+            &args.db_path,
+            None,
+            args.model.as_deref(),
+            args.dim,
+            args.distance.as_deref(),
+        )?
+    };
 
     println!("Code: {}", code);
     println!("Model: {}", spec.model);

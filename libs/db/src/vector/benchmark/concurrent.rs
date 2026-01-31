@@ -788,7 +788,6 @@ impl ConcurrentBenchmark {
 
         // Register embedding for this benchmark
         let registry = storage.cache().clone();
-        let txn_db = storage.transaction_db()?;
 
         let embedding_name = format!("bench-{}", embedding_code);
         let embedding = registry
@@ -796,7 +795,6 @@ impl ConcurrentBenchmark {
                 EmbeddingBuilder::new(&embedding_name, self.config.vector_dim as u32, self.config.distance)
                     .with_hnsw_m(self.config.hnsw_m as u16)
                     .with_hnsw_ef_construction(self.config.hnsw_ef_construction as u16),
-                &txn_db,
             )?;
 
         // Create Writer (MPSC) - all insert producers share this

@@ -18,7 +18,7 @@ use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, MutationCodec};
 use super::distance::Distance;
 use super::embedding::{Embedding, EmbeddingBuilder};
 use super::mutation::AddEmbeddingSpec;
-use super::schema::EmbeddingSpecs;
+use super::schema::{EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs};
 
 // ============================================================================
 // EmbeddingFilter
@@ -351,6 +351,40 @@ impl EmbeddingRegistry {
     /// Get embedding by code (for deserialization from storage).
     pub fn get_by_code(&self, code: u64) -> Option<Embedding> {
         self.by_code.get(&code).map(|e| e.clone())
+    }
+
+    /// Get the full EmbeddingSpec by code (reads from storage).
+    ///
+    /// Unlike `get_by_code()` which returns a lightweight `Embedding` handle,
+    /// this method reads the full specification from RocksDB including HNSW
+    /// and RaBitQ build parameters.
+    ///
+    /// # Returns
+    /// - `Ok(Some(spec))` if found
+    /// - `Ok(None)` if code not found in storage
+    /// - `Err` if storage access fails
+    ///
+    /// # Fields in EmbeddingSpec
+    /// - `model`, `dim`, `distance`, `storage_type` (basic fields)
+    /// - `hnsw_m`, `hnsw_ef_construction` (HNSW build params)
+    /// - `rabitq_bits`, `rabitq_seed` (RaBitQ build params)
+    pub fn get_spec_by_code(&self, code: u64) -> Result<Option<EmbeddingSpec>> {
+        let storage = self.storage()?;
+        let db = storage.transaction_db()?;
+        let cf = db
+            .cf_handle(EmbeddingSpecs::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("CF {} not found", EmbeddingSpecs::CF_NAME))?;
+
+        let key = EmbeddingSpecCfKey(code);
+        let key_bytes = EmbeddingSpecs::key_to_bytes(&key);
+
+        match db.get_cf(&cf, &key_bytes)? {
+            Some(value_bytes) => {
+                let value = EmbeddingSpecs::value_from_bytes(&value_bytes)?;
+                Ok(Some(value.0))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Attach/update embedder for existing space (runtime configuration).
