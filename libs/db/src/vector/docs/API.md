@@ -1606,11 +1606,11 @@ let results = SearchKNN::new(&embedding, query, 10)
     .await?;
 ```
 
-### Enum-Based Dispatch (Advanced)
+### Channel API with Runnable Helpers
 
-The `Mutation` and `Query` enums are the underlying channel payloads. Most callers
-should use the `Runnable` helpers above. If you need explicit control (batching,
-custom timeouts, or manual dispatch), you can send enums directly.
+The channel APIs are designed to be used through `Runnable` helpers for both
+mutations and queries. These helpers build the correct enum variants and handle
+timeouts ergonomically.
 
 #### Flow 1: Mutations via `Writer` (Insert + Delete)
 
@@ -1647,7 +1647,7 @@ let insert = InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vec![
     .immediate(); // build index synchronously
 let delete = DeleteVector::new(&embedding, ExternalKey::NodeId(Id::new()));
 
-// Preferred: Runnable helpers
+// Runnable helpers
 insert.run(&writer).await?;
 delete.run(&writer).await?;
 writer.flush().await?;
@@ -1660,12 +1660,12 @@ MutationBatch::new()
     .await?;
 ```
 
-#### Flow 2: Queries via `Reader` + `Query::SearchKNN`
+#### Flow 2: Queries via `Reader` (SearchKNN)
 
 ```rust
 use motlie_db::vector::{
-    create_reader, spawn_query_consumers_with_processor, Query, ReaderConfig,
-    SearchKNN, SearchKNNDispatch, Processor,
+    create_reader, spawn_query_consumers_with_processor, ReaderConfig,
+    SearchKNN, Processor,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -1678,25 +1678,16 @@ let processor = Arc::new(Processor::new(storage.clone(), registry.clone()));
 let (reader, receiver) = create_reader(ReaderConfig::default());
 spawn_query_consumers_with_processor(receiver, ReaderConfig::default(), processor.clone(), 2);
 
-// Build SearchKNN dispatch
-let params = SearchKNN::new(&embedding, query_vec, 10).with_ef(100);
-let (dispatch, rx) = SearchKNNDispatch::new(params, Duration::from_secs(5), processor.clone());
-
-// Preferred: Runnable helper (SearchKNN implements Runnable for Reader/SearchReader)
+// Runnable helper (SearchKNN implements Runnable for Reader/SearchReader)
 let results = SearchKNN::new(&embedding, query_vec, 10)
     .with_ef(100)
     .run(&reader, Duration::from_secs(5))
     .await?;
-
-// Advanced: manual enum dispatch
-reader.send_query(Query::SearchKNN(dispatch)).await?;
-let results = rx.await??;
 ```
 
 **Notes:**
 - The `Query` enum is an internal dispatch mechanism; the public, ergonomic path
-  is `SearchReader` + `Runnable::run(...)`.
-- `SearchKNNDispatch` is the only query wrapper that exposes a public constructor.
+  is `SearchReader` or `Reader` + `Runnable::run(...)`.
 
 ### Search Configuration
 
