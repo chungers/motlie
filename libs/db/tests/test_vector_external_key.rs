@@ -43,11 +43,11 @@ async fn test_mixed_external_key_types() {
 
     // Get registry from storage cache
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register embedding
     let builder = EmbeddingBuilder::new("test-mixed-key", DIM, Distance::L2);
-    let embedding = registry.register(builder, &txn_db).expect("register embedding");
+    let embedding = registry.register(builder).expect("register embedding");
 
     // Create writer and mutation consumer
     let (writer, writer_rx) = create_writer(WriterConfig::default());

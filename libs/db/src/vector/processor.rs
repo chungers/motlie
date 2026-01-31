@@ -1323,11 +1323,11 @@ mod tests {
         let storage = Arc::new(storage);
 
         // Create registry with an embedding spec
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register embedding");
         let embedding_code = embedding.code();
 
@@ -1375,11 +1375,11 @@ mod tests {
         let storage = Arc::new(storage);
 
         // Create registry with 64-dim embedding
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
@@ -1412,11 +1412,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
@@ -1452,11 +1452,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
@@ -1501,11 +1501,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
@@ -1532,11 +1532,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
 
         // HNSW is always enabled - soft-delete is used, VecIds are NOT reused
@@ -1600,11 +1600,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
 
         // Create processor (HNSW always enabled, params derived from EmbeddingSpec)
@@ -1662,11 +1662,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
 
         // Create processor (HNSW always enabled, params derived from EmbeddingSpec)
@@ -1727,11 +1727,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
         let embedding_code = embedding.code();
 
@@ -1760,11 +1760,11 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
 
         // Create processor with HNSW disabled for testing
@@ -1793,12 +1793,12 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         // Use L2 distance - will get Exact strategy (not RaBitQ)
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::L2);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
 
         // Create processor (HNSW always enabled, params derived from EmbeddingSpec)
@@ -1863,12 +1863,12 @@ mod tests {
         storage.ready().expect("Failed to initialize storage");
         let storage = Arc::new(storage);
 
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
         let txn_db = storage.transaction_db().expect("Failed to get txn_db");
         // Use Cosine distance - will get RaBitQ strategy
         let builder = EmbeddingBuilder::new("test-model", 64, Distance::Cosine);
         let embedding = registry
-            .register(builder, &txn_db)
+            .register(builder)
             .expect("Failed to register");
 
         // Create processor (HNSW always enabled, params derived from EmbeddingSpec)
@@ -1930,12 +1930,12 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         // Create processor
@@ -1978,12 +1978,12 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         // Create processor
@@ -2055,12 +2055,12 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         // Create processor
@@ -2121,12 +2121,12 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage.clone(), registry);
@@ -2169,12 +2169,12 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         // Register embedding
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
 
         // Create processor (HNSW always enabled, params derived from EmbeddingSpec)
         let processor = Processor::new(storage.clone(), registry);
@@ -2243,11 +2243,11 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
@@ -2272,11 +2272,11 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
@@ -2309,11 +2309,11 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
@@ -2347,11 +2347,11 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage, registry);
@@ -2393,11 +2393,11 @@ mod tests {
         let mut storage = Storage::readwrite(temp_dir.path());
         storage.ready().expect("storage init");
         let storage = Arc::new(storage);
-        let registry = Arc::new(EmbeddingRegistry::new());
+        let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 
         let txn_db = storage.transaction_db().expect("txn_db");
         let builder = EmbeddingBuilder::new("test", 64, Distance::L2);
-        let embedding = registry.register(builder, &txn_db).expect("register");
+        let embedding = registry.register(builder).expect("register");
         let embedding_code = embedding.code();
 
         let processor = Processor::new(storage.clone(), registry);

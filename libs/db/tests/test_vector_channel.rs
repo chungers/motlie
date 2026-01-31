@@ -69,14 +69,11 @@ async fn test_mutation_via_writer_consumer() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     // Register embedding
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-channel", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-channel", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Create Writer with Consumer
@@ -150,13 +147,10 @@ async fn test_query_via_reader_pool() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-reader-pool", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-reader-pool", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Create Writer
@@ -219,13 +213,10 @@ async fn test_concurrent_queries_mpmc() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-concurrent", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-concurrent", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Create Writer
@@ -356,13 +347,9 @@ async fn test_subsystem_start_lifecycle() {
 
     let timeout = Duration::from_secs(5);
 
-    // Register embedding and test end-to-end
-    let txn_db = storage.transaction_db().expect("txn_db");
+    // Register embedding and test end-to-end (storage already set by start_with_async)
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-subsystem", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-subsystem", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Insert via Writer
@@ -401,13 +388,10 @@ async fn test_writer_flush_semantics() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-flush", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-flush", DIM as u32, Distance::Cosine))
         .expect("register");
 
     let (writer, writer_rx) = create_writer(WriterConfig::default());
@@ -514,13 +498,10 @@ async fn test_concurrent_deletes_vs_searches() {
     let storage = Arc::new(storage);
 
     let registry = storage.cache().clone();
-    let txn_db = storage.transaction_db().expect("txn_db");
+    registry.set_storage(storage.clone()).expect("set storage");
 
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-delete-search", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-delete-search", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Create Writer with Consumer
@@ -756,13 +737,9 @@ async fn test_subsystem_start_with_gc_lifecycle() {
 
     let timeout = Duration::from_secs(5);
 
-    // Register embedding and insert some vectors
-    let txn_db = storage.transaction_db().expect("txn_db");
+    // Register embedding and insert some vectors (storage already set by start_with_async)
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-gc-lifecycle", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-gc-lifecycle", DIM as u32, Distance::Cosine))
         .expect("register");
 
     let vectors = generate_vectors(DIM, 20, 55);
@@ -830,13 +807,9 @@ async fn test_subsystem_start_with_async_and_gc() {
 
     let timeout = Duration::from_secs(5);
 
-    // Register embedding
-    let txn_db = storage.transaction_db().expect("txn_db");
+    // Register embedding (storage already set by start_with_async)
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-async-gc", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-async-gc", DIM as u32, Distance::Cosine))
         .expect("register");
 
     // Insert vectors using async path (build_index=false is default with async updater)
@@ -984,13 +957,9 @@ async fn test_consumer_exit_timing() {
         None, // No GC
     );
 
-    // Register embedding and insert vectors to ensure consumers are active
-    let txn_db = storage.transaction_db().expect("txn_db");
+    // Register embedding and insert vectors to ensure consumers are active (storage already set by start_with_async)
     let embedding = registry
-        .register(
-            EmbeddingBuilder::new("test-consumer-timing", DIM as u32, Distance::Cosine),
-            &txn_db,
-        )
+        .register(EmbeddingBuilder::new("test-consumer-timing", DIM as u32, Distance::Cosine))
         .expect("register");
 
     let vectors = generate_vectors(DIM, 50, 99);
