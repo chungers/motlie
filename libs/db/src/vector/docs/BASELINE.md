@@ -1,7 +1,7 @@
 # Vector Subsystem Baseline Benchmarks
 
 **Status:** Active
-**Date:** January 17, 2026
+**Date:** January 17, 2026 (Updated: January 31, 2026)
 **Purpose:** Establish reproducible performance baselines with recall measurement
 
 ---
@@ -41,8 +41,7 @@ Throughput baselines may omit recall, but must be labeled throughput-only.
 **Note on Targets vs CI Gates:**
 - **Production targets** (>90% @10, >95% @100) are aspirational goals for deployed systems
 - **CI gate threshold** is set at 80% to catch regressions while allowing headroom for HNSW approximation
-- RaBitQ with reranking achieves 100% recall, meeting production targets
-- Pure HNSW achieves ~83-85% recall, which is expected for approximate search without reranking
+- **Recorded runs (see "Recorded Baselines" below):** RaBitQ with reranking reached 100% recall on the last LAION sweep; Pure HNSW achieved ~83–85% recall. These are run-specific and not universal guarantees.
 
 ### Latency Metrics
 
@@ -111,7 +110,7 @@ Binary quantization for fast filtering + exact rerank of top candidates.
 SearchMode::RaBitQ { bits: 2 }  // 2-bit quantization
 SearchMode::RaBitQ { bits: 4 }  // 4-bit quantization
 ```
-CODEX: RaBitQ quality measurement is now covered by `bench_vector sweep --rabitq`; `test_vector_baseline.rs` no longer measures recall.
+CODEX: RaBitQ quality measurement is now covered by `bench_vector sweep --rabitq`; `test_vector_baseline.rs` was removed and no longer exists.
 
 - **Distance metric**: Cosine only (ADC approximates angular distance)
 - **Recall**: Depends on bits and rerank factor
@@ -247,8 +246,8 @@ BenchConfig {
 | Test | Dataset | Search Mode | Distance | Recall Required |
 |------|---------|-------------|----------|-----------------|
 | `bench_vector sweep --assert-recall 0.80` | LAION | Exact (HNSW) | Cosine | Yes (>80%, typically 83%) |
-| `bench_vector sweep --rabitq --bits 2` | LAION | RaBitQ-2bit | Cosine | Yes (>80%, measured 100% on current run) |
-| `bench_vector sweep --rabitq --bits 4` | LAION | RaBitQ-4bit | Cosine | Yes (>80%, measured 100% on current run) |
+| `bench_vector sweep --rabitq --bits 2` | LAION | RaBitQ-2bit | Cosine | Yes (>80%, last recorded run reached 100%) |
+| `bench_vector sweep --rabitq --bits 4` | LAION | RaBitQ-4bit | Cosine | Yes (>80%, last recorded run reached 100%) |
 | `baseline_concurrent_balanced` | Random | Exact | L2 | No (throughput only) |
 | `baseline_concurrent_stress` | Random | Exact | L2 | No (throughput only) |
 
@@ -288,14 +287,11 @@ cargo run --release --bin bench_vector -- sweep \
     --assert-recall 0.80
 ```
 
-#### Deprecated: Test-based Benchmarks
+#### Deprecated: Test-based Baselines
 
-> **⚠️ DEPRECATED:** `tests/test_vector_baseline.rs` now contains only smoke tests; use the CLI approach above for quality baselines.
+> **⚠️ DEPRECATED:** There is no `tests/test_vector_baseline.rs` in the current codebase. Quality baselines are CLI-only via `bench_vector sweep`. Throughput baselines remain in `test_vector_concurrent.rs` as ignored tests.
 
 ```bash
-# LAION quality baselines (requires LAION data)
-cargo test -p motlie-db --release --test test_vector_baseline baseline_laion -- --ignored --nocapture
-
 # Concurrent throughput baselines (random vectors)
 cargo test -p motlie-db --release --test test_vector_concurrent baseline_full -- --ignored --nocapture
 ```
@@ -876,7 +872,7 @@ For CI, run 1M scale benchmark and assert minimum thresholds:
 
 ### Tests (Deprecated for quality baselines)
 
-- [tests/test_vector_baseline.rs](../../../tests/test_vector_baseline.rs) - LAION recall baseline tests ⚠️ *deprecated in favor of bench_vector*
+- (removed) `tests/test_vector_baseline.rs` - LAION recall baseline tests (superseded by `bench_vector sweep`)
 - [tests/test_vector_concurrent.rs](../../../tests/test_vector_concurrent.rs) - Throughput baseline tests
 
 ### Baseline Artifacts
