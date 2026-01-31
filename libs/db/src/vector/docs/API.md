@@ -1699,6 +1699,20 @@ let results = SearchKNN::new(&embedding_l2, query_vec, 10)
     .exact()
     .run(&reader, Duration::from_secs(5))
     .await?;
+
+// Inspect ExternalKey variants in SearchResult
+for result in results {
+    match result.external_key {
+        ExternalKey::NodeId(id) => println!("NodeId: {id}"),
+        ExternalKey::NodeFragment(id, ts) => println!("NodeFragment: {id} @ {ts:?}"),
+        ExternalKey::Edge(src, dst, name) => println!("Edge: {src} -> {dst} ({name:?})"),
+        ExternalKey::EdgeFragment(src, dst, name, ts) => {
+            println!("EdgeFragment: {src} -> {dst} ({name:?}) @ {ts:?}")
+        }
+        ExternalKey::NodeSummary(hash) => println!("NodeSummary: {hash:?}"),
+        ExternalKey::EdgeSummary(hash) => println!("EdgeSummary: {hash:?}"),
+    }
+}
 ```
 
 **Notes:**
