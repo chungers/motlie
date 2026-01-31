@@ -181,44 +181,41 @@ processor.insert_vector(...)?;  // SpecHash set here
 ### HNSW Configuration
 
 HNSW (Hierarchical Navigable Small World) is a graph-based ANN algorithm. HNSW parameters
-are now configured through `EmbeddingSpec`, which is the single source of truth:
+are configured at registration time via `EmbeddingBuilder` and persisted in the registry
+as an `EmbeddingSpec`. `EmbeddingSpec` is the single source of truth used to construct
+HNSW indexes after restart; you should not manually instantiate it in normal usage.
 
 ```rust
-use motlie_db::vector::{Distance, EmbeddingSpec, VectorElementType, hnsw};
-use motlie_db::vector::cache::NavigationCache;
+use motlie_db::vector::{EmbeddingBuilder, EmbeddingRegistry, Distance, Processor, Storage};
+use std::path::Path;
 use std::sync::Arc;
 
-// Create EmbeddingSpec with HNSW parameters
-let spec = EmbeddingSpec {
-    model: "openai-ada".to_string(),
-    dim: 512,
-    distance: Distance::Cosine,
-    storage_type: VectorElementType::F32,
-    hnsw_m: 16,                // Connections per node
-    hnsw_ef_construction: 100, // Build-time beam width
-    rabitq_bits: 1,
-    rabitq_seed: 42,
-};
+// Register embedding with HNSW parameters via builder
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = EmbeddingRegistry::new(storage.clone());
+registry.prewarm()?;
 
-// Create HNSW index from spec (the only constructor)
-let nav_cache = Arc::new(NavigationCache::new());
-let index = hnsw::Index::from_spec(
-    1, // embedding_code
-    &spec,
-    64, // batch_threshold (runtime knob)
-    nav_cache,
-);
+let embedding = registry.register(
+    EmbeddingBuilder::new("openai-ada", 512, Distance::Cosine)
+        .with_hnsw_m(16)                // Connections per node
+        .with_hnsw_ef_construction(100) // Build-time beam width
+        .with_rabitq_bits(1)
+        .with_rabitq_seed(42),
+)?;
 
-// Derived values are computed from EmbeddingSpec:
+// In normal usage, let Processor construct HNSW indices from the persisted spec
+let _processor = Processor::new(storage.clone(), Arc::new(registry));
+
+// Derived values are computed from EmbeddingSpec at index construction:
 // - m_max = 2 * hnsw_m (always)
 // - m_max_0 = 2 * hnsw_m (always)
 // - m_l = 1.0 / ln(hnsw_m)
-assert_eq!(spec.m(), 16);
-assert_eq!(spec.m_max(), 32);
-assert_eq!(spec.ef_construction(), 100);
 ```
 
-> **Note**: `hnsw::Config` has been deleted. All HNSW parameters come from `EmbeddingSpec`.
+> **Note**: `hnsw::Config` has been deleted. All HNSW parameters come from
+> the persisted `EmbeddingSpec` created during registration.
 
 **Parameter Impact:**
 
