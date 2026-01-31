@@ -146,14 +146,14 @@ Insert vectors using the channel API:
 
 ```rust
 let config = BenchConfig::balanced()
-    .with_dataset(DatasetSource::Laion { data_dir })
-    .with_search_mode(SearchMode::Exact)  // or RaBitQ { bits }
+    .with_dataset(DatasetSource::Random { seed: 42 })  // Random for throughput
     .with_vectors_per_producer(10000);
 
 let bench = ConcurrentBenchmark::new(config);
 let result = bench.run(storage, embedding_code).await?;
 ```
-CODEX: `ConcurrentBenchmark` remains throughput-only; quality baselines live in the CLI.
+
+> **⚠️ NOTE:** `ConcurrentBenchmark` measures **throughput only** using exact search. The `search_mode` config field is validated but not used during search execution. For RaBitQ quality measurement, use `bench_vector sweep --rabitq`.
 
 ### Phase 3: Search Quality Measurement
 
@@ -590,7 +590,10 @@ Potential additions:
 
 ### Concurrent Benchmark Recall
 
-Currently, concurrent benchmarks (`test_vector_concurrent.rs`) measure throughput only.
+Currently, `ConcurrentBenchmark` and `test_vector_concurrent.rs` measure **throughput only**.
+The benchmark always returns `recall_at_k = None`. For recall measurement, use
+`bench_vector sweep --dataset laion --assert-recall`.
+
 Future work could add recall tracking to concurrent workloads, but this requires
 careful design to avoid measuring concurrency effects on recall accuracy.
 
@@ -673,12 +676,12 @@ let (writer, reader) = subsystem.start_with_async(
 );
 
 // Inserts now use async path by default (immediate_index=false)
-InsertVector::new(&embedding, id, vector)
+InsertVector::new(&embedding, external_key, vector)
     .run(&writer)
     .await?;
 
 // Use .immediate() for sync path when needed
-InsertVector::new(&embedding, id, vector)
+InsertVector::new(&embedding, external_key, vector)
     .immediate()  // Forces sync graph build
     .run(&writer)
     .await?;
@@ -697,7 +700,7 @@ See [PHASE7.md](./PHASE7.md) for complete design documentation.
 
 ## Scale Benchmarks (Phase 8.3)
 
-**Status:** In Progress (January 2026)
+**Status:** Complete for 10K-1M scales (January 2026); 10M+ pending
 
 Phase 8.3 validates scalability from 10K to 1B vectors using synthetic workloads
 with reproducible random vector generation.
