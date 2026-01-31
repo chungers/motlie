@@ -1682,7 +1682,13 @@ spawn_query_consumers_with_processor(receiver, ReaderConfig::default(), processo
 let params = SearchKNN::new(&embedding, query_vec, 10).with_ef(100);
 let (dispatch, rx) = SearchKNNDispatch::new(params, Duration::from_secs(5), processor.clone());
 
-// Send query and await result
+// Preferred: Runnable helper (SearchKNN implements Runnable for Reader/SearchReader)
+let results = SearchKNN::new(&embedding, query_vec, 10)
+    .with_ef(100)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Advanced: manual enum dispatch
 reader.send_query(Query::SearchKNN(dispatch)).await?;
 let results = rx.await??;
 ```
