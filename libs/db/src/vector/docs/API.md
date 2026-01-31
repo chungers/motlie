@@ -129,6 +129,48 @@ let by_model = registry.find_by_model("openai");
 use `EmbeddingRegistry::new_without_storage()` and call `set_storage(storage)` once before
 `prewarm()` or `register()`.
 
+**Lookup + insert using registry filters:**
+
+```rust
+use motlie_db::vector::{Distance, EmbeddingFilter, EmbeddingRegistry, ExternalKey, Processor, Storage};
+use motlie_db::Id;
+use std::path::Path;
+use std::sync::Arc;
+
+// Open storage + registry
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
+
+// Find an existing embedding by model/dim/distance
+let filter = EmbeddingFilter::default()
+    .model("clip-vit-b32")
+    .dim(512)
+    .distance(Distance::Cosine);
+let embedding = registry
+    .find(&filter)
+    .into_iter()
+    .next()
+    .ok_or_else(|| anyhow::anyhow!("Embedding not found"))?;
+
+// Insert vectors using Processor (it loads EmbeddingSpec from storage internally)
+let processor = Processor::new(storage.clone(), registry.clone());
+let external_key = ExternalKey::NodeId(Id::new());
+let _vec_id = processor.insert_vector(&embedding, external_key, &vector, true)?;
+```
+
+**Insert-time validation (Processor/ops):**
+
+- **Embedding exists**: lookup by code via registry
+- **Dimension match**: `vector.len() == spec.dim()`
+- **External key uniqueness**: IdForward is checked for duplicates
+- **SpecHash consistency**: on first insert, the spec hash is stored; later inserts
+  must match the stored hash or they fail with “EmbeddingSpec changed…”
+- **Storage type**: vectors are encoded using the persisted `EmbeddingSpec.storage_type`
+  (F32/F16). Input is always `&[f32]`; conversion happens at write time.
+
 **EmbeddingBuilder Fields:**
 
 | Field | Description |
