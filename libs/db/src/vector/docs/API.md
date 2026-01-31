@@ -1616,8 +1616,8 @@ custom timeouts, or manual dispatch), you can send enums directly.
 
 ```rust
 use motlie_db::vector::{
-    create_writer, spawn_mutation_consumer_with_storage, Mutation, WriterConfig,
-    InsertVector, DeleteVector, EmbeddingBuilder, EmbeddingRegistry, Distance, ExternalKey, Storage,
+    create_writer, spawn_mutation_consumer_with_storage, WriterConfig,
+    InsertVector, DeleteVector, MutationBatch, EmbeddingBuilder, EmbeddingRegistry, Distance, ExternalKey, Storage,
 };
 use motlie_db::Id;
 use std::path::Path;
@@ -1647,9 +1647,17 @@ let insert = InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vec![
     .immediate(); // build index synchronously
 let delete = DeleteVector::new(&embedding, ExternalKey::NodeId(Id::new()));
 
-// Send as a batch
-writer.send(vec![Mutation::from(insert), Mutation::from(delete)]).await?;
+// Preferred: Runnable helpers
+insert.run(&writer).await?;
+delete.run(&writer).await?;
 writer.flush().await?;
+
+// Batch helper (sends Vec<Mutation> under the hood)
+MutationBatch::new()
+    .push(insert)
+    .push(delete)
+    .run(&writer)
+    .await?;
 ```
 
 #### Flow 2: Queries via `Reader` + `Query::SearchKNN`
