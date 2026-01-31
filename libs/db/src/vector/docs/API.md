@@ -1145,9 +1145,9 @@ for (i, vector) in base_vectors.iter().enumerate() {
     txn.commit()?;
     cache_update.apply(index.nav_cache());
 
-    // Encode and cache binary code
-    let code = rabitq.encode(vector);
-    binary_cache.put(embedding.code(), vec_id, code);
+    // Encode and cache binary code (with ADC correction factors)
+    let (code, correction) = rabitq.encode_with_correction(vector);
+    binary_cache.put(embedding.code(), vec_id, code, correction);
 }
 
 // 6. Two-phase search: ADC pre-filter → exact rerank
@@ -1710,11 +1710,15 @@ impl NavigationLayerInfo {
 
 // Binary code cache for RaBitQ
 pub struct BinaryCodeCache { /* private */ }
+pub struct BinaryCodeEntry {
+    pub code: Vec<u8>,
+    pub correction: AdcCorrection,
+}
 impl BinaryCodeCache {
     pub fn new() -> Self;
-    pub fn put(&self, embedding: EmbeddingCode, vec_id: VecId, code: Vec<u8>);
-    pub fn get(&self, embedding: EmbeddingCode, vec_id: VecId) -> Option<Vec<u8>>;
-    pub fn get_batch(&self, embedding: EmbeddingCode, vec_ids: &[VecId]) -> Vec<Option<Vec<u8>>>;
+    pub fn put(&self, embedding: EmbeddingCode, vec_id: VecId, code: Vec<u8>, correction: AdcCorrection);
+    pub fn get(&self, embedding: EmbeddingCode, vec_id: VecId) -> Option<Arc<BinaryCodeEntry>>;
+    pub fn get_batch(&self, embedding: EmbeddingCode, vec_ids: &[VecId]) -> Vec<Option<Arc<BinaryCodeEntry>>>;
     pub fn contains(&self, embedding: EmbeddingCode, vec_id: VecId) -> bool;
     pub fn stats(&self) -> (usize, usize);  // (count, bytes)
     pub fn clear(&self);
