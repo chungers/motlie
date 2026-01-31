@@ -1484,6 +1484,310 @@ impl Processor {
 }
 ```
 
+### Mutation Types
+
+The `Mutation` enum represents all write operations. Each variant has a corresponding
+struct with builder methods for ergonomic construction.
+
+```rust
+/// All write operations dispatched through the Writer channel.
+pub enum Mutation {
+    AddEmbeddingSpec(AddEmbeddingSpec),  // Register new embedding space
+    InsertVector(InsertVector),           // Insert single vector
+    DeleteVector(DeleteVector),           // Delete vector by external key
+    InsertVectorBatch(InsertVectorBatch), // Batch insert (optimization)
+    Flush(FlushMarker),                   // Internal: sync marker
+}
+```
+
+#### InsertVector
+
+Insert a single vector into an embedding space.
+
+```rust
+pub struct InsertVector {
+    /// Embedding space code (from Embedding::code())
+    pub embedding: EmbeddingCode,
+    /// External key identifying the source entity (node, edge, fragment, summary)
+    pub external_key: ExternalKey,
+    /// Vector data (must match embedding dimension)
+    pub vector: Vec<f32>,
+    /// If true, builds HNSW index synchronously; if false, queues for async processing
+    pub immediate_index: bool,
+}
+
+impl InsertVector {
+    /// Create with async indexing (default, recommended for throughput)
+    pub fn new(embedding: &Embedding, external_key: ExternalKey, vector: Vec<f32>) -> Self;
+    /// Enable synchronous HNSW indexing (use for latency-sensitive single inserts)
+    pub fn immediate(self) -> Self;
+}
+```
+
+**Example:**
+```rust
+let insert = InsertVector::new(&embedding, ExternalKey::NodeId(node_id), vec![0.1; 512])
+    .immediate();  // Optional: force sync indexing
+insert.run(&writer).await?;
+```
+
+#### DeleteVector
+
+Delete a vector by its external key.
+
+```rust
+pub struct DeleteVector {
+    /// Embedding space code
+    pub embedding: EmbeddingCode,
+    /// External key of the vector to delete
+    pub external_key: ExternalKey,
+}
+
+impl DeleteVector {
+    pub fn new(embedding: &Embedding, external_key: ExternalKey) -> Self;
+}
+```
+
+**Behavior:** Removes ID mappings, vector data, metadata, and marks HNSW edges for
+lazy cleanup by the garbage collector.
+
+#### InsertVectorBatch
+
+Efficiently insert multiple vectors in a single operation.
+
+```rust
+pub struct InsertVectorBatch {
+    /// Embedding space code
+    pub embedding: EmbeddingCode,
+    /// Batch of (external_key, vector) pairs
+    pub vectors: Vec<(ExternalKey, Vec<f32>)>,
+    /// If true, builds HNSW index synchronously for all vectors
+    pub immediate_index: bool,
+}
+
+impl InsertVectorBatch {
+    pub fn new(embedding: &Embedding, vectors: Vec<(ExternalKey, Vec<f32>)>) -> Self;
+    pub fn immediate(self) -> Self;
+}
+```
+
+**Performance:** More efficient than individual InsertVector for bulk loading
+(amortizes transaction overhead, enables batch HNSW construction).
+
+#### AddEmbeddingSpec
+
+Register a new embedding space (typically done via EmbeddingRegistry::register).
+
+```rust
+pub struct AddEmbeddingSpec {
+    pub code: EmbeddingCode,           // Allocated code (primary key)
+    pub model: String,                 // Model name (e.g., "gemma", "ada-002")
+    pub dim: u32,                      // Vector dimensionality
+    pub distance: Distance,            // Similarity metric
+    pub storage_type: VectorElementType, // F32 or F16
+    pub hnsw_m: u16,                   // HNSW M parameter (default: 16)
+    pub hnsw_ef_construction: u16,     // HNSW build beam width (default: 200)
+    pub rabitq_bits: u8,               // RaBitQ bits per dim (default: 1)
+    pub rabitq_seed: u64,              // RaBitQ rotation seed (default: 42)
+}
+```
+
+### Query Types
+
+The `Query` enum represents all read operations. Each variant has a corresponding
+struct that implements `QueryExecutor` for direct execution or can be dispatched
+through the Reader channel.
+
+```rust
+pub enum Query {
+    // Point Lookups
+    GetVector(GetVectorDispatch),       // Get raw vector by external ID
+    GetInternalId(GetInternalIdDispatch), // External key → internal vec_id
+    GetExternalId(GetExternalIdDispatch), // Internal vec_id → external key
+    ResolveIds(ResolveIdsDispatch),     // Batch resolve vec_ids → external keys
+
+    // Registry Queries
+    ListEmbeddings(ListEmbeddingsDispatch),  // List all embedding spaces
+    FindEmbeddings(FindEmbeddingsDispatch),  // Filter by model/dim/distance
+
+    // Search Operations
+    SearchKNN(SearchKNNDispatch),       // K-nearest neighbor search
+}
+```
+
+#### SearchKNN
+
+K-nearest neighbor search using HNSW + optional RaBitQ acceleration.
+
+```rust
+pub struct SearchKNN {
+    /// Embedding space to search
+    pub embedding: Embedding,
+    /// Query vector (must match embedding dimension)
+    pub query: Vec<f32>,
+    /// Number of results to return
+    pub k: usize,
+    /// Search expansion factor (higher = better recall, slower). Default: 100
+    pub ef: usize,
+    /// Force exact distance computation (bypass RaBitQ). Default: false
+    pub exact: bool,
+    /// Re-rank factor for RaBitQ mode (k * rerank_factor candidates). Default: 10
+    pub rerank_factor: usize,
+}
+
+impl SearchKNN {
+    pub fn new(embedding: &Embedding, query: Vec<f32>, k: usize) -> Self;
+    pub fn with_ef(self, ef: usize) -> Self;
+    pub fn exact(self) -> Self;
+    pub fn with_rerank_factor(self, factor: usize) -> Self;
+}
+```
+
+**Example:**
+```rust
+let results = SearchKNN::new(&embedding, query_vec, 10)
+    .with_ef(200)           // Higher ef for better recall
+    .with_rerank_factor(20) // More candidates for re-ranking
+    .run(&search_reader, Duration::from_secs(5))
+    .await?;
+```
+
+**Returns:** `Vec<SearchResult>` where:
+```rust
+pub struct SearchResult {
+    pub external_key: ExternalKey,  // Typed external key
+    pub vec_id: VecId,              // Internal vector ID (u32)
+    pub distance: f32,              // Distance from query (lower = more similar)
+}
+```
+
+#### GetVector
+
+Retrieve raw vector data by external ID.
+
+```rust
+pub struct GetVector {
+    pub embedding: EmbeddingCode,
+    pub id: Id,  // External document ID (ULID)
+}
+// Returns: Option<Vec<f32>>
+```
+
+#### GetInternalId / GetExternalId
+
+Resolve between external keys and internal vector IDs.
+
+```rust
+pub struct GetInternalId {
+    pub embedding: EmbeddingCode,
+    pub external_key: ExternalKey,
+}
+// Returns: Option<VecId>
+
+pub struct GetExternalId {
+    pub embedding: EmbeddingCode,
+    pub vec_id: VecId,
+}
+// Returns: Option<ExternalKey>
+```
+
+#### ResolveIds
+
+Batch resolve internal vec_ids to external keys (used after SearchKNN).
+
+```rust
+pub struct ResolveIds {
+    pub embedding: EmbeddingCode,
+    pub vec_ids: Vec<VecId>,
+}
+// Returns: Vec<Option<ExternalKey>>
+```
+
+### Runnable Traits
+
+Two `Runnable` traits provide ergonomic execution patterns:
+
+#### MutationRunnable (for mutations)
+
+```rust
+// Re-exported as: pub use mutation::Runnable as MutationRunnable;
+#[async_trait]
+pub trait MutationRunnable {
+    /// Execute this mutation against the writer (fire-and-forget).
+    /// Use Writer::flush() after for confirmation.
+    async fn run(self, writer: &Writer) -> Result<()>;
+}
+
+// Implemented for:
+impl MutationRunnable for InsertVector { ... }
+impl MutationRunnable for InsertVectorBatch { ... }
+impl MutationRunnable for DeleteVector { ... }
+impl MutationRunnable for AddEmbeddingSpec { ... }
+impl MutationRunnable for MutationBatch { ... }
+```
+
+**Example:**
+```rust
+use motlie_db::vector::{InsertVector, MutationRunnable};
+
+InsertVector::new(&embedding, key, vector).run(&writer).await?;
+writer.flush().await?;  // Wait for commit confirmation
+```
+
+#### Runnable<R> (for queries)
+
+```rust
+// Generic over reader type (Reader or SearchReader)
+#[async_trait]
+pub trait Runnable<R> {
+    type Output: Send + 'static;
+    async fn run(self, reader: &R, timeout: Duration) -> Result<Self::Output>;
+}
+
+// SearchKNN implements Runnable for both Reader and SearchReader
+impl Runnable<Reader> for SearchKNN { type Output = Vec<SearchResult>; ... }
+impl Runnable<SearchReader> for SearchKNN { type Output = Vec<SearchResult>; ... }
+```
+
+**Example:**
+```rust
+use motlie_db::vector::{SearchKNN, Runnable};
+
+let results: Vec<SearchResult> = SearchKNN::new(&embedding, query, 10)
+    .with_ef(100)
+    .run(&search_reader, Duration::from_secs(5))
+    .await?;
+```
+
+### MutationBatch Helper
+
+Batch multiple mutations into a single channel send for efficiency.
+
+```rust
+pub struct MutationBatch(pub Vec<Mutation>);
+
+impl MutationBatch {
+    pub fn new() -> Self;
+    pub fn push<M: Into<Mutation>>(mut self, mutation: M) -> Self;
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+}
+
+impl MutationRunnable for MutationBatch {
+    async fn run(self, writer: &Writer) -> Result<()>;
+}
+```
+
+**Example:**
+```rust
+MutationBatch::new()
+    .push(InsertVector::new(&embedding, key1, vec1))
+    .push(InsertVector::new(&embedding, key2, vec2))
+    .push(DeleteVector::new(&embedding, old_key))
+    .run(&writer)
+    .await?;
+```
+
 ### MPSC / Channel API (Public)
 
 The async API uses channels for mutations (MPSC) and queries (MPMC).
@@ -1499,12 +1803,14 @@ impl Writer {
 }
 
 pub struct WriterConfig { pub channel_buffer_size: usize }
+pub struct MutationConsumer { /* receiver, config, processor */ }
 pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutation>>);
 pub fn spawn_mutation_consumer(consumer: MutationConsumer) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_mutation_consumer_with_storage(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     storage: Arc<Storage>,
+    registry: Arc<EmbeddingRegistry>,
 ) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_mutation_consumer_with_storage_autoreg(
     receiver: mpsc::Receiver<Vec<Mutation>>,
@@ -1520,6 +1826,8 @@ impl Reader {
 }
 
 pub struct ReaderConfig { pub channel_buffer_size: usize }
+pub struct QueryConsumer { /* receiver, config, storage */ }
+pub struct ProcessorQueryConsumer { /* receiver, config, processor */ }
 pub fn create_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Query>);
 pub fn spawn_query_consumer(consumer: QueryConsumer) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_query_consumer_with_processor(
