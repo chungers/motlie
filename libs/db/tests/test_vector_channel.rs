@@ -870,3 +870,162 @@ async fn test_subsystem_start_with_async_and_gc() {
 
     // If we reach here, both GC and AsyncUpdater shutdown completed successfully
 }
+
+// ============================================================================
+// Test: Shutdown Ordering Assertion (SUBSYSTEM Phase 3)
+// ============================================================================
+
+/// Validates that shutdown order is enforced: AsyncUpdater shuts down before GC.
+/// Uses test hooks with atomic counter to verify correct ordering.
+///
+/// This test directly verifies the GC and AsyncUpdater components shutdown in order,
+/// independent of the full subsystem lifecycle complexity.
+///
+/// Run with: cargo test -p motlie-db --features test-hooks test_subsystem_shutdown_ordering
+#[cfg(feature = "test-hooks")]
+#[test]
+fn test_subsystem_shutdown_ordering() {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use motlie_db::vector::{AsyncGraphUpdater, GarbageCollector, NavigationCache, EmbeddingRegistry};
+
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut storage = Storage::readwrite(temp_dir.path());
+    storage.ready().expect("storage ready");
+    let storage = Arc::new(storage);
+
+    let registry = Arc::new(EmbeddingRegistry::new());
+    let nav_cache = Arc::new(NavigationCache::new());
+
+    // Shutdown order counter
+    let shutdown_order = Arc::new(AtomicUsize::new(0));
+    let async_shutdown_order = shutdown_order.clone();
+    let gc_shutdown_order = shutdown_order.clone();
+
+    // Start AsyncUpdater with shutdown hook
+    let async_config = AsyncUpdaterConfig::default()
+        .with_num_workers(1)
+        .with_batch_size(10)
+        .with_process_on_startup(false)
+        .with_shutdown_hook(move || {
+            let order = async_shutdown_order.fetch_add(1, AtomicOrdering::SeqCst);
+            assert_eq!(
+                order, 0,
+                "AsyncUpdater should shut down first (got order {})",
+                order
+            );
+        });
+
+    let async_updater = AsyncGraphUpdater::start(
+        storage.clone(),
+        registry.clone(),
+        nav_cache,
+        async_config,
+    );
+
+    // Start GC with shutdown hook
+    let gc_config = GcConfig::default()
+        .with_interval(Duration::from_secs(60))
+        .with_process_on_startup(false)
+        .with_shutdown_hook(move || {
+            let order = gc_shutdown_order.fetch_add(1, AtomicOrdering::SeqCst);
+            assert_eq!(
+                order, 1,
+                "GC should shut down second (after AsyncUpdater) (got order {})",
+                order
+            );
+        });
+
+    let gc = GarbageCollector::start(
+        storage.clone(),
+        registry,
+        gc_config,
+    );
+
+    // Verify components started
+    assert!(!async_updater.is_shutdown(), "AsyncUpdater should be running");
+    assert!(!gc.is_shutdown(), "GC should be running");
+
+    // Shut down in correct order: AsyncUpdater first, then GC
+    // This matches the order in Subsystem::on_shutdown()
+    async_updater.shutdown();
+    gc.shutdown();
+
+    // Verify both hooks were called in correct order
+    let final_order = shutdown_order.load(AtomicOrdering::SeqCst);
+    assert_eq!(
+        final_order, 2,
+        "Both shutdown hooks should have been called (got {})",
+        final_order
+    );
+}
+
+// ============================================================================
+// Test: Consumer Exit Timing Assertion (SUBSYSTEM Phase 3)
+// ============================================================================
+
+/// Validates that consumers exit promptly when channel closes.
+/// Consumer joins should complete within a reasonable timeout after writer flush.
+#[tokio::test]
+async fn test_consumer_exit_timing() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let mut storage = Storage::readwrite(temp_dir.path());
+    storage.ready().expect("storage ready");
+    let storage = Arc::new(storage);
+
+    let subsystem = Subsystem::new();
+    let registry = subsystem.cache().clone();
+
+    let (writer, search_reader) = subsystem.start_with_async(
+        storage.clone(),
+        WriterConfig::default(),
+        ReaderConfig::default(),
+        4, // 4 query workers
+        None, // No async updater
+        None, // No GC
+    );
+
+    // Register embedding and insert vectors to ensure consumers are active
+    let txn_db = storage.transaction_db().expect("txn_db");
+    let embedding = registry
+        .register(
+            EmbeddingBuilder::new("test-consumer-timing", DIM as u32, Distance::Cosine),
+            &txn_db,
+        )
+        .expect("register");
+
+    let vectors = generate_vectors(DIM, 50, 99);
+    for vector in &vectors {
+        InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
+            .immediate()
+            .run(&writer)
+            .await
+            .expect("insert");
+    }
+
+    // Do some searches to ensure query consumers are busy
+    let timeout = Duration::from_secs(5);
+    for i in 0..10 {
+        let _ = SearchKNN::new(&embedding, vectors[i % vectors.len()].clone(), K)
+            .with_ef(50)
+            .run(&search_reader, timeout)
+            .await;
+    }
+
+    // Flush writer (this closes the channel and signals consumers to exit)
+    writer.flush().await.expect("flush");
+
+    // Drop handles and measure shutdown time
+    let shutdown_start = std::time::Instant::now();
+    drop(writer);
+    drop(search_reader);
+    drop(storage);
+    let shutdown_duration = shutdown_start.elapsed();
+
+    // Consumer joins should complete within 1 second (generous for CI)
+    // Cooperative shutdown via channel close should be nearly instant
+    assert!(
+        shutdown_duration < Duration::from_secs(1),
+        "Consumer joins should complete within 1 second, took {:?}",
+        shutdown_duration
+    );
+}
