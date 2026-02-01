@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use motlie_db::vector::benchmark::{LAION_EMBEDDING_DIM, SIFT_EMBEDDING_DIM};
 use motlie_db::vector::{
-    create_search_reader_with_storage, create_writer,
+    create_reader_with_storage, create_writer,
     spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
     Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable,
     SearchKNN, Storage, WriterConfig,
@@ -142,7 +142,7 @@ async fn test_cosine_2bit_rabitq() {
     );
 
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -280,7 +280,7 @@ async fn test_cosine_4bit_rabitq() {
     );
 
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -477,7 +477,7 @@ async fn test_multi_embedding_non_interference() {
     );
 
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -833,7 +833,7 @@ async fn test_exact_vs_rabitq_search_paths() {
     );
 
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),

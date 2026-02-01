@@ -19,7 +19,7 @@ use motlie_db::vector::benchmark::{
     RandomDataset, SiftDataset, save_rabitq_results_csv, GIST_QUERIES,
 };
 use motlie_db::vector::{
-    create_search_reader_with_storage, create_writer, hnsw, spawn_mutation_consumer_with_storage_autoreg,
+    create_reader_with_storage, create_writer, hnsw, spawn_mutation_consumer_with_storage_autoreg,
     spawn_query_consumers_with_storage_autoreg, AsyncGraphUpdater, AsyncUpdaterConfig,
     BinaryCodeCache, Distance, EmbeddingBuilder, EmbeddingCode, EmbeddingRegistry, IdAllocator,
     InsertVectorBatch, NavigationCache, RaBitQ, ReaderConfig, Runnable, SearchKNN, Storage, VecId,
@@ -819,7 +819,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
             .context("Expected stdin as JSON array of floats")?;
 
         let (search_reader, query_rx) =
-            create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+            create_reader_with_storage(ReaderConfig::default(), storage.clone());
         let query_handles = spawn_query_consumers_with_storage_autoreg(
             query_rx,
             ReaderConfig::default(),
@@ -877,7 +877,7 @@ pub async fn query(args: QueryArgs) -> Result<()> {
 
     // Setup query reader/consumers
     let (search_reader, query_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let query_handles = spawn_query_consumers_with_storage_autoreg(
         query_rx,
         ReaderConfig::default(),
