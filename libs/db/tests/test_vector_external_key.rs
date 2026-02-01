@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use motlie_db::graph::{NameHash, SummaryHash};
 use motlie_db::vector::{
-    create_search_reader_with_storage, create_writer,
+    create_reader_with_storage, create_writer,
     spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
     DeleteVector, Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable,
     ReaderConfig, Runnable, SearchKNN, Storage, WriterConfig,
@@ -57,9 +57,9 @@ async fn test_mixed_external_key_types() {
         storage.clone(),
     );
 
-    // Create search reader and consumers
+    // Create reader and consumers
     let (search_reader, search_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _query_handles = spawn_query_consumers_with_storage_autoreg(
         search_rx,
         ReaderConfig::default(),

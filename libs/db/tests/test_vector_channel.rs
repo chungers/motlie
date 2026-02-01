@@ -5,7 +5,7 @@
 //! | Test | Description | Phase 6 Task |
 //! |------|-------------|--------------|
 //! | `test_mutation_via_writer_consumer` | End-to-end insert via Writer → Consumer → Storage | 6.2 |
-//! | `test_query_via_reader_pool` | Search via SearchReader → ProcessorConsumer pool | 6.3/6.4 |
+//! | `test_query_via_reader_pool` | Search via Reader → Consumer pool | 6.3/6.4 |
 //! | `test_concurrent_queries_mpmc` | 100 concurrent searches via MPMC channel | 6.6 |
 //! | `test_subsystem_start_lifecycle` | Subsystem::start() returns working handles | 6.5 |
 //! | `test_writer_flush_semantics` | Flush guarantees visibility | 6.2 |
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use motlie_db::vector::{
-    create_search_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+    create_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
     spawn_query_consumers_with_storage_autoreg, AsyncUpdaterConfig, DeleteVector, Distance,
     EmbeddingBuilder, ExternalKey, GcConfig, InsertVector, MutationRunnable, ReaderConfig, Runnable,
     SearchKNN, Storage, Subsystem, WriterConfig,
@@ -84,9 +84,9 @@ async fn test_mutation_via_writer_consumer() {
         storage.clone(),
     );
 
-    // Create SearchReader for verification
+    // Create Reader for verification
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -132,11 +132,11 @@ async fn test_mutation_via_writer_consumer() {
 }
 
 // ============================================================================
-// Test: Query via SearchReader → ProcessorConsumer Pool (Task 6.3/6.4)
+// Test: Query via Reader → Consumer Pool (Task 6.3/6.4)
 // ============================================================================
 
 /// Validates query flow through MPMC channel:
-/// 1. Query sent via SearchReader
+/// 1. Query sent via Reader
 /// 2. Any of N ProcessorConsumers picks it up (MPMC)
 /// 3. Result returned via oneshot channel
 #[tokio::test]
@@ -161,10 +161,10 @@ async fn test_query_via_reader_pool() {
         storage.clone(),
     );
 
-    // Create SearchReader with 4-worker pool (tests MPMC distribution)
+    // Create Reader with 4-worker pool (tests MPMC distribution)
     let num_workers = 4;
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -227,10 +227,10 @@ async fn test_concurrent_queries_mpmc() {
         storage.clone(),
     );
 
-    // Create SearchReader with 8-worker pool for concurrent queries
+    // Create Reader with 8-worker pool for concurrent queries
     let num_workers = 8;
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -313,7 +313,7 @@ async fn test_concurrent_queries_mpmc() {
 // Test: Subsystem::start() Lifecycle (Task 6.5)
 // ============================================================================
 
-/// Validates Subsystem::start() returns working Writer + SearchReader.
+/// Validates Subsystem::start() returns working Writer + Reader.
 /// This is the recommended lifecycle management pattern.
 #[tokio::test]
 async fn test_subsystem_start_lifecycle() {
@@ -339,10 +339,10 @@ async fn test_subsystem_start_lifecycle() {
     // Verify Writer is active
     assert!(!writer.is_closed(), "Writer should be active after start");
 
-    // Verify SearchReader is active
+    // Verify Reader is active
     assert!(
         !search_reader.is_closed(),
-        "SearchReader should be active after start"
+        "Reader should be active after start"
     );
 
     let timeout = Duration::from_secs(5);
@@ -363,7 +363,7 @@ async fn test_subsystem_start_lifecycle() {
     }
     writer.flush().await.expect("flush");
 
-    // Search via SearchReader
+    // Search via Reader
     let results = SearchKNN::new(&embedding, vectors[0].clone(), K)
         .with_ef(50)
         .exact()
@@ -402,7 +402,7 @@ async fn test_writer_flush_semantics() {
     );
 
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -440,7 +440,7 @@ async fn test_writer_flush_semantics() {
 // Test: Channel Close Propagation (Task 6.2/6.4)
 // ============================================================================
 
-/// Validates that Writer and SearchReader detect channel close.
+/// Validates that Writer and Reader detect channel close.
 #[tokio::test]
 async fn test_channel_close_propagation() {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -464,13 +464,13 @@ async fn test_channel_close_propagation() {
         "Writer should detect closed channel after receiver drop"
     );
 
-    // Same test for SearchReader
+    // Same test for Reader
     let (search_reader, query_receiver) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
 
     assert!(
         !search_reader.is_closed(),
-        "SearchReader should be active initially"
+        "Reader should be active initially"
     );
 
     drop(query_receiver);
@@ -478,7 +478,7 @@ async fn test_channel_close_propagation() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert!(
         search_reader.is_closed(),
-        "SearchReader should detect closed channel after receiver drop"
+        "Reader should detect closed channel after receiver drop"
     );
 }
 
@@ -512,9 +512,9 @@ async fn test_concurrent_deletes_vs_searches() {
         storage.clone(),
     );
 
-    // Create SearchReader with 4-worker pool
+    // Create Reader with 4-worker pool
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -733,7 +733,7 @@ async fn test_subsystem_start_with_gc_lifecycle() {
 
     // Verify handles are active
     assert!(!writer.is_closed(), "Writer should be active");
-    assert!(!search_reader.is_closed(), "SearchReader should be active");
+    assert!(!search_reader.is_closed(), "Reader should be active");
 
     let timeout = Duration::from_secs(5);
 
@@ -803,7 +803,7 @@ async fn test_subsystem_start_with_async_and_gc() {
     );
 
     assert!(!writer.is_closed(), "Writer should be active");
-    assert!(!search_reader.is_closed(), "SearchReader should be active");
+    assert!(!search_reader.is_closed(), "Reader should be active");
 
     let timeout = Duration::from_secs(5);
 

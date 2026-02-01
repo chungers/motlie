@@ -5,7 +5,7 @@
 //!
 //! | Test | Description | Validates |
 //! |------|-------------|-----------|
-//! | `test_snapshot_isolation_delete_during_search` | Snapshot count remains stable while SearchReader queries run during deletes | Isolation + end-to-end |
+//! | `test_snapshot_isolation_delete_during_search` | Snapshot count remains stable while Reader queries run during deletes | Isolation + end-to-end |
 //! | `test_snapshot_isolation_insert_during_search` | Snapshot excludes concurrent inserts | Isolation |
 //! | `test_transaction_conflict_resolution` | Pessimistic locking serializes conflicts | Conflict handling |
 //! | `test_transaction_conflict_stress` | High-contention conflict handling | Stress |
@@ -30,7 +30,7 @@ use motlie_db::vector::benchmark::ConcurrentMetrics;
 use motlie_db::vector::hnsw;
 use motlie_db::vector::schema::{EmbeddingCode, EmbeddingSpec, VectorCfKey, VectorCfValue, Vectors};
 use motlie_db::vector::reader::{
-    create_search_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig,
+    create_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig,
 };
 use motlie_db::vector::{
     cache::NavigationCache, create_writer, spawn_mutation_consumer_with_storage_autoreg,
@@ -146,7 +146,7 @@ fn test_snapshot_isolation_delete_during_search() {
     let (_temp_dir, storage) = create_test_storage();
     let storage = Arc::new(storage);
 
-    // Register embedding for SearchReader/Processor path
+    // Register embedding for Reader/Processor path
     let registry = storage.cache().clone();
     let txn_db = storage.transaction_db().expect("txn_db");
     let embedding = registry
@@ -225,7 +225,7 @@ fn test_snapshot_isolation_delete_during_search() {
         });
 
         let (search_reader, reader_rx) =
-            create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+            create_reader_with_storage(ReaderConfig::default(), storage.clone());
         let query_handles = spawn_query_consumers_with_storage_autoreg(
             reader_rx,
             ReaderConfig::default(),
@@ -290,7 +290,7 @@ fn test_snapshot_isolation_delete_during_search() {
     for (idx, result) in search_results.iter().enumerate() {
         assert!(
             !result.is_empty(),
-            "SearchReader result {} should not be empty during deletes",
+            "Reader result {} should not be empty during deletes",
             idx
         );
     }
@@ -386,9 +386,9 @@ fn test_snapshot_isolation_insert_during_search() {
     );
 }
 
-/// Test: Snapshot isolation with SearchReader during concurrent inserts.
+/// Test: Snapshot isolation with Reader during concurrent inserts.
 ///
-/// Validates that snapshot count remains stable while SearchReader queries
+/// Validates that snapshot count remains stable while Reader queries
 /// run during inserts.
 #[test]
 fn test_snapshot_isolation_insert_during_search_reader() {
@@ -469,7 +469,7 @@ fn test_snapshot_isolation_insert_during_search_reader() {
         });
 
         let (search_reader, reader_rx) =
-            create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+            create_reader_with_storage(ReaderConfig::default(), storage.clone());
         let query_handles = spawn_query_consumers_with_storage_autoreg(
             reader_rx,
             ReaderConfig::default(),
@@ -510,7 +510,7 @@ fn test_snapshot_isolation_insert_during_search_reader() {
     for (idx, result) in search_results.iter().enumerate() {
         assert!(
             !result.is_empty(),
-            "SearchReader result {} should not be empty during inserts",
+            "Reader result {} should not be empty during inserts",
             idx
         );
     }
