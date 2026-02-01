@@ -73,32 +73,6 @@ pub mod search;
 #[cfg(test)]
 mod crash_recovery_tests;
 
-// Legacy module aliases for backwards compatibility during transition
-// TODO: Remove these after updating all imports
-pub mod navigation {
-    //! Re-export from cache module for backwards compatibility.
-    pub use crate::vector::cache::{
-        BinaryCodeCache, NavigationCache, NavigationCacheConfig, NavigationLayerInfo,
-    };
-}
-pub mod rabitq {
-    //! Re-export from quantization module for backwards compatibility.
-    pub use crate::vector::quantization::RaBitQ;
-}
-pub mod parallel {
-    //! Re-export from search module for backwards compatibility.
-    pub use crate::vector::search::{
-        batch_distances_parallel, distances_from_vectors_parallel, rerank_adaptive, rerank_auto,
-        rerank_parallel, rerank_sequential,
-    };
-}
-pub mod search_config {
-    //! Re-export from search module for backwards compatibility.
-    pub use crate::vector::search::{
-        SearchConfig, SearchStrategy, DEFAULT_PARALLEL_RERANK_THRESHOLD,
-    };
-}
-
 // Re-exports for public API
 pub use cache::{BinaryCodeCache, BinaryCodeEntry, NavigationCache, NavigationCacheConfig, NavigationLayerInfo};
 pub use config::{RaBitQConfig, RaBitQConfigWarning, VectorConfig};
@@ -157,23 +131,7 @@ pub use subsystem::{EmbeddingRegistryConfig, Subsystem, VectorBlockCacheConfig};
 /// Storage type alias using generic rocksdb::Storage
 pub type Storage = crate::rocksdb::Storage<Subsystem>;
 
-/// BlockCacheConfig re-export (alias to VectorBlockCacheConfig for backwards compat)
-pub type BlockCacheConfig = VectorBlockCacheConfig;
-
 // Note: SystemInfo functionality is now in Subsystem which implements SubsystemInfo
-
-/// Format a byte count as a human-readable string.
-fn format_bytes(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 * 1024 {
-        format!("{} GB", bytes / (1024 * 1024 * 1024))
-    } else if bytes >= 1024 * 1024 {
-        format!("{} MB", bytes / (1024 * 1024))
-    } else if bytes >= 1024 {
-        format!("{} KB", bytes / 1024)
-    } else {
-        format!("{} B", bytes)
-    }
-}
 
 #[cfg(test)]
 mod tests {

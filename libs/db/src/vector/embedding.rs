@@ -217,14 +217,6 @@ impl Embedding {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // Internal
-    // ─────────────────────────────────────────────────────────────
-
-    /// Attach an embedder (used by registry).
-    pub(crate) fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
-        self.embedder = Some(embedder);
-        self
-    }
 }
 
 // Equality and Hash based on code only (for HashMap keys)

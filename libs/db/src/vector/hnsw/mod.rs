@@ -47,7 +47,7 @@ use anyhow::Result;
 
 use crate::vector::cache::{BinaryCodeCache, NavigationCache};
 use crate::vector::distance::Distance;
-use crate::vector::rabitq::RaBitQ;
+use crate::vector::quantization::RaBitQ;
 use crate::vector::schema::{EmbeddingCode, VecId, VectorElementType};
 use crate::vector::Storage;
 
