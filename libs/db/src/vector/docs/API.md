@@ -2020,163 +2020,301 @@ MutationBatch::new()
     .await?;
 ```
 
-#### Flow 1a: Multi-threaded Mutations (Tokio Tasks)
+#### Flow 1a: Multi-threaded Client Pattern (Tokio Tasks)
 
-Multiple async tasks can share the `Writer` and send mutations concurrently.
-The MPSC channel serializes writes to the single consumer.
+Multiple async tasks act as clients, each inserting vectors and then querying.
+This example retrieves an existing embedding from the registry by code.
 
 ```rust
 use motlie_db::vector::{
-    create_writer, spawn_mutation_consumer_with_storage, WriterConfig,
-    InsertVector, EmbeddingBuilder, EmbeddingRegistry, Distance, ExternalKey, Storage,
-    MutationRunnable,
+    create_writer, create_search_reader_with_storage, spawn_mutation_consumer_with_storage,
+    spawn_query_consumers_with_storage, WriterConfig, ReaderConfig,
+    InsertVector, SearchKNN, EmbeddingRegistry, ExternalKey, Storage,
+    MutationRunnable, Runnable,
 };
 use motlie_db::Id;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
-// Setup storage, registry, embedding (same as Flow 1)
+// Setup storage and registry
 let mut storage = Storage::readwrite(Path::new("./vector_db"));
 storage.ready()?;
 let storage = Arc::new(storage);
 let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 registry.prewarm()?;
 
-let embedding = registry.register(
-    EmbeddingBuilder::new("clip-vit-b32", 512, Distance::Cosine),
-)?;
+// Retrieve existing embedding by code (e.g., from config or previous registration)
+// This avoids re-registering and ensures all clients use the same embedding space
+let embedding_code: u64 = 12345;  // Known code from `embeddings list` or saved config
 
-// Create writer + consumer
-let (writer, receiver) = create_writer(WriterConfig::default());
-let consumer_handle = spawn_mutation_consumer_with_storage(
-    receiver,
+// Get full spec to verify parameters
+let spec = registry
+    .get_spec_by_code(embedding_code)?
+    .ok_or_else(|| anyhow::anyhow!("Embedding {} not found", embedding_code))?;
+println!(
+    "Using embedding: model={}, dim={}, distance={:?}",
+    spec.model, spec.dim, spec.distance
+);
+
+// Get lightweight handle for operations
+let embedding = registry
+    .get_by_code(embedding_code)
+    .ok_or_else(|| anyhow::anyhow!("Embedding {} not in cache", embedding_code))?;
+
+// Create writer channel + mutation consumer
+let (writer, mutation_rx) = create_writer(WriterConfig::default());
+let mutation_handle = spawn_mutation_consumer_with_storage(
+    mutation_rx,
     WriterConfig::default(),
     storage.clone(),
     registry.clone(),
 );
 
-// Spawn multiple producer tasks - each acts as a client
+// Create search reader + query consumers (4 workers for parallel query processing)
+let (search_reader, query_rx) = create_search_reader_with_storage(
+    ReaderConfig::default(),
+    storage.clone(),
+);
+let query_handles = spawn_query_consumers_with_storage(
+    query_rx,
+    ReaderConfig::default(),
+    storage.clone(),
+    registry.clone(),
+    4,  // 4 query consumer workers
+);
+
+// Spawn client tasks - each inserts vectors, then queries
 let num_clients = 4;
-let vectors_per_client = 100;
-let mut handles = Vec::new();
+let vectors_per_client = 50;
+let dim = spec.dim as usize;
+let mut client_handles = Vec::new();
 
 for client_id in 0..num_clients {
     let writer = writer.clone();
+    let search_reader = search_reader.clone();
     let embedding = embedding.clone();
 
     let handle = tokio::spawn(async move {
+        // Phase 1: Insert vectors
+        let mut my_vectors = Vec::new();
         for i in 0..vectors_per_client {
-            let vector: Vec<f32> = (0..512).map(|j| ((client_id * 1000 + i + j) as f32).sin()).collect();
+            let vector: Vec<f32> = (0..dim)
+                .map(|j| ((client_id * 1000 + i + j) as f32 * 0.01).sin())
+                .collect();
             let external_key = ExternalKey::NodeId(Id::new());
 
-            InsertVector::new(&embedding, external_key, vector)
+            InsertVector::new(&embedding, external_key.clone(), vector.clone())
                 .run(&writer)
                 .await?;
+
+            my_vectors.push((external_key, vector));
         }
+
+        // Flush to ensure inserts are committed before querying
+        writer.flush().await?;
+
+        // Phase 2: Query using vectors we just inserted
+        for (external_key, query_vector) in my_vectors.iter().take(5) {
+            let results = SearchKNN::new(&embedding, query_vector.clone(), 10)
+                .with_ef(100)
+                .run(&search_reader, Duration::from_secs(5))
+                .await?;
+
+            // Verify our vector appears in results (should be distance ~0)
+            let found_self = results.iter().any(|r| r.external_key == *external_key);
+            println!(
+                "Client {}: query returned {} results, found_self={}",
+                client_id, results.len(), found_self
+            );
+        }
+
         Ok::<_, anyhow::Error>(())
     });
-    handles.push(handle);
+    client_handles.push(handle);
 }
 
-// Wait for all clients to finish
-for handle in handles {
+// Wait for all clients to complete
+for handle in client_handles {
     handle.await??;
 }
 
-// Flush to ensure all mutations are committed
-writer.flush().await?;
-
-// Drop writer to close channel, then wait for consumer to finish
+// Graceful shutdown: drop writer to close mutation channel
 drop(writer);
-consumer_handle.await??;
+mutation_handle.await??;
+
+// Drop search_reader to close query channel, then wait for query consumers
+drop(search_reader);
+for handle in query_handles {
+    handle.await??;
+}
 ```
 
-#### Flow 1b: Multi-threaded Mutations (std::thread with Runtime)
+#### Flow 1b: Multi-threaded Client Pattern (std::thread)
 
-For applications using `std::thread`, each thread can create its own tokio runtime
-or use `block_on` to send mutations.
+For applications using OS threads, each thread acts as a client doing both
+inserts and queries. Uses `block_on` to bridge sync/async boundaries.
 
 ```rust
 use motlie_db::vector::{
-    create_writer, spawn_mutation_consumer_with_storage, WriterConfig,
-    InsertVector, EmbeddingBuilder, EmbeddingRegistry, Distance, ExternalKey, Storage,
-    MutationRunnable,
+    create_writer, create_search_reader_with_storage, spawn_mutation_consumer_with_storage,
+    spawn_query_consumers_with_storage, WriterConfig, ReaderConfig,
+    InsertVector, SearchKNN, EmbeddingRegistry, Distance, EmbeddingFilter,
+    ExternalKey, Storage, MutationRunnable, Runnable,
 };
 use motlie_db::Id;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
-// Setup storage, registry, embedding
+// Setup storage and registry
 let mut storage = Storage::readwrite(Path::new("./vector_db"));
 storage.ready()?;
 let storage = Arc::new(storage);
 let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 registry.prewarm()?;
 
-let embedding = registry.register(
-    EmbeddingBuilder::new("clip-vit-b32", 512, Distance::Cosine),
-)?;
+// Find existing embedding by model/dim/distance filter
+// Useful when you know the model name but not the code
+let filter = EmbeddingFilter::default()
+    .model("clip-vit-b32")
+    .dim(512)
+    .distance(Distance::Cosine);
 
-// Create a shared runtime for the consumer
+let embedding = registry
+    .find(&filter)
+    .into_iter()
+    .next()
+    .ok_or_else(|| anyhow::anyhow!("Embedding not found for filter"))?;
+
+// Optionally inspect the full spec
+let spec = registry
+    .get_spec_by_code(embedding.code())?
+    .ok_or_else(|| anyhow::anyhow!("Spec not found"))?;
+println!(
+    "Found embedding code={}, hnsw_m={}, ef_construction={}",
+    embedding.code(), spec.hnsw_m, spec.hnsw_ef_construction
+);
+
+// Create shared tokio runtime for async operations
 let rt = Arc::new(tokio::runtime::Runtime::new()?);
 
-// Create writer + spawn consumer on the runtime
-let (writer, receiver) = create_writer(WriterConfig::default());
-let consumer_handle = rt.spawn(spawn_mutation_consumer_with_storage(
-    receiver,
-    WriterConfig::default(),
-    storage.clone(),
-    registry.clone(),
-));
+// Create writer + mutation consumer
+let (writer, mutation_rx) = create_writer(WriterConfig::default());
+let mutation_handle = {
+    let rt = rt.clone();
+    let storage = storage.clone();
+    let registry = registry.clone();
+    rt.spawn(async move {
+        spawn_mutation_consumer_with_storage(
+            mutation_rx,
+            WriterConfig::default(),
+            storage,
+            registry,
+        ).await
+    })
+};
+
+// Create search reader + query consumers
+let (search_reader, query_rx) = rt.block_on(async {
+    create_search_reader_with_storage(ReaderConfig::default(), storage.clone())
+});
+let query_handles: Vec<_> = {
+    let rt = rt.clone();
+    let storage = storage.clone();
+    let registry = registry.clone();
+    rt.block_on(async move {
+        spawn_query_consumers_with_storage(
+            query_rx,
+            ReaderConfig::default(),
+            storage,
+            registry,
+            4,
+        )
+    })
+};
 
 // Spawn OS threads as clients
 let num_threads = 4;
-let vectors_per_thread = 100;
+let vectors_per_thread = 50;
+let dim = embedding.dim() as usize;
 let mut thread_handles = Vec::new();
 
 for thread_id in 0..num_threads {
     let writer = writer.clone();
+    let search_reader = search_reader.clone();
     let embedding = embedding.clone();
     let rt = rt.clone();
 
     let handle = thread::spawn(move || {
+        // Phase 1: Insert vectors
+        let mut my_vectors = Vec::new();
         for i in 0..vectors_per_thread {
-            let vector: Vec<f32> = (0..512).map(|j| ((thread_id * 1000 + i + j) as f32).cos()).collect();
+            let vector: Vec<f32> = (0..dim)
+                .map(|j| ((thread_id * 1000 + i + j) as f32 * 0.01).cos())
+                .collect();
             let external_key = ExternalKey::NodeId(Id::new());
 
-            // Block on the async send from this OS thread
             rt.block_on(async {
-                InsertVector::new(&embedding, external_key, vector)
+                InsertVector::new(&embedding, external_key.clone(), vector.clone())
                     .run(&writer)
                     .await
             })?;
+
+            my_vectors.push((external_key, vector));
         }
+
+        // Flush before querying
+        rt.block_on(writer.flush())?;
+
+        // Phase 2: Query using our inserted vectors
+        for (external_key, query_vector) in my_vectors.iter().take(5) {
+            let results = rt.block_on(async {
+                SearchKNN::new(&embedding, query_vector.clone(), 10)
+                    .with_ef(100)
+                    .run(&search_reader, Duration::from_secs(5))
+                    .await
+            })?;
+
+            let found_self = results.iter().any(|r| r.external_key == *external_key);
+            println!(
+                "Thread {}: query returned {} results, found_self={}",
+                thread_id, results.len(), found_self
+            );
+        }
+
         Ok::<_, anyhow::Error>(())
     });
     thread_handles.push(handle);
 }
 
-// Wait for all threads to finish
+// Wait for all threads
 for handle in thread_handles {
     handle.join().expect("Thread panicked")?;
 }
 
-// Flush and shutdown
+// Graceful shutdown
 rt.block_on(async {
-    writer.flush().await?;
     drop(writer);
+    mutation_handle.await??;
+    drop(search_reader);
+    for h in query_handles {
+        h.await??;
+    }
     Ok::<_, anyhow::Error>(())
 })?;
 ```
 
-**Key points for multi-threaded usage:**
+**Key points for multi-threaded client pattern:**
 
-- `Writer` is `Clone` and can be shared across threads/tasks
-- Each clone sends to the same MPSC channel
-- The single consumer serializes all mutations
-- Call `writer.flush()` to ensure mutations are committed before reading
-- Drop all `Writer` clones to close the channel and allow consumer to exit
+- **Retrieve existing embeddings**: Use `get_by_code()` or `find()` to get an existing
+  embedding from the registry rather than re-registering
+- **Inspect with `get_spec_by_code()`**: Verify HNSW/RaBitQ parameters before use
+- **Writer is Clone**: Share across threads/tasks; all clones send to same MPSC channel
+- **SearchReader is Clone**: Share across threads/tasks for concurrent queries
+- **Flush before queries**: Call `writer.flush()` to ensure inserts are committed
+- **Graceful shutdown**: Drop Writer/SearchReader to close channels, then await handles
 
 #### Flow 2: Queries via `Reader` (SearchKNN)
 
