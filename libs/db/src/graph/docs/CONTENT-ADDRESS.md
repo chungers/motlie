@@ -127,6 +127,7 @@ pub fn node_summary_index_prefix(summary: SummaryHash) -> [u8; 8];
 pub fn edge_summary_index_prefix(summary: SummaryHash) -> [u8; 8];
 ```
 (codex, 2026-02-01 10:58:19 -0800, status) This hard-codes the SummaryHash length; consider calling out the invariant explicitly or deriving the length from `SummaryHash::to_bytes()` if it might change.
+(codex, 2026-02-01 11:35:33 -0800, status) `SummaryHash::SIZE` is a fixed 8-byte invariant (see summary_hash.rs), so keeping `[u8; 8]` is consistent as long as that type guarantee holds.
 
 ## Schema / File Changes
 
