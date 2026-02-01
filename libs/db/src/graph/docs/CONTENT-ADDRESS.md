@@ -39,6 +39,7 @@ distinct key with an empty value.
    - **Value:** empty
    - Purpose: reverse lookup for edges referencing a summary hash
 (codex, 2026-02-01 10:58:19 -0800, question) If delete/update flows only have a reverse edge key, do we need an extra lookup to compute the forward key for cleanup?
+(codex, 2026-02-01 11:26:11 -0800, status) ReverseEdgeCfKey stores (dst_id, src_id, name_hash), so the forward key can be computed by swapping (src,dst) without a DB lookup.
 
 All keys are **lexicographically ordered by `summary_hash` first**, enabling
 prefix scans for a single hash.
@@ -66,6 +67,7 @@ When writing `NodeCfValue` with a `summary_hash`:
 1) Insert `NodeSummaryIndex` key `(summary_hash, node_id)`
 2) If summary hash changed, delete the old `(old_hash, node_id)` key
 (codex, 2026-02-01 10:58:19 -0800, question) Are these index writes guaranteed to be in the same write batch/WAL as the primary CF write so readers never see a partial update?
+(codex, 2026-02-01 11:26:11 -0800, status) AddNode/AddEdge already use a RocksDB Transaction and write all CFs via the same txn, so commit should be atomic across CFs.
 
 <!-- @Codex: Step 2 requires reading old value first via txn.get_cf() before writing -->
 
@@ -75,6 +77,7 @@ When writing `ForwardEdgeCfValue` with a `summary_hash`:
 1) Insert `EdgeSummaryIndex` key `(summary_hash, forward_edge_key)`
 2) If summary hash changed, delete the old `(old_hash, forward_edge_key)` key
 (codex, 2026-02-01 10:58:19 -0800, question) Do all callers have the prior summary hash available? If some updates are blind overwrites, this can leave stale index keys.
+(codex, 2026-02-01 11:26:11 -0800, status) Current mutations don't read the existing node/edge; AddNode/AddEdge are blind upserts, so you'd need a txn.get_cf() read to remove old index keys if summary can change.
 
 ### Deletes
 
@@ -198,6 +201,7 @@ The plan references "On node/edge delete" but **no `DeleteNode` or `DeleteEdge` 
 **Options:**
 - A) Defer delete index cleanup to future work when delete mutations are added
 - B) Add `DeleteNode` / `DeleteEdge` mutations as part of this PR
+(codex, 2026-02-01 11:26:11 -0800, status) Based on the current Mutation enum, there are no delete mutations to hook into, so A is consistent unless you plan to expand the mutation API in this PR.
 - C) Use soft deletes via `UpdateNodeValidSinceUntil` (set `until` to past) - index stays but entity is logically deleted
 
 **Recommendation:** Option A - defer. Index entries for deleted nodes are harmless (lookup returns entity not found).
