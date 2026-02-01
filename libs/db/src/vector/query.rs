@@ -852,29 +852,28 @@ impl QueryProcessor for SearchKNNDispatch {
 // Runnable Implementation for SearchKNN
 // ============================================================================
 
-/// Runnable implementation for SearchKNN with SearchReader.
+/// Runnable implementation for SearchKNN with Reader.
 ///
 /// This allows the ergonomic pattern:
 /// ```rust,ignore
 /// let results = SearchKNN::new(&embedding, query, 10)
 ///     .with_ef(100)
-///     .run(&search_reader, timeout)
+///     .run(&reader, timeout)
 ///     .await?;
 /// ```
 #[async_trait::async_trait]
-impl crate::reader::Runnable<super::reader::SearchReader> for SearchKNN {
+impl crate::reader::Runnable<super::reader::Reader> for SearchKNN {
     type Output = Vec<SearchResult>;
 
     async fn run(
         self,
-        reader: &super::reader::SearchReader,
+        reader: &super::reader::Reader,
         timeout: Duration,
     ) -> Result<Self::Output> {
         let (dispatch, rx) =
             SearchKNNDispatch::new(self, timeout, reader.processor().clone());
 
         reader
-            .reader()
             .send_query(Query::SearchKNN(dispatch))
             .await
             .context("Failed to send SearchKNN query")?;

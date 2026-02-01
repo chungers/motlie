@@ -62,6 +62,39 @@ The vector module provides approximate nearest neighbor (ANN) search using the H
 | **Exact HNSW** | Cosine, L2, DotProduct | High recall, any embedding type |
 | **RaBitQ** | Cosine only | Speed optimization for normalized vectors |
 
+### API Architecture
+
+The vector module has two layers of API:
+
+| Layer | Visibility | Execution | Use Case |
+|-------|------------|-----------|----------|
+| **Processor** | `pub(crate)` | Synchronous | Internal - direct HNSW operations |
+| **Reader + Runnable** | `pub` | Async (MPSC channel) | Public - multi-threaded workloads |
+
+**Processor (internal, sync):**
+- Direct synchronous execution of search/insert operations
+- Used internally by mutation and query consumers
+- Not exposed in the public API
+
+**Reader + Runnable (public, async):**
+- Async operations via MPSC channel to consumer workers
+- Work distribution across multiple consumers
+- Backpressure via bounded channel buffer
+- The recommended public API for all operations
+
+```rust
+// Public async API (recommended)
+let results = SearchKNN::new(&embedding, query, k)
+    .with_ef(100)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Mutations also use async channel API
+InsertVector::new(&embedding, external_key, vector)
+    .run(&writer)
+    .await?;
+```
+
 ---
 
 ## Part 1: Index Building
@@ -990,7 +1023,7 @@ let storage = StorageBuilder::new(path)
     .build()?;
 
 // Simple start (no async updater, no GC)
-let (writer, search_reader) = subsystem.start(
+let (writer, reader) = subsystem.start(
     storage.vector_storage().clone(),
     WriterConfig::default(),
     ReaderConfig::default(),
@@ -1006,7 +1039,7 @@ let gc_config = GcConfig::default()
     .with_interval(Duration::from_secs(60))
     .with_batch_size(100);
 
-let (writer, search_reader) = subsystem.start_with_async(
+let (writer, reader) = subsystem.start_with_async(
     storage.vector_storage().clone(),
     WriterConfig::default(),
     ReaderConfig::default(),
@@ -1454,10 +1487,25 @@ pub fn insert(
 ) -> Result<CacheUpdate>;
 ```
 
-### Processor (Internal API)
+### Processor (Internal, Synchronous API)
 
-`Processor` is the internal execution engine used by mutation/query consumers.
-It is exposed for internal integrations and test helpers.
+`Processor` is the **internal** execution engine for vector operations. It provides
+**synchronous** direct execution of search, insert, and delete operations.
+
+**Visibility:** `pub(crate)` - not part of the public API. Used internally by:
+- Mutation consumers (execute `InsertVector`, `DeleteVector`, etc.)
+- Query consumers (execute `SearchKNN`, `GetVector`, etc.)
+
+**Why internal?** The public API uses async MPSC channels (`Writer`/`Reader`) which
+provide work distribution, backpressure, and multi-threaded execution. Direct
+Processor access bypasses these benefits and is reserved for internal use.
+
+| API Layer | Visibility | Execution | When to Use |
+|-----------|------------|-----------|-------------|
+| `Writer` + `InsertVector::run()` | Public | Async | Production workloads |
+| `Reader` + `SearchKNN::run()` | Public | Async | Production workloads |
+| `Processor::insert_vector()` | Internal | Sync | Mutation consumers |
+| `Processor::search()` | Internal | Sync | Query consumers |
 
 **Note:** HNSW structural parameters (m, ef_construction, etc.) are derived from
 `EmbeddingSpec` which is persisted in RocksDB and protected by SpecHash. Only
@@ -1465,7 +1513,7 @@ It is exposed for internal integrations and test helpers.
 index integrity. See `docs/CONFIG.md` for the design rationale.
 
 ```rust
-pub struct Processor { /* private */ }
+pub(crate) struct Processor { /* private */ }
 impl Processor {
     // Preferred constructors (HNSW params derived from EmbeddingSpec)
     pub fn new(storage: Arc<Storage>, registry: Arc<EmbeddingRegistry>) -> Self;
@@ -1699,7 +1747,7 @@ impl SearchKNN {
 let results = SearchKNN::new(&embedding, query_vec, 10)
     .with_ef(200)           // Higher ef for better recall
     .with_rerank_factor(20) // More candidates for re-ranking
-    .run(&search_reader, Duration::from_secs(5))
+    .run(&reader, Duration::from_secs(5))
     .await?;
 ```
 
@@ -1789,16 +1837,18 @@ writer.flush().await?;  // Wait for commit confirmation
 #### Runnable<R> (for queries)
 
 ```rust
-// Generic over reader type (Reader or SearchReader)
+// Generic over reader type
 #[async_trait]
 pub trait Runnable<R> {
     type Output: Send + 'static;
     async fn run(self, reader: &R, timeout: Duration) -> Result<Self::Output>;
 }
 
-// SearchKNN implements Runnable for both Reader and SearchReader
+// All query types implement Runnable<Reader>
 impl Runnable<Reader> for SearchKNN { type Output = Vec<SearchResult>; ... }
-impl Runnable<SearchReader> for SearchKNN { type Output = Vec<SearchResult>; ... }
+impl Runnable<Reader> for GetVector { type Output = Option<Vec<f32>>; ... }
+impl Runnable<Reader> for GetInternalId { type Output = Option<VecId>; ... }
+// etc.
 ```
 
 **Example:**
@@ -1807,7 +1857,7 @@ use motlie_db::vector::{SearchKNN, Runnable};
 
 let results: Vec<SearchResult> = SearchKNN::new(&embedding, query, 10)
     .with_ef(100)
-    .run(&search_reader, Duration::from_secs(5))
+    .run(&reader, Duration::from_secs(5))
     .await?;
 ```
 
@@ -1870,8 +1920,9 @@ pub fn spawn_mutation_consumer_with_storage_autoreg(
     storage: Arc<Storage>,
 ) -> tokio::task::JoinHandle<Result<()>>;
 
-// Queries (Reader - MPMC / flume)
-pub struct Reader { /* flume::Sender<Query> */ }
+// Queries (Reader - MPMC / flume + Processor)
+// Reader is the unified type for all queries (point lookups + SearchKNN)
+pub struct Reader { /* flume::Sender<Query> + Arc<Processor> */ }
 impl Reader {
     pub async fn send_query(&self, query: Query) -> Result<()>;
     pub fn is_closed(&self) -> bool;
@@ -1880,7 +1931,10 @@ impl Reader {
 pub struct ReaderConfig { pub channel_buffer_size: usize }
 pub struct QueryConsumer { /* receiver, config, storage */ }
 pub struct ProcessorQueryConsumer { /* receiver, config, processor */ }
-pub fn create_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Query>);
+// Recommended: create with storage (auto-creates Processor)
+pub fn create_reader_with_storage(config: ReaderConfig, storage: Arc<Storage>) -> (Reader, flume::Receiver<Query>);
+// Alternative: create with explicit Processor
+pub fn create_reader(config: ReaderConfig, processor: Arc<Processor>) -> (Reader, flume::Receiver<Query>);
 pub fn spawn_query_consumer(consumer: QueryConsumer) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_query_consumer_with_processor(
     consumer: ProcessorQueryConsumer,
@@ -1911,41 +1965,29 @@ pub fn spawn_query_consumers_with_storage_autoreg(
     count: usize,
 ) -> Vec<tokio::task::JoinHandle<Result<()>>>;
 
-// SearchReader (bundles Reader + Processor)
-pub struct SearchReader { /* reader + processor */ }
-impl SearchReader {
-    pub async fn search_knn(
-        &self,
-        embedding: &Embedding,
-        query: Vec<f32>,
-        k: usize,
-        ef: usize,
-        timeout: Duration,
-    ) -> Result<Vec<SearchResult>>;
-
-    pub async fn search_knn_exact(
-        &self,
-        embedding: &Embedding,
-        query: Vec<f32>,
-        k: usize,
-        ef: usize,
-        timeout: Duration,
-    ) -> Result<Vec<SearchResult>>;
-
-    pub fn reader(&self) -> &Reader;
-    pub fn processor(&self) -> &Arc<Processor>;
+// Reader (unified - includes channel sender + Processor)
+pub struct Reader { /* sender + processor */ }
+impl Reader {
+    pub async fn send_query(&self, query: Query) -> Result<()>;
     pub fn is_closed(&self) -> bool;
 }
 
-pub fn create_search_reader(
-    config: ReaderConfig,
-    processor: Arc<Processor>,
-) -> (SearchReader, flume::Receiver<Query>);
-
-pub fn create_search_reader_with_storage(
+// Recommended: create Reader with storage (auto-creates Processor)
+pub fn create_reader_with_storage(
     config: ReaderConfig,
     storage: Arc<Storage>,
-) -> (SearchReader, flume::Receiver<Query>);
+) -> (Reader, flume::Receiver<Query>);
+
+// Alternative: create Reader with explicit Processor
+pub fn create_reader(
+    config: ReaderConfig,
+    processor: Arc<Processor>,
+) -> (Reader, flume::Receiver<Query>);
+
+// Deprecated aliases (for backwards compatibility)
+pub type SearchReader = Reader;
+pub fn create_search_reader(...) -> (Reader, ...);
+pub fn create_search_reader_with_storage(...) -> (Reader, ...);
 ```
 
 **Runnable helpers:**
@@ -1956,13 +1998,13 @@ InsertVector::new(&embedding, ExternalKey::NodeId(id), vec![...])
     .run(&writer)
     .await?;
 
-// Queries: use Runnable<Reader> or Runnable<SearchReader>
+// Queries: use Runnable<Reader>
 let result = GetVector::new(embedding.code(), id)
     .run(&reader, Duration::from_secs(5))
     .await?;
 
 let results = SearchKNN::new(&embedding, query, 10)
-    .run(&search_reader, Duration::from_secs(5))
+    .run(&reader, Duration::from_secs(5))
     .await?;
 ```
 
@@ -2027,7 +2069,7 @@ This example retrieves an existing embedding from the registry by code.
 
 ```rust
 use motlie_db::vector::{
-    create_writer, create_search_reader_with_storage, spawn_mutation_consumer_with_storage,
+    create_writer, create_reader_with_storage, spawn_mutation_consumer_with_storage,
     spawn_query_consumers_with_storage, WriterConfig, ReaderConfig,
     InsertVector, SearchKNN, EmbeddingRegistry, ExternalKey, Storage,
     MutationRunnable, Runnable,
@@ -2072,7 +2114,7 @@ let mutation_handle = spawn_mutation_consumer_with_storage(
 );
 
 // Create search reader + query consumers (4 workers for parallel query processing)
-let (search_reader, query_rx) = create_search_reader_with_storage(
+let (reader, query_rx) = create_reader_with_storage(
     ReaderConfig::default(),
     storage.clone(),
 );
@@ -2092,7 +2134,7 @@ let mut client_handles = Vec::new();
 
 for client_id in 0..num_clients {
     let writer = writer.clone();
-    let search_reader = search_reader.clone();
+    let reader = reader.clone();
     let embedding = embedding.clone();
 
     let handle = tokio::spawn(async move {
@@ -2118,7 +2160,7 @@ for client_id in 0..num_clients {
         for (external_key, query_vector) in my_vectors.iter().take(5) {
             let results = SearchKNN::new(&embedding, query_vector.clone(), 10)
                 .with_ef(100)
-                .run(&search_reader, Duration::from_secs(5))
+                .run(&reader, Duration::from_secs(5))
                 .await?;
 
             // Verify our vector appears in results (should be distance ~0)
@@ -2143,8 +2185,8 @@ for handle in client_handles {
 drop(writer);
 mutation_handle.await??;
 
-// Drop search_reader to close query channel, then wait for query consumers
-drop(search_reader);
+// Drop reader to close query channel, then wait for query consumers
+drop(reader);
 for handle in query_handles {
     handle.await??;
 }
@@ -2157,7 +2199,7 @@ inserts and queries. Uses `block_on` to bridge sync/async boundaries.
 
 ```rust
 use motlie_db::vector::{
-    create_writer, create_search_reader_with_storage, spawn_mutation_consumer_with_storage,
+    create_writer, create_reader_with_storage, spawn_mutation_consumer_with_storage,
     spawn_query_consumers_with_storage, WriterConfig, ReaderConfig,
     InsertVector, SearchKNN, EmbeddingRegistry, Distance, EmbeddingFilter,
     ExternalKey, Storage, MutationRunnable, Runnable,
@@ -2217,8 +2259,8 @@ let mutation_handle = {
 };
 
 // Create search reader + query consumers
-let (search_reader, query_rx) = rt.block_on(async {
-    create_search_reader_with_storage(ReaderConfig::default(), storage.clone())
+let (reader, query_rx) = rt.block_on(async {
+    create_reader_with_storage(ReaderConfig::default(), storage.clone())
 });
 let query_handles: Vec<_> = {
     let rt = rt.clone();
@@ -2243,7 +2285,7 @@ let mut thread_handles = Vec::new();
 
 for thread_id in 0..num_threads {
     let writer = writer.clone();
-    let search_reader = search_reader.clone();
+    let reader = reader.clone();
     let embedding = embedding.clone();
     let rt = rt.clone();
 
@@ -2273,7 +2315,7 @@ for thread_id in 0..num_threads {
             let results = rt.block_on(async {
                 SearchKNN::new(&embedding, query_vector.clone(), 10)
                     .with_ef(100)
-                    .run(&search_reader, Duration::from_secs(5))
+                    .run(&reader, Duration::from_secs(5))
                     .await
             })?;
 
@@ -2298,7 +2340,7 @@ for handle in thread_handles {
 rt.block_on(async {
     drop(writer);
     mutation_handle.await??;
-    drop(search_reader);
+    drop(reader);
     for h in query_handles {
         h.await??;
     }
@@ -2312,9 +2354,9 @@ rt.block_on(async {
   embedding from the registry rather than re-registering
 - **Inspect with `get_spec_by_code()`**: Verify HNSW/RaBitQ parameters before use
 - **Writer is Clone**: Share across threads/tasks; all clones send to same MPSC channel
-- **SearchReader is Clone**: Share across threads/tasks for concurrent queries
+- **Reader is Clone**: Share across threads/tasks for concurrent queries
 - **Flush before queries**: Call `writer.flush()` to ensure inserts are committed
-- **Graceful shutdown**: Drop Writer/SearchReader to close channels, then await handles
+- **Graceful shutdown**: Drop Writer/Reader to close channels, then await handles
 
 #### Flow 2: Queries via `Reader` (SearchKNN)
 
@@ -2334,7 +2376,7 @@ let processor = Arc::new(Processor::new(storage.clone(), registry.clone()));
 let (reader, receiver) = create_reader(ReaderConfig::default());
 spawn_query_consumers_with_processor(receiver, ReaderConfig::default(), processor.clone(), 2);
 
-// Runnable helper (SearchKNN implements Runnable for Reader/SearchReader)
+// Runnable helper (SearchKNN implements Runnable for Reader)
 let results = SearchKNN::new(&embedding, query_vec, 10)
     .with_ef(100)
     .run(&reader, Duration::from_secs(5))
@@ -2373,7 +2415,7 @@ for result in results {
 
 **Notes:**
 - The `Query` enum is an internal dispatch mechanism; the public, ergonomic path
-  is `SearchReader` or `Reader` + `Runnable::run(...)`.
+  is `Reader` + `Runnable::run(...)`.
 
 ### Search Configuration
 

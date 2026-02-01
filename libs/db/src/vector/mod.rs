@@ -145,7 +145,9 @@ pub use query::{
     QueryExecutor, QueryProcessor, QueryWithTimeout, ResolveIds, SearchKNN,
 };
 pub use reader::{
-    create_reader, create_search_reader, create_search_reader_with_storage,
+    create_reader, create_reader_with_storage,
+    // Deprecated aliases (for backwards compatibility)
+    create_search_reader, create_search_reader_with_storage, SearchReader,
     spawn_consumer as spawn_query_consumer,
     spawn_consumer_with_processor as spawn_query_consumer_with_processor,
     spawn_consumers as spawn_query_consumers,
@@ -153,7 +155,6 @@ pub use reader::{
     spawn_query_consumers_with_storage,
     spawn_query_consumers_with_storage_autoreg,
     Consumer as QueryConsumer, ProcessorConsumer as ProcessorQueryConsumer, Reader, ReaderConfig,
-    SearchReader,
 };
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder

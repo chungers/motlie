@@ -1,7 +1,7 @@
 //! Vector query reader module providing query infrastructure.
 //!
 //! This module follows the same pattern as graph::reader:
-//! - Reader - handle for sending queries
+//! - Reader - handle for sending queries (with Processor for SearchKNN)
 //! - ReaderConfig - configuration
 //! - Consumer - processes queries from channel
 //! - Spawn functions for creating consumers
@@ -15,27 +15,22 @@
 //! ┌─────────┐     MPMC (flume)     ┌──────────┐
 //! │ Reader  │──────────────────────│ Consumer │ (N workers)
 //! └─────────┘       Query          └──────────┘
-//!                                       │
-//!                                       ▼
-//!                                  ┌──────────┐
-//!                                  │ Storage  │
-//!                                  └──────────┘
+//!      │                                │
+//!      ▼                                ▼
+//! ┌───────────┐                    ┌──────────┐
+//! │ Processor │                    │ Storage  │
+//! └───────────┘                    └──────────┘
 //! ```
 //!
-//! # SearchKNN Support
-//!
-//! For queries that need HNSW search (SearchKNN), use `spawn_consumers_with_processor`
-//! which provides access to the Processor for index operations. This bundles
-//! Storage + Processor together, eliminating ad-hoc plumbing at call sites.
+//! The Reader holds a Processor reference enabling SearchKNN queries to
+//! perform HNSW index operations directly through the reader.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use super::embedding::Embedding;
-use super::processor::{Processor, SearchResult};
-use super::query::{Query, SearchKNN, SearchKNNDispatch};
+use super::processor::Processor;
+use super::query::Query;
 use super::Storage;
 
 // ============================================================================
@@ -64,30 +59,41 @@ impl Default for ReaderConfig {
 /// Handle for sending vector queries to be processed.
 ///
 /// The Reader sends queries through an MPMC (flume) channel, allowing
-/// multiple consumer workers to process queries in parallel.
+/// multiple consumer workers to process queries in parallel. It also holds
+/// a Processor reference for SearchKNN operations.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use motlie_db::vector::{Reader, GetVector};
+/// use motlie_db::vector::{Reader, GetVector, SearchKNN, Runnable};
 /// use std::time::Duration;
 ///
-/// // Create reader and consumers
-/// let (reader, receiver) = create_reader(ReaderConfig::default());
+/// // Create reader with storage
+/// let (reader, receiver) = create_reader_with_storage(
+///     ReaderConfig::default(),
+///     storage.clone(),
+/// );
 ///
-/// // Execute a query
+/// // Point lookup query
 /// let query = GetVector::new(embedding_code, id);
 /// let result = query.run(&reader, Duration::from_secs(5)).await?;
+///
+/// // SearchKNN query
+/// let results = SearchKNN::new(&embedding, query_vec, 10)
+///     .with_ef(100)
+///     .run(&reader, Duration::from_secs(5))
+///     .await?;
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Reader {
     sender: flume::Sender<Query>,
+    processor: Arc<Processor>,
 }
 
 impl Reader {
-    /// Create a new Reader with the given sender.
-    pub fn new(sender: flume::Sender<Query>) -> Self {
-        Self { sender }
+    /// Create a new Reader with the given sender and processor.
+    pub fn new(sender: flume::Sender<Query>, processor: Arc<Processor>) -> Self {
+        Self { sender, processor }
     }
 
     /// Send a query to the reader queue.
@@ -104,12 +110,70 @@ impl Reader {
     pub fn is_closed(&self) -> bool {
         self.sender.is_disconnected()
     }
+
+    /// Get the processor reference.
+    ///
+    /// Used internally by `Runnable` implementations (e.g., `SearchKNN`) to access
+    /// the processor for query dispatch.
+    pub(crate) fn processor(&self) -> &Arc<Processor> {
+        &self.processor
+    }
 }
 
-/// Create a new query reader and receiver pair.
-pub fn create_reader(config: ReaderConfig) -> (Reader, flume::Receiver<Query>) {
+impl std::fmt::Debug for Reader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reader")
+            .field("sender", &self.sender)
+            .field("processor", &"<Arc<Processor>>")
+            .finish()
+    }
+}
+
+/// Create a Reader from Storage (auto-creates Processor internally).
+///
+/// This is the recommended way to create a Reader - it constructs
+/// the internal Processor automatically.
+///
+/// # Returns
+///
+/// Tuple of (Reader, flume::Receiver<Query>) - spawn consumers with the receiver.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let storage = Arc::new(Storage::readwrite(path));
+/// let (reader, receiver) = create_reader_with_storage(
+///     ReaderConfig::default(),
+///     storage.clone(),
+/// );
+/// spawn_query_consumers_with_storage_autoreg(receiver, config, storage, 2);
+///
+/// // Use SearchKNN::run() for searches
+/// let results = SearchKNN::new(&embedding, query, 10)
+///     .run(&reader, timeout)
+///     .await?;
+/// ```
+pub fn create_reader_with_storage(
+    config: ReaderConfig,
+    storage: Arc<super::Storage>,
+) -> (Reader, flume::Receiver<Query>) {
+    let registry = storage.cache().clone();
+    let processor = Arc::new(Processor::new(storage, registry));
     let (sender, receiver) = flume::bounded(config.channel_buffer_size);
-    let reader = Reader::new(sender);
+    let reader = Reader::new(sender, processor);
+    (reader, receiver)
+}
+
+/// Create a Reader with an explicit Processor.
+///
+/// Use this when you need to share a Processor across multiple Readers
+/// or have custom Processor configuration.
+pub fn create_reader(
+    config: ReaderConfig,
+    processor: Arc<Processor>,
+) -> (Reader, flume::Receiver<Query>) {
+    let (sender, receiver) = flume::bounded(config.channel_buffer_size);
+    let reader = Reader::new(sender, processor);
     (reader, receiver)
 }
 
@@ -344,191 +408,32 @@ pub fn spawn_query_consumers_with_storage_autoreg(
 }
 
 // ============================================================================
-// SearchReader - High-level API for SearchKNN
+// Deprecated Aliases (for backwards compatibility)
 // ============================================================================
 
-/// High-level reader for SearchKNN queries.
+/// Deprecated: Use `Reader` instead.
 ///
-/// `SearchReader` bundles a `Reader` with an `Arc<Processor>`, providing
-/// a simple API for HNSW nearest neighbor search without ad-hoc processor
-/// plumbing at call sites.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// // Setup
-/// let (reader, receiver) = create_reader(ReaderConfig::default());
-/// let search_reader = SearchReader::new(reader, processor);
-///
-/// // Spawn consumers
-/// spawn_consumers_with_processor(receiver, config, processor, 4);
-///
-/// // Simple search API - no dispatch construction needed
-/// let results = search_reader
-///     .search_knn(embedding, query_vec, 10, 100, Duration::from_secs(5))
-///     .await?;
-/// ```
-#[derive(Clone)]
-pub struct SearchReader {
-    reader: Reader,
-    processor: Arc<Processor>,
-}
+/// `SearchReader` has been consolidated into `Reader`. This type alias
+/// is provided for backwards compatibility during migration.
+#[deprecated(since = "0.2.0", note = "Use Reader instead - SearchReader has been consolidated")]
+pub type SearchReader = Reader;
 
-impl SearchReader {
-    /// Create a new SearchReader.
-    pub fn new(reader: Reader, processor: Arc<Processor>) -> Self {
-        Self { reader, processor }
-    }
-
-    /// Perform K-nearest neighbor search with auto-strategy selection.
-    ///
-    /// Strategy is auto-selected based on embedding's distance metric:
-    /// - Cosine → RaBitQ (fast approximate search with re-ranking)
-    /// - L2/DotProduct → Exact
-    ///
-    /// Use `search_knn_exact()` to force exact distance computation.
-    ///
-    /// # Arguments
-    ///
-    /// * `embedding` - Embedding space reference
-    /// * `query` - Query vector
-    /// * `k` - Number of results to return
-    /// * `ef` - Search expansion factor (higher = more accurate, slower)
-    /// * `timeout` - Query timeout
-    ///
-    /// # Returns
-    ///
-    /// Vector of `SearchResult` structs, sorted by distance (ascending).
-    pub async fn search_knn(
-        &self,
-        embedding: &Embedding,
-        query: Vec<f32>,
-        k: usize,
-        ef: usize,
-        timeout: Duration,
-    ) -> Result<Vec<SearchResult>> {
-        let params = SearchKNN::new(embedding, query, k).with_ef(ef);
-        let (dispatch, rx) = SearchKNNDispatch::new(params, timeout, self.processor.clone());
-
-        self.reader
-            .send_query(Query::SearchKNN(dispatch))
-            .await
-            .context("Failed to send SearchKNN query")?;
-
-        rx.await
-            .context("SearchKNN query was cancelled")?
-            .context("SearchKNN query failed")
-    }
-
-    /// Perform K-nearest neighbor search with exact distance computation.
-    ///
-    /// Forces exact distance computation regardless of embedding's distance metric.
-    /// Use this when maximum accuracy is required at the cost of speed.
-    ///
-    /// # Arguments
-    ///
-    /// * `embedding` - Embedding space reference
-    /// * `query` - Query vector
-    /// * `k` - Number of results to return
-    /// * `ef` - Search expansion factor (higher = more accurate, slower)
-    /// * `timeout` - Query timeout
-    ///
-    /// # Returns
-    ///
-    /// Vector of `SearchResult` structs, sorted by distance (ascending).
-    pub async fn search_knn_exact(
-        &self,
-        embedding: &Embedding,
-        query: Vec<f32>,
-        k: usize,
-        ef: usize,
-        timeout: Duration,
-    ) -> Result<Vec<SearchResult>> {
-        let params = SearchKNN::new(embedding, query, k).with_ef(ef).exact();
-        let (dispatch, rx) = SearchKNNDispatch::new(params, timeout, self.processor.clone());
-
-        self.reader
-            .send_query(Query::SearchKNN(dispatch))
-            .await
-            .context("Failed to send SearchKNN query")?;
-
-        rx.await
-            .context("SearchKNN query was cancelled")?
-            .context("SearchKNN query failed")
-    }
-
-    /// Get the underlying reader for other query types.
-    pub fn reader(&self) -> &Reader {
-        &self.reader
-    }
-
-    /// Get the processor for direct operations.
-    pub fn processor(&self) -> &Arc<Processor> {
-        &self.processor
-    }
-
-    /// Check if the reader is still active.
-    pub fn is_closed(&self) -> bool {
-        self.reader.is_closed()
-    }
-}
-
-impl std::fmt::Debug for SearchReader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SearchReader")
-            .field("reader", &self.reader)
-            .field("processor", &"<Arc<Processor>>")
-            .finish()
-    }
-}
-
-/// Create a SearchReader along with a reader and receiver.
-///
-/// Convenience function that creates all components needed for SearchKNN.
-///
-/// # Returns
-///
-/// Tuple of (SearchReader, flume::Receiver<Query>) - spawn consumers with the receiver.
-pub fn create_search_reader(
-    config: ReaderConfig,
-    processor: Arc<Processor>,
-) -> (SearchReader, flume::Receiver<Query>) {
-    let (reader, receiver) = create_reader(config);
-    let search_reader = SearchReader::new(reader, processor);
-    (search_reader, receiver)
-}
-
-/// Create a SearchReader from Storage (auto-creates Processor internally).
-///
-/// This convenience function creates a SearchReader without requiring direct
-/// Processor access, enabling `Processor` to be `pub(crate)`.
-///
-/// # Returns
-///
-/// Tuple of (SearchReader, flume::Receiver<Query>) - spawn consumers with the receiver.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let storage = Arc::new(Storage::readwrite(path));
-/// let (search_reader, receiver) = create_search_reader_with_storage(
-///     ReaderConfig::default(),
-///     storage.clone(),
-/// );
-/// spawn_query_consumers_with_storage_autoreg(receiver, config, storage, 2);
-///
-/// // Use SearchKNN::run() for searches
-/// let results = SearchKNN::new(&embedding, query, 10)
-///     .run(&search_reader, timeout)
-///     .await?;
-/// ```
+/// Deprecated: Use `create_reader_with_storage` instead.
+#[deprecated(since = "0.2.0", note = "Use create_reader_with_storage instead")]
 pub fn create_search_reader_with_storage(
     config: ReaderConfig,
     storage: Arc<super::Storage>,
-) -> (SearchReader, flume::Receiver<Query>) {
-    let registry = storage.cache().clone();
-    let processor = Arc::new(Processor::new(storage, registry));
-    create_search_reader(config, processor)
+) -> (Reader, flume::Receiver<Query>) {
+    create_reader_with_storage(config, storage)
+}
+
+/// Deprecated: Use `create_reader` instead.
+#[deprecated(since = "0.2.0", note = "Use create_reader instead")]
+pub fn create_search_reader(
+    config: ReaderConfig,
+    processor: Arc<Processor>,
+) -> (Reader, flume::Receiver<Query>) {
+    create_reader(config, processor)
 }
 
 // ============================================================================
@@ -538,16 +443,26 @@ pub fn create_search_reader_with_storage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    fn create_test_storage() -> Arc<Storage> {
+        let dir = tempdir().unwrap();
+        let mut storage = Storage::readwrite(dir.path());
+        storage.ready().unwrap();
+        Arc::new(storage)
+    }
 
     #[tokio::test]
     async fn test_reader_creation() {
-        let (reader, _receiver) = create_reader(ReaderConfig::default());
+        let storage = create_test_storage();
+        let (reader, _receiver) = create_reader_with_storage(ReaderConfig::default(), storage);
         assert!(!reader.is_closed());
     }
 
     #[tokio::test]
     async fn test_reader_channel_closed() {
-        let (reader, receiver) = create_reader(ReaderConfig::default());
+        let storage = create_test_storage();
+        let (reader, receiver) = create_reader_with_storage(ReaderConfig::default(), storage);
         drop(receiver);
         assert!(reader.is_closed());
     }
@@ -565,7 +480,8 @@ mod tests {
 
     #[test]
     fn test_reader_is_clone() {
-        let (reader, _receiver) = create_reader(ReaderConfig::default());
+        let storage = create_test_storage();
+        let (reader, _receiver) = create_reader_with_storage(ReaderConfig::default(), storage);
         let _reader2 = reader.clone();
     }
 }
