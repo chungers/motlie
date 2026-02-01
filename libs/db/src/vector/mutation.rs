@@ -351,7 +351,7 @@ impl Mutation {
     ///
     /// Returns an optional `MutationCacheUpdate` for cache updates.
     /// The cache update should be applied AFTER transaction commit.
-    pub fn execute(
+    pub(crate) fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,

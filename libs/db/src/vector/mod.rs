@@ -106,7 +106,7 @@ pub use distance::Distance;
 pub use embedding::{Embedder, Embedding, EmbeddingBuilder};
 pub use hnsw::ConfigWarning;
 pub use id::IdAllocator;
-pub use processor::{Processor, SearchResult};
+pub use processor::SearchResult;
 pub use quantization::RaBitQ;
 pub use registry::{EmbeddingFilter, EmbeddingRegistry};
 pub use schema::{
@@ -130,11 +130,9 @@ pub use mutation::{
 };
 pub use writer::{
     create_writer,
-    spawn_consumer as spawn_mutation_consumer,
     spawn_mutation_consumer_with_storage,
     spawn_mutation_consumer_with_storage_autoreg,
-    Consumer as MutationConsumer, MutationCacheUpdate, MutationExecutor, MutationProcessor, Writer,
-    WriterConfig,
+    MutationCacheUpdate, MutationProcessor, Writer, WriterConfig,
 };
 
 // Query types and infrastructure (following graph::query pattern)
@@ -145,16 +143,14 @@ pub use query::{
     QueryExecutor, QueryProcessor, QueryWithTimeout, ResolveIds, SearchKNN,
 };
 pub use reader::{
-    create_reader, create_reader_with_storage,
+    create_reader_with_storage,
     // Deprecated aliases (for backwards compatibility)
-    create_search_reader, create_search_reader_with_storage, SearchReader,
+    create_search_reader_with_storage, SearchReader,
     spawn_consumer as spawn_query_consumer,
-    spawn_consumer_with_processor as spawn_query_consumer_with_processor,
     spawn_consumers as spawn_query_consumers,
-    spawn_consumers_with_processor as spawn_query_consumers_with_processor,
     spawn_query_consumers_with_storage,
     spawn_query_consumers_with_storage_autoreg,
-    Consumer as QueryConsumer, ProcessorConsumer as ProcessorQueryConsumer, Reader, ReaderConfig,
+    Consumer as QueryConsumer, Reader, ReaderConfig,
 };
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder

@@ -92,7 +92,7 @@ pub struct Reader {
 
 impl Reader {
     /// Create a new Reader with the given sender and processor.
-    pub fn new(sender: flume::Sender<Query>, processor: Arc<Processor>) -> Self {
+    pub(crate) fn new(sender: flume::Sender<Query>, processor: Arc<Processor>) -> Self {
         Self { sender, processor }
     }
 
@@ -168,7 +168,7 @@ pub fn create_reader_with_storage(
 ///
 /// Use this when you need to share a Processor across multiple Readers
 /// or have custom Processor configuration.
-pub fn create_reader(
+pub(crate) fn create_reader(
     config: ReaderConfig,
     processor: Arc<Processor>,
 ) -> (Reader, flume::Receiver<Query>) {
@@ -278,7 +278,7 @@ pub fn spawn_consumers(
 /// enabling SearchKNN queries to perform HNSW index operations.
 ///
 /// Use this when your query workload includes SearchKNN.
-pub struct ProcessorConsumer {
+pub(crate) struct ProcessorConsumer {
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     processor: Arc<Processor>,
@@ -286,7 +286,7 @@ pub struct ProcessorConsumer {
 
 impl ProcessorConsumer {
     /// Create a new ProcessorConsumer.
-    pub fn new(
+    pub(crate) fn new(
         receiver: flume::Receiver<Query>,
         config: ReaderConfig,
         processor: Arc<Processor>,
@@ -324,13 +324,13 @@ impl ProcessorConsumer {
     }
 
     /// Get the processor reference (for SearchKNN dispatch setup).
-    pub fn processor(&self) -> &Arc<Processor> {
+    pub(crate) fn processor(&self) -> &Arc<Processor> {
         &self.processor
     }
 }
 
 /// Spawn a Processor-backed query consumer as a tokio task.
-pub fn spawn_consumer_with_processor(
+pub(crate) fn spawn_consumer_with_processor(
     consumer: ProcessorConsumer,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move { consumer.run().await })
@@ -351,7 +351,7 @@ pub fn spawn_consumer_with_processor(
 /// # Returns
 ///
 /// Vector of JoinHandles for all spawned consumers
-pub fn spawn_consumers_with_processor(
+pub(crate) fn spawn_consumers_with_processor(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     processor: Arc<Processor>,
@@ -429,7 +429,7 @@ pub fn create_search_reader_with_storage(
 
 /// Deprecated: Use `create_reader` instead.
 #[deprecated(since = "0.2.0", note = "Use create_reader instead")]
-pub fn create_search_reader(
+pub(crate) fn create_search_reader(
     config: ReaderConfig,
     processor: Arc<Processor>,
 ) -> (Reader, flume::Receiver<Query>) {

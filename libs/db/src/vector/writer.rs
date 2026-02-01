@@ -199,7 +199,7 @@ impl MutationCacheUpdate {
 /// Following the same pattern as `graph::writer::MutationExecutor`.
 ///
 /// Note: This is synchronous because RocksDB operations are blocking.
-pub trait MutationExecutor: Send + Sync {
+pub(crate) trait MutationExecutor: Send + Sync {
     /// Execute this mutation directly against a RocksDB transaction.
     ///
     /// Returns an optional MutationCacheUpdate if caching is needed.
@@ -357,7 +357,7 @@ pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutati
 ///
 /// The consumer receives mutation batches and delegates to a Processor
 /// for database operations.
-pub struct Consumer {
+pub(crate) struct Consumer {
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     processor: Arc<Processor>,
@@ -365,7 +365,7 @@ pub struct Consumer {
 
 impl Consumer {
     /// Create a new Consumer.
-    pub fn new(
+    pub(crate) fn new(
         receiver: mpsc::Receiver<Vec<Mutation>>,
         config: WriterConfig,
         processor: Arc<Processor>,
@@ -522,7 +522,7 @@ impl Consumer {
 /// Spawn a mutation consumer as a tokio task.
 ///
 /// Returns a JoinHandle that resolves when the consumer completes.
-pub fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
+pub(crate) fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move { consumer.run().await })
 }
 

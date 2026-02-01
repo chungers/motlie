@@ -776,7 +776,7 @@ impl SearchKNN {
     /// Strategy selection:
     /// - If `exact=true`: Uses `processor.search()` with exact distances
     /// - If `exact=false`: Constructs `SearchConfig` for auto-strategy selection
-    pub fn execute_with_processor(&self, processor: &Processor) -> Result<Vec<SearchResult>> {
+    pub(crate) fn execute_with_processor(&self, processor: &Processor) -> Result<Vec<SearchResult>> {
         if self.exact {
             // Exact search - always use precise distance computation
             processor.search(&self.embedding, &self.query, self.k, self.ef)
