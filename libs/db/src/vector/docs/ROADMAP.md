@@ -448,7 +448,7 @@ let matches = registry.find(
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ CF: vector/graph_meta                                                   │ │
 │  │ Key:   [embedding: u64] + [field: u8] = 9 bytes                        │ │
-│  │ Value: Varies by field (entry_point, max_level, count, config)         │ │
+│  │ Value: Varies by field (entry_point, max_level, count, spec_hash)      │ │
 │  │ Access: Point lookup (rarely changes)                                  │ │
 │  │ Options: No compression                                                │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
@@ -1067,7 +1067,7 @@ Added semantic type aliases and union pattern for polymorphic CFs:
 - `RabitqCode` (Vec<u8>) - RaBitQ quantized code
 
 **Union Pattern for Polymorphic CFs:**
-- `GraphMeta`: `GraphMetaField` enum with `EntryPoint`, `MaxLevel`, `Count`, `Config` variants
+- `GraphMeta`: `GraphMetaField` enum with `EntryPoint`, `MaxLevel`, `Count`, `SpecHash` variants
 - `IdAlloc`: `IdAllocField` enum with `NextId`, `FreeBitmap` variants
 - Single enum for both key discrimination and value storage
 - Key helpers: `GraphMetaCfKey::entry_point(code)`, etc.
