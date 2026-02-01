@@ -1247,6 +1247,7 @@ pub async fn sweep(args: SweepArgs) -> Result<()> {
     let storage_type = VectorElementType::F16;
 
     let spec = EmbeddingSpec {
+        code: embedding_code,
         model: "bench".to_string(),
         dim: dim as u32,
         distance,
@@ -2134,10 +2135,10 @@ fn embeddings_inspect(args: EmbeddingsInspectArgs) -> Result<()> {
         let mut storage = Storage::readwrite(&args.db_path);
         storage.ready()?;
         let registry = EmbeddingRegistry::new(Arc::new(storage));
-        let spec = registry
-            .get_spec_by_code(code)?
+        let embedding = registry
+            .get_by_code(code)
             .ok_or_else(|| anyhow::anyhow!("No embedding found for code {}", code))?;
-        (code, spec)
+        (code, embedding.spec().clone())
     } else {
         // Fall back to resolve_embedding_spec for model/dim/distance lookups
         resolve_embedding_spec(

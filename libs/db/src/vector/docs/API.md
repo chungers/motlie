@@ -206,8 +206,8 @@ InsertVector::new(&embedding, external_key, vector.clone())
 **Lookup by code + insert (async channel API):**
 
 When you have an existing embedding code (e.g., from a saved configuration or admin tool),
-use `get_spec_by_code()` to retrieve the full specification and `get_by_code()` for the
-lightweight handle:
+use `get_by_code()` to retrieve the embedding handle. The `Embedding` wraps an immutable
+`Arc<EmbeddingSpec>` which you can access via `.spec()`:
 
 ```rust
 use motlie_db::vector::{
@@ -228,26 +228,24 @@ registry.prewarm()?;
 // Known embedding code (e.g., from CLI `embeddings list` or saved config)
 let embedding_code: u64 = 12345;
 
-// Get full spec to inspect build parameters (hnsw_m, ef_construction, etc.)
-let spec = registry
-    .get_spec_by_code(embedding_code)?
+// Get Embedding handle - wraps Arc<EmbeddingSpec> for zero-copy access
+let embedding = registry
+    .get_by_code(embedding_code)
     .ok_or_else(|| anyhow::anyhow!("Embedding code {} not found", embedding_code))?;
+
+// Access spec via .spec() to inspect build parameters
+let spec = embedding.spec();
 println!(
     "Found embedding: model={}, dim={}, distance={:?}, hnsw_m={}, ef_construction={}",
     spec.model, spec.dim, spec.distance, spec.hnsw_m, spec.hnsw_ef_construction
 );
-
-// Get lightweight Embedding handle for operations
-let embedding = registry
-    .get_by_code(embedding_code)
-    .ok_or_else(|| anyhow::anyhow!("Embedding code {} not in cache", embedding_code))?;
 
 // Create writer + consumer
 let (writer, receiver) = create_writer(WriterConfig::default());
 spawn_mutation_consumer_with_storage_autoreg(receiver, WriterConfig::default(), storage.clone());
 
 // Insert vectors using Runnable helper
-let vector: Vec<f32> = vec![0.1; spec.dim as usize];  // Use spec.dim to match dimension
+let vector: Vec<f32> = vec![0.1; embedding.dim() as usize];  // Use accessor methods
 let external_key = ExternalKey::NodeId(Id::new());
 InsertVector::new(&embedding, external_key, vector.clone())
     .immediate()
@@ -1382,11 +1380,9 @@ impl EmbeddingRegistry {
         txn: &Transaction<'_, TransactionDB>,
     ) -> Result<Embedding>;
     pub fn get(&self, model: &str, dim: u32, distance: Distance) -> Option<Embedding>;
-    // Returns lightweight Embedding handle (code, model, dim, distance, storage_type)
+    // Returns Embedding wrapping Arc<EmbeddingSpec> - use .spec() to access full spec
+    // (includes hnsw_m, hnsw_ef_construction, rabitq_bits, rabitq_seed)
     pub fn get_by_code(&self, code: u64) -> Option<Embedding>;
-    // Returns full EmbeddingSpec from storage (includes hnsw_m, hnsw_ef_construction,
-    // rabitq_bits, rabitq_seed for inspecting build parameters)
-    pub fn get_spec_by_code(&self, code: u64) -> Result<Option<EmbeddingSpec>>;
     pub fn set_embedder(&self, code: u64, embedder: Arc<dyn Embedder>) -> Result<()>;
     pub fn list_all(&self) -> Vec<Embedding>;
     pub fn find_by_model(&self, model: &str) -> Vec<Embedding>;
@@ -2131,19 +2127,16 @@ registry.prewarm()?;
 // This avoids re-registering and ensures all clients use the same embedding space
 let embedding_code: u64 = 12345;  // Known code from `embeddings list` or saved config
 
-// Get full spec to verify parameters
-let spec = registry
-    .get_spec_by_code(embedding_code)?
-    .ok_or_else(|| anyhow::anyhow!("Embedding {} not found", embedding_code))?;
-println!(
-    "Using embedding: model={}, dim={}, distance={:?}",
-    spec.model, spec.dim, spec.distance
-);
-
-// Get lightweight handle for operations
+// Get embedding handle - wraps Arc<EmbeddingSpec> for zero-copy access
 let embedding = registry
     .get_by_code(embedding_code)
-    .ok_or_else(|| anyhow::anyhow!("Embedding {} not in cache", embedding_code))?;
+    .ok_or_else(|| anyhow::anyhow!("Embedding {} not found", embedding_code))?;
+
+// Access spec via .spec() to verify parameters
+println!(
+    "Using embedding: model={}, dim={}, distance={:?}",
+    embedding.model(), embedding.dim(), embedding.distance()
+);
 
 // Create writer channel + mutation consumer
 let (writer, mutation_rx) = create_writer(WriterConfig::default());
@@ -2271,10 +2264,8 @@ let embedding = registry
     .next()
     .ok_or_else(|| anyhow::anyhow!("Embedding not found for filter"))?;
 
-// Optionally inspect the full spec
-let spec = registry
-    .get_spec_by_code(embedding.code())?
-    .ok_or_else(|| anyhow::anyhow!("Spec not found"))?;
+// Access the full spec via .spec() to inspect build parameters
+let spec = embedding.spec();
 println!(
     "Found embedding code={}, hnsw_m={}, ef_construction={}",
     embedding.code(), spec.hnsw_m, spec.hnsw_ef_construction
@@ -2393,7 +2384,7 @@ rt.block_on(async {
 
 - **Retrieve existing embeddings**: Use `get_by_code()` or `find()` to get an existing
   embedding from the registry rather than re-registering
-- **Inspect with `get_spec_by_code()`**: Verify HNSW/RaBitQ parameters before use
+- **Inspect with `.spec()`**: Access the full `EmbeddingSpec` via `embedding.spec()` to verify HNSW/RaBitQ parameters
 - **Writer is Clone**: Share across threads/tasks; all clones send to same MPSC channel
 - **Reader is Clone**: Share across threads/tasks for concurrent queries
 - **Flush before queries**: Call `writer.flush()` to ensure inserts are committed

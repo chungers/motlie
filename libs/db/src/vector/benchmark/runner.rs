@@ -397,6 +397,7 @@ pub fn build_hnsw_index(
 
     // Create EmbeddingSpec with HNSW parameters
     let spec = EmbeddingSpec {
+        code: embedding_code,
         model: "benchmark".to_string(),
         dim: dim as u32,
         distance,

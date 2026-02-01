@@ -1,9 +1,10 @@
 //! Embedding type and Embedder trait definitions.
 //!
 //! Design rationale (ARCH-17, ARCH-18):
-//! - `Embedding` is a rich struct with model, dim, distance, and optional embedder
+//! - `Embedding` wraps `Arc<EmbeddingSpec>` - immutable, shared from RocksDB
 //! - `Embedder` trait enables document-to-vector computation
 //! - Direct field access without registry lookup
+//! - Zero-copy: spec is read once from RocksDB and shared via Arc
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -13,6 +14,7 @@ use anyhow::Result;
 
 use super::distance::Distance;
 use super::error;
+use super::schema::EmbeddingSpec;
 
 // ============================================================================
 // Embedder Trait
@@ -59,10 +61,12 @@ pub trait Embedder: Send + Sync {
 
 /// Complete embedding space specification with optional compute behavior.
 ///
+/// Wraps `Arc<EmbeddingSpec>` for zero-copy sharing. The spec is read once
+/// from RocksDB and shared via Arc - no data copying after initial read.
+///
 /// Design rationale:
-/// - `code`: u64 for fast key serialization (ARCH-14)
-/// - `model`, `dim`, `distance`: Direct access without registry lookup (ARCH-17)
-/// - `embedder`: Optional compute capability (ARCH-18)
+/// - `spec`: Immutable `Arc<EmbeddingSpec>` from RocksDB (ARCH-14, ARCH-17)
+/// - `embedder`: Optional compute capability, runtime-attached (ARCH-18)
 ///
 /// # Example
 ///
@@ -71,89 +75,108 @@ pub trait Embedder: Send + Sync {
 ///     EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
 /// )?;
 ///
-/// // Direct field access
+/// // Direct field access (delegates to spec)
 /// assert_eq!(embedding.model(), "gemma");
 /// assert_eq!(embedding.dim(), 768);
 /// assert_eq!(embedding.distance(), Distance::Cosine);
+///
+/// // Build parameters are also accessible
+/// assert_eq!(embedding.hnsw_m(), 16);
 ///
 /// // If embedder is attached
 /// let vec = embedding.embed("Hello world")?;
 /// ```
 #[derive(Clone)]
 pub struct Embedding {
-    /// Unique namespace code for storage keys (allocated by registry)
-    code: u64,
-    /// Model identifier (e.g., "gemma", "qwen3", "openai-ada-002")
-    model: Arc<str>,
-    /// Vector dimensionality
-    dim: u32,
-    /// Distance metric for similarity computation
-    distance: Distance,
-    /// Storage type for vector elements (F32 or F16)
-    storage_type: super::schema::VectorElementType,
-    /// Optional embedder for computing vectors from documents
+    /// Immutable specification from RocksDB (shared via Arc)
+    spec: Arc<EmbeddingSpec>,
+    /// Optional embedder for computing vectors from documents (runtime-attached)
     embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl Embedding {
-    /// Create a new Embedding (called by EmbeddingRegistry).
-    pub(crate) fn new(
-        code: u64,
-        model: impl Into<Arc<str>>,
-        dim: u32,
-        distance: Distance,
-        storage_type: super::schema::VectorElementType,
-        embedder: Option<Arc<dyn Embedder>>,
-    ) -> Self {
-        Self {
-            code,
-            model: model.into(),
-            dim,
-            distance,
-            storage_type,
-            embedder,
-        }
+    /// Create a new Embedding from an Arc<EmbeddingSpec> (called by EmbeddingRegistry).
+    pub(crate) fn new(spec: Arc<EmbeddingSpec>, embedder: Option<Arc<dyn Embedder>>) -> Self {
+        Self { spec, embedder }
+    }
+
+    /// Get the underlying spec reference.
+    #[inline]
+    pub fn spec(&self) -> &EmbeddingSpec {
+        &self.spec
     }
 
     // ─────────────────────────────────────────────────────────────
-    // Accessors
+    // Core Accessors (delegated to spec)
     // ─────────────────────────────────────────────────────────────
 
     /// Namespace code for storage keys.
     #[inline]
     pub fn code(&self) -> u64 {
-        self.code
+        self.spec.code
     }
 
     /// Code as big-endian bytes for key construction.
     #[inline]
     pub fn code_bytes(&self) -> [u8; 8] {
-        self.code.to_be_bytes()
+        self.spec.code.to_be_bytes()
     }
 
     /// Model identifier.
     #[inline]
     pub fn model(&self) -> &str {
-        &self.model
+        &self.spec.model
     }
 
     /// Vector dimensionality.
     #[inline]
     pub fn dim(&self) -> u32 {
-        self.dim
+        self.spec.dim
     }
 
     /// Distance metric.
     #[inline]
     pub fn distance(&self) -> Distance {
-        self.distance
+        self.spec.distance
     }
 
     /// Storage type for vector elements (F32 or F16).
     #[inline]
     pub fn storage_type(&self) -> super::schema::VectorElementType {
-        self.storage_type
+        self.spec.storage_type
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // Build Parameters (delegated to spec)
+    // ─────────────────────────────────────────────────────────────
+
+    /// HNSW M parameter: number of bidirectional links per node.
+    #[inline]
+    pub fn hnsw_m(&self) -> u16 {
+        self.spec.hnsw_m
+    }
+
+    /// HNSW ef_construction: search beam width during index build.
+    #[inline]
+    pub fn hnsw_ef_construction(&self) -> u16 {
+        self.spec.hnsw_ef_construction
+    }
+
+    /// RaBitQ bits per dimension for binary quantization.
+    #[inline]
+    pub fn rabitq_bits(&self) -> u8 {
+        self.spec.rabitq_bits
+    }
+
+    /// RaBitQ rotation matrix seed.
+    #[inline]
+    pub fn rabitq_seed(&self) -> u64 {
+        self.spec.rabitq_seed
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Embedder
+    // ─────────────────────────────────────────────────────────────
 
     /// Check if this embedding has compute capability.
     #[inline]
@@ -161,15 +184,11 @@ impl Embedding {
         self.embedder.is_some()
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // Behavior (delegated to Embedder trait)
-    // ─────────────────────────────────────────────────────────────
-
     /// Compute embedding for a document (requires embedder).
     pub fn embed(&self, document: &str) -> Result<Vec<f32>> {
         self.embedder
             .as_ref()
-            .ok_or_else(|| error::no_embedder(&self.model))?
+            .ok_or_else(|| error::no_embedder(&self.spec.model))?
             .embed(document)
     }
 
@@ -177,24 +196,24 @@ impl Embedding {
     pub fn embed_batch(&self, documents: &[&str]) -> Result<Vec<Vec<f32>>> {
         self.embedder
             .as_ref()
-            .ok_or_else(|| error::no_embedder(&self.model))?
+            .ok_or_else(|| error::no_embedder(&self.spec.model))?
             .embed_batch(documents)
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // Distance & Validation
+    // ─────────────────────────────────────────────────────────────
 
     /// Compute distance between two vectors using this space's metric.
     #[inline]
     pub fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32 {
-        self.distance.compute(a, b)
+        self.spec.distance.compute(a, b)
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // Validation
-    // ─────────────────────────────────────────────────────────────
 
     /// Validate vector dimension matches this embedding space.
     #[inline]
     pub fn validate_vector(&self, vector: &[f32]) -> Result<()> {
-        error::check_dimension(self.dim, vector)
+        error::check_dimension(self.spec.dim, vector)
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -211,7 +230,7 @@ impl Embedding {
 // Equality and Hash based on code only (for HashMap keys)
 impl PartialEq for Embedding {
     fn eq(&self, other: &Self) -> bool {
-        self.code == other.code
+        self.spec.code == other.spec.code
     }
 }
 
@@ -219,17 +238,18 @@ impl Eq for Embedding {}
 
 impl Hash for Embedding {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.code.hash(state);
+        self.spec.code.hash(state);
     }
 }
 
 impl fmt::Debug for Embedding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Embedding")
-            .field("code", &self.code)
-            .field("model", &self.model)
-            .field("dim", &self.dim)
-            .field("distance", &self.distance)
+            .field("code", &self.spec.code)
+            .field("model", &self.spec.model)
+            .field("dim", &self.spec.dim)
+            .field("distance", &self.spec.distance)
+            .field("hnsw_m", &self.spec.hnsw_m)
             .field("has_embedder", &self.embedder.is_some())
             .finish()
     }
@@ -240,9 +260,9 @@ impl fmt::Display for Embedding {
         write!(
             f,
             "{}:{}:{}",
-            self.model,
-            self.dim,
-            self.distance.as_str()
+            self.spec.model,
+            self.spec.dim,
+            self.spec.distance.as_str()
         )
     }
 }
@@ -471,9 +491,24 @@ mod tests {
     use super::*;
     use super::super::schema::VectorElementType;
 
+    fn make_test_embedding(code: u64, model: &str, dim: u32, distance: Distance) -> Embedding {
+        let spec = Arc::new(EmbeddingSpec {
+            code,
+            model: model.to_string(),
+            dim,
+            distance,
+            storage_type: VectorElementType::default(),
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        });
+        Embedding::new(spec, None)
+    }
+
     #[test]
     fn test_embedding_accessors() {
-        let emb = Embedding::new(42, "gemma", 768, Distance::Cosine, VectorElementType::default(), None);
+        let emb = make_test_embedding(42, "gemma", 768, Distance::Cosine);
 
         assert_eq!(emb.code(), 42);
         assert_eq!(emb.model(), "gemma");
@@ -484,16 +519,16 @@ mod tests {
 
     #[test]
     fn test_embedding_code_bytes() {
-        let emb = Embedding::new(0x0102030405060708, "test", 128, Distance::L2, VectorElementType::default(), None);
+        let emb = make_test_embedding(0x0102030405060708, "test", 128, Distance::L2);
         let bytes = emb.code_bytes();
         assert_eq!(bytes, [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
     }
 
     #[test]
     fn test_embedding_equality() {
-        let emb1 = Embedding::new(42, "gemma", 768, Distance::Cosine, VectorElementType::default(), None);
-        let emb2 = Embedding::new(42, "different", 1024, Distance::L2, VectorElementType::default(), None);
-        let emb3 = Embedding::new(43, "gemma", 768, Distance::Cosine, VectorElementType::default(), None);
+        let emb1 = make_test_embedding(42, "gemma", 768, Distance::Cosine);
+        let emb2 = make_test_embedding(42, "different", 1024, Distance::L2);
+        let emb3 = make_test_embedding(43, "gemma", 768, Distance::Cosine);
 
         // Same code = equal (regardless of other fields)
         assert_eq!(emb1, emb2);
@@ -503,13 +538,13 @@ mod tests {
 
     #[test]
     fn test_embedding_display() {
-        let emb = Embedding::new(1, "gemma", 768, Distance::Cosine, VectorElementType::default(), None);
+        let emb = make_test_embedding(1, "gemma", 768, Distance::Cosine);
         assert_eq!(format!("{}", emb), "gemma:768:cosine");
     }
 
     #[test]
     fn test_embedding_validate_vector() {
-        let emb = Embedding::new(1, "test", 4, Distance::Cosine, VectorElementType::default(), None);
+        let emb = make_test_embedding(1, "test", 4, Distance::Cosine);
 
         // Correct dimension
         assert!(emb.validate_vector(&[1.0, 2.0, 3.0, 4.0]).is_ok());
@@ -611,7 +646,7 @@ mod tests {
 
     #[test]
     fn test_embedding_no_embedder_error() {
-        let emb = Embedding::new(1, "test", 128, Distance::Cosine, VectorElementType::default(), None);
+        let emb = make_test_embedding(1, "test", 128, Distance::Cosine);
         let result = emb.embed("hello");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No embedder"));
