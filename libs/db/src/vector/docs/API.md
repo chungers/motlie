@@ -2020,6 +2020,164 @@ MutationBatch::new()
     .await?;
 ```
 
+#### Flow 1a: Multi-threaded Mutations (Tokio Tasks)
+
+Multiple async tasks can share the `Writer` and send mutations concurrently.
+The MPSC channel serializes writes to the single consumer.
+
+```rust
+use motlie_db::vector::{
+    create_writer, spawn_mutation_consumer_with_storage, WriterConfig,
+    InsertVector, EmbeddingBuilder, EmbeddingRegistry, Distance, ExternalKey, Storage,
+    MutationRunnable,
+};
+use motlie_db::Id;
+use std::path::Path;
+use std::sync::Arc;
+
+// Setup storage, registry, embedding (same as Flow 1)
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
+
+let embedding = registry.register(
+    EmbeddingBuilder::new("clip-vit-b32", 512, Distance::Cosine),
+)?;
+
+// Create writer + consumer
+let (writer, receiver) = create_writer(WriterConfig::default());
+let consumer_handle = spawn_mutation_consumer_with_storage(
+    receiver,
+    WriterConfig::default(),
+    storage.clone(),
+    registry.clone(),
+);
+
+// Spawn multiple producer tasks - each acts as a client
+let num_clients = 4;
+let vectors_per_client = 100;
+let mut handles = Vec::new();
+
+for client_id in 0..num_clients {
+    let writer = writer.clone();
+    let embedding = embedding.clone();
+
+    let handle = tokio::spawn(async move {
+        for i in 0..vectors_per_client {
+            let vector: Vec<f32> = (0..512).map(|j| ((client_id * 1000 + i + j) as f32).sin()).collect();
+            let external_key = ExternalKey::NodeId(Id::new());
+
+            InsertVector::new(&embedding, external_key, vector)
+                .run(&writer)
+                .await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    handles.push(handle);
+}
+
+// Wait for all clients to finish
+for handle in handles {
+    handle.await??;
+}
+
+// Flush to ensure all mutations are committed
+writer.flush().await?;
+
+// Drop writer to close channel, then wait for consumer to finish
+drop(writer);
+consumer_handle.await??;
+```
+
+#### Flow 1b: Multi-threaded Mutations (std::thread with Runtime)
+
+For applications using `std::thread`, each thread can create its own tokio runtime
+or use `block_on` to send mutations.
+
+```rust
+use motlie_db::vector::{
+    create_writer, spawn_mutation_consumer_with_storage, WriterConfig,
+    InsertVector, EmbeddingBuilder, EmbeddingRegistry, Distance, ExternalKey, Storage,
+    MutationRunnable,
+};
+use motlie_db::Id;
+use std::path::Path;
+use std::sync::Arc;
+use std::thread;
+
+// Setup storage, registry, embedding
+let mut storage = Storage::readwrite(Path::new("./vector_db"));
+storage.ready()?;
+let storage = Arc::new(storage);
+let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
+registry.prewarm()?;
+
+let embedding = registry.register(
+    EmbeddingBuilder::new("clip-vit-b32", 512, Distance::Cosine),
+)?;
+
+// Create a shared runtime for the consumer
+let rt = Arc::new(tokio::runtime::Runtime::new()?);
+
+// Create writer + spawn consumer on the runtime
+let (writer, receiver) = create_writer(WriterConfig::default());
+let consumer_handle = rt.spawn(spawn_mutation_consumer_with_storage(
+    receiver,
+    WriterConfig::default(),
+    storage.clone(),
+    registry.clone(),
+));
+
+// Spawn OS threads as clients
+let num_threads = 4;
+let vectors_per_thread = 100;
+let mut thread_handles = Vec::new();
+
+for thread_id in 0..num_threads {
+    let writer = writer.clone();
+    let embedding = embedding.clone();
+    let rt = rt.clone();
+
+    let handle = thread::spawn(move || {
+        for i in 0..vectors_per_thread {
+            let vector: Vec<f32> = (0..512).map(|j| ((thread_id * 1000 + i + j) as f32).cos()).collect();
+            let external_key = ExternalKey::NodeId(Id::new());
+
+            // Block on the async send from this OS thread
+            rt.block_on(async {
+                InsertVector::new(&embedding, external_key, vector)
+                    .run(&writer)
+                    .await
+            })?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    thread_handles.push(handle);
+}
+
+// Wait for all threads to finish
+for handle in thread_handles {
+    handle.join().expect("Thread panicked")?;
+}
+
+// Flush and shutdown
+rt.block_on(async {
+    writer.flush().await?;
+    drop(writer);
+    Ok::<_, anyhow::Error>(())
+})?;
+```
+
+**Key points for multi-threaded usage:**
+
+- `Writer` is `Clone` and can be shared across threads/tasks
+- Each clone sends to the same MPSC channel
+- The single consumer serializes all mutations
+- Call `writer.flush()` to ensure mutations are committed before reading
+- Drop all `Writer` clones to close the channel and allow consumer to exit
+
 #### Flow 2: Queries via `Reader` (SearchKNN)
 
 ```rust
