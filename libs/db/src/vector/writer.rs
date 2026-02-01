@@ -637,14 +637,26 @@ mod tests {
     #[tokio::test]
     async fn test_send_mutations() {
         use super::super::embedding::Embedding;
-        use super::super::schema::{ExternalKey, VectorElementType};
+        use super::super::schema::{EmbeddingSpec, ExternalKey, VectorElementType};
         use super::super::Distance;
+        use std::sync::Arc;
 
         let (writer, mut receiver) = create_writer(WriterConfig::default());
 
         // Send a mutation
         let id = crate::Id::new();
-        let embedding = Embedding::new(1, "test", 128, Distance::Cosine, VectorElementType::F32, None);
+        let spec = Arc::new(EmbeddingSpec {
+            code: 1,
+            model: "test".to_string(),
+            dim: 128,
+            distance: Distance::Cosine,
+            storage_type: VectorElementType::F32,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        });
+        let embedding = Embedding::new(spec, None);
         let mutation = super::super::mutation::InsertVector::new(&embedding, ExternalKey::NodeId(id), vec![1.0, 2.0, 3.0]);
         writer.send(vec![mutation.into()]).await.unwrap();
 

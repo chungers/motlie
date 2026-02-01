@@ -413,8 +413,13 @@ pub struct EmbeddingSpecs;
 ///
 /// Rich struct with >2 fields, so defined separately per naming convention.
 /// This is the **single source of truth** for how to build and search an embedding space.
+///
+/// The `code` field is populated after deserialization from the RocksDB key.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EmbeddingSpec {
+    /// Unique namespace code for storage keys (populated from RocksDB key after read)
+    #[serde(skip)]
+    pub code: u64,
     /// Model name (e.g., "gemma", "qwen3", "ada-002")
     pub model: String,
     /// Vector dimensionality (e.g., 128, 768, 1536)
@@ -530,6 +535,13 @@ impl EmbeddingSpec {
     #[inline]
     pub fn ef_construction(&self) -> usize {
         self.hnsw_ef_construction as usize
+    }
+
+    /// Set the code field (called after deserialization from RocksDB key).
+    #[inline]
+    pub fn with_code(mut self, code: u64) -> Self {
+        self.code = code;
+        self
     }
 }
 
@@ -2336,6 +2348,7 @@ mod tests {
     #[test]
     fn test_embedding_spec_m_accessors() {
         let spec = EmbeddingSpec {
+            code: 0,
             model: "test".to_string(),
             dim: 128,
             distance: crate::vector::distance::Distance::L2,
@@ -2364,6 +2377,7 @@ mod tests {
         // Test m_l = 1.0 / ln(m) for various M values
         for m in [8u16, 16, 32, 64] {
             let spec = EmbeddingSpec {
+                code: 0,
                 model: "test".to_string(),
                 dim: 128,
                 distance: crate::vector::distance::Distance::L2,
@@ -2389,6 +2403,7 @@ mod tests {
     fn test_embedding_spec_accessors_with_different_values() {
         // Test with non-default values
         let spec = EmbeddingSpec {
+            code: 0,
             model: "custom".to_string(),
             dim: 768,
             distance: crate::vector::distance::Distance::Cosine,
