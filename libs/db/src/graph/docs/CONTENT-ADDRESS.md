@@ -33,6 +33,7 @@ distinct key with an empty value.
    - **Key:** `[summary_hash: 8] + [forward_edge_key: 40] = 48 bytes`
    - **Value:** empty
    - Purpose: reverse lookup for edges referencing a summary hash
+(codex, 2026-02-01 10:58:19 -0800, question) If delete/update flows only have a reverse edge key, do we need an extra lookup to compute the forward key for cleanup?
 
 All keys are **lexicographically ordered by `summary_hash` first**, enabling
 prefix scans for a single hash.
@@ -54,12 +55,14 @@ existing canonical encodings.
 When writing `NodeCfValue` with a `summary_hash`:
 1) Insert `NodeSummaryIndex` key `(summary_hash, node_id)`
 2) If summary hash changed, delete the old `(old_hash, node_id)` key
+(codex, 2026-02-01 10:58:19 -0800, question) Are these index writes guaranteed to be in the same write batch/WAL as the primary CF write so readers never see a partial update?
 
 ### Edge insert/update
 
 When writing `ForwardEdgeCfValue` with a `summary_hash`:
 1) Insert `EdgeSummaryIndex` key `(summary_hash, forward_edge_key)`
 2) If summary hash changed, delete the old `(old_hash, forward_edge_key)` key
+(codex, 2026-02-01 10:58:19 -0800, question) Do all callers have the prior summary hash available? If some updates are blind overwrites, this can leave stale index keys.
 
 ### Deletes
 
@@ -104,6 +107,7 @@ pub fn edges_for_summary_iter(
 pub fn node_summary_index_prefix(summary: SummaryHash) -> [u8; 8];
 pub fn edge_summary_index_prefix(summary: SummaryHash) -> [u8; 8];
 ```
+(codex, 2026-02-01 10:58:19 -0800, status) This hard-codes the SummaryHash length; consider calling out the invariant explicitly or deriving the length from `SummaryHash::to_bytes()` if it might change.
 
 ## Schema / File Changes
 
