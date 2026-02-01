@@ -1339,6 +1339,7 @@ impl Distance {
 // Immutable embedding specification
 pub struct Embedding { /* private */ }
 impl Embedding {
+    pub fn spec(&self) -> &EmbeddingSpec;
     pub fn code(&self) -> u64;
     pub fn code_bytes(&self) -> [u8; 8];
     pub fn model(&self) -> &str;
@@ -1381,7 +1382,8 @@ impl EmbeddingRegistry {
     ) -> Result<Embedding>;
     pub fn get(&self, model: &str, dim: u32, distance: Distance) -> Option<Embedding>;
     // Returns Embedding wrapping Arc<EmbeddingSpec> - use .spec() to access full spec
-    // (includes hnsw_m, hnsw_ef_construction, rabitq_bits, rabitq_seed)
+    // (includes hnsw_m, hnsw_ef_construction, rabitq_bits, rabitq_seed).
+    // Note: get_by_code lazily loads from storage; get() is cache-only (call prewarm()).
     pub fn get_by_code(&self, code: u64) -> Option<Embedding>;
     pub fn set_embedder(&self, code: u64, embedder: Arc<dyn Embedder>) -> Result<()>;
     pub fn list_all(&self) -> Vec<Embedding>;
@@ -1426,8 +1428,10 @@ impl ExternalKey {
 ### Configuration Types
 
 ```rust
-// EmbeddingSpec is the single source of truth for HNSW parameters
+// EmbeddingSpec is the single source of truth for HNSW parameters.
+// `code` is populated from the RocksDB key (not user-assigned).
 pub struct EmbeddingSpec {
+    pub code: u64,
     pub model: String,
     pub dim: u32,
     pub distance: Distance,
