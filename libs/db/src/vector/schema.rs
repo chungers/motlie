@@ -1299,8 +1299,6 @@ pub(crate) enum GraphMetaField {
     MaxLevel(HnswLayer),
     /// Total vector count in this embedding space
     Count(u32),
-    /// Serialized HNSW configuration (deprecated - use EmbeddingSpec)
-    Config(Vec<u8>),
     /// Hash of EmbeddingSpec at index build time (for drift detection)
     /// Set on first insert, validated on subsequent inserts and searches
     SpecHash(u64),
@@ -1313,8 +1311,7 @@ impl GraphMetaField {
             Self::EntryPoint(_) => 0,
             Self::MaxLevel(_) => 1,
             Self::Count(_) => 2,
-            Self::Config(_) => 3,
-            Self::SpecHash(_) => 4,
+            Self::SpecHash(_) => 3,
         }
     }
 }
@@ -1337,11 +1334,6 @@ impl GraphMetaCfKey {
     /// Create key for count field
     pub fn count(embedding_code: EmbeddingCode) -> Self {
         Self(embedding_code, GraphMetaField::Count(0))
-    }
-
-    /// Create key for config field
-    pub fn config(embedding_code: EmbeddingCode) -> Self {
-        Self(embedding_code, GraphMetaField::Config(Vec::new()))
     }
 
     /// Create key for spec_hash field
@@ -1395,8 +1387,7 @@ impl GraphMeta {
             0 => GraphMetaField::EntryPoint(0),
             1 => GraphMetaField::MaxLevel(0),
             2 => GraphMetaField::Count(0),
-            3 => GraphMetaField::Config(Vec::new()),
-            4 => GraphMetaField::SpecHash(0),
+            3 => GraphMetaField::SpecHash(0),
             _ => anyhow::bail!("Unknown GraphMeta discriminant: {}", discriminant),
         };
         Ok(GraphMetaCfKey(embedding_code, field))
@@ -1408,7 +1399,6 @@ impl GraphMeta {
             GraphMetaField::EntryPoint(v) => v.to_be_bytes().to_vec(),
             GraphMetaField::MaxLevel(v) => vec![*v],
             GraphMetaField::Count(v) => v.to_be_bytes().to_vec(),
-            GraphMetaField::Config(v) => v.clone(),
             GraphMetaField::SpecHash(v) => v.to_be_bytes().to_vec(),
         }
     }
@@ -1434,7 +1424,6 @@ impl GraphMeta {
                 }
                 GraphMetaField::Count(u32::from_be_bytes(bytes.try_into()?))
             }
-            GraphMetaField::Config(_) => GraphMetaField::Config(bytes.to_vec()),
             GraphMetaField::SpecHash(_) => {
                 if bytes.len() != 8 {
                     anyhow::bail!("Invalid SpecHash length: expected 8, got {}", bytes.len());
