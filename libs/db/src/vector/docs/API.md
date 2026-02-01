@@ -1289,7 +1289,116 @@ for result in results {
 }
 ```
 
-### Flow 3: Using SearchConfig Builder
+### Flow 3: Async Graph Update (High-Throughput Ingest)
+
+For high-throughput ingestion, use two-phase insert: vectors are stored immediately,
+HNSW graph edges are built asynchronously by background workers. This maximizes
+write throughput at the cost of slightly delayed searchability.
+
+```rust
+use motlie_db::vector::{
+    Storage, EmbeddingRegistry, EmbeddingBuilder, Distance, ExternalKey, InsertVector,
+    SearchKNN, Runnable, MutationRunnable, ReaderConfig, WriterConfig, AsyncUpdaterConfig,
+    GcConfig, Subsystem,
+};
+use motlie_db::StorageBuilder;
+use motlie_db::Id;
+use std::sync::Arc;
+use std::path::Path;
+use std::time::Duration;
+
+// 1. Create subsystem with async graph updater
+let subsystem = Arc::new(Subsystem::new());
+let storage = StorageBuilder::new(Path::new("./vector_db"))
+    .with_rocksdb(subsystem.clone())
+    .build()?;
+
+// 2. Configure async updater (background HNSW edge building)
+let async_config = AsyncUpdaterConfig::default()
+    .with_num_workers(4)      // 4 background workers
+    .with_batch_size(200);    // Process 200 vectors per batch
+
+let gc_config = GcConfig::default()
+    .with_interval(Duration::from_secs(60));
+
+// 3. Start subsystem with async updater enabled
+let (writer, reader) = subsystem.start_with_async(
+    storage.vector_storage().clone(),
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,  // query workers
+    Some(async_config),  // Enable async graph updates
+    Some(gc_config),
+);
+
+// 4. Register embedding
+let registry = subsystem.registry();
+let embedding = registry.register(
+    EmbeddingBuilder::new("clip", 512, Distance::Cosine),
+)?;
+
+// 5. Insert vectors (default: build_index=false → async graph update)
+// Vectors are stored immediately, HNSW edges built by background workers
+for (i, vector) in vectors.iter().enumerate() {
+    let external_key = ExternalKey::NodeId(Id::new());
+    InsertVector::new(&embedding, external_key, vector.clone())
+        // No .immediate() → uses async graph update (default)
+        .run(&writer)
+        .await?;
+}
+
+// 6. Flush to ensure all vectors are persisted
+writer.flush().await?;
+
+// At this point:
+// - All vectors are stored in RocksDB (immediately searchable via pending scan)
+// - HNSW edges are being built by background workers
+// - Vectors transition: Pending → Indexed as edges complete
+
+// 7. Search with pending fallback (finds not-yet-indexed vectors too)
+// By default, search scans up to 1000 pending vectors as fallback
+let results = SearchKNN::new(&embedding, query, 10)
+    .with_ef(100)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// 8. Or: Search only fully indexed vectors (no pending fallback)
+// Use SearchConfig for advanced control
+use motlie_db::vector::SearchConfig;
+let config = SearchConfig::new(embedding.clone(), 10)
+    .exact()
+    .with_ef(100)
+    .no_pending_fallback();  // Only return indexed vectors
+
+// 9. Graceful shutdown waits for async updater to drain pending queue
+storage.shutdown();
+```
+
+**Vector Lifecycle with Async Graph Update:**
+
+```
+InsertVector (build_index=false)
+       │
+       ▼
+┌─────────────┐
+│   Pending   │  Vector stored, not yet in HNSW graph
+└──────┬──────┘  (searchable via pending_scan_limit fallback)
+       │
+       │ AsyncUpdater processes
+       ▼
+┌─────────────┐
+│   Indexed   │  HNSW edges built, fully searchable
+└─────────────┘
+```
+
+**When to use async vs immediate indexing:**
+
+| Mode | Use Case | Throughput | Search Latency |
+|------|----------|------------|----------------|
+| `InsertVector::new(...)` (default) | Bulk ingest, ETL | High | Vectors searchable after async processing |
+| `InsertVector::new(...).immediate()` | Real-time updates | Lower | Immediate searchability |
+
+### Flow 4: Using SearchConfig Builder
 
 ```rust
 use motlie_db::vector::{SearchConfig, SearchStrategy};
@@ -1656,6 +1765,12 @@ impl Processor {
         config: &SearchConfig,
         query: &[f32],
     ) -> Result<Vec<SearchResult>>;
+
+    pub fn delete_vector(
+        &self,
+        embedding: &Embedding,
+        external_key: ExternalKey,
+    ) -> Result<Option<VecId>>;  // Returns deleted VecId if found
 }
 ```
 
@@ -2394,6 +2509,87 @@ rt.block_on(async {
 - **Flush before queries**: Call `writer.flush()` to ensure inserts are committed
 - **Graceful shutdown**: Drop Writer/Reader to close channels, then await handles
 
+#### Flow 1c: Batch Insert for Bulk Loading
+
+For bulk data loading, use `InsertVectorBatch` to amortize transaction overhead.
+This is more efficient than individual `InsertVector` calls for large imports.
+
+```rust
+use motlie_db::vector::{
+    InsertVectorBatch, MutationRunnable, EmbeddingRegistry, ExternalKey, Storage,
+    WriterConfig, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+};
+use motlie_db::Id;
+use std::sync::Arc;
+use std::path::Path;
+
+// Setup (storage, registry, embedding already created)
+let (writer, writer_rx) = create_writer(WriterConfig::default());
+spawn_mutation_consumer_with_storage_autoreg(writer_rx, WriterConfig::default(), storage.clone());
+
+// Prepare batch of vectors (e.g., from file or external source)
+let batch_size = 1000;
+let vectors: Vec<(ExternalKey, Vec<f32>)> = (0..batch_size)
+    .map(|i| {
+        let external_key = ExternalKey::NodeId(Id::new());
+        let vector: Vec<f32> = vec![i as f32 * 0.001; embedding.dim() as usize];
+        (external_key, vector)
+    })
+    .collect();
+
+// Insert as batch (amortizes transaction overhead)
+InsertVectorBatch::new(&embedding, vectors)
+    .immediate()  // Or omit for async graph update
+    .run(&writer)
+    .await?;
+
+writer.flush().await?;
+println!("Inserted {} vectors in batch", batch_size);
+```
+
+**Batch vs Single Insert Performance:**
+
+| Method | Vectors | Typical Time | Notes |
+|--------|---------|--------------|-------|
+| `InsertVector` × 1000 | 1000 | ~5-10s | One txn per vector |
+| `InsertVectorBatch(1000)` | 1000 | ~0.5-1s | Single txn for batch |
+
+**Multi-threaded batch loading:**
+
+```rust
+// Parallel batch loading across multiple tasks
+let num_loaders = 4;
+let vectors_per_loader = 10000;
+let batch_size = 500;
+
+let loader_handles: Vec<_> = (0..num_loaders).map(|loader_id| {
+    let writer = writer.clone();
+    let embedding = embedding.clone();
+
+    tokio::spawn(async move {
+        for batch_start in (0..vectors_per_loader).step_by(batch_size) {
+            let batch: Vec<(ExternalKey, Vec<f32>)> = (batch_start..batch_start + batch_size)
+                .map(|i| {
+                    let external_key = ExternalKey::NodeId(Id::new());
+                    let vector: Vec<f32> = vec![(loader_id * 10000 + i) as f32 * 0.0001; 512];
+                    (external_key, vector)
+                })
+                .collect();
+
+            InsertVectorBatch::new(&embedding, batch)
+                .run(&writer)  // Async graph update for throughput
+                .await?;
+        }
+        writer.flush().await?;
+        Ok::<_, anyhow::Error>(())
+    })
+}).collect();
+
+for handle in loader_handles {
+    handle.await??;
+}
+```
+
 #### Flow 2: Queries via `Reader` (SearchKNN)
 
 ```rust
@@ -2450,6 +2646,81 @@ for result in results {
 - The `Query` enum is an internal dispatch mechanism; the public, ergonomic path
   is `Reader` + `Runnable::run(...)`.
 
+#### Flow 3: Point Lookups via `Reader`
+
+In addition to `SearchKNN`, the `Reader` supports point lookups for retrieving
+vectors, resolving IDs, and batch ID resolution after search.
+
+```rust
+use motlie_db::vector::{
+    GetVector, GetInternalId, GetExternalId, ResolveIds, Runnable,
+    Reader, ExternalKey,
+};
+use motlie_db::Id;
+use std::time::Duration;
+
+// Assume reader and embedding are already created
+
+// 1. Get raw vector by external ID
+let external_id = Id::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV")?;
+let maybe_vector: Option<Vec<f32>> = GetVector::new(embedding.code(), external_id)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+if let Some(vector) = maybe_vector {
+    println!("Retrieved vector with {} dimensions", vector.len());
+}
+
+// 2. Resolve external key → internal VecId
+let external_key = ExternalKey::NodeId(external_id);
+let maybe_vec_id: Option<VecId> = GetInternalId::new(embedding.code(), external_key.clone())
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+if let Some(vec_id) = maybe_vec_id {
+    println!("External key maps to internal vec_id={}", vec_id);
+
+    // 3. Reverse lookup: internal VecId → external key
+    let resolved_key: Option<ExternalKey> = GetExternalId::new(embedding.code(), vec_id)
+        .run(&reader, Duration::from_secs(5))
+        .await?;
+    assert_eq!(resolved_key, Some(external_key));
+}
+
+// 4. Batch resolve VecIds after SearchKNN (common pattern)
+let search_results = SearchKNN::new(&embedding, query_vec, 100)
+    .with_ef(200)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+// Extract vec_ids from search results
+let vec_ids: Vec<VecId> = search_results.iter().map(|r| r.vec_id).collect();
+
+// Batch resolve to external keys (more efficient than individual lookups)
+let external_keys: Vec<Option<ExternalKey>> = ResolveIds::new(embedding.code(), vec_ids)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
+
+for (result, maybe_key) in search_results.iter().zip(external_keys.iter()) {
+    if let Some(key) = maybe_key {
+        println!("vec_id={} → {:?}, distance={:.4}", result.vec_id, key, result.distance);
+    }
+}
+```
+
+**When to use point lookups:**
+
+| Query Type | Use Case |
+|------------|----------|
+| `GetVector` | Retrieve raw vector for visualization or re-embedding |
+| `GetInternalId` | Check if external key exists before insert (idempotency) |
+| `GetExternalId` | Map internal IDs back to application entities |
+| `ResolveIds` | Batch resolve after SearchKNN (already included in SearchResult) |
+
+> **Note:** `SearchKNN` results already include `external_key` in each `SearchResult`,
+> so `ResolveIds` is mainly useful when you have vec_ids from other sources (e.g.,
+> stored in application database, graph edges, etc.).
+
 ### Search Configuration
 
 ```rust
@@ -2495,6 +2766,37 @@ impl SearchConfig {
     pub fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32;
     pub fn validate_embedding_code(&self, expected_code: u64) -> Result<()>;
 }
+```
+
+**Pending Scan Fallback:**
+
+When using async graph updates (see Flow 3), vectors are stored immediately but HNSW
+edges are built asynchronously. The `pending_scan_limit` controls how many pending
+(not-yet-indexed) vectors are scanned as a fallback when HNSW search returns
+insufficient results.
+
+| Setting | Behavior |
+|---------|----------|
+| `DEFAULT_PENDING_SCAN_LIMIT` (1000) | Scan up to 1000 pending vectors via brute-force |
+| `with_pending_scan_limit(N)` | Scan up to N pending vectors |
+| `no_pending_fallback()` | Only return fully indexed vectors (skip pending) |
+
+**Use cases:**
+- **Real-time search during bulk ingest**: Keep default (1000) to find recently inserted vectors
+- **Strict indexed-only results**: Use `no_pending_fallback()` for consistent latency
+- **Large pending queue**: Increase limit if async updater is behind
+
+```rust
+// Default: scan up to 1000 pending vectors as fallback
+let config = SearchConfig::new(embedding, 10);
+
+// Custom limit: scan up to 5000 pending vectors
+let config = SearchConfig::new(embedding, 10)
+    .with_pending_scan_limit(5000);
+
+// No fallback: only return fully indexed vectors
+let config = SearchConfig::new(embedding, 10)
+    .no_pending_fallback();
 ```
 
 ### Caching
