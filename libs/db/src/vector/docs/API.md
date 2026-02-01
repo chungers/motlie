@@ -162,10 +162,13 @@ let by_model = registry.find_by_model("openai");
 use `EmbeddingRegistry::new_without_storage()` and call `set_storage(storage)` once before
 `prewarm()` or `register()`.
 
-**Lookup + insert using registry filters:**
+**Lookup + insert using registry filters (async channel API):**
 
 ```rust
-use motlie_db::vector::{Distance, EmbeddingFilter, EmbeddingRegistry, ExternalKey, Processor, Storage};
+use motlie_db::vector::{
+    Distance, EmbeddingFilter, EmbeddingRegistry, ExternalKey, InsertVector, Runnable, Storage,
+    WriterConfig, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+};
 use motlie_db::Id;
 use std::path::Path;
 use std::sync::Arc;
@@ -188,13 +191,19 @@ let embedding = registry
     .next()
     .ok_or_else(|| anyhow::anyhow!("Embedding not found"))?;
 
-// Insert vectors using Processor (it loads EmbeddingSpec from storage internally)
-let processor = Processor::new(storage.clone(), registry.clone());
+// Create writer + consumer
+let (writer, receiver) = create_writer(WriterConfig::default());
+spawn_mutation_consumer_with_storage_autoreg(receiver, WriterConfig::default(), storage.clone());
+
+// Insert vectors using Runnable helper (immediate indexing)
 let external_key = ExternalKey::NodeId(Id::new());
-let _vec_id = processor.insert_vector(&embedding, external_key, &vector, true)?;
+InsertVector::new(&embedding, external_key, vector.clone())
+    .immediate()
+    .run(&writer)
+    .await?;
 ```
 
-**Lookup by code + insert:**
+**Lookup by code + insert (async channel API):**
 
 When you have an existing embedding code (e.g., from a saved configuration or admin tool),
 use `get_spec_by_code()` to retrieve the full specification and `get_by_code()` for the
@@ -202,7 +211,8 @@ lightweight handle:
 
 ```rust
 use motlie_db::vector::{
-    Distance, EmbeddingRegistry, ExternalKey, Processor, Storage,
+    Distance, EmbeddingRegistry, ExternalKey, InsertVector, Runnable, Storage,
+    WriterConfig, create_writer, spawn_mutation_consumer_with_storage_autoreg,
 };
 use motlie_db::Id;
 use std::path::Path;
@@ -232,16 +242,22 @@ let embedding = registry
     .get_by_code(embedding_code)
     .ok_or_else(|| anyhow::anyhow!("Embedding code {} not in cache", embedding_code))?;
 
-// Insert vectors using Processor
-let processor = Processor::new(storage.clone(), registry.clone());
+// Create writer + consumer
+let (writer, receiver) = create_writer(WriterConfig::default());
+spawn_mutation_consumer_with_storage_autoreg(receiver, WriterConfig::default(), storage.clone());
+
+// Insert vectors using Runnable helper
 let vector: Vec<f32> = vec![0.1; spec.dim as usize];  // Use spec.dim to match dimension
 let external_key = ExternalKey::NodeId(Id::new());
-let vec_id = processor.insert_vector(&embedding, external_key, &vector, true)?;
+InsertVector::new(&embedding, external_key, vector.clone())
+    .immediate()
+    .run(&writer)
+    .await?;
 
-println!("Inserted vector with vec_id={}", vec_id);
+println!("Inserted vector");
 ```
 
-**Insert-time validation (Processor/ops):**
+**Insert-time validation (mutation/ops):**
 
 - **Embedding exists**: lookup by code via registry
 - **Dimension match**: `vector.len() == spec.dim()`
@@ -293,7 +309,10 @@ Build parameters are **immutable after the first vector insert**. When the first
 let builder = EmbeddingBuilder::new("gemma", 768, Distance::Cosine)
     .with_hnsw_m(32);
 let embedding = registry.register(builder)?;
-processor.insert_vector(...)?;  // SpecHash set here
+InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector)
+    .immediate()
+    .run(&writer)
+    .await?;  // SpecHash set here
 
 // ❌ ERROR: Cannot change parameters after data exists
 // Attempting to register with different params and insert will fail:
@@ -308,7 +327,7 @@ as an `EmbeddingSpec`. `EmbeddingSpec` is the single source of truth used to con
 HNSW indexes after restart; you should not manually instantiate it in normal usage.
 
 ```rust
-use motlie_db::vector::{EmbeddingBuilder, EmbeddingRegistry, Distance, Processor, Storage};
+use motlie_db::vector::{EmbeddingBuilder, EmbeddingRegistry, Distance, Storage};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -319,7 +338,7 @@ let storage = Arc::new(storage);
 let registry = EmbeddingRegistry::new(storage.clone());
 registry.prewarm()?;
 
-let embedding = registry.register(
+let _embedding = registry.register(
     EmbeddingBuilder::new("openai-ada", 512, Distance::Cosine)
         .with_hnsw_m(16)                // Connections per node
         .with_hnsw_ef_construction(100) // Build-time beam width
@@ -327,8 +346,8 @@ let embedding = registry.register(
         .with_rabitq_seed(42),
 )?;
 
-// In normal usage, let Processor construct HNSW indices from the persisted spec
-let _processor = Processor::new(storage.clone(), Arc::new(registry));
+// In normal usage, mutation/query consumers construct HNSW indices from the
+// persisted EmbeddingSpec (no manual index construction in public API).
 
 // Derived values are computed from EmbeddingSpec at index construction:
 // - m_max = 2 * hnsw_m (always)
@@ -358,7 +377,10 @@ let _processor = Processor::new(storage.clone(), Arc::new(registry));
 ### Building the Index
 
 ```rust
-use motlie_db::vector::{EmbeddingBuilder, EmbeddingRegistry, ExternalKey, Processor, Storage, Distance};
+use motlie_db::vector::{
+    EmbeddingBuilder, EmbeddingRegistry, ExternalKey, InsertVector, Runnable, Storage, Distance,
+    WriterConfig, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+};
 use motlie_db::Id;
 use std::sync::Arc;
 use std::path::Path;
@@ -379,13 +401,17 @@ let embedding = registry.register(
         .with_rabitq_seed(42),
 )?;
 
-// Create processor (manages transactions, HNSW, caches)
-let processor = Processor::new(storage.clone(), registry.clone());
+// Create writer + consumer (async channel API)
+let (writer, receiver) = create_writer(WriterConfig::default());
+spawn_mutation_consumer_with_storage_autoreg(receiver, WriterConfig::default(), storage.clone());
 
-// Insert vectors (atomic insert + optional HNSW build)
+// Insert vectors (immediate indexing)
 for (id, vector) in vectors.iter().enumerate() {
     let external_key = ExternalKey::NodeId(Id::new());
-    let _vec_id = processor.insert_vector(&embedding, external_key, vector, true)?;
+    InsertVector::new(&embedding, external_key, vector.clone())
+        .immediate()
+        .run(&writer)
+        .await?;
 }
 ```
 
@@ -410,8 +436,13 @@ let query: Vec<f32> = /* your query vector */;
 let ef_search = 100;  // Beam width (higher = better recall, slower)
 let k = 10;           // Number of results
 
-// Perform search
-let results = processor.search(&embedding, &query, k, ef_search)?;
+// Assume Reader + consumers already created via create_reader_with_storage(...)
+// Perform search (async channel API)
+let results = SearchKNN::new(&embedding, query, k)
+    .with_ef(ef_search)
+    .exact()
+    .run(&reader, Duration::from_secs(5))
+    .await?;
 
 // Results are SearchResult structs, sorted by distance ascending
 for result in results {
@@ -440,15 +471,12 @@ RaBitQ uses binary quantization with ADC (Asymmetric Distance Computation) for f
 3. L2 on unnormalized data would lose magnitude information
 
 ```rust
-use motlie_db::vector::SearchConfig;
-
-// Two-phase search: ADC navigation → exact reranking
-let config = SearchConfig::new(embedding.clone(), k)
-    .rabitq()?  // Err if distance != Cosine
+// Two-phase search: ADC navigation → exact reranking (auto-selected for Cosine)
+let results = SearchKNN::new(&embedding, query, k)
     .with_ef(ef_search)
-    .with_rerank_factor(rerank_factor);
-
-let results = processor.search_with_config(&config, &query)?;
+    .with_rerank_factor(rerank_factor)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
 ```
 
 **RaBitQ Parameters:**
@@ -465,9 +493,11 @@ let results = processor.search_with_config(&config, &query)?;
 > with quantized codes, preserving numeric ordering. This achieves 91-99% recall with
 > 4-bit quantization vs only ~24% with symmetric Hamming. See RABITQ.md for details.
 
-### Search Configuration
+### Search Configuration (Internal / Advanced)
 
-`SearchConfig` provides a builder pattern for configuring searches:
+`SearchConfig` provides a builder pattern for configuring searches and is used
+internally by `SearchKNN`. Since `Processor` is `pub(crate)`, external callers
+should use `SearchKNN` via `Reader` instead of `SearchConfig` directly.
 
 ```rust
 use motlie_db::vector::{SearchConfig, SearchStrategy};
@@ -738,7 +768,10 @@ Search results are filtered using two mechanisms:
 
 ```rust
 // Search automatically filters deleted vectors
-let results = processor.search_with_config(&config, &query)?;
+let results = SearchKNN::new(&embedding, query, 10)
+    .with_ef(100)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
 // results will never contain deleted vectors
 ```
 
@@ -798,32 +831,47 @@ The vector module is designed for concurrent multi-threaded access. This section
 **Usage pattern:**
 
 ```rust
-use motlie_db::vector::{EmbeddingRegistry, ExternalKey, Processor, Storage};
+use motlie_db::vector::{
+    create_reader_with_storage, create_writer, spawn_mutation_consumer_with_storage_autoreg,
+    spawn_query_consumers_with_storage_autoreg, EmbeddingRegistry, ExternalKey, InsertVector,
+    ReaderConfig, Runnable, SearchKNN, Storage, WriterConfig,
+};
 use motlie_db::Id;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 let mut storage = Storage::readwrite(Path::new("./db"))?;
 storage.ready()?;
 let storage = Arc::new(storage);
 let registry = Arc::new(EmbeddingRegistry::new(storage.clone()));
 registry.prewarm()?;
-let processor = Arc::new(Processor::new(storage.clone(), registry.clone()));
+
+let (writer, writer_rx) = create_writer(WriterConfig::default());
+spawn_mutation_consumer_with_storage_autoreg(writer_rx, WriterConfig::default(), storage.clone());
+
+let (reader, reader_rx) = create_reader_with_storage(ReaderConfig::default(), storage.clone());
+spawn_query_consumers_with_storage_autoreg(reader_rx, ReaderConfig::default(), storage.clone(), 4);
 
 // Spawn multiple reader threads
 let handles: Vec<_> = (0..4).map(|_| {
-    let processor = processor.clone();
     let embedding = embedding.clone();
+    let reader = reader.clone();
     thread::spawn(move || {
-        processor.search(&embedding, &query, 10, 100)
+        let _ = SearchKNN::new(&embedding, query.clone(), 10)
+            .with_ef(100)
+            .exact()
+            .run(&reader, Duration::from_secs(5));
     })
 }).collect();
 
 // Writer thread (separate)
-let processor_w = processor.clone();
+let writer_w = writer.clone();
 thread::spawn(move || {
-    let _ = processor_w.insert_vector(&embedding, ExternalKey::NodeId(Id::new()), &vector, true);
+    let _ = InsertVector::new(&embedding, ExternalKey::NodeId(Id::new()), vector.clone())
+        .immediate()
+        .run(&writer_w);
 });
 ```
 
@@ -834,7 +882,7 @@ RocksDB TransactionDB provides **snapshot isolation** for reads and **pessimisti
 **Snapshot Isolation (Readers):**
 
 The vector APIs use TransactionDB internally, which provides snapshot isolation.
-`Processor::search()` and the query channel create their own transactions and
+`SearchKNN::run()` and the query channel create their own transactions and
 operate on a consistent snapshot per call. Custom snapshot APIs are not currently
 exposed on the public vector API.
 
@@ -920,16 +968,20 @@ High contention may produce these errors:
 **Recommended error handling:**
 
 ```rust
-fn insert_with_retry(
-    processor: &Processor,
+async fn insert_with_retry(
+    writer: &Writer,
     embedding: &Embedding,
     external_key: ExternalKey,
-    vector: &[f32],
+    vector: Vec<f32>,
     max_retries: usize,
-) -> Result<VecId> {
+) -> Result<()> {
     for attempt in 0..max_retries {
-        match processor.insert_vector(embedding, external_key.clone(), vector, true) {
-            Ok(vec_id) => return Ok(vec_id),
+        let result = InsertVector::new(embedding, external_key.clone(), vector.clone())
+            .immediate()
+            .run(writer)
+            .await;
+        match result {
+            Ok(()) => return Ok(()),
             Err(_) if attempt + 1 < max_retries => {
                 // Exponential backoff for transient conflicts
                 std::thread::sleep(Duration::from_millis(10 << attempt));
@@ -985,9 +1037,9 @@ The system handles failures gracefully:
 
 ### Best Practices for Concurrency
 
-1. **Use Processor inserts**: `Processor::insert_vector()` and `Processor::insert_batch()` handle transactions and cache updates
+1. **Use mutation helpers**: `InsertVector::run()` / `InsertVectorBatch::run()` handle transactions and cache updates via the writer
 2. **Keep transactions short**: Long-held locks reduce concurrency
-3. **Batch operations**: Use `Processor::insert_batch()` or `InsertVectorBatch` mutations for bulk inserts
+3. **Batch operations**: Use `InsertVectorBatch` mutations for bulk inserts
 4. **Monitor contention**: Track `errors` in metrics for timeout/conflict rates
 5. **Size NavigationCache**: Larger cache reduces storage reads under load
 6. **Test under load**: Run concurrent stress tests before production
@@ -1136,11 +1188,14 @@ on_shutdown():
 
 ```rust
 use motlie_db::vector::{
-    Storage, EmbeddingRegistry, EmbeddingBuilder, Distance, Processor, ExternalKey,
+    Storage, EmbeddingRegistry, EmbeddingBuilder, Distance, ExternalKey, InsertVector, Runnable,
+    SearchKNN, ReaderConfig, WriterConfig, create_reader_with_storage, create_writer,
+    spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
 };
 use motlie_db::Id;
 use std::sync::Arc;
 use std::path::Path;
+use std::time::Duration;
 
 // 1. Initialize storage
 let mut storage = Storage::readwrite(Path::new("./vector_db"));
@@ -1155,17 +1210,28 @@ let embedding = registry.register(
     EmbeddingBuilder::new("sift", 128, Distance::L2),
 )?;
 
-// 3. Create Processor (handles index + cache)
-let processor = Processor::new(storage.clone(), registry.clone());
+// 3. Create writer + reader (async channel API)
+let (writer, writer_rx) = create_writer(WriterConfig::default());
+spawn_mutation_consumer_with_storage_autoreg(writer_rx, WriterConfig::default(), storage.clone());
 
-// 4. Insert vectors
+let (reader, reader_rx) = create_reader_with_storage(ReaderConfig::default(), storage.clone());
+spawn_query_consumers_with_storage_autoreg(reader_rx, ReaderConfig::default(), storage.clone(), 2);
+
+// 4. Insert vectors (immediate indexing)
 for (i, vector) in base_vectors.iter().enumerate() {
     let external_key = ExternalKey::NodeId(Id::new());
-    let _vec_id = processor.insert_vector(&embedding, external_key, vector, true)?;
+    InsertVector::new(&embedding, external_key, vector.clone())
+        .immediate()
+        .run(&writer)
+        .await?;
 }
 
-// 5. Search
-let results = processor.search(&embedding, &query, 10, 100)?;
+// 5. Search (exact L2)
+let results = SearchKNN::new(&embedding, query, 10)
+    .with_ef(100)
+    .exact()
+    .run(&reader, Duration::from_secs(5))
+    .await?;
 for result in results {
     println!("Key: {:?}, L2 Distance: {:.4}", result.external_key, result.distance);
 }
@@ -1176,11 +1242,14 @@ for result in results {
 ```rust
 use motlie_db::vector::{
     Storage, EmbeddingRegistry, EmbeddingBuilder, Distance,
-    Processor, ExternalKey, SearchConfig,
+    ExternalKey, InsertVector, Runnable, SearchKNN, ReaderConfig, WriterConfig,
+    create_reader_with_storage, create_writer,
+    spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
 };
 use motlie_db::Id;
 use std::sync::Arc;
 use std::path::Path;
+use std::time::Duration;
 
 // 1. Initialize storage
 let mut storage = Storage::readwrite(Path::new("./vector_db"));
@@ -1194,21 +1263,28 @@ let embedding = registry.register(
     EmbeddingBuilder::new("clip-vit-b32", 512, Distance::Cosine),
 )?;
 
-// 3. Create Processor (manages HNSW + RaBitQ cache)
-let processor = Processor::new(storage.clone(), registry.clone());
+// 3. Create writer + reader (async channel API)
+let (writer, writer_rx) = create_writer(WriterConfig::default());
+spawn_mutation_consumer_with_storage_autoreg(writer_rx, WriterConfig::default(), storage.clone());
+
+let (reader, reader_rx) = create_reader_with_storage(ReaderConfig::default(), storage.clone());
+spawn_query_consumers_with_storage_autoreg(reader_rx, ReaderConfig::default(), storage.clone(), 2);
 
 // 4. Insert vectors (binary codes cached on insert)
 for (i, vector) in base_vectors.iter().enumerate() {
     let external_key = ExternalKey::NodeId(Id::new());
-    let _vec_id = processor.insert_vector(&embedding, external_key, vector, true)?;
+    InsertVector::new(&embedding, external_key, vector.clone())
+        .immediate()
+        .run(&writer)
+        .await?;
 }
 
-// 5. Two-phase search: ADC pre-filter → exact rerank
-let config = SearchConfig::new(embedding.clone(), 10)
-    .rabitq()?
+// 5. Two-phase search: ADC pre-filter → exact rerank (auto-selected for Cosine)
+let results = SearchKNN::new(&embedding, query, 10)
     .with_ef(100)
-    .with_rerank_factor(10);
-let results = processor.search_with_config(&config, &query)?;
+    .with_rerank_factor(10)
+    .run(&reader, Duration::from_secs(5))
+    .await?;
 
 for result in results {
     println!("Key: {:?}, Cosine Distance: {:.4}", result.external_key, result.distance);
@@ -1693,24 +1769,25 @@ pub struct AddEmbeddingSpec {
 
 ### Query Types
 
-The `Query` enum represents all read operations. Each variant has a corresponding
-struct that implements `QueryExecutor` for direct execution or can be dispatched
-through the Reader channel.
+The `Query` enum represents all read operations and is used internally for
+channel dispatch. External callers should use the typed query structs
+(`GetVector`, `SearchKNN`, etc.) with `Runnable::run(...)` instead of
+constructing `Query` variants directly.
 
 ```rust
 pub enum Query {
     // Point Lookups
-    GetVector(GetVectorDispatch),       // Get raw vector by external ID
-    GetInternalId(GetInternalIdDispatch), // External key → internal vec_id
-    GetExternalId(GetExternalIdDispatch), // Internal vec_id → external key
-    ResolveIds(ResolveIdsDispatch),     // Batch resolve vec_ids → external keys
+    GetVector(...),       // Internal dispatch wrapper
+    GetInternalId(...),   // Internal dispatch wrapper
+    GetExternalId(...),   // Internal dispatch wrapper
+    ResolveIds(...),      // Internal dispatch wrapper
 
     // Registry Queries
-    ListEmbeddings(ListEmbeddingsDispatch),  // List all embedding spaces
-    FindEmbeddings(FindEmbeddingsDispatch),  // Filter by model/dim/distance
+    ListEmbeddings(...),  // Internal dispatch wrapper
+    FindEmbeddings(...),  // Internal dispatch wrapper
 
     // Search Operations
-    SearchKNN(SearchKNNDispatch),       // K-nearest neighbor search
+    SearchKNN(...),       // Internal dispatch wrapper
 }
 ```
 
@@ -1905,9 +1982,7 @@ impl Writer {
 }
 
 pub struct WriterConfig { pub channel_buffer_size: usize }
-pub struct MutationConsumer { /* receiver, config, processor */ }
 pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutation>>);
-pub fn spawn_mutation_consumer(consumer: MutationConsumer) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_mutation_consumer_with_storage(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
@@ -1920,9 +1995,9 @@ pub fn spawn_mutation_consumer_with_storage_autoreg(
     storage: Arc<Storage>,
 ) -> tokio::task::JoinHandle<Result<()>>;
 
-// Queries (Reader - MPMC / flume + Processor)
+// Queries (Reader - MPMC / flume)
 // Reader is the unified type for all queries (point lookups + SearchKNN)
-pub struct Reader { /* flume::Sender<Query> + Arc<Processor> */ }
+pub struct Reader { /* flume::Sender<Query> */ }
 impl Reader {
     pub async fn send_query(&self, query: Query) -> Result<()>;
     pub fn is_closed(&self) -> bool;
@@ -1930,25 +2005,13 @@ impl Reader {
 
 pub struct ReaderConfig { pub channel_buffer_size: usize }
 pub struct QueryConsumer { /* receiver, config, storage */ }
-pub struct ProcessorQueryConsumer { /* receiver, config, processor */ }
-// Recommended: create with storage (auto-creates Processor)
+// Recommended: create with storage (auto-creates internal processor)
 pub fn create_reader_with_storage(config: ReaderConfig, storage: Arc<Storage>) -> (Reader, flume::Receiver<Query>);
-// Alternative: create with explicit Processor
-pub fn create_reader(config: ReaderConfig, processor: Arc<Processor>) -> (Reader, flume::Receiver<Query>);
 pub fn spawn_query_consumer(consumer: QueryConsumer) -> tokio::task::JoinHandle<Result<()>>;
-pub fn spawn_query_consumer_with_processor(
-    consumer: ProcessorQueryConsumer,
-) -> tokio::task::JoinHandle<Result<()>>;
 pub fn spawn_query_consumers(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     storage: Arc<Storage>,
-    count: usize,
-) -> Vec<tokio::task::JoinHandle<Result<()>>>;
-pub fn spawn_query_consumers_with_processor(
-    receiver: flume::Receiver<Query>,
-    config: ReaderConfig,
-    processor: Arc<Processor>,
     count: usize,
 ) -> Vec<tokio::task::JoinHandle<Result<()>>>;
 pub fn spawn_query_consumers_with_storage(
@@ -1965,29 +2028,7 @@ pub fn spawn_query_consumers_with_storage_autoreg(
     count: usize,
 ) -> Vec<tokio::task::JoinHandle<Result<()>>>;
 
-// Reader (unified - includes channel sender + Processor)
-pub struct Reader { /* sender + processor */ }
-impl Reader {
-    pub async fn send_query(&self, query: Query) -> Result<()>;
-    pub fn is_closed(&self) -> bool;
-}
-
-// Recommended: create Reader with storage (auto-creates Processor)
-pub fn create_reader_with_storage(
-    config: ReaderConfig,
-    storage: Arc<Storage>,
-) -> (Reader, flume::Receiver<Query>);
-
-// Alternative: create Reader with explicit Processor
-pub fn create_reader(
-    config: ReaderConfig,
-    processor: Arc<Processor>,
-) -> (Reader, flume::Receiver<Query>);
-
-// Deprecated aliases (for backwards compatibility)
-pub type SearchReader = Reader;
-pub fn create_search_reader(...) -> (Reader, ...);
-pub fn create_search_reader_with_storage(...) -> (Reader, ...);
+// SearchReader alias removed (breaking change): use Reader directly.
 ```
 
 **Runnable helpers:**
@@ -2362,19 +2403,16 @@ rt.block_on(async {
 
 ```rust
 use motlie_db::vector::{
-    create_reader, spawn_query_consumers_with_processor, ReaderConfig,
-    SearchKNN, Processor,
+    create_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig,
+    SearchKNN,
 };
-use std::sync::Arc;
 use std::time::Duration;
 
-// Assume storage/registry/embedding are already created (see Flow 1 above)
-// Create processor explicitly (needed for SearchKNNDispatch)
-let processor = Arc::new(Processor::new(storage.clone(), registry.clone()));
+// Assume storage/embedding are already created (see Flow 1 above)
 
 // Create reader + consumer
-let (reader, receiver) = create_reader(ReaderConfig::default());
-spawn_query_consumers_with_processor(receiver, ReaderConfig::default(), processor.clone(), 2);
+let (reader, receiver) = create_reader_with_storage(ReaderConfig::default(), storage.clone());
+spawn_query_consumers_with_storage_autoreg(receiver, ReaderConfig::default(), storage.clone(), 2);
 
 // Runnable helper (SearchKNN implements Runnable for Reader)
 let results = SearchKNN::new(&embedding, query_vec, 10)

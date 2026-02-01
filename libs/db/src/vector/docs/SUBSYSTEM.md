@@ -93,7 +93,7 @@ pub fn start_with_async(
     num_query_workers: usize,
     async_config: Option<AsyncUpdaterConfig>,
     gc_config: Option<GcConfig>,  // NEW PARAMETER
-) -> (Writer, SearchReader) {
+) -> (Writer, Reader) {
     // ... existing code ...
 
     // Start GC if configured

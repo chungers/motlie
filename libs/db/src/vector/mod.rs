@@ -144,8 +144,6 @@ pub use query::{
 };
 pub use reader::{
     create_reader_with_storage,
-    // Deprecated aliases (for backwards compatibility)
-    create_search_reader_with_storage, SearchReader,
     spawn_consumer as spawn_query_consumer,
     spawn_consumers as spawn_query_consumers,
     spawn_query_consumers_with_storage,
