@@ -30,7 +30,7 @@ use super::config::RaBitQConfig;
 use super::embedding::Embedding;
 use super::hnsw;
 use super::id::IdAllocator;
-use super::rabitq::RaBitQ;
+use super::quantization::RaBitQ;
 use super::registry::EmbeddingRegistry;
 use super::schema::{
     EmbeddingCode, EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, ExternalKey, GraphMeta,
