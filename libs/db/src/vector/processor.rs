@@ -100,7 +100,7 @@ impl SearchResult {
 /// let allocator = processor.get_or_create_allocator(embedding_code);
 /// let vec_id = allocator.allocate_local();
 /// ```
-pub struct Processor {
+pub(crate) struct Processor {
     /// Vector storage (RocksDB via generic Storage<Subsystem>)
     storage: Arc<Storage>,
     /// Embedding registry (pre-warmed on startup)

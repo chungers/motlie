@@ -124,7 +124,7 @@ impl InsertBatchResult {
 ///
 /// # Returns
 /// `InsertResult` with vec_id and deferred cache updates.
-pub fn vector(
+pub(crate) fn vector(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     processor: &Processor,
@@ -344,7 +344,7 @@ pub fn vector(
 ///
 /// # Returns
 /// `InsertBatchResult` with vec_ids and deferred cache updates.
-pub fn batch(
+pub(crate) fn batch(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     processor: &Processor,
