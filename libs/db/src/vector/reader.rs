@@ -373,7 +373,7 @@ pub(crate) fn spawn_consumers_with_processor(
 ///
 /// # Arguments
 ///
-/// * `receiver` - The flume receiver from `create_reader()` or `create_search_reader()`
+/// * `receiver` - The flume receiver from `create_reader()`
 /// * `config` - Reader configuration
 /// * `storage` - Vector storage instance
 /// * `registry` - Embedding registry (typically from `storage.cache().clone()`)
@@ -411,30 +411,7 @@ pub fn spawn_query_consumers_with_storage_autoreg(
 // Deprecated Aliases (for backwards compatibility)
 // ============================================================================
 
-/// Deprecated: Use `Reader` instead.
-///
-/// `SearchReader` has been consolidated into `Reader`. This type alias
-/// is provided for backwards compatibility during migration.
-#[deprecated(since = "0.2.0", note = "Use Reader instead - SearchReader has been consolidated")]
-pub type SearchReader = Reader;
-
-/// Deprecated: Use `create_reader_with_storage` instead.
-#[deprecated(since = "0.2.0", note = "Use create_reader_with_storage instead")]
-pub fn create_search_reader_with_storage(
-    config: ReaderConfig,
-    storage: Arc<super::Storage>,
-) -> (Reader, flume::Receiver<Query>) {
-    create_reader_with_storage(config, storage)
-}
-
-/// Deprecated: Use `create_reader` instead.
-#[deprecated(since = "0.2.0", note = "Use create_reader instead")]
-pub(crate) fn create_search_reader(
-    config: ReaderConfig,
-    processor: Arc<Processor>,
-) -> (Reader, flume::Receiver<Query>) {
-    create_reader(config, processor)
-}
+// SearchReader alias removed (breaking change): use Reader directly.
 
 // ============================================================================
 // Tests

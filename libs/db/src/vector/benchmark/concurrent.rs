@@ -58,7 +58,7 @@ use crate::reader::Runnable as QueryRunnable;
 use crate::vector::benchmark::dataset::LAION_EMBEDDING_DIM;
 use crate::vector::schema::{EmbeddingCode, ExternalKey};
 use crate::vector::writer::{create_writer, spawn_mutation_consumer_with_storage_autoreg, WriterConfig};
-use crate::vector::reader::{create_search_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig};
+use crate::vector::reader::{create_reader_with_storage, spawn_query_consumers_with_storage_autoreg, ReaderConfig};
 use crate::vector::{
     Distance, EmbeddingBuilder, InsertVector, InsertVectorBatch, MutationRunnable, SearchKNN,
     Storage,
@@ -753,7 +753,7 @@ impl fmt::Display for BenchResult {
 ///
 /// This benchmark correctly uses the production channel infrastructure:
 /// - Inserts go through Writer (MPSC) → single mutation consumer
-/// - Searches go through SearchReader (MPMC) → query worker pool
+/// - Searches go through Reader (MPMC) → query worker pool
 pub struct ConcurrentBenchmark {
     config: BenchConfig,
 }
@@ -769,7 +769,7 @@ impl ConcurrentBenchmark {
     ///
     /// This method:
     /// 1. Registers an embedding for the benchmark
-    /// 2. Creates Writer (MPSC) and SearchReader (MPMC) channels
+    /// 2. Creates Writer (MPSC) and Reader (MPMC) channels
     /// 3. Spawns insert producer tasks (all send to same Writer)
     /// 4. Spawns search producer tasks
     /// 5. Waits for duration or completion
@@ -807,9 +807,9 @@ impl ConcurrentBenchmark {
             storage.clone(),
         );
 
-        // Create SearchReader (MPMC) - query workers share this
+        // Create Reader (MPMC) - query workers share this
         let (search_reader, reader_rx) =
-            create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+            create_reader_with_storage(ReaderConfig::default(), storage.clone());
         let query_handles = spawn_query_consumers_with_storage_autoreg(
             reader_rx,
             ReaderConfig::default(),
@@ -935,7 +935,7 @@ impl ConcurrentBenchmark {
 // ============================================================================
 
 use crate::vector::writer::Writer;
-use crate::vector::reader::SearchReader;
+use crate::vector::reader::Reader;
 use crate::vector::Embedding;
 
 /// Insert producer workload: sends inserts to Writer channel until deadline.
@@ -1039,9 +1039,9 @@ async fn insert_producer_workload(
     }
 }
 
-/// Search producer workload: sends searches to SearchReader until deadline.
+/// Search producer workload: sends searches to Reader until deadline.
 async fn search_producer_workload(
-    search_reader: SearchReader,
+    search_reader: Reader,
     embedding: Embedding,
     metrics: Arc<ConcurrentMetrics>,
     stop: Arc<AtomicBool>,
@@ -1061,7 +1061,7 @@ async fn search_producer_workload(
 
         let op_start = Instant::now();
 
-        // Send search through SearchReader channel (MPMC)
+        // Send search through Reader channel (MPMC)
         let result = SearchKNN::new(&embedding, query, k)
             .with_ef(ef)
             .run(&search_reader, timeout)
