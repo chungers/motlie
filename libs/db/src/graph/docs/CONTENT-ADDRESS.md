@@ -67,10 +67,12 @@ pub struct ForwardEdgeCfValue(
 ```rust
 pub struct ReverseEdgeCfKey(pub DstId, pub SrcId, pub NameHash);  // 40 bytes
 
-// Value: empty (no ReverseEdgeCfValue type)
-// ReverseEdges is purely an index for "find edges TO this node".
-// All edge details (TemporalRange, weight, summary, version) live in ForwardEdges.
-// This avoids data duplication and consistency bugs between forward/reverse CFs.
+pub struct ReverseEdgeCfValue(pub Option<TemporalRange>);
+// ReverseEdges is primarily an index for "find edges TO this node".
+// TemporalRange is denormalized here for fast inbound scans with time filtering.
+// Other edge details (weight, summary, version) remain authoritative in ForwardEdges.
+
+**Consistency rule:** whenever an edge's temporal range is updated, update both ForwardEdges and ReverseEdges in the same transaction to keep this denormalized field in sync.
 ```
 
 ---
@@ -464,9 +466,10 @@ fn insert_edge(
     let edge_value = ForwardEdgeCfValue(None, weight, Some(summary_hash), version);
     txn.put_cf(forward_edges_cf, edge_key, edge_value)?;
 
-    // 4. Write reverse edge index (HOT) - empty value, just for reverse lookup
+    // 4. Write reverse edge (HOT) - denormalized TemporalRange for inbound scans
     let reverse_key = ReverseEdgeCfKey(dst, src, name_hash);
-    txn.put_cf(reverse_edges_cf, reverse_key, &[])?;
+    let reverse_value = ReverseEdgeCfValue(None);
+    txn.put_cf(reverse_edges_cf, reverse_key, reverse_value)?;
 
     // 5. Write versioned summary (COLD)
     let summary_key = EdgeSummaryCfKey(src, dst, name_hash, version);
@@ -570,7 +573,7 @@ fn update_edge(
     let new_value = ForwardEdgeCfValue(current.0, current.1, Some(new_hash), new_version);
     txn.put_cf(forward_edges_cf, edge_key, new_value)?;
 
-    // Note: Reverse edge index unchanged (key stays same, value is empty)
+    // Note: Reverse edge key unchanged. TemporalRange is updated via temporal mutations.
 
     // 5. Write new versioned summary (COLD)
     let summary_key = EdgeSummaryCfKey(src, dst, name_hash, new_version);

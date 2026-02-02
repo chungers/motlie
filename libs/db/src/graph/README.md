@@ -146,8 +146,10 @@ Defined in `schema.rs`. The graph uses 5 column families:
 | `nodes` | `(Id)` | `(TemporalRange?, NodeName, NodeSummary)` | Node metadata |
 | `node-fragments` | `(Id, TimestampMilli)` | `(TemporalRange?, FragmentContent)` | Node content fragments |
 | `outgoing-edges` | `(SrcId, DstId, EdgeName)` | `(TemporalRange?, Weight?, EdgeSummary)` | Edges by source |
-| `incoming-edges` | `(DstId, SrcId, EdgeName)` | `()` | Reverse edge index |
+| `incoming-edges` | `(DstId, SrcId, EdgeName)` | `(TemporalRange?)` | Reverse edge index with denormalized temporal range |
 | `edge-fragments` | `(SrcId, DstId, EdgeName, TimestampMilli)` | `(TemporalRange?, FragmentContent)` | Edge content fragments |
+
+**Note**: `incoming-edges` denormalizes `TemporalRange` for fast inbound scans with temporal filtering. Temporal range updates must write both `outgoing-edges` and `incoming-edges` in the same transaction.
 
 **Note**: Name-based lookups (finding nodes/edges by name) are handled by the fulltext search module using Tantivy indexing.
 
