@@ -2,9 +2,9 @@
 
 ## Problem
 
-1. **No reverse index**: `SummaryHash` from vector search cannot be resolved to graph entities without full scan
-2. **No optimistic locking**: Blind upserts can silently lose concurrent updates
-3. **No GC for stale content**: Old summaries accumulate without cleanup
+1. **No reverse index**: `SummaryHash` from vector search cannot be resolved to graph entities without full scan (codex, 2026-02-02, validated)
+2. **No optimistic locking**: Blind upserts can silently lose concurrent updates (codex, 2026-02-02, validated)
+3. **No GC for stale content**: Old summaries accumulate without cleanup (codex, 2026-02-02, validated)
 
 ## Core Goal
 
@@ -34,6 +34,7 @@ pub const VERSION_MAX: Version = u32::MAX;
 - If `version == VERSION_MAX`, reject further updates with `Error::VersionOverflow`
 - This is extremely unlikely (136 years at 1 update/sec per entity)
 - If encountered, options: (1) delete and recreate entity, (2) upgrade to u64 in future schema version
+(codex, 2026-02-02, not-implemented)
 
 ## 1.1 Entity Column Families (HOT)
 
@@ -50,6 +51,7 @@ pub struct NodeCfValue(
     pub bool,                  // deleted flag (tombstone) [NEW]
 );
 ```
+(codex, 2026-02-02, not-implemented)
 
 ### ForwardEdges
 
@@ -68,14 +70,16 @@ pub struct ForwardEdgeCfValue(
     pub bool,                  // deleted flag (tombstone) [NEW]
 );
 ```
+(codex, 2026-02-02, not-implemented)
 
 **Tombstone Semantics:**
 - `deleted = true`: Entity is logically deleted but retained for audit/time-travel
 - Versioned summaries and index entries are preserved until GC
 - `current_*_for_summary()` filters out deleted entities
 - GC policy determines tombstone retention period
+(codex, 2026-02-02, not-implemented)
 
-**Note:** Edge identity is `(src, dst, name)`. `name` is immutable; renames are modeled as delete+insert.
+**Note:** Edge identity is `(src, dst, name)`. `name` is immutable; renames are modeled as delete+insert. (codex, 2026-02-02, validated)
 
 ### ReverseEdges
 
@@ -88,13 +92,14 @@ pub struct ReverseEdgeCfValue(pub Option<TemporalRange>);
 // Other edge details (weight, summary, version) remain authoritative in ForwardEdges.
 
 **Consistency rule:** whenever an edge's temporal range is updated, update both ForwardEdges and ReverseEdges in the same transaction to keep this denormalized field in sync.
+(codex, 2026-02-02, validated)
 ```
 
 ---
 
 ## 1.2 Content Column Families (COLD)
 
-**Changed from content-addressed to entity+version keyed.** Enables clean GC.
+**Changed from content-addressed to entity+version keyed.** Enables clean GC. (codex, 2026-02-02, not-implemented)
 
 ### NodeSummaries
 
@@ -147,6 +152,7 @@ impl NodeSummaryIndexCfValue {
     pub fn is_current(&self) -> bool { self.0 == Self::CURRENT }
 }
 ```
+(codex, 2026-02-02, not-implemented)
 
 ### EdgeSummaryIndex
 
@@ -162,20 +168,22 @@ pub struct EdgeSummaryIndexCfKey(
 /// 1-byte marker: 0x01 = current, 0x00 = stale
 pub struct EdgeSummaryIndexCfValue(pub u8);
 ```
+(codex, 2026-02-02, not-implemented)
 
 **Marker Bit Semantics:**
 - `0x01` (CURRENT): This (entity, version) is the current version
 - `0x00` (STALE): Entity has been updated to a newer version, or deleted
 
 This eliminates point-reads in `current_*_for_summary()` - just filter by marker during prefix scan.
+(codex, 2026-02-02, not-implemented)
 
-**EntityKey (edge):** `(src_id, dst_id, name_hash)`. This matches the forward edge key.
+**EntityKey (edge):** `(src_id, dst_id, name_hash)`. This matches the forward edge key. (codex, 2026-02-02, validated)
 
 ---
 
 ## 1.4 Fragment Column Families (Unchanged)
 
-Fragments use timestamp for append-only semantics. No GC.
+Fragments use timestamp for append-only semantics. No GC. (codex, 2026-02-02, validated)
 
 ```rust
 pub struct NodeFragmentCfKey(pub Id, pub TimestampMilli);  // 24 bytes
@@ -215,6 +223,7 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     "graph/meta",
 ];
 ```
+(codex, 2026-02-02, not-implemented)
 
 ---
 
@@ -273,6 +282,7 @@ pub fn node_versions_for_summary(&self, hash: SummaryHash, node_id: Id) -> Resul
 /// Get summary for specific version, or current if version=None.
 pub fn get_node_summary(&self, id: Id, version: Option<Version>) -> Result<Option<NodeSummary>>;
 ```
+(codex, 2026-02-02, not-implemented)
 
 ---
 
@@ -319,6 +329,7 @@ pub fn get_edge_summary(
     version: Option<Version>,
 ) -> Result<Option<EdgeSummary>>;
 ```
+(codex, 2026-02-02, not-implemented)
 
 ---
 
@@ -331,7 +342,7 @@ pub fn get_edge_summary(
 | `(hash)` | 8 | All nodes with this hash (any version) |
 | `(hash, node_id)` | 24 | All versions of specific node with this hash |
 
-**Content-based search:** scanning by `(hash)` enables "find all entities with identical content" without any entity-specific filters.
+**Content-based search:** scanning by `(hash)` enables "find all entities with identical content" without any entity-specific filters. (codex, 2026-02-02, not-implemented)
 
 ### EdgeSummaryIndex
 
@@ -373,6 +384,7 @@ Query Results for hash 0xAAA:
   current_nodes_for_summary(0xAAA):
     []  // Empty! None currently have 0xAAA
 ```
+(codex, 2026-02-02, illustrative)
 
 ---
 
@@ -408,6 +420,7 @@ Query Results for hash 0xAAA:
   current_edges_for_summary(0xAAA):
     [(C, D, "knows")]  // Only edge still at v1 with this hash
 ```
+(codex, 2026-02-02, illustrative)
 
 ---
 
@@ -434,6 +447,7 @@ pub struct EdgeSummaryLookupResult {
 ---
 
 # Part 3: Implementation Tasks
+(codex, 2026-02-02, not-implemented)
 
 ## 3.1 Write Path: Insert
 
@@ -820,6 +834,7 @@ pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<Forward
 ---
 
 ## 3.4 Garbage Collection
+(codex, 2026-02-02, not-implemented)
 
 ### GcConfig
 
@@ -935,6 +950,7 @@ impl GraphMeta {
     }
 }
 ```
+(codex, 2026-02-02, not-implemented)
 
 **Pattern Benefits (from vector::GraphMeta):**
 - Single CF for all graph-level metadata
@@ -1107,6 +1123,7 @@ fn gc_node_summary_index(&self) -> Result<u64> {
 ---
 
 ## 3.5 Reverse Index Repair Task
+(codex, 2026-02-02, not-implemented)
 
 Periodic integrity check to detect and fix inconsistencies between forward edges and reverse index.
 
@@ -1184,6 +1201,7 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | **Version overflow** | Reject writes at VERSION_MAX; documented policy |
 | **GC** | Incremental with cursor (persisted via `GraphMeta` pattern); delete old versions; delete stale index entries; hard delete tombstones after retention |
 | **Repair** | Periodic forward↔reverse consistency check |
+(codex, 2026-02-02, not-implemented)
 
 ---
 
