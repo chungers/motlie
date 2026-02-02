@@ -22,11 +22,18 @@ Given a content hash from vector search, resolve to all entity keys that referen
 /// Entity version number for optimistic locking.
 /// u32 provides 4 billion versions per entity - sufficient for 136 years at 1 update/sec.
 pub type Version = u32;
+
+pub const VERSION_MAX: Version = u32::MAX;
 ```
 
 | Type | Max Value | Overflow at 1 update/sec | Size Savings vs u64 |
 |------|-----------|--------------------------|---------------------|
 | `u32` | 4.2 billion | 136 years | 4 bytes/entry |
+
+**Overflow Policy:**
+- If `version == VERSION_MAX`, reject further updates with `Error::VersionOverflow`
+- This is extremely unlikely (136 years at 1 update/sec per entity)
+- If encountered, options: (1) delete and recreate entity, (2) upgrade to u64 in future schema version
 
 ## 1.1 Entity Column Families (HOT)
 
@@ -40,6 +47,7 @@ pub struct NodeCfValue(
     pub NameHash,
     pub Option<SummaryHash>,  // Content hash for vector search matching
     pub Version,               // Version (monotonic, starts at 1) [NEW]
+    pub bool,                  // deleted flag (tombstone) [NEW]
 );
 ```
 
@@ -57,8 +65,15 @@ pub struct ForwardEdgeCfValue(
     pub Option<f64>,           // weight
     pub Option<SummaryHash>,   // Content hash
     pub Version,               // Version [NEW]
+    pub bool,                  // deleted flag (tombstone) [NEW]
 );
 ```
+
+**Tombstone Semantics:**
+- `deleted = true`: Entity is logically deleted but retained for audit/time-travel
+- Versioned summaries and index entries are preserved until GC
+- `current_*_for_summary()` filters out deleted entities
+- GC policy determines tombstone retention period
 
 **Note:** Edge identity is `(src, dst, name)`. `name` is immutable; renames are modeled as delete+insert.
 
@@ -122,7 +137,15 @@ pub struct NodeSummaryIndexCfKey(
     pub Version,      // 4 bytes - version
 );  // Total: 28 bytes
 
-// Value: empty (existence is the data)
+/// 1-byte marker: 0x01 = current, 0x00 = stale
+pub struct NodeSummaryIndexCfValue(pub u8);
+
+impl NodeSummaryIndexCfValue {
+    pub const CURRENT: u8 = 0x01;
+    pub const STALE: u8 = 0x00;
+
+    pub fn is_current(&self) -> bool { self.0 == Self::CURRENT }
+}
 ```
 
 ### EdgeSummaryIndex
@@ -136,8 +159,15 @@ pub struct EdgeSummaryIndexCfKey(
     pub Version,      // 4 bytes - version
 );  // Total: 52 bytes
 
-// Value: empty
+/// 1-byte marker: 0x01 = current, 0x00 = stale
+pub struct EdgeSummaryIndexCfValue(pub u8);
 ```
+
+**Marker Bit Semantics:**
+- `0x01` (CURRENT): This (entity, version) is the current version
+- `0x00` (STALE): Entity has been updated to a newer version, or deleted
+
+This eliminates point-reads in `current_*_for_summary()` - just filter by marker during prefix scan.
 
 **EntityKey (edge):** `(src_id, dst_id, name_hash)`. This matches the forward edge key.
 
@@ -180,6 +210,9 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     // Reverse indexes [NEW]
     "graph/node_summary_index",
     "graph/edge_summary_index",
+
+    // Graph-level metadata (GC cursors, future config) [NEW]
+    "graph/meta",
 ];
 ```
 
@@ -413,23 +446,25 @@ fn insert_node(&self, id: Id, name: &str, summary: NodeSummary) -> Result<()> {
     }
 
     let version: Version = 1;
+    let deleted = false;
     let name_hash = NameHash::from_name(name);
     let summary_hash = SummaryHash::from_summary(&summary)?;
 
     // 2. Write name interning
     txn.put_cf(names_cf, NameCfKey(name_hash), name)?;
 
-    // 3. Write node (HOT)
-    let node_value = NodeCfValue(None, name_hash, Some(summary_hash), version);
+    // 3. Write node (HOT) with version and deleted flag
+    let node_value = NodeCfValue(None, name_hash, Some(summary_hash), version, deleted);
     txn.put_cf(nodes_cf, NodeCfKey(id), node_value)?;
 
     // 4. Write versioned summary (COLD)
     let summary_key = NodeSummaryCfKey(id, version);
     txn.put_cf(node_summaries_cf, summary_key, summary)?;
 
-    // 5. Write reverse index entry
+    // 5. Write reverse index entry with CURRENT marker
     let index_key = NodeSummaryIndexCfKey(summary_hash, id, version);
-    txn.put_cf(node_summary_index_cf, index_key, &[])?;
+    let index_value = NodeSummaryIndexCfValue(NodeSummaryIndexCfValue::CURRENT);
+    txn.put_cf(node_summary_index_cf, index_key, index_value)?;
 
     txn.commit()
 }
@@ -457,13 +492,14 @@ fn insert_edge(
     }
 
     let version: Version = 1;
+    let deleted = false;
     let summary_hash = SummaryHash::from_summary(&summary)?;
 
     // 2. Write name interning
     txn.put_cf(names_cf, NameCfKey(name_hash), name)?;
 
-    // 3. Write forward edge (HOT)
-    let edge_value = ForwardEdgeCfValue(None, weight, Some(summary_hash), version);
+    // 3. Write forward edge (HOT) with version and deleted flag
+    let edge_value = ForwardEdgeCfValue(None, weight, Some(summary_hash), version, deleted);
     txn.put_cf(forward_edges_cf, edge_key, edge_value)?;
 
     // 4. Write reverse edge (HOT) - denormalized TemporalRange for inbound scans
@@ -475,9 +511,10 @@ fn insert_edge(
     let summary_key = EdgeSummaryCfKey(src, dst, name_hash, version);
     txn.put_cf(edge_summaries_cf, summary_key, summary)?;
 
-    // 6. Write reverse index entry
+    // 6. Write reverse index entry with CURRENT marker
     let index_key = EdgeSummaryIndexCfKey(summary_hash, src, dst, name_hash, version);
-    txn.put_cf(edge_summary_index_cf, index_key, &[])?;
+    let index_value = EdgeSummaryIndexCfValue(EdgeSummaryIndexCfValue::CURRENT);
+    txn.put_cf(edge_summary_index_cf, index_key, index_value)?;
 
     txn.commit()
 }
@@ -503,6 +540,7 @@ fn update_node(
         .ok_or(Error::NotFound(id))?;
     let current = Nodes::value_from_bytes(&current)?;
     let current_version = current.3;
+    let old_hash = current.2; // Save old hash for index update
 
     // 2. Optimistic lock check
     if current_version != expected_version {
@@ -512,23 +550,34 @@ fn update_node(
         });
     }
 
-    // 3. Compute new version and hash
+    // 3. Version overflow check
+    if current_version == VERSION_MAX {
+        return Err(Error::VersionOverflow(id));
+    }
+
+    // 4. Compute new version and hash
     let new_version = current_version + 1;
     let new_hash = SummaryHash::from_summary(&new_summary)?;
 
-    // 4. Write updated node (HOT)
-    let new_value = NodeCfValue(current.0, current.1, Some(new_hash), new_version);
+    // 5. Write updated node (HOT) - preserve deleted flag
+    let new_value = NodeCfValue(current.0, current.1, Some(new_hash), new_version, current.4);
     txn.put_cf(nodes_cf, NodeCfKey(id), new_value)?;
 
-    // 5. Write new versioned summary (COLD)
-    // Old version stays until GC
+    // 6. Write new versioned summary (COLD)
     let summary_key = NodeSummaryCfKey(id, new_version);
     txn.put_cf(node_summaries_cf, summary_key, new_summary)?;
 
-    // 6. Write new reverse index entry
-    // Old index entry stays until GC
-    let index_key = NodeSummaryIndexCfKey(new_hash, id, new_version);
-    txn.put_cf(node_summary_index_cf, index_key, &[])?;
+    // 7. Flip old index entry to STALE
+    if let Some(old_h) = old_hash {
+        let old_index_key = NodeSummaryIndexCfKey(old_h, id, current_version);
+        let stale_value = NodeSummaryIndexCfValue(NodeSummaryIndexCfValue::STALE);
+        txn.put_cf(node_summary_index_cf, old_index_key, stale_value)?;
+    }
+
+    // 8. Write new index entry with CURRENT marker
+    let new_index_key = NodeSummaryIndexCfKey(new_hash, id, new_version);
+    let current_value = NodeSummaryIndexCfValue(NodeSummaryIndexCfValue::CURRENT);
+    txn.put_cf(node_summary_index_cf, new_index_key, current_value)?;
 
     txn.commit()?;
     Ok(new_version)
@@ -556,6 +605,7 @@ fn update_edge(
         .ok_or(Error::NotFound(edge_key))?;
     let current = ForwardEdges::value_from_bytes(&current)?;
     let current_version = current.3;
+    let old_hash = current.2; // Save old hash for index update
 
     // 2. Optimistic lock check
     if current_version != expected_version {
@@ -565,23 +615,135 @@ fn update_edge(
         });
     }
 
-    // 3. Compute new version and hash
+    // 3. Version overflow check
+    if current_version == VERSION_MAX {
+        return Err(Error::VersionOverflow(edge_key));
+    }
+
+    // 4. Compute new version and hash
     let new_version = current_version + 1;
     let new_hash = SummaryHash::from_summary(&new_summary)?;
 
-    // 4. Write updated forward edge (HOT)
-    let new_value = ForwardEdgeCfValue(current.0, current.1, Some(new_hash), new_version);
+    // 5. Write updated forward edge (HOT) - preserve deleted flag
+    let new_value = ForwardEdgeCfValue(current.0, current.1, Some(new_hash), new_version, current.4);
     txn.put_cf(forward_edges_cf, edge_key, new_value)?;
 
     // Note: Reverse edge key unchanged. TemporalRange is updated via temporal mutations.
 
-    // 5. Write new versioned summary (COLD)
+    // 6. Write new versioned summary (COLD)
     let summary_key = EdgeSummaryCfKey(src, dst, name_hash, new_version);
     txn.put_cf(edge_summaries_cf, summary_key, new_summary)?;
 
-    // 6. Write new reverse index entry
-    let index_key = EdgeSummaryIndexCfKey(new_hash, src, dst, name_hash, new_version);
-    txn.put_cf(edge_summary_index_cf, index_key, &[])?;
+    // 7. Flip old index entry to STALE
+    if let Some(old_h) = old_hash {
+        let old_index_key = EdgeSummaryIndexCfKey(old_h, src, dst, name_hash, current_version);
+        let stale_value = EdgeSummaryIndexCfValue(EdgeSummaryIndexCfValue::STALE);
+        txn.put_cf(edge_summary_index_cf, old_index_key, stale_value)?;
+    }
+
+    // 8. Write new index entry with CURRENT marker
+    let new_index_key = EdgeSummaryIndexCfKey(new_hash, src, dst, name_hash, new_version);
+    let current_value = EdgeSummaryIndexCfValue(EdgeSummaryIndexCfValue::CURRENT);
+    txn.put_cf(edge_summary_index_cf, new_index_key, current_value)?;
+
+    txn.commit()?;
+    Ok(new_version)
+}
+```
+
+### Delete Node (Tombstone)
+
+```rust
+fn delete_node(&self, id: Id, expected_version: Version) -> Result<Version> {
+    let txn = self.txn_db.transaction();
+
+    // 1. Read current node
+    let current = txn.get_cf(nodes_cf, id)?
+        .ok_or(Error::NotFound(id))?;
+    let current = Nodes::value_from_bytes(&current)?;
+    let current_version = current.3;
+
+    // 2. Optimistic lock check
+    if current_version != expected_version {
+        return Err(Error::VersionMismatch {
+            expected: expected_version,
+            actual: current_version,
+        });
+    }
+
+    // 3. Already deleted?
+    if current.4 {
+        return Err(Error::AlreadyDeleted(id));
+    }
+
+    // 4. Increment version and set deleted flag
+    let new_version = current_version + 1;
+    let new_value = NodeCfValue(current.0, current.1, current.2, new_version, true);
+    txn.put_cf(nodes_cf, NodeCfKey(id), new_value)?;
+
+    // 5. Flip current index entry to STALE
+    if let Some(hash) = current.2 {
+        let index_key = NodeSummaryIndexCfKey(hash, id, current_version);
+        let stale_value = NodeSummaryIndexCfValue(NodeSummaryIndexCfValue::STALE);
+        txn.put_cf(node_summary_index_cf, index_key, stale_value)?;
+    }
+
+    // Note: No new index entry for tombstoned entity
+    // Versioned summary preserved for audit/time-travel until GC
+
+    txn.commit()?;
+    Ok(new_version)
+}
+```
+
+### Delete Edge (Tombstone)
+
+```rust
+fn delete_edge(
+    &self,
+    src: Id,
+    dst: Id,
+    name: &str,
+    expected_version: Version,
+) -> Result<Version> {
+    let txn = self.txn_db.transaction();
+
+    let name_hash = NameHash::from_name(name);
+    let edge_key = ForwardEdgeCfKey(src, dst, name_hash);
+
+    // 1. Read current edge
+    let current = txn.get_cf(forward_edges_cf, &edge_key)?
+        .ok_or(Error::NotFound(edge_key))?;
+    let current = ForwardEdges::value_from_bytes(&current)?;
+    let current_version = current.3;
+
+    // 2. Optimistic lock check
+    if current_version != expected_version {
+        return Err(Error::VersionMismatch {
+            expected: expected_version,
+            actual: current_version,
+        });
+    }
+
+    // 3. Already deleted?
+    if current.4 {
+        return Err(Error::AlreadyDeleted(edge_key));
+    }
+
+    // 4. Increment version and set deleted flag
+    let new_version = current_version + 1;
+    let new_value = ForwardEdgeCfValue(current.0, current.1, current.2, new_version, true);
+    txn.put_cf(forward_edges_cf, edge_key, new_value)?;
+
+    // 5. Flip current index entry to STALE
+    if let Some(hash) = current.2 {
+        let index_key = EdgeSummaryIndexCfKey(hash, src, dst, name_hash, current_version);
+        let stale_value = EdgeSummaryIndexCfValue(EdgeSummaryIndexCfValue::STALE);
+        txn.put_cf(edge_summary_index_cf, index_key, stale_value)?;
+    }
+
+    // Note: Reverse edge entry stays (could remove if needed)
+    // Versioned summary preserved for audit/time-travel until GC
 
     txn.commit()?;
     Ok(new_version)
@@ -599,13 +761,19 @@ pub fn current_nodes_for_summary(&self, hash: SummaryHash) -> Result<Vec<Id>> {
     let prefix = hash.as_bytes();
     let mut results = Vec::new();
 
-    for (key, _) in self.prefix_scan(node_summary_index_cf, prefix)? {
-        let index_key = NodeSummaryIndex::key_from_bytes(&key)?;
-        let (_, node_id, version) = (index_key.0, index_key.1, index_key.2);
+    for (key, value) in self.prefix_scan(node_summary_index_cf, prefix)? {
+        // Filter by marker bit - no point-read needed!
+        let marker = NodeSummaryIndexCfValue::from_bytes(&value)?;
+        if !marker.is_current() {
+            continue;
+        }
 
-        // Verify this version is still current
+        let index_key = NodeSummaryIndex::key_from_bytes(&key)?;
+        let node_id = index_key.1;
+
+        // Optional: verify entity not tombstoned (if audit queries need different behavior)
         if let Some(node) = self.get_node(node_id)? {
-            if node.version == version && node.summary_hash == Some(hash) {
+            if !node.deleted {
                 results.push(node_id);
             }
         }
@@ -622,14 +790,19 @@ pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<Forward
     let prefix = hash.as_bytes();
     let mut results = Vec::new();
 
-    for (key, _) in self.prefix_scan(edge_summary_index_cf, prefix)? {
+    for (key, value) in self.prefix_scan(edge_summary_index_cf, prefix)? {
+        // Filter by marker bit - no point-read needed!
+        let marker = EdgeSummaryIndexCfValue::from_bytes(&value)?;
+        if !marker.is_current() {
+            continue;
+        }
+
         let index_key = EdgeSummaryIndex::key_from_bytes(&key)?;
         let edge_key = ForwardEdgeCfKey(index_key.1, index_key.2, index_key.3);
-        let version = index_key.4;
 
-        // Verify this version is still current
+        // Optional: verify entity not tombstoned
         if let Some(edge) = self.get_edge(&edge_key)? {
-            if edge.version == version && edge.summary_hash == Some(hash) {
+            if !edge.deleted {
                 results.push(edge_key);
             }
         }
@@ -650,16 +823,130 @@ pub struct GraphGcConfig {
     /// Interval between GC cycles
     pub interval: Duration,  // default: 60s
 
-    /// Max entities to process per cycle
+    /// Max entries to process per cycle (bounds latency)
     pub batch_size: usize,  // default: 1000
 
     /// Number of summary versions to retain per entity
     pub versions_to_keep: usize,  // default: 2
 
+    /// Tombstone retention period before hard delete
+    pub tombstone_retention: Duration,  // default: 7 days
+
     /// Run GC on startup
     pub process_on_startup: bool,  // default: true
 }
 ```
+
+### GC Cursor (Incremental Processing)
+
+Cursors are persisted using the `GraphMeta` pattern from the vector crate — a discriminated enum where the key discriminant selects the field type.
+
+```rust
+/// Stored in "graph/meta" CF — reuses singleton metadata pattern from vector::GraphMeta
+pub struct GraphMeta;
+impl ColumnFamily for GraphMeta {
+    const CF_NAME: &'static str = "graph/meta";
+}
+
+/// Discriminated enum — discriminant byte in key, payload in value
+/// Pattern borrowed from vector::schema::GraphMetaField
+#[derive(Debug, Clone)]
+pub enum GraphMetaField {
+    // GC cursors: last processed key bytes (empty = start from beginning)
+    GcCursorNodeSummaries(Vec<u8>),      // 0x00
+    GcCursorEdgeSummaries(Vec<u8>),      // 0x01
+    GcCursorNodeSummaryIndex(Vec<u8>),   // 0x02
+    GcCursorEdgeSummaryIndex(Vec<u8>),   // 0x03
+    GcCursorNodeTombstones(Vec<u8>),     // 0x04
+    GcCursorEdgeTombstones(Vec<u8>),     // 0x05
+    // Future: other graph-level metadata
+}
+
+impl GraphMetaField {
+    pub fn discriminant(&self) -> u8 {
+        match self {
+            Self::GcCursorNodeSummaries(_) => 0x00,
+            Self::GcCursorEdgeSummaries(_) => 0x01,
+            Self::GcCursorNodeSummaryIndex(_) => 0x02,
+            Self::GcCursorEdgeSummaryIndex(_) => 0x03,
+            Self::GcCursorNodeTombstones(_) => 0x04,
+            Self::GcCursorEdgeTombstones(_) => 0x05,
+        }
+    }
+
+    pub fn from_discriminant(d: u8) -> Self {
+        match d {
+            0x00 => Self::GcCursorNodeSummaries(vec![]),
+            0x01 => Self::GcCursorEdgeSummaries(vec![]),
+            0x02 => Self::GcCursorNodeSummaryIndex(vec![]),
+            0x03 => Self::GcCursorEdgeSummaryIndex(vec![]),
+            0x04 => Self::GcCursorNodeTombstones(vec![]),
+            0x05 => Self::GcCursorEdgeTombstones(vec![]),
+            _ => panic!("Unknown GraphMetaField discriminant: {}", d),
+        }
+    }
+}
+
+/// Key: just the discriminant byte (1 byte total)
+pub struct GraphMetaCfKey(pub GraphMetaField);
+
+/// Value: field-dependent payload (cursor bytes for GC cursors)
+pub struct GraphMetaCfValue(pub GraphMetaField);
+
+impl GraphMeta {
+    pub fn key_to_bytes(key: &GraphMetaCfKey) -> Vec<u8> {
+        vec![key.0.discriminant()]
+    }
+
+    pub fn key_from_bytes(bytes: &[u8]) -> Result<GraphMetaCfKey> {
+        if bytes.len() != 1 {
+            anyhow::bail!("Invalid GraphMetaCfKey length");
+        }
+        Ok(GraphMetaCfKey(GraphMetaField::from_discriminant(bytes[0])))
+    }
+
+    pub fn value_to_bytes(value: &GraphMetaCfValue) -> Vec<u8> {
+        match &value.0 {
+            GraphMetaField::GcCursorNodeSummaries(v)
+            | GraphMetaField::GcCursorEdgeSummaries(v)
+            | GraphMetaField::GcCursorNodeSummaryIndex(v)
+            | GraphMetaField::GcCursorEdgeSummaryIndex(v)
+            | GraphMetaField::GcCursorNodeTombstones(v)
+            | GraphMetaField::GcCursorEdgeTombstones(v) => v.clone(),
+        }
+    }
+
+    pub fn value_from_bytes(key: &GraphMetaCfKey, bytes: &[u8]) -> Result<GraphMetaCfValue> {
+        let field = match key.0.discriminant() {
+            0x00 => GraphMetaField::GcCursorNodeSummaries(bytes.to_vec()),
+            0x01 => GraphMetaField::GcCursorEdgeSummaries(bytes.to_vec()),
+            0x02 => GraphMetaField::GcCursorNodeSummaryIndex(bytes.to_vec()),
+            0x03 => GraphMetaField::GcCursorEdgeSummaryIndex(bytes.to_vec()),
+            0x04 => GraphMetaField::GcCursorNodeTombstones(bytes.to_vec()),
+            0x05 => GraphMetaField::GcCursorEdgeTombstones(bytes.to_vec()),
+            d => anyhow::bail!("Unknown discriminant: {}", d),
+        };
+        Ok(GraphMetaCfValue(field))
+    }
+}
+```
+
+**Pattern Benefits (from vector::GraphMeta):**
+- Single CF for all graph-level metadata
+- Extensible: add new fields with new discriminants
+- Compact keys: 1 byte per field
+- Type-safe: enum variants enforce value types
+- Same pattern as vector subsystem for consistency
+
+**Persistence & Recovery:**
+- On GC cycle completion: write cursor to `graph/meta` CF in same transaction
+- On startup: read cursor from `graph/meta` CF, resume from last position
+- If cursor points to deleted key, RocksDB iterator advances to next valid key
+
+**Incremental GC Behavior:**
+- Each cycle: read cursor, scan next `batch_size` entries, update cursor
+- When cursor reaches end (iterator exhausted), delete cursor to reset
+- Bounds work per cycle, amortizes cost over time
 
 ### GC Targets
 
@@ -667,8 +954,10 @@ pub struct GraphGcConfig {
 |--------|-------------|------------------|
 | NodeSummaries | `(Id, version)` | Keep versions ≥ (current - N + 1) |
 | EdgeSummaries | `(EdgeKey, version)` | Keep versions ≥ (current - N + 1) |
-| NodeSummaryIndex | `(Hash, Id, version)` | Delete if version not in retained set |
-| EdgeSummaryIndex | `(Hash, EdgeKey, version)` | Delete if version not in retained set |
+| NodeSummaryIndex | `(Hash, Id, version)` | Delete if marker=STALE and version not in retained set |
+| EdgeSummaryIndex | `(Hash, EdgeKey, version)` | Delete if marker=STALE and version not in retained set |
+| Tombstones (Nodes) | `(Id)` where deleted=true | Hard delete after `tombstone_retention` period |
+| Tombstones (Edges) | `(EdgeKey)` where deleted=true | Hard delete after `tombstone_retention` period |
 
 ### GcMetrics
 
@@ -730,37 +1019,79 @@ fn gc_node_summaries(&self) -> Result<u64> {
 }
 ```
 
-### GC Logic: Reverse Index
+### GC Logic: Reverse Index (with Cursor)
 
 ```rust
 fn gc_node_summary_index(&self) -> Result<u64> {
     let txn = self.txn_db.transaction();
     let mut deleted = 0u64;
+    let mut processed = 0usize;
     let n = self.config.versions_to_keep as Version;
 
-    // Cache: node_id → current_version
-    let version_cache: HashMap<Id, Version> = self.scan_nodes_batch()?
-        .map(|(id, val)| (id, val.version))
+    // 1. Load cursor from graph/meta CF using GraphMeta pattern
+    let cursor_key = GraphMetaCfKey(GraphMetaField::GcCursorNodeSummaryIndex(vec![]));
+    let cursor_key_bytes = GraphMeta::key_to_bytes(&cursor_key);
+    let start_key = txn.get_cf(graph_meta_cf, &cursor_key_bytes)?
+        .map(|v| GraphMeta::value_from_bytes(&cursor_key, &v).unwrap().0)
+        .and_then(|f| match f {
+            GraphMetaField::GcCursorNodeSummaryIndex(cursor) => Some(cursor),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    // 2. Cache: node_id → (current_version, deleted)
+    let version_cache: HashMap<Id, (Version, bool)> = self.scan_nodes_batch()?
+        .map(|(id, val)| (id, (val.version, val.deleted)))
         .collect();
 
-    for (key, _) in self.full_scan(node_summary_index_cf)? {
+    // 3. Incremental scan from cursor position
+    let iter = if start_key.is_empty() {
+        txn.iterator_cf(node_summary_index_cf, IteratorMode::Start)
+    } else {
+        txn.iterator_cf(node_summary_index_cf, IteratorMode::From(&start_key, Direction::Forward))
+    };
+
+    let mut last_key: Option<Vec<u8>> = None;
+    for item in iter {
+        if processed >= self.config.batch_size {
+            break; // Batch limit reached
+        }
+
+        let (key, value) = item?;
+        last_key = Some(key.to_vec());
+        processed += 1;
+
         let index_key = NodeSummaryIndex::key_from_bytes(&key)?;
         let (_, node_id, version) = (index_key.0, index_key.1, index_key.2);
+        let marker = NodeSummaryIndexCfValue::from_bytes(&value)?;
 
-        match version_cache.get(&node_id) {
-            Some(&current_version) => {
-                let min_keep = current_version.saturating_sub(n - 1);
-                if version < min_keep {
+        // Only GC stale entries
+        if !marker.is_current() {
+            match version_cache.get(&node_id) {
+                Some(&(current_version, node_deleted)) => {
+                    let min_keep = current_version.saturating_sub(n - 1);
+                    // Delete if version too old OR node is tombstoned
+                    if version < min_keep || node_deleted {
+                        txn.delete_cf(node_summary_index_cf, &key)?;
+                        deleted += 1;
+                    }
+                }
+                None => {
+                    // Node hard-deleted entirely
                     txn.delete_cf(node_summary_index_cf, &key)?;
                     deleted += 1;
                 }
             }
-            None => {
-                // Node deleted entirely
-                txn.delete_cf(node_summary_index_cf, &key)?;
-                deleted += 1;
-            }
         }
+    }
+
+    // 4. Persist cursor for next cycle using GraphMeta pattern
+    if let Some(key) = last_key {
+        let cursor_value = GraphMetaCfValue(GraphMetaField::GcCursorNodeSummaryIndex(key));
+        txn.put_cf(graph_meta_cf, &cursor_key_bytes, GraphMeta::value_to_bytes(&cursor_value))?;
+    } else {
+        // Iterator exhausted - delete cursor to start fresh next cycle
+        txn.delete_cf(graph_meta_cf, &cursor_key_bytes)?;
     }
 
     txn.commit()?;
@@ -768,16 +1099,71 @@ fn gc_node_summary_index(&self) -> Result<u64> {
 }
 ```
 
+---
+
+## 3.5 Reverse Index Repair Task
+
+Periodic integrity check to detect and fix inconsistencies between forward edges and reverse index.
+
+### RepairConfig
+
+```rust
+pub struct RepairConfig {
+    /// Interval between repair cycles
+    pub interval: Duration,  // default: 1 hour
+
+    /// Max entries to check per cycle
+    pub batch_size: usize,  // default: 10000
+
+    /// Auto-fix inconsistencies (vs. report only)
+    pub auto_fix: bool,  // default: false
+}
+```
+
+### Repair Logic
+
+```rust
+fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
+    let mut metrics = RepairMetrics::default();
+
+    // 1. Scan forward edges, ensure reverse entries exist
+    for (fwd_key, _) in self.scan_forward_edges_batch()? {
+        let rev_key = ReverseEdgeCfKey(fwd_key.1, fwd_key.0, fwd_key.2);
+        if self.get_reverse_edge(&rev_key)?.is_none() {
+            metrics.missing_reverse += 1;
+            if self.config.auto_fix {
+                self.create_reverse_edge(&rev_key)?;
+            }
+        }
+    }
+
+    // 2. Scan reverse edges, drop orphans pointing to missing forward edges
+    for (rev_key, _) in self.scan_reverse_edges_batch()? {
+        let fwd_key = ForwardEdgeCfKey(rev_key.1, rev_key.0, rev_key.2);
+        if self.get_forward_edge(&fwd_key)?.is_none() {
+            metrics.orphan_reverse += 1;
+            if self.config.auto_fix {
+                self.delete_reverse_edge(&rev_key)?;
+            }
+        }
+    }
+
+    Ok(metrics)
+}
+```
+
+---
 
 # Part 4: File Changes Summary
 
 | File | Changes |
 |------|---------|
-| **schema.rs** | Add `version: Version` to entity values; change summary CF keys to `(EntityId, Version)`; add `NodeSummaryIndex` and `EdgeSummaryIndex` CFs; update `ALL_COLUMN_FAMILIES` |
-| **mutation.rs** | Update `AddNode`/`AddEdge` to set version=1 and write index; add `UpdateNode`/`UpdateEdge` with optimistic locking |
-| **query.rs** | Add `all_nodes_for_summary()`, `current_nodes_for_summary()`, `node_versions_for_summary()`, and edge equivalents; update `get_node_summary()`/`get_edge_summary()` for versioned keys |
-| **gc.rs** | New file: `GraphGcConfig`, `GraphGcMetrics`, `GraphGarbageCollector` with background worker |
-| **tests.rs** | Test optimistic locking (version mismatch); test multi-version resolution; test GC cleanup |
+| **schema.rs** | Add `version: Version` and `deleted: bool` to entity values; add index CfValue with marker byte; change summary CF keys to `(EntityId, Version)`; add `NodeSummaryIndex` and `EdgeSummaryIndex` CFs; add `GraphMeta` CF with discriminated enum pattern (borrowed from vector::GraphMeta); update `ALL_COLUMN_FAMILIES` |
+| **mutation.rs** | Update `AddNode`/`AddEdge` to set version=1, deleted=false, and write index with CURRENT marker; add `UpdateNode`/`UpdateEdge` with optimistic locking (flip old index to STALE); add `DeleteNode`/`DeleteEdge` tombstone mutations |
+| **query.rs** | Add `all_nodes_for_summary()`, `current_nodes_for_summary()`, `node_versions_for_summary()`, and edge equivalents; filter by marker byte in current queries; filter out deleted entities |
+| **gc.rs** | New file: `GraphGcConfig` with cursor support and tombstone retention; incremental GC with resume cursor; `GraphGarbageCollector` with background worker |
+| **repair.rs** | New file: `RepairConfig`, forward↔reverse consistency checker |
+| **tests.rs** | Test optimistic locking (version mismatch); test multi-version resolution; test tombstone semantics; test GC cleanup; test marker bit filtering |
 
 ---
 
@@ -785,220 +1171,12 @@ fn gc_node_summary_index(&self) -> Result<u64> {
 
 | Aspect | Design |
 |--------|--------|
-| **Reverse index** | `(SummaryHash, EntityKey, Version)` → empty |
+| **Reverse index** | `(SummaryHash, EntityKey, Version)` → 1-byte marker (CURRENT/STALE) |
 | **Multi-version support** | Index returns all versions; query API provides `all_*` and `current_*` variants |
 | **Content storage** | Keyed by `(EntityId, Version)` — enables clean GC |
 | **Optimistic locking** | Version in entity value; reject update if mismatch |
-| **GC** | Delete old versions beyond retention; delete stale index entries |
+| **Delete semantics** | Tombstone flag in entity value; retained for audit until GC |
+| **Version overflow** | Reject writes at VERSION_MAX; documented policy |
+| **GC** | Incremental with cursor (persisted via `GraphMeta` pattern); delete old versions; delete stale index entries; hard delete tombstones after retention |
+| **Repair** | Periodic forward↔reverse consistency check |
 
----
-
-# Alternative Design
-
-Author: Codex
-
-This section proposes targeted changes to reduce read amplification, bound GC cost, and clarify migration/deletion behaviors for the CONTENT-ADDRESS design.
-
----
-
-## 1) Current-Only Reverse Index (Reduce Read Amplification)
-
-**Problem:** `current_*_for_summary()` scans all index entries for a hash and then point-reads each entity to check if the version is current. This is O(k) reads for k index entries. If `SummaryHash` fanout is low (summaries are unique), this is typically small and acceptable. If summaries are templated and many entities share identical content, the scan can grow.
-
-**Note on fanout:** Fanout is driven by **summary content collisions**, not edge names. A common edge label like `"friends_with"` only creates large fanout if the **edge summaries** are also identical/templated (same `SummaryHash` across many edges).
-
-### Option A: Maintain a “Current” Index (Optional for High-Fanout Hashes)
-
-Add a second CF that only contains *current* versions. This avoids per-entry validation reads for the common path (vector search resolution).
-
-**Schema:**
-
-```rust
-// Node current-only index
-pub struct NodeSummaryCurrentIndexCfKey(
-    pub SummaryHash,  // 8 bytes
-    pub Id,           // 16 bytes
-);
-
-// Edge current-only index
-pub struct EdgeSummaryCurrentIndexCfKey(
-    pub SummaryHash,  // 8 bytes
-    pub SrcId,        // 16 bytes
-    pub DstId,        // 16 bytes
-    pub NameHash,     // 8 bytes
-);
-```
-
-**Write path:**
-
-- **Insert:** write to both `*_summary_index` and `*_summary_current_index`.
-- **Update:**
-  - Insert new `(hash, entity)` into current index.
-  - Remove old `(old_hash, entity)` from current index.
-- **Delete:** remove `(hash, entity)` from current index.
-
-**Read path:**
-
-- `current_nodes_for_summary()` becomes a prefix scan on the current index only.
-- `all_nodes_for_summary()` continues to use the versioned index.
-
-**Pros:**
-- Eliminates N point reads in the hot path.
-- Keeps full history without slowing vector resolution.
-
-**Cons:**
-- Adds write amplification (1 extra CF write per update).
-- Requires tracking old hash on update (already present in entity value).
-
-### Option B: “Current Marker” Bit in Index Value
-
-Keep one index CF but store a 1-byte value indicating current or stale. Update flips old entry to stale instead of deleting. This avoids extra CF and keeps write costs smaller than Option A.
-
-**Pros:**
-- Single CF.
-- Enables cheap current filtering without point reads.
-
-**Cons:**
-- Requires random reads of index values during scans.
-- Still keeps stale entries; GC must remove stale ones eventually.
-
-**Implementation detail:**
-
-- **Key:** `(SummaryHash, EntityKey, Version)` (unchanged)
-- **Value:** 1 byte: `0x01 = current`, `0x00 = stale`
-- **Insert:** write entry with `0x01`
-- **Update:** write new entry with `0x01`, flip old entry to `0x00`
-- **Delete:** flip latest entry to `0x00` (or delete it)
-- **Read:** `current_*_for_summary(hash)` filters by value `0x01` during prefix scan
-
----
-
-## 2) Bounded GC: Incremental, Partitioned, and Time-Sliced
-
-**Problem:** Full scans over large CFs can be expensive and cause latency spikes.
-
-### Option A: Incremental Scan with Resume Cursor
-
-Persist a cursor (last processed key) per CF. Each GC cycle scans at most `batch_size` entries and resumes next cycle.
-
-**Schema (for GC metadata):**
-
-```rust
-pub struct GcCursorCfKey(pub GcTarget); // e.g., "node_summary_index"
-pub struct GcCursorCfValue(pub Vec<u8>); // last key
-```
-
-**Behavior:**
-- Each cycle: read cursor, scan next `batch_size`, update cursor.
-- This bounds work per cycle and amortizes cost.
-
-### Option B: Time-Partitioned Index Keys
-
-Add a short time bucket prefix (e.g., daily) so GC can target old buckets without scanning recent hot partitions.
-
-**Schema:**
-
-```rust
-pub struct NodeSummaryIndexCfKey(
-    pub DayBucket,    // u32, days since epoch
-    pub SummaryHash,
-    pub Id,
-    pub Version,
-);
-```
-
-**Behavior:**
-- GC can delete entire buckets once all entries are older than retention.
-- Avoids full scan by key range deletion if RocksDB supports range delete.
-
----
-
-## 3) Migration Strategy (Content-Addressed → Entity+Version)
-
-**Problem:** Existing content-addressed summaries must be preserved and made queryable without downtime.
-
-### Recommended Migration Plan
-
-1. **Dual-read:**
-   - Read `NodeSummaryCfKey(SummaryHash)` if versioned key not found.
-   - This keeps lookups working during migration.
-2. **Backfill job:**
-   - For each node/edge entity, compute current `summary_hash` and write versioned summary + index entries.
-3. **Dual-write:**
-   - During migration, write both old and new summary formats (temporary).
-4. **Cutover:**
-   - Once backfill is complete, disable old format writes and reads.
-5. **Cleanup:**
-   - Drop old CFs after a safety period.
-
----
-
-## 4) Delete Semantics and Tombstones
-
-**Problem:** Deletes are not explicitly defined, which affects GC and reverse lookup semantics.
-
-### Option A: Hard Deletes
-
-- Remove entity from HOT CF.
-- Remove entries from current index immediately.
-- GC removes historic summaries and index entries in time.
-
-**Pros:** simple; storage reclaimable.
-**Cons:** loses audit/history unless retained by versioned content and index.
-
-### Option B: Tombstones
-
-Add a `deleted` flag in HOT values:
-
-```rust
-pub struct NodeCfValue(
-    pub Option<TemporalRange>,
-    pub NameHash,
-    pub Option<SummaryHash>,
-    pub Version,
-    pub bool, // deleted
-);
-```
-
-**Behavior:**
-- Tombstoned entities remain queryable for audit/time-travel.
-- `current_*_for_summary` filters out deleted entries.
-- GC policy decides how long to keep tombstones.
-
----
-
-## 5) Version Overflow and High-Rate Updates
-
-**Problem:** `u32` is likely sufficient, but extreme update rates could overflow.
-
-### Mitigation Options
-
-- **Overflow policy:** if `Version::MAX` reached, freeze writes or rotate entity key.
-- **Widen to `u64`:** small storage increase, removes ambiguity.
-- **Modulo + epoch:** store `(epoch, version)` to keep size bounded.
-
----
-
-## 6) Reverse Index Integrity Checks
-
-**Problem:** With empty values for reverse edges, corruption or partial writes can create inconsistencies.
-
-### Mitigation
-
-Add a periodic repair task:
-
-- Scan forward edges, ensure reverse index entries exist.
-- Optionally, drop reverse entries that point to missing forward edges.
-
-This can run at low priority and uses bounded batching (similar to GC).
-
----
-
-## 7) Summary of Recommended Changes
-
-- Add a **current-only index** CF to eliminate point-read validation in `current_*` lookups.
-- Implement **incremental GC with cursors** to bound work per cycle.
-- Define a **migration plan** with dual-read/dual-write + backfill.
-- Document **delete semantics** (hard delete vs tombstone) and their impact on reverse index and GC.
-- Specify **version overflow policy** or upgrade to `u64` if needed.
-- Add **reverse index repair** task for integrity.
