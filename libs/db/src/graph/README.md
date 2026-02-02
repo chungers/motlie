@@ -139,32 +139,15 @@ let result = NodeById::new(node_id, None)
 
 ## Schema
 
-Defined in `schema.rs`. The graph uses 8 column families:
-
-### Hot Column Families (frequently accessed)
+Defined in `schema.rs`. The graph uses 5 column families:
 
 | Column Family | Key | Value | Purpose |
 |---------------|-----|-------|---------|
-| `graph/names` | `(NameHash)` | `String` | Name interning |
-| `graph/nodes` | `(Id)` | `(TemporalRange?, NameHash, SummaryHash?)` | Node metadata |
-| `graph/forward_edges` | `(SrcId, DstId, NameHash)` | `(TemporalRange?, Weight?, SummaryHash?)` | Edges by source |
-| `graph/reverse_edges` | `(DstId, SrcId, NameHash)` | `()` | Reverse edge index (empty value) |
-
-### Cold Column Families (blob separation)
-
-| Column Family | Key | Value | Purpose |
-|---------------|-----|-------|---------|
-| `graph/node_summaries` | `(SummaryHash)` | `NodeSummary` | Node summary content |
-| `graph/edge_summaries` | `(SummaryHash)` | `EdgeSummary` | Edge summary content |
-
-### Fragment Column Families (append-only)
-
-| Column Family | Key | Value | Purpose |
-|---------------|-----|-------|---------|
-| `graph/node_fragments` | `(Id, TimestampMilli)` | `(TemporalRange?, FragmentContent)` | Node content fragments |
-| `graph/edge_fragments` | `(SrcId, DstId, NameHash, TimestampMilli)` | `(TemporalRange?, FragmentContent)` | Edge content fragments |
-
-**Note**: `reverse_edges` has an empty value - it's purely an index for "find edges TO this node". All edge details (TemporalRange, weight, summary) are in `forward_edges`.
+| `nodes` | `(Id)` | `(TemporalRange?, NodeName, NodeSummary)` | Node metadata |
+| `node-fragments` | `(Id, TimestampMilli)` | `(TemporalRange?, FragmentContent)` | Node content fragments |
+| `outgoing-edges` | `(SrcId, DstId, EdgeName)` | `(TemporalRange?, Weight?, EdgeSummary)` | Edges by source |
+| `incoming-edges` | `(DstId, SrcId, EdgeName)` | `()` | Reverse edge index |
+| `edge-fragments` | `(SrcId, DstId, EdgeName, TimestampMilli)` | `(TemporalRange?, FragmentContent)` | Edge content fragments |
 
 **Note**: Name-based lookups (finding nodes/edges by name) are handled by the fulltext search module using Tantivy indexing.
 
