@@ -811,3 +811,204 @@ fn gc_node_fragments(&self) -> Result<u64> {
 | **Content storage** | Keyed by `(EntityId, Version)` — enables clean GC |
 | **Optimistic locking** | Version in entity value; reject update if mismatch |
 | **GC** | Delete old versions beyond retention; delete stale index entries; delete old fragments by age |
+
+---
+
+# Alternative Design
+
+Author: Codex
+
+This section proposes targeted changes to reduce read amplification, bound GC cost, and clarify migration/deletion behaviors for the CONTENT-ADDRESS design.
+
+---
+
+## 1) Current-Only Reverse Index (Reduce Read Amplification)
+
+**Problem:** `current_*_for_summary()` scans all index entries for a hash and then point-reads each entity to check if the version is current. This is O(k) reads for k index entries, which can be large for popular hashes.
+
+### Option A: Maintain a “Current” Index
+
+Add a second CF that only contains *current* versions. This avoids per-entry validation reads for the common path (vector search resolution).
+
+**Schema:**
+
+```rust
+// Node current-only index
+pub struct NodeSummaryCurrentIndexCfKey(
+    pub SummaryHash,  // 8 bytes
+    pub Id,           // 16 bytes
+);
+
+// Edge current-only index
+pub struct EdgeSummaryCurrentIndexCfKey(
+    pub SummaryHash,  // 8 bytes
+    pub SrcId,        // 16 bytes
+    pub DstId,        // 16 bytes
+    pub NameHash,     // 8 bytes
+);
+```
+
+**Write path:**
+
+- **Insert:** write to both `*_summary_index` and `*_summary_current_index`.
+- **Update:**
+  - Insert new `(hash, entity)` into current index.
+  - Remove old `(old_hash, entity)` from current index.
+- **Delete:** remove `(hash, entity)` from current index.
+
+**Read path:**
+
+- `current_nodes_for_summary()` becomes a prefix scan on the current index only.
+- `all_nodes_for_summary()` continues to use the versioned index.
+
+**Pros:**
+- Eliminates N point reads in the hot path.
+- Keeps full history without slowing vector resolution.
+
+**Cons:**
+- Adds write amplification (1 extra CF write per update).
+- Requires tracking old hash on update (already present in entity value).
+
+### Option B: “Current Marker” Bit in Index Value
+
+Keep one index CF but store a 1-byte value indicating current or stale. Update flips old entry to stale instead of deleting. This avoids extra CF and keeps write costs smaller than Option A.
+
+**Pros:**
+- Single CF.
+- Enables cheap current filtering without point reads.
+
+**Cons:**
+- Requires random reads of index values during scans.
+- Still keeps stale entries; GC must remove stale ones eventually.
+
+---
+
+## 2) Bounded GC: Incremental, Partitioned, and Time-Sliced
+
+**Problem:** Full scans over large CFs can be expensive and cause latency spikes.
+
+### Option A: Incremental Scan with Resume Cursor
+
+Persist a cursor (last processed key) per CF. Each GC cycle scans at most `batch_size` entries and resumes next cycle.
+
+**Schema (for GC metadata):**
+
+```rust
+pub struct GcCursorCfKey(pub GcTarget); // e.g., "node_summary_index"
+pub struct GcCursorCfValue(pub Vec<u8>); // last key
+```
+
+**Behavior:**
+- Each cycle: read cursor, scan next `batch_size`, update cursor.
+- This bounds work per cycle and amortizes cost.
+
+### Option B: Time-Partitioned Index Keys
+
+Add a short time bucket prefix (e.g., daily) so GC can target old buckets without scanning recent hot partitions.
+
+**Schema:**
+
+```rust
+pub struct NodeSummaryIndexCfKey(
+    pub DayBucket,    // u32, days since epoch
+    pub SummaryHash,
+    pub Id,
+    pub Version,
+);
+```
+
+**Behavior:**
+- GC can delete entire buckets once all entries are older than retention.
+- Avoids full scan by key range deletion if RocksDB supports range delete.
+
+---
+
+## 3) Migration Strategy (Content-Addressed → Entity+Version)
+
+**Problem:** Existing content-addressed summaries must be preserved and made queryable without downtime.
+
+### Recommended Migration Plan
+
+1. **Dual-read:**
+   - Read `NodeSummaryCfKey(SummaryHash)` if versioned key not found.
+   - This keeps lookups working during migration.
+2. **Backfill job:**
+   - For each node/edge entity, compute current `summary_hash` and write versioned summary + index entries.
+3. **Dual-write:**
+   - During migration, write both old and new summary formats (temporary).
+4. **Cutover:**
+   - Once backfill is complete, disable old format writes and reads.
+5. **Cleanup:**
+   - Drop old CFs after a safety period.
+
+---
+
+## 4) Delete Semantics and Tombstones
+
+**Problem:** Deletes are not explicitly defined, which affects GC and reverse lookup semantics.
+
+### Option A: Hard Deletes
+
+- Remove entity from HOT CF.
+- Remove entries from current index immediately.
+- GC removes historic summaries and index entries in time.
+
+**Pros:** simple; storage reclaimable.
+**Cons:** loses audit/history unless retained by versioned content and index.
+
+### Option B: Tombstones
+
+Add a `deleted` flag in HOT values:
+
+```rust
+pub struct NodeCfValue(
+    pub Option<TemporalRange>,
+    pub NameHash,
+    pub Option<SummaryHash>,
+    pub Version,
+    pub bool, // deleted
+);
+```
+
+**Behavior:**
+- Tombstoned entities remain queryable for audit/time-travel.
+- `current_*_for_summary` filters out deleted entries.
+- GC policy decides how long to keep tombstones.
+
+---
+
+## 5) Version Overflow and High-Rate Updates
+
+**Problem:** `u32` is likely sufficient, but extreme update rates could overflow.
+
+### Mitigation Options
+
+- **Overflow policy:** if `Version::MAX` reached, freeze writes or rotate entity key.
+- **Widen to `u64`:** small storage increase, removes ambiguity.
+- **Modulo + epoch:** store `(epoch, version)` to keep size bounded.
+
+---
+
+## 6) Reverse Index Integrity Checks
+
+**Problem:** With empty values for reverse edges, corruption or partial writes can create inconsistencies.
+
+### Mitigation
+
+Add a periodic repair task:
+
+- Scan forward edges, ensure reverse index entries exist.
+- Optionally, drop reverse entries that point to missing forward edges.
+
+This can run at low priority and uses bounded batching (similar to GC).
+
+---
+
+## 7) Summary of Recommended Changes
+
+- Add a **current-only index** CF to eliminate point-read validation in `current_*` lookups.
+- Implement **incremental GC with cursors** to bound work per cycle.
+- Define a **migration plan** with dual-read/dual-write + backfill.
+- Document **delete semantics** (hard delete vs tombstone) and their impact on reverse index and GC.
+- Specify **version overflow policy** or upgrade to `u64` if needed.
+- Add **reverse index repair** task for integrity.
