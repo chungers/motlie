@@ -722,16 +722,16 @@ impl Visitable for AllReverseEdges {
                     false
                 }
             },
-            |key_bytes, value_bytes| {
+            |key_bytes, _value_bytes| {
                 let key = schema::ReverseEdges::key_from_bytes(key_bytes)?;
-                let value = schema::ReverseEdges::value_from_bytes(value_bytes)?;
                 // Resolve NameHash to String
                 let name = resolve_name(storage, key.2)?;
+                // ReverseEdges has empty value - valid_range comes from ForwardEdges
                 Ok(ReverseEdgeRecord {
                     dst_id: key.0,
                     src_id: key.1,
                     name,
-                    valid_range: value.0,
+                    valid_range: None,
                 })
             },
             |record| &record.valid_range,
