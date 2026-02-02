@@ -16,6 +16,18 @@ Given a content hash from vector search, resolve to all entity keys that referen
 
 # Part 1: Schema Changes
 
+## 1.0 Version Type
+
+```rust
+/// Entity version number for optimistic locking.
+/// u32 provides 4 billion versions per entity - sufficient for 136 years at 1 update/sec.
+pub type Version = u32;
+```
+
+| Type | Max Value | Overflow at 1 update/sec | Size Savings vs u64 |
+|------|-----------|--------------------------|---------------------|
+| `u32` | 4.2 billion | 136 years | 4 bytes/entry |
+
 ## 1.1 Entity Column Families (HOT)
 
 ### Nodes
@@ -27,7 +39,7 @@ pub struct NodeCfValue(
     pub Option<TemporalRange>,
     pub NameHash,
     pub Option<SummaryHash>,  // Content hash for vector search matching
-    pub u64,                   // Version (monotonic, starts at 1) [NEW]
+    pub Version,               // Version (monotonic, starts at 1) [NEW]
 );
 ```
 
@@ -44,7 +56,7 @@ pub struct ForwardEdgeCfValue(
     pub Option<TemporalRange>,
     pub Option<f64>,           // weight
     pub Option<SummaryHash>,   // Content hash
-    pub u64,                   // Version [NEW]
+    pub Version,               // Version [NEW]
 );
 ```
 
@@ -55,7 +67,7 @@ pub struct ReverseEdgeCfKey(pub DstId, pub SrcId, pub NameHash);  // 40 bytes
 
 pub struct ReverseEdgeCfValue(
     pub Option<TemporalRange>,
-    pub u64,  // Version (mirrors forward edge) [NEW]
+    pub Version,  // Version (mirrors forward edge) [NEW]
 );
 ```
 
@@ -71,9 +83,9 @@ pub struct ReverseEdgeCfValue(
 // OLD: NodeSummaryCfKey(SummaryHash)  // content-addressed
 // NEW: Entity+version keyed
 pub struct NodeSummaryCfKey(
-    pub Id,   // 16 bytes - node_id
-    pub u64,  // 8 bytes - version
-);  // Total: 24 bytes
+    pub Id,      // 16 bytes - node_id
+    pub Version, // 4 bytes - version
+);  // Total: 20 bytes
 
 pub struct NodeSummaryCfValue(pub NodeSummary);
 ```
@@ -87,8 +99,8 @@ pub struct EdgeSummaryCfKey(
     pub SrcId,    // 16 bytes
     pub DstId,    // 16 bytes
     pub NameHash, // 8 bytes
-    pub u64,      // 8 bytes - version
-);  // Total: 48 bytes
+    pub Version,  // 4 bytes - version
+);  // Total: 44 bytes
 
 pub struct EdgeSummaryCfValue(pub EdgeSummary);
 ```
@@ -103,8 +115,8 @@ pub struct EdgeSummaryCfValue(pub EdgeSummary);
 pub struct NodeSummaryIndexCfKey(
     pub SummaryHash,  // 8 bytes - prefix for hash lookup
     pub Id,           // 16 bytes - node_id
-    pub u64,          // 8 bytes - version
-);  // Total: 32 bytes
+    pub Version,      // 4 bytes - version
+);  // Total: 28 bytes
 
 // Value: empty (existence is the data)
 ```
@@ -117,8 +129,8 @@ pub struct EdgeSummaryIndexCfKey(
     pub SrcId,        // 16 bytes
     pub DstId,        // 16 bytes
     pub NameHash,     // 8 bytes
-    pub u64,          // 8 bytes - version
-);  // Total: 56 bytes
+    pub Version,      // 4 bytes - version
+);  // Total: 52 bytes
 
 // Value: empty
 ```
@@ -197,7 +209,7 @@ A `SummaryHash` lookup can return **multiple results**, including:
 ```rust
 /// Returns ALL (node_id, version) pairs that have this hash.
 /// Includes old versions that may no longer be current.
-pub fn all_nodes_for_summary(&self, hash: SummaryHash) -> Result<Vec<(Id, u64)>>;
+pub fn all_nodes_for_summary(&self, hash: SummaryHash) -> Result<Vec<(Id, Version)>>;
 ```
 
 ### Current Versions Only
@@ -212,14 +224,14 @@ pub fn current_nodes_for_summary(&self, hash: SummaryHash) -> Result<Vec<Id>>;
 
 ```rust
 /// Returns all versions of a specific node that had this hash.
-pub fn node_versions_for_summary(&self, hash: SummaryHash, node_id: Id) -> Result<Vec<u64>>;
+pub fn node_versions_for_summary(&self, hash: SummaryHash, node_id: Id) -> Result<Vec<Version>>;
 ```
 
 ### Get Summary by Version
 
 ```rust
 /// Get summary for specific version, or current if version=None.
-pub fn get_node_summary(&self, id: Id, version: Option<u64>) -> Result<Option<NodeSummary>>;
+pub fn get_node_summary(&self, id: Id, version: Option<Version>) -> Result<Option<NodeSummary>>;
 ```
 
 ---
@@ -230,7 +242,7 @@ pub fn get_node_summary(&self, id: Id, version: Option<u64>) -> Result<Option<No
 
 ```rust
 /// Returns ALL (edge_key, version) pairs that have this hash.
-pub fn all_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<(ForwardEdgeCfKey, u64)>>;
+pub fn all_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<(ForwardEdgeCfKey, Version)>>;
 ```
 
 ### Current Versions Only
@@ -250,7 +262,7 @@ pub fn edge_versions_for_summary(
     src: Id,
     dst: Id,
     name: &str,
-) -> Result<Vec<u64>>;
+) -> Result<Vec<Version>>;
 ```
 
 ### Get Summary by Version
@@ -262,7 +274,7 @@ pub fn get_edge_summary(
     src: Id,
     dst: Id,
     name: &str,
-    version: Option<u64>,
+    version: Option<Version>,
 ) -> Result<Option<EdgeSummary>>;
 ```
 
@@ -361,7 +373,7 @@ Query Results for hash 0xAAA:
 /// Node lookup result with version info
 pub struct NodeSummaryLookupResult {
     pub node_id: Id,
-    pub version: u64,
+    pub version: Version,
     pub is_current: bool,  // version == entity's current version
 }
 
@@ -370,7 +382,7 @@ pub struct EdgeSummaryLookupResult {
     pub src: Id,
     pub dst: Id,
     pub name_hash: NameHash,
-    pub version: u64,
+    pub version: Version,
     pub is_current: bool,
 }
 ```
@@ -392,7 +404,7 @@ fn insert_node(&self, id: Id, name: &str, summary: NodeSummary) -> Result<()> {
         return Err(Error::AlreadyExists(id));
     }
 
-    let version = 1u64;
+    let version: Version = 1;
     let name_hash = NameHash::from_name(name);
     let summary_hash = SummaryHash::from_summary(&summary)?;
 
@@ -436,7 +448,7 @@ fn insert_edge(
         return Err(Error::AlreadyExists(edge_key));
     }
 
-    let version = 1u64;
+    let version: Version = 1;
     let summary_hash = SummaryHash::from_summary(&summary)?;
 
     // 2. Write name interning
@@ -474,8 +486,8 @@ fn update_node(
     &self,
     id: Id,
     new_summary: NodeSummary,
-    expected_version: u64,
-) -> Result<u64> {
+    expected_version: Version,
+) -> Result<Version> {
     let txn = self.txn_db.transaction();
 
     // 1. Read current node
@@ -524,8 +536,8 @@ fn update_edge(
     dst: Id,
     name: &str,
     new_summary: EdgeSummary,
-    expected_version: u64,
-) -> Result<u64> {
+    expected_version: Version,
+) -> Result<Version> {
     let txn = self.txn_db.transaction();
 
     let name_hash = NameHash::from_name(name);
@@ -696,7 +708,7 @@ impl GraphGarbageCollector {
 fn gc_node_summaries(&self) -> Result<u64> {
     let txn = self.txn_db.transaction();
     let mut deleted = 0u64;
-    let n = self.config.versions_to_keep as u64;
+    let n = self.config.versions_to_keep as Version;
 
     for (node_id, node_value) in self.scan_nodes_batch()? {
         let current_version = node_value.version;
@@ -726,10 +738,10 @@ fn gc_node_summaries(&self) -> Result<u64> {
 fn gc_node_summary_index(&self) -> Result<u64> {
     let txn = self.txn_db.transaction();
     let mut deleted = 0u64;
-    let n = self.config.versions_to_keep as u64;
+    let n = self.config.versions_to_keep as Version;
 
     // Cache: node_id → current_version
-    let version_cache: HashMap<Id, u64> = self.scan_nodes_batch()?
+    let version_cache: HashMap<Id, Version> = self.scan_nodes_batch()?
         .map(|(id, val)| (id, val.version))
         .collect();
 
@@ -786,7 +798,7 @@ fn gc_node_fragments(&self) -> Result<u64> {
 
 | File | Changes |
 |------|---------|
-| **schema.rs** | Add `version: u64` to entity values; change summary CF keys to `(EntityId, version)`; add `NodeSummaryIndex` and `EdgeSummaryIndex` CFs; update `ALL_COLUMN_FAMILIES` |
+| **schema.rs** | Add `version: Version` to entity values; change summary CF keys to `(EntityId, Version)`; add `NodeSummaryIndex` and `EdgeSummaryIndex` CFs; update `ALL_COLUMN_FAMILIES` |
 | **mutation.rs** | Update `AddNode`/`AddEdge` to set version=1 and write index; add `UpdateNode`/`UpdateEdge` with optimistic locking |
 | **query.rs** | Add `all_nodes_for_summary()`, `current_nodes_for_summary()`, `node_versions_for_summary()`, and edge equivalents; update `get_node_summary()`/`get_edge_summary()` for versioned keys |
 | **gc.rs** | New file: `GraphGcConfig`, `GraphGcMetrics`, `GraphGarbageCollector` with background worker |
