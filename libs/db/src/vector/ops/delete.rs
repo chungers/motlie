@@ -108,7 +108,7 @@ impl DeleteResult {
 ///
 /// # Returns
 /// `DeleteResult` indicating whether deletion occurred and if it was soft.
-pub fn vector(
+pub(crate) fn vector(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     _processor: &Processor,

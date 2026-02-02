@@ -52,8 +52,6 @@ use super::ColumnFamilySerde;
 use super::HotColumnFamilyRecord;
 use super::ValidRangePatchable;
 
-// Type alias for backwards compatibility within this module
-type BlockCacheConfig = GraphBlockCacheConfig;
 use crate::DataUrl;
 use crate::Id;
 use crate::TimestampMilli;

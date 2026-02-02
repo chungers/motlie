@@ -283,7 +283,6 @@ impl RabitqExperimentResult {
 }
 
 /// Run all experiments according to configuration.
-#[allow(deprecated)]
 pub fn run_all_experiments(config: &ExperimentConfig) -> Result<Vec<ExperimentResult>> {
     // Load full dataset
     let max_vectors = *config.scales.iter().max().unwrap_or(&200_000);
@@ -397,6 +396,7 @@ pub fn build_hnsw_index(
 
     // Create EmbeddingSpec with HNSW parameters
     let spec = EmbeddingSpec {
+        code: embedding_code,
         model: "benchmark".to_string(),
         dim: dim as u32,
         distance,

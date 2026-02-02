@@ -79,9 +79,6 @@ pub use subsystem::{GraphBlockCacheConfig, NameCacheConfig, Subsystem};
 /// Storage type alias using generic rocksdb::Storage
 pub type Storage = crate::rocksdb::Storage<Subsystem>;
 
-/// BlockCacheConfig re-export (alias to GraphBlockCacheConfig for backwards compat)
-pub type BlockCacheConfig = GraphBlockCacheConfig;
-
 pub use writer::{
     // Mutation consumer functions
     create_mutation_consumer,

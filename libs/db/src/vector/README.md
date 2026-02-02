@@ -52,7 +52,7 @@ pub(crate) type RabitqCode = Vec<u8>;        // RaBitQ quantized binary code
 | `Edges` | `(EmbeddingCode, VecId, HnswLayer)` | `RoaringBitmapBytes` | HNSW graph edges |
 | `BinaryCodes` | `(EmbeddingCode, VecId)` | `RabitqCode` | RaBitQ quantized codes |
 | `VecMeta` | `(EmbeddingCode, VecId)` | `VecMetadata` | Vector metadata (level, created_at) |
-| `GraphMeta` | `(EmbeddingCode, GraphMetaField)` | `GraphMetaValue` | Graph metadata (entry point, max level, count, config) |
+| `GraphMeta` | `(EmbeddingCode, GraphMetaField)` | `GraphMetaValue` | Graph metadata (entry point, max level, count, spec hash) |
 | `IdForward` | `(EmbeddingCode, Id)` | `VecId` | ULID → vec_id mapping |
 | `IdReverse` | `(EmbeddingCode, VecId)` | `Id` | vec_id → ULID mapping |
 | `IdAlloc` | `(EmbeddingCode, IdAllocField)` | `IdAllocValue` | ID allocator state (next_id, free bitmap) |
@@ -134,7 +134,7 @@ pub(crate) enum GraphMetaField {
     EntryPoint(VecId),
     MaxLevel(HnswLayer),
     Count(u32),
-    Config(Vec<u8>),
+    SpecHash(u64),
 }
 
 impl GraphMetaField {
@@ -144,7 +144,7 @@ impl GraphMetaField {
             Self::EntryPoint(_) => 0,
             Self::MaxLevel(_) => 1,
             Self::Count(_) => 2,
-            Self::Config(_) => 3,
+            Self::SpecHash(_) => 3,
         }
     }
 }
@@ -177,8 +177,8 @@ impl GraphMetaCfKey {
         Self(embedding_code, GraphMetaField::Count(0)) // placeholder
     }
 
-    pub fn config(embedding_code: EmbeddingCode) -> Self {
-        Self(embedding_code, GraphMetaField::Config(Vec::new())) // placeholder
+    pub fn spec_hash(embedding_code: EmbeddingCode) -> Self {
+        Self(embedding_code, GraphMetaField::SpecHash(0)) // placeholder
     }
 }
 ```
@@ -203,7 +203,7 @@ pub fn key_from_bytes(bytes: &[u8]) -> Result<GraphMetaCfKey> {
         0 => GraphMetaField::EntryPoint(0),
         1 => GraphMetaField::MaxLevel(0),
         2 => GraphMetaField::Count(0),
-        3 => GraphMetaField::Config(Vec::new()),
+        3 => GraphMetaField::SpecHash(0),
         _ => bail!("Unknown discriminant: {}", discriminant),
     };
     Ok(GraphMetaCfKey(embedding_code, field))
@@ -266,7 +266,7 @@ for (key_bytes, value_bytes) in db.prefix_iterator_cf(&cf, &prefix) {
         GraphMetaField::EntryPoint(v) => { /* ... */ }
         GraphMetaField::MaxLevel(v) => { /* ... */ }
         GraphMetaField::Count(v) => { /* ... */ }
-        GraphMetaField::Config(v) => { /* ... */ }
+        GraphMetaField::SpecHash(v) => { /* ... */ }
     }
 }
 ```
@@ -283,5 +283,5 @@ for (key_bytes, value_bytes) in db.prefix_iterator_cf(&cf, &prefix) {
 
 | CF | Field Enum | Variants |
 |---|---|---|
-| `GraphMeta` | `GraphMetaField` | `EntryPoint(VecId)`, `MaxLevel(HnswLayer)`, `Count(u32)`, `Config(Vec<u8>)` |
+| `GraphMeta` | `GraphMetaField` | `EntryPoint(VecId)`, `MaxLevel(HnswLayer)`, `Count(u32)`, `SpecHash(u64)` |
 | `IdAlloc` | `IdAllocField` | `NextId(VecId)`, `FreeBitmap(RoaringBitmapBytes)` |

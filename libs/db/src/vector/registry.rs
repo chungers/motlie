@@ -2,9 +2,11 @@
 //!
 //! Design rationale (ARCH-17):
 //! - Registry allocates unique codes for embedding spaces
-//! - Provides queryable discovery API
+//! - Caches `Arc<EmbeddingSpec>` - immutable, shared, zero-copy
+//! - `Embedding` is created on-demand wrapping the cached spec
+//! - Lazy load on cache miss (reads from RocksDB)
+//! - Atomic registration via DashMap entry API
 //! - Pre-warms from RocksDB on startup (following NameCache pattern)
-//! - Stores storage reference to prevent DB misuse across calls
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -16,9 +18,9 @@ use std::sync::OnceLock;
 
 use crate::rocksdb::{ColumnFamily, ColumnFamilySerde, MutationCodec};
 use super::distance::Distance;
-use super::embedding::{Embedding, EmbeddingBuilder};
+use super::embedding::{Embedder, Embedding, EmbeddingBuilder};
 use super::mutation::AddEmbeddingSpec;
-use super::schema::EmbeddingSpecs;
+use super::schema::{EmbeddingSpec, EmbeddingSpecCfKey, EmbeddingSpecs, VectorElementType};
 
 // ============================================================================
 // EmbeddingFilter
@@ -65,19 +67,24 @@ impl EmbeddingFilter {
     }
 
     /// Check if an embedding matches this filter.
-    fn matches(&self, emb: &Embedding) -> bool {
+    pub fn matches(&self, emb: &Embedding) -> bool {
+        self.matches_spec(emb.spec())
+    }
+
+    /// Check if an EmbeddingSpec matches this filter.
+    pub fn matches_spec(&self, spec: &EmbeddingSpec) -> bool {
         if let Some(ref model) = self.model {
-            if emb.model() != model {
+            if spec.model != *model {
                 return false;
             }
         }
         if let Some(dim) = self.dim {
-            if emb.dim() != dim {
+            if spec.dim != dim {
                 return false;
             }
         }
         if let Some(distance) = self.distance {
-            if emb.distance() != distance {
+            if spec.distance != distance {
                 return false;
             }
         }
@@ -115,10 +122,12 @@ type SpecKey = (String, u32, Distance);
 /// let all_gemma = registry.find_by_model("gemma");
 /// ```
 pub struct EmbeddingRegistry {
-    /// (model, dim, distance) -> Embedding mapping
-    by_spec: DashMap<SpecKey, Embedding>,
-    /// code -> Embedding mapping (for lookup by code)
-    by_code: DashMap<u64, Embedding>,
+    /// (model, dim, distance) -> Arc<EmbeddingSpec> mapping
+    by_spec: DashMap<SpecKey, Arc<EmbeddingSpec>>,
+    /// code -> Arc<EmbeddingSpec> mapping (for lookup by code)
+    by_code: DashMap<u64, Arc<EmbeddingSpec>>,
+    /// code -> Embedder mapping (runtime-attached, optional)
+    embedders: DashMap<u64, Arc<dyn Embedder>>,
     /// Next code to allocate
     next_code: AtomicU64,
     /// Storage reference (set once via set_storage or new)
@@ -135,6 +144,7 @@ impl EmbeddingRegistry {
         Self {
             by_spec: DashMap::new(),
             by_code: DashMap::new(),
+            embedders: DashMap::new(),
             next_code: AtomicU64::new(1), // Start at 1 (0 is reserved)
             storage: cell,
         }
@@ -148,6 +158,7 @@ impl EmbeddingRegistry {
         Self {
             by_spec: DashMap::new(),
             by_code: DashMap::new(),
+            embedders: DashMap::new(),
             next_code: AtomicU64::new(1), // Start at 1 (0 is reserved)
             storage: OnceLock::new(),
         }
@@ -176,6 +187,14 @@ impl EmbeddingRegistry {
         Ok(db.transaction())
     }
 
+    /// Create an Embedding from a cached Arc<EmbeddingSpec>.
+    ///
+    /// Looks up the optional embedder from the embedders map.
+    fn make_embedding(&self, spec: Arc<EmbeddingSpec>) -> Embedding {
+        let embedder = self.embedders.get(&spec.code).map(|e| e.clone());
+        Embedding::new(spec, embedder)
+    }
+
     /// Pre-warm the registry by loading all entries from RocksDB.
     ///
     /// Unlike NameCache (which limits to N entries), we load everything
@@ -200,19 +219,12 @@ impl EmbeddingRegistry {
             let value = EmbeddingSpecs::value_from_bytes(&value_bytes)?;
 
             let code = key.0;
-            let spec = &value.0;
-            let embedding = Embedding::new(
-                code,
-                spec.model.clone(),
-                spec.dim,
-                spec.distance,
-                spec.storage_type,
-                None,
-            );
+            // Create EmbeddingSpec with code populated from key
+            let spec = Arc::new(value.0.with_code(code));
 
             let spec_key = (spec.model.clone(), spec.dim, spec.distance);
-            self.by_spec.insert(spec_key, embedding.clone());
-            self.by_code.insert(code, embedding);
+            self.by_spec.insert(spec_key, spec.clone());
+            self.by_code.insert(code, spec);
 
             max_code = max_code.max(code);
             count += 1;
@@ -282,15 +294,12 @@ impl EmbeddingRegistry {
         // This preserves idempotent behavior: caller can retrieve existing
         // embedding even with invalid build params in the builder.
         if let Some(existing) = self.by_spec.get(&spec_key) {
-            let mut emb = existing.clone();
-            // Attach embedder if provided
+            let spec = existing.clone();
+            // Attach embedder if provided (store separately)
             if let Some(embedder) = builder.embedder {
-                emb = emb.with_embedder(embedder);
-                // Update cache with embedder
-                self.by_spec.insert(spec_key.clone(), emb.clone());
-                self.by_code.insert(emb.code(), emb.clone());
+                self.embedders.insert(spec.code, embedder);
             }
-            return Ok(emb);
+            return Ok(self.make_embedding(spec));
         }
 
         // Slow path: new registration - validate build parameters
@@ -309,7 +318,7 @@ impl EmbeddingRegistry {
             model: builder.model.clone(),
             dim: builder.dim,
             distance: builder.distance,
-            storage_type: super::schema::VectorElementType::default(), // F32 for backward compat
+            storage_type: VectorElementType::default(), // F32 for backward compat
             // Build parameters from EmbeddingBuilder (Phase 5.7c)
             hnsw_m: builder.hnsw_m,
             hnsw_ef_construction: builder.hnsw_ef_construction,
@@ -321,21 +330,29 @@ impl EmbeddingRegistry {
         // Write to transaction (caller commits)
         txn.put_cf(&cf, key_bytes, value_bytes)?;
 
-        // Create embedding
-        let embedding = Embedding::new(
+        // Create Arc<EmbeddingSpec> for cache
+        let spec = Arc::new(EmbeddingSpec {
             code,
-            builder.model,
-            builder.dim,
-            builder.distance,
-            super::schema::VectorElementType::default(), // F32 for backward compat
-            builder.embedder,
-        );
+            model: builder.model,
+            dim: builder.dim,
+            distance: builder.distance,
+            storage_type: VectorElementType::default(),
+            hnsw_m: builder.hnsw_m,
+            hnsw_ef_construction: builder.hnsw_ef_construction,
+            rabitq_bits: builder.rabitq_bits,
+            rabitq_seed: builder.rabitq_seed,
+        });
+
+        // Store embedder separately if provided
+        if let Some(embedder) = builder.embedder {
+            self.embedders.insert(code, embedder);
+        }
 
         // Update cache
-        self.by_spec.insert(spec_key, embedding.clone());
-        self.by_code.insert(code, embedding.clone());
+        self.by_spec.insert(spec_key, spec.clone());
+        self.by_code.insert(code, spec.clone());
 
-        Ok(embedding)
+        Ok(self.make_embedding(spec))
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -343,14 +360,47 @@ impl EmbeddingRegistry {
     // ─────────────────────────────────────────────────────────────
 
     /// Get embedding by exact spec (None if not registered).
+    ///
+    /// First checks cache, then falls back to RocksDB if not found.
     pub fn get(&self, model: &str, dim: u32, distance: Distance) -> Option<Embedding> {
         let spec_key = (model.to_string(), dim, distance);
-        self.by_spec.get(&spec_key).map(|e| e.clone())
+        self.by_spec.get(&spec_key).map(|e| self.make_embedding(e.clone()))
     }
 
     /// Get embedding by code (for deserialization from storage).
+    ///
+    /// First checks cache, then falls back to RocksDB if not found (lazy load).
     pub fn get_by_code(&self, code: u64) -> Option<Embedding> {
-        self.by_code.get(&code).map(|e| e.clone())
+        // Fast path: check cache
+        if let Some(spec) = self.by_code.get(&code) {
+            return Some(self.make_embedding(spec.clone()));
+        }
+
+        // Slow path: lazy load from RocksDB
+        self.load_from_storage(code).map(|spec| self.make_embedding(spec))
+    }
+
+    /// Load spec from RocksDB and cache it (lazy load).
+    fn load_from_storage(&self, code: u64) -> Option<Arc<EmbeddingSpec>> {
+        let storage = self.storage().ok()?;
+        let db = storage.transaction_db().ok()?;
+        let cf = db.cf_handle(EmbeddingSpecs::CF_NAME)?;
+
+        let key = EmbeddingSpecCfKey(code);
+        let key_bytes = EmbeddingSpecs::key_to_bytes(&key);
+
+        let value_bytes = db.get_cf(&cf, &key_bytes).ok()??;
+        let value = EmbeddingSpecs::value_from_bytes(&value_bytes).ok()?;
+
+        // Create spec with code populated
+        let spec = Arc::new(value.0.with_code(code));
+
+        // Cache for next time
+        let spec_key = (spec.model.clone(), spec.dim, spec.distance);
+        self.by_spec.insert(spec_key, spec.clone());
+        self.by_code.insert(code, spec.clone());
+
+        Some(spec)
     }
 
     /// Attach/update embedder for existing space (runtime configuration).
@@ -359,19 +409,13 @@ impl EmbeddingRegistry {
         code: u64,
         embedder: Arc<dyn super::embedding::Embedder>,
     ) -> Result<()> {
-        let mut emb = self
-            .by_code
-            .get(&code)
-            .map(|e| e.clone())
-            .ok_or_else(|| anyhow::anyhow!("Unknown embedding code: {}", code))?;
+        // Verify the code exists
+        if !self.by_code.contains_key(&code) {
+            return Err(anyhow::anyhow!("Unknown embedding code: {}", code));
+        }
 
-        emb = emb.with_embedder(embedder);
-
-        // Update both caches
-        let spec_key = (emb.model().to_string(), emb.dim(), emb.distance());
-        self.by_spec.insert(spec_key, emb.clone());
-        self.by_code.insert(code, emb);
-
+        // Store embedder separately
+        self.embedders.insert(code, embedder);
         Ok(())
     }
 
@@ -381,15 +425,18 @@ impl EmbeddingRegistry {
 
     /// List all registered embedding spaces.
     pub fn list_all(&self) -> Vec<Embedding> {
-        self.by_code.iter().map(|e| e.value().clone()).collect()
+        self.by_code
+            .iter()
+            .map(|e| self.make_embedding(e.value().clone()))
+            .collect()
     }
 
     /// Find all spaces using a specific model.
     pub fn find_by_model(&self, model: &str) -> Vec<Embedding> {
         self.by_code
             .iter()
-            .filter(|e| e.value().model() == model)
-            .map(|e| e.value().clone())
+            .filter(|e| e.value().model == model)
+            .map(|e| self.make_embedding(e.value().clone()))
             .collect()
     }
 
@@ -397,8 +444,8 @@ impl EmbeddingRegistry {
     pub fn find_by_distance(&self, distance: Distance) -> Vec<Embedding> {
         self.by_code
             .iter()
-            .filter(|e| e.value().distance() == distance)
-            .map(|e| e.value().clone())
+            .filter(|e| e.value().distance == distance)
+            .map(|e| self.make_embedding(e.value().clone()))
             .collect()
     }
 
@@ -406,8 +453,8 @@ impl EmbeddingRegistry {
     pub fn find_by_dim(&self, dim: u32) -> Vec<Embedding> {
         self.by_code
             .iter()
-            .filter(|e| e.value().dim() == dim)
-            .map(|e| e.value().clone())
+            .filter(|e| e.value().dim == dim)
+            .map(|e| self.make_embedding(e.value().clone()))
             .collect()
     }
 
@@ -415,8 +462,8 @@ impl EmbeddingRegistry {
     pub fn find(&self, filter: &EmbeddingFilter) -> Vec<Embedding> {
         self.by_code
             .iter()
-            .filter(|e| filter.matches(e.value()))
-            .map(|e| e.value().clone())
+            .filter(|e| filter.matches_spec(e.value()))
+            .map(|e| self.make_embedding(e.value().clone()))
             .collect()
     }
 
@@ -444,13 +491,23 @@ impl EmbeddingRegistry {
         model: &str,
         dim: u32,
         distance: Distance,
-        storage_type: super::schema::VectorElementType,
+        storage_type: VectorElementType,
     ) {
-        let embedding = Embedding::new(code, model, dim, distance, storage_type, None);
+        let spec = Arc::new(EmbeddingSpec {
+            code,
+            model: model.to_string(),
+            dim,
+            distance,
+            storage_type,
+            hnsw_m: 16, // defaults
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        });
         let spec_key = (model.to_string(), dim, distance);
 
-        self.by_spec.insert(spec_key, embedding.clone());
-        self.by_code.insert(code, embedding);
+        self.by_spec.insert(spec_key, spec.clone());
+        self.by_code.insert(code, spec);
 
         // Update next_code if needed
         let current_next = self.next_code.load(Ordering::SeqCst);
@@ -472,7 +529,18 @@ mod tests {
 
     #[test]
     fn test_embedding_filter() {
-        let emb = Embedding::new(1, "gemma", 768, Distance::Cosine, crate::vector::schema::VectorElementType::default(), None);
+        let spec = Arc::new(EmbeddingSpec {
+            code: 1,
+            model: "gemma".to_string(),
+            dim: 768,
+            distance: Distance::Cosine,
+            storage_type: VectorElementType::default(),
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        });
+        let emb = Embedding::new(spec, None);
 
         // Empty filter matches everything
         assert!(EmbeddingFilter::default().matches(&emb));

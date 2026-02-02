@@ -26,7 +26,7 @@ use motlie_db::vector::benchmark::{
 };
 use motlie_db::vector::search::rerank_adaptive;
 use motlie_db::vector::{
-    create_search_reader_with_storage, create_writer,
+    create_reader_with_storage, create_writer,
     spawn_mutation_consumer_with_storage_autoreg, spawn_query_consumers_with_storage_autoreg,
     Distance, EmbeddingBuilder, ExternalKey, InsertVector, MutationRunnable, ReaderConfig, Runnable,
     SearchKNN, Storage, VecId, WriterConfig,
@@ -166,7 +166,7 @@ async fn test_sift_l2_hnsw_with_runnable() -> anyhow::Result<()> {
 
     // Create search reader and spawn query consumers
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -280,7 +280,7 @@ async fn test_laion_clip_cosine_exact_hnsw_with_runnable() -> anyhow::Result<()>
 
     // Create search reader and spawn query consumers
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
@@ -401,7 +401,7 @@ async fn test_laion_clip_cosine_rabitq_with_runnable() -> anyhow::Result<()> {
 
     // Create search reader and spawn query consumers
     let (search_reader, reader_rx) =
-        create_search_reader_with_storage(ReaderConfig::default(), storage.clone());
+        create_reader_with_storage(ReaderConfig::default(), storage.clone());
     let _reader_handles = spawn_query_consumers_with_storage_autoreg(
         reader_rx,
         ReaderConfig::default(),
