@@ -1324,7 +1324,6 @@ pub enum GraphMetaField {
     EntryPoint(VecId),
     MaxLevel(u8),
     Count(u32),
-    Config(Vec<u8>),  // deprecated, use EmbeddingSpec
 
     // NEW: Hash of EmbeddingSpec at build time
     SpecHash(u64),

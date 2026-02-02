@@ -413,8 +413,13 @@ pub struct EmbeddingSpecs;
 ///
 /// Rich struct with >2 fields, so defined separately per naming convention.
 /// This is the **single source of truth** for how to build and search an embedding space.
+///
+/// The `code` field is populated after deserialization from the RocksDB key.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EmbeddingSpec {
+    /// Unique namespace code for storage keys (populated from RocksDB key after read)
+    #[serde(skip)]
+    pub code: u64,
     /// Model name (e.g., "gemma", "qwen3", "ada-002")
     pub model: String,
     /// Vector dimensionality (e.g., 128, 768, 1536)
@@ -530,6 +535,13 @@ impl EmbeddingSpec {
     #[inline]
     pub fn ef_construction(&self) -> usize {
         self.hnsw_ef_construction as usize
+    }
+
+    /// Set the code field (called after deserialization from RocksDB key).
+    #[inline]
+    pub fn with_code(mut self, code: u64) -> Self {
+        self.code = code;
+        self
     }
 }
 
@@ -1287,8 +1299,6 @@ pub(crate) enum GraphMetaField {
     MaxLevel(HnswLayer),
     /// Total vector count in this embedding space
     Count(u32),
-    /// Serialized HNSW configuration (deprecated - use EmbeddingSpec)
-    Config(Vec<u8>),
     /// Hash of EmbeddingSpec at index build time (for drift detection)
     /// Set on first insert, validated on subsequent inserts and searches
     SpecHash(u64),
@@ -1301,8 +1311,7 @@ impl GraphMetaField {
             Self::EntryPoint(_) => 0,
             Self::MaxLevel(_) => 1,
             Self::Count(_) => 2,
-            Self::Config(_) => 3,
-            Self::SpecHash(_) => 4,
+            Self::SpecHash(_) => 3,
         }
     }
 }
@@ -1325,11 +1334,6 @@ impl GraphMetaCfKey {
     /// Create key for count field
     pub fn count(embedding_code: EmbeddingCode) -> Self {
         Self(embedding_code, GraphMetaField::Count(0))
-    }
-
-    /// Create key for config field
-    pub fn config(embedding_code: EmbeddingCode) -> Self {
-        Self(embedding_code, GraphMetaField::Config(Vec::new()))
     }
 
     /// Create key for spec_hash field
@@ -1383,8 +1387,7 @@ impl GraphMeta {
             0 => GraphMetaField::EntryPoint(0),
             1 => GraphMetaField::MaxLevel(0),
             2 => GraphMetaField::Count(0),
-            3 => GraphMetaField::Config(Vec::new()),
-            4 => GraphMetaField::SpecHash(0),
+            3 => GraphMetaField::SpecHash(0),
             _ => anyhow::bail!("Unknown GraphMeta discriminant: {}", discriminant),
         };
         Ok(GraphMetaCfKey(embedding_code, field))
@@ -1396,7 +1399,6 @@ impl GraphMeta {
             GraphMetaField::EntryPoint(v) => v.to_be_bytes().to_vec(),
             GraphMetaField::MaxLevel(v) => vec![*v],
             GraphMetaField::Count(v) => v.to_be_bytes().to_vec(),
-            GraphMetaField::Config(v) => v.clone(),
             GraphMetaField::SpecHash(v) => v.to_be_bytes().to_vec(),
         }
     }
@@ -1422,7 +1424,6 @@ impl GraphMeta {
                 }
                 GraphMetaField::Count(u32::from_be_bytes(bytes.try_into()?))
             }
-            GraphMetaField::Config(_) => GraphMetaField::Config(bytes.to_vec()),
             GraphMetaField::SpecHash(_) => {
                 if bytes.len() != 8 {
                     anyhow::bail!("Invalid SpecHash length: expected 8, got {}", bytes.len());
@@ -2336,6 +2337,7 @@ mod tests {
     #[test]
     fn test_embedding_spec_m_accessors() {
         let spec = EmbeddingSpec {
+            code: 0,
             model: "test".to_string(),
             dim: 128,
             distance: crate::vector::distance::Distance::L2,
@@ -2364,6 +2366,7 @@ mod tests {
         // Test m_l = 1.0 / ln(m) for various M values
         for m in [8u16, 16, 32, 64] {
             let spec = EmbeddingSpec {
+                code: 0,
                 model: "test".to_string(),
                 dim: 128,
                 distance: crate::vector::distance::Distance::L2,
@@ -2389,6 +2392,7 @@ mod tests {
     fn test_embedding_spec_accessors_with_different_values() {
         // Test with non-default values
         let spec = EmbeddingSpec {
+            code: 0,
             model: "custom".to_string(),
             dim: 768,
             distance: crate::vector::distance::Distance::Cosine,

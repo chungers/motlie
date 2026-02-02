@@ -122,6 +122,7 @@ impl MutationCodec for AddEmbeddingSpec {
     fn to_record(&self) -> (EmbeddingSpecCfKey, EmbeddingSpecCfValue) {
         let key = EmbeddingSpecCfKey(self.code);
         let value = EmbeddingSpecCfValue(EmbeddingSpec {
+            code: self.code,
             model: self.model.clone(),
             dim: self.dim,
             distance: self.distance,
@@ -351,7 +352,7 @@ impl Mutation {
     ///
     /// Returns an optional `MutationCacheUpdate` for cache updates.
     /// The cache update should be applied AFTER transaction commit.
-    pub fn execute(
+    pub(crate) fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         txn_db: &rocksdb::TransactionDB,
@@ -582,12 +583,24 @@ impl Runnable for MutationBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vector::schema::VectorElementType;
+    use crate::vector::schema::{EmbeddingSpec, VectorElementType};
     use crate::Id;
+    use std::sync::Arc;
 
     /// Create a test embedding for unit tests.
     fn test_embedding(code: EmbeddingCode) -> Embedding {
-        Embedding::new(code, "test", 128, Distance::Cosine, VectorElementType::F32, None)
+        let spec = Arc::new(EmbeddingSpec {
+            code,
+            model: "test".to_string(),
+            dim: 128,
+            distance: Distance::Cosine,
+            storage_type: VectorElementType::F32,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        });
+        Embedding::new(spec, None)
     }
 
     #[test]

@@ -47,7 +47,7 @@ use anyhow::Result;
 
 use crate::vector::cache::{BinaryCodeCache, NavigationCache};
 use crate::vector::distance::Distance;
-use crate::vector::rabitq::RaBitQ;
+use crate::vector::quantization::RaBitQ;
 use crate::vector::schema::{EmbeddingCode, VecId, VectorElementType};
 use crate::vector::Storage;
 
@@ -334,6 +334,7 @@ mod tests {
     /// Helper: Create an EmbeddingSpec for testing with customizable HNSW parameters
     fn make_test_spec(dim: usize, m: u16, ef_construction: u16, distance: Distance) -> EmbeddingSpec {
         EmbeddingSpec {
+            code: 0,
             model: "test".to_string(),
             dim: dim as u32,
             distance,
@@ -779,7 +780,18 @@ mod tests {
 
     /// Helper: Create an Embedding for testing
     fn make_test_embedding(code: u64, dim: u32, distance: Distance) -> Embedding {
-        Embedding::new(code, "test-model", dim, distance, crate::vector::schema::VectorElementType::default(), None)
+        let spec = std::sync::Arc::new(EmbeddingSpec {
+            code,
+            model: "test-model".to_string(),
+            dim,
+            distance,
+            storage_type: VectorElementType::default(),
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        });
+        Embedding::new(spec, None)
     }
 
     #[test]
