@@ -65,10 +65,10 @@ pub struct ForwardEdgeCfValue(
 ```rust
 pub struct ReverseEdgeCfKey(pub DstId, pub SrcId, pub NameHash);  // 40 bytes
 
-pub struct ReverseEdgeCfValue(
-    pub Option<TemporalRange>,
-    pub Version,  // Version (mirrors forward edge) [NEW]
-);
+// Value: empty (no ReverseEdgeCfValue type)
+// ReverseEdges is purely an index for "find edges TO this node".
+// All edge details (TemporalRange, weight, summary, version) live in ForwardEdges.
+// This avoids data duplication and consistency bugs between forward/reverse CFs.
 ```
 
 ---
@@ -458,10 +458,9 @@ fn insert_edge(
     let edge_value = ForwardEdgeCfValue(None, weight, Some(summary_hash), version);
     txn.put_cf(forward_edges_cf, edge_key, edge_value)?;
 
-    // 4. Write reverse edge (HOT)
+    // 4. Write reverse edge index (HOT) - empty value, just for reverse lookup
     let reverse_key = ReverseEdgeCfKey(dst, src, name_hash);
-    let reverse_value = ReverseEdgeCfValue(None, version);
-    txn.put_cf(reverse_edges_cf, reverse_key, reverse_value)?;
+    txn.put_cf(reverse_edges_cf, reverse_key, &[])?;
 
     // 5. Write versioned summary (COLD)
     let summary_key = EdgeSummaryCfKey(src, dst, name_hash, version);
@@ -565,16 +564,13 @@ fn update_edge(
     let new_value = ForwardEdgeCfValue(current.0, current.1, Some(new_hash), new_version);
     txn.put_cf(forward_edges_cf, edge_key, new_value)?;
 
-    // 5. Write updated reverse edge (HOT)
-    let reverse_key = ReverseEdgeCfKey(dst, src, name_hash);
-    let reverse_value = ReverseEdgeCfValue(current.0, new_version);
-    txn.put_cf(reverse_edges_cf, reverse_key, reverse_value)?;
+    // Note: Reverse edge index unchanged (key stays same, value is empty)
 
-    // 6. Write new versioned summary (COLD)
+    // 5. Write new versioned summary (COLD)
     let summary_key = EdgeSummaryCfKey(src, dst, name_hash, new_version);
     txn.put_cf(edge_summaries_cf, summary_key, new_summary)?;
 
-    // 7. Write new reverse index entry
+    // 6. Write new reverse index entry
     let index_key = EdgeSummaryIndexCfKey(new_hash, src, dst, name_hash, new_version);
     txn.put_cf(edge_summary_index_cf, index_key, &[])?;
 
