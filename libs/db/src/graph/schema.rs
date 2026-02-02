@@ -196,22 +196,7 @@ impl ValidRangePatchable for ForwardEdges {
     }
 }
 
-impl ValidRangePatchable for ReverseEdges {
-    fn patch_valid_range(
-        &self,
-        old_value: &[u8],
-        new_range: TemporalRange,
-    ) -> Result<Vec<u8>, anyhow::Error> {
-        use crate::graph::HotColumnFamilyRecord;
-
-        let mut value = ReverseEdges::value_from_bytes(old_value)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-        value.0 = Some(new_range);
-        ReverseEdges::value_to_bytes(&value)
-            .map(|aligned_vec| aligned_vec.to_vec())
-            .map_err(|e| anyhow::anyhow!("Failed to serialize value: {}", e))
-    }
-}
+// ReverseEdges has no ValidRangePatchable impl - value is empty, no range to patch
 
 /// Forward edges column family (HOT - optimized for graph traversal).
 ///
@@ -239,6 +224,10 @@ pub(crate) struct ForwardEdgeCfValue(
 );
 
 /// Reverse edges column family (index only).
+///
+/// This is purely a reverse lookup index for "find edges TO this node".
+/// All edge details (TemporalRange, weight, summary) live in ForwardEdges.
+/// Value is empty - existence of the key is the only data needed.
 pub(crate) struct ReverseEdges;
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ReverseEdgeCfKey(
@@ -246,11 +235,7 @@ pub(crate) struct ReverseEdgeCfKey(
     pub(crate) SrcId,
     pub(crate) NameHash, // Edge name stored as hash; full name in Names CF
 );
-/// Reverse edge value - minimal for reverse lookups
-/// Size: ~17 bytes
-#[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
-#[archive(check_bytes)]
-pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<TemporalRange>);
+// No ReverseEdgeCfValue - value is empty bytes
 
 /// Edge fragments column family.
 pub struct EdgeFragments;
@@ -633,26 +618,23 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for ReverseEdges {
 }
 
 impl ReverseEdges {
-    /// Create key-value pair from AddEdge mutation.
-    pub fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
+    /// Create key from AddEdge mutation (no value - index only).
+    pub fn key_from(args: &AddEdge) -> ReverseEdgeCfKey {
         let name_hash = NameHash::from_name(&args.name);
-        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, name_hash);
-        let value = ReverseEdgeCfValue(args.valid_range.clone());
-        (key, value)
+        ReverseEdgeCfKey(args.target_node_id, args.source_node_id, name_hash)
     }
 
-    /// Create and serialize to bytes (key bytes, value bytes).
+    /// Create and serialize key to bytes (value is empty).
     pub fn create_bytes(args: &AddEdge) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-        let (key, value) = Self::record_from(args);
-        let key_bytes = <Self as HotColumnFamilyRecord>::key_to_bytes(&key);
-        let value_bytes = <Self as HotColumnFamilyRecord>::value_to_bytes(&value)?.to_vec();
-        Ok((key_bytes, value_bytes))
+        let key = Self::key_from(args);
+        let key_bytes = Self::key_to_bytes(&key);
+        Ok((key_bytes, Vec::new())) // Empty value
     }
 }
 
 impl HotColumnFamilyRecord for ReverseEdges {
     type Key = ReverseEdgeCfKey;
-    type Value = ReverseEdgeCfValue;
+    type Value = (); // Empty value - ReverseEdges is purely an index
 
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
         // ReverseEdgeCfKey(DstId, SrcId, NameHash)
