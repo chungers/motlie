@@ -255,7 +255,8 @@ pub fn all_nodes_for_summary(&self, hash: SummaryHash) -> Result<Vec<(Id, Versio
 
 ```rust
 /// Returns only node_ids where this hash is the CURRENT version.
-/// Filters out old versions by checking entity's current state.
+/// Filters out old versions using marker bit (CURRENT vs STALE),
+/// and optionally excludes tombstoned entities.
 pub fn current_nodes_for_summary(&self, hash: SummaryHash) -> Result<Vec<Id>>;
 ```
 
@@ -288,6 +289,8 @@ pub fn all_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<(ForwardEdg
 
 ```rust
 /// Returns only edge keys where this hash is the CURRENT version.
+/// Filters out old versions using marker bit (CURRENT vs STALE),
+/// and optionally excludes tombstoned entities.
 pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<ForwardEdgeCfKey>>;
 ```
 
@@ -359,9 +362,9 @@ Current State:
     C → (hash=0xDDD, version=2)  // "Contractor"
 
   NodeSummaryIndex CF (entries for hash 0xAAA):
-    (0xAAA, A, 1) → empty   // Stale: A changed to 0xBBB at v2
-    (0xAAA, B, 1) → empty   // Stale: B changed to 0xCCC at v2
-    (0xAAA, C, 1) → empty   // Stale: C changed to 0xDDD at v2
+    (0xAAA, A, 1) → STALE   // A changed to 0xBBB at v2
+    (0xAAA, B, 1) → STALE   // B changed to 0xCCC at v2
+    (0xAAA, C, 1) → STALE   // C changed to 0xDDD at v2
 
 Query Results for hash 0xAAA:
   all_nodes_for_summary(0xAAA):
@@ -390,9 +393,9 @@ Current State:
     (E, F, "works_with") → (hash=0xCCC, version=2)  // Changed
 
   EdgeSummaryIndex CF (entries for hash 0xAAA):
-    (0xAAA, A, B, "knows", 1)      → empty  // Stale
-    (0xAAA, C, D, "knows", 1)      → empty  // Current
-    (0xAAA, E, F, "works_with", 1) → empty  // Stale
+    (0xAAA, A, B, "knows", 1)      → STALE   // Updated at v2
+    (0xAAA, C, D, "knows", 1)      → CURRENT // Still current
+    (0xAAA, E, F, "works_with", 1) → STALE   // Updated at v2
 
 Query Results for hash 0xAAA:
   all_edges_for_summary(0xAAA):
@@ -689,7 +692,8 @@ fn delete_node(&self, id: Id, expected_version: Version) -> Result<Version> {
     }
 
     // Note: No new index entry for tombstoned entity
-    // Versioned summary preserved for audit/time-travel until GC
+    // Tombstone versions do not add a new summary row; latest summary remains at prior version.
+    // Versioned summaries are preserved for audit/time-travel until GC.
 
     txn.commit()?;
     Ok(new_version)
@@ -743,7 +747,8 @@ fn delete_edge(
     }
 
     // Note: Reverse edge entry stays (could remove if needed)
-    // Versioned summary preserved for audit/time-travel until GC
+    // Tombstone versions do not add a new summary row; latest summary remains at prior version.
+    // Versioned summaries are preserved for audit/time-travel until GC.
 
     txn.commit()?;
     Ok(new_version)
@@ -1179,4 +1184,3 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | **Version overflow** | Reject writes at VERSION_MAX; documented policy |
 | **GC** | Incremental with cursor (persisted via `GraphMeta` pattern); delete old versions; delete stale index entries; hard delete tombstones after retention |
 | **Repair** | Periodic forward↔reverse consistency check |
-
