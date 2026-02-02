@@ -1,246 +1,805 @@
-# CONTENT-ADDRESS: Reverse Index for SummaryHash → Id
+# CONTENT-ADDRESS: Reverse Index with Versioning, Optimistic Locking, and GC
 
 ## Problem
 
-Graph stores content-addressed summaries:
-- `NodeSummaryCfKey(SummaryHash)` → `NodeSummary`
-- `EdgeSummaryCfKey(SummaryHash)` → `EdgeSummary`
+1. **No reverse index**: `SummaryHash` from vector search cannot be resolved to graph entities without full scan
+2. **No optimistic locking**: Blind upserts can silently lose concurrent updates
+3. **No GC for stale content**: Old summaries/fragments accumulate without cleanup
 
-<!-- @Codex: See schema.rs:705-763 for NodeSummaries CF, schema.rs:765-830 for EdgeSummaries CF -->
+## Core Goal
 
-But there is no reverse mapping from `SummaryHash` back to the owning
-`NodeId` / `Edge` keys. This makes it impossible to resolve a content-hash
-returned by vector search into concrete graph entities without a full scan.
+**Reverse index:** `SummaryHash → Vec<(EntityKey, Version)>`
 
-## Goals
+Given a content hash from vector search, resolve to all entity keys that reference it.
 
-- Add an efficient reverse index: `SummaryHash → Vec<Id>`
-- Avoid large value updates (no `Vec<Id>` stored as values)
-- Keep write amplification low
-- Support prefix/range scans by `SummaryHash`
+---
 
-## Design
+# Part 1: Schema Changes
 
-Use **multimap keys** in new CFs. Each `(SummaryHash, EntityKey)` pair is a
-distinct key with an empty value.
+## 1.1 Entity Column Families (HOT)
 
-### Column Families
-
-<!-- @Codex: Follow naming conventions in schema.rs:1-44 -->
-<!-- @Codex: Use ColumnFamilySerde trait (not HotColumnFamilyRecord) since values are empty -->
-
-1) `NodeSummaryIndex`
-   - **Key:** `[summary_hash: 8] + [node_id: 16] = 24 bytes`
-   - **Value:** empty
-   - Purpose: reverse lookup for nodes referencing a summary hash
-
-2) `EdgeSummaryIndex`
-   - **Key:** `[summary_hash: 8] + [forward_edge_key: 40] = 48 bytes`
-   - **Value:** empty
-   - Purpose: reverse lookup for edges referencing a summary hash
-(codex, 2026-02-01 10:58:19 -0800, question) If delete/update flows only have a reverse edge key, do we need an extra lookup to compute the forward key for cleanup?
-(codex, 2026-02-01 11:26:11 -0800, status) ReverseEdgeCfKey stores (dst_id, src_id, name_hash), so the forward key can be computed by swapping (src,dst) without a DB lookup.
-
-All keys are **lexicographically ordered by `summary_hash` first**, enabling
-prefix scans for a single hash.
-
-<!-- @Codex: Use 8-byte prefix extractor for SummaryHash prefix scans, similar to schema.rs:531 -->
-
-### Encoding Source of Truth
-
-Reuse existing `HotColumnFamilyRecord` key encoders in `graph/schema.rs`:
-- `NodeCfKey` for node IDs → `Nodes::key_to_bytes()` at schema.rs:331-333
-- `ForwardEdgeCfKey` for edges → `ForwardEdges::key_to_bytes()` at schema.rs:568-576
-- `SummaryHash::as_bytes()` → summary_hash.rs:84
-
-No custom serialization is introduced; the index key is a concatenation of
-existing canonical encodings.
-
-## Write Path Changes
-
-<!-- @Codex: Modify AddNode::execute() at mutation.rs:469-505 -->
-<!-- @Codex: Modify AddEdge::execute() at mutation.rs:545-593 -->
-
-### Node insert/update
-
-When writing `NodeCfValue` with a `summary_hash`:
-1) Insert `NodeSummaryIndex` key `(summary_hash, node_id)`
-2) If summary hash changed, delete the old `(old_hash, node_id)` key
-(codex, 2026-02-01 10:58:19 -0800, question) Are these index writes guaranteed to be in the same write batch/WAL as the primary CF write so readers never see a partial update?
-(codex, 2026-02-01 11:26:11 -0800, status) AddNode/AddEdge already use a RocksDB Transaction and write all CFs via the same txn, so commit should be atomic across CFs.
-
-<!-- @Codex: Step 2 requires reading old value first via txn.get_cf() before writing -->
-
-### Edge insert/update
-
-When writing `ForwardEdgeCfValue` with a `summary_hash`:
-1) Insert `EdgeSummaryIndex` key `(summary_hash, forward_edge_key)`
-2) If summary hash changed, delete the old `(old_hash, forward_edge_key)` key
-(codex, 2026-02-01 10:58:19 -0800, question) Do all callers have the prior summary hash available? If some updates are blind overwrites, this can leave stale index keys.
-(codex, 2026-02-01 11:26:11 -0800, status) Current mutations don't read the existing node/edge; AddNode/AddEdge are blind upserts, so you'd need a txn.get_cf() read to remove old index keys if summary can change.
-
-### Deletes
-
-On node/edge delete:
-- Remove the corresponding index key(s) for the stored summary hash.
-
-<!-- @Codex: No DeleteNode/DeleteEdge mutations exist yet - see OPEN QUESTIONS -->
-
-## Read / Query API
-
-<!-- @Codex: Add to query.rs, follow pattern of resolve_node_summary() at query.rs:117-147 -->
-
-Add graph query helpers to resolve a summary hash back to concrete entities.
-
-### Exact lookup (materialize Vec<Id>)
+### Nodes
 
 ```rust
-pub fn node_ids_for_summary(
-    &self,
-    summary: SummaryHash,
-) -> Result<Vec<Id>>;
+pub struct NodeCfKey(pub Id);  // 16 bytes
 
-pub fn edges_for_summary(
-    &self,
-    summary: SummaryHash,
-) -> Result<Vec<ForwardEdgeCfKey>>;
+pub struct NodeCfValue(
+    pub Option<TemporalRange>,
+    pub NameHash,
+    pub Option<SummaryHash>,  // Content hash for vector search matching
+    pub u64,                   // Version (monotonic, starts at 1) [NEW]
+);
 ```
 
-### Prefix scan (streaming / iterator)
+### ForwardEdges
 
 ```rust
-pub fn node_ids_for_summary_iter(
-    &self,
-    summary: SummaryHash,
-) -> Result<impl Iterator<Item = Result<Id>>>;
+pub struct ForwardEdgeCfKey(
+    pub SrcId,      // 16 bytes
+    pub DstId,      // 16 bytes
+    pub NameHash,   // 8 bytes
+);  // Total: 40 bytes
 
-pub fn edges_for_summary_iter(
-    &self,
-    summary: SummaryHash,
-) -> Result<impl Iterator<Item = Result<ForwardEdgeCfKey>>>;
+pub struct ForwardEdgeCfValue(
+    pub Option<TemporalRange>,
+    pub Option<f64>,           // weight
+    pub Option<SummaryHash>,   // Content hash
+    pub u64,                   // Version [NEW]
+);
 ```
 
-### Prefix bytes (for scan utilities)
+### ReverseEdges
 
 ```rust
-pub fn node_summary_index_prefix(summary: SummaryHash) -> [u8; 8];
-pub fn edge_summary_index_prefix(summary: SummaryHash) -> [u8; 8];
+pub struct ReverseEdgeCfKey(pub DstId, pub SrcId, pub NameHash);  // 40 bytes
+
+pub struct ReverseEdgeCfValue(
+    pub Option<TemporalRange>,
+    pub u64,  // Version (mirrors forward edge) [NEW]
+);
 ```
-(codex, 2026-02-01 10:58:19 -0800, status) This hard-codes the SummaryHash length; consider calling out the invariant explicitly or deriving the length from `SummaryHash::to_bytes()` if it might change.
-(codex, 2026-02-01 11:35:33 -0800, status) `SummaryHash::SIZE` is a fixed 8-byte invariant (see summary_hash.rs), so keeping `[u8; 8]` is consistent as long as that type guarantee holds.
-
-## Schema / File Changes
-
-**Core**
-- `libs/db/src/graph/schema.rs`
-  - Add `NodeSummaryIndex` and `EdgeSummaryIndex` CFs
-  - Define key types and `key_to_bytes` / `key_from_bytes`
-  - CF options (block cache, bloom) as in other small index CFs
-  - Register in `ALL_COLUMN_FAMILIES` array
-
-<!-- @Codex: Reference patterns:
-  - CF struct: schema.rs:78 (Names)
-  - ColumnFamily impl: schema.rs:86-88
-  - ColumnFamilyConfig impl: schema.rs:90-116
-  - ColumnFamilySerde impl: schema.rs:118-139
-  - Prefix extractor: schema.rs:531 (ForwardEdges uses 16-byte prefix)
--->
-
-**Mutation**
-- `libs/db/src/graph/mutation.rs`
-  - Update node/edge write paths to maintain index entries
-  - Track old summary hashes for update/delete cleanup
-
-<!-- @Codex: Reference patterns:
-  - AddNode::execute(): mutation.rs:469-505
-  - AddEdge::execute(): mutation.rs:545-593
-  - txn.put_cf() usage: mutation.rs:493, 583
-  - txn.get_cf() for reads: mutation.rs:347-349
--->
-
-**Query**
-- `libs/db/src/graph/query.rs`
-  - Add lookup + iterator APIs above
-
-<!-- @Codex: Reference patterns:
-  - resolve_node_summary(): query.rs:117-147
-  - iterate_cf! macro: query.rs:334-371
-  - prefix iteration: use db.prefix_iterator_cf() or iterator_cf with From mode
--->
-
-**Tests**
-- `libs/db/src/graph/tests.rs`
-  - Insert node/edge with summary hash; verify reverse lookup
-  - Update summary hash; ensure old index removed
-  - Delete node/edge; ensure index removed (defer if Q1 = Option A)
-
-<!-- @Codex: Reference test patterns at tests.rs:18-61 -->
-
-## Performance / Write Amplification
-
-- Adds **one extra small write** per node/edge with a summary hash
-- Uses multimap keys (no large value updates)
-- Deletes on summary change add one extra delete
-
-This overhead is expected to be negligible relative to node/edge writes.
-
-## Notes
-
-- Index enables resolving `ExternalKey::NodeSummary` / `EdgeSummary` results
-  into concrete graph entities without a full scan.
-- If multiple nodes/edges share the same summary hash, the index returns all
-  of them.
 
 ---
 
-## OPEN QUESTIONS (for Codex review)
+## 1.2 Content Column Families (COLD)
 
-### Q1: Delete Mutations
+**Changed from content-addressed to entity+version keyed.** Enables clean GC.
 
-The plan references "On node/edge delete" but **no `DeleteNode` or `DeleteEdge` mutations exist** in the current codebase (see `mutation.rs` Mutation enum at line 95-113).
+### NodeSummaries
 
-**Options:**
-- A) Defer delete index cleanup to future work when delete mutations are added
-- B) Add `DeleteNode` / `DeleteEdge` mutations as part of this PR
-(codex, 2026-02-01 11:26:11 -0800, status) Based on the current Mutation enum, there are no delete mutations to hook into, so A is consistent unless you plan to expand the mutation API in this PR.
-- C) Use soft deletes via `UpdateNodeValidSinceUntil` (set `until` to past) - index stays but entity is logically deleted
+```rust
+// OLD: NodeSummaryCfKey(SummaryHash)  // content-addressed
+// NEW: Entity+version keyed
+pub struct NodeSummaryCfKey(
+    pub Id,   // 16 bytes - node_id
+    pub u64,  // 8 bytes - version
+);  // Total: 24 bytes
 
-**Recommendation:** Option A - defer. Index entries for deleted nodes are harmless (lookup returns entity not found).
+pub struct NodeSummaryCfValue(pub NodeSummary);
+```
 
----
+### EdgeSummaries
 
-### Q2: Update Semantics - Read Before Write
+```rust
+// OLD: EdgeSummaryCfKey(SummaryHash)  // content-addressed
+// NEW: Entity+version keyed
+pub struct EdgeSummaryCfKey(
+    pub SrcId,    // 16 bytes
+    pub DstId,    // 16 bytes
+    pub NameHash, // 8 bytes
+    pub u64,      // 8 bytes - version
+);  // Total: 48 bytes
 
-Step 2 of write path says "If summary hash changed, delete old index entry." This requires **reading the old value first** to get the previous `summary_hash`.
-
-**Trade-offs:**
-- **Pro:** Clean index, no stale entries
-- **Con:** Adds one read per write (txn.get_cf before put_cf)
-
-**Options:**
-- A) Always read old value, delete old index entry if hash changed (clean index)
-- B) Skip read, allow duplicate index entries (periodic cleanup job)
-- C) Only read if this is a known update (caller provides `is_update` flag)
-
-**Recommendation:** Option A - the read is cheap (same transaction, likely cached), and a clean index avoids subtle bugs.
-
----
-
-### Q3: CF Registration Location
-
-New CFs must be added to `ALL_COLUMN_FAMILIES` at `schema.rs:834`. Should the index CFs be:
-- A) Grouped with other index CFs (after `ReverseEdges`)
-- B) Grouped with summary CFs (`NodeSummaries`, `EdgeSummaries`)
-
-**Recommendation:** Option B - logically related to summary storage.
+pub struct EdgeSummaryCfValue(pub EdgeSummary);
+```
 
 ---
 
-### Q4: Empty Value Representation
+## 1.3 Reverse Index Column Families [NEW]
 
-Index entries have empty values. Options for value type:
-- A) `()` unit type with custom serde (0 bytes)
-- B) `struct EmptyValue;` marker type
-- C) Use raw `put_cf(key, &[])` without value type
+### NodeSummaryIndex
 
-**Recommendation:** Option A or C - minimal overhead. Option C is simplest if we bypass `ColumnFamilySerde::value_to_bytes`.
+```rust
+pub struct NodeSummaryIndexCfKey(
+    pub SummaryHash,  // 8 bytes - prefix for hash lookup
+    pub Id,           // 16 bytes - node_id
+    pub u64,          // 8 bytes - version
+);  // Total: 32 bytes
+
+// Value: empty (existence is the data)
+```
+
+### EdgeSummaryIndex
+
+```rust
+pub struct EdgeSummaryIndexCfKey(
+    pub SummaryHash,  // 8 bytes - prefix for hash lookup
+    pub SrcId,        // 16 bytes
+    pub DstId,        // 16 bytes
+    pub NameHash,     // 8 bytes
+    pub u64,          // 8 bytes - version
+);  // Total: 56 bytes
+
+// Value: empty
+```
+
+---
+
+## 1.4 Fragment Column Families (Unchanged)
+
+Fragments use timestamp for append-only semantics. GC by age.
+
+```rust
+pub struct NodeFragmentCfKey(pub Id, pub TimestampMilli);  // 24 bytes
+pub struct NodeFragmentCfValue(pub Option<TemporalRange>, pub FragmentContent);
+
+pub struct EdgeFragmentCfKey(pub SrcId, pub DstId, pub NameHash, pub TimestampMilli);  // 48 bytes
+pub struct EdgeFragmentCfValue(pub Option<TemporalRange>, pub FragmentContent);
+```
+
+---
+
+## 1.5 Column Family Registry
+
+```rust
+pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
+    // Names (interning)
+    "graph/names",
+
+    // Entities (HOT)
+    "graph/nodes",
+    "graph/forward_edges",
+    "graph/reverse_edges",
+
+    // Content (COLD) - entity+version keyed
+    "graph/node_summaries",
+    "graph/edge_summaries",
+
+    // Fragments - timestamp keyed
+    "graph/node_fragments",
+    "graph/edge_fragments",
+
+    // Reverse indexes [NEW]
+    "graph/node_summary_index",
+    "graph/edge_summary_index",
+];
+```
+
+---
+
+# Part 2: Reverse Lookup API and Behavior
+
+## 2.1 Critical Insight: Multi-Version Resolution
+
+A `SummaryHash` lookup can return **multiple results**, including:
+
+| Scenario | What's Returned |
+|----------|-----------------|
+| Different entities with same content | All entities that share the hash |
+| Same entity at different versions | Multiple (entity, version) pairs |
+| Old version after entity was updated | The old (entity, version) — now stale |
+
+### Use Cases
+
+| Use Case | Query Type |
+|----------|------------|
+| Vector search resolution | Current versions only |
+| Time-travel query | Specific version |
+| Audit/debugging | All versions |
+| Content history | All versions of specific entity |
+
+---
+
+## 2.2 Node Reverse Lookup API
+
+### All Matches (Including Old Versions)
+
+```rust
+/// Returns ALL (node_id, version) pairs that have this hash.
+/// Includes old versions that may no longer be current.
+pub fn all_nodes_for_summary(&self, hash: SummaryHash) -> Result<Vec<(Id, u64)>>;
+```
+
+### Current Versions Only
+
+```rust
+/// Returns only node_ids where this hash is the CURRENT version.
+/// Filters out old versions by checking entity's current state.
+pub fn current_nodes_for_summary(&self, hash: SummaryHash) -> Result<Vec<Id>>;
+```
+
+### Versions of Specific Node
+
+```rust
+/// Returns all versions of a specific node that had this hash.
+pub fn node_versions_for_summary(&self, hash: SummaryHash, node_id: Id) -> Result<Vec<u64>>;
+```
+
+### Get Summary by Version
+
+```rust
+/// Get summary for specific version, or current if version=None.
+pub fn get_node_summary(&self, id: Id, version: Option<u64>) -> Result<Option<NodeSummary>>;
+```
+
+---
+
+## 2.3 Edge Reverse Lookup API
+
+### All Matches (Including Old Versions)
+
+```rust
+/// Returns ALL (edge_key, version) pairs that have this hash.
+pub fn all_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<(ForwardEdgeCfKey, u64)>>;
+```
+
+### Current Versions Only
+
+```rust
+/// Returns only edge keys where this hash is the CURRENT version.
+pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<ForwardEdgeCfKey>>;
+```
+
+### Versions of Specific Edge
+
+```rust
+/// Returns all versions of a specific edge that had this hash.
+pub fn edge_versions_for_summary(
+    &self,
+    hash: SummaryHash,
+    src: Id,
+    dst: Id,
+    name: &str,
+) -> Result<Vec<u64>>;
+```
+
+### Get Summary by Version
+
+```rust
+/// Get edge summary for specific version, or current if version=None.
+pub fn get_edge_summary(
+    &self,
+    src: Id,
+    dst: Id,
+    name: &str,
+    version: Option<u64>,
+) -> Result<Option<EdgeSummary>>;
+```
+
+---
+
+## 2.4 Index Prefix Scan Capabilities
+
+### NodeSummaryIndex
+
+| Prefix | Bytes | Returns |
+|--------|-------|---------|
+| `(hash)` | 8 | All nodes with this hash (any version) |
+| `(hash, node_id)` | 24 | All versions of specific node with this hash |
+
+### EdgeSummaryIndex
+
+| Prefix | Bytes | Returns |
+|--------|-------|---------|
+| `(hash)` | 8 | All edges with this hash (any version) |
+| `(hash, src)` | 24 | All edges from `src` with this hash |
+| `(hash, src, dst)` | 40 | All edges between `src→dst` with this hash |
+| `(hash, src, dst, name)` | 48 | All versions of specific edge with this hash |
+
+---
+
+## 2.5 Node Example: Multi-Version Resolution
+
+```
+Timeline:
+  t1: Insert Node A, summary="Person", hash=0xAAA, version=1
+  t2: Insert Node B, summary="Person", hash=0xAAA, version=1
+  t3: Update Node A, summary="Employee", hash=0xBBB, version=2
+  t4: Insert Node C, summary="Person", hash=0xAAA, version=1
+  t5: Update Node B, summary="Manager", hash=0xCCC, version=2
+  t6: Update Node C, summary="Contractor", hash=0xDDD, version=2
+
+Current State:
+  Nodes CF:
+    A → (hash=0xBBB, version=2)  // "Employee"
+    B → (hash=0xCCC, version=2)  // "Manager"
+    C → (hash=0xDDD, version=2)  // "Contractor"
+
+  NodeSummaryIndex CF (entries for hash 0xAAA):
+    (0xAAA, A, 1) → empty   // Stale: A changed to 0xBBB at v2
+    (0xAAA, B, 1) → empty   // Stale: B changed to 0xCCC at v2
+    (0xAAA, C, 1) → empty   // Stale: C changed to 0xDDD at v2
+
+Query Results for hash 0xAAA:
+  all_nodes_for_summary(0xAAA):
+    [(A, 1), (B, 1), (C, 1)]  // All three had it at v1
+
+  current_nodes_for_summary(0xAAA):
+    []  // Empty! None currently have 0xAAA
+```
+
+---
+
+## 2.6 Edge Example: Multi-Version Resolution
+
+```
+Timeline:
+  t1: Insert Edge (A→B, "knows"), summary="Friends", hash=0xAAA, version=1
+  t2: Insert Edge (C→D, "knows"), summary="Friends", hash=0xAAA, version=1
+  t3: Insert Edge (E→F, "works_with"), summary="Friends", hash=0xAAA, version=1
+  t4: Update Edge (A→B, "knows"), summary="Close friends", hash=0xBBB, version=2
+  t5: Update Edge (E→F, "works_with"), summary="Colleagues", hash=0xCCC, version=2
+
+Current State:
+  ForwardEdges CF:
+    (A, B, "knows")      → (hash=0xBBB, version=2)  // Changed
+    (C, D, "knows")      → (hash=0xAAA, version=1)  // Still "Friends"
+    (E, F, "works_with") → (hash=0xCCC, version=2)  // Changed
+
+  EdgeSummaryIndex CF (entries for hash 0xAAA):
+    (0xAAA, A, B, "knows", 1)      → empty  // Stale
+    (0xAAA, C, D, "knows", 1)      → empty  // Current
+    (0xAAA, E, F, "works_with", 1) → empty  // Stale
+
+Query Results for hash 0xAAA:
+  all_edges_for_summary(0xAAA):
+    [
+      ((A, B, "knows"), 1),        // Had it at v1, now stale
+      ((C, D, "knows"), 1),        // Still current
+      ((E, F, "works_with"), 1),   // Had it at v1, now stale
+    ]
+
+  current_edges_for_summary(0xAAA):
+    [(C, D, "knows")]  // Only edge still at v1 with this hash
+```
+
+---
+
+## 2.7 Result Types
+
+```rust
+/// Node lookup result with version info
+pub struct NodeSummaryLookupResult {
+    pub node_id: Id,
+    pub version: u64,
+    pub is_current: bool,  // version == entity's current version
+}
+
+/// Edge lookup result with version info
+pub struct EdgeSummaryLookupResult {
+    pub src: Id,
+    pub dst: Id,
+    pub name_hash: NameHash,
+    pub version: u64,
+    pub is_current: bool,
+}
+```
+
+---
+
+# Part 3: Implementation Tasks
+
+## 3.1 Write Path: Insert
+
+### Insert Node (version = 1)
+
+```rust
+fn insert_node(&self, id: Id, name: &str, summary: NodeSummary) -> Result<()> {
+    let txn = self.txn_db.transaction();
+
+    // 1. Check doesn't exist
+    if txn.get_cf(nodes_cf, id)?.is_some() {
+        return Err(Error::AlreadyExists(id));
+    }
+
+    let version = 1u64;
+    let name_hash = NameHash::from_name(name);
+    let summary_hash = SummaryHash::from_summary(&summary)?;
+
+    // 2. Write name interning
+    txn.put_cf(names_cf, NameCfKey(name_hash), name)?;
+
+    // 3. Write node (HOT)
+    let node_value = NodeCfValue(None, name_hash, Some(summary_hash), version);
+    txn.put_cf(nodes_cf, NodeCfKey(id), node_value)?;
+
+    // 4. Write versioned summary (COLD)
+    let summary_key = NodeSummaryCfKey(id, version);
+    txn.put_cf(node_summaries_cf, summary_key, summary)?;
+
+    // 5. Write reverse index entry
+    let index_key = NodeSummaryIndexCfKey(summary_hash, id, version);
+    txn.put_cf(node_summary_index_cf, index_key, &[])?;
+
+    txn.commit()
+}
+```
+
+### Insert Edge (version = 1)
+
+```rust
+fn insert_edge(
+    &self,
+    src: Id,
+    dst: Id,
+    name: &str,
+    summary: EdgeSummary,
+    weight: Option<f64>,
+) -> Result<()> {
+    let txn = self.txn_db.transaction();
+
+    let name_hash = NameHash::from_name(name);
+    let edge_key = ForwardEdgeCfKey(src, dst, name_hash);
+
+    // 1. Check doesn't exist
+    if txn.get_cf(forward_edges_cf, &edge_key)?.is_some() {
+        return Err(Error::AlreadyExists(edge_key));
+    }
+
+    let version = 1u64;
+    let summary_hash = SummaryHash::from_summary(&summary)?;
+
+    // 2. Write name interning
+    txn.put_cf(names_cf, NameCfKey(name_hash), name)?;
+
+    // 3. Write forward edge (HOT)
+    let edge_value = ForwardEdgeCfValue(None, weight, Some(summary_hash), version);
+    txn.put_cf(forward_edges_cf, edge_key, edge_value)?;
+
+    // 4. Write reverse edge (HOT)
+    let reverse_key = ReverseEdgeCfKey(dst, src, name_hash);
+    let reverse_value = ReverseEdgeCfValue(None, version);
+    txn.put_cf(reverse_edges_cf, reverse_key, reverse_value)?;
+
+    // 5. Write versioned summary (COLD)
+    let summary_key = EdgeSummaryCfKey(src, dst, name_hash, version);
+    txn.put_cf(edge_summaries_cf, summary_key, summary)?;
+
+    // 6. Write reverse index entry
+    let index_key = EdgeSummaryIndexCfKey(summary_hash, src, dst, name_hash, version);
+    txn.put_cf(edge_summary_index_cf, index_key, &[])?;
+
+    txn.commit()
+}
+```
+
+---
+
+## 3.2 Write Path: Update (Optimistic Locking)
+
+### Update Node
+
+```rust
+fn update_node(
+    &self,
+    id: Id,
+    new_summary: NodeSummary,
+    expected_version: u64,
+) -> Result<u64> {
+    let txn = self.txn_db.transaction();
+
+    // 1. Read current node
+    let current = txn.get_cf(nodes_cf, id)?
+        .ok_or(Error::NotFound(id))?;
+    let current = Nodes::value_from_bytes(&current)?;
+    let current_version = current.3;
+
+    // 2. Optimistic lock check
+    if current_version != expected_version {
+        return Err(Error::VersionMismatch {
+            expected: expected_version,
+            actual: current_version,
+        });
+    }
+
+    // 3. Compute new version and hash
+    let new_version = current_version + 1;
+    let new_hash = SummaryHash::from_summary(&new_summary)?;
+
+    // 4. Write updated node (HOT)
+    let new_value = NodeCfValue(current.0, current.1, Some(new_hash), new_version);
+    txn.put_cf(nodes_cf, NodeCfKey(id), new_value)?;
+
+    // 5. Write new versioned summary (COLD)
+    // Old version stays until GC
+    let summary_key = NodeSummaryCfKey(id, new_version);
+    txn.put_cf(node_summaries_cf, summary_key, new_summary)?;
+
+    // 6. Write new reverse index entry
+    // Old index entry stays until GC
+    let index_key = NodeSummaryIndexCfKey(new_hash, id, new_version);
+    txn.put_cf(node_summary_index_cf, index_key, &[])?;
+
+    txn.commit()?;
+    Ok(new_version)
+}
+```
+
+### Update Edge
+
+```rust
+fn update_edge(
+    &self,
+    src: Id,
+    dst: Id,
+    name: &str,
+    new_summary: EdgeSummary,
+    expected_version: u64,
+) -> Result<u64> {
+    let txn = self.txn_db.transaction();
+
+    let name_hash = NameHash::from_name(name);
+    let edge_key = ForwardEdgeCfKey(src, dst, name_hash);
+
+    // 1. Read current edge
+    let current = txn.get_cf(forward_edges_cf, &edge_key)?
+        .ok_or(Error::NotFound(edge_key))?;
+    let current = ForwardEdges::value_from_bytes(&current)?;
+    let current_version = current.3;
+
+    // 2. Optimistic lock check
+    if current_version != expected_version {
+        return Err(Error::VersionMismatch {
+            expected: expected_version,
+            actual: current_version,
+        });
+    }
+
+    // 3. Compute new version and hash
+    let new_version = current_version + 1;
+    let new_hash = SummaryHash::from_summary(&new_summary)?;
+
+    // 4. Write updated forward edge (HOT)
+    let new_value = ForwardEdgeCfValue(current.0, current.1, Some(new_hash), new_version);
+    txn.put_cf(forward_edges_cf, edge_key, new_value)?;
+
+    // 5. Write updated reverse edge (HOT)
+    let reverse_key = ReverseEdgeCfKey(dst, src, name_hash);
+    let reverse_value = ReverseEdgeCfValue(current.0, new_version);
+    txn.put_cf(reverse_edges_cf, reverse_key, reverse_value)?;
+
+    // 6. Write new versioned summary (COLD)
+    let summary_key = EdgeSummaryCfKey(src, dst, name_hash, new_version);
+    txn.put_cf(edge_summaries_cf, summary_key, new_summary)?;
+
+    // 7. Write new reverse index entry
+    let index_key = EdgeSummaryIndexCfKey(new_hash, src, dst, name_hash, new_version);
+    txn.put_cf(edge_summary_index_cf, index_key, &[])?;
+
+    txn.commit()?;
+    Ok(new_version)
+}
+```
+
+---
+
+## 3.3 Read Path: Query Implementation
+
+### current_nodes_for_summary
+
+```rust
+pub fn current_nodes_for_summary(&self, hash: SummaryHash) -> Result<Vec<Id>> {
+    let prefix = hash.as_bytes();
+    let mut results = Vec::new();
+
+    for (key, _) in self.prefix_scan(node_summary_index_cf, prefix)? {
+        let index_key = NodeSummaryIndex::key_from_bytes(&key)?;
+        let (_, node_id, version) = (index_key.0, index_key.1, index_key.2);
+
+        // Verify this version is still current
+        if let Some(node) = self.get_node(node_id)? {
+            if node.version == version && node.summary_hash == Some(hash) {
+                results.push(node_id);
+            }
+        }
+    }
+
+    Ok(results)
+}
+```
+
+### current_edges_for_summary
+
+```rust
+pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<ForwardEdgeCfKey>> {
+    let prefix = hash.as_bytes();
+    let mut results = Vec::new();
+
+    for (key, _) in self.prefix_scan(edge_summary_index_cf, prefix)? {
+        let index_key = EdgeSummaryIndex::key_from_bytes(&key)?;
+        let edge_key = ForwardEdgeCfKey(index_key.1, index_key.2, index_key.3);
+        let version = index_key.4;
+
+        // Verify this version is still current
+        if let Some(edge) = self.get_edge(&edge_key)? {
+            if edge.version == version && edge.summary_hash == Some(hash) {
+                results.push(edge_key);
+            }
+        }
+    }
+
+    Ok(results)
+}
+```
+
+---
+
+## 3.4 Garbage Collection
+
+### GcConfig
+
+```rust
+pub struct GraphGcConfig {
+    /// Interval between GC cycles
+    pub interval: Duration,  // default: 60s
+
+    /// Max entities to process per cycle
+    pub batch_size: usize,  // default: 1000
+
+    /// Number of summary versions to retain per entity
+    pub versions_to_keep: usize,  // default: 2
+
+    /// Delete fragments older than this
+    pub fragment_max_age: Duration,  // default: 30 days
+
+    /// Run GC on startup
+    pub process_on_startup: bool,  // default: true
+}
+```
+
+### GC Targets
+
+| Target | Key Pattern | Retention Policy |
+|--------|-------------|------------------|
+| NodeSummaries | `(Id, version)` | Keep versions ≥ (current - N + 1) |
+| EdgeSummaries | `(EdgeKey, version)` | Keep versions ≥ (current - N + 1) |
+| NodeSummaryIndex | `(Hash, Id, version)` | Delete if version not in retained set |
+| EdgeSummaryIndex | `(Hash, EdgeKey, version)` | Delete if version not in retained set |
+| NodeFragments | `(Id, timestamp)` | Delete if timestamp < (now - max_age) |
+| EdgeFragments | `(EdgeKey, timestamp)` | Delete if timestamp < (now - max_age) |
+
+### GcMetrics
+
+```rust
+#[derive(Default)]
+pub struct GcMetrics {
+    pub node_summaries_deleted: AtomicU64,
+    pub edge_summaries_deleted: AtomicU64,
+    pub node_index_entries_deleted: AtomicU64,
+    pub edge_index_entries_deleted: AtomicU64,
+    pub node_fragments_deleted: AtomicU64,
+    pub edge_fragments_deleted: AtomicU64,
+    pub cycles_completed: AtomicU64,
+}
+```
+
+### GC Implementation
+
+```rust
+pub struct GraphGarbageCollector {
+    storage: Arc<Storage>,
+    config: GraphGcConfig,
+    shutdown: Arc<AtomicBool>,
+    metrics: Arc<GcMetrics>,
+}
+
+impl GraphGarbageCollector {
+    pub fn start(storage: Arc<Storage>, config: GraphGcConfig) -> Self;
+    pub fn shutdown(self);
+    pub fn run_cycle(&self) -> Result<GcMetrics>;
+}
+```
+
+### GC Logic: Node Summaries
+
+```rust
+fn gc_node_summaries(&self) -> Result<u64> {
+    let txn = self.txn_db.transaction();
+    let mut deleted = 0u64;
+    let n = self.config.versions_to_keep as u64;
+
+    for (node_id, node_value) in self.scan_nodes_batch()? {
+        let current_version = node_value.version;
+        let min_keep = current_version.saturating_sub(n - 1);
+
+        // Scan summaries for this node
+        let prefix = node_id.into_bytes();
+        for (key, _) in self.prefix_scan(node_summaries_cf, &prefix)? {
+            let summary_key = NodeSummaries::key_from_bytes(&key)?;
+            let version = summary_key.1;
+
+            if version < min_keep {
+                txn.delete_cf(node_summaries_cf, &key)?;
+                deleted += 1;
+            }
+        }
+    }
+
+    txn.commit()?;
+    Ok(deleted)
+}
+```
+
+### GC Logic: Reverse Index
+
+```rust
+fn gc_node_summary_index(&self) -> Result<u64> {
+    let txn = self.txn_db.transaction();
+    let mut deleted = 0u64;
+    let n = self.config.versions_to_keep as u64;
+
+    // Cache: node_id → current_version
+    let version_cache: HashMap<Id, u64> = self.scan_nodes_batch()?
+        .map(|(id, val)| (id, val.version))
+        .collect();
+
+    for (key, _) in self.full_scan(node_summary_index_cf)? {
+        let index_key = NodeSummaryIndex::key_from_bytes(&key)?;
+        let (_, node_id, version) = (index_key.0, index_key.1, index_key.2);
+
+        match version_cache.get(&node_id) {
+            Some(&current_version) => {
+                let min_keep = current_version.saturating_sub(n - 1);
+                if version < min_keep {
+                    txn.delete_cf(node_summary_index_cf, &key)?;
+                    deleted += 1;
+                }
+            }
+            None => {
+                // Node deleted entirely
+                txn.delete_cf(node_summary_index_cf, &key)?;
+                deleted += 1;
+            }
+        }
+    }
+
+    txn.commit()?;
+    Ok(deleted)
+}
+```
+
+### GC Logic: Fragments
+
+```rust
+fn gc_node_fragments(&self) -> Result<u64> {
+    let txn = self.txn_db.transaction();
+    let mut deleted = 0u64;
+    let cutoff = TimestampMilli::now().0
+        - self.config.fragment_max_age.as_millis() as u64;
+
+    for (key, _) in self.full_scan(node_fragments_cf)? {
+        let frag_key = NodeFragments::key_from_bytes(&key)?;
+        if frag_key.1.0 < cutoff {
+            txn.delete_cf(node_fragments_cf, &key)?;
+            deleted += 1;
+        }
+    }
+
+    txn.commit()?;
+    Ok(deleted)
+}
+```
+
+---
+
+# Part 4: File Changes Summary
+
+| File | Changes |
+|------|---------|
+| **schema.rs** | Add `version: u64` to entity values; change summary CF keys to `(EntityId, version)`; add `NodeSummaryIndex` and `EdgeSummaryIndex` CFs; update `ALL_COLUMN_FAMILIES` |
+| **mutation.rs** | Update `AddNode`/`AddEdge` to set version=1 and write index; add `UpdateNode`/`UpdateEdge` with optimistic locking |
+| **query.rs** | Add `all_nodes_for_summary()`, `current_nodes_for_summary()`, `node_versions_for_summary()`, and edge equivalents; update `get_node_summary()`/`get_edge_summary()` for versioned keys |
+| **gc.rs** | New file: `GraphGcConfig`, `GraphGcMetrics`, `GraphGarbageCollector` with background worker |
+| **tests.rs** | Test optimistic locking (version mismatch); test multi-version resolution; test GC cleanup |
+
+---
+
+# Part 5: Summary
+
+| Aspect | Design |
+|--------|--------|
+| **Reverse index** | `(SummaryHash, EntityKey, Version)` → empty |
+| **Multi-version support** | Index returns all versions; query API provides `all_*` and `current_*` variants |
+| **Content storage** | Keyed by `(EntityId, Version)` — enables clean GC |
+| **Optimistic locking** | Version in entity value; reject update if mismatch |
+| **GC** | Delete old versions beyond retention; delete stale index entries; delete old fragments by age |
