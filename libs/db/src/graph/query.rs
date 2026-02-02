@@ -1923,7 +1923,7 @@ impl QueryExecutor for IncomingEdgesDispatch {
             );
 
             for item in iter {
-                let (key_bytes, _value_bytes) = item?;
+                let (key_bytes, value_bytes) = item?;
                 let key: schema::ReverseEdgeCfKey =
                     schema::ReverseEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
@@ -1933,29 +1933,38 @@ impl QueryExecutor for IncomingEdgesDispatch {
                     break;
                 }
 
+                // Deserialize and check temporal validity
+                let value: schema::ReverseEdgeCfValue =
+                    schema::ReverseEdges::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+                // Always check temporal validity - skip invalid edges
+                if !schema::is_valid_at_time(&value.0, ref_time) {
+                    continue;
+                }
+
                 let source_id = key.1;
                 let edge_name_hash = key.2;
 
-                // Lookup ForwardEdge for temporal validity and weight
+                // Lookup weight from ForwardEdges CF
                 // ReverseEdgeCfKey is (dst_id, src_id, NameHash)
                 // ForwardEdgeCfKey is (src_id, dst_id, NameHash)
                 let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
                 let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
 
-                if let Some(forward_value_bytes) = db.get_cf(forward_cf, forward_key_bytes)? {
+                let weight = if let Some(forward_value_bytes) =
+                    db.get_cf(forward_cf, forward_key_bytes)?
+                {
                     let forward_value: schema::ForwardEdgeCfValue =
                         schema::ForwardEdges::value_from_bytes(&forward_value_bytes).map_err(
                             |e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e),
                         )?;
+                    forward_value.1 // Extract weight from field 1
+                } else {
+                    None
+                };
 
-                    // Check temporal validity from ForwardEdge (authoritative source)
-                    if !schema::is_valid_at_time(&forward_value.0, ref_time) {
-                        continue;
-                    }
-
-                    let weight = forward_value.1; // Extract weight from field 1
-                    edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
-                }
+                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
             }
         } else {
             let txn_db = storage.transaction_db()?;
@@ -1983,7 +1992,7 @@ impl QueryExecutor for IncomingEdgesDispatch {
             );
 
             for item in iter {
-                let (key_bytes, _value_bytes) = item?;
+                let (key_bytes, value_bytes) = item?;
                 let key: schema::ReverseEdgeCfKey =
                     schema::ReverseEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
@@ -1993,29 +2002,38 @@ impl QueryExecutor for IncomingEdgesDispatch {
                     break;
                 }
 
+                // Deserialize and check temporal validity
+                let value: schema::ReverseEdgeCfValue =
+                    schema::ReverseEdges::value_from_bytes(&value_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+
+                // Always check temporal validity - skip invalid edges
+                if !schema::is_valid_at_time(&value.0, ref_time) {
+                    continue;
+                }
+
                 let source_id = key.1;
                 let edge_name_hash = key.2;
 
-                // Lookup ForwardEdge for temporal validity and weight
+                // Lookup weight from ForwardEdges CF
                 // ReverseEdgeCfKey is (dst_id, src_id, NameHash)
                 // ForwardEdgeCfKey is (src_id, dst_id, NameHash)
                 let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
                 let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
 
-                if let Some(forward_value_bytes) = txn_db.get_cf(forward_cf, forward_key_bytes)? {
+                let weight = if let Some(forward_value_bytes) =
+                    txn_db.get_cf(forward_cf, forward_key_bytes)?
+                {
                     let forward_value: schema::ForwardEdgeCfValue =
                         schema::ForwardEdges::value_from_bytes(&forward_value_bytes).map_err(
                             |e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e),
                         )?;
+                    forward_value.1 // Extract weight from field 1
+                } else {
+                    None
+                };
 
-                    // Check temporal validity from ForwardEdge (authoritative source)
-                    if !schema::is_valid_at_time(&forward_value.0, ref_time) {
-                        continue;
-                    }
-
-                    let weight = forward_value.1; // Extract weight from field 1
-                    edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
-                }
+                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
             }
         }
 
@@ -2546,7 +2564,7 @@ impl TransactionQueryExecutor for IncomingEdges {
         );
 
         for item in iter {
-            let (key_bytes, _value_bytes) = item?;
+            let (key_bytes, value_bytes) = item?;
 
             let key: schema::ReverseEdgeCfKey = schema::ReverseEdges::key_from_bytes(&key_bytes)?;
 
@@ -2555,24 +2573,29 @@ impl TransactionQueryExecutor for IncomingEdges {
                 break;
             }
 
-            let dest_id = key.0;
-            let source_id = key.1;
-            let edge_name_hash = key.2;
+            let value: schema::ReverseEdgeCfValue =
+                schema::ReverseEdges::value_from_bytes(&value_bytes)?;
 
-            // Lookup ForwardEdge for temporal validity and weight
-            let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
-            let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
+            // Check temporal validity
+            if schema::is_valid_at_time(&value.0, ref_time) {
+                let dest_id = key.0;
+                let source_id = key.1;
+                let edge_name_hash = key.2;
 
-            if let Some(forward_value_bytes) = txn.get_cf(forward_cf, &forward_key_bytes)? {
-                let forward_value: schema::ForwardEdgeCfValue =
-                    schema::ForwardEdges::value_from_bytes(&forward_value_bytes)?;
+                // Lookup weight from ForwardEdges CF
+                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
+                let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
 
-                // Check temporal validity from ForwardEdge (authoritative source)
-                if !schema::is_valid_at_time(&forward_value.0, ref_time) {
-                    continue;
-                }
+                let weight = if let Some(forward_value_bytes) =
+                    txn.get_cf(forward_cf, &forward_key_bytes)?
+                {
+                    let forward_value: schema::ForwardEdgeCfValue =
+                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes)?;
+                    forward_value.1
+                } else {
+                    None
+                };
 
-                let weight = forward_value.1;
                 edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
             }
         }

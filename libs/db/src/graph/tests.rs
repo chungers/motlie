@@ -1941,7 +1941,25 @@ use tokio::time::Duration;
         assert_eq!(archived.1, Some(2.718), "Archived weight value should match");
     }
 
-    // ReverseEdgeCfValue test removed - ReverseEdges now has empty value
+    /// Test rkyv serialization round-trip for ReverseEdgeCfValue
+    #[test]
+    fn test_rkyv_reverse_edge_value_round_trip() {
+        use crate::graph::schema::{ReverseEdgeCfValue, ReverseEdges};
+        use crate::{TemporalRange, TimestampMilli};
+
+        let temporal_range = TemporalRange::valid_until(TimestampMilli(9999));
+
+        let original = ReverseEdgeCfValue(temporal_range);
+
+        // Serialize with rkyv
+        let bytes = ReverseEdges::value_to_bytes(&original).expect("rkyv serialize");
+
+        // Deserialize with rkyv
+        let recovered: ReverseEdgeCfValue = ReverseEdges::value_from_bytes(&bytes).expect("rkyv deserialize");
+
+        // Verify temporal range matches
+        assert_eq!(original.0, recovered.0, "TemporalRange should match");
+    }
 
     /// Test rkyv handles None values correctly
     #[test]

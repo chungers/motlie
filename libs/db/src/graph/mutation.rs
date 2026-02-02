@@ -369,7 +369,7 @@ fn update_edge_valid_range(
     new_range: schema::TemporalRange,
 ) -> Result<()> {
     use super::ValidRangePatchable;
-    use super::schema::{ForwardEdgeCfKey, ForwardEdges};
+    use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
 
     // Patch ForwardEdges CF
     let forward_cf = txn_db
@@ -392,7 +392,26 @@ fn update_edge_valid_range(
     let patched_forward_bytes = forward_edges.patch_valid_range(&forward_value_bytes, new_range)?;
     txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
 
-    // ReverseEdges has empty value - no patching needed (TemporalRange is in ForwardEdges only)
+    // Patch ReverseEdges CF
+    let reverse_cf = txn_db
+        .cf_handle(ReverseEdges::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
+
+    let reverse_key = ReverseEdgeCfKey(dst_id, src_id, name_hash);
+    let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
+
+    let reverse_value_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "ReverseEdge not found: src={}, dst={}, name_hash={}",
+            src_id,
+            dst_id,
+            name_hash
+        )
+    })?;
+
+    let reverse_edges = ReverseEdges;
+    let patched_reverse_bytes = reverse_edges.patch_valid_range(&reverse_value_bytes, new_range)?;
+    txn.put_cf(reverse_cf, &reverse_key_bytes, patched_reverse_bytes)?;
 
     Ok(())
 }
