@@ -137,6 +137,8 @@ pub struct EdgeSummaryIndexCfKey(
 // Value: empty
 ```
 
+**EntityKey (edge):** `(src_id, dst_id, name_hash)`. This matches the forward edge key.
+
 ---
 
 ## 1.4 Fragment Column Families (Unchanged)
@@ -290,6 +292,8 @@ pub fn get_edge_summary(
 |--------|-------|---------|
 | `(hash)` | 8 | All nodes with this hash (any version) |
 | `(hash, node_id)` | 24 | All versions of specific node with this hash |
+
+**Content-based search:** scanning by `(hash)` enables "find all entities with identical content" without any entity-specific filters.
 
 ### EdgeSummaryIndex
 
@@ -796,9 +800,11 @@ This section proposes targeted changes to reduce read amplification, bound GC co
 
 ## 1) Current-Only Reverse Index (Reduce Read Amplification)
 
-**Problem:** `current_*_for_summary()` scans all index entries for a hash and then point-reads each entity to check if the version is current. This is O(k) reads for k index entries, which can be large for popular hashes.
+**Problem:** `current_*_for_summary()` scans all index entries for a hash and then point-reads each entity to check if the version is current. This is O(k) reads for k index entries. If `SummaryHash` fanout is low (summaries are unique), this is typically small and acceptable. If summaries are templated and many entities share identical content, the scan can grow.
 
-### Option A: Maintain a “Current” Index
+**Note on fanout:** Fanout is driven by **summary content collisions**, not edge names. A common edge label like `"friends_with"` only creates large fanout if the **edge summaries** are also identical/templated (same `SummaryHash` across many edges).
+
+### Option A: Maintain a “Current” Index (Optional for High-Fanout Hashes)
 
 Add a second CF that only contains *current* versions. This avoids per-entry validation reads for the common path (vector search resolution).
 
@@ -852,6 +858,15 @@ Keep one index CF but store a 1-byte value indicating current or stale. Update f
 **Cons:**
 - Requires random reads of index values during scans.
 - Still keeps stale entries; GC must remove stale ones eventually.
+
+**Implementation detail:**
+
+- **Key:** `(SummaryHash, EntityKey, Version)` (unchanged)
+- **Value:** 1 byte: `0x01 = current`, `0x00 = stale`
+- **Insert:** write entry with `0x01`
+- **Update:** write new entry with `0x01`, flip old entry to `0x00`
+- **Delete:** flip latest entry to `0x00` (or delete it)
+- **Read:** `current_*_for_summary(hash)` filters by value `0x01` during prefix scan
 
 ---
 
