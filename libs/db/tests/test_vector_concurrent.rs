@@ -1019,7 +1019,7 @@ fn test_cache_isolation_under_load() {
 //
 // These benchmarks use the proper MPSC/MPMC channel architecture:
 // - Insert producers send to Writer (MPSC) → single mutation consumer
-// - Search producers send to SearchReader (MPMC) → query worker pool
+// - Search producers send to Reader (MPMC) → query worker pool
 //
 
 /// Quick benchmark with smaller config for CI validation.
@@ -1064,7 +1064,7 @@ async fn benchmark_quick_validation() {
 //
 // Architecture: Uses proper MPSC/MPMC channel infrastructure.
 // - Insert producers → Writer (MPSC) → single mutation consumer
-// - Search producers → SearchReader (MPMC) → query worker pool
+// - Search producers → Reader (MPMC) → query worker pool
 //
 // Run with: cargo test -p motlie-db --test test_vector_concurrent baseline_full -- --ignored --nocapture
 

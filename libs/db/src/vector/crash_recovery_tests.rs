@@ -49,6 +49,7 @@ mod tests {
     /// Helper: Create test EmbeddingSpec with default HNSW parameters
     fn make_test_spec(dim: usize, distance: Distance) -> EmbeddingSpec {
         EmbeddingSpec {
+            code: 0,
             model: "test".to_string(),
             dim: dim as u32,
             distance,

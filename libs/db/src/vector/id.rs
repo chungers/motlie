@@ -227,6 +227,7 @@ impl IdAllocator {
     ///
     /// This method is kept for crash recovery tests that need to simulate
     /// persistence outside of normal transaction flows.
+    #[cfg(test)]
     pub(crate) fn persist(&self, db: &TransactionDB, embedding: EmbeddingCode) -> Result<()> {
         let txn = db.transaction();
         self.persist_in_txn(&txn, db, embedding)?;
@@ -240,6 +241,7 @@ impl IdAllocator {
     /// * `txn` - Active transaction to write within
     /// * `db` - TransactionDB for CF handle lookup
     /// * `embedding` - Embedding code to persist state for
+    #[cfg(test)]
     pub(crate) fn persist_in_txn(
         &self,
         txn: &rocksdb::Transaction<'_, TransactionDB>,

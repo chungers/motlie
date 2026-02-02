@@ -30,8 +30,9 @@ use anyhow::Result;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
+use crate::vector::processor::Processor;
 use crate::vector::schema::ExternalKey;
-use crate::vector::{Distance, Embedding, Processor, Storage};
+use crate::vector::{Distance, Embedding, Storage};
 use crate::Id;
 
 use super::metrics::compute_recall;

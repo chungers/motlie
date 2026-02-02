@@ -15,7 +15,7 @@ use super::async_updater::{AsyncGraphUpdater, AsyncUpdaterConfig};
 use super::cache::NavigationCache;
 use super::gc::{GarbageCollector, GcConfig};
 use super::processor::Processor;
-use super::reader::{create_search_reader, ReaderConfig, SearchReader, spawn_consumers_with_processor};
+use super::reader::{create_reader, ReaderConfig, Reader, spawn_consumers_with_processor};
 use super::registry::EmbeddingRegistry;
 use super::schema::{self, ALL_COLUMN_FAMILIES, EmbeddingSpecs};
 use super::writer::{create_writer, spawn_consumer, Consumer, Writer, WriterConfig};
@@ -127,7 +127,7 @@ impl Subsystem {
     /// Start the vector subsystem with managed lifecycle.
     ///
     /// This is the recommended way to use the vector subsystem. It:
-    /// 1. Creates Writer + SearchReader with internal wiring
+    /// 1. Creates Writer + Reader with internal wiring
     /// 2. Spawns mutation consumer (1 worker)
     /// 3. Spawns query consumers (configurable workers)
     /// 4. Registers Writer for automatic shutdown flush
@@ -141,7 +141,7 @@ impl Subsystem {
     ///
     /// # Returns
     ///
-    /// Tuple of (Writer, SearchReader) for sending mutations and queries.
+    /// Tuple of (Writer, Reader) for sending mutations and queries.
     ///
     /// # Example
     ///
@@ -198,7 +198,7 @@ impl Subsystem {
         writer_config: WriterConfig,
         reader_config: ReaderConfig,
         num_query_workers: usize,
-    ) -> (Writer, SearchReader) {
+    ) -> (Writer, Reader) {
         self.start_with_async(storage, writer_config, reader_config, num_query_workers, None, None)
     }
 
@@ -233,7 +233,7 @@ impl Subsystem {
     ///
     /// # Returns
     ///
-    /// Tuple of (Writer, SearchReader) for sending mutations and queries.
+    /// Tuple of (Writer, Reader) for sending mutations and queries.
     ///
     /// # Example
     ///
@@ -281,7 +281,7 @@ impl Subsystem {
         num_query_workers: usize,
         async_config: Option<AsyncUpdaterConfig>,
         gc_config: Option<GcConfig>,
-    ) -> (Writer, SearchReader) {
+    ) -> (Writer, Reader) {
         // Set storage on registry (enables register() calls)
         // This is safe to call multiple times - subsequent calls are no-ops
         let _ = self.cache.set_storage(storage.clone());
@@ -303,7 +303,7 @@ impl Subsystem {
         let mutation_handle = spawn_consumer(mutation_consumer);
 
         // Create and spawn query consumers
-        let (search_reader, query_receiver) = create_search_reader(reader_config.clone(), processor.clone());
+        let (reader, query_receiver) = create_reader(reader_config.clone(), processor.clone());
         let query_handles = spawn_consumers_with_processor(
             query_receiver,
             reader_config,
@@ -342,7 +342,7 @@ impl Subsystem {
             *self.gc.write().expect("gc lock poisoned") = Some(gc);
         }
 
-        (writer, search_reader)
+        (writer, reader)
     }
 
     /// Get reference to the navigation cache.
