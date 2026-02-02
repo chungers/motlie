@@ -1184,3 +1184,165 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | **Version overflow** | Reject writes at VERSION_MAX; documented policy |
 | **GC** | Incremental with cursor (persisted via `GraphMeta` pattern); delete old versions; delete stale index entries; hard delete tombstones after retention |
 | **Repair** | Periodic forward↔reverse consistency check |
+
+---
+
+# Part 6: Performance Analysis
+
+## 6.1 Write Amplification
+
+### Baseline (Current Design)
+
+| Operation | CF Writes | Details |
+|-----------|-----------|---------|
+| AddNode | 3 puts | Names, NodeSummaries, Nodes |
+| AddEdge | 4 puts | Names, EdgeSummaries, ForwardEdges, ReverseEdges |
+| UpdateEdgeWeight | 1 get + 1 put | Read-modify-write on ForwardEdges |
+
+### New Design
+
+| Operation | CF Writes | Delta | Notes |
+|-----------|-----------|-------|-------|
+| InsertNode | 4 puts | **+1** | +NodeSummaryIndex (CURRENT marker) |
+| InsertEdge | 5 puts | **+1** | +EdgeSummaryIndex (CURRENT marker) |
+| UpdateNode | 1 get + 4 puts | **+1 get, +2 puts** | Optimistic read + STALE/CURRENT markers |
+| UpdateEdge | 1 get + 4 puts | **+2 puts** | STALE/CURRENT markers |
+| DeleteNode | 1 get + 2 puts | **new op** | Tombstone + STALE marker |
+| DeleteEdge | 1 get + 2 puts | **new op** | Tombstone + STALE marker |
+
+### Bytes per Operation
+
+| Operation | Key Bytes | Value Bytes | Total |
+|-----------|-----------|-------------|-------|
+| NodeSummaryIndex entry | 28 | 1 | 29 |
+| EdgeSummaryIndex entry | 52 | 1 | 53 |
+| Version field (entity) | 0 | 4 | 4 |
+| Deleted flag (entity) | 0 | 1 | 1 |
+
+---
+
+## 6.2 Read Amplification
+
+### Reverse Lookup: `current_nodes_for_summary(hash)`
+
+| Step | Operation | Count |
+|------|-----------|-------|
+| 1 | Prefix scan NodeSummaryIndex | N entries |
+| 2 | Filter by marker (CURRENT) | in-scan |
+| 3 | Get Nodes (tombstone check) | M gets (M ≤ N) |
+
+**Optimization:** Skip step 3 if tombstone filtering not required.
+
+### Reverse Lookup: `all_nodes_for_summary(hash)`
+
+| Step | Operation | Count |
+|------|-----------|-------|
+| 1 | Prefix scan NodeSummaryIndex | N entries |
+
+No additional reads — returns all (entity, version) pairs.
+
+### Point Reads (Unchanged)
+
+| Query | Operations |
+|-------|------------|
+| NodeById | 1 get |
+| OutgoingEdges | 1 prefix scan |
+| IncomingEdges | 1 prefix scan |
+
+---
+
+## 6.3 QPS Impact Estimates
+
+### By Workload Type
+
+| Workload | Write Impact | Read Impact | Net |
+|----------|--------------|-------------|-----|
+| Insert-heavy (90% insert) | -20% to -25% | 0% | **-18% to -23%** |
+| Update-heavy (50% update) | -33% to -50% | 0% | **-17% to -25%** |
+| Read-heavy (90% read) | -20% | 0% | **-2%** |
+| Mixed balanced | -25% | 0% | **-12%** |
+
+### Benchmark Reference Points
+
+From existing benchmarks:
+
+| Metric | Value | Source |
+|--------|-------|--------|
+| Vector insert throughput | ~140 ops/sec | throughput_balanced.csv |
+| Graph DFS 10K nodes | 154ms | performance_metrics.csv |
+| Graph BFS 10K nodes | 152ms | performance_metrics.csv |
+| RocksDB single put | ~7μs | typical SSD |
+
+**Estimated index write overhead:** ~7-14μs per mutation (1-2 additional puts).
+
+---
+
+## 6.4 Mitigation Strategies
+
+### 1. Batch Writes
+
+Group mutations to amortize WAL overhead:
+
+```rust
+// Bad: individual writes (3 WAL syncs)
+node1.run(&writer).await?;
+node2.run(&writer).await?;
+node3.run(&writer).await?;
+
+// Good: batched (1 WAL sync)
+mutations![node1, node2, node3].run(&writer).await?;
+```
+
+**Impact:** 2-3x throughput improvement for bulk operations.
+
+### 2. Async Index Updates (Optional)
+
+For write-heavy workloads tolerating eventual consistency:
+
+```rust
+// HOT path: entity write only (synchronous)
+txn.put_cf(nodes_cf, key, value)?;
+txn.commit()?;
+
+// COLD path: index update (async, best-effort)
+index_queue.send(IndexUpdate::Node { id, version, hash })?;
+```
+
+**Trade-off:** Reverse lookups may miss recently written entities until index catches up.
+
+### 3. Skip Tombstone Check
+
+For use cases where deleted entities are acceptable in results:
+
+```rust
+pub fn current_nodes_for_summary_fast(&self, hash: SummaryHash) -> Result<Vec<Id>> {
+    // Only prefix scan + marker filter
+    // No Nodes CF get (skip tombstone check)
+}
+```
+
+**Impact:** 50% reduction in read amplification for reverse lookups.
+
+### 4. Tuned RocksDB Settings
+
+Recommended CF-specific tuning:
+
+| CF | Block Cache | Bloom Filter | Compression |
+|----|-------------|--------------|-------------|
+| Nodes, ForwardEdges | Large (HOT) | 10 bits | LZ4 |
+| NodeSummaryIndex | Medium | 10 bits | None (small values) |
+| NodeSummaries | Small (COLD) | None | ZSTD |
+
+---
+
+## 6.5 Cost-Benefit Summary
+
+| Cost | Benefit |
+|------|---------|
+| +1 put per insert | Reverse lookup: hash → entities |
+| +2 puts per update | Multi-version tracking |
+| +1 get per update | Optimistic locking (no lost updates) |
+| +5 new CFs | Clean separation HOT/COLD/INDEX |
+| ~15-25% write throughput | Vector search → graph entity resolution |
+
+**Conclusion:** The reverse index capability enables the core use case (vector search results resolving to graph entities). The write amplification cost is acceptable and can be mitigated through batching.
