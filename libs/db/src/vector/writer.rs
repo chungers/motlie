@@ -199,7 +199,7 @@ impl MutationCacheUpdate {
 /// Following the same pattern as `graph::writer::MutationExecutor`.
 ///
 /// Note: This is synchronous because RocksDB operations are blocking.
-pub trait MutationExecutor: Send + Sync {
+pub(crate) trait MutationExecutor: Send + Sync {
     /// Execute this mutation directly against a RocksDB transaction.
     ///
     /// Returns an optional MutationCacheUpdate if caching is needed.
@@ -357,7 +357,7 @@ pub fn create_writer(config: WriterConfig) -> (Writer, mpsc::Receiver<Vec<Mutati
 ///
 /// The consumer receives mutation batches and delegates to a Processor
 /// for database operations.
-pub struct Consumer {
+pub(crate) struct Consumer {
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     processor: Arc<Processor>,
@@ -365,7 +365,7 @@ pub struct Consumer {
 
 impl Consumer {
     /// Create a new Consumer.
-    pub fn new(
+    pub(crate) fn new(
         receiver: mpsc::Receiver<Vec<Mutation>>,
         config: WriterConfig,
         processor: Arc<Processor>,
@@ -522,7 +522,7 @@ impl Consumer {
 /// Spawn a mutation consumer as a tokio task.
 ///
 /// Returns a JoinHandle that resolves when the consumer completes.
-pub fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
+pub(crate) fn spawn_consumer(consumer: Consumer) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move { consumer.run().await })
 }
 
@@ -637,14 +637,26 @@ mod tests {
     #[tokio::test]
     async fn test_send_mutations() {
         use super::super::embedding::Embedding;
-        use super::super::schema::{ExternalKey, VectorElementType};
+        use super::super::schema::{EmbeddingSpec, ExternalKey, VectorElementType};
         use super::super::Distance;
+        use std::sync::Arc;
 
         let (writer, mut receiver) = create_writer(WriterConfig::default());
 
         // Send a mutation
         let id = crate::Id::new();
-        let embedding = Embedding::new(1, "test", 128, Distance::Cosine, VectorElementType::F32, None);
+        let spec = Arc::new(EmbeddingSpec {
+            code: 1,
+            model: "test".to_string(),
+            dim: 128,
+            distance: Distance::Cosine,
+            storage_type: VectorElementType::F32,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        });
+        let embedding = Embedding::new(spec, None);
         let mutation = super::super::mutation::InsertVector::new(&embedding, ExternalKey::NodeId(id), vec![1.0, 2.0, 3.0]);
         writer.send(vec![mutation.into()]).await.unwrap();
 

@@ -55,7 +55,7 @@ use crate::vector::schema::EmbeddingSpecs;
 ///
 /// For stricter atomicity, consider adding a rollback callback, but this
 /// is overkill for the current use case.
-pub fn spec(
+pub(crate) fn spec(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     processor: &Processor,

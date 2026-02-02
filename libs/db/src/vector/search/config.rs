@@ -460,10 +460,26 @@ impl std::fmt::Display for SearchConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vector::schema::VectorElementType;
+    use crate::vector::schema::{EmbeddingSpec, VectorElementType};
+    use std::sync::Arc;
 
     fn make_embedding(distance: Distance) -> Embedding {
-        Embedding::new(1, "test", 128, distance, VectorElementType::default(), None)
+        make_embedding_with_code(1, "test", 128, distance)
+    }
+
+    fn make_embedding_with_code(code: u64, model: &str, dim: u32, distance: Distance) -> Embedding {
+        let spec = Arc::new(EmbeddingSpec {
+            code,
+            model: model.to_string(),
+            dim,
+            distance,
+            storage_type: VectorElementType::default(),
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            rabitq_bits: 1,
+            rabitq_seed: 42,
+        });
+        Embedding::new(spec, None)
     }
 
     #[test]
@@ -705,8 +721,8 @@ mod tests {
     #[test]
     fn test_multiple_embeddings_different_codes() {
         // Test that different embedding codes are properly distinguished
-        let emb1 = Embedding::new(1, "model1", 128, Distance::Cosine, VectorElementType::default(), None);
-        let emb2 = Embedding::new(2, "model2", 768, Distance::L2, VectorElementType::default(), None);
+        let emb1 = make_embedding_with_code(1, "model1", 128, Distance::Cosine);
+        let emb2 = make_embedding_with_code(2, "model2", 768, Distance::L2);
 
         let config1 = SearchConfig::new(emb1, 10);
         let config2 = SearchConfig::new(emb2, 10);

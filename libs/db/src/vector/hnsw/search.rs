@@ -296,7 +296,7 @@ pub fn search_with_rabitq_cached(
         .collect();
 
     // Parallel reranking - each worker has thread-safe RocksDB access
-    let exact_results = crate::vector::parallel::rerank_parallel(&vec_ids, |vec_id| {
+    let exact_results = crate::vector::search::rerank_parallel(&vec_ids, |vec_id| {
         distance(index, storage, query, vec_id).ok()
     }, k);
 
