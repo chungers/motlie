@@ -4,7 +4,7 @@
 
 1. **No reverse index**: `SummaryHash` from vector search cannot be resolved to graph entities without full scan
 2. **No optimistic locking**: Blind upserts can silently lose concurrent updates
-3. **No GC for stale content**: Old summaries/fragments accumulate without cleanup
+3. **No GC for stale content**: Old summaries accumulate without cleanup
 
 ## Core Goal
 
@@ -59,6 +59,8 @@ pub struct ForwardEdgeCfValue(
     pub Version,               // Version [NEW]
 );
 ```
+
+**Note:** Edge identity is `(src, dst, name)`. `name` is immutable; renames are modeled as delete+insert.
 
 ### ReverseEdges
 
@@ -139,7 +141,7 @@ pub struct EdgeSummaryIndexCfKey(
 
 ## 1.4 Fragment Column Families (Unchanged)
 
-Fragments use timestamp for append-only semantics. GC by age.
+Fragments use timestamp for append-only semantics. No GC.
 
 ```rust
 pub struct NodeFragmentCfKey(pub Id, pub TimestampMilli);  // 24 bytes
@@ -647,9 +649,6 @@ pub struct GraphGcConfig {
     /// Number of summary versions to retain per entity
     pub versions_to_keep: usize,  // default: 2
 
-    /// Delete fragments older than this
-    pub fragment_max_age: Duration,  // default: 30 days
-
     /// Run GC on startup
     pub process_on_startup: bool,  // default: true
 }
@@ -663,8 +662,6 @@ pub struct GraphGcConfig {
 | EdgeSummaries | `(EdgeKey, version)` | Keep versions ≥ (current - N + 1) |
 | NodeSummaryIndex | `(Hash, Id, version)` | Delete if version not in retained set |
 | EdgeSummaryIndex | `(Hash, EdgeKey, version)` | Delete if version not in retained set |
-| NodeFragments | `(Id, timestamp)` | Delete if timestamp < (now - max_age) |
-| EdgeFragments | `(EdgeKey, timestamp)` | Delete if timestamp < (now - max_age) |
 
 ### GcMetrics
 
@@ -675,8 +672,6 @@ pub struct GcMetrics {
     pub edge_summaries_deleted: AtomicU64,
     pub node_index_entries_deleted: AtomicU64,
     pub edge_index_entries_deleted: AtomicU64,
-    pub node_fragments_deleted: AtomicU64,
-    pub edge_fragments_deleted: AtomicU64,
     pub cycles_completed: AtomicU64,
 }
 ```
@@ -766,29 +761,6 @@ fn gc_node_summary_index(&self) -> Result<u64> {
 }
 ```
 
-### GC Logic: Fragments
-
-```rust
-fn gc_node_fragments(&self) -> Result<u64> {
-    let txn = self.txn_db.transaction();
-    let mut deleted = 0u64;
-    let cutoff = TimestampMilli::now().0
-        - self.config.fragment_max_age.as_millis() as u64;
-
-    for (key, _) in self.full_scan(node_fragments_cf)? {
-        let frag_key = NodeFragments::key_from_bytes(&key)?;
-        if frag_key.1.0 < cutoff {
-            txn.delete_cf(node_fragments_cf, &key)?;
-            deleted += 1;
-        }
-    }
-
-    txn.commit()?;
-    Ok(deleted)
-}
-```
-
----
 
 # Part 4: File Changes Summary
 
@@ -810,7 +782,7 @@ fn gc_node_fragments(&self) -> Result<u64> {
 | **Multi-version support** | Index returns all versions; query API provides `all_*` and `current_*` variants |
 | **Content storage** | Keyed by `(EntityId, Version)` — enables clean GC |
 | **Optimistic locking** | Version in entity value; reject update if mismatch |
-| **GC** | Delete old versions beyond retention; delete stale index entries; delete old fragments by age |
+| **GC** | Delete old versions beyond retention; delete stale index entries |
 
 ---
 
