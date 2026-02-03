@@ -288,6 +288,11 @@ impl Subsystem {
                 <schema::ReverseEdges as ColumnFamily>::CF_NAME,
                 <schema::ReverseEdges as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
+            // CONTENT-ADDRESS: Graph-level metadata (GC cursors) (claude, 2026-02-02)
+            ColumnFamilyDescriptor::new(
+                <schema::GraphMeta as ColumnFamily>::CF_NAME,
+                <schema::GraphMeta as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
+            ),
         ]
     }
 }

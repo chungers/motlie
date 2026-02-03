@@ -100,6 +100,11 @@ pub enum Mutation {
     UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil),
     UpdateEdgeValidSinceUntil(UpdateEdgeValidSinceUntil),
     UpdateEdgeWeight(UpdateEdgeWeight),
+    // CONTENT-ADDRESS: Update/Delete with optimistic locking
+    UpdateNodeSummary(UpdateNodeSummary),
+    UpdateEdgeSummary(UpdateEdgeSummary),
+    DeleteNode(DeleteNode),
+    DeleteEdge(DeleteEdge),
 
     /// Flush marker for synchronization.
     ///
@@ -233,6 +238,87 @@ pub struct UpdateEdgeWeight {
 
     /// The new weight value
     pub weight: f64,
+}
+
+// ============================================================================
+// CONTENT-ADDRESS: Update/Delete Mutations with Optimistic Locking
+// (claude, 2026-02-02, implementing)
+// ============================================================================
+
+/// Update a node's summary with optimistic locking.
+///
+/// This mutation:
+/// 1. Reads the current node to get version and old summary hash
+/// 2. Verifies version matches expected_version (optimistic lock check)
+/// 3. Increments version
+/// 4. Writes new summary to NodeSummaries CF
+/// 5. Flips old index entry to STALE
+/// 6. Writes new index entry with CURRENT marker
+/// 7. Updates Nodes CF with new version and summary hash
+#[derive(Debug, Clone)]
+pub struct UpdateNodeSummary {
+    /// The UUID of the Node to update
+    pub id: Id,
+
+    /// The new summary content
+    pub new_summary: schema::NodeSummary,
+
+    /// Expected version for optimistic locking
+    /// If the current version doesn't match, the update fails
+    pub expected_version: schema::Version,
+}
+
+/// Update an edge's summary with optimistic locking.
+#[derive(Debug, Clone)]
+pub struct UpdateEdgeSummary {
+    /// The UUID of the source Node
+    pub src_id: Id,
+
+    /// The UUID of the destination Node
+    pub dst_id: Id,
+
+    /// The name of the Edge
+    pub name: schema::EdgeName,
+
+    /// The new summary content
+    pub new_summary: schema::EdgeSummary,
+
+    /// Expected version for optimistic locking
+    pub expected_version: schema::Version,
+}
+
+/// Delete a node with tombstone semantics.
+///
+/// This mutation:
+/// 1. Reads the current node to verify version
+/// 2. Sets deleted=true flag (tombstone)
+/// 3. Increments version
+/// 4. Flips current index entry to STALE
+///
+/// The node remains in the database for audit/time-travel until GC.
+#[derive(Debug, Clone)]
+pub struct DeleteNode {
+    /// The UUID of the Node to delete
+    pub id: Id,
+
+    /// Expected version for optimistic locking
+    pub expected_version: schema::Version,
+}
+
+/// Delete an edge with tombstone semantics.
+#[derive(Debug, Clone)]
+pub struct DeleteEdge {
+    /// The UUID of the source Node
+    pub src_id: Id,
+
+    /// The UUID of the destination Node
+    pub dst_id: Id,
+
+    /// The name of the Edge
+    pub name: schema::EdgeName,
+
+    /// Expected version for optimistic locking
+    pub expected_version: schema::Version,
 }
 
 // ============================================================================
@@ -474,14 +560,18 @@ impl MutationExecutor for AddNode {
     ) -> Result<()> {
         tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation");
 
-    
-        use super::schema::{Nodes, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
+        use super::schema::{
+            Nodes, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue,
+            NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+        };
         use super::summary_hash::SummaryHash;
 
         // Write name to Names CF (idempotent)
         write_name_to_cf(txn, txn_db, &self.name)?;
 
         // Write summary to NodeSummaries CF (cold) if non-empty
+        // Also write reverse index entry with CURRENT marker
+        // (claude, 2026-02-02, in-progress) CONTENT-ADDRESS index writes
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
                 let summaries_cf = txn_db
@@ -491,6 +581,15 @@ impl MutationExecutor for AddNode {
                 let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(self.summary.clone()))?;
                 // Content-addressable: same content = same hash = idempotent write
                 txn.put_cf(summaries_cf, summary_key, summary_value)?;
+
+                // Write reverse index entry with CURRENT marker (version=1 for new nodes)
+                let index_cf = txn_db
+                    .cf_handle(NodeSummaryIndex::CF_NAME)
+                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeSummaryIndex::CF_NAME))?;
+                let index_key = NodeSummaryIndexCfKey(summary_hash, self.id, 1);
+                let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
+                let index_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
+                txn.put_cf(index_cf, index_key_bytes, index_value_bytes)?;
             }
         }
 
@@ -512,14 +611,18 @@ impl MutationExecutor for AddNode {
     ) -> Result<()> {
         tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation (cached)");
 
-    
-        use super::schema::{Nodes, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
+        use super::schema::{
+            Nodes, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue,
+            NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+        };
         use super::summary_hash::SummaryHash;
 
         // Write name to Names CF with cache optimization
         write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
 
         // Write summary to NodeSummaries CF (cold) if non-empty
+        // Also write reverse index entry with CURRENT marker
+        // (claude, 2026-02-02, in-progress) CONTENT-ADDRESS index writes
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
                 let summaries_cf = txn_db
@@ -528,6 +631,15 @@ impl MutationExecutor for AddNode {
                 let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(summary_hash));
                 let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(self.summary.clone()))?;
                 txn.put_cf(summaries_cf, summary_key, summary_value)?;
+
+                // Write reverse index entry with CURRENT marker (version=1 for new nodes)
+                let index_cf = txn_db
+                    .cf_handle(NodeSummaryIndex::CF_NAME)
+                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeSummaryIndex::CF_NAME))?;
+                let index_key = NodeSummaryIndexCfKey(summary_hash, self.id, 1);
+                let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
+                let index_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
+                txn.put_cf(index_cf, index_key_bytes, index_value_bytes)?;
             }
         }
 
@@ -555,14 +667,18 @@ impl MutationExecutor for AddEdge {
             "Executing AddEdge mutation"
         );
 
-    
-        use super::schema::{ForwardEdges, ReverseEdges, EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
+        use super::schema::{
+            ForwardEdges, ReverseEdges, EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue,
+            EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
+        };
         use super::summary_hash::SummaryHash;
 
         // Write name to Names CF (idempotent)
-        write_name_to_cf(txn, txn_db, &self.name)?;
+        let name_hash = write_name_to_cf(txn, txn_db, &self.name)?;
 
         // Write summary to EdgeSummaries CF (cold) if non-empty
+        // Also write reverse index entry with CURRENT marker
+        // (claude, 2026-02-02, in-progress) CONTENT-ADDRESS index writes
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
                 let summaries_cf = txn_db
@@ -572,6 +688,21 @@ impl MutationExecutor for AddEdge {
                 let summary_value = EdgeSummaries::value_to_bytes(&EdgeSummaryCfValue(self.summary.clone()))?;
                 // Content-addressable: same content = same hash = idempotent write
                 txn.put_cf(summaries_cf, summary_key, summary_value)?;
+
+                // Write reverse index entry with CURRENT marker (version=1 for new edges)
+                let index_cf = txn_db
+                    .cf_handle(EdgeSummaryIndex::CF_NAME)
+                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeSummaryIndex::CF_NAME))?;
+                let index_key = EdgeSummaryIndexCfKey(
+                    summary_hash,
+                    self.source_node_id,
+                    self.target_node_id,
+                    name_hash,
+                    1, // version=1 for new edges
+                );
+                let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
+                let index_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
+                txn.put_cf(index_cf, index_key_bytes, index_value_bytes)?;
             }
         }
 
@@ -605,14 +736,18 @@ impl MutationExecutor for AddEdge {
             "Executing AddEdge mutation (cached)"
         );
 
-    
-        use super::schema::{ForwardEdges, ReverseEdges, EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
+        use super::schema::{
+            ForwardEdges, ReverseEdges, EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue,
+            EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
+        };
         use super::summary_hash::SummaryHash;
 
         // Write name to Names CF with cache optimization
-        write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
+        let name_hash = write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
 
         // Write summary to EdgeSummaries CF (cold) if non-empty
+        // Also write reverse index entry with CURRENT marker
+        // (claude, 2026-02-02, in-progress) CONTENT-ADDRESS index writes
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
                 let summaries_cf = txn_db
@@ -621,6 +756,21 @@ impl MutationExecutor for AddEdge {
                 let summary_key = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(summary_hash));
                 let summary_value = EdgeSummaries::value_to_bytes(&EdgeSummaryCfValue(self.summary.clone()))?;
                 txn.put_cf(summaries_cf, summary_key, summary_value)?;
+
+                // Write reverse index entry with CURRENT marker (version=1 for new edges)
+                let index_cf = txn_db
+                    .cf_handle(EdgeSummaryIndex::CF_NAME)
+                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeSummaryIndex::CF_NAME))?;
+                let index_key = EdgeSummaryIndexCfKey(
+                    summary_hash,
+                    self.source_node_id,
+                    self.target_node_id,
+                    name_hash,
+                    1, // version=1 for new edges
+                );
+                let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
+                let index_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
+                txn.put_cf(index_cf, index_key_bytes, index_value_bytes)?;
             }
         }
 
@@ -793,7 +943,7 @@ impl MutationExecutor for UpdateEdgeWeight {
             "Executing UpdateEdgeWeight mutation"
         );
 
-    
+
         use super::schema::{ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges};
 
         let cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
@@ -825,6 +975,398 @@ impl MutationExecutor for UpdateEdgeWeight {
     }
 }
 
+// ============================================================================
+// CONTENT-ADDRESS: MutationExecutor Implementations for Update/Delete
+// (claude, 2026-02-02, implementing)
+// ============================================================================
+
+impl MutationExecutor for UpdateNodeSummary {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        tracing::debug!(
+            id = %self.id,
+            expected_version = self.expected_version,
+            "Executing UpdateNodeSummary mutation"
+        );
+
+        use super::schema::{
+            NodeCfKey, NodeCfValue, Nodes, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue,
+            NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue, VERSION_MAX,
+        };
+        use super::summary_hash::SummaryHash;
+
+        // 1. Read current node
+        let nodes_cf = txn_db
+            .cf_handle(Nodes::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+        let node_key = NodeCfKey(self.id);
+        let node_key_bytes = Nodes::key_to_bytes(&node_key);
+
+        let current_bytes = txn
+            .get_cf(nodes_cf, &node_key_bytes)?
+            .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
+        let current: NodeCfValue = Nodes::value_from_bytes(&current_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize node: {}", e))?;
+
+        let current_version = current.3;
+        let old_hash = current.2;
+        let is_deleted = current.4;
+
+        // 2. Check if already deleted
+        if is_deleted {
+            return Err(anyhow::anyhow!("Cannot update deleted node: {}", self.id));
+        }
+
+        // 3. Optimistic lock check
+        if current_version != self.expected_version {
+            return Err(anyhow::anyhow!(
+                "Version mismatch for node {}: expected {}, actual {}",
+                self.id,
+                self.expected_version,
+                current_version
+            ));
+        }
+
+        // 4. Version overflow check
+        if current_version == VERSION_MAX {
+            return Err(anyhow::anyhow!("Version overflow for node: {}", self.id));
+        }
+
+        // 5. Compute new version and hash
+        let new_version = current_version + 1;
+        let new_hash = SummaryHash::from_summary(&self.new_summary)?;
+
+        // 6. Write new summary to NodeSummaries CF (cold)
+        let summaries_cf = txn_db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(new_hash));
+        let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(self.new_summary.clone()))?;
+        txn.put_cf(summaries_cf, summary_key, summary_value)?;
+
+        // 7. Flip old index entry to STALE (if exists)
+        if let Some(old_h) = old_hash {
+            let index_cf = txn_db
+                .cf_handle(NodeSummaryIndex::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
+            let old_index_key = NodeSummaryIndexCfKey(old_h, self.id, current_version);
+            let old_index_key_bytes = NodeSummaryIndex::key_to_bytes(&old_index_key);
+            let stale_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
+            txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
+        }
+
+        // 8. Write new index entry with CURRENT marker
+        let index_cf = txn_db
+            .cf_handle(NodeSummaryIndex::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
+        let new_index_key = NodeSummaryIndexCfKey(new_hash, self.id, new_version);
+        let new_index_key_bytes = NodeSummaryIndex::key_to_bytes(&new_index_key);
+        let current_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
+        txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
+
+        // 9. Update Nodes CF with new version and summary hash
+        let new_node_value = NodeCfValue(current.0, current.1, Some(new_hash), new_version, false);
+        let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize node: {}", e))?;
+        txn.put_cf(nodes_cf, node_key_bytes, new_node_bytes)?;
+
+        tracing::info!(
+            id = %self.id,
+            old_version = current_version,
+            new_version = new_version,
+            "UpdateNodeSummary completed"
+        );
+
+        Ok(())
+    }
+}
+
+impl MutationExecutor for UpdateEdgeSummary {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        tracing::debug!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            name = %self.name,
+            expected_version = self.expected_version,
+            "Executing UpdateEdgeSummary mutation"
+        );
+
+        use super::schema::{
+            ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges,
+            EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue,
+            EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue, VERSION_MAX,
+        };
+        use super::summary_hash::SummaryHash;
+
+        let name_hash = NameHash::from_name(&self.name);
+
+        // 1. Read current edge
+        let forward_cf = txn_db
+            .cf_handle(ForwardEdges::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+        let edge_key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash);
+        let edge_key_bytes = ForwardEdges::key_to_bytes(&edge_key);
+
+        let current_bytes = txn
+            .get_cf(forward_cf, &edge_key_bytes)?
+            .ok_or_else(|| anyhow::anyhow!("Edge not found: {}→{}", self.src_id, self.dst_id))?;
+        let current: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&current_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge: {}", e))?;
+
+        let current_version = current.3;
+        let old_hash = current.2;
+        let is_deleted = current.4;
+
+        // 2. Check if already deleted
+        if is_deleted {
+            return Err(anyhow::anyhow!("Cannot update deleted edge: {}→{}", self.src_id, self.dst_id));
+        }
+
+        // 3. Optimistic lock check
+        if current_version != self.expected_version {
+            return Err(anyhow::anyhow!(
+                "Version mismatch for edge {}→{}: expected {}, actual {}",
+                self.src_id,
+                self.dst_id,
+                self.expected_version,
+                current_version
+            ));
+        }
+
+        // 4. Version overflow check
+        if current_version == VERSION_MAX {
+            return Err(anyhow::anyhow!("Version overflow for edge: {}→{}", self.src_id, self.dst_id));
+        }
+
+        // 5. Compute new version and hash
+        let new_version = current_version + 1;
+        let new_hash = SummaryHash::from_summary(&self.new_summary)?;
+
+        // 6. Write new summary to EdgeSummaries CF (cold)
+        let summaries_cf = txn_db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        let summary_key = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(new_hash));
+        let summary_value = EdgeSummaries::value_to_bytes(&EdgeSummaryCfValue(self.new_summary.clone()))?;
+        txn.put_cf(summaries_cf, summary_key, summary_value)?;
+
+        // 7. Flip old index entry to STALE (if exists)
+        if let Some(old_h) = old_hash {
+            let index_cf = txn_db
+                .cf_handle(EdgeSummaryIndex::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
+            let old_index_key = EdgeSummaryIndexCfKey(old_h, self.src_id, self.dst_id, name_hash, current_version);
+            let old_index_key_bytes = EdgeSummaryIndex::key_to_bytes(&old_index_key);
+            let stale_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
+            txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
+        }
+
+        // 8. Write new index entry with CURRENT marker
+        let index_cf = txn_db
+            .cf_handle(EdgeSummaryIndex::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
+        let new_index_key = EdgeSummaryIndexCfKey(new_hash, self.src_id, self.dst_id, name_hash, new_version);
+        let new_index_key_bytes = EdgeSummaryIndex::key_to_bytes(&new_index_key);
+        let current_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
+        txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
+
+        // 9. Update ForwardEdges CF with new version and summary hash
+        let new_edge_value = ForwardEdgeCfValue(current.0, current.1, Some(new_hash), new_version, false);
+        let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize edge: {}", e))?;
+        txn.put_cf(forward_cf, edge_key_bytes, new_edge_bytes)?;
+
+        tracing::info!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            old_version = current_version,
+            new_version = new_version,
+            "UpdateEdgeSummary completed"
+        );
+
+        Ok(())
+    }
+}
+
+impl MutationExecutor for DeleteNode {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        tracing::debug!(
+            id = %self.id,
+            expected_version = self.expected_version,
+            "Executing DeleteNode mutation"
+        );
+
+        use super::schema::{
+            NodeCfKey, NodeCfValue, Nodes,
+            NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue, VERSION_MAX,
+        };
+
+        // 1. Read current node
+        let nodes_cf = txn_db
+            .cf_handle(Nodes::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+        let node_key = NodeCfKey(self.id);
+        let node_key_bytes = Nodes::key_to_bytes(&node_key);
+
+        let current_bytes = txn
+            .get_cf(nodes_cf, &node_key_bytes)?
+            .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
+        let current: NodeCfValue = Nodes::value_from_bytes(&current_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize node: {}", e))?;
+
+        let current_version = current.3;
+        let current_hash = current.2;
+        let is_deleted = current.4;
+
+        // 2. Check if already deleted
+        if is_deleted {
+            return Err(anyhow::anyhow!("Node already deleted: {}", self.id));
+        }
+
+        // 3. Optimistic lock check
+        if current_version != self.expected_version {
+            return Err(anyhow::anyhow!(
+                "Version mismatch for node {}: expected {}, actual {}",
+                self.id,
+                self.expected_version,
+                current_version
+            ));
+        }
+
+        // 4. Version overflow check
+        if current_version == VERSION_MAX {
+            return Err(anyhow::anyhow!("Version overflow for node: {}", self.id));
+        }
+
+        // 5. Increment version and set deleted flag
+        let new_version = current_version + 1;
+        let new_node_value = NodeCfValue(current.0, current.1, current.2, new_version, true);
+        let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize node: {}", e))?;
+        txn.put_cf(nodes_cf, &node_key_bytes, new_node_bytes)?;
+
+        // 6. Flip current index entry to STALE
+        if let Some(hash) = current_hash {
+            let index_cf = txn_db
+                .cf_handle(NodeSummaryIndex::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
+            let index_key = NodeSummaryIndexCfKey(hash, self.id, current_version);
+            let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
+            let stale_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
+            txn.put_cf(index_cf, index_key_bytes, stale_value_bytes)?;
+        }
+
+        tracing::info!(
+            id = %self.id,
+            old_version = current_version,
+            new_version = new_version,
+            "DeleteNode completed (tombstoned)"
+        );
+
+        Ok(())
+    }
+}
+
+impl MutationExecutor for DeleteEdge {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        tracing::debug!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            name = %self.name,
+            expected_version = self.expected_version,
+            "Executing DeleteEdge mutation"
+        );
+
+        use super::schema::{
+            ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges,
+            EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue, VERSION_MAX,
+        };
+
+        let name_hash = NameHash::from_name(&self.name);
+
+        // 1. Read current edge
+        let forward_cf = txn_db
+            .cf_handle(ForwardEdges::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+        let edge_key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash);
+        let edge_key_bytes = ForwardEdges::key_to_bytes(&edge_key);
+
+        let current_bytes = txn
+            .get_cf(forward_cf, &edge_key_bytes)?
+            .ok_or_else(|| anyhow::anyhow!("Edge not found: {}→{}", self.src_id, self.dst_id))?;
+        let current: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&current_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge: {}", e))?;
+
+        let current_version = current.3;
+        let current_hash = current.2;
+        let is_deleted = current.4;
+
+        // 2. Check if already deleted
+        if is_deleted {
+            return Err(anyhow::anyhow!("Edge already deleted: {}→{}", self.src_id, self.dst_id));
+        }
+
+        // 3. Optimistic lock check
+        if current_version != self.expected_version {
+            return Err(anyhow::anyhow!(
+                "Version mismatch for edge {}→{}: expected {}, actual {}",
+                self.src_id,
+                self.dst_id,
+                self.expected_version,
+                current_version
+            ));
+        }
+
+        // 4. Version overflow check
+        if current_version == VERSION_MAX {
+            return Err(anyhow::anyhow!("Version overflow for edge: {}→{}", self.src_id, self.dst_id));
+        }
+
+        // 5. Increment version and set deleted flag
+        let new_version = current_version + 1;
+        let new_edge_value = ForwardEdgeCfValue(current.0, current.1, current.2, new_version, true);
+        let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize edge: {}", e))?;
+        txn.put_cf(forward_cf, &edge_key_bytes, new_edge_bytes)?;
+
+        // 6. Flip current index entry to STALE
+        if let Some(hash) = current_hash {
+            let index_cf = txn_db
+                .cf_handle(EdgeSummaryIndex::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
+            let index_key = EdgeSummaryIndexCfKey(hash, self.src_id, self.dst_id, name_hash, current_version);
+            let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
+            let stale_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
+            txn.put_cf(index_cf, index_key_bytes, stale_value_bytes)?;
+        }
+
+        tracing::info!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            old_version = current_version,
+            new_version = new_version,
+            "DeleteEdge completed (tombstoned)"
+        );
+
+        Ok(())
+    }
+}
+
 impl Mutation {
     /// Execute this mutation directly against storage.
     /// Delegates to the specific mutation type's executor.
@@ -841,6 +1383,11 @@ impl Mutation {
             Mutation::UpdateNodeValidSinceUntil(m) => m.execute(txn, txn_db),
             Mutation::UpdateEdgeValidSinceUntil(m) => m.execute(txn, txn_db),
             Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db),
+            // CONTENT-ADDRESS: Update/Delete with optimistic locking
+            Mutation::UpdateNodeSummary(m) => m.execute(txn, txn_db),
+            Mutation::UpdateEdgeSummary(m) => m.execute(txn, txn_db),
+            Mutation::DeleteNode(m) => m.execute(txn, txn_db),
+            Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
             // Flush is not a storage operation - it's handled by the consumer
             // for synchronization purposes only
             Mutation::Flush(_) => Ok(()),
@@ -866,6 +1413,11 @@ impl Mutation {
             Mutation::UpdateNodeValidSinceUntil(m) => m.execute(txn, txn_db), // No new names
             Mutation::UpdateEdgeValidSinceUntil(m) => m.execute(txn, txn_db), // No new names
             Mutation::UpdateEdgeWeight(m) => m.execute(txn, txn_db), // No new names
+            // CONTENT-ADDRESS: Update/Delete with optimistic locking (no new names)
+            Mutation::UpdateNodeSummary(m) => m.execute(txn, txn_db),
+            Mutation::UpdateEdgeSummary(m) => m.execute(txn, txn_db),
+            Mutation::DeleteNode(m) => m.execute(txn, txn_db),
+            Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
             Mutation::Flush(_) => Ok(()),
         }
     }
@@ -934,6 +1486,35 @@ impl Runnable for UpdateEdgeWeight {
     }
 }
 
+// CONTENT-ADDRESS: Runnable for Update/Delete mutations
+#[async_trait::async_trait]
+impl Runnable for UpdateNodeSummary {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::UpdateNodeSummary(self)]).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for UpdateEdgeSummary {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::UpdateEdgeSummary(self)]).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for DeleteNode {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::DeleteNode(self)]).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for DeleteEdge {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::DeleteEdge(self)]).await
+    }
+}
+
 // ============================================================================
 // From Trait - Automatic conversion to Mutation enum
 // ============================================================================
@@ -977,6 +1558,31 @@ impl From<UpdateEdgeValidSinceUntil> for Mutation {
 impl From<UpdateEdgeWeight> for Mutation {
     fn from(m: UpdateEdgeWeight) -> Self {
         Mutation::UpdateEdgeWeight(m)
+    }
+}
+
+// CONTENT-ADDRESS: From for Update/Delete mutations
+impl From<UpdateNodeSummary> for Mutation {
+    fn from(m: UpdateNodeSummary) -> Self {
+        Mutation::UpdateNodeSummary(m)
+    }
+}
+
+impl From<UpdateEdgeSummary> for Mutation {
+    fn from(m: UpdateEdgeSummary) -> Self {
+        Mutation::UpdateEdgeSummary(m)
+    }
+}
+
+impl From<DeleteNode> for Mutation {
+    fn from(m: DeleteNode) -> Self {
+        Mutation::DeleteNode(m)
+    }
+}
+
+impl From<DeleteEdge> for Mutation {
+    fn from(m: DeleteEdge) -> Self {
+        Mutation::DeleteEdge(m)
     }
 }
 

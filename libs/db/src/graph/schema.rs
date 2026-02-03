@@ -1114,6 +1114,169 @@ impl ColumnFamilySerde for EdgeSummaryIndex {
     }
 }
 
+// ============================================================================
+// GraphMeta Column Family - Graph-level metadata (GC cursors, future config)
+// (claude, 2026-02-02, implemented) CONTENT-ADDRESS GC cursor persistence
+// ============================================================================
+
+/// GraphMeta column family - stores graph-level metadata.
+///
+/// Key: discriminant byte (1 byte)
+/// Value: field-dependent payload (cursor bytes for GC cursors)
+///
+/// Pattern borrowed from vector::GraphMeta for consistency.
+pub(crate) struct GraphMeta;
+
+/// GraphMeta field enum - discriminated union for different metadata fields.
+///
+/// Each variant stores a different type of graph-level metadata.
+/// The discriminant byte is stored in the key, the value bytes depend on variant.
+#[derive(Debug, Clone)]
+pub(crate) enum GraphMetaField {
+    /// GC cursor for NodeSummaries CF - stores last processed key bytes
+    GcCursorNodeSummaries(Vec<u8>),      // 0x00
+    /// GC cursor for EdgeSummaries CF
+    GcCursorEdgeSummaries(Vec<u8>),      // 0x01
+    /// GC cursor for NodeSummaryIndex CF
+    GcCursorNodeSummaryIndex(Vec<u8>),   // 0x02
+    /// GC cursor for EdgeSummaryIndex CF
+    GcCursorEdgeSummaryIndex(Vec<u8>),   // 0x03
+    /// GC cursor for Node tombstones
+    GcCursorNodeTombstones(Vec<u8>),     // 0x04
+    /// GC cursor for Edge tombstones
+    GcCursorEdgeTombstones(Vec<u8>),     // 0x05
+}
+
+impl GraphMetaField {
+    /// Get the discriminant byte for key serialization
+    pub fn discriminant(&self) -> u8 {
+        match self {
+            Self::GcCursorNodeSummaries(_) => 0x00,
+            Self::GcCursorEdgeSummaries(_) => 0x01,
+            Self::GcCursorNodeSummaryIndex(_) => 0x02,
+            Self::GcCursorEdgeSummaryIndex(_) => 0x03,
+            Self::GcCursorNodeTombstones(_) => 0x04,
+            Self::GcCursorEdgeTombstones(_) => 0x05,
+        }
+    }
+
+    /// Create a field variant from discriminant (with empty payload)
+    pub fn from_discriminant(d: u8) -> anyhow::Result<Self> {
+        match d {
+            0x00 => Ok(Self::GcCursorNodeSummaries(vec![])),
+            0x01 => Ok(Self::GcCursorEdgeSummaries(vec![])),
+            0x02 => Ok(Self::GcCursorNodeSummaryIndex(vec![])),
+            0x03 => Ok(Self::GcCursorEdgeSummaryIndex(vec![])),
+            0x04 => Ok(Self::GcCursorNodeTombstones(vec![])),
+            0x05 => Ok(Self::GcCursorEdgeTombstones(vec![])),
+            _ => anyhow::bail!("Unknown GraphMetaField discriminant: {}", d),
+        }
+    }
+
+    /// Get the inner cursor bytes
+    pub fn cursor_bytes(&self) -> &[u8] {
+        match self {
+            Self::GcCursorNodeSummaries(v)
+            | Self::GcCursorEdgeSummaries(v)
+            | Self::GcCursorNodeSummaryIndex(v)
+            | Self::GcCursorEdgeSummaryIndex(v)
+            | Self::GcCursorNodeTombstones(v)
+            | Self::GcCursorEdgeTombstones(v) => v,
+        }
+    }
+}
+
+/// GraphMeta key: just the discriminant byte (1 byte total)
+#[derive(Debug, Clone)]
+pub(crate) struct GraphMetaCfKey(pub(crate) GraphMetaField);
+
+impl GraphMetaCfKey {
+    /// Create key for NodeSummaries GC cursor
+    pub fn gc_cursor_node_summaries() -> Self {
+        Self(GraphMetaField::GcCursorNodeSummaries(vec![]))
+    }
+
+    /// Create key for EdgeSummaries GC cursor
+    pub fn gc_cursor_edge_summaries() -> Self {
+        Self(GraphMetaField::GcCursorEdgeSummaries(vec![]))
+    }
+
+    /// Create key for NodeSummaryIndex GC cursor
+    pub fn gc_cursor_node_summary_index() -> Self {
+        Self(GraphMetaField::GcCursorNodeSummaryIndex(vec![]))
+    }
+
+    /// Create key for EdgeSummaryIndex GC cursor
+    pub fn gc_cursor_edge_summary_index() -> Self {
+        Self(GraphMetaField::GcCursorEdgeSummaryIndex(vec![]))
+    }
+
+    /// Create key for Node tombstones GC cursor
+    pub fn gc_cursor_node_tombstones() -> Self {
+        Self(GraphMetaField::GcCursorNodeTombstones(vec![]))
+    }
+
+    /// Create key for Edge tombstones GC cursor
+    pub fn gc_cursor_edge_tombstones() -> Self {
+        Self(GraphMetaField::GcCursorEdgeTombstones(vec![]))
+    }
+}
+
+/// GraphMeta value: wraps the field with actual cursor data
+#[derive(Debug, Clone)]
+pub(crate) struct GraphMetaCfValue(pub(crate) GraphMetaField);
+
+impl ColumnFamily for GraphMeta {
+    const CF_NAME: &'static str = "graph/meta";
+}
+
+impl ColumnFamilyConfig<super::subsystem::GraphBlockCacheConfig> for GraphMeta {
+    fn cf_options(cache: &rocksdb::Cache, config: &super::subsystem::GraphBlockCacheConfig) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl GraphMeta {
+    /// Serialize key: just the discriminant byte
+    pub fn key_to_bytes(key: &GraphMetaCfKey) -> Vec<u8> {
+        vec![key.0.discriminant()]
+    }
+
+    /// Deserialize key from bytes
+    pub fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<GraphMetaCfKey> {
+        if bytes.len() != 1 {
+            anyhow::bail!("Invalid GraphMetaCfKey length: expected 1, got {}", bytes.len());
+        }
+        let field = GraphMetaField::from_discriminant(bytes[0])?;
+        Ok(GraphMetaCfKey(field))
+    }
+
+    /// Serialize value: just the cursor bytes (variable length)
+    pub fn value_to_bytes(value: &GraphMetaCfValue) -> Vec<u8> {
+        value.0.cursor_bytes().to_vec()
+    }
+
+    /// Deserialize value using key's field variant for type info
+    pub fn value_from_bytes(key: &GraphMetaCfKey, bytes: &[u8]) -> anyhow::Result<GraphMetaCfValue> {
+        let field = match key.0.discriminant() {
+            0x00 => GraphMetaField::GcCursorNodeSummaries(bytes.to_vec()),
+            0x01 => GraphMetaField::GcCursorEdgeSummaries(bytes.to_vec()),
+            0x02 => GraphMetaField::GcCursorNodeSummaryIndex(bytes.to_vec()),
+            0x03 => GraphMetaField::GcCursorEdgeSummaryIndex(bytes.to_vec()),
+            0x04 => GraphMetaField::GcCursorNodeTombstones(bytes.to_vec()),
+            0x05 => GraphMetaField::GcCursorEdgeTombstones(bytes.to_vec()),
+            d => anyhow::bail!("Unknown discriminant: {}", d),
+        };
+        Ok(GraphMetaCfValue(field))
+    }
+}
+
 /// All column families used in the database.
 /// This is the authoritative list that should be used when opening the database.
 /// (claude, 2026-02-02, in-progress) Added reverse index CFs for CONTENT-ADDRESS
@@ -1128,6 +1291,7 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     EdgeSummaryIndex::CF_NAME,   // CONTENT-ADDRESS: Reverse index hash→edges
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
+    GraphMeta::CF_NAME,          // CONTENT-ADDRESS: Graph-level metadata (GC cursors)
 ];
 
 #[cfg(test)]

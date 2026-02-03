@@ -253,6 +253,7 @@ A `SummaryHash` lookup can return **multiple results**, including:
 ---
 
 ## 2.2 Node Reverse Lookup API
+(claude, 2026-02-02, implemented in query.rs - NodesBySummaryHash, EdgesBySummaryHash)
 
 ### All Matches (Including Old Versions)
 
@@ -450,9 +451,10 @@ pub struct EdgeSummaryLookupResult {
 ---
 
 # Part 3: Implementation Tasks
-(codex, 2026-02-02, planned)
+(codex, 2026-02-02, planned) (claude, 2026-02-02, in-progress)
 
 ## 3.1 Write Path: Insert
+(claude, 2026-02-02, implemented in mutation.rs - AddNode and AddEdge now write index entries)
 
 ### Insert Node (version = 1)
 
@@ -837,7 +839,7 @@ pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<Forward
 ---
 
 ## 3.4 Garbage Collection
-(codex, 2026-02-02, planned)
+(codex, 2026-02-02, planned) (claude, 2026-02-02, GraphMeta CF implemented in schema.rs)
 
 ### GcConfig
 
@@ -1207,6 +1209,15 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 (codex, 2026-02-02, planned)
 
 **Approval:** Design is ready to implement, with noted planned components. (codex, 2026-02-02, approved)
+
+**Implementation Status** (claude, 2026-02-02):
+- [x] Version type and entity value fields - schema.rs
+- [x] NodeSummaryIndex and EdgeSummaryIndex CFs - schema.rs, subsystem.rs
+- [x] Insert write paths with CURRENT marker - mutation.rs (AddNode, AddEdge)
+- [x] Reverse lookup query APIs - query.rs (NodesBySummaryHash, EdgesBySummaryHash)
+- [x] GraphMeta CF for GC cursors - schema.rs, subsystem.rs
+- [x] Update/Delete mutations with optimistic locking - mutation.rs (UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge)
+- [ ] GC implementation - gc.rs (pending)
 
 ---
 

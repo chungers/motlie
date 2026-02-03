@@ -528,6 +528,39 @@ impl<P: Processor> Consumer<P> {
                         "Processing UpdateEdgeWeight"
                     );
                 }
+                // CONTENT-ADDRESS: Update/Delete mutations
+                Mutation::UpdateNodeSummary(args) => {
+                    tracing::debug!(
+                        id = %args.id,
+                        expected_version = args.expected_version,
+                        "Processing UpdateNodeSummary"
+                    );
+                }
+                Mutation::UpdateEdgeSummary(args) => {
+                    tracing::debug!(
+                        src = %args.src_id,
+                        dst = %args.dst_id,
+                        name = %args.name,
+                        expected_version = args.expected_version,
+                        "Processing UpdateEdgeSummary"
+                    );
+                }
+                Mutation::DeleteNode(args) => {
+                    tracing::debug!(
+                        id = %args.id,
+                        expected_version = args.expected_version,
+                        "Processing DeleteNode"
+                    );
+                }
+                Mutation::DeleteEdge(args) => {
+                    tracing::debug!(
+                        src = %args.src_id,
+                        dst = %args.dst_id,
+                        name = %args.name,
+                        expected_version = args.expected_version,
+                        "Processing DeleteEdge"
+                    );
+                }
                 Mutation::Flush(_) => {
                     tracing::debug!("Processing Flush marker");
                 }
