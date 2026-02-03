@@ -2069,3 +2069,412 @@ use tokio::time::Duration;
         assert_eq!(reverse_key.2, recovered.2, "NameHash should match");
     }
 
+// ============================================================================
+// CONTENT-ADDRESS Tests
+// ============================================================================
+
+mod content_address_tests {
+    use super::*;
+    use crate::graph::schema::{
+        NodeSummary, EdgeSummary, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+        EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
+    };
+    use crate::graph::SummaryHash;
+
+    /// Test that nodes are created with version=1 and deleted=false
+    #[tokio::test]
+    async fn test_node_initial_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let node_id = Id::new();
+        let node_args = AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli::now(),
+            name: "test_node".to_string(),
+            valid_range: None,
+            summary: NodeSummary::from_text("initial summary"),
+        };
+        node_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify node was created with version=1
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+        let nodes_cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+
+        let key_bytes = Nodes::key_to_bytes(&crate::graph::schema::NodeCfKey(node_id));
+        let value_bytes = txn_db.get_cf(nodes_cf, &key_bytes).unwrap().unwrap();
+        let value: crate::graph::schema::NodeCfValue = Nodes::value_from_bytes(&value_bytes).unwrap();
+
+        assert_eq!(value.3, 1, "Initial version should be 1");
+        assert!(!value.4, "Initial deleted flag should be false");
+    }
+
+    /// Test that edges are created with version=1 and deleted=false
+    #[tokio::test]
+    async fn test_edge_initial_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let src_id = Id::new();
+        let dst_id = Id::new();
+        let edge_args = AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: TimestampMilli::now(),
+            name: "test_edge".to_string(),
+            summary: EdgeSummary::from_text("initial summary"),
+            weight: Some(1.0),
+            valid_range: None,
+        };
+        edge_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify edge was created with version=1
+        use crate::graph::schema::{ForwardEdges, ForwardEdgeCfKey, ForwardEdgeCfValue};
+        use crate::graph::NameHash;
+
+        let storage = {
+            let mut s = Storage::readwrite(&db_path);
+            s.ready().unwrap();
+            s
+        };
+        let txn_db = storage.transaction_db().unwrap();
+        let edges_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).unwrap();
+
+        let name_hash = NameHash::from_name("test_edge");
+        let key = ForwardEdgeCfKey(src_id, dst_id, name_hash);
+        let key_bytes = ForwardEdges::key_to_bytes(&key);
+        let value_bytes = txn_db.get_cf(edges_cf, &key_bytes).unwrap().unwrap();
+        let value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes).unwrap();
+
+        assert_eq!(value.3, 1, "Initial version should be 1");
+        assert!(!value.4, "Initial deleted flag should be false");
+    }
+
+    /// Test that AddNode writes a CURRENT index entry
+    #[tokio::test]
+    async fn test_node_index_entry_current_marker() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let node_id = Id::new();
+        let summary = NodeSummary::from_text("test summary for indexing");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let node_args = AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli::now(),
+            name: "indexed_node".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        };
+        node_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify index entry exists with CURRENT marker
+        let storage = {
+            let mut s = Storage::readwrite(&db_path);
+            s.ready().unwrap();
+            s
+        };
+        let txn_db = storage.transaction_db().unwrap();
+        let index_cf = txn_db.cf_handle(NodeSummaryIndex::CF_NAME).unwrap();
+
+        let index_key = NodeSummaryIndexCfKey(summary_hash, node_id, 1);
+        let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
+        let index_value_bytes = txn_db.get_cf(index_cf, &index_key_bytes).unwrap().unwrap();
+        let index_value: NodeSummaryIndexCfValue = NodeSummaryIndex::value_from_bytes(&index_value_bytes).unwrap();
+
+        assert!(index_value.is_current(), "Index entry should have CURRENT marker");
+    }
+
+    /// Test that AddEdge writes a CURRENT index entry
+    #[tokio::test]
+    async fn test_edge_index_entry_current_marker() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let src_id = Id::new();
+        let dst_id = Id::new();
+        let summary = EdgeSummary::from_text("test edge summary");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let edge_args = AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: TimestampMilli::now(),
+            name: "indexed_edge".to_string(),
+            summary: summary.clone(),
+            weight: None,
+            valid_range: None,
+        };
+        edge_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify index entry exists with CURRENT marker
+        use crate::graph::NameHash;
+        let storage = {
+            let mut s = Storage::readwrite(&db_path);
+            s.ready().unwrap();
+            s
+        };
+        let txn_db = storage.transaction_db().unwrap();
+        let index_cf = txn_db.cf_handle(EdgeSummaryIndex::CF_NAME).unwrap();
+
+        let name_hash = NameHash::from_name("indexed_edge");
+        let index_key = EdgeSummaryIndexCfKey(summary_hash, src_id, dst_id, name_hash, 1);
+        let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
+        let index_value_bytes = txn_db.get_cf(index_cf, &index_key_bytes).unwrap().unwrap();
+        let index_value: EdgeSummaryIndexCfValue = EdgeSummaryIndex::value_from_bytes(&index_value_bytes).unwrap();
+
+        assert!(index_value.is_current(), "Index entry should have CURRENT marker");
+    }
+
+    /// Test reverse lookup - nodes with same summary hash create multiple index entries
+    #[tokio::test]
+    async fn test_node_reverse_lookup() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config.clone(), &db_path);
+
+        // Create two nodes with same summary
+        let summary = NodeSummary::from_text("shared summary content");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let node1_id = Id::new();
+        let node1_args = AddNode {
+            id: node1_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node1".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        };
+        node1_args.run(&writer).await.unwrap();
+
+        let node2_id = Id::new();
+        let node2_args = AddNode {
+            id: node2_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node2".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        };
+        node2_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify both nodes created index entries by prefix scanning
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+        let index_cf = txn_db.cf_handle(NodeSummaryIndex::CF_NAME).unwrap();
+
+        // Prefix scan by hash
+        let hash_prefix = summary_hash.as_bytes();
+        let mut found_ids = Vec::new();
+        let iter = txn_db.prefix_iterator_cf(index_cf, hash_prefix);
+        for item in iter {
+            let (key_bytes, value_bytes) = item.unwrap();
+            if !key_bytes.starts_with(hash_prefix) {
+                break;
+            }
+            let index_key: NodeSummaryIndexCfKey = NodeSummaryIndex::key_from_bytes(&key_bytes).unwrap();
+            let index_value: NodeSummaryIndexCfValue = NodeSummaryIndex::value_from_bytes(&value_bytes).unwrap();
+            if index_value.is_current() {
+                found_ids.push(index_key.1);
+            }
+        }
+
+        assert_eq!(found_ids.len(), 2, "Should find both nodes with same summary hash");
+        assert!(found_ids.contains(&node1_id), "Should contain node1");
+        assert!(found_ids.contains(&node2_id), "Should contain node2");
+    }
+
+    /// Test reverse lookup - edges with same summary hash create multiple index entries
+    #[tokio::test]
+    async fn test_edge_reverse_lookup() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config.clone(), &db_path);
+
+        // Create two edges with same summary
+        let summary = EdgeSummary::from_text("shared edge summary");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let edge1_args = AddEdge {
+            source_node_id: Id::new(),
+            target_node_id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "edge1".to_string(),
+            summary: summary.clone(),
+            weight: None,
+            valid_range: None,
+        };
+        edge1_args.run(&writer).await.unwrap();
+
+        let edge2_args = AddEdge {
+            source_node_id: Id::new(),
+            target_node_id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "edge2".to_string(),
+            summary: summary.clone(),
+            weight: None,
+            valid_range: None,
+        };
+        edge2_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify both edges created index entries by prefix scanning
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+        let index_cf = txn_db.cf_handle(EdgeSummaryIndex::CF_NAME).unwrap();
+
+        // Prefix scan by hash
+        let hash_prefix = summary_hash.as_bytes();
+        let mut count = 0;
+        let iter = txn_db.prefix_iterator_cf(index_cf, hash_prefix);
+        for item in iter {
+            let (key_bytes, value_bytes) = item.unwrap();
+            if !key_bytes.starts_with(hash_prefix) {
+                break;
+            }
+            let index_value: EdgeSummaryIndexCfValue = EdgeSummaryIndex::value_from_bytes(&value_bytes).unwrap();
+            if index_value.is_current() {
+                count += 1;
+            }
+        }
+
+        assert_eq!(count, 2, "Should find both edges with same summary hash");
+    }
+
+    /// Test GC configuration defaults
+    #[test]
+    fn test_gc_config_defaults() {
+        use crate::graph::gc::GraphGcConfig;
+        use std::time::Duration;
+
+        let config = GraphGcConfig::default();
+        assert_eq!(config.interval, Duration::from_secs(60));
+        assert_eq!(config.batch_size, 1000);
+        assert_eq!(config.versions_to_keep, 2);
+        assert!(config.process_on_startup);
+    }
+
+    /// Test repair configuration defaults
+    #[test]
+    fn test_repair_config_defaults() {
+        use crate::graph::repair::RepairConfig;
+        use std::time::Duration;
+
+        let config = RepairConfig::default();
+        assert_eq!(config.interval, Duration::from_secs(3600));
+        assert_eq!(config.batch_size, 10000);
+        assert!(!config.auto_fix);
+        assert!(!config.process_on_startup);
+    }
+
+    /// Test GC metrics tracking
+    #[test]
+    fn test_gc_metrics() {
+        use crate::graph::gc::GcMetrics;
+        use std::sync::atomic::Ordering;
+
+        let metrics = GcMetrics::new();
+        metrics.node_index_entries_deleted.fetch_add(10, Ordering::Relaxed);
+        metrics.edge_index_entries_deleted.fetch_add(5, Ordering::Relaxed);
+        metrics.node_summaries_deleted.fetch_add(3, Ordering::Relaxed);
+        metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.node_index_entries_deleted, 10);
+        assert_eq!(snapshot.edge_index_entries_deleted, 5);
+        assert_eq!(snapshot.node_summaries_deleted, 3);
+        assert_eq!(snapshot.cycles_completed, 1);
+        assert_eq!(snapshot.total_deleted(), 18);
+    }
+
+    /// Test repair metrics tracking
+    #[test]
+    fn test_repair_metrics() {
+        use crate::graph::repair::RepairMetrics;
+        use std::sync::atomic::Ordering;
+
+        let metrics = RepairMetrics::new();
+        metrics.missing_reverse.fetch_add(5, Ordering::Relaxed);
+        metrics.orphan_reverse.fetch_add(3, Ordering::Relaxed);
+        metrics.forward_checked.fetch_add(100, Ordering::Relaxed);
+        metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.missing_reverse, 5);
+        assert_eq!(snapshot.orphan_reverse, 3);
+        assert_eq!(snapshot.total_inconsistencies(), 8);
+        assert!(!snapshot.is_consistent());
+    }
+
+    /// Test Version type
+    #[test]
+    fn test_version_type() {
+        use crate::graph::schema::Version;
+        let v: Version = 1;
+        assert_eq!(v, 1u32);
+
+        // Test increment doesn't panic at normal values
+        let v2: Version = v + 1;
+        assert_eq!(v2, 2);
+    }
+
+    /// Test NodeSummaryIndexCfValue marker semantics
+    #[test]
+    fn test_index_marker_semantics() {
+        let current = NodeSummaryIndexCfValue(NodeSummaryIndexCfValue::CURRENT);
+        let stale = NodeSummaryIndexCfValue(NodeSummaryIndexCfValue::STALE);
+
+        assert!(current.is_current());
+        assert!(!stale.is_current());
+    }
+}
+

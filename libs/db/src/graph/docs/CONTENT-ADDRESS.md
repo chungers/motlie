@@ -1217,7 +1217,10 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 - [x] GraphMeta CF for GC cursors - schema.rs, subsystem.rs
 - [x] Update/Delete mutations with optimistic locking - mutation.rs (UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge)
 - [x] GC implementation - gc.rs (GraphGarbageCollector with cursor-based incremental GC)
-- [ ] Reverse index repair task - repair.rs (future)
+- [x] GC for orphaned summaries - gc.rs (gc_node_summaries, gc_edge_summaries)
+- [x] Reverse index repair task - repair.rs (GraphRepairer with forward↔reverse consistency checking)
+- [x] Fulltext index updates for Update/Delete - fulltext/mutation.rs
+- [x] Unit tests - tests.rs (content_address_tests module)
 
 ---
 

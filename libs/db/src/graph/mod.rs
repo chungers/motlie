@@ -39,6 +39,9 @@ pub mod scan;
 /// Garbage collection for stale summary index entries and tombstones.
 pub mod gc;
 
+/// Repair module for graph index consistency checking.
+pub mod repair;
+
 #[cfg(test)]
 mod tests;
 
@@ -86,6 +89,9 @@ pub use subsystem::{GraphBlockCacheConfig, NameCacheConfig, Subsystem};
 
 // CONTENT-ADDRESS: Garbage collection for stale index entries
 pub use gc::{GraphGarbageCollector, GraphGcConfig, GcMetrics, GcMetricsSnapshot};
+
+// CONTENT-ADDRESS: Repair for forward/reverse edge consistency
+pub use repair::{GraphRepairer, RepairConfig, RepairMetrics, RepairMetricsSnapshot};
 
 /// Storage type alias using generic rocksdb::Storage
 pub type Storage = crate::rocksdb::Storage<Subsystem>;
