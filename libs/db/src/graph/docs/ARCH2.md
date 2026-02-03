@@ -61,6 +61,16 @@ public entry point, which makes it harder to:
 
 ---
 
+## Recent Implementation Changes (as of 2026-02-03)
+
+- **Subsystem-managed lifecycle**: `Subsystem::start(...)` now wires Writer/Reader, spawns consumers, optionally starts GC, and manages shutdown ordering (flush → join consumers → stop GC). `graph/subsystem.rs`
+- **GC and RefCount**: GC is integrated for stale index cleanup; summaries are content-addressed with RefCount deleted inline by mutations, removing orphan summary scans. `graph/gc.rs`, `graph/mutation.rs`, `graph/schema.rs`
+- **Public APIs unchanged**: Writer/Reader are still the public async channel APIs; `Graph` remains the processor used by consumers.
+
+These changes improve robustness and lifecycle management but **do not yet introduce** an internal `graph::processor::Processor` or hide `Graph` behind the public APIs.
+
+---
+
 ## Proposed Refactor (Match Vector Pattern)
 
 ### 1) Introduce `graph::processor::Processor` (pub(crate))
@@ -109,6 +119,8 @@ Vector’s architecture clearly separates synchronous internal execution
 (`Processor`) from async public APIs (`Writer`/`Reader`). Refactoring graph
 to follow the same pattern will make the system more consistent, easier to
 extend, and safer to evolve without breaking public interfaces.
+
+**Status:** Not implemented yet; recent changes are additive (GC/RefCount + lifecycle) and do not change the processor/public API boundary.
 
 ---
 
