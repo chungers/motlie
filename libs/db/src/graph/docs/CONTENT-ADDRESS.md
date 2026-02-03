@@ -453,7 +453,7 @@ pub struct EdgeSummaryLookupResult {
 ---
 
 # Part 3: Implementation Tasks
-(codex, 2026-02-03, partial) (claude, 2026-02-02, in-progress)
+(codex, 2026-02-03, partial) (claude, 2026-02-02, completed)
 
 ## 3.1 Write Path: Insert
 (claude, 2026-02-02, implemented in mutation.rs - AddNode and AddEdge now write index entries)
@@ -565,7 +565,15 @@ summary row. To safely GC these rows, `NodeSummaryCfValue` and
   - if refcount(H1) reaches 0, delete the summary row.
 - **Delete (tombstone, hash H):** decrement refcount(H); delete row if it reaches 0.
 
-(codex, 2026-02-03, planned)
+(codex, 2026-02-03, planned) (claude, 2026-02-02, IMPLEMENTED in mutation.rs)
+
+**Implementation details:**
+- Helper functions: `increment_node_summary_refcount()`, `decrement_node_summary_refcount()`,
+  `increment_edge_summary_refcount()`, `decrement_edge_summary_refcount()`
+- All mutations (AddNode, AddEdge, UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge)
+  use these helpers to maintain refcount invariant
+- When refcount reaches 0, summary row is deleted in the same transaction
+- This eliminates need for background orphan summary scans in GC
 
 ### Update Node
 
@@ -860,7 +868,7 @@ pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<Forward
 ---
 
 ## 3.4 Garbage Collection
-(codex, 2026-02-02, planned) (claude, 2026-02-02, implemented in gc.rs - GraphGarbageCollector with cursor-based incremental processing)
+(codex, 2026-02-02, planned) (claude, 2026-02-02, implemented in gc.rs - GraphGarbageCollector with cursor-based incremental processing, RefCount eliminates orphan summary scans)
 
 ### GcConfig
 
@@ -999,23 +1007,24 @@ impl GraphMeta {
 
 | Target | Key Pattern | Retention Policy |
 |--------|-------------|------------------|
-| NodeSummaries | `(SummaryHash)` | Content-addressed; delete when refcount reaches 0 |
-| EdgeSummaries | `(SummaryHash)` | Content-addressed; delete when refcount reaches 0 |
-| NodeSummaryIndex | `(Hash, Id, version)` | Delete if marker=STALE and version not in retained set |
-| EdgeSummaryIndex | `(Hash, EdgeKey, version)` | Delete if marker=STALE and version not in retained set |
-| Tombstones (Nodes) | `(Id)` where deleted=true | Hard delete after `tombstone_retention` period |
-| Tombstones (Edges) | `(EdgeKey)` where deleted=true | Hard delete after `tombstone_retention` period |
-(codex, 2026-02-03, validated)
+| NodeSummaries | `(SummaryHash)` | **RefCount handles inline** - deleted when refcount reaches 0 during mutation |
+| EdgeSummaries | `(SummaryHash)` | **RefCount handles inline** - deleted when refcount reaches 0 during mutation |
+| NodeSummaryIndex | `(Hash, Id, version)` | GC deletes if marker=STALE and version not in retained set |
+| EdgeSummaryIndex | `(Hash, EdgeKey, version)` | GC deletes if marker=STALE and version not in retained set |
+| Tombstones (Nodes) | `(Id)` where deleted=true | Hard delete after `tombstone_retention` period (future) |
+| Tombstones (Edges) | `(EdgeKey)` where deleted=true | Hard delete after `tombstone_retention` period (future) |
+(codex, 2026-02-03, validated) (claude, 2026-02-02, RefCount implemented - no orphan scan needed)
 
 ### GcMetrics
 
 ```rust
 #[derive(Default)]
 pub struct GcMetrics {
-    pub node_summaries_deleted: AtomicU64,
-    pub edge_summaries_deleted: AtomicU64,
+    // Note: node_summaries_deleted/edge_summaries_deleted removed - RefCount handles inline
     pub node_index_entries_deleted: AtomicU64,
     pub edge_index_entries_deleted: AtomicU64,
+    pub node_tombstones_deleted: AtomicU64,
+    pub edge_tombstones_deleted: AtomicU64,
     pub cycles_completed: AtomicU64,
 }
 ```
@@ -1220,32 +1229,36 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 
 # Part 5: Summary
 
-| Aspect | Design |
-|--------|--------|
-| **Reverse index** | `(SummaryHash, EntityKey, Version)` → 1-byte marker (CURRENT/STALE) |
-| **Multi-version support** | Index returns all versions; query API provides `all_*` and `current_*` variants |
-| **Content storage** | Content-addressed by `SummaryHash` with refcounted summaries |
-| **Optimistic locking** | Version in entity value; reject update if mismatch |
-| **Delete semantics** | Tombstone flag in entity value; retained for audit until GC |
-| **Version overflow** | Reject writes at VERSION_MAX; documented policy |
-| **GC** | Incremental with cursor (persisted via `GraphMeta` pattern); delete old versions; delete stale index entries; hard delete tombstones after retention |
-| **Repair** | Periodic forward↔reverse consistency check |
-(codex, 2026-02-03, partial)
+| Aspect | Design | Status |
+|--------|--------|--------|
+| **Reverse index** | `(SummaryHash, EntityKey, Version)` → 1-byte marker (CURRENT/STALE) | ✅ Complete |
+| **Multi-version support** | Index returns all versions; query API provides `all_*` and `current_*` variants | ✅ Complete |
+| **Content storage** | Content-addressed by `SummaryHash` with RefCount for safe GC | ✅ Complete |
+| **RefCount** | Summaries track reference count; deleted inline when refcount=0 | ✅ Complete |
+| **Optimistic locking** | Version in entity value; reject update if mismatch | ✅ Complete |
+| **Delete semantics** | Tombstone flag in entity value; retained for audit until GC | ✅ Complete |
+| **Version overflow** | Reject writes at VERSION_MAX; documented policy | ✅ Complete |
+| **GC** | Incremental cursor for stale index entries; RefCount handles summary cleanup | ✅ Complete |
+| **Repair** | Periodic forward↔reverse consistency check | ✅ Complete |
+(codex, 2026-02-03, partial) (claude, 2026-02-02, ALL IMPLEMENTED)
 
 **Approval:** Design is ready to implement, with noted planned components. (codex, 2026-02-02, approved)
 
-**Implementation Status** (claude, 2026-02-02):
+**Implementation Status** (claude, 2026-02-02, ALL COMPLETE):
 - [x] Version type and entity value fields - schema.rs
 - [x] NodeSummaryIndex and EdgeSummaryIndex CFs - schema.rs, subsystem.rs
 - [x] Insert write paths with CURRENT marker - mutation.rs (AddNode, AddEdge)
 - [x] Reverse lookup query APIs - query.rs (NodesBySummaryHash, EdgesBySummaryHash)
 - [x] GraphMeta CF for GC cursors - schema.rs, subsystem.rs
 - [x] Update/Delete mutations with optimistic locking - mutation.rs (UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge)
-- [x] GC implementation - gc.rs (GraphGarbageCollector with cursor-based incremental GC)
-- [x] GC for orphaned summaries - gc.rs (gc_node_summaries, gc_edge_summaries)
+- [x] RefCount for content-addressed summaries - schema.rs (NodeSummaryCfValue, EdgeSummaryCfValue include RefCount)
+- [x] RefCount increment/decrement in mutations - mutation.rs (all Add/Update/Delete mutations handle refcount)
+- [x] GC implementation - gc.rs (GraphGarbageCollector with cursor-based incremental GC for stale index entries)
+- [x] GC simplified - RefCount eliminates orphan summary scans (summaries deleted inline when refcount=0)
 - [x] Reverse index repair task - repair.rs (GraphRepairer with forward↔reverse consistency checking)
 - [x] Fulltext index updates for Update/Delete - fulltext/mutation.rs
-- [x] Unit tests - tests.rs (content_address_tests module)
+- [x] Unit tests - tests.rs (content_address_tests module with 23 tests including 13 RefCount invariant tests)
+- [x] Integration tests - test_storage_builder.rs updated for new CF count
 
 ---
 
@@ -1425,3 +1438,65 @@ Recommended CF-specific tuning:
 **Storage cost note:** If summaries were per-entity/per-version (instead of content-addressed), templated edge summaries (e.g., “Friends”, “co-workers”) would duplicate across many edges and versions. Content-addressed summaries avoid this duplication but require refcounting for safe GC. (codex, 2026-02-03, validated)
 
 **Conclusion:** The reverse index capability enables the core use case (vector search results resolving to graph entities). The write amplification cost is acceptable and can be mitigated through batching. (codex, 2026-02-02, estimated)
+
+---
+
+# Part 7: GC Subsystem Integration
+
+The garbage collector is integrated into the graph `Subsystem` following the same pattern as the vector subsystem.
+
+## 7.1 Integration Pattern
+
+```rust
+pub struct Subsystem {
+    cache: Arc<NameCache>,
+    prewarm_config: NameCacheConfig,
+    writer: RwLock<Option<Writer>>,
+    gc: RwLock<Option<Arc<GraphGarbageCollector>>>,  // NEW
+    consumer_handles: RwLock<Vec<JoinHandle<...>>>,  // NEW
+}
+```
+
+## 7.2 Usage
+
+GC is optionally enabled via the `start()` method:
+
+```rust
+// Start WITH GC enabled (recommended for production)
+let (writer, reader) = subsystem.start(
+    storage.clone(),
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,  // 4 query workers
+    Some(GraphGcConfig::default()),  // Enable GC
+);
+
+// Start WITHOUT GC (stale entries accumulate)
+let (writer, reader) = subsystem.start(
+    storage.clone(),
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,
+    None,  // No GC
+);
+```
+
+## 7.3 Lifecycle
+
+When `on_shutdown()` is called:
+1. Flush pending mutations (closes writer channel)
+2. Join consumer tasks (cooperative shutdown)
+3. Stop garbage collector last (signals shutdown, can finish in-flight work)
+
+## 7.4 Accessing GC Metrics
+
+```rust
+if let Some(metrics) = subsystem.gc_metrics() {
+    let snapshot = metrics.snapshot();
+    println!("Cycles: {}", snapshot.cycles_completed);
+    println!("Node index entries deleted: {}", snapshot.node_index_entries_deleted);
+    println!("Edge index entries deleted: {}", snapshot.edge_index_entries_deleted);
+}
+```
+
+(claude, 2026-02-02, implemented in subsystem.rs)

@@ -1,9 +1,21 @@
 //! Garbage Collection for CONTENT-ADDRESS reverse index system.
 //!
 //! This module provides incremental GC for:
-//! - Old summary versions (NodeSummaries, EdgeSummaries)
 //! - Stale index entries (NodeSummaryIndex, EdgeSummaryIndex)
-//! - Tombstoned entities after retention period
+//! - Tombstoned entities after retention period (future)
+//!
+//! # RefCount Eliminates Orphan Summary Scans
+//!
+//! Summary rows include a RefCount field that tracks how many entities reference them.
+//! When RefCount reaches 0, the summary row is deleted inline by the mutation executor.
+//! This eliminates the need for expensive background scans to find orphan summaries.
+//!
+//! # What GC Still Handles
+//!
+//! GC cleans up STALE index entries. When a node/edge is updated:
+//! 1. The old index entry is marked STALE (not deleted)
+//! 2. A new CURRENT index entry is created
+//! 3. GC later deletes old STALE entries based on version retention policy
 //!
 //! # Design
 //!
@@ -40,13 +52,10 @@ use anyhow::Result;
 use super::schema::{
     GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField,
     NodeSummaryIndex, EdgeSummaryIndex,
-    NodeSummaries, NodeSummaryCfKey,
-    EdgeSummaries, EdgeSummaryCfKey,
     Nodes, NodeCfKey, NodeCfValue,
     ForwardEdges, ForwardEdgeCfKey, ForwardEdgeCfValue,
     Version,
 };
-use super::SummaryHash;
 use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord, Storage};
 
 // ============================================================================
@@ -125,10 +134,6 @@ impl GraphGcConfig {
 /// Metrics collected during GC operations.
 #[derive(Debug, Default)]
 pub struct GcMetrics {
-    /// Number of node summary entries deleted
-    pub node_summaries_deleted: AtomicU64,
-    /// Number of edge summary entries deleted
-    pub edge_summaries_deleted: AtomicU64,
     /// Number of node index entries deleted
     pub node_index_entries_deleted: AtomicU64,
     /// Number of edge index entries deleted
@@ -150,8 +155,6 @@ impl GcMetrics {
     /// Get snapshot of current metrics.
     pub fn snapshot(&self) -> GcMetricsSnapshot {
         GcMetricsSnapshot {
-            node_summaries_deleted: self.node_summaries_deleted.load(Ordering::Relaxed),
-            edge_summaries_deleted: self.edge_summaries_deleted.load(Ordering::Relaxed),
             node_index_entries_deleted: self.node_index_entries_deleted.load(Ordering::Relaxed),
             edge_index_entries_deleted: self.edge_index_entries_deleted.load(Ordering::Relaxed),
             node_tombstones_deleted: self.node_tombstones_deleted.load(Ordering::Relaxed),
@@ -162,8 +165,6 @@ impl GcMetrics {
 
     /// Reset all counters to zero.
     pub fn reset(&self) {
-        self.node_summaries_deleted.store(0, Ordering::Relaxed);
-        self.edge_summaries_deleted.store(0, Ordering::Relaxed);
         self.node_index_entries_deleted.store(0, Ordering::Relaxed);
         self.edge_index_entries_deleted.store(0, Ordering::Relaxed);
         self.node_tombstones_deleted.store(0, Ordering::Relaxed);
@@ -175,8 +176,6 @@ impl GcMetrics {
 /// Point-in-time snapshot of GC metrics.
 #[derive(Debug, Clone, Default)]
 pub struct GcMetricsSnapshot {
-    pub node_summaries_deleted: u64,
-    pub edge_summaries_deleted: u64,
     pub node_index_entries_deleted: u64,
     pub edge_index_entries_deleted: u64,
     pub node_tombstones_deleted: u64,
@@ -187,9 +186,7 @@ pub struct GcMetricsSnapshot {
 impl GcMetricsSnapshot {
     /// Total entries deleted across all categories.
     pub fn total_deleted(&self) -> u64 {
-        self.node_summaries_deleted
-            + self.edge_summaries_deleted
-            + self.node_index_entries_deleted
+        self.node_index_entries_deleted
             + self.edge_index_entries_deleted
             + self.node_tombstones_deleted
             + self.edge_tombstones_deleted
@@ -203,6 +200,20 @@ impl GcMetricsSnapshot {
 /// Graph garbage collector for CONTENT-ADDRESS reverse index.
 ///
 /// Provides incremental GC with cursor-based progress tracking.
+///
+/// # What GC Cleans Up
+///
+/// 1. **Stale index entries** - When entities are updated, old index entries
+///    are marked STALE. GC deletes these based on `versions_to_keep` policy.
+///
+/// 2. **Tombstone cleanup** (future) - Hard-delete tombstoned entities after
+///    `tombstone_retention` period.
+///
+/// # What RefCount Handles (No GC Needed)
+///
+/// Summary rows (NodeSummaries, EdgeSummaries) are automatically deleted
+/// when their RefCount reaches 0. This happens inline during mutation
+/// execution, so GC doesn't need to scan for orphan summaries.
 pub struct GraphGarbageCollector {
     storage: Arc<Storage>,
     config: GraphGcConfig,
@@ -238,8 +249,8 @@ impl GraphGarbageCollector {
 
     /// Run a single GC cycle.
     ///
-    /// Processes up to `batch_size` entries from each GC target,
-    /// persisting cursors for incremental progress.
+    /// Processes up to `batch_size` entries from each index CF,
+    /// deleting stale entries based on version retention policy.
     pub fn run_cycle(&self) -> Result<GcMetricsSnapshot> {
         let before = self.metrics.snapshot();
 
@@ -249,11 +260,8 @@ impl GraphGarbageCollector {
         // GC stale edge summary index entries
         self.gc_edge_summary_index()?;
 
-        // GC orphaned node summaries (no index references)
-        self.gc_node_summaries()?;
-
-        // GC orphaned edge summaries (no index references)
-        self.gc_edge_summaries()?;
+        // Note: Summary rows are cleaned up by RefCount (inline during mutations)
+        // No orphan scan needed!
 
         self.metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
 
@@ -262,8 +270,6 @@ impl GraphGarbageCollector {
         tracing::info!(
             node_index_deleted = after.node_index_entries_deleted - before.node_index_entries_deleted,
             edge_index_deleted = after.edge_index_entries_deleted - before.edge_index_entries_deleted,
-            node_summaries_deleted = after.node_summaries_deleted - before.node_summaries_deleted,
-            edge_summaries_deleted = after.edge_summaries_deleted - before.edge_summaries_deleted,
             cycle = after.cycles_completed,
             "GC cycle completed"
         );
@@ -298,8 +304,6 @@ impl GraphGarbageCollector {
             .get_cf(meta_cf, &cursor_key_bytes)?
             .unwrap_or_default();
 
-        // Build version cache: node_id → current_version
-        // Note: In production, this should be done incrementally or use a bloom filter
         let n = self.config.versions_to_keep as Version;
 
         // Create iterator from cursor position
@@ -473,188 +477,6 @@ impl GraphGarbageCollector {
 
         txn.commit()?;
         self.metrics.edge_index_entries_deleted.fetch_add(deleted, Ordering::Relaxed);
-
-        Ok(deleted)
-    }
-
-    /// GC orphaned entries from NodeSummaries CF.
-    ///
-    /// Summaries are content-addressed (keyed by SummaryHash). An orphan is a summary
-    /// that has no index entries referencing it. This scans summaries and deletes
-    /// those with no corresponding index entries.
-    fn gc_node_summaries(&self) -> Result<u64> {
-        let txn_db = self.storage.transaction_db()?;
-        let txn = txn_db.transaction();
-        let mut deleted = 0u64;
-        let mut processed = 0usize;
-
-        // Get CFs
-        let summaries_cf = txn_db
-            .cf_handle(NodeSummaries::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
-        let index_cf = txn_db
-            .cf_handle(NodeSummaryIndex::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
-        let meta_cf = txn_db
-            .cf_handle(GraphMeta::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
-
-        // Load cursor
-        let cursor_key = GraphMetaCfKey::gc_cursor_node_summaries();
-        let cursor_key_bytes = GraphMeta::key_to_bytes(&cursor_key);
-        let start_key = txn
-            .get_cf(meta_cf, &cursor_key_bytes)?
-            .unwrap_or_default();
-
-        // Create iterator from cursor position
-        let iter = if start_key.is_empty() {
-            txn.iterator_cf(summaries_cf, rocksdb::IteratorMode::Start)
-        } else {
-            txn.iterator_cf(
-                summaries_cf,
-                rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
-            )
-        };
-
-        let mut last_key: Option<Vec<u8>> = None;
-
-        for item in iter {
-            if processed >= self.config.batch_size {
-                break;
-            }
-
-            let (key_bytes, _value_bytes) = item?;
-            last_key = Some(key_bytes.to_vec());
-            processed += 1;
-
-            // Parse summary key to get the hash
-            let summary_key: NodeSummaryCfKey = NodeSummaries::key_from_bytes(&key_bytes)?;
-            let hash: SummaryHash = summary_key.0;
-
-            // Check if any index entry references this hash (prefix scan)
-            let hash_prefix = hash.as_bytes();
-            let mut has_references = false;
-
-            let index_iter = txn.prefix_iterator_cf(index_cf, hash_prefix);
-            for index_item in index_iter {
-                let (index_key, _) = index_item?;
-                // Verify prefix match (prefix_iterator may return keys after prefix)
-                if index_key.starts_with(hash_prefix) {
-                    has_references = true;
-                    break;
-                } else {
-                    break; // Moved past prefix
-                }
-            }
-
-            // Delete orphaned summary
-            if !has_references {
-                txn.delete_cf(summaries_cf, &key_bytes)?;
-                deleted += 1;
-            }
-        }
-
-        // Persist cursor
-        if let Some(key) = last_key {
-            let cursor_value = GraphMetaCfValue(GraphMetaField::GcCursorNodeSummaries(key));
-            txn.put_cf(meta_cf, &cursor_key_bytes, GraphMeta::value_to_bytes(&cursor_value))?;
-        } else {
-            // Iterator exhausted - delete cursor to start fresh
-            txn.delete_cf(meta_cf, &cursor_key_bytes)?;
-        }
-
-        txn.commit()?;
-        self.metrics.node_summaries_deleted.fetch_add(deleted, Ordering::Relaxed);
-
-        Ok(deleted)
-    }
-
-    /// GC orphaned entries from EdgeSummaries CF.
-    ///
-    /// Similar to gc_node_summaries - deletes summaries with no index references.
-    fn gc_edge_summaries(&self) -> Result<u64> {
-        let txn_db = self.storage.transaction_db()?;
-        let txn = txn_db.transaction();
-        let mut deleted = 0u64;
-        let mut processed = 0usize;
-
-        // Get CFs
-        let summaries_cf = txn_db
-            .cf_handle(EdgeSummaries::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
-        let index_cf = txn_db
-            .cf_handle(EdgeSummaryIndex::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
-        let meta_cf = txn_db
-            .cf_handle(GraphMeta::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
-
-        // Load cursor
-        let cursor_key = GraphMetaCfKey::gc_cursor_edge_summaries();
-        let cursor_key_bytes = GraphMeta::key_to_bytes(&cursor_key);
-        let start_key = txn
-            .get_cf(meta_cf, &cursor_key_bytes)?
-            .unwrap_or_default();
-
-        // Create iterator from cursor position
-        let iter = if start_key.is_empty() {
-            txn.iterator_cf(summaries_cf, rocksdb::IteratorMode::Start)
-        } else {
-            txn.iterator_cf(
-                summaries_cf,
-                rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
-            )
-        };
-
-        let mut last_key: Option<Vec<u8>> = None;
-
-        for item in iter {
-            if processed >= self.config.batch_size {
-                break;
-            }
-
-            let (key_bytes, _value_bytes) = item?;
-            last_key = Some(key_bytes.to_vec());
-            processed += 1;
-
-            // Parse summary key to get the hash
-            let summary_key: EdgeSummaryCfKey = EdgeSummaries::key_from_bytes(&key_bytes)?;
-            let hash: SummaryHash = summary_key.0;
-
-            // Check if any index entry references this hash (prefix scan)
-            let hash_prefix = hash.as_bytes();
-            let mut has_references = false;
-
-            let index_iter = txn.prefix_iterator_cf(index_cf, hash_prefix);
-            for index_item in index_iter {
-                let (index_key, _) = index_item?;
-                // Verify prefix match
-                if index_key.starts_with(hash_prefix) {
-                    has_references = true;
-                    break;
-                } else {
-                    break;
-                }
-            }
-
-            // Delete orphaned summary
-            if !has_references {
-                txn.delete_cf(summaries_cf, &key_bytes)?;
-                deleted += 1;
-            }
-        }
-
-        // Persist cursor
-        if let Some(key) = last_key {
-            let cursor_value = GraphMetaCfValue(GraphMetaField::GcCursorEdgeSummaries(key));
-            txn.put_cf(meta_cf, &cursor_key_bytes, GraphMeta::value_to_bytes(&cursor_value))?;
-        } else {
-            // Iterator exhausted - delete cursor to start fresh
-            txn.delete_cf(meta_cf, &cursor_key_bytes)?;
-        }
-
-        txn.commit()?;
-        self.metrics.edge_summaries_deleted.fetch_add(deleted, Ordering::Relaxed);
 
         Ok(deleted)
     }

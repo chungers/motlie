@@ -73,6 +73,11 @@ pub type Version = u32;
 /// Maximum version value. If reached, reject further updates with Error::VersionOverflow.
 pub const VERSION_MAX: Version = u32::MAX;
 
+/// Reference count for content-addressed summaries.
+/// u32 allows billions of references while bounding storage overhead to 4 bytes.
+/// Used to enable safe GC of shared summary content.
+pub type RefCount = u32;
+
 // ============================================================================
 // Names Column Family (for name interning)
 // ============================================================================
@@ -719,16 +724,20 @@ impl HotColumnFamilyRecord for ReverseEdges {
 ///
 /// Stores node summary content keyed by content hash (SummaryHash).
 /// Content-addressable: identical summaries stored once, referenced by hash.
+/// RefCount enables safe GC when all references are removed.
 ///
 /// Key: SummaryHash (8 bytes, content-addressable)
-/// Value: NodeSummary (DataUrl, rmp_serde + LZ4 compressed)
+/// Value: (RefCount, NodeSummary) - refcount + content
 pub(crate) struct NodeSummaries;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct NodeSummaryCfKey(pub(crate) SummaryHash);
 
+/// Value stores refcount + summary to enable safe GC of shared content.
+/// Field 0: RefCount - number of entities referencing this summary
+/// Field 1: NodeSummary - the actual summary content
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct NodeSummaryCfValue(pub(crate) NodeSummary);
+pub(crate) struct NodeSummaryCfValue(pub(crate) RefCount, pub(crate) NodeSummary);
 
 impl ColumnFamily for NodeSummaries {
     const CF_NAME: &'static str = "graph/node_summaries";
@@ -786,16 +795,20 @@ impl ColumnFamilySerde for NodeSummaries {
 ///
 /// Stores edge summary content keyed by content hash (SummaryHash).
 /// Content-addressable: identical summaries stored once, referenced by hash.
+/// RefCount enables safe GC when all references are removed.
 ///
 /// Key: SummaryHash (8 bytes, content-addressable)
-/// Value: EdgeSummary (DataUrl, rmp_serde + LZ4 compressed)
+/// Value: (RefCount, EdgeSummary) - refcount + content
 pub(crate) struct EdgeSummaries;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct EdgeSummaryCfKey(pub(crate) SummaryHash);
 
+/// Value stores refcount + summary to enable safe GC of shared content.
+/// Field 0: RefCount - number of entities referencing this summary
+/// Field 1: EdgeSummary - the actual summary content
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EdgeSummaryCfValue(pub(crate) EdgeSummary);
+pub(crate) struct EdgeSummaryCfValue(pub(crate) RefCount, pub(crate) EdgeSummary);
 
 impl ColumnFamily for EdgeSummaries {
     const CF_NAME: &'static str = "graph/edge_summaries";
