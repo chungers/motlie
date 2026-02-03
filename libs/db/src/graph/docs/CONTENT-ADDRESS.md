@@ -101,7 +101,7 @@ pub struct ReverseEdgeCfValue(pub Option<TemporalRange>);
 
 ## 1.2 Content Column Families (COLD)
 
-**Currently content-addressed (SummaryHash).** Versioned summaries are planned for GC support. (codex, 2026-02-03, validated)
+**Decision:** Summaries remain content-addressed by `SummaryHash` (no versioned summaries) to avoid high fan-out storage blowup for templated edge summaries. RefCount handles safe cleanup. (codex, 2026-02-03, validated)
 
 ### NodeSummaries
 
