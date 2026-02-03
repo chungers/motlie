@@ -6,6 +6,8 @@
 2. **No optimistic locking**: Blind upserts can silently lose concurrent updates (codex, 2026-02-02, validated)
 3. **No GC for stale content**: Old summaries accumulate without cleanup (codex, 2026-02-02, validated)
 
+**Breaking change:** This work changes on-disk schema; no migration or deprecation is required for this project phase. (codex, 2026-02-03, validated)
+
 ## Core Goal
 
 **Reverse index:** `SummaryHash → Vec<(EntityKey, Version)>`
@@ -99,35 +101,27 @@ pub struct ReverseEdgeCfValue(pub Option<TemporalRange>);
 
 ## 1.2 Content Column Families (COLD)
 
-**Changed from content-addressed to entity+version keyed.** Enables clean GC. (codex, 2026-02-02, validated)
+**Currently content-addressed (SummaryHash).** Versioned summaries are planned for GC support. (codex, 2026-02-03, validated)
 
 ### NodeSummaries
 
 ```rust
-// OLD: NodeSummaryCfKey(SummaryHash)  // content-addressed
-// NEW: Entity+version keyed
-pub struct NodeSummaryCfKey(
-    pub Id,      // 16 bytes - node_id
-    pub Version, // 4 bytes - version
-);  // Total: 20 bytes
+// CURRENT (implemented): content-addressed
+pub struct NodeSummaryCfKey(pub SummaryHash);  // 8 bytes
 
 pub struct NodeSummaryCfValue(pub NodeSummary);
 ```
+(codex, 2026-02-03, validated)
 
 ### EdgeSummaries
 
 ```rust
-// OLD: EdgeSummaryCfKey(SummaryHash)  // content-addressed
-// NEW: Entity+version keyed
-pub struct EdgeSummaryCfKey(
-    pub SrcId,    // 16 bytes
-    pub DstId,    // 16 bytes
-    pub NameHash, // 8 bytes
-    pub Version,  // 4 bytes - version
-);  // Total: 44 bytes
+// CURRENT (implemented): content-addressed
+pub struct EdgeSummaryCfKey(pub SummaryHash);  // 8 bytes
 
 pub struct EdgeSummaryCfValue(pub EdgeSummary);
 ```
+(codex, 2026-02-03, validated)
 
 ---
 
@@ -451,10 +445,11 @@ pub struct EdgeSummaryLookupResult {
 ---
 
 # Part 3: Implementation Tasks
-(codex, 2026-02-02, planned) (claude, 2026-02-02, in-progress)
+(codex, 2026-02-03, partial) (claude, 2026-02-02, in-progress)
 
 ## 3.1 Write Path: Insert
 (claude, 2026-02-02, implemented in mutation.rs - AddNode and AddEdge now write index entries)
+(codex, 2026-02-03, validated)
 
 ### Insert Node (version = 1)
 
@@ -479,8 +474,8 @@ fn insert_node(&self, id: Id, name: &str, summary: NodeSummary) -> Result<()> {
     let node_value = NodeCfValue(None, name_hash, Some(summary_hash), version, deleted);
     txn.put_cf(nodes_cf, NodeCfKey(id), node_value)?;
 
-    // 4. Write versioned summary (COLD)
-    let summary_key = NodeSummaryCfKey(id, version);
+    // 4. Write summary (COLD) - content-addressed
+    let summary_key = NodeSummaryCfKey(summary_hash);
     txn.put_cf(node_summaries_cf, summary_key, summary)?;
 
     // 5. Write reverse index entry with CURRENT marker
@@ -529,8 +524,8 @@ fn insert_edge(
     let reverse_value = ReverseEdgeCfValue(None);
     txn.put_cf(reverse_edges_cf, reverse_key, reverse_value)?;
 
-    // 5. Write versioned summary (COLD)
-    let summary_key = EdgeSummaryCfKey(src, dst, name_hash, version);
+    // 5. Write summary (COLD) - content-addressed
+    let summary_key = EdgeSummaryCfKey(summary_hash);
     txn.put_cf(edge_summaries_cf, summary_key, summary)?;
 
     // 6. Write reverse index entry with CURRENT marker
@@ -545,6 +540,7 @@ fn insert_edge(
 ---
 
 ## 3.2 Write Path: Update (Optimistic Locking)
+(codex, 2026-02-03, validated)
 
 ### Update Node
 
@@ -585,8 +581,8 @@ fn update_node(
     let new_value = NodeCfValue(current.0, current.1, Some(new_hash), new_version, current.4);
     txn.put_cf(nodes_cf, NodeCfKey(id), new_value)?;
 
-    // 6. Write new versioned summary (COLD)
-    let summary_key = NodeSummaryCfKey(id, new_version);
+    // 6. Write new summary (COLD) - content-addressed
+    let summary_key = NodeSummaryCfKey(new_hash);
     txn.put_cf(node_summaries_cf, summary_key, new_summary)?;
 
     // 7. Flip old index entry to STALE
@@ -652,8 +648,8 @@ fn update_edge(
 
     // Note: Reverse edge key unchanged. TemporalRange is updated via temporal mutations.
 
-    // 6. Write new versioned summary (COLD)
-    let summary_key = EdgeSummaryCfKey(src, dst, name_hash, new_version);
+    // 6. Write new summary (COLD) - content-addressed
+    let summary_key = EdgeSummaryCfKey(new_hash);
     txn.put_cf(edge_summaries_cf, summary_key, new_summary)?;
 
     // 7. Flip old index entry to STALE
@@ -978,12 +974,13 @@ impl GraphMeta {
 
 | Target | Key Pattern | Retention Policy |
 |--------|-------------|------------------|
-| NodeSummaries | `(Id, version)` | Keep versions ≥ (current - N + 1) |
-| EdgeSummaries | `(EdgeKey, version)` | Keep versions ≥ (current - N + 1) |
+| NodeSummaries | `(SummaryHash)` | Content-addressed; no per-version GC (versioned summaries planned) |
+| EdgeSummaries | `(SummaryHash)` | Content-addressed; no per-version GC (versioned summaries planned) |
 | NodeSummaryIndex | `(Hash, Id, version)` | Delete if marker=STALE and version not in retained set |
 | EdgeSummaryIndex | `(Hash, EdgeKey, version)` | Delete if marker=STALE and version not in retained set |
 | Tombstones (Nodes) | `(Id)` where deleted=true | Hard delete after `tombstone_retention` period |
 | Tombstones (Edges) | `(EdgeKey)` where deleted=true | Hard delete after `tombstone_retention` period |
+(codex, 2026-02-03, validated)
 
 ### GcMetrics
 
@@ -1016,6 +1013,8 @@ impl GraphGarbageCollector {
 ```
 
 ### GC Logic: Node Summaries
+
+**Note:** This GC logic assumes versioned summaries keyed by `(Id, version)`. It is not applicable while summaries remain content-addressed by `SummaryHash`. (codex, 2026-02-03, validated)
 
 ```rust
 fn gc_node_summaries(&self) -> Result<u64> {
@@ -1200,13 +1199,13 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 |--------|--------|
 | **Reverse index** | `(SummaryHash, EntityKey, Version)` → 1-byte marker (CURRENT/STALE) |
 | **Multi-version support** | Index returns all versions; query API provides `all_*` and `current_*` variants |
-| **Content storage** | Keyed by `(EntityId, Version)` — enables clean GC |
+| **Content storage** | Content-addressed by `SummaryHash` (versioned summaries planned) |
 | **Optimistic locking** | Version in entity value; reject update if mismatch |
 | **Delete semantics** | Tombstone flag in entity value; retained for audit until GC |
 | **Version overflow** | Reject writes at VERSION_MAX; documented policy |
 | **GC** | Incremental with cursor (persisted via `GraphMeta` pattern); delete old versions; delete stale index entries; hard delete tombstones after retention |
 | **Repair** | Periodic forward↔reverse consistency check |
-(codex, 2026-02-02, planned)
+(codex, 2026-02-03, partial)
 
 **Approval:** Design is ready to implement, with noted planned components. (codex, 2026-02-02, approved)
 
