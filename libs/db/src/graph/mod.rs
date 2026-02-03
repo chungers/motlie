@@ -43,11 +43,16 @@ mod tests;
 pub use mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
     UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
+    // CONTENT-ADDRESS: Update/Delete mutations with optimistic locking
+    UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge,
 };
 pub use crate::writer::Runnable;
 pub use query::{
     EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, IncomingEdges, NodeById,
     NodeFragmentsByIdTimeRange, OutgoingEdges, Query, TransactionQueryExecutor,
+    // CONTENT-ADDRESS reverse lookup query types
+    NodesBySummaryHash, NodeSummaryLookupResult,
+    EdgesBySummaryHash, EdgeSummaryLookupResult,
 };
 pub use transaction::Transaction;
 pub use crate::reader::Runnable as QueryRunnable;
@@ -71,7 +76,7 @@ pub use reader::{
 };
 pub use name_hash::{NameCache, NameHash};
 pub use summary_hash::SummaryHash;
-pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
+pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId, Version};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{GraphBlockCacheConfig, NameCacheConfig, Subsystem};
