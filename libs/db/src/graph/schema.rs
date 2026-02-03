@@ -62,6 +62,18 @@ use serde::{Deserialize, Serialize};
 pub use crate::{is_valid_at_time, StartTimestamp, TemporalRange, UntilTimestamp};
 
 // ============================================================================
+// Version Type for Optimistic Locking (CONTENT-ADDRESS design)
+// ============================================================================
+
+/// Entity version number for optimistic locking.
+/// u32 provides 4 billion versions per entity - sufficient for 136 years at 1 update/sec.
+/// (claude, 2026-02-02, in-progress)
+pub type Version = u32;
+
+/// Maximum version value. If reached, reject further updates with Error::VersionOverflow.
+pub const VERSION_MAX: Version = u32::MAX;
+
+// ============================================================================
 // Names Column Family (for name interning)
 // ============================================================================
 
@@ -148,13 +160,16 @@ pub(crate) struct Nodes;
 pub(crate) struct NodeCfKey(pub(crate) Id);
 
 /// Node value - optimized for graph traversal (hot path)
-/// Size: ~26 bytes (vs ~200-500 bytes with inline summary)
+/// Size: ~31 bytes (vs ~200-500 bytes with inline summary)
+/// (claude, 2026-02-02, in-progress) Added version and deleted for CONTENT-ADDRESS
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct NodeCfValue(
     pub(crate) Option<TemporalRange>,
     pub(crate) NameHash,            // Node name hash; full name in Names CF
     pub(crate) Option<SummaryHash>, // Content hash; full summary in NodeSummaries CF
+    pub(crate) Version,             // Monotonic version for optimistic locking (starts at 1)
+    pub(crate) bool,                // Deleted flag (tombstone) for soft deletes
 );
 
 impl ValidRangePatchable for Nodes {
@@ -229,13 +244,16 @@ pub(crate) struct ForwardEdgeCfKey(
 );
 
 /// Forward edge value - optimized for graph traversal (hot path)
-/// Size: ~35 bytes (vs ~200-500 bytes with inline summary)
+/// Size: ~40 bytes (vs ~200-500 bytes with inline summary)
+/// (claude, 2026-02-02, in-progress) Added version and deleted for CONTENT-ADDRESS
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct ForwardEdgeCfValue(
     pub(crate) Option<TemporalRange>, // Field 0: Temporal validity
     pub(crate) Option<f64>,           // Field 1: Optional weight
     pub(crate) Option<SummaryHash>,   // Field 2: Content hash; full summary in EdgeSummaries CF
+    pub(crate) Version,               // Field 3: Monotonic version for optimistic locking
+    pub(crate) bool,                  // Field 4: Deleted flag (tombstone)
 );
 
 /// Reverse edges column family (index only).
@@ -298,6 +316,7 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for Nodes {
 
 impl Nodes {
     /// Create key-value pair from AddNode mutation.
+    /// (claude, 2026-02-02, in-progress) Updated for CONTENT-ADDRESS: version=1, deleted=false
     pub fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
         let name_hash = NameHash::from_name(&args.name);
@@ -309,7 +328,8 @@ impl Nodes {
             None
         };
 
-        let value = NodeCfValue(args.valid_range.clone(), name_hash, summary_hash);
+        // New nodes start at version 1, not deleted
+        let value = NodeCfValue(args.valid_range.clone(), name_hash, summary_hash, 1, false);
         (key, value)
     }
 
@@ -535,6 +555,7 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for ForwardEdges {
 
 impl ForwardEdges {
     /// Create key-value pair from AddEdge mutation.
+    /// (claude, 2026-02-02, in-progress) Updated for CONTENT-ADDRESS: version=1, deleted=false
     pub fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let name_hash = NameHash::from_name(&args.name);
         let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, name_hash);
@@ -546,7 +567,8 @@ impl ForwardEdges {
             None
         };
 
-        let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, summary_hash);
+        // New edges start at version 1, not deleted
+        let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, summary_hash, 1, false);
         (key, value)
     }
 
@@ -827,15 +849,283 @@ impl ColumnFamilySerde for EdgeSummaries {
     // value_to_bytes and value_from_bytes use default impl (MessagePack + LZ4)
 }
 
+// ============================================================================
+// Reverse Index Column Families (CONTENT-ADDRESS design)
+// (claude, 2026-02-02, in-progress)
+// ============================================================================
+
+/// NodeSummaryIndex column family - reverse lookup from SummaryHash to nodes.
+///
+/// Key: (SummaryHash, Id, Version) = 28 bytes
+/// Value: 1-byte marker (CURRENT=0x01, STALE=0x00)
+///
+/// Enables: "find all nodes with this content hash"
+pub(crate) struct NodeSummaryIndex;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct NodeSummaryIndexCfKey(
+    pub(crate) SummaryHash, // 8 bytes - prefix for hash lookup
+    pub(crate) Id,          // 16 bytes - node_id
+    pub(crate) Version,     // 4 bytes - version
+);
+
+/// 1-byte marker: 0x01 = current, 0x00 = stale
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub(crate) struct NodeSummaryIndexCfValue(pub(crate) u8);
+
+impl NodeSummaryIndexCfValue {
+    pub const CURRENT: u8 = 0x01;
+    pub const STALE: u8 = 0x00;
+
+    pub fn current() -> Self {
+        Self(Self::CURRENT)
+    }
+
+    pub fn stale() -> Self {
+        Self(Self::STALE)
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.0 == Self::CURRENT
+    }
+}
+
+impl ColumnFamily for NodeSummaryIndex {
+    const CF_NAME: &'static str = "graph/node_summary_index";
+}
+
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for NodeSummaryIndex {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        // Enable bloom filter for prefix lookups
+        block_opts.set_bloom_filter(10.0, false);
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [summary_hash (8)] + [node_id (16)] + [version (4)] = 28 bytes
+        // Use 8-byte prefix to scan all nodes with a given hash
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl ColumnFamilySerde for NodeSummaryIndex {
+    type Key = NodeSummaryIndexCfKey;
+    type Value = NodeSummaryIndexCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // Layout: [summary_hash (8)] + [node_id (16)] + [version (4)] = 28 bytes
+        let mut bytes = Vec::with_capacity(28);
+        bytes.extend_from_slice(key.0.as_bytes());
+        bytes.extend_from_slice(&key.1.into_bytes());
+        bytes.extend_from_slice(&key.2.to_be_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
+        if bytes.len() != 28 {
+            anyhow::bail!(
+                "Invalid NodeSummaryIndexCfKey length: expected 28, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(&bytes[0..8]);
+
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(&bytes[8..24]);
+
+        let mut version_bytes = [0u8; 4];
+        version_bytes.copy_from_slice(&bytes[24..28]);
+        let version = u32::from_be_bytes(version_bytes);
+
+        Ok(NodeSummaryIndexCfKey(
+            SummaryHash::from_bytes(hash_bytes),
+            Id::from_bytes(id_bytes),
+            version,
+        ))
+    }
+
+    fn value_to_bytes(value: &Self::Value) -> anyhow::Result<Vec<u8>> {
+        Ok(vec![value.0])
+    }
+
+    fn value_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Value> {
+        if bytes.len() != 1 {
+            anyhow::bail!(
+                "Invalid NodeSummaryIndexCfValue length: expected 1, got {}",
+                bytes.len()
+            );
+        }
+        Ok(NodeSummaryIndexCfValue(bytes[0]))
+    }
+}
+
+/// EdgeSummaryIndex column family - reverse lookup from SummaryHash to edges.
+///
+/// Key: (SummaryHash, SrcId, DstId, NameHash, Version) = 52 bytes
+/// Value: 1-byte marker (CURRENT=0x01, STALE=0x00)
+///
+/// Enables: "find all edges with this content hash"
+pub(crate) struct EdgeSummaryIndex;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct EdgeSummaryIndexCfKey(
+    pub(crate) SummaryHash, // 8 bytes - prefix for hash lookup
+    pub(crate) SrcId,       // 16 bytes
+    pub(crate) DstId,       // 16 bytes
+    pub(crate) NameHash,    // 8 bytes
+    pub(crate) Version,     // 4 bytes
+);
+
+/// 1-byte marker: 0x01 = current, 0x00 = stale
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub(crate) struct EdgeSummaryIndexCfValue(pub(crate) u8);
+
+impl EdgeSummaryIndexCfValue {
+    pub const CURRENT: u8 = 0x01;
+    pub const STALE: u8 = 0x00;
+
+    pub fn current() -> Self {
+        Self(Self::CURRENT)
+    }
+
+    pub fn stale() -> Self {
+        Self(Self::STALE)
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.0 == Self::CURRENT
+    }
+}
+
+impl ColumnFamily for EdgeSummaryIndex {
+    const CF_NAME: &'static str = "graph/edge_summary_index";
+}
+
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for EdgeSummaryIndex {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        // Enable bloom filter for prefix lookups
+        block_opts.set_bloom_filter(10.0, false);
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [summary_hash (8)] + [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [version (4)] = 52 bytes
+        // Use 8-byte prefix to scan all edges with a given hash
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl ColumnFamilySerde for EdgeSummaryIndex {
+    type Key = EdgeSummaryIndexCfKey;
+    type Value = EdgeSummaryIndexCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // Layout: [summary_hash (8)] + [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [version (4)] = 52 bytes
+        let mut bytes = Vec::with_capacity(52);
+        bytes.extend_from_slice(key.0.as_bytes());
+        bytes.extend_from_slice(&key.1.into_bytes());
+        bytes.extend_from_slice(&key.2.into_bytes());
+        bytes.extend_from_slice(key.3.as_bytes());
+        bytes.extend_from_slice(&key.4.to_be_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
+        if bytes.len() != 52 {
+            anyhow::bail!(
+                "Invalid EdgeSummaryIndexCfKey length: expected 52, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(&bytes[0..8]);
+
+        let mut src_id_bytes = [0u8; 16];
+        src_id_bytes.copy_from_slice(&bytes[8..24]);
+
+        let mut dst_id_bytes = [0u8; 16];
+        dst_id_bytes.copy_from_slice(&bytes[24..40]);
+
+        let mut name_hash_bytes = [0u8; 8];
+        name_hash_bytes.copy_from_slice(&bytes[40..48]);
+
+        let mut version_bytes = [0u8; 4];
+        version_bytes.copy_from_slice(&bytes[48..52]);
+        let version = u32::from_be_bytes(version_bytes);
+
+        Ok(EdgeSummaryIndexCfKey(
+            SummaryHash::from_bytes(hash_bytes),
+            Id::from_bytes(src_id_bytes),
+            Id::from_bytes(dst_id_bytes),
+            NameHash::from_bytes(name_hash_bytes),
+            version,
+        ))
+    }
+
+    fn value_to_bytes(value: &Self::Value) -> anyhow::Result<Vec<u8>> {
+        Ok(vec![value.0])
+    }
+
+    fn value_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Value> {
+        if bytes.len() != 1 {
+            anyhow::bail!(
+                "Invalid EdgeSummaryIndexCfValue length: expected 1, got {}",
+                bytes.len()
+            );
+        }
+        Ok(EdgeSummaryIndexCfValue(bytes[0]))
+    }
+}
+
 /// All column families used in the database.
 /// This is the authoritative list that should be used when opening the database.
+/// (claude, 2026-02-02, in-progress) Added reverse index CFs for CONTENT-ADDRESS
 pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     Names::CF_NAME,
     Nodes::CF_NAME,
     NodeFragments::CF_NAME,
-    NodeSummaries::CF_NAME, // Phase 2: Cold CF for node summaries
+    NodeSummaries::CF_NAME,      // Phase 2: Cold CF for node summaries
+    NodeSummaryIndex::CF_NAME,   // CONTENT-ADDRESS: Reverse index hash→nodes
     EdgeFragments::CF_NAME,
-    EdgeSummaries::CF_NAME, // Phase 2: Cold CF for edge summaries
+    EdgeSummaries::CF_NAME,      // Phase 2: Cold CF for edge summaries
+    EdgeSummaryIndex::CF_NAME,   // CONTENT-ADDRESS: Reverse index hash→edges
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
 ];
