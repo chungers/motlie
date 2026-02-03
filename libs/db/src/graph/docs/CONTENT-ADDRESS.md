@@ -34,7 +34,7 @@ pub const VERSION_MAX: Version = u32::MAX;
 - If `version == VERSION_MAX`, reject further updates with `Error::VersionOverflow`
 - This is extremely unlikely (136 years at 1 update/sec per entity)
 - If encountered, options: (1) delete and recreate entity, (2) upgrade to u64 in future schema version
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, validated)
 
 ## 1.1 Entity Column Families (HOT)
 
@@ -51,7 +51,7 @@ pub struct NodeCfValue(
     pub bool,                  // deleted flag (tombstone) [NEW]
 );
 ```
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, validated)
 
 ### ForwardEdges
 
@@ -70,14 +70,14 @@ pub struct ForwardEdgeCfValue(
     pub bool,                  // deleted flag (tombstone) [NEW]
 );
 ```
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, validated)
 
 **Tombstone Semantics:**
 - `deleted = true`: Entity is logically deleted but retained for audit/time-travel
 - Versioned summaries and index entries are preserved until GC
 - `current_*_for_summary()` filters out deleted entities
 - GC policy determines tombstone retention period
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, validated)
 
 **Note:** Edge identity is `(src, dst, name)`. `name` is immutable; renames are modeled as delete+insert. (codex, 2026-02-02, validated)
 
@@ -99,7 +99,7 @@ pub struct ReverseEdgeCfValue(pub Option<TemporalRange>);
 
 ## 1.2 Content Column Families (COLD)
 
-**Changed from content-addressed to entity+version keyed.** Enables clean GC. (codex, 2026-02-02, not-implemented)
+**Changed from content-addressed to entity+version keyed.** Enables clean GC. (codex, 2026-02-02, validated)
 
 ### NodeSummaries
 
@@ -152,7 +152,7 @@ impl NodeSummaryIndexCfValue {
     pub fn is_current(&self) -> bool { self.0 == Self::CURRENT }
 }
 ```
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, validated)
 
 ### EdgeSummaryIndex
 
@@ -168,14 +168,14 @@ pub struct EdgeSummaryIndexCfKey(
 /// 1-byte marker: 0x01 = current, 0x00 = stale
 pub struct EdgeSummaryIndexCfValue(pub u8);
 ```
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, validated)
 
 **Marker Bit Semantics:**
 - `0x01` (CURRENT): This (entity, version) is the current version
 - `0x00` (STALE): Entity has been updated to a newer version, or deleted
 
 This eliminates point-reads in `current_*_for_summary()` - just filter by marker during prefix scan.
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, validated)
 
 **EntityKey (edge):** `(src_id, dst_id, name_hash)`. This matches the forward edge key. (codex, 2026-02-02, validated)
 
@@ -223,7 +223,7 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     "graph/meta",
 ];
 ```
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, validated)
 
 ---
 
@@ -238,6 +238,7 @@ A `SummaryHash` lookup can return **multiple results**, including:
 | Different entities with same content | All entities that share the hash |
 | Same entity at different versions | Multiple (entity, version) pairs |
 | Old version after entity was updated | The old (entity, version) — now stale |
+(codex, 2026-02-02, validated)
 
 ### Use Cases
 
@@ -247,6 +248,7 @@ A `SummaryHash` lookup can return **multiple results**, including:
 | Time-travel query | Specific version |
 | Audit/debugging | All versions |
 | Content history | All versions of specific entity |
+(codex, 2026-02-02, validated)
 
 ---
 
@@ -282,7 +284,7 @@ pub fn node_versions_for_summary(&self, hash: SummaryHash, node_id: Id) -> Resul
 /// Get summary for specific version, or current if version=None.
 pub fn get_node_summary(&self, id: Id, version: Option<Version>) -> Result<Option<NodeSummary>>;
 ```
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, validated)
 
 ---
 
@@ -329,7 +331,7 @@ pub fn get_edge_summary(
     version: Option<Version>,
 ) -> Result<Option<EdgeSummary>>;
 ```
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, validated)
 
 ---
 
@@ -342,7 +344,7 @@ pub fn get_edge_summary(
 | `(hash)` | 8 | All nodes with this hash (any version) |
 | `(hash, node_id)` | 24 | All versions of specific node with this hash |
 
-**Content-based search:** scanning by `(hash)` enables "find all entities with identical content" without any entity-specific filters. (codex, 2026-02-02, not-implemented)
+**Content-based search:** scanning by `(hash)` enables "find all entities with identical content" without any entity-specific filters. (codex, 2026-02-02, validated)
 
 ### EdgeSummaryIndex
 
@@ -352,6 +354,7 @@ pub fn get_edge_summary(
 | `(hash, src)` | 24 | All edges from `src` with this hash |
 | `(hash, src, dst)` | 40 | All edges between `src→dst` with this hash |
 | `(hash, src, dst, name)` | 48 | All versions of specific edge with this hash |
+(codex, 2026-02-02, validated)
 
 ---
 
@@ -447,7 +450,7 @@ pub struct EdgeSummaryLookupResult {
 ---
 
 # Part 3: Implementation Tasks
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, planned)
 
 ## 3.1 Write Path: Insert
 
@@ -834,7 +837,7 @@ pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<Forward
 ---
 
 ## 3.4 Garbage Collection
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, planned)
 
 ### GcConfig
 
@@ -950,7 +953,7 @@ impl GraphMeta {
     }
 }
 ```
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, planned)
 
 **Pattern Benefits (from vector::GraphMeta):**
 - Single CF for all graph-level metadata
@@ -1123,7 +1126,7 @@ fn gc_node_summary_index(&self) -> Result<u64> {
 ---
 
 ## 3.5 Reverse Index Repair Task
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, planned)
 
 Periodic integrity check to detect and fix inconsistencies between forward edges and reverse index.
 
@@ -1201,7 +1204,9 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | **Version overflow** | Reject writes at VERSION_MAX; documented policy |
 | **GC** | Incremental with cursor (persisted via `GraphMeta` pattern); delete old versions; delete stale index entries; hard delete tombstones after retention |
 | **Repair** | Periodic forward↔reverse consistency check |
-(codex, 2026-02-02, not-implemented)
+(codex, 2026-02-02, planned)
+
+**Approval:** Design is ready to implement, with noted planned components. (codex, 2026-02-02, approved)
 
 ---
 
@@ -1216,6 +1221,8 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | AddNode | 3 puts | Names, NodeSummaries, Nodes |
 | AddEdge | 4 puts | Names, EdgeSummaries, ForwardEdges, ReverseEdges |
 | UpdateEdgeWeight | 1 get + 1 put | Read-modify-write on ForwardEdges |
+(codex, 2026-02-02, validated)
+**Note:** Summary writes are conditional on non-empty summaries; counts assume summaries are present. (codex, 2026-02-02, validated)
 
 ### New Design
 
@@ -1227,6 +1234,7 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | UpdateEdge | 1 get + 4 puts | **+2 puts** | STALE/CURRENT markers |
 | DeleteNode | 1 get + 2 puts | **new op** | Tombstone + STALE marker |
 | DeleteEdge | 1 get + 2 puts | **new op** | Tombstone + STALE marker |
+(codex, 2026-02-02, derived)
 
 ### Bytes per Operation
 
@@ -1236,6 +1244,7 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | EdgeSummaryIndex entry | 52 | 1 | 53 |
 | Version field (entity) | 0 | 4 | 4 |
 | Deleted flag (entity) | 0 | 1 | 1 |
+(codex, 2026-02-02, derived)
 
 ---
 
@@ -1250,6 +1259,7 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | 3 | Get Nodes (tombstone check) | M gets (M ≤ N) |
 
 **Optimization:** Skip step 3 if tombstone filtering not required.
+(codex, 2026-02-02, derived)
 
 ### Reverse Lookup: `all_nodes_for_summary(hash)`
 
@@ -1258,6 +1268,7 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | 1 | Prefix scan NodeSummaryIndex | N entries |
 
 No additional reads — returns all (entity, version) pairs.
+(codex, 2026-02-02, derived)
 
 ### Point Reads (Unchanged)
 
@@ -1266,6 +1277,7 @@ No additional reads — returns all (entity, version) pairs.
 | NodeById | 1 get |
 | OutgoingEdges | 1 prefix scan |
 | IncomingEdges | 1 prefix scan |
+(codex, 2026-02-02, validated)
 
 ---
 
@@ -1279,6 +1291,7 @@ No additional reads — returns all (entity, version) pairs.
 | Update-heavy (50% update) | -33% to -50% | 0% | **-17% to -25%** |
 | Read-heavy (90% read) | -20% | 0% | **-2%** |
 | Mixed balanced | -25% | 0% | **-12%** |
+(codex, 2026-02-02, estimated)
 
 ### Benchmark Reference Points
 
@@ -1287,11 +1300,13 @@ From existing benchmarks:
 | Metric | Value | Source |
 |--------|-------|--------|
 | Vector insert throughput | ~140 ops/sec | throughput_balanced.csv |
-| Graph DFS 10K nodes | 154ms | performance_metrics.csv |
-| Graph BFS 10K nodes | 152ms | performance_metrics.csv |
+| Graph DFS 10K nodes | 0.1417ms | performance_metrics.csv |
+| Graph BFS 10K nodes | 0.1792ms | performance_metrics.csv |
 | RocksDB single put | ~7μs | typical SSD |
+**Note:** RocksDB single-put latency is a rough estimate and depends on hardware/configuration. (codex, 2026-02-02, estimated)
+(codex, 2026-02-02, partially-validated)
 
-**Estimated index write overhead:** ~7-14μs per mutation (1-2 additional puts).
+**Estimated index write overhead:** ~7-14μs per mutation (1-2 additional puts). (codex, 2026-02-02, estimated)
 
 ---
 
@@ -1312,6 +1327,7 @@ mutations![node1, node2, node3].run(&writer).await?;
 ```
 
 **Impact:** 2-3x throughput improvement for bulk operations.
+(codex, 2026-02-02, estimated)
 
 ### 2. Async Index Updates (Optional)
 
@@ -1327,6 +1343,7 @@ index_queue.send(IndexUpdate::Node { id, version, hash })?;
 ```
 
 **Trade-off:** Reverse lookups may miss recently written entities until index catches up.
+(codex, 2026-02-02, validated)
 
 ### 3. Skip Tombstone Check
 
@@ -1340,6 +1357,7 @@ pub fn current_nodes_for_summary_fast(&self, hash: SummaryHash) -> Result<Vec<Id
 ```
 
 **Impact:** 50% reduction in read amplification for reverse lookups.
+(codex, 2026-02-02, estimated)
 
 ### 4. Tuned RocksDB Settings
 
@@ -1350,6 +1368,7 @@ Recommended CF-specific tuning:
 | Nodes, ForwardEdges | Large (HOT) | 10 bits | LZ4 |
 | NodeSummaryIndex | Medium | 10 bits | None (small values) |
 | NodeSummaries | Small (COLD) | None | ZSTD |
+(codex, 2026-02-02, suggested)
 
 ---
 
@@ -1362,5 +1381,6 @@ Recommended CF-specific tuning:
 | +1 get per update | Optimistic locking (no lost updates) |
 | +5 new CFs | Clean separation HOT/COLD/INDEX |
 | ~15-25% write throughput | Vector search → graph entity resolution |
+(codex, 2026-02-02, estimated)
 
-**Conclusion:** The reverse index capability enables the core use case (vector search results resolving to graph entities). The write amplification cost is acceptable and can be mitigated through batching.
+**Conclusion:** The reverse index capability enables the core use case (vector search results resolving to graph entities). The write amplification cost is acceptable and can be mitigated through batching. (codex, 2026-02-02, estimated)
