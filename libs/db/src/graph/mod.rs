@@ -36,6 +36,9 @@ pub mod writer;
 /// Scan API for iterating over column families with pagination support.
 pub mod scan;
 
+/// Garbage collection for stale summary index entries and tombstones.
+pub mod gc;
+
 #[cfg(test)]
 mod tests;
 
@@ -80,6 +83,9 @@ pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSu
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{GraphBlockCacheConfig, NameCacheConfig, Subsystem};
+
+// CONTENT-ADDRESS: Garbage collection for stale index entries
+pub use gc::{GraphGarbageCollector, GraphGcConfig, GcMetrics, GcMetricsSnapshot};
 
 /// Storage type alias using generic rocksdb::Storage
 pub type Storage = crate::rocksdb::Storage<Subsystem>;

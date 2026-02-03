@@ -839,7 +839,7 @@ pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<Forward
 ---
 
 ## 3.4 Garbage Collection
-(codex, 2026-02-02, planned) (claude, 2026-02-02, GraphMeta CF implemented in schema.rs)
+(codex, 2026-02-02, planned) (claude, 2026-02-02, implemented in gc.rs - GraphGarbageCollector with cursor-based incremental processing)
 
 ### GcConfig
 
@@ -1217,7 +1217,8 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 - [x] Reverse lookup query APIs - query.rs (NodesBySummaryHash, EdgesBySummaryHash)
 - [x] GraphMeta CF for GC cursors - schema.rs, subsystem.rs
 - [x] Update/Delete mutations with optimistic locking - mutation.rs (UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge)
-- [ ] GC implementation - gc.rs (pending)
+- [x] GC implementation - gc.rs (GraphGarbageCollector with cursor-based incremental GC)
+- [ ] Reverse index repair task - repair.rs (future)
 
 ---
 
