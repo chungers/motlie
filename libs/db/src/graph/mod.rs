@@ -82,7 +82,7 @@ pub use reader::{
 };
 pub use name_hash::{NameCache, NameHash};
 pub use summary_hash::SummaryHash;
-pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId, Version};
+pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, RefCount, SrcId, Version};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{GraphBlockCacheConfig, NameCacheConfig, Subsystem};

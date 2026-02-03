@@ -411,6 +411,149 @@ fn write_name_to_cf_cached(
     Ok(name_hash)
 }
 
+// ============================================================================
+// RefCount Helper Functions for Content-Addressed Summaries
+// ============================================================================
+
+use super::summary_hash::SummaryHash;
+use super::schema::{NodeSummary, EdgeSummary, RefCount};
+
+/// Increment refcount for a node summary, creating the row if it doesn't exist.
+/// Returns the new refcount.
+fn increment_node_summary_refcount(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    hash: SummaryHash,
+    summary: &NodeSummary,
+) -> Result<RefCount> {
+    use super::schema::{NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
+
+    let cf = txn_db
+        .cf_handle(NodeSummaries::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
+
+    // Read existing value (if any)
+    let new_refcount = match txn.get_cf(cf, &key_bytes)? {
+        Some(existing_bytes) => {
+            let existing: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&existing_bytes)?;
+            existing.0.saturating_add(1)
+        }
+        None => 1, // First reference
+    };
+
+    // Write with updated refcount
+    let value = NodeSummaryCfValue(new_refcount, summary.clone());
+    let value_bytes = NodeSummaries::value_to_bytes(&value)?;
+    txn.put_cf(cf, key_bytes, value_bytes)?;
+
+    tracing::trace!(hash = ?hash, refcount = new_refcount, "Incremented node summary refcount");
+    Ok(new_refcount)
+}
+
+/// Decrement refcount for a node summary, deleting the row if it reaches 0.
+/// Returns the new refcount (0 means deleted).
+fn decrement_node_summary_refcount(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    hash: SummaryHash,
+) -> Result<RefCount> {
+    use super::schema::{NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
+
+    let cf = txn_db
+        .cf_handle(NodeSummaries::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
+
+    // Read existing value
+    let existing_bytes = txn.get_cf(cf, &key_bytes)?
+        .ok_or_else(|| anyhow::anyhow!("Cannot decrement refcount: NodeSummary not found for hash {:?}", hash))?;
+    let existing: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&existing_bytes)?;
+    let new_refcount = existing.0.saturating_sub(1);
+
+    if new_refcount == 0 {
+        // Delete the row
+        txn.delete_cf(cf, key_bytes)?;
+        tracing::trace!(hash = ?hash, "Deleted node summary (refcount reached 0)");
+    } else {
+        // Write with decremented refcount
+        let value = NodeSummaryCfValue(new_refcount, existing.1);
+        let value_bytes = NodeSummaries::value_to_bytes(&value)?;
+        txn.put_cf(cf, key_bytes, value_bytes)?;
+        tracing::trace!(hash = ?hash, refcount = new_refcount, "Decremented node summary refcount");
+    }
+
+    Ok(new_refcount)
+}
+
+/// Increment refcount for an edge summary, creating the row if it doesn't exist.
+/// Returns the new refcount.
+fn increment_edge_summary_refcount(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    hash: SummaryHash,
+    summary: &EdgeSummary,
+) -> Result<RefCount> {
+    use super::schema::{EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
+
+    let cf = txn_db
+        .cf_handle(EdgeSummaries::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
+
+    // Read existing value (if any)
+    let new_refcount = match txn.get_cf(cf, &key_bytes)? {
+        Some(existing_bytes) => {
+            let existing: EdgeSummaryCfValue = EdgeSummaries::value_from_bytes(&existing_bytes)?;
+            existing.0.saturating_add(1)
+        }
+        None => 1, // First reference
+    };
+
+    // Write with updated refcount
+    let value = EdgeSummaryCfValue(new_refcount, summary.clone());
+    let value_bytes = EdgeSummaries::value_to_bytes(&value)?;
+    txn.put_cf(cf, key_bytes, value_bytes)?;
+
+    tracing::trace!(hash = ?hash, refcount = new_refcount, "Incremented edge summary refcount");
+    Ok(new_refcount)
+}
+
+/// Decrement refcount for an edge summary, deleting the row if it reaches 0.
+/// Returns the new refcount (0 means deleted).
+fn decrement_edge_summary_refcount(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    hash: SummaryHash,
+) -> Result<RefCount> {
+    use super::schema::{EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
+
+    let cf = txn_db
+        .cf_handle(EdgeSummaries::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
+
+    // Read existing value
+    let existing_bytes = txn.get_cf(cf, &key_bytes)?
+        .ok_or_else(|| anyhow::anyhow!("Cannot decrement refcount: EdgeSummary not found for hash {:?}", hash))?;
+    let existing: EdgeSummaryCfValue = EdgeSummaries::value_from_bytes(&existing_bytes)?;
+    let new_refcount = existing.0.saturating_sub(1);
+
+    if new_refcount == 0 {
+        // Delete the row
+        txn.delete_cf(cf, key_bytes)?;
+        tracing::trace!(hash = ?hash, "Deleted edge summary (refcount reached 0)");
+    } else {
+        // Write with decremented refcount
+        let value = EdgeSummaryCfValue(new_refcount, existing.1);
+        let value_bytes = EdgeSummaries::value_to_bytes(&value)?;
+        txn.put_cf(cf, key_bytes, value_bytes)?;
+        tracing::trace!(hash = ?hash, refcount = new_refcount, "Decremented edge summary refcount");
+    }
+
+    Ok(new_refcount)
+}
+
 /// Helper function to update TemporalRange for a single node.
 /// Updates the Nodes CF.
 fn update_node_valid_range(
@@ -561,26 +704,19 @@ impl MutationExecutor for AddNode {
         tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation");
 
         use super::schema::{
-            Nodes, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue,
-            NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+            Nodes, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
         };
-        use super::summary_hash::SummaryHash;
 
         // Write name to Names CF (idempotent)
         write_name_to_cf(txn, txn_db, &self.name)?;
 
         // Write summary to NodeSummaries CF (cold) if non-empty
+        // Increment refcount (or create with refcount=1)
         // Also write reverse index entry with CURRENT marker
-        // (claude, 2026-02-02, in-progress) CONTENT-ADDRESS index writes
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
-                let summaries_cf = txn_db
-                    .cf_handle(NodeSummaries::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeSummaries::CF_NAME))?;
-                let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(summary_hash));
-                let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(self.summary.clone()))?;
-                // Content-addressable: same content = same hash = idempotent write
-                txn.put_cf(summaries_cf, summary_key, summary_value)?;
+                // Increment refcount (creates row if missing)
+                increment_node_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
 
                 // Write reverse index entry with CURRENT marker (version=1 for new nodes)
                 let index_cf = txn_db
@@ -612,25 +748,19 @@ impl MutationExecutor for AddNode {
         tracing::debug!(id = %self.id, name = %self.name, "Executing AddNode mutation (cached)");
 
         use super::schema::{
-            Nodes, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue,
-            NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+            Nodes, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
         };
-        use super::summary_hash::SummaryHash;
 
         // Write name to Names CF with cache optimization
         write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
 
         // Write summary to NodeSummaries CF (cold) if non-empty
+        // Increment refcount (or create with refcount=1)
         // Also write reverse index entry with CURRENT marker
-        // (claude, 2026-02-02, in-progress) CONTENT-ADDRESS index writes
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
-                let summaries_cf = txn_db
-                    .cf_handle(NodeSummaries::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", NodeSummaries::CF_NAME))?;
-                let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(summary_hash));
-                let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(self.summary.clone()))?;
-                txn.put_cf(summaries_cf, summary_key, summary_value)?;
+                // Increment refcount (creates row if missing)
+                increment_node_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
 
                 // Write reverse index entry with CURRENT marker (version=1 for new nodes)
                 let index_cf = txn_db
@@ -668,26 +798,20 @@ impl MutationExecutor for AddEdge {
         );
 
         use super::schema::{
-            ForwardEdges, ReverseEdges, EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue,
+            ForwardEdges, ReverseEdges,
             EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
         };
-        use super::summary_hash::SummaryHash;
 
         // Write name to Names CF (idempotent)
         let name_hash = write_name_to_cf(txn, txn_db, &self.name)?;
 
         // Write summary to EdgeSummaries CF (cold) if non-empty
+        // Increment refcount (or create with refcount=1)
         // Also write reverse index entry with CURRENT marker
-        // (claude, 2026-02-02, in-progress) CONTENT-ADDRESS index writes
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
-                let summaries_cf = txn_db
-                    .cf_handle(EdgeSummaries::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeSummaries::CF_NAME))?;
-                let summary_key = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(summary_hash));
-                let summary_value = EdgeSummaries::value_to_bytes(&EdgeSummaryCfValue(self.summary.clone()))?;
-                // Content-addressable: same content = same hash = idempotent write
-                txn.put_cf(summaries_cf, summary_key, summary_value)?;
+                // Increment refcount (creates row if missing)
+                increment_edge_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
 
                 // Write reverse index entry with CURRENT marker (version=1 for new edges)
                 let index_cf = txn_db
@@ -737,25 +861,20 @@ impl MutationExecutor for AddEdge {
         );
 
         use super::schema::{
-            ForwardEdges, ReverseEdges, EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue,
+            ForwardEdges, ReverseEdges,
             EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
         };
-        use super::summary_hash::SummaryHash;
 
         // Write name to Names CF with cache optimization
         let name_hash = write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
 
         // Write summary to EdgeSummaries CF (cold) if non-empty
+        // Increment refcount (or create with refcount=1)
         // Also write reverse index entry with CURRENT marker
-        // (claude, 2026-02-02, in-progress) CONTENT-ADDRESS index writes
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
-                let summaries_cf = txn_db
-                    .cf_handle(EdgeSummaries::CF_NAME)
-                    .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", EdgeSummaries::CF_NAME))?;
-                let summary_key = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(summary_hash));
-                let summary_value = EdgeSummaries::value_to_bytes(&EdgeSummaryCfValue(self.summary.clone()))?;
-                txn.put_cf(summaries_cf, summary_key, summary_value)?;
+                // Increment refcount (creates row if missing)
+                increment_edge_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
 
                 // Write reverse index entry with CURRENT marker (version=1 for new edges)
                 let index_cf = txn_db
@@ -993,10 +1112,9 @@ impl MutationExecutor for UpdateNodeSummary {
         );
 
         use super::schema::{
-            NodeCfKey, NodeCfValue, Nodes, NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue,
+            NodeCfKey, NodeCfValue, Nodes,
             NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue, VERSION_MAX,
         };
-        use super::summary_hash::SummaryHash;
 
         // 1. Read current node
         let nodes_cf = txn_db
@@ -1039,15 +1157,15 @@ impl MutationExecutor for UpdateNodeSummary {
         let new_version = current_version + 1;
         let new_hash = SummaryHash::from_summary(&self.new_summary)?;
 
-        // 6. Write new summary to NodeSummaries CF (cold)
-        let summaries_cf = txn_db
-            .cf_handle(NodeSummaries::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
-        let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(new_hash));
-        let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(self.new_summary.clone()))?;
-        txn.put_cf(summaries_cf, summary_key, summary_value)?;
+        // 6. Increment refcount for new summary (creates row if missing)
+        increment_node_summary_refcount(txn, txn_db, new_hash, &self.new_summary)?;
 
-        // 7. Flip old index entry to STALE (if exists)
+        // 7. Decrement refcount for old summary (deletes row if refcount reaches 0)
+        if let Some(old_h) = old_hash {
+            decrement_node_summary_refcount(txn, txn_db, old_h)?;
+        }
+
+        // 9. Flip old index entry to STALE (if exists)
         if let Some(old_h) = old_hash {
             let index_cf = txn_db
                 .cf_handle(NodeSummaryIndex::CF_NAME)
@@ -1058,7 +1176,7 @@ impl MutationExecutor for UpdateNodeSummary {
             txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
         }
 
-        // 8. Write new index entry with CURRENT marker
+        // 10. Write new index entry with CURRENT marker
         let index_cf = txn_db
             .cf_handle(NodeSummaryIndex::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
@@ -1067,7 +1185,7 @@ impl MutationExecutor for UpdateNodeSummary {
         let current_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
         txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
 
-        // 9. Update Nodes CF with new version and summary hash
+        // 11. Update Nodes CF with new version and summary hash
         let new_node_value = NodeCfValue(current.0, current.1, Some(new_hash), new_version, false);
         let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize node: {}", e))?;
@@ -1100,10 +1218,8 @@ impl MutationExecutor for UpdateEdgeSummary {
 
         use super::schema::{
             ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges,
-            EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue,
             EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue, VERSION_MAX,
         };
-        use super::summary_hash::SummaryHash;
 
         let name_hash = NameHash::from_name(&self.name);
 
@@ -1149,15 +1265,15 @@ impl MutationExecutor for UpdateEdgeSummary {
         let new_version = current_version + 1;
         let new_hash = SummaryHash::from_summary(&self.new_summary)?;
 
-        // 6. Write new summary to EdgeSummaries CF (cold)
-        let summaries_cf = txn_db
-            .cf_handle(EdgeSummaries::CF_NAME)
-            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
-        let summary_key = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(new_hash));
-        let summary_value = EdgeSummaries::value_to_bytes(&EdgeSummaryCfValue(self.new_summary.clone()))?;
-        txn.put_cf(summaries_cf, summary_key, summary_value)?;
+        // 6. Increment refcount for new summary (creates row if missing)
+        increment_edge_summary_refcount(txn, txn_db, new_hash, &self.new_summary)?;
 
-        // 7. Flip old index entry to STALE (if exists)
+        // 7. Decrement refcount for old summary (deletes row if refcount reaches 0)
+        if let Some(old_h) = old_hash {
+            decrement_edge_summary_refcount(txn, txn_db, old_h)?;
+        }
+
+        // 8. Flip old index entry to STALE (if exists)
         if let Some(old_h) = old_hash {
             let index_cf = txn_db
                 .cf_handle(EdgeSummaryIndex::CF_NAME)
@@ -1168,7 +1284,7 @@ impl MutationExecutor for UpdateEdgeSummary {
             txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
         }
 
-        // 8. Write new index entry with CURRENT marker
+        // 9. Write new index entry with CURRENT marker
         let index_cf = txn_db
             .cf_handle(EdgeSummaryIndex::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
@@ -1177,7 +1293,7 @@ impl MutationExecutor for UpdateEdgeSummary {
         let current_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
         txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
 
-        // 9. Update ForwardEdges CF with new version and summary hash
+        // 10. Update ForwardEdges CF with new version and summary hash
         let new_edge_value = ForwardEdgeCfValue(current.0, current.1, Some(new_hash), new_version, false);
         let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize edge: {}", e))?;
@@ -1256,7 +1372,12 @@ impl MutationExecutor for DeleteNode {
             .map_err(|e| anyhow::anyhow!("Failed to serialize node: {}", e))?;
         txn.put_cf(nodes_cf, &node_key_bytes, new_node_bytes)?;
 
-        // 6. Flip current index entry to STALE
+        // 6. Decrement refcount for the summary (deletes row if refcount reaches 0)
+        if let Some(hash) = current_hash {
+            decrement_node_summary_refcount(txn, txn_db, hash)?;
+        }
+
+        // 7. Flip current index entry to STALE
         if let Some(hash) = current_hash {
             let index_cf = txn_db
                 .cf_handle(NodeSummaryIndex::CF_NAME)
@@ -1344,7 +1465,12 @@ impl MutationExecutor for DeleteEdge {
             .map_err(|e| anyhow::anyhow!("Failed to serialize edge: {}", e))?;
         txn.put_cf(forward_cf, &edge_key_bytes, new_edge_bytes)?;
 
-        // 6. Flip current index entry to STALE
+        // 6. Decrement refcount for the summary (deletes row if refcount reaches 0)
+        if let Some(hash) = current_hash {
+            decrement_edge_summary_refcount(txn, txn_db, hash)?;
+        }
+
+        // 7. Flip current index entry to STALE
         if let Some(hash) = current_hash {
             let index_cf = txn_db
                 .cf_handle(EdgeSummaryIndex::CF_NAME)

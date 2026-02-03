@@ -140,7 +140,7 @@ fn resolve_node_summary(
     match value_bytes {
         Some(bytes) => {
             let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
+            Ok(value.1) // .1 is the summary, .0 is the refcount
         }
         None => Ok(NodeSummary::from_text("")),
     }
@@ -175,7 +175,7 @@ fn resolve_edge_summary(
     match value_bytes {
         Some(bytes) => {
             let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
+            Ok(value.1) // .1 is the summary, .0 is the refcount
         }
         None => Ok(EdgeSummary::from_text("")),
     }
@@ -200,7 +200,7 @@ fn resolve_edge_summary_from_txn(
     match txn.get_cf(summaries_cf, &key_bytes)? {
         Some(bytes) => {
             let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
+            Ok(value.1) // .1 is the summary, .0 is the refcount
         }
         None => Ok(EdgeSummary::from_text("")),
     }
@@ -225,7 +225,7 @@ fn resolve_node_summary_from_txn(
     match txn.get_cf(summaries_cf, &key_bytes)? {
         Some(bytes) => {
             let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
+            Ok(value.1) // .1 is the summary, .0 is the refcount
         }
         None => Ok(NodeSummary::from_text("")),
     }
