@@ -109,7 +109,12 @@ pub struct ReverseEdgeCfValue(pub Option<TemporalRange>);
 // CURRENT (implemented): content-addressed
 pub struct NodeSummaryCfKey(pub SummaryHash);  // 8 bytes
 
-pub struct NodeSummaryCfValue(pub NodeSummary);
+/// Reference count for content-addressed summaries.
+/// Use u32 to bound storage overhead while allowing billions of references.
+pub type RefCount = u32;
+
+// Value stores refcount + summary to enable safe GC of shared content
+pub struct NodeSummaryCfValue(pub RefCount, pub NodeSummary); // (refcount, summary)
 ```
 (codex, 2026-02-03, validated)
 
@@ -119,7 +124,8 @@ pub struct NodeSummaryCfValue(pub NodeSummary);
 // CURRENT (implemented): content-addressed
 pub struct EdgeSummaryCfKey(pub SummaryHash);  // 8 bytes
 
-pub struct EdgeSummaryCfValue(pub EdgeSummary);
+// Value stores refcount + summary to enable safe GC of shared content
+pub struct EdgeSummaryCfValue(pub RefCount, pub EdgeSummary); // (refcount, summary)
 ```
 (codex, 2026-02-03, validated)
 
@@ -420,6 +426,8 @@ Query Results for hash 0xAAA:
 ```
 (codex, 2026-02-02, illustrative)
 
+**Note:** It is expected that ANN search can return vectors for multiple versions of the same edge (e.g., 0xAAA for v1 and 0xBBB for v2). In that case, reverse lookup yields distinct versioned results for the same edge. The reranker should deduplicate to the latest version and rank accordingly. (codex, 2026-02-03, validated)
+
 ---
 
 ## 2.7 Result Types
@@ -541,6 +549,23 @@ fn insert_edge(
 
 ## 3.2 Write Path: Update (Optimistic Locking)
 (codex, 2026-02-03, validated)
+
+### Refcount Handling for Content-Addressed Summaries
+
+When summaries are keyed by `SummaryHash`, multiple entities can share the same
+summary row. To safely GC these rows, `NodeSummaryCfValue` and
+`EdgeSummaryCfValue` store a refcount.
+
+**Rules (must occur in the same transaction as the entity update):**
+
+- **Insert (new entity with summary hash H):** increment refcount(H), create row if missing.
+- **Update (old hash H1 → new hash H2):**
+  - increment refcount(H2)
+  - decrement refcount(H1)
+  - if refcount(H1) reaches 0, delete the summary row.
+- **Delete (tombstone, hash H):** decrement refcount(H); delete row if it reaches 0.
+
+(codex, 2026-02-03, planned)
 
 ### Update Node
 
@@ -974,8 +999,8 @@ impl GraphMeta {
 
 | Target | Key Pattern | Retention Policy |
 |--------|-------------|------------------|
-| NodeSummaries | `(SummaryHash)` | Content-addressed; no per-version GC (versioned summaries planned) |
-| EdgeSummaries | `(SummaryHash)` | Content-addressed; no per-version GC (versioned summaries planned) |
+| NodeSummaries | `(SummaryHash)` | Content-addressed; delete when refcount reaches 0 |
+| EdgeSummaries | `(SummaryHash)` | Content-addressed; delete when refcount reaches 0 |
 | NodeSummaryIndex | `(Hash, Id, version)` | Delete if marker=STALE and version not in retained set |
 | EdgeSummaryIndex | `(Hash, EdgeKey, version)` | Delete if marker=STALE and version not in retained set |
 | Tombstones (Nodes) | `(Id)` where deleted=true | Hard delete after `tombstone_retention` period |
@@ -1199,7 +1224,7 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 |--------|--------|
 | **Reverse index** | `(SummaryHash, EntityKey, Version)` → 1-byte marker (CURRENT/STALE) |
 | **Multi-version support** | Index returns all versions; query API provides `all_*` and `current_*` variants |
-| **Content storage** | Content-addressed by `SummaryHash` (versioned summaries planned) |
+| **Content storage** | Content-addressed by `SummaryHash` with refcounted summaries |
 | **Optimistic locking** | Version in entity value; reject update if mismatch |
 | **Delete semantics** | Tombstone flag in entity value; retained for audit until GC |
 | **Version overflow** | Reject writes at VERSION_MAX; documented policy |
@@ -1396,5 +1421,7 @@ Recommended CF-specific tuning:
 | +5 new CFs | Clean separation HOT/COLD/INDEX |
 | ~15-25% write throughput | Vector search → graph entity resolution |
 (codex, 2026-02-02, estimated)
+
+**Storage cost note:** If summaries were per-entity/per-version (instead of content-addressed), templated edge summaries (e.g., “Friends”, “co-workers”) would duplicate across many edges and versions. Content-addressed summaries avoid this duplication but require refcounting for safe GC. (codex, 2026-02-03, validated)
 
 **Conclusion:** The reverse index capability enables the core use case (vector search results resolving to graph entities). The write amplification cost is acceptable and can be mitigated through batching. (codex, 2026-02-02, estimated)
