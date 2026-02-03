@@ -40,10 +40,13 @@ use anyhow::Result;
 use super::schema::{
     GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField,
     NodeSummaryIndex, EdgeSummaryIndex,
+    NodeSummaries, NodeSummaryCfKey,
+    EdgeSummaries, EdgeSummaryCfKey,
     Nodes, NodeCfKey, NodeCfValue,
     ForwardEdges, ForwardEdgeCfKey, ForwardEdgeCfValue,
     Version,
 };
+use super::SummaryHash;
 use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord, Storage};
 
 // ============================================================================
@@ -246,6 +249,12 @@ impl GraphGarbageCollector {
         // GC stale edge summary index entries
         self.gc_edge_summary_index()?;
 
+        // GC orphaned node summaries (no index references)
+        self.gc_node_summaries()?;
+
+        // GC orphaned edge summaries (no index references)
+        self.gc_edge_summaries()?;
+
         self.metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
 
         let after = self.metrics.snapshot();
@@ -253,6 +262,8 @@ impl GraphGarbageCollector {
         tracing::info!(
             node_index_deleted = after.node_index_entries_deleted - before.node_index_entries_deleted,
             edge_index_deleted = after.edge_index_entries_deleted - before.edge_index_entries_deleted,
+            node_summaries_deleted = after.node_summaries_deleted - before.node_summaries_deleted,
+            edge_summaries_deleted = after.edge_summaries_deleted - before.edge_summaries_deleted,
             cycle = after.cycles_completed,
             "GC cycle completed"
         );
@@ -462,6 +473,188 @@ impl GraphGarbageCollector {
 
         txn.commit()?;
         self.metrics.edge_index_entries_deleted.fetch_add(deleted, Ordering::Relaxed);
+
+        Ok(deleted)
+    }
+
+    /// GC orphaned entries from NodeSummaries CF.
+    ///
+    /// Summaries are content-addressed (keyed by SummaryHash). An orphan is a summary
+    /// that has no index entries referencing it. This scans summaries and deletes
+    /// those with no corresponding index entries.
+    fn gc_node_summaries(&self) -> Result<u64> {
+        let txn_db = self.storage.transaction_db()?;
+        let txn = txn_db.transaction();
+        let mut deleted = 0u64;
+        let mut processed = 0usize;
+
+        // Get CFs
+        let summaries_cf = txn_db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        let index_cf = txn_db
+            .cf_handle(NodeSummaryIndex::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
+        let meta_cf = txn_db
+            .cf_handle(GraphMeta::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
+
+        // Load cursor
+        let cursor_key = GraphMetaCfKey::gc_cursor_node_summaries();
+        let cursor_key_bytes = GraphMeta::key_to_bytes(&cursor_key);
+        let start_key = txn
+            .get_cf(meta_cf, &cursor_key_bytes)?
+            .unwrap_or_default();
+
+        // Create iterator from cursor position
+        let iter = if start_key.is_empty() {
+            txn.iterator_cf(summaries_cf, rocksdb::IteratorMode::Start)
+        } else {
+            txn.iterator_cf(
+                summaries_cf,
+                rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
+            )
+        };
+
+        let mut last_key: Option<Vec<u8>> = None;
+
+        for item in iter {
+            if processed >= self.config.batch_size {
+                break;
+            }
+
+            let (key_bytes, _value_bytes) = item?;
+            last_key = Some(key_bytes.to_vec());
+            processed += 1;
+
+            // Parse summary key to get the hash
+            let summary_key: NodeSummaryCfKey = NodeSummaries::key_from_bytes(&key_bytes)?;
+            let hash: SummaryHash = summary_key.0;
+
+            // Check if any index entry references this hash (prefix scan)
+            let hash_prefix = hash.as_bytes();
+            let mut has_references = false;
+
+            let index_iter = txn.prefix_iterator_cf(index_cf, hash_prefix);
+            for index_item in index_iter {
+                let (index_key, _) = index_item?;
+                // Verify prefix match (prefix_iterator may return keys after prefix)
+                if index_key.starts_with(hash_prefix) {
+                    has_references = true;
+                    break;
+                } else {
+                    break; // Moved past prefix
+                }
+            }
+
+            // Delete orphaned summary
+            if !has_references {
+                txn.delete_cf(summaries_cf, &key_bytes)?;
+                deleted += 1;
+            }
+        }
+
+        // Persist cursor
+        if let Some(key) = last_key {
+            let cursor_value = GraphMetaCfValue(GraphMetaField::GcCursorNodeSummaries(key));
+            txn.put_cf(meta_cf, &cursor_key_bytes, GraphMeta::value_to_bytes(&cursor_value))?;
+        } else {
+            // Iterator exhausted - delete cursor to start fresh
+            txn.delete_cf(meta_cf, &cursor_key_bytes)?;
+        }
+
+        txn.commit()?;
+        self.metrics.node_summaries_deleted.fetch_add(deleted, Ordering::Relaxed);
+
+        Ok(deleted)
+    }
+
+    /// GC orphaned entries from EdgeSummaries CF.
+    ///
+    /// Similar to gc_node_summaries - deletes summaries with no index references.
+    fn gc_edge_summaries(&self) -> Result<u64> {
+        let txn_db = self.storage.transaction_db()?;
+        let txn = txn_db.transaction();
+        let mut deleted = 0u64;
+        let mut processed = 0usize;
+
+        // Get CFs
+        let summaries_cf = txn_db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        let index_cf = txn_db
+            .cf_handle(EdgeSummaryIndex::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
+        let meta_cf = txn_db
+            .cf_handle(GraphMeta::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("GraphMeta CF not found"))?;
+
+        // Load cursor
+        let cursor_key = GraphMetaCfKey::gc_cursor_edge_summaries();
+        let cursor_key_bytes = GraphMeta::key_to_bytes(&cursor_key);
+        let start_key = txn
+            .get_cf(meta_cf, &cursor_key_bytes)?
+            .unwrap_or_default();
+
+        // Create iterator from cursor position
+        let iter = if start_key.is_empty() {
+            txn.iterator_cf(summaries_cf, rocksdb::IteratorMode::Start)
+        } else {
+            txn.iterator_cf(
+                summaries_cf,
+                rocksdb::IteratorMode::From(&start_key, rocksdb::Direction::Forward),
+            )
+        };
+
+        let mut last_key: Option<Vec<u8>> = None;
+
+        for item in iter {
+            if processed >= self.config.batch_size {
+                break;
+            }
+
+            let (key_bytes, _value_bytes) = item?;
+            last_key = Some(key_bytes.to_vec());
+            processed += 1;
+
+            // Parse summary key to get the hash
+            let summary_key: EdgeSummaryCfKey = EdgeSummaries::key_from_bytes(&key_bytes)?;
+            let hash: SummaryHash = summary_key.0;
+
+            // Check if any index entry references this hash (prefix scan)
+            let hash_prefix = hash.as_bytes();
+            let mut has_references = false;
+
+            let index_iter = txn.prefix_iterator_cf(index_cf, hash_prefix);
+            for index_item in index_iter {
+                let (index_key, _) = index_item?;
+                // Verify prefix match
+                if index_key.starts_with(hash_prefix) {
+                    has_references = true;
+                    break;
+                } else {
+                    break;
+                }
+            }
+
+            // Delete orphaned summary
+            if !has_references {
+                txn.delete_cf(summaries_cf, &key_bytes)?;
+                deleted += 1;
+            }
+        }
+
+        // Persist cursor
+        if let Some(key) = last_key {
+            let cursor_value = GraphMetaCfValue(GraphMetaField::GcCursorEdgeSummaries(key));
+            txn.put_cf(meta_cf, &cursor_key_bytes, GraphMeta::value_to_bytes(&cursor_value))?;
+        } else {
+            // Iterator exhausted - delete cursor to start fresh
+            txn.delete_cf(meta_cf, &cursor_key_bytes)?;
+        }
+
+        txn.commit()?;
+        self.metrics.edge_summaries_deleted.fetch_add(deleted, Ordering::Relaxed);
 
         Ok(deleted)
     }
