@@ -89,6 +89,7 @@ Responsibilities:
 
 - `Graph` can wrap an `Arc<Processor>` or `Arc<Storage>`
 - Public API can remain stable while internal implementation migrates
+- **Desired outcome:** the refactor should make it possible to remove `Graph` entirely over time, leaving `Processor` + public async `Writer`/`Reader` as the primary entry points
 
 ---
 
@@ -98,6 +99,7 @@ Responsibilities:
 - **API Stability:** Public async APIs remain unchanged
 - **Consistency:** Aligns graph with vector/fulltext patterns
 - **Future-proof:** Easier to add caches or new execution modes
+- **Simplification (success criterion):** Fewer public types and clearer ownership boundaries
 
 ---
 
@@ -107,3 +109,27 @@ Vector’s architecture clearly separates synchronous internal execution
 (`Processor`) from async public APIs (`Writer`/`Reader`). Refactoring graph
 to follow the same pattern will make the system more consistent, easier to
 extend, and safer to evolve without breaking public interfaces.
+
+---
+
+## Can `Graph` Be Removed Entirely?
+
+Yes — it is structurally possible. The graph crate already routes most public
+usage through async `Writer`/`Reader` channel APIs. If those APIs construct and
+hold the internal `Processor` (as in the vector crate), `Graph` becomes a thin
+facade with no unique responsibilities. At that point it can be deprecated and
+eventually removed.
+
+### Preconditions
+
+- Any `Graph`-specific helpers must be moved to `Processor` or to the public
+  async APIs.
+- Call sites that currently construct `Graph::new(storage)` must have equivalent
+  construction paths via `Processor` + `Writer`/`Reader` helpers.
+- Tests/examples should be migrated to use the async APIs or direct `Processor`
+  calls.
+
+### Desired Outcome
+
+`Processor` becomes the only synchronous core, and `Writer`/`Reader` become the
+public entry points. `Graph` is no longer required for external users.
