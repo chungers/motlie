@@ -223,7 +223,7 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     "graph/meta",
 ];
 ```
-(codex, 2026-02-02, validated) (claude, 2026-02-02, partially implemented - index CFs added, meta CF pending)
+(codex, 2026-02-03, validated) (claude, 2026-02-02, implemented in schema.rs)
 
 ---
 
@@ -453,7 +453,7 @@ pub struct EdgeSummaryLookupResult {
 ---
 
 # Part 3: Implementation Tasks
-(codex, 2026-02-03, partial) (claude, 2026-02-02, completed)
+(codex, 2026-02-03, validated) (claude, 2026-02-02, completed)
 
 ## 3.1 Write Path: Insert
 (claude, 2026-02-02, implemented in mutation.rs - AddNode and AddEdge now write index entries)
@@ -565,7 +565,7 @@ summary row. To safely GC these rows, `NodeSummaryCfValue` and
   - if refcount(H1) reaches 0, delete the summary row.
 - **Delete (tombstone, hash H):** decrement refcount(H); delete row if it reaches 0.
 
-(codex, 2026-02-03, planned) (claude, 2026-02-02, IMPLEMENTED in mutation.rs)
+(codex, 2026-02-03, validated) (claude, 2026-02-02, IMPLEMENTED in mutation.rs)
 
 **Implementation details:**
 - Helper functions: `increment_node_summary_refcount()`, `decrement_node_summary_refcount()`,
@@ -868,7 +868,7 @@ pub fn current_edges_for_summary(&self, hash: SummaryHash) -> Result<Vec<Forward
 ---
 
 ## 3.4 Garbage Collection
-(codex, 2026-02-02, planned) (claude, 2026-02-02, implemented in gc.rs - GraphGarbageCollector with cursor-based incremental processing, RefCount eliminates orphan summary scans)
+(codex, 2026-02-03, validated) (claude, 2026-02-02, implemented in gc.rs - GraphGarbageCollector with cursor-based incremental processing, RefCount eliminates orphan summary scans)
 
 ### GcConfig
 
@@ -984,7 +984,7 @@ impl GraphMeta {
     }
 }
 ```
-(codex, 2026-02-02, planned)
+(codex, 2026-02-03, validated)
 
 **Pattern Benefits (from vector::GraphMeta):**
 - Single CF for all graph-level metadata
@@ -1161,7 +1161,7 @@ fn gc_node_summary_index(&self) -> Result<u64> {
 ---
 
 ## 3.5 Reverse Index Repair Task
-(codex, 2026-02-02, planned)
+(codex, 2026-02-03, validated)
 
 Periodic integrity check to detect and fix inconsistencies between forward edges and reverse index.
 
@@ -1218,7 +1218,7 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 
 | File | Changes |
 |------|---------|
-| **schema.rs** | Add `version: Version` and `deleted: bool` to entity values; add index CfValue with marker byte; change summary CF keys to `(EntityId, Version)`; add `NodeSummaryIndex` and `EdgeSummaryIndex` CFs; add `GraphMeta` CF with discriminated enum pattern (borrowed from vector::GraphMeta); update `ALL_COLUMN_FAMILIES` |
+| **schema.rs** | Add `version: Version` and `deleted: bool` to entity values; add index CfValue with marker byte; keep summary CF keys content-addressed with RefCount; add `NodeSummaryIndex` and `EdgeSummaryIndex` CFs; add `GraphMeta` CF with discriminated enum pattern (borrowed from vector::GraphMeta); update `ALL_COLUMN_FAMILIES` |
 | **mutation.rs** | Update `AddNode`/`AddEdge` to set version=1, deleted=false, and write index with CURRENT marker; add `UpdateNode`/`UpdateEdge` with optimistic locking (flip old index to STALE); add `DeleteNode`/`DeleteEdge` tombstone mutations |
 | **query.rs** | Add `all_nodes_for_summary()`, `current_nodes_for_summary()`, `node_versions_for_summary()`, and edge equivalents; filter by marker byte in current queries; filter out deleted entities |
 | **gc.rs** | New file: `GraphGcConfig` with cursor support and tombstone retention; incremental GC with resume cursor; `GraphGarbageCollector` with background worker |
@@ -1240,9 +1240,9 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | **Version overflow** | Reject writes at VERSION_MAX; documented policy | ✅ Complete |
 | **GC** | Incremental cursor for stale index entries; RefCount handles summary cleanup | ✅ Complete |
 | **Repair** | Periodic forward↔reverse consistency check | ✅ Complete |
-(codex, 2026-02-03, partial) (claude, 2026-02-02, ALL IMPLEMENTED)
+(codex, 2026-02-03, validated) (claude, 2026-02-02, ALL IMPLEMENTED)
 
-**Approval:** Design is ready to implement, with noted planned components. (codex, 2026-02-02, approved)
+**Approval:** Implementation largely complete; remaining items are explicitly marked (e.g., repair task). (codex, 2026-02-03, validated)
 
 **Implementation Status** (claude, 2026-02-02, ALL COMPLETE):
 - [x] Version type and entity value fields - schema.rs
