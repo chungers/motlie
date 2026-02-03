@@ -1222,6 +1222,8 @@ use tokio::time::Duration;
             None,
             name_hash,
             summary_hash,
+            1,     // version
+            false, // deleted
         );
 
         // Serialize and compress
@@ -1761,9 +1763,9 @@ use tokio::time::Duration;
         let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(new_summary.clone())).unwrap();
         txn.put_cf(&summary_cf, &summary_key, &summary_value).unwrap();
 
-        // Update node1 to point to new summary_hash
+        // Update node1 to point to new summary_hash (preserve version, increment if needed)
         let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
-        let new_value1 = NodeCfValue(value1.0, value1.1, Some(new_hash));
+        let new_value1 = NodeCfValue(value1.0, value1.1, Some(new_hash), value1.3, value1.4);
         let value_bytes = Nodes::value_to_bytes(&new_value1).unwrap();
         txn.put_cf(&cf, &key1, &value_bytes).unwrap();
 
@@ -1851,7 +1853,7 @@ use tokio::time::Duration;
             TimestampMilli(2000),
         );
 
-        let original = NodeCfValue(temporal_range, name_hash, Some(summary_hash));
+        let original = NodeCfValue(temporal_range, name_hash, Some(summary_hash), 1, false);
 
         // Serialize with rkyv
         let bytes = Nodes::value_to_bytes(&original).expect("rkyv serialize");
@@ -1878,7 +1880,7 @@ use tokio::time::Duration;
         let summary_hash = SummaryHash::from_summary(&summary).unwrap();
         let temporal_range = TemporalRange::valid_from(TimestampMilli(5000));
 
-        let original = NodeCfValue(temporal_range.clone(), name_hash, Some(summary_hash));
+        let original = NodeCfValue(temporal_range.clone(), name_hash, Some(summary_hash), 1, false);
         let bytes = Nodes::value_to_bytes(&original).expect("serialize");
 
         // Access archived data without full deserialization
@@ -1910,7 +1912,7 @@ use tokio::time::Duration;
             TimestampMilli(200),
         );
 
-        let original = ForwardEdgeCfValue(temporal_range, Some(3.14), Some(summary_hash));
+        let original = ForwardEdgeCfValue(temporal_range, Some(3.14), Some(summary_hash), 1, false);
 
         // Serialize with rkyv
         let bytes = ForwardEdges::value_to_bytes(&original).expect("rkyv serialize");
@@ -1930,7 +1932,7 @@ use tokio::time::Duration;
         use crate::graph::schema::{ForwardEdgeCfValue, ForwardEdges};
 
         let weight = Some(2.718);
-        let original = ForwardEdgeCfValue(None, weight, None);
+        let original = ForwardEdgeCfValue(None, weight, None, 1, false);
         let bytes = ForwardEdges::value_to_bytes(&original).expect("serialize");
 
         // Access archived data without full deserialization
@@ -1969,19 +1971,23 @@ use tokio::time::Duration;
 
         // NodeCfValue with None summary_hash
         let name_hash = NameHash::from_name("no_summary");
-        let node_value = NodeCfValue(None, name_hash, None);
+        let node_value = NodeCfValue(None, name_hash, None, 1, false);
         let bytes = Nodes::value_to_bytes(&node_value).expect("serialize");
         let recovered: NodeCfValue = Nodes::value_from_bytes(&bytes).expect("deserialize");
         assert!(recovered.0.is_none(), "TemporalRange should be None");
         assert!(recovered.2.is_none(), "SummaryHash should be None");
+        assert_eq!(recovered.3, 1, "Version should be 1");
+        assert!(!recovered.4, "Deleted should be false");
 
         // ForwardEdgeCfValue with all None
-        let edge_value = ForwardEdgeCfValue(None, None, None);
+        let edge_value = ForwardEdgeCfValue(None, None, None, 1, false);
         let bytes = ForwardEdges::value_to_bytes(&edge_value).expect("serialize");
         let recovered: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&bytes).expect("deserialize");
         assert!(recovered.0.is_none(), "TemporalRange should be None");
         assert!(recovered.1.is_none(), "Weight should be None");
         assert!(recovered.2.is_none(), "SummaryHash should be None");
+        assert_eq!(recovered.3, 1, "Version should be 1");
+        assert!(!recovered.4, "Deleted should be false");
     }
 
     /// Test rkyv serialized size is reasonable
@@ -1993,13 +1999,13 @@ use tokio::time::Duration;
         use crate::DataUrl;
 
         // NodeCfValue with rkyv includes alignment padding
-        // Fields: TemporalRange (Option), NameHash (8), Option<SummaryHash> (8)
-        // rkyv aligned size is typically 64 bytes for this structure
+        // Fields: TemporalRange (Option), NameHash (8), Option<SummaryHash> (8), Version (4), bool (1)
+        // rkyv aligned size is typically 64-80 bytes for this structure
         let name_hash = NameHash::from_name("test");
-        let node_value = NodeCfValue(None, name_hash, None);
+        let node_value = NodeCfValue(None, name_hash, None, 1, false);
         let bytes = Nodes::value_to_bytes(&node_value).expect("serialize");
         assert!(
-            bytes.len() <= 80,
+            bytes.len() <= 96,
             "NodeCfValue size should be reasonable: got {} bytes",
             bytes.len()
         );
@@ -2009,10 +2015,10 @@ use tokio::time::Duration;
         // ForwardEdgeCfValue with all fields
         let summary = DataUrl::from_text("x");
         let summary_hash = SummaryHash::from_summary(&summary).unwrap();
-        let edge_value = ForwardEdgeCfValue(None, Some(1.0), Some(summary_hash));
+        let edge_value = ForwardEdgeCfValue(None, Some(1.0), Some(summary_hash), 1, false);
         let bytes = ForwardEdges::value_to_bytes(&edge_value).expect("serialize");
         assert!(
-            bytes.len() <= 80,
+            bytes.len() <= 96,
             "ForwardEdgeCfValue size should be reasonable: got {} bytes",
             bytes.len()
         );

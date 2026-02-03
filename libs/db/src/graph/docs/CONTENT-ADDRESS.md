@@ -34,7 +34,7 @@ pub const VERSION_MAX: Version = u32::MAX;
 - If `version == VERSION_MAX`, reject further updates with `Error::VersionOverflow`
 - This is extremely unlikely (136 years at 1 update/sec per entity)
 - If encountered, options: (1) delete and recreate entity, (2) upgrade to u64 in future schema version
-(codex, 2026-02-02, validated)
+(codex, 2026-02-02, validated) (claude, 2026-02-02, implemented in schema.rs)
 
 ## 1.1 Entity Column Families (HOT)
 
@@ -51,7 +51,7 @@ pub struct NodeCfValue(
     pub bool,                  // deleted flag (tombstone) [NEW]
 );
 ```
-(codex, 2026-02-02, validated)
+(codex, 2026-02-02, validated) (claude, 2026-02-02, implemented in schema.rs)
 
 ### ForwardEdges
 
@@ -70,7 +70,7 @@ pub struct ForwardEdgeCfValue(
     pub bool,                  // deleted flag (tombstone) [NEW]
 );
 ```
-(codex, 2026-02-02, validated)
+(codex, 2026-02-02, validated) (claude, 2026-02-02, implemented in schema.rs)
 
 **Tombstone Semantics:**
 - `deleted = true`: Entity is logically deleted but retained for audit/time-travel
@@ -152,7 +152,7 @@ impl NodeSummaryIndexCfValue {
     pub fn is_current(&self) -> bool { self.0 == Self::CURRENT }
 }
 ```
-(codex, 2026-02-02, validated)
+(codex, 2026-02-02, validated) (claude, 2026-02-02, implemented in schema.rs)
 
 ### EdgeSummaryIndex
 
@@ -168,7 +168,7 @@ pub struct EdgeSummaryIndexCfKey(
 /// 1-byte marker: 0x01 = current, 0x00 = stale
 pub struct EdgeSummaryIndexCfValue(pub u8);
 ```
-(codex, 2026-02-02, validated)
+(codex, 2026-02-02, validated) (claude, 2026-02-02, implemented in schema.rs)
 
 **Marker Bit Semantics:**
 - `0x01` (CURRENT): This (entity, version) is the current version
@@ -223,7 +223,7 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     "graph/meta",
 ];
 ```
-(codex, 2026-02-02, validated)
+(codex, 2026-02-02, validated) (claude, 2026-02-02, partially implemented - index CFs added, meta CF pending)
 
 ---
 

@@ -262,6 +262,11 @@ impl Subsystem {
                 <schema::NodeSummaries as ColumnFamily>::CF_NAME,
                 <schema::NodeSummaries as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
+            // CONTENT-ADDRESS: Reverse index hash→nodes (claude, 2026-02-02)
+            ColumnFamilyDescriptor::new(
+                <schema::NodeSummaryIndex as ColumnFamily>::CF_NAME,
+                <schema::NodeSummaryIndex as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
+            ),
             ColumnFamilyDescriptor::new(
                 <schema::EdgeFragments as ColumnFamily>::CF_NAME,
                 <schema::EdgeFragments as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
@@ -269,6 +274,11 @@ impl Subsystem {
             ColumnFamilyDescriptor::new(
                 <schema::EdgeSummaries as ColumnFamily>::CF_NAME,
                 <schema::EdgeSummaries as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
+            ),
+            // CONTENT-ADDRESS: Reverse index hash→edges (claude, 2026-02-02)
+            ColumnFamilyDescriptor::new(
+                <schema::EdgeSummaryIndex as ColumnFamily>::CF_NAME,
+                <schema::EdgeSummaryIndex as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::ForwardEdges as ColumnFamily>::CF_NAME,
