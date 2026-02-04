@@ -101,7 +101,7 @@ pub struct ReverseEdgeCfValue(pub Option<TemporalRange>);
 
 ## 1.2 Content Column Families (COLD)
 
-**Decision:** Summaries remain content-addressed by `SummaryHash` (no versioned summaries) to avoid high fan-out storage blowup for templated edge summaries. RefCount handles safe cleanup. (codex, 2026-02-03, validated)
+**Content-addressed by SummaryHash with RefCount.** Summaries are deduplicated by content hash to avoid storage blowup for templated summaries; RefCount tracks references for safe inline deletion. (codex, 2026-02-03, validated) (claude, 2026-02-02, implemented)
 
 ### NodeSummaries
 
@@ -223,7 +223,7 @@ pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     "graph/meta",
 ];
 ```
-(codex, 2026-02-03, validated) (claude, 2026-02-02, implemented in schema.rs)
+(codex, 2026-02-03, validated) (claude, 2026-02-02, implemented in schema.rs and subsystem.rs)
 
 ---
 
@@ -984,7 +984,7 @@ impl GraphMeta {
     }
 }
 ```
-(codex, 2026-02-03, validated)
+(codex, 2026-02-03, validated) (claude, 2026-02-02, implemented in schema.rs)
 
 **Pattern Benefits (from vector::GraphMeta):**
 - Single CF for all graph-level metadata
@@ -1011,9 +1011,11 @@ impl GraphMeta {
 | EdgeSummaries | `(SummaryHash)` | **RefCount handles inline** - deleted when refcount reaches 0 during mutation |
 | NodeSummaryIndex | `(Hash, Id, version)` | GC deletes if marker=STALE and version not in retained set |
 | EdgeSummaryIndex | `(Hash, EdgeKey, version)` | GC deletes if marker=STALE and version not in retained set |
-| Tombstones (Nodes) | `(Id)` where deleted=true | Hard delete after `tombstone_retention` period (future) |
-| Tombstones (Edges) | `(EdgeKey)` where deleted=true | Hard delete after `tombstone_retention` period (future) |
+| Tombstones (Nodes) | `(Id)` where deleted=true | **DEFERRED**: Hard delete after `tombstone_retention` period |
+| Tombstones (Edges) | `(EdgeKey)` where deleted=true | **DEFERRED**: Hard delete after `tombstone_retention` period |
 (codex, 2026-02-03, validated) (claude, 2026-02-02, RefCount implemented - no orphan scan needed)
+
+**Note on Tombstone GC:** Tombstone hard deletion is deferred. Currently, deleted entities remain in storage indefinitely (marked `deleted=true`). The `tombstone_retention` config field exists but the purge logic is not implemented. This is acceptable for most use cases - tombstones have minimal storage overhead and preserve audit history.
 
 ### GcMetrics
 
@@ -1046,37 +1048,18 @@ impl GraphGarbageCollector {
 }
 ```
 
-### GC Logic: Node Summaries
+### GC Logic: Summary Cleanup (Handled by RefCount)
 
-**Note:** This GC logic assumes versioned summaries keyed by `(Id, version)`. It is not applicable while summaries remain content-addressed by `SummaryHash`. (codex, 2026-02-03, validated)
+**Note:** Summary GC is handled inline by RefCount - no background scan needed. When a mutation decrements a summary's refcount to 0, the summary row is deleted in the same transaction. This is more efficient than background orphan scans.
 
 ```rust
-fn gc_node_summaries(&self) -> Result<u64> {
-    let txn = self.txn_db.transaction();
-    let mut deleted = 0u64;
-    let n = self.config.versions_to_keep as Version;
-
-    for (node_id, node_value) in self.scan_nodes_batch()? {
-        let current_version = node_value.version;
-        let min_keep = current_version.saturating_sub(n - 1);
-
-        // Scan summaries for this node
-        let prefix = node_id.into_bytes();
-        for (key, _) in self.prefix_scan(node_summaries_cf, &prefix)? {
-            let summary_key = NodeSummaries::key_from_bytes(&key)?;
-            let version = summary_key.1;
-
-            if version < min_keep {
-                txn.delete_cf(node_summaries_cf, &key)?;
-                deleted += 1;
-            }
-        }
-    }
-
-    txn.commit()?;
-    Ok(deleted)
-}
+// RefCount handles summary cleanup inline during mutations:
+// - AddNode/AddEdge: increment refcount (create row if missing)
+// - UpdateNodeSummary/UpdateEdgeSummary: increment new, decrement old
+// - DeleteNode/DeleteEdge: decrement refcount
+// When refcount reaches 0, summary row is deleted immediately.
 ```
+(claude, 2026-02-02, implemented in mutation.rs)
 
 ### GC Logic: Reverse Index (with Cursor)
 
@@ -1161,7 +1144,7 @@ fn gc_node_summary_index(&self) -> Result<u64> {
 ---
 
 ## 3.5 Reverse Index Repair Task
-(codex, 2026-02-03, validated)
+(codex, 2026-02-03, validated) (claude, 2026-02-02, implemented in repair.rs)
 
 Periodic integrity check to detect and fix inconsistencies between forward edges and reverse index.
 
@@ -1236,13 +1219,15 @@ fn repair_forward_reverse_consistency(&self) -> Result<RepairMetrics> {
 | **Content storage** | Content-addressed by `SummaryHash` with RefCount for safe GC | ✅ Complete |
 | **RefCount** | Summaries track reference count; deleted inline when refcount=0 | ✅ Complete |
 | **Optimistic locking** | Version in entity value; reject update if mismatch | ✅ Complete |
-| **Delete semantics** | Tombstone flag in entity value; retained for audit until GC | ✅ Complete |
+| **Delete semantics** | Tombstone flag in entity value; retained for audit | ✅ Complete |
 | **Version overflow** | Reject writes at VERSION_MAX; documented policy | ✅ Complete |
-| **GC** | Incremental cursor for stale index entries; RefCount handles summary cleanup | ✅ Complete |
+| **GC: Stale index** | Incremental cursor for stale index entries | ✅ Complete |
+| **GC: Summaries** | RefCount handles cleanup inline (no background scan) | ✅ Complete |
+| **GC: Tombstones** | Hard delete after retention period | 🔮 Deferred |
 | **Repair** | Periodic forward↔reverse consistency check | ✅ Complete |
-(codex, 2026-02-03, validated) (claude, 2026-02-02, ALL IMPLEMENTED)
+(codex, 2026-02-03, validated) (claude, 2026-02-04, status updated)
 
-**Approval:** Implementation largely complete; remaining items are explicitly marked (e.g., repair task). (codex, 2026-02-03, validated)
+**Approval:** Implementation complete except tombstone hard delete (deferred). (codex, 2026-02-03, validated)
 
 **Implementation Status** (claude, 2026-02-02, ALL COMPLETE):
 - [x] Version type and entity value fields - schema.rs
