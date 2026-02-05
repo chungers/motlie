@@ -27,6 +27,7 @@
 9. [Performance Analysis](#performance-analysis)
 10. [Pros and Cons](#pros-and-cons)
 11. [Summary](#summary)
+12. [Bitemporal Model: System Time vs Application Time](#bitemporal-model-system-time-vs-application-time)
 
 ---
 
@@ -886,6 +887,180 @@ For each summary hash:
 | Fragments | Unchanged (already temporal) |
 
 (claude, 2026-02-04, designed)
+
+---
+
+## Bitemporal Model: System Time vs Application Time
+
+This design uses a **bitemporal model** with two orthogonal temporal dimensions:
+
+| Dimension | Field | Purpose | Example |
+|-----------|-------|---------|---------|
+| **System Time** | `ValidSince`, `ValidUntil` | When this version existed in the DB | "Record created Nov 15, superseded Nov 20" |
+| **Application Time** | `TemporalRange` | When the entity is valid in the real world | "Promo runs Dec 1-7, 2025" |
+
+These are **semantically orthogonal**:
+- **System time** enables audit trails, time-travel queries, and rollback
+- **Application time** models business validity (when a promo is active, when a contract is in force)
+
+### Example 12: Sales Promo with Business Validity
+
+A "Holiday Sale" promo node has a business validity period (Dec 1-7) independent of when it was created or modified in the database:
+
+```
+=== Business Setup ===
+Nov 15: Marketing creates the promo, sets it to run Dec 1-7
+
+t=Nov15: AddNode {
+    id: HolidaySale,
+    name: "promo",
+    summary: { discount: "20%", items: ["electronics"] },
+    valid_range: TemporalRange(Dec1, Dec7)  // APPLICATION TIME
+}
+
+=== Nodes CF ===
+(HolidaySale, valid_since=Nov15) → (
+    valid_until=NULL,
+    temporal_range=(Dec1, Dec7),  // Business validity
+    hash=0xAAA,
+    version=1
+)
+
+=== Nov 20: Marketing extends the promo to Dec 10 ===
+t=Nov20: UpdateNode {
+    id: HolidaySale,
+    new_summary: { discount: "20%", items: ["electronics"], extended: true },
+    new_temporal_range: TemporalRange(Dec1, Dec10),  // Changed!
+    expected_version: 1
+}
+
+=== Nodes CF (after update) ===
+(HolidaySale, valid_since=Nov15) → (
+    valid_until=NULL,
+    temporal_range=(Dec1, Dec10),  // Extended
+    hash=0xBBB,
+    version=2
+)
+
+=== NodeVersionHistory ===
+(HolidaySale, Nov15, v=1) → (updated_at=Nov15, hash=0xAAA)
+(HolidaySale, Nov15, v=2) → (updated_at=Nov20, hash=0xBBB)
+
+=== Queries ===
+
+Q1: "What is the current promo?" (now = Nov 25)
+    → HolidaySale: discount=20%, runs Dec 1-10
+
+Q2: "What was the promo config on Nov 18?" (time-travel, SYSTEM TIME)
+    → HolidaySale v1: discount=20%, runs Dec 1-7  // Before extension
+
+Q3: "Is the promo active on Dec 5?" (APPLICATION TIME check)
+    → Yes, Dec 5 is within TemporalRange(Dec1, Dec10)
+
+Q4: "Is the promo active on Dec 15?"
+    → No, Dec 15 is outside TemporalRange
+```
+
+### Example 13: Contract with Effective Dates and Amendments
+
+A contract between OrgA and OrgB has an effective period, and amendments create new versions:
+
+```
+=== Jan 1: Contract signed, effective Feb 1 - Jan 31 next year ===
+t=Jan1: AddEdge {
+    src: OrgA, dst: OrgB, name: "contract",
+    summary: { terms: "Standard", value: "$100K" },
+    valid_range: TemporalRange(Feb1, Jan31NextYear)  // APPLICATION TIME
+}
+
+=== ForwardEdges CF ===
+(OrgA, OrgB, "contract", valid_since=Jan1) → (
+    valid_until=NULL,
+    temporal_range=(Feb1, Jan31),
+    hash=0xAAA, version=1
+)
+
+=== Mar 15: Amendment increases value ===
+t=Mar15: UpdateEdge {
+    src: OrgA, dst: OrgB, name: "contract",
+    new_summary: { terms: "Amended", value: "$150K" },
+    expected_version: 1
+}
+// Note: TemporalRange unchanged - contract still runs Feb 1 - Jan 31
+
+=== ForwardEdges CF (after amendment) ===
+(OrgA, OrgB, "contract", valid_since=Jan1) → (
+    valid_until=NULL,
+    temporal_range=(Feb1, Jan31),  // Unchanged
+    hash=0xBBB, version=2
+)
+
+=== EdgeVersionHistory ===
+(OrgA, OrgB, "contract", Jan1, v=1) → (updated_at=Jan1, hash=0xAAA)
+(OrgA, OrgB, "contract", Jan1, v=2) → (updated_at=Mar15, hash=0xBBB)
+
+=== Queries ===
+
+Q1: "What are the current contract terms?" (now = Apr 1)
+    → terms="Amended", value=$150K, effective Feb 1 - Jan 31
+
+Q2: "What were the contract terms before the amendment?" (SYSTEM TIME rollback)
+    → EdgeAtVersion(v=1): terms="Standard", value=$100K
+
+Q3: "Is the contract in force on Dec 15?" (APPLICATION TIME)
+    → Yes, Dec 15 is within TemporalRange(Feb1, Jan31)
+
+Q4: "Rollback to pre-amendment terms"
+    → RestoreEdge { as_of: Feb1 }
+    → Creates v=3 with hash=0xAAA (original terms), same TemporalRange
+```
+
+### Example 14: Event with Moving Date Window
+
+An "Annual Conference" edge tracks a recurring event where the business dates change each year:
+
+```
+=== Setup: Conference 2025 ===
+t=Jun1: AddEdge {
+    src: Company, dst: Venue, name: "annual_conference",
+    summary: { year: 2025, attendees: 500 },
+    valid_range: TemporalRange(Sep15_2025, Sep17_2025)  // 3-day event
+}
+
+=== Sep 10: Venue conflict, reschedule to Oct ===
+t=Sep10: UpdateEdge {
+    src: Company, dst: Venue, name: "annual_conference",
+    new_summary: { year: 2025, attendees: 500, rescheduled: true },
+    new_temporal_range: TemporalRange(Oct20_2025, Oct22_2025),  // New dates
+    expected_version: 1
+}
+
+=== EdgeVersionHistory ===
+(Company, Venue, "annual_conference", Jun1, v=1) → (updated_at=Jun1, hash=0xAAA)
+(Company, Venue, "annual_conference", Jun1, v=2) → (updated_at=Sep10, hash=0xBBB)
+
+=== Queries ===
+
+Q1: "When was the conference originally scheduled?"
+    → Time-travel to Sep 1: TemporalRange(Sep15, Sep17)
+
+Q2: "When is the conference now?"
+    → Current: TemporalRange(Oct20, Oct22)
+
+Q3: "Show all schedule changes" (audit)
+    → EdgeHistory: v1 (Sep 15-17), v2 (Oct 20-22)
+```
+
+### Key Distinction
+
+| Query Type | Uses | Returns |
+|------------|------|---------|
+| "What did we know on date X?" | System time (`ValidSince`) | Version active at X |
+| "Is this entity active on date X?" | Application time (`TemporalRange`) | Boolean check |
+| "Show all changes to this entity" | System time (VersionHistory) | All versions with timestamps |
+| "Find entities active during period P" | Application time scan | Entities where TemporalRange overlaps P |
+
+(claude, 2026-02-05, added to clarify bitemporal model)
 
 ---
 
