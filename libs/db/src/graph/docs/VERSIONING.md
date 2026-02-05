@@ -117,22 +117,20 @@ pub struct UpdateEdgeSummary {
     pub expected_version: Version,
 }
 
-/// Change edge destination. Atomically closes old edge and creates new edge.
-/// Preserves logical continuity of the relationship.
-pub struct RetargetEdge {
-    pub src: Id,
-    pub old_dst: Id,
-    pub new_dst: Id,
-    pub name: String,
-    pub new_summary: Option<EdgeSummary>,  // None = copy from old edge
-}
-
-/// Change edge name. Atomically closes old edge and creates new edge.
-pub struct RenameEdge {
+/// Change edge topology (destination and/or name).
+/// Atomically closes old edge and creates new edge.
+/// At least one of new_dst or new_name must be Some.
+pub struct UpdateEdgeTopology {
+    // Identity of edge to change
     pub src: Id,
     pub dst: Id,
-    pub old_name: String,
-    pub new_name: String,
+    pub name: String,
+
+    // What to change (at least one must be Some)
+    pub new_dst: Option<Id>,      // None = keep current dst
+    pub new_name: Option<String>, // None = keep current name
+
+    // Optional: update summary in same operation
     pub new_summary: Option<EdgeSummary>,  // None = copy from old edge
 }
 
@@ -170,8 +168,7 @@ Public mutations translate to these internal CF operations:
 |-----------------|---------------------|
 | `AddEdge` | Insert ForwardEdge, ReverseEdge; Put Summary; Write VersionHistory |
 | `UpdateEdgeSummary` | Update ForwardEdge value (same key); Put Summary; Write VersionHistory |
-| `RetargetEdge` | Close old ForwardEdge/ReverseEdge (valid_until=now); Insert new edges |
-| `RenameEdge` | Close old edges; Insert new edges with new name |
+| `UpdateEdgeTopology` | Close old ForwardEdge/ReverseEdge (valid_until=now); Insert new edges with new dst/name |
 | `DeleteEdge` | Update valid_until=now on ForwardEdge and ReverseEdge |
 | `RestoreEdge` | Query past state; Insert new edges with old topology/summary |
 
@@ -242,11 +239,11 @@ Query: OutgoingEdges { src: Alice, name: "knows" }
 Result: [Bob, Carol]  // Alice knows BOTH
 ```
 
-### Example 2: Retarget (Alice Stops Knowing Bob, Starts Knowing Carol)
+### Example 2: Topology Change (Alice Stops Knowing Bob, Starts Knowing Carol)
 
 ```
 t=1000: AddEdge { src: Alice, dst: Bob, name: "knows", summary: "friends" }
-t=2000: RetargetEdge { src: Alice, old_dst: Bob, new_dst: Carol, name: "knows" }
+t=2000: UpdateEdgeTopology { src: Alice, dst: Bob, name: "knows", new_dst: Some(Carol) }
 
 ForwardEdges after t=2000:
   (Alice, Bob,   "knows", 1000) → (until=2000, "friends", v1)  // CLOSED
@@ -283,8 +280,8 @@ EdgeSummaries (append-only, no decrement):
 ```
 Timeline:
   t=1000: AddEdge Alice→Bob "knows"
-  t=2000: RetargetEdge Alice: Bob→Carol
-  t=3000: RetargetEdge Alice: Carol→Dave
+  t=2000: UpdateEdgeTopology Alice: Bob→Carol
+  t=3000: UpdateEdgeTopology Alice: Carol→Dave
   t=4000: RollbackEdgeTopology { src: Alice, name: "knows", as_of: 1500 }
 
 State after each operation:
