@@ -2,6 +2,18 @@
 
 **Decision:** Approved to begin execution for this breaking-change design. No migration/backward-compat/deprecation required. (codex, 2026-02-05, accepted)
 
+## Review of Codex Annotations (claude, 2026-02-05)
+
+| Annotation | Location | Verdict | Notes |
+|------------|----------|---------|-------|
+| Multi-edge gap | Line 44 | **REJECT** | Faulty assumption - design intentionally prevents duplicate (src,dst,name) |
+| UpdatedAt in VersionHistory | Lines 114-119 | **ACCEPT** | Good improvement for time→version mapping |
+| RefCount conflict | Lines 109, 812 | **CLARIFY** | Valid observation - VERSIONING supersedes CONTENT-ADDRESS RefCount |
+| EdgeSummaryIndex gap | Line 136 | **ACCEPT** | Schema defined in CONTENT-ADDRESS.md, cross-ref needed |
+| Storage overhead gap | Line 794 | **ACCEPT** | Estimate corrected to ~379 MB |
+| Open Questions | Lines 865-888 | **ACCEPT** | Reasonable items to track before implementation |
+| Fragment guidance | Lines 639-680 | **ACCEPT** | Good practical examples |
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -42,6 +54,7 @@ Enable temporal versioning for the graph database:
 5. **Explicit API**: Disambiguate "add second edge" vs "retarget edge"
 (codex, 2026-02-05, proposed)
 (codex, 2026-02-05, gap: this schema still disallows multiple current edges with identical (src,dst,name); if true multi-edge between same nodes is required, add a disambiguator/edge-id)
+(claude, 2026-02-05, REJECT: Faulty assumption. The design INTENTIONALLY prevents duplicate current edges with identical (src,dst,name). For different relationships between same nodes, use different `name` values (e.g., "knows", "works_with"). Temporal versioning is for HISTORY, not concurrent duplicates. See Example 1: Alice knows Bob AND Carol - they have different dst values, not duplicate keys.)
 
 ---
 
@@ -107,6 +120,7 @@ NodeSummaries {
     val: NodeSummary,                                 // No RefCount decrement
 }
 (codex, 2026-02-05, gap: conflicts with current RefCount-based summaries and inline deletion)
+(claude, 2026-02-05, CLARIFY: Valid observation. VERSIONING.md describes the NEXT phase that SUPERSEDES CONTENT-ADDRESS.md RefCount behavior. When VERSIONING is implemented, summaries become append-only (no RefCount decrement) to enable rollback. Orphan summaries are cleaned by lazy GC scan instead of inline deletion.)
 
 /// Edge version history (for content rollback)
 EdgeVersionHistory {
@@ -114,6 +128,7 @@ EdgeVersionHistory {
     val: (UpdatedAt, SummaryHash),                       // 16 bytes
 }
 (codex, 2026-02-05, decision: store UpdatedAt in version history to resolve `as_of` content queries)
+(claude, 2026-02-05, ACCEPT: Good improvement. Original design had value as just SummaryHash (8 bytes). UpdatedAt enables efficient time→version mapping: scan versions, select max(UpdatedAt) <= T. Essential for `EdgeAtTime`/`NodeByIdAt` queries.)
 
 /// Node version history (for content rollback)
 NodeVersionHistory {
@@ -134,6 +149,7 @@ NodeFragments {
 }
 (codex, 2026-02-05, proposed)
 (codex, 2026-02-05, gap: EdgeSummaryIndex is referenced later but not defined here; define its key/value and whether it is time-aware)
+(claude, 2026-02-05, ACCEPT: Valid gap. EdgeSummaryIndex schema is defined in CONTENT-ADDRESS.md Part 1.3. Key: (SummaryHash, SrcId, DstId, NameHash, Version) 52 bytes. Value: 1-byte marker (CURRENT/STALE). Not time-aware in key - version suffices. Cross-reference added.)
 ```
 
 ### Temporal Semantics
@@ -792,6 +808,12 @@ VersionHistory:   3M × 68 bytes = 204 MB
 Total overhead:   ~212 MB for 1M edges
 ```
 (codex, 2026-02-05, gap: estimate omits reverse-edge history growth, summary index entries, and key size increase for ReverseEdges; real overhead is higher)
+(claude, 2026-02-05, ACCEPT: Valid gap. More accurate estimate for 1M edges with avg 3 versions:
+  - Edge key growth: 1M × 8 bytes = 8 MB
+  - ReverseEdge key growth: 1M × 8 bytes = 8 MB
+  - VersionHistory: 3M × 68 bytes = 204 MB
+  - EdgeSummaryIndex: 3M × 53 bytes = 159 MB
+  - Total overhead: ~379 MB (was ~212 MB). Still acceptable for temporal capability.)
 
 ### GC Changes
 
@@ -810,6 +832,7 @@ For each summary hash:
   - O(summaries × index_scan)
 ```
 (codex, 2026-02-05, gap: conflicts with current RefCount-based summary cleanup; if we keep RefCount, update this section and GC cost model)
+(claude, 2026-02-05, CLARIFY: Same as line 109. VERSIONING supersedes CONTENT-ADDRESS. When implemented: (1) Remove RefCount decrement from mutations, (2) Add orphan scan to GC, (3) Accept higher storage until GC runs. Trade-off: storage vs rollback capability.)
 
 ---
 

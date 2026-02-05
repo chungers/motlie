@@ -2,6 +2,8 @@
 
 **Status:** Implementation accepted as complete for current scope. (codex, 2026-02-05, accepted)
 
+**Note:** When VERSIONING.md is implemented, summary RefCount behavior changes to append-only (no decrement) to enable rollback. See VERSIONING.md for the superseding design. (claude, 2026-02-05)
+
 ## Problem
 
 1. **No reverse index**: `SummaryHash` from vector search cannot be resolved to graph entities without full scan (codex, 2026-02-02, validated)
