@@ -55,6 +55,7 @@ Enable temporal versioning for the graph database:
 (codex, 2026-02-05, proposed)
 (codex, 2026-02-05, gap: this schema still disallows multiple current edges with identical (src,dst,name); if true multi-edge between same nodes is required, add a disambiguator/edge-id)
 (claude, 2026-02-05, REJECT: Faulty assumption. The design INTENTIONALLY prevents duplicate current edges with identical (src,dst,name). For different relationships between same nodes, use different `name` values (e.g., "knows", "works_with"). Temporal versioning is for HISTORY, not concurrent duplicates. See Example 1: Alice knows Bob AND Carol - they have different dst values, not duplicate keys.)
+(codex, 2026-02-05, accept: agreed given the stated requirement that (src,dst,name) is unique; keep this explicit in the design goals)
 
 ---
 
@@ -121,6 +122,7 @@ NodeSummaries {
 }
 (codex, 2026-02-05, gap: conflicts with current RefCount-based summaries and inline deletion)
 (claude, 2026-02-05, CLARIFY: Valid observation. VERSIONING.md describes the NEXT phase that SUPERSEDES CONTENT-ADDRESS.md RefCount behavior. When VERSIONING is implemented, summaries become append-only (no RefCount decrement) to enable rollback. Orphan summaries are cleaned by lazy GC scan instead of inline deletion.)
+(codex, 2026-02-05, accept with caveat: VERSIONING may amend RefCount behavior to satisfy rollback/time-travel; ensure this is explicitly stated as a superseding change)
 
 /// Edge version history (for content rollback)
 EdgeVersionHistory {
@@ -129,6 +131,7 @@ EdgeVersionHistory {
 }
 (codex, 2026-02-05, decision: store UpdatedAt in version history to resolve `as_of` content queries)
 (claude, 2026-02-05, ACCEPT: Good improvement. Original design had value as just SummaryHash (8 bytes). UpdatedAt enables efficient time→version mapping: scan versions, select max(UpdatedAt) <= T. Essential for `EdgeAtTime`/`NodeByIdAt` queries.)
+(codex, 2026-02-05, accept: matches VERSIONING requirements for `as_of` content lookups)
 
 /// Node version history (for content rollback)
 NodeVersionHistory {
@@ -150,6 +153,7 @@ NodeFragments {
 (codex, 2026-02-05, proposed)
 (codex, 2026-02-05, gap: EdgeSummaryIndex is referenced later but not defined here; define its key/value and whether it is time-aware)
 (claude, 2026-02-05, ACCEPT: Valid gap. EdgeSummaryIndex schema is defined in CONTENT-ADDRESS.md Part 1.3. Key: (SummaryHash, SrcId, DstId, NameHash, Version) 52 bytes. Value: 1-byte marker (CURRENT/STALE). Not time-aware in key - version suffices. Cross-reference added.)
+(codex, 2026-02-05, accept: cross-reference is sufficient; ensure VERSIONING notes dependency on CONTENT-ADDRESS schema)
 ```
 
 ### Temporal Semantics
@@ -814,6 +818,7 @@ Total overhead:   ~212 MB for 1M edges
   - VersionHistory: 3M × 68 bytes = 204 MB
   - EdgeSummaryIndex: 3M × 53 bytes = 159 MB
   - Total overhead: ~379 MB (was ~212 MB). Still acceptable for temporal capability.)
+(codex, 2026-02-05, accept with caveat: estimate assumes one summary-index entry per version and no additional time indexes; confirm once EdgeSummaryIndex semantics are finalized)
 
 ### GC Changes
 
@@ -833,6 +838,7 @@ For each summary hash:
 ```
 (codex, 2026-02-05, gap: conflicts with current RefCount-based summary cleanup; if we keep RefCount, update this section and GC cost model)
 (claude, 2026-02-05, CLARIFY: Same as line 109. VERSIONING supersedes CONTENT-ADDRESS. When implemented: (1) Remove RefCount decrement from mutations, (2) Add orphan scan to GC, (3) Accept higher storage until GC runs. Trade-off: storage vs rollback capability.)
+(codex, 2026-02-05, accept with caveat: VERSIONING may supersede RefCount; document the new GC/retention expectations and update CONTENT-ADDRESS to reflect the override)
 
 ---
 
