@@ -1,11 +1,5 @@
 # VERSIONING: Temporal Graph with Time-Travel and Rollback
 
-## BREAKING CHANGE
-
-This document describes a **breaking schema change** that modifies edge and node key structures. Migration required.
-
----
-
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -18,7 +12,7 @@ This document describes a **breaking schema change** that modifies edge and node
 8. [Examples: Fragments](#examples-fragments)
 9. [Performance Analysis](#performance-analysis)
 10. [Pros and Cons](#pros-and-cons)
-11. [Migration Path](#migration-path)
+11. [Summary](#summary)
 
 ---
 
@@ -48,7 +42,7 @@ Enable temporal versioning for the graph database:
 
 ## Schema Changes
 
-### BREAKING: ValidSince Added to Keys
+### ValidSince Added to Keys
 
 ```rust
 // ============================================================
@@ -58,7 +52,7 @@ ForwardEdgeCfKey(SrcId, DstId, NameHash)              // 40 bytes
 ReverseEdgeCfKey(DstId, SrcId, NameHash)              // 40 bytes
 
 // ============================================================
-// EDGES - NEW SCHEMA (BREAKING)
+// EDGES - NEW SCHEMA
 // ============================================================
 ForwardEdgeCfKey(SrcId, DstId, NameHash, ValidSince)  // 48 bytes (+8)
 ReverseEdgeCfKey(DstId, SrcId, NameHash, ValidSince)  // 48 bytes (+8)
@@ -69,7 +63,7 @@ ReverseEdgeCfKey(DstId, SrcId, NameHash, ValidSince)  // 48 bytes (+8)
 NodeCfKey(Id)                                          // 16 bytes
 
 // ============================================================
-// NODES - NEW SCHEMA (BREAKING)
+// NODES - NEW SCHEMA
 // ============================================================
 NodeCfKey(Id, ValidSince)                              // 24 bytes (+8)
 ```
@@ -773,7 +767,6 @@ For each summary hash:
 
 | Drawback | Description | Mitigation |
 |----------|-------------|------------|
-| **Breaking schema change** | Requires migration | One-time migration script |
 | **Larger keys** | +8 bytes per edge/node key | Acceptable for capabilities gained |
 | **More write ops** | +1 VersionHistory write per mutation | Batching amortizes cost |
 | **Scan vs get for nodes** | NodeById now requires scan | Usually few valid_since values per ID |
@@ -788,42 +781,6 @@ For each summary hash:
 
 ---
 
-## Migration Path
-
-### Phase 1: Schema Migration (Breaking)
-
-```rust
-// For each existing edge:
-let old_key = ForwardEdgeCfKey(src, dst, name);
-let old_val = db.get(old_key);
-
-let new_key = ForwardEdgeCfKey(src, dst, name, 0);  // valid_since=0 (epoch)
-let new_val = ForwardEdgeCfValue {
-    valid_until: None,  // Currently valid
-    ...old_val,
-};
-
-db.delete(old_key);
-db.put(new_key, new_val);
-
-// Same for ReverseEdges, Nodes
-```
-
-### Phase 2: New Mutations
-
-1. Implement `UpdateEdge` with topology change support
-2. Implement `DeleteEdge` with soft delete
-3. Implement `RestoreEdge` and `RollbackEdges`
-4. Update all queries to filter by `valid_until`
-
-### Phase 3: GC Updates
-
-1. Remove RefCount decrement from mutations
-2. Implement orphan summary GC scan
-3. Add VersionHistory writes to all mutations
-
----
-
 ## Summary
 
 | Feature | Status |
@@ -834,6 +791,5 @@ db.put(new_key, new_val);
 | Multi-edge support | Explicit via AddEdge (fails if exists) |
 | Retarget support | Explicit via UpdateEdge with new_dst |
 | Fragments | Unchanged (already temporal) |
-| Breaking change | Yes (key structure) |
 
 (claude, 2026-02-04, designed)
