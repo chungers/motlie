@@ -1,5 +1,7 @@
 # VERSIONING: Temporal Graph with Time-Travel and Rollback
 
+**Decision:** Approved to begin execution for this breaking-change design. No migration/backward-compat/deprecation required. (codex, 2026-02-05, accepted)
+
 ## Table of Contents
 
 1. [Overview](#overview)
@@ -27,6 +29,7 @@ Enable temporal versioning for the graph database:
 | Content rollback | No | Yes |
 | Multi-edge support | Implicit | Explicit |
 | Audit history | Partial | Full |
+(codex, 2026-02-05, proposed)
 
 ---
 
@@ -37,6 +40,8 @@ Enable temporal versioning for the graph database:
 3. **Audit**: Preserve full history of all changes
 4. **Deduplication**: Content-addressed summaries avoid storage blowup
 5. **Explicit API**: Disambiguate "add second edge" vs "retarget edge"
+(codex, 2026-02-05, proposed)
+(codex, 2026-02-05, gap: this schema still disallows multiple current edges with identical (src,dst,name); if true multi-edge between same nodes is required, add a disambiguator/edge-id)
 
 ---
 
@@ -66,6 +71,7 @@ NodeCfKey(Id)                                          // 16 bytes
 // NODES - NEW SCHEMA
 // ============================================================
 NodeCfKey(Id, ValidSince)                              // 24 bytes (+8)
+(codex, 2026-02-05, proposed)
 ```
 
 ### Complete CF Schema
@@ -100,17 +106,19 @@ NodeSummaries {
     key: SummaryHash,                                 // 8 bytes
     val: NodeSummary,                                 // No RefCount decrement
 }
+(codex, 2026-02-05, gap: conflicts with current RefCount-based summaries and inline deletion)
 
 /// Edge version history (for content rollback)
 EdgeVersionHistory {
     key: (SrcId, DstId, NameHash, ValidSince, Version),  // 52 bytes
-    val: SummaryHash,                                     // 8 bytes
+    val: (UpdatedAt, SummaryHash),                       // 16 bytes
 }
+(codex, 2026-02-05, decision: store UpdatedAt in version history to resolve `as_of` content queries)
 
 /// Node version history (for content rollback)
 NodeVersionHistory {
     key: (Id, ValidSince, Version),                   // 28 bytes
-    val: SummaryHash,                                 // 8 bytes
+    val: (UpdatedAt, SummaryHash),                    // 16 bytes
 }
 
 /// Edge fragments (unchanged - already temporal via timestamp)
@@ -124,6 +132,8 @@ NodeFragments {
     key: (Id, TimestampMilli),                        // 24 bytes
     val: (TemporalRange, FragmentContent),
 }
+(codex, 2026-02-05, proposed)
+(codex, 2026-02-05, gap: EdgeSummaryIndex is referenced later but not defined here; define its key/value and whether it is time-aware)
 ```
 
 ### Temporal Semantics
@@ -137,6 +147,7 @@ NodeFragments {
 **Entity is current if:** `valid_until.is_none() || valid_until > now()`
 
 **Entity is valid at time T if:** `valid_since <= T && (valid_until.is_none() || valid_until > T)`
+(codex, 2026-02-05, proposed)
 
 ---
 
@@ -289,6 +300,7 @@ fn execute_update_edge(mutation: UpdateEdge) -> Result<Version> {
         txn.put(ReverseEdges,
             key: (mutation.dst, mutation.src, mutation.name, old_edge.valid_since),
             val: (valid_until: now));
+        // (codex, 2026-02-05, decision: reverse edge valid_until must be updated in the same txn to keep inbound scans consistent)
 
         // Create new edges
         txn.put(ForwardEdges,
@@ -301,7 +313,7 @@ fn execute_update_edge(mutation: UpdateEdge) -> Result<Version> {
         // Write history for new edge
         txn.put(EdgeVersionHistory,
             key: (mutation.src, new_dst, new_name, now, 1),
-            val: new_hash);
+            val: (updated_at: now, hash: new_hash));
 
         new_version = 1;  // New edge starts at version 1
     } else {
@@ -315,7 +327,7 @@ fn execute_update_edge(mutation: UpdateEdge) -> Result<Version> {
         // Write history
         txn.put(EdgeVersionHistory,
             key: (mutation.src, mutation.dst, mutation.name, old_edge.valid_since, new_version),
-            val: new_hash);
+            val: (updated_at: now, hash: new_hash));
     }
 
     // Put summary (idempotent, content-addressed)
@@ -324,6 +336,8 @@ fn execute_update_edge(mutation: UpdateEdge) -> Result<Version> {
     // Update summary index
     txn.put(EdgeSummaryIndex, (old_edge.hash, ..., old_edge.version), STALE);
     txn.put(EdgeSummaryIndex, (new_hash, ..., new_version), CURRENT);
+    // (codex, 2026-02-05, gap: requires explicit EdgeSummaryIndex schema and time/version mapping for `as_of` lookups)
+    // (codex, 2026-02-05, decision: ensure AddEdge/DeleteEdge/RestoreEdge also maintain the summary index for current selection)
 
     txn.commit()?;
     Ok(new_version)
@@ -351,6 +365,7 @@ pub struct IncomingEdges {
     pub dst: Id,
     pub name: Option<String>,
 }
+(codex, 2026-02-05, decision: current-state reads should use reverse prefix scan on (Id, ValidSince) to select the latest valid row and avoid O(n) scans)
 ```
 
 ### Time-Travel Queries
@@ -391,6 +406,7 @@ pub struct EdgeHistory {
     pub name: String,
 }
 // Returns: Vec<(ValidSince, ValidUntil, Version, Summary)>
+(codex, 2026-02-05, decision: VersionHistory carries UpdatedAt to resolve time->version mapping)
 
 /// Get fragments in time range
 pub struct EdgeFragmentsInRange {
@@ -472,9 +488,9 @@ t=3000: UpdateEdge { src: Alice, dst: Bob, name: "knows",
 (Alice, Bob, "knows", 1000) → (until=NULL, hash=0xCCC, v=3)  // Same key, updated
 
 === EdgeVersionHistory CF ===
-(Alice, Bob, "knows", 1000, v=1) → 0xAAA
-(Alice, Bob, "knows", 1000, v=2) → 0xBBB
-(Alice, Bob, "knows", 1000, v=3) → 0xCCC
+(Alice, Bob, "knows", 1000, v=1) → (updated_at=1000, hash=0xAAA)
+(Alice, Bob, "knows", 1000, v=2) → (updated_at=2000, hash=0xBBB)
+(Alice, Bob, "knows", 1000, v=3) → (updated_at=3000, hash=0xCCC)
 
 === EdgeSummaries CF (append-only) ===
 0xAAA → "acquaintances"   // Preserved for rollback
@@ -536,10 +552,10 @@ t=3000: UpdateEdge { new_summary: Some("enemies") }  // Oops!
 t=4000: RestoreEdge { src: Alice, dst: Bob, name: "knows", as_of: 2500 }
 
 === EdgeVersionHistory ===
-(Alice, Bob, "knows", 1000, v=1) → 0xAAA ("acquaintances")
-(Alice, Bob, "knows", 1000, v=2) → 0xBBB ("friends")
-(Alice, Bob, "knows", 1000, v=3) → 0xCCC ("enemies")
-(Alice, Bob, "knows", 1000, v=4) → 0xBBB ("friends")  // Rollback reuses old hash!
+(Alice, Bob, "knows", 1000, v=1) → (updated_at=1000, hash=0xAAA) ("acquaintances")
+(Alice, Bob, "knows", 1000, v=2) → (updated_at=2000, hash=0xBBB) ("friends")
+(Alice, Bob, "knows", 1000, v=3) → (updated_at=3000, hash=0xCCC) ("enemies")
+(Alice, Bob, "knows", 1000, v=4) → (updated_at=4000, hash=0xBBB) ("friends")  // Rollback reuses old hash!
 
 === EdgeSummaries ===
 0xAAA → "acquaintances"  // Still exists
@@ -583,9 +599,9 @@ t=3000: UpdateNode { id: Alice, new_summary: Some({ bio: "Manager" }), expected_
 (Alice, 1000) → (until=NULL, name="person", hash=0xCCC, v=3)
 
 === NodeVersionHistory ===
-(Alice, 1000, v=1) → 0xAAA
-(Alice, 1000, v=2) → 0xBBB
-(Alice, 1000, v=3) → 0xCCC
+(Alice, 1000, v=1) → (updated_at=1000, hash=0xAAA)
+(Alice, 1000, v=2) → (updated_at=2000, hash=0xBBB)
+(Alice, 1000, v=3) → (updated_at=3000, hash=0xCCC)
 
 === NodeSummaries ===
 0xAAA → { bio: "Student" }
@@ -618,6 +634,50 @@ t=3500: NodeById(Alice) → { bio: "Engineer" } (restored)
 ## Examples: Fragments
 
 Fragments are append-only with timestamp keys. They don't need the ValidSince pattern because each fragment is a distinct event.
+
+### Guidance: Use Fragments for Rich Context Without Edge Explosion
+
+When a relationship needs multiple contextual facts (evidence, episodes, sources), prefer fragments over parallel edges. This keeps the hot edge scan small while enabling rich retrieval via BM25/vector indexes on summaries and fragments.
+
+Note: vector search returns a hash that can point to a fragment used by multiple nodes/edges. Fragments are append-only; we can periodically re-summarize and update summaries later. Filtering/ACL and dedup/consistency are deferred for now and can be handled by LLM evaluation at test time.
+
+Example A: Single "supports" edge with multiple evidence fragments
+```
+t=1000: AddEdge { src: A, dst: B, name: "supports", summary: "supports" }
+t=1200: AddEdgeFragment { src: A, dst: B, name: "supports",
+                          content: "Cites study X (2021) showing safety" }
+t=1800: AddEdgeFragment { src: A, dst: B, name: "supports",
+                          content: "Funded project Y per report Z" }
+Query: OutgoingEdges { src: A, name: "supports" } -> 1 edge
+Query: EdgeFragmentsInRange { src: A, dst: B, name: "supports", start: 0, end: now }
+  -> BM25/vector rank fragments to build an LLM-ready justification list
+```
+
+Example B: "collaborates_with" edge plus time-scoped fragments
+```
+t=1000: AddEdge { src: OrgA, dst: OrgB, name: "collaborates_with", summary: "collaboration" }
+t=1500: AddEdgeFragment { src: OrgA, dst: OrgB, name: "collaborates_with",
+                          content: "Joint paper on topic T (DOI ...)" }
+t=2500: AddEdgeFragment { src: OrgA, dst: OrgB, name: "collaborates_with",
+                          content: "Co-led grant G for 2024-2026" }
+Query: OutgoingEdgesAt { src: OrgA, name: "collaborates_with", at: 2000 } -> 1 edge
+Query: EdgeFragmentsInRange { src: OrgA, dst: OrgB, name: "collaborates_with",
+                              start: 1000, end: 3000 }
+  -> Retrieve context without scanning multiple duplicate edges
+```
+
+Example C: "trusted_by" edge with provenance fragments
+```
+t=1000: AddEdge { src: Analyst, dst: Source, name: "trusted_by", summary: "trusted" }
+t=1300: AddEdgeFragment { src: Analyst, dst: Source, name: "trusted_by",
+                          content: "Verification call logged (case #123)" }
+t=1900: AddEdgeFragment { src: Analyst, dst: Source, name: "trusted_by",
+                          content: "Third-party audit A confirms controls" }
+Query: OutgoingEdges { src: Analyst, name: "trusted_by" } -> 1 edge
+Query: EdgeFragmentsInRange { src: Analyst, dst: Source, name: "trusted_by",
+                              start: 0, end: now }
+  -> Rank fragments semantically to assemble nuanced trust context
+```
 
 ### Example 10: Edge Fragments Over Time
 
@@ -704,6 +764,7 @@ Fragments up to t=2200: ["Graduated college", "Got first job"]
 | **OutgoingEdgesAt(T)** | N/A | 1 scan + filter | New capability |
 | **NodeById** | 1 get | 1 scan + filter | Scan vs get |
 | **EdgeHistory** | N/A | 1 scan | New capability |
+(codex, 2026-02-05, decision: use reverse prefix scan for NodeById/NodeByIdAt to reduce scan cost; document expected max versions per node)
 
 **Filter cost:** Each edge scan now filters by `valid_until`:
 ```rust
@@ -720,16 +781,17 @@ prefix_scan(src).filter(|e| e.valid_until.is_none() || e.valid_until > now)
 |-----------|---------|----------|-------|
 | **Edge key** | 40 bytes | 48 bytes | +8 bytes (+20%) |
 | **Node key** | 16 bytes | 24 bytes | +8 bytes (+50%) |
-| **EdgeVersionHistory** | N/A | 52 + 8 = 60 bytes/version | New |
-| **NodeVersionHistory** | N/A | 28 + 8 = 36 bytes/version | New |
+| **EdgeVersionHistory** | N/A | 52 + 16 = 68 bytes/version | New |
+| **NodeVersionHistory** | N/A | 28 + 16 = 44 bytes/version | New |
 | **Summaries** | Cleaned inline | Append-only | More storage until GC |
 
 **Example storage for 1M edges with avg 3 versions:**
 ```
 Edge keys:        1M × 8 bytes = 8 MB additional
-VersionHistory:   3M × 60 bytes = 180 MB
-Total overhead:   ~188 MB for 1M edges
+VersionHistory:   3M × 68 bytes = 204 MB
+Total overhead:   ~212 MB for 1M edges
 ```
+(codex, 2026-02-05, gap: estimate omits reverse-edge history growth, summary index entries, and key size increase for ReverseEdges; real overhead is higher)
 
 ### GC Changes
 
@@ -747,6 +809,7 @@ For each summary hash:
   - If none: delete summary
   - O(summaries × index_scan)
 ```
+(codex, 2026-02-05, gap: conflicts with current RefCount-based summary cleanup; if we keep RefCount, update this section and GC cost model)
 
 ---
 
@@ -778,6 +841,7 @@ For each summary hash:
 - **High-frequency updates**: If edges update 1000s of times/sec, history accumulates fast
 - **Storage-constrained**: History consumes storage until GC
 - **No audit requirements**: If you don't need rollback/time-travel, simpler schema is better
+(codex, 2026-02-05, decision: cost/benefit is favorable only when audit/time-travel/rollback are hard requirements; otherwise complexity and storage cost are not justified)
 
 ---
 
@@ -793,3 +857,31 @@ For each summary hash:
 | Fragments | Unchanged (already temporal) |
 
 (claude, 2026-02-04, designed)
+
+---
+
+## Open Questions
+
+1. **EdgeSummaryIndex schema and time semantics**
+   - Analysis: The design references `EdgeSummaryIndex` but does not define key/value layout or how "current" vs historical entries map to time-travel queries.
+   - Recommendation: Define the schema explicitly (key order, marker bit, and time/version mapping) before implementation to avoid divergent indexing behavior. (codex, 2026-02-05, decision)
+
+2. **Time-to-version lookup for `EdgeAtTime` / `NodeByIdAt`**
+   - Analysis: We can scan versions and select the max `UpdatedAt <= T`, but this is O(k) per edge where k=versions. Acceptable if k stays small.
+   - Recommendation: Start with scan-by-version using `UpdatedAt`; add a time-ordered index only if version counts grow or latency targets are missed. (codex, 2026-02-05, decision)
+
+3. **Summary/fragment index maintenance on updates and rollbacks**
+   - Analysis: When content updates or rollbacks occur, summary/fragment indexes must be updated to avoid stale retrieval. The current doc does not detail which indexes are updated in each mutation.
+   - Recommendation: Enumerate index maintenance steps per mutation (Add/Update/Delete/Restore) before implementation to keep retrieval consistent. (codex, 2026-02-05, decision)
+
+4. **History retention/GC policy**
+   - Analysis: The design supports full history but does not define retention bounds or GC triggers, which affects storage and compliance.
+   - Recommendation: Treat history as unbounded for MVP; add optional retention policies later once workload patterns are known. (codex, 2026-02-05, decision)
+
+5. **Concurrency semantics and conflict resolution**
+   - Analysis: The design uses optimistic version checks, but does not specify behavior for concurrent writers updating topology vs content at the same time.
+   - Recommendation: Define conflict rules (e.g., version mismatch aborts; topology changes always close prior current row) to keep transactions deterministic. (codex, 2026-02-05, decision)
+
+6. **Restore/rollback interval behavior**
+   - Analysis: Restores currently create new `valid_since` intervals; reopening an old interval is not described.
+   - Recommendation: Keep "new interval on restore" as the rule for audit clarity, and document it explicitly. (codex, 2026-02-05, decision)
