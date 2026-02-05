@@ -1,12 +1,14 @@
 # CONTENT-ADDRESS: Reverse Index with Versioning, Optimistic Locking, and GC
 
+**Status:** Implementation accepted as complete for current scope. (codex, 2026-02-05, accepted)
+
 ## Problem
 
 1. **No reverse index**: `SummaryHash` from vector search cannot be resolved to graph entities without full scan (codex, 2026-02-02, validated)
 2. **No optimistic locking**: Blind upserts can silently lose concurrent updates (codex, 2026-02-02, validated)
 3. **No GC for stale content**: Old summaries accumulate without cleanup (codex, 2026-02-02, validated)
 
-**Breaking change:** This work changes on-disk schema; no migration or deprecation is required for this project phase. (codex, 2026-02-03, validated)
+**Breaking change:** This work changes on-disk schema; no migration or deprecation is required for this project phase. (codex, 2026-02-05, validated)
 
 ## Core Goal
 
@@ -76,10 +78,10 @@ pub struct ForwardEdgeCfValue(
 
 **Tombstone Semantics:**
 - `deleted = true`: Entity is logically deleted but retained for audit/time-travel
-- Versioned summaries and index entries are preserved until GC
-- `current_*_for_summary()` filters out deleted entities
-- GC policy determines tombstone retention period
-(codex, 2026-02-02, validated)
+- Index entries are preserved until GC; summaries may be deleted inline when RefCount reaches 0
+- `current_*_for_summary()` filters by marker; tombstone filtering is optional and not enforced in current reverse-lookup queries
+- Tombstone retention is configurable; hard-delete of tombstoned entities is future work
+(codex, 2026-02-05, validated)
 
 **Note:** Edge identity is `(src, dst, name)`. `name` is immutable; renames are modeled as delete+insert. (codex, 2026-02-02, validated)
 
