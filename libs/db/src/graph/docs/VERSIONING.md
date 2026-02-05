@@ -106,33 +106,43 @@ pub struct AddEdge {
     pub valid_since: Option<TimestampMilli>,  // default: now
 }
 
-/// Update summary/weight of existing current edge.
-/// Topology unchanged. Uses optimistic locking.
-pub struct UpdateEdgeSummary {
-    pub src: Id,
-    pub dst: Id,
-    pub name: String,
-    pub new_summary: EdgeSummary,
-    pub new_weight: Option<Option<f64>>,  // None = unchanged, Some(None) = clear, Some(v) = set
-    pub expected_version: Version,
-}
-
-/// Change edge topology (destination and/or name).
-/// Atomically closes old edge and creates new edge.
-/// At least one of new_dst or new_name must be Some.
-pub struct UpdateEdgeTopology {
+/// Update edge: change topology (dst/name) and/or summary.
+/// If topology changes, atomically closes old edge and creates new edge.
+/// All CF updates occur in a single transaction.
+pub struct UpdateEdge {
     // Identity of edge to change
     pub src: Id,
     pub dst: Id,
     pub name: String,
 
-    // What to change (at least one must be Some)
-    pub new_dst: Option<Id>,      // None = keep current dst
-    pub new_name: Option<String>, // None = keep current name
+    // Topology changes (None = keep current)
+    pub new_dst: Option<Id>,
+    pub new_name: Option<String>,
 
-    // Optional: update summary in same operation
-    pub new_summary: Option<EdgeSummary>,  // None = copy from old edge
+    // Content changes (None = keep current)
+    pub new_summary: Option<EdgeSummary>,
+    pub new_weight: Option<Option<f64>>,  // Some(None) = clear weight
+
+    // Optimistic locking
+    pub expected_version: Version,
 }
+
+// Transaction logic:
+//
+// If topology unchanged (new_dst=None AND new_name=None):
+//   1. Update ForwardEdge value in place (same key)
+//   2. Put new summary (if changed)
+//   3. Write EdgeVersionHistory
+//   4. Update EdgeSummaryIndex (mark old STALE, new CURRENT)
+//
+// If topology changed (new_dst OR new_name is Some):
+//   1. Close old ForwardEdge: set valid_until = now
+//   2. Close old ReverseEdge: set valid_until = now
+//   3. Insert new ForwardEdge: (src, new_dst, new_name, now) → (valid_until=NULL, ...)
+//   4. Insert new ReverseEdge: (new_dst, src, new_name, now) → (valid_until=NULL)
+//   5. Put new summary (if changed, else reuse old hash)
+//   6. Write EdgeVersionHistory for new edge
+//   7. Update EdgeSummaryIndex (mark old STALE, new CURRENT)
 
 /// Soft delete: sets valid_until = now.
 /// Edge remains queryable via time-travel.
@@ -167,9 +177,8 @@ Public mutations translate to these internal CF operations:
 | Public Mutation | Internal Operations |
 |-----------------|---------------------|
 | `AddEdge` | Insert ForwardEdge, ReverseEdge; Put Summary; Write VersionHistory |
-| `UpdateEdgeSummary` | Update ForwardEdge value (same key); Put Summary; Write VersionHistory |
-| `UpdateEdgeTopology` | Close old ForwardEdge/ReverseEdge (valid_until=now); Insert new edges with new dst/name |
-| `DeleteEdge` | Update valid_until=now on ForwardEdge and ReverseEdge |
+| `UpdateEdge` | If topology unchanged: update in place. If changed: close old edges, insert new edges. All in single txn. |
+| `DeleteEdge` | Set valid_until=now on ForwardEdge and ReverseEdge |
 | `RestoreEdge` | Query past state; Insert new edges with old topology/summary |
 
 ---
@@ -243,7 +252,7 @@ Result: [Bob, Carol]  // Alice knows BOTH
 
 ```
 t=1000: AddEdge { src: Alice, dst: Bob, name: "knows", summary: "friends" }
-t=2000: UpdateEdgeTopology { src: Alice, dst: Bob, name: "knows", new_dst: Some(Carol) }
+t=2000: UpdateEdge { src: Alice, dst: Bob, name: "knows", new_dst: Some(Carol), expected_version: 1 }
 
 ForwardEdges after t=2000:
   (Alice, Bob,   "knows", 1000) → (until=2000, "friends", v1)  // CLOSED
@@ -260,8 +269,8 @@ Result: [Bob]  // Time travel to before retarget
 
 ```
 t=1000: AddEdge { src: Alice, dst: Bob, name: "knows", summary: "acquaintances" }
-t=2000: UpdateEdgeSummary { src: Alice, dst: Bob, name: "knows",
-                            new_summary: "close friends", expected_version: 1 }
+t=2000: UpdateEdge { src: Alice, dst: Bob, name: "knows",
+                     new_summary: Some("close friends"), expected_version: 1 }
 
 ForwardEdges after t=2000:
   (Alice, Bob, "knows", 1000) → (until=NULL, hash=0xBBB, v2)  // same key, updated value
@@ -280,8 +289,8 @@ EdgeSummaries (append-only, no decrement):
 ```
 Timeline:
   t=1000: AddEdge Alice→Bob "knows"
-  t=2000: UpdateEdgeTopology Alice: Bob→Carol
-  t=3000: UpdateEdgeTopology Alice: Carol→Dave
+  t=2000: UpdateEdge { ..., new_dst: Some(Carol) }  // Bob→Carol
+  t=3000: UpdateEdge { ..., new_dst: Some(Dave) }   // Carol→Dave
   t=4000: RollbackEdgeTopology { src: Alice, name: "knows", as_of: 1500 }
 
 State after each operation:
