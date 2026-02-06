@@ -106,4 +106,4 @@ pub use crate::graph::mutation::{
 };
 
 // Re-export schema types commonly used with mutations
-pub use crate::graph::schema::{EdgeName, EdgeSummary, NodeName, NodeSummary, TemporalRange};
+pub use crate::graph::schema::{EdgeName, EdgeSummary, NodeName, NodeSummary, ValidRange};

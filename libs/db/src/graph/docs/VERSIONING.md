@@ -70,21 +70,21 @@ Enable temporal versioning for the graph database:
 | **Node** | `id` | ❌ | N/A | N/A | N/A | Immutable identity |
 | | `name` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | NameHash stored per version |
 | | `summary` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | SummaryHash stored per version |
-| | `TemporalRange` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | Full range stored per version |
+| | `ValidRange` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | Full range stored per version |
 | **Edge** | `src` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
 | | `dst` | ✅ | ✅ | ForwardEdges | ✅ Rollback | Topology change: close old, create new |
 | | `name` | ✅ | ✅ | ForwardEdges | ✅ Rollback | Topology change: close old, create new |
 | | `summary` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | SummaryHash stored per version |
 | | `weight` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | Weight stored per version |
-| | `TemporalRange` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | Full range stored per version |
+| | `ValidRange` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | Full range stored per version |
 | **NodeFragment** | `id` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
 | | `timestamp` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
 | | `content` | ❌ | ✅ | Key (timestamp) | 🔒 Append-only | Immutable once written |
-| | `TemporalRange` | ❌ | ✅ | Stored with fragment | 🔒 Append-only | Immutable once written |
+| | `ValidRange` | ❌ | ✅ | Stored with fragment | 🔒 Append-only | Immutable once written |
 | **EdgeFragment** | `src,dst,name` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
 | | `timestamp` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
 | | `content` | ❌ | ✅ | Key (timestamp) | 🔒 Append-only | Immutable once written |
-| | `TemporalRange` | ❌ | ✅ | Stored with fragment | 🔒 Append-only | Immutable once written |
+| | `ValidRange` | ❌ | ✅ | Stored with fragment | 🔒 Append-only | Immutable once written |
 
 ### Legend
 
@@ -107,17 +107,17 @@ Enable temporal versioning for the graph database:
 **NodeVersionHistory value (40 bytes):**
 ```
 ┌──────────┬─────────────┬──────────┬───────────────┐
-│ UpdatedAt│ SummaryHash │ NameHash │ TemporalRange │
+│ UpdatedAt│ SummaryHash │ NameHash │ ValidRange │
 │  8 bytes │   8 bytes   │ 8 bytes  │   16 bytes    │
 └──────────┴─────────────┴──────────┴───────────────┘
 ```
 
 **EdgeVersionHistory value (40 bytes):**
 ```
-┌──────────┬─────────────┬────────┬───────────────┐
-│ UpdatedAt│ SummaryHash │ Weight │ TemporalRange │
-│  8 bytes │   8 bytes   │ 8 bytes│   16 bytes    │
-└──────────┴─────────────┴────────┴───────────────┘
+┌──────────┬─────────────┬────────────┬───────────────┐
+│ UpdatedAt│ SummaryHash │ EdgeWeight │ ValidRange │
+│  8 bytes │   8 bytes   │  8 bytes   │   16 bytes    │
+└──────────┴─────────────┴────────────┴───────────────┘
 ```
 
 (claude, 2026-02-05, added comprehensive version/history capability table)
@@ -126,104 +126,209 @@ Enable temporal versioning for the graph database:
 
 ## Schema Changes
 
-### ValidSince Added to Keys
+### Temporal Type Aliases
 
 ```rust
-// ============================================================
-// EDGES - OLD SCHEMA
-// ============================================================
-ForwardEdgeCfKey(SrcId, DstId, NameHash)              // 40 bytes
-ReverseEdgeCfKey(DstId, SrcId, NameHash)              // 40 bytes
+/// Timestamp types for temporal versioning (all milliseconds since epoch)
+pub type ValidSince = TimestampMilli;  // When this version became valid (SYSTEM TIME)
+pub type ValidUntil = TimestampMilli;  // When this version stopped being valid (SYSTEM TIME)
 
-// ============================================================
-// EDGES - NEW SCHEMA
-// ============================================================
-ForwardEdgeCfKey(SrcId, DstId, NameHash, ValidSince)  // 48 bytes (+8)
-ReverseEdgeCfKey(DstId, SrcId, NameHash, ValidSince)  // 48 bytes (+8)
-
-// ============================================================
-// NODES - OLD SCHEMA
-// ============================================================
-NodeCfKey(Id)                                          // 16 bytes
-
-// ============================================================
-// NODES - NEW SCHEMA
-// ============================================================
-NodeCfKey(Id, ValidSince)                              // 24 bytes (+8)
-(codex, 2026-02-05, proposed)
+/// Edge weight type alias
+pub type EdgeWeight = f64;
 ```
 
-### Complete CF Schema
+### Bitemporal Model: Two Orthogonal Time Dimensions
+
+**CRITICAL DISTINCTION** - This design has TWO independent temporal concepts:
+
+| Dimension | Fields | Stored In | Purpose |
+|-----------|--------|-----------|---------|
+| **System Time** | `ValidSince` (key), `ValidUntil` (value) | Entity CF key/value | When this version existed in the database. Used for audit trails, time-travel queries, and rollback. |
+| **Application Time** | `ValidRange` (value) | Entity CF value + VersionHistory | When the entity is valid in the business domain (e.g., "promo runs Dec 1-7"). |
+
+**These are independent:**
+- Changing `ValidRange` (business validity) creates a new VERSION (increments version counter)
+- `ValidSince`/`ValidUntil` track WHEN that version change happened in the database
+- You can time-travel to see "what ValidRange did we have on Nov 18?" (system time query)
+- You can filter by "is this entity active on Dec 5?" (application time query)
+
+See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time) for detailed examples.
+
+### Comprehensive Schema: BEFORE vs AFTER
+
+| CF | BEFORE CfKey | BEFORE CfValue | AFTER CfKey | AFTER CfValue | Delta |
+|----|--------------|----------------|-------------|---------------|-------|
+| **Nodes** | `(Id)` 16B | `(ValidRange?, NameHash, SummaryHash?, Version, Deleted)` | `(Id, ValidSince)` 24B | `(ValidUntil, ValidRange?, NameHash, SummaryHash?, Version, Deleted)` | Key +8B |
+| **ForwardEdges** | `(SrcId, DstId, NameHash)` 40B | `(ValidRange?, Weight?, SummaryHash?, Version, Deleted)` | `(SrcId, DstId, NameHash, ValidSince)` 48B | `(ValidUntil, ValidRange?, Weight?, SummaryHash?, Version, Deleted)` | Key +8B |
+| **ReverseEdges** | `(DstId, SrcId, NameHash)` 40B | `(ValidRange?)` | `(DstId, SrcId, NameHash, ValidSince)` 48B | `(ValidUntil, ValidRange?)` | Key +8B |
+| **NodeSummaries** | `(SummaryHash)` 8B | `(RefCount, NodeSummary)` | `(SummaryHash)` 8B | `(NodeSummary)` | RefCount removed |
+| **EdgeSummaries** | `(SummaryHash)` 8B | `(RefCount, EdgeSummary)` | `(SummaryHash)` 8B | `(EdgeSummary)` | RefCount removed |
+| **NodeVersionHistory** | N/A | N/A | `(Id, ValidSince, Version)` 28B | `(UpdatedAt, SummaryHash, NameHash, ValidRange)` 40B | **NEW** |
+| **EdgeVersionHistory** | N/A | N/A | `(SrcId, DstId, NameHash, ValidSince, Version)` 52B | `(UpdatedAt, SummaryHash, Weight, ValidRange)` 40B | **NEW** |
+| **NodeFragments** | `(Id, TimestampMilli)` 24B | `(ValidRange?, FragmentContent)` | *unchanged* | *unchanged* | None |
+| **EdgeFragments** | `(SrcId, DstId, NameHash, TimestampMilli)` 48B | `(ValidRange?, FragmentContent)` | *unchanged* | *unchanged* | None |
+| **NodeSummaryIndex** | `(SummaryHash, Id, Version)` 28B | `(Marker)` 1B | *unchanged* | *unchanged* | None |
+| **EdgeSummaryIndex** | `(SummaryHash, SrcId, DstId, NameHash, Version)` 52B | `(Marker)` 1B | *unchanged* | *unchanged* | None |
+
+### Complete CF Schema (AFTER)
 
 ```rust
-/// Forward edges with temporal key
-ForwardEdges {
-    key: (SrcId, DstId, NameHash, ValidSinceMilli),  // 48 bytes
-    val: (ValidUntilMilli, Weight, SummaryHash, Version, Deleted),
-}
+// ============================================================
+// TEMPORAL TYPE ALIASES
+// ============================================================
+pub type ValidSince = TimestampMilli;
+pub type ValidUntil = TimestampMilli;
 
-/// Reverse edges for incoming queries
-ReverseEdges {
-    key: (DstId, SrcId, NameHash, ValidSinceMilli),  // 48 bytes
-    val: (ValidUntilMilli),
-}
+// ============================================================
+// NODES CF
+// ============================================================
+/// Node entity with temporal key for time-travel queries
+pub struct NodeCfKey(
+    pub Id,          // 16 bytes
+    pub ValidSince,  // 8 bytes
+);  // Total: 24 bytes
 
-/// Nodes with temporal key
-Nodes {
-    key: (Id, ValidSinceMilli),                       // 24 bytes
-    val: (ValidUntilMilli, NameHash, SummaryHash, Version, Deleted),
-}
+pub struct NodeCfValue(
+    pub Option<ValidUntil>,       // System time: when this version stopped being valid (None = current)
+    pub Option<ValidRange>,    // Application time: business validity period
+    pub NameHash,                 // 8 bytes
+    pub Option<SummaryHash>,      // Content hash for vector search
+    pub Version,                  // Monotonic version counter
+    pub bool,                     // Deleted flag (tombstone)
+);
 
-/// Edge summaries (content-addressed, append-only for rollback)
-EdgeSummaries {
-    key: SummaryHash,                                 // 8 bytes
-    val: EdgeSummary,                                 // No RefCount decrement
-}
+// ============================================================
+// FORWARD EDGES CF
+// ============================================================
+/// Forward edge with temporal key for time-travel queries
+pub struct ForwardEdgeCfKey(
+    pub SrcId,       // 16 bytes
+    pub DstId,       // 16 bytes
+    pub NameHash,    // 8 bytes
+    pub ValidSince,  // 8 bytes
+);  // Total: 48 bytes
 
-/// Node summaries (content-addressed, append-only for rollback)
-NodeSummaries {
-    key: SummaryHash,                                 // 8 bytes
-    val: NodeSummary,                                 // No RefCount decrement
-}
-(codex, 2026-02-05, gap: conflicts with current RefCount-based summaries and inline deletion)
-(claude, 2026-02-05, CLARIFY: Valid observation. VERSIONING.md describes the NEXT phase that SUPERSEDES CONTENT-ADDRESS.md RefCount behavior. When VERSIONING is implemented, summaries become append-only (no RefCount decrement) to enable rollback. Orphan summaries are cleaned by lazy GC scan instead of inline deletion.)
-(codex, 2026-02-05, accept with caveat: VERSIONING may amend RefCount behavior to satisfy rollback/time-travel; ensure this is explicitly stated as a superseding change)
+pub struct ForwardEdgeCfValue(
+    pub Option<ValidUntil>,       // System time: when this version stopped being valid
+    pub Option<ValidRange>,    // Application time: business validity period
+    pub Option<EdgeWeight>,       // Weight
+    pub Option<SummaryHash>,      // Content hash
+    pub Version,                  // Monotonic version counter
+    pub bool,                     // Deleted flag (tombstone)
+);
 
-/// Edge version history (for full rollback of all mutable fields)
-EdgeVersionHistory {
-    key: (SrcId, DstId, NameHash, ValidSince, Version),  // 52 bytes
-    val: (UpdatedAt, SummaryHash, Weight, TemporalRange), // 40 bytes
-    // UpdatedAt: u64 (8), SummaryHash: u64 (8), Weight: f64 (8, NaN=None),
-    // TemporalRange: (u64, u64) (16, 0=None for each bound)
-}
-(codex, 2026-02-05, decision: store UpdatedAt in version history to resolve `as_of` content queries)
-(claude, 2026-02-05, ACCEPT: Good improvement. Original design had value as just SummaryHash (8 bytes). UpdatedAt enables efficient time→version mapping: scan versions, select max(UpdatedAt) <= T. Essential for `EdgeAtTime`/`NodeByIdAt` queries.)
-(claude, 2026-02-05, EXPANDED: Added Weight and TemporalRange to enable full rollback of all mutable edge fields, not just summary.)
+// ============================================================
+// REVERSE EDGES CF
+// ============================================================
+/// Reverse edge index with temporal key (denormalized for inbound scans)
+pub struct ReverseEdgeCfKey(
+    pub DstId,       // 16 bytes
+    pub SrcId,       // 16 bytes
+    pub NameHash,    // 8 bytes
+    pub ValidSince,  // 8 bytes
+);  // Total: 48 bytes
 
-/// Node version history (for full rollback of all mutable fields)
-NodeVersionHistory {
-    key: (Id, ValidSince, Version),                      // 28 bytes
-    val: (UpdatedAt, SummaryHash, NameHash, TemporalRange), // 40 bytes
-    // UpdatedAt: u64 (8), SummaryHash: u64 (8), NameHash: u64 (8),
-    // TemporalRange: (u64, u64) (16, 0=None for each bound)
-}
-(claude, 2026-02-05, EXPANDED: Added NameHash and TemporalRange to enable full rollback of all mutable node fields.)
+pub struct ReverseEdgeCfValue(
+    pub Option<ValidUntil>,       // System time: denormalized for fast filtering
+    pub Option<ValidRange>,    // Application time: denormalized for business time queries
+);
+/// NOTE: Update both ForwardEdges and ReverseEdges in same transaction
 
-/// Edge fragments (unchanged - already temporal via timestamp)
-EdgeFragments {
-    key: (SrcId, DstId, NameHash, TimestampMilli),    // 48 bytes
-    val: (TemporalRange, FragmentContent),
-}
+// ============================================================
+// SUMMARIES CF (Content-addressed, append-only for rollback)
+// ============================================================
+/// Node summaries - RefCount REMOVED for append-only rollback support
+pub struct NodeSummaryCfKey(pub SummaryHash);  // 8 bytes
+pub struct NodeSummaryCfValue(pub NodeSummary);
+/// (claude, 2026-02-05) VERSIONING supersedes CONTENT-ADDRESS RefCount behavior.
+/// Summaries are append-only; orphans cleaned by lazy GC scan.
 
-/// Node fragments (unchanged - already temporal via timestamp)
-NodeFragments {
-    key: (Id, TimestampMilli),                        // 24 bytes
-    val: (TemporalRange, FragmentContent),
-}
-(codex, 2026-02-05, proposed)
-(codex, 2026-02-05, gap: EdgeSummaryIndex is referenced later but not defined here; define its key/value and whether it is time-aware)
-(claude, 2026-02-05, ACCEPT: Valid gap. EdgeSummaryIndex schema is defined in CONTENT-ADDRESS.md Part 1.3. Key: (SummaryHash, SrcId, DstId, NameHash, Version) 52 bytes. Value: 1-byte marker (CURRENT/STALE). Not time-aware in key - version suffices. Cross-reference added.)
-(codex, 2026-02-05, accept: cross-reference is sufficient; ensure VERSIONING notes dependency on CONTENT-ADDRESS schema)
+/// Edge summaries - RefCount REMOVED for append-only rollback support
+pub struct EdgeSummaryCfKey(pub SummaryHash);  // 8 bytes
+pub struct EdgeSummaryCfValue(pub EdgeSummary);
+
+// ============================================================
+// VERSION HISTORY CFs (NEW - enables full rollback)
+// ============================================================
+/// Node version history - stores full snapshot for rollback
+pub struct NodeVersionHistoryCfKey(
+    pub Id,          // 16 bytes
+    pub ValidSince,  // 8 bytes
+    pub Version,     // 4 bytes
+);  // Total: 28 bytes
+
+pub struct NodeVersionHistoryCfValue(
+    pub UpdatedAt,       // 8 bytes - timestamp of this version
+    pub SummaryHash,     // 8 bytes - content hash
+    pub NameHash,        // 8 bytes - node name at this version
+    pub ValidRange,   // 16 bytes - (start, end) business validity
+);  // Total: 40 bytes
+/// (claude, 2026-02-05) EXPANDED: Added NameHash and ValidRange for full rollback.
+
+/// Edge version history - stores full snapshot for rollback
+pub struct EdgeVersionHistoryCfKey(
+    pub SrcId,       // 16 bytes
+    pub DstId,       // 16 bytes
+    pub NameHash,    // 8 bytes
+    pub ValidSince,  // 8 bytes
+    pub Version,     // 4 bytes
+);  // Total: 52 bytes
+
+pub struct EdgeVersionHistoryCfValue(
+    pub UpdatedAt,       // 8 bytes - timestamp of this version
+    pub SummaryHash,     // 8 bytes - content hash
+    pub EdgeWeight,      // 8 bytes - f64, NaN = None
+    pub ValidRange,   // 16 bytes - (start, end) business validity
+);  // Total: 40 bytes
+/// (codex, 2026-02-05) UpdatedAt enables time→version mapping for `as_of` queries.
+/// (claude, 2026-02-05) EXPANDED: Added Weight and ValidRange for full rollback.
+
+// ============================================================
+// FRAGMENT CFs (UNCHANGED - already temporal via timestamp key)
+// ============================================================
+pub struct NodeFragmentCfKey(
+    pub Id,              // 16 bytes
+    pub TimestampMilli,  // 8 bytes
+);  // Total: 24 bytes
+
+pub struct NodeFragmentCfValue(
+    pub Option<ValidRange>,
+    pub FragmentContent,
+);
+
+pub struct EdgeFragmentCfKey(
+    pub SrcId,           // 16 bytes
+    pub DstId,           // 16 bytes
+    pub NameHash,        // 8 bytes
+    pub TimestampMilli,  // 8 bytes
+);  // Total: 48 bytes
+
+pub struct EdgeFragmentCfValue(
+    pub Option<ValidRange>,
+    pub FragmentContent,
+);
+
+// ============================================================
+// SUMMARY INDEX CFs (UNCHANGED - see CONTENT-ADDRESS.md Part 1.3)
+// ============================================================
+/// Node summary reverse index (hash → nodes)
+pub struct NodeSummaryIndexCfKey(
+    pub SummaryHash,  // 8 bytes
+    pub Id,           // 16 bytes
+    pub Version,      // 4 bytes
+);  // Total: 28 bytes
+pub struct NodeSummaryIndexCfValue(pub u8);  // CURRENT=0x01, STALE=0x00
+
+/// Edge summary reverse index (hash → edges)
+pub struct EdgeSummaryIndexCfKey(
+    pub SummaryHash,  // 8 bytes
+    pub SrcId,        // 16 bytes
+    pub DstId,        // 16 bytes
+    pub NameHash,     // 8 bytes
+    pub Version,      // 4 bytes
+);  // Total: 52 bytes
+pub struct EdgeSummaryIndexCfValue(pub u8);  // CURRENT=0x01, STALE=0x00
+/// NOTE: Index CFs defined in CONTENT-ADDRESS.md; not time-aware in key (version suffices).
 ```
 
 ### Temporal Semantics
@@ -243,6 +348,18 @@ NodeFragments {
 
 ## Mutation API
 
+### Update Semantics: `Option<Option<T>>` Pattern
+
+For nullable fields (`weight`, `temporal_range`), updates use `Option<Option<T>>` to distinguish three cases:
+
+| Value | Meaning | Example |
+|-------|---------|---------|
+| `None` | Don't change field | `new_weight: None` → keep current weight |
+| `Some(None)` | Clear field (set to null) | `new_weight: Some(None)` → remove weight |
+| `Some(Some(v))` | Set field to value | `new_weight: Some(Some(0.5))` → set weight to 0.5 |
+
+This avoids sentinel values like `ValidRange(0, MAX)` to represent "always valid" when you really want "no constraint".
+
 ### Edge Mutations
 
 ```rust
@@ -253,13 +370,14 @@ pub struct AddEdge {
     pub dst: Id,
     pub name: String,
     pub summary: EdgeSummary,
-    pub weight: Option<f64>,
-    pub valid_since: Option<TimestampMilli>,  // default: now
+    pub weight: Option<EdgeWeight>,
+    pub temporal_range: Option<ValidRange>,  // Business validity period
+    pub valid_since: Option<TimestampMilli>,    // System time (default: now)
 }
 
-/// Update edge: change topology (dst/name) and/or content (summary/weight).
+/// Update edge: change topology (dst/name) and/or content (summary/weight/temporal_range).
 /// If topology changes: closes old edge, creates new edge.
-/// If only content changes: updates in place.
+/// If only content changes: updates in place, increments version.
 /// All operations in single transaction.
 pub struct UpdateEdge {
     // Identity of edge to change
@@ -273,7 +391,8 @@ pub struct UpdateEdge {
 
     // Content changes (None = keep current)
     pub new_summary: Option<EdgeSummary>,
-    pub new_weight: Option<Option<f64>>,  // Some(None) = clear weight
+    pub new_weight: Option<Option<EdgeWeight>>,           // None=keep, Some(None)=clear, Some(v)=set
+    pub new_temporal_range: Option<Option<ValidRange>>, // None=keep, Some(None)=clear, Some(v)=set
 
     // Optimistic locking
     pub expected_version: Version,
@@ -313,7 +432,8 @@ pub struct AddNode {
     pub id: Id,
     pub name: String,
     pub summary: NodeSummary,
-    pub valid_since: Option<TimestampMilli>,
+    pub temporal_range: Option<ValidRange>,  // Business validity period
+    pub valid_since: Option<TimestampMilli>,    // System time (default: now)
 }
 
 /// Update node content.
@@ -321,6 +441,7 @@ pub struct UpdateNode {
     pub id: Id,
     pub new_name: Option<String>,
     pub new_summary: Option<NodeSummary>,
+    pub new_temporal_range: Option<Option<ValidRange>>,  // None=keep, Some(None)=clear, Some(v)=set
     pub expected_version: Version,
 }
 
@@ -337,6 +458,60 @@ pub struct RestoreNode {
 }
 ```
 
+### API Migration: ValidRange Updates
+
+**BEFORE (current API):**
+```rust
+/// Patches ValidRange directly - no versioning, no optimistic locking
+pub struct UpdateNodeValidSinceUntil {
+    pub id: Id,
+    pub temporal_range: ValidRange,
+    pub reason: String,
+}
+
+pub struct UpdateEdgeValidSinceUntil {
+    pub src_id: Id,
+    pub dst_id: Id,
+    pub name: EdgeName,
+    pub temporal_range: ValidRange,
+    pub reason: String,
+}
+```
+
+**AFTER (VERSIONING):**
+
+The `UpdateNodeValidSinceUntil` and `UpdateEdgeValidSinceUntil` mutations are **DEPRECATED**.
+Use `UpdateNode` and `UpdateEdge` with `new_temporal_range` instead:
+
+```rust
+// BEFORE: No version tracking
+UpdateNodeValidSinceUntil {
+    id: alice,
+    temporal_range: ValidRange(Dec1, Dec10),
+    reason: "extended promo",
+}
+
+// AFTER: Version tracked, history preserved
+UpdateNode {
+    id: alice,
+    new_temporal_range: Some(ValidRange(Dec1, Dec10)),
+    expected_version: 1,
+    ..Default::default()
+}
+```
+
+**Key differences:**
+
+| Aspect | Before | After |
+|--------|--------|-------|
+| Version increment | ❌ No | ✅ Yes |
+| Optimistic locking | ❌ No | ✅ Yes (expected_version) |
+| History preserved | ❌ No | ✅ Yes (VersionHistory) |
+| Rollback support | ❌ No | ✅ Yes |
+| Combined with other changes | ❌ No | ✅ Yes (same UpdateNode/UpdateEdge) |
+
+**Note:** The `reason` field is removed. Use fragments for audit commentary if needed.
+
 ### Fragment Mutations (Unchanged)
 
 Fragments are already temporal via their timestamp key:
@@ -348,14 +523,14 @@ pub struct AddEdgeFragment {
     pub dst: Id,
     pub name: String,
     pub content: FragmentContent,
-    pub valid_range: Option<TemporalRange>,
+    pub valid_range: Option<ValidRange>,
 }
 
 /// Add fragment to node (append-only, no versioning needed)
 pub struct AddNodeFragment {
     pub id: Id,
     pub content: FragmentContent,
-    pub valid_range: Option<TemporalRange>,
+    pub valid_range: Option<ValidRange>,
 }
 ```
 
@@ -455,8 +630,62 @@ pub struct IncomingEdges {
     pub dst: Id,
     pub name: Option<String>,
 }
-(codex, 2026-02-05, decision: current-state reads should use reverse prefix scan on (Id, ValidSince) to select the latest valid row and avoid O(n) scans)
 ```
+
+### Implementation: NodeById with Temporal Keys
+
+With `NodeCfKey(Id, ValidSince)`, we use **reverse prefix seek** to find the current node:
+
+```rust
+/// Get current node by ID using reverse seek.
+/// Complexity: O(log N) seek + O(1) read (NOT a full scan)
+fn get_node_by_id(db: &DB, id: Id) -> Result<Option<Node>> {
+    let mut iter = db.iterator_cf(
+        nodes_cf,
+        IteratorMode::From(&(id, u64::MAX), Direction::Reverse)
+    );
+
+    // First entry with matching Id prefix = latest ValidSince
+    if let Some((key, value)) = iter.next() {
+        let (node_id, valid_since) = NodeCfKey::from_bytes(&key)?;
+
+        // Verify we're still in the same Id prefix
+        if node_id != id {
+            return Ok(None);  // No versions exist for this Id
+        }
+
+        let node_value = NodeCfValue::from_bytes(&value)?;
+
+        // Check if this version is current (valid_until = None or > now)
+        if node_value.valid_until.is_none() {
+            return Ok(Some(Node { id, valid_since, ..node_value }));
+        }
+        // If valid_until is set, node was deleted - return None for current query
+    }
+    Ok(None)
+}
+
+/// Get node at specific time using forward seek + filter.
+fn get_node_by_id_at(db: &DB, id: Id, at: TimestampMilli) -> Result<Option<Node>> {
+    let mut iter = db.prefix_iterator_cf(nodes_cf, &id.to_bytes());
+
+    // Find version where: valid_since <= at AND (valid_until is None OR valid_until > at)
+    for (key, value) in iter {
+        let (node_id, valid_since) = NodeCfKey::from_bytes(&key)?;
+        if node_id != id { break; }
+
+        let node_value = NodeCfValue::from_bytes(&value)?;
+
+        if valid_since <= at &&
+           (node_value.valid_until.is_none() || node_value.valid_until.unwrap() > at) {
+            return Ok(Some(Node { id, valid_since, ..node_value }));
+        }
+    }
+    Ok(None)
+}
+```
+
+(claude, 2026-02-05, added implementation detail for temporal node lookups)
 
 ### Time-Travel Queries
 
@@ -852,9 +1081,45 @@ Fragments up to t=2200: ["Graduated college", "Got first job"]
 |-------|-----------|------------|-------|
 | **OutgoingEdges** | 1 scan | 1 scan + filter | +filter cost |
 | **OutgoingEdgesAt(T)** | N/A | 1 scan + filter | New capability |
-| **NodeById** | 1 get | 1 scan + filter | Scan vs get |
+| **NodeById** | 1 get | 1 reverse seek | O(1) → O(log N) |
 | **EdgeHistory** | N/A | 1 scan | New capability |
 (codex, 2026-02-05, decision: use reverse prefix scan for NodeById/NodeByIdAt to reduce scan cost; document expected max versions per node)
+
+**NodeById lookup cost analysis:**
+
+With `NodeCfKey(Id, ValidSince)`, finding the current node requires a reverse seek:
+
+```rust
+// Before: O(1) point lookup
+db.get(&NodeCfKey(id))
+
+// After: O(log N) seek + O(1) read
+iter.seek_for_prev(&(id, u64::MAX));  // Seek to largest key <= (id, MAX)
+let (key, value) = iter.next()?;       // First entry = latest ValidSince
+if value.valid_until.is_none() { ... } // Check if current
+```
+
+| Aspect | Point Lookup | Reverse Seek |
+|--------|--------------|--------------|
+| **Complexity** | O(1) with bloom | O(log N) seek + O(1) read |
+| **Typical latency** | ~1-2 μs | ~2-5 μs |
+| **Entries read** | 1 | 1 |
+| **Bloom filter** | Full key match | Prefix match (less selective) |
+
+**Why this is acceptable:**
+1. **Single entry read**: Reverse seek returns latest ValidSince first; we read only 1 entry
+2. **Prefix bloom filters**: RocksDB can filter SST files by Id prefix
+3. **Log factor is small**: log₂(1 billion) ≈ 30 index lookups worst case
+4. **~2-3x overhead**: Microseconds, not milliseconds
+
+**RocksDB tuning for prefix seeks:**
+```rust
+// Enable prefix bloom filters for faster prefix scans
+options.set_prefix_extractor(SliceTransform::create_fixed_prefix(16)); // Id = 16 bytes
+options.set_memtable_prefix_bloom_ratio(0.1);
+```
+
+(claude, 2026-02-05, added NodeById seek cost analysis)
 
 **Filter cost:** Each edge scan now filters by `valid_until`:
 ```rust
@@ -883,7 +1148,7 @@ EdgeVersionHistory:   3M × 92 bytes = 276 MB
 EdgeSummaryIndex:     3M × 53 bytes = 159 MB
 Total overhead:       ~451 MB for 1M edges
 ```
-(claude, 2026-02-05, UPDATED: EdgeVersionHistory expanded from 68→92 bytes to include Weight and TemporalRange for full rollback capability. Trade-off: +72 MB per 1M edges for complete audit trail.)
+(claude, 2026-02-05, UPDATED: EdgeVersionHistory expanded from 68→92 bytes to include Weight and ValidRange for full rollback capability. Trade-off: +72 MB per 1M edges for complete audit trail.)
 
 ### GC Changes
 
@@ -961,7 +1226,7 @@ This design uses a **bitemporal model** with two orthogonal temporal dimensions:
 | Dimension | Field | Purpose | Example |
 |-----------|-------|---------|---------|
 | **System Time** | `ValidSince`, `ValidUntil` | When this version existed in the DB | "Record created Nov 15, superseded Nov 20" |
-| **Application Time** | `TemporalRange` | When the entity is valid in the real world | "Promo runs Dec 1-7, 2025" |
+| **Application Time** | `ValidRange` | When the entity is valid in the real world | "Promo runs Dec 1-7, 2025" |
 
 These are **semantically orthogonal**:
 - **System time** enables audit trails, time-travel queries, and rollback
@@ -979,7 +1244,7 @@ t=Nov15: AddNode {
     id: HolidaySale,
     name: "promo",
     summary: { discount: "20%", items: ["electronics"] },
-    valid_range: TemporalRange(Dec1, Dec7)  // APPLICATION TIME
+    valid_range: ValidRange(Dec1, Dec7)  // APPLICATION TIME
 }
 
 === Nodes CF ===
@@ -994,7 +1259,7 @@ t=Nov15: AddNode {
 t=Nov20: UpdateNode {
     id: HolidaySale,
     new_summary: { discount: "20%", items: ["electronics"], extended: true },
-    new_temporal_range: TemporalRange(Dec1, Dec10),  // Changed!
+    new_temporal_range: ValidRange(Dec1, Dec10),  // Changed!
     expected_version: 1
 }
 
@@ -1019,10 +1284,10 @@ Q2: "What was the promo config on Nov 18?" (time-travel, SYSTEM TIME)
     → HolidaySale v1: discount=20%, runs Dec 1-7  // Before extension
 
 Q3: "Is the promo active on Dec 5?" (APPLICATION TIME check)
-    → Yes, Dec 5 is within TemporalRange(Dec1, Dec10)
+    → Yes, Dec 5 is within ValidRange(Dec1, Dec10)
 
 Q4: "Is the promo active on Dec 15?"
-    → No, Dec 15 is outside TemporalRange
+    → No, Dec 15 is outside ValidRange
 ```
 
 ### Example 13: Contract with Effective Dates and Amendments
@@ -1034,7 +1299,7 @@ A contract between OrgA and OrgB has an effective period, and amendments create 
 t=Jan1: AddEdge {
     src: OrgA, dst: OrgB, name: "contract",
     summary: { terms: "Standard", value: "$100K" },
-    valid_range: TemporalRange(Feb1, Jan31NextYear)  // APPLICATION TIME
+    valid_range: ValidRange(Feb1, Jan31NextYear)  // APPLICATION TIME
 }
 
 === ForwardEdges CF ===
@@ -1050,7 +1315,7 @@ t=Mar15: UpdateEdge {
     new_summary: { terms: "Amended", value: "$150K" },
     expected_version: 1
 }
-// Note: TemporalRange unchanged - contract still runs Feb 1 - Jan 31
+// Note: ValidRange unchanged - contract still runs Feb 1 - Jan 31
 
 === ForwardEdges CF (after amendment) ===
 (OrgA, OrgB, "contract", valid_since=Jan1) → (
@@ -1072,11 +1337,11 @@ Q2: "What were the contract terms before the amendment?" (SYSTEM TIME rollback)
     → EdgeAtVersion(v=1): terms="Standard", value=$100K
 
 Q3: "Is the contract in force on Dec 15?" (APPLICATION TIME)
-    → Yes, Dec 15 is within TemporalRange(Feb1, Jan31)
+    → Yes, Dec 15 is within ValidRange(Feb1, Jan31)
 
 Q4: "Rollback to pre-amendment terms"
     → RestoreEdge { as_of: Feb1 }
-    → Creates v=3 with hash=0xAAA (original terms), same TemporalRange
+    → Creates v=3 with hash=0xAAA (original terms), same ValidRange
 ```
 
 ### Example 14: Event with Moving Date Window
@@ -1088,14 +1353,14 @@ An "Annual Conference" edge tracks a recurring event where the business dates ch
 t=Jun1: AddEdge {
     src: Company, dst: Venue, name: "annual_conference",
     summary: { year: 2025, attendees: 500 },
-    valid_range: TemporalRange(Sep15_2025, Sep17_2025)  // 3-day event
+    valid_range: ValidRange(Sep15_2025, Sep17_2025)  // 3-day event
 }
 
 === Sep 10: Venue conflict, reschedule to Oct ===
 t=Sep10: UpdateEdge {
     src: Company, dst: Venue, name: "annual_conference",
     new_summary: { year: 2025, attendees: 500, rescheduled: true },
-    new_temporal_range: TemporalRange(Oct20_2025, Oct22_2025),  // New dates
+    new_temporal_range: ValidRange(Oct20_2025, Oct22_2025),  // New dates
     expected_version: 1
 }
 
@@ -1106,10 +1371,10 @@ t=Sep10: UpdateEdge {
 === Queries ===
 
 Q1: "When was the conference originally scheduled?"
-    → Time-travel to Sep 1: TemporalRange(Sep15, Sep17)
+    → Time-travel to Sep 1: ValidRange(Sep15, Sep17)
 
 Q2: "When is the conference now?"
-    → Current: TemporalRange(Oct20, Oct22)
+    → Current: ValidRange(Oct20, Oct22)
 
 Q3: "Show all schedule changes" (audit)
     → EdgeHistory: v1 (Sep 15-17), v2 (Oct 20-22)
@@ -1120,9 +1385,9 @@ Q3: "Show all schedule changes" (audit)
 | Query Type | Uses | Returns |
 |------------|------|---------|
 | "What did we know on date X?" | System time (`ValidSince`) | Version active at X |
-| "Is this entity active on date X?" | Application time (`TemporalRange`) | Boolean check |
+| "Is this entity active on date X?" | Application time (`ValidRange`) | Boolean check |
 | "Show all changes to this entity" | System time (Edge/NodeVersionHistory) | All versions with timestamps |
-| "Find entities active during period P" | Application time scan | Entities where TemporalRange overlaps P |
+| "Find entities active during period P" | Application time scan | Entities where ValidRange overlaps P |
 
 (claude, 2026-02-05, added to clarify bitemporal model)
 

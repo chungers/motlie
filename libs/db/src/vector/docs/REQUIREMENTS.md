@@ -304,7 +304,7 @@ These assumptions shape the implementation architecture and are derived from pro
 |----|------------|-----------|
 | <a id="arch-1"></a>**ARCH-1** | Vector index is **temporal-agnostic** | Simplifies index, avoids sync complexity |
 | <a id="arch-2"></a>**ARCH-2** | Temporal visibility enforced during re-ranking | Graph RocksDB is source of truth |
-| <a id="arch-3"></a>**ARCH-3** | Over-fetch pattern for filtered queries | Return larger candidate set, filter by `TemporalRange` |
+| <a id="arch-3"></a>**ARCH-3** | Over-fetch pattern for filtered queries | Return larger candidate set, filter by `ValidRange` |
 
 **Design Pattern:**
 

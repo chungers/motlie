@@ -647,8 +647,8 @@ pub struct OutgoingEdges {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the TemporalRange in the record
-    /// Records without a TemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the ValidRange in the record
+    /// Records without a ValidRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
@@ -679,8 +679,8 @@ pub struct IncomingEdges {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the TemporalRange in the record
-    /// Records without a TemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the ValidRange in the record
+    /// Records without a ValidRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
@@ -3681,7 +3681,7 @@ mod tests {
         use crate::writer::Runnable as MutationRunnable;
         use super::super::schema::EdgeSummary;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
-        use crate::{Id, TemporalRange, TimestampMilli};
+        use crate::{Id, ValidRange, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -3745,7 +3745,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(1000),
             content: DataUrl::from_markdown("Valid from 1000 to 3000"),
-            valid_range: TemporalRange::valid_between(TimestampMilli(1000), TimestampMilli(3000)),
+            valid_range: ValidRange::valid_between(TimestampMilli(1000), TimestampMilli(3000)),
         }
         .run(&writer)
         .await
@@ -3758,7 +3758,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(2000),
             content: DataUrl::from_markdown("Valid from 2000 to 5000"),
-            valid_range: TemporalRange::valid_between(TimestampMilli(2000), TimestampMilli(5000)),
+            valid_range: ValidRange::valid_between(TimestampMilli(2000), TimestampMilli(5000)),
         }
         .run(&writer)
         .await

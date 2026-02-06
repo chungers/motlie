@@ -28,7 +28,7 @@ use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use super::schema::{
     self, is_valid_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
     FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,
-    SrcId, TemporalRange,
+    SrcId, ValidRange,
 };
 use super::Storage;
 use crate::{Id, TimestampMilli};
@@ -197,7 +197,7 @@ pub struct NodeRecord {
     pub id: Id,
     pub name: NodeName,
     pub summary: NodeSummary,
-    pub valid_range: Option<TemporalRange>,
+    pub valid_range: Option<ValidRange>,
 }
 
 /// A forward edge record as seen by scan visitors.
@@ -208,7 +208,7 @@ pub struct EdgeRecord {
     pub name: EdgeName,
     pub summary: EdgeSummary,
     pub weight: Option<f64>,
-    pub valid_range: Option<TemporalRange>,
+    pub valid_range: Option<ValidRange>,
 }
 
 /// A reverse edge record as seen by scan visitors (index only, no summary/weight).
@@ -217,7 +217,7 @@ pub struct ReverseEdgeRecord {
     pub dst_id: DstId,
     pub src_id: SrcId,
     pub name: EdgeName,
-    pub valid_range: Option<TemporalRange>,
+    pub valid_range: Option<ValidRange>,
 }
 
 /// A node fragment record as seen by scan visitors.
@@ -226,7 +226,7 @@ pub struct NodeFragmentRecord {
     pub node_id: Id,
     pub timestamp: TimestampMilli,
     pub content: FragmentContent,
-    pub valid_range: Option<TemporalRange>,
+    pub valid_range: Option<ValidRange>,
 }
 
 /// An edge fragment record as seen by scan visitors.
@@ -237,7 +237,7 @@ pub struct EdgeFragmentRecord {
     pub edge_name: EdgeName,
     pub timestamp: TimestampMilli,
     pub content: FragmentContent,
-    pub valid_range: Option<TemporalRange>,
+    pub valid_range: Option<ValidRange>,
 }
 
 
@@ -343,7 +343,7 @@ where
     CF: ColumnFamily,
     V: Visitor<R>,
     F: Fn(&[u8], &[u8]) -> Result<R>,
-    G: Fn(&R) -> &Option<TemporalRange>,
+    G: Fn(&R) -> &Option<ValidRange>,
 {
     let direction = if reverse {
         Direction::Reverse
@@ -456,7 +456,7 @@ where
     CF: HotColumnFamilyRecord,
     V: Visitor<R>,
     F: Fn(&[u8], &[u8]) -> Result<R>,
-    G: Fn(&R) -> &Option<TemporalRange>,
+    G: Fn(&R) -> &Option<ValidRange>,
 {
     let direction = if reverse {
         Direction::Reverse

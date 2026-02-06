@@ -22,7 +22,7 @@ Motlie is a temporal graph database built on RocksDB, using column families for 
 **Value Layout (MessagePack + LZ4):**
 ```rust
 NodeCfValue(
-    Option<TemporalRange>,  // Temporal validity
+    Option<ValidRange>,  // Temporal validity
     NodeName,                     // String name
     NodeSummary,                  // DataUrl (markdown content)
 )
@@ -49,14 +49,14 @@ NodeCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 ForwardEdgeCfValue(
-    Option<TemporalRange>,  // Field 0: Temporal validity
+    Option<ValidRange>,  // Field 0: Temporal validity
     Option<f64>,                  // Field 1: Optional weight
     EdgeSummary,                  // Field 2: Edge summary (DataUrl)
 )
 ```
 
 **Field Ordering Rationale:**
-1. `Option<TemporalRange>` - Small, frequently accessed for temporal filtering
+1. `Option<ValidRange>` - Small, frequently accessed for temporal filtering
 2. `Option<f64>` - Small (9 bytes), frequently accessed by graph algorithms
 3. `EdgeSummary` - Large (100-1000 bytes), accessed when edge details needed
 
@@ -87,7 +87,7 @@ This ordering optimizes deserialization: algorithms can read temporal range + we
 **Value Layout (MessagePack + LZ4):**
 ```rust
 ReverseEdgeCfValue(
-    Option<TemporalRange>,  // Temporal validity only
+    Option<ValidRange>,  // Temporal validity only
 )
 ```
 
@@ -118,7 +118,7 @@ ReverseEdgeCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 NodeFragmentCfValue(
-    Option<TemporalRange>,  // Temporal validity
+    Option<ValidRange>,  // Temporal validity
     FragmentContent,              // DataUrl (markdown/text/etc)
 )
 ```
@@ -146,7 +146,7 @@ NodeFragmentCfValue(
 **Value Layout (MessagePack + LZ4):**
 ```rust
 EdgeFragmentCfValue(
-    Option<TemporalRange>,  // Temporal validity
+    Option<ValidRange>,  // Temporal validity
     FragmentContent,              // DataUrl (markdown/text/etc)
 )
 ```
@@ -196,7 +196,7 @@ EdgeFragmentCfValue(
 All column families support optional temporal validity ranges:
 
 ```rust
-pub struct TemporalRange(
+pub struct ValidRange(
     pub Option<TimestampMilli>,  // valid_since (None = beginning of time)
     pub Option<TimestampMilli>,  // valid_until (None = end of time)
 );
@@ -367,7 +367,7 @@ UpdateEdgeValidSinceUntil {
     src_id,
     dst_id,
     name: "edge_name".to_string(),
-    temporal_range: TemporalRange(Some(start), Some(end)),
+    temporal_range: ValidRange(Some(start), Some(end)),
     reason: "Invalidating old edge".to_string(),
 }.run(&writer).await
 ```
@@ -376,7 +376,7 @@ UpdateEdgeValidSinceUntil {
 ```rust
 UpdateNodeValidSinceUntil {
     id: node_id,
-    temporal_range: TemporalRange(Some(start), Some(end)),
+    temporal_range: ValidRange(Some(start), Some(end)),
     reason: "Invalidating old node".to_string(),
 }.run(&writer).await
 ```

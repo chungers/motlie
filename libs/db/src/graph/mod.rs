@@ -116,12 +116,12 @@ use writer::Processor;
 
 
 
-/// Trait implemented by column families that supports patching of TemporalRange.
+/// Trait implemented by column families that supports patching of ValidRange.
 pub(crate) trait ValidRangePatchable {
     fn patch_valid_range(
         &self,
         old_value: &[u8],
-        new_range: schema::TemporalRange,
+        new_range: schema::ValidRange,
     ) -> Result<Vec<u8>, anyhow::Error>;
 }
 

@@ -52,7 +52,7 @@ This document evaluates motlie_db's current API capabilities for implementing po
 
 **Edge Weights:** Supported via `Option<f64>` in `AddEdge` and retrievable via `EdgeSummaryBySrcDstName`
 
-**Temporal Validity:** All entities support optional `TemporalRange` for time-based queries
+**Temporal Validity:** All entities support optional `ValidRange` for time-based queries
 
 **Bi-directional Traversal:** Both `OutgoingEdges` and `IncomingEdges` available
 
@@ -934,7 +934,7 @@ Both Kahn's algorithm and DFS-based topological sort work seamlessly with:
    - `UpdateEdgeWeight` mutation for dynamic updates
 
 3. **Temporal Queries**
-   - `TemporalRange` support unique to motlie_db
+   - `ValidRange` support unique to motlie_db
    - Enables time-aware graph algorithms
    - Can analyze graph evolution over time
 
@@ -1687,7 +1687,7 @@ pub struct AddUndirectedEdge {
     pub name: EdgeName,
     pub summary: EdgeSummary,
     pub weight: Option<f64>,
-    pub valid_range: Option<TemporalRange>,
+    pub valid_range: Option<ValidRange>,
 }
 // Automatically creates both (a→b) and (b→a) with same metadata
 ```
