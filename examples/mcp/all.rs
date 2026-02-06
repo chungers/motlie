@@ -154,7 +154,7 @@ impl CombinedServer {
     #[tool(description = "Update the temporal validity range of a node")]
     async fn update_node_valid_range(
         &self,
-        Parameters(params): Parameters<db::UpdateNodeValidRangeParams>,
+        Parameters(params): Parameters<db::UpdateNodeActivePeriodParams>,
     ) -> Result<CallToolResult, McpError> {
         params.call(&self.db_resource).await
     }
@@ -162,7 +162,7 @@ impl CombinedServer {
     #[tool(description = "Update the temporal validity range of an edge")]
     async fn update_edge_valid_range(
         &self,
-        Parameters(params): Parameters<db::UpdateEdgeValidRangeParams>,
+        Parameters(params): Parameters<db::UpdateEdgeActivePeriodParams>,
     ) -> Result<CallToolResult, McpError> {
         params.call(&self.db_resource).await
     }

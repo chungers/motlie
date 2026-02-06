@@ -70,21 +70,21 @@ Enable temporal versioning for the graph database:
 | **Node** | `id` | ❌ | N/A | N/A | N/A | Immutable identity |
 | | `name` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | NameHash stored per version |
 | | `summary` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | SummaryHash stored per version |
-| | `ValidRange` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | Full range stored per version |
+| | `ActivePeriod` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | Full range stored per version |
 | **Edge** | `src` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
 | | `dst` | ✅ | ✅ | ForwardEdges | ✅ Rollback | Topology change: close old, create new |
 | | `name` | ✅ | ✅ | ForwardEdges | ✅ Rollback | Topology change: close old, create new |
 | | `summary` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | SummaryHash stored per version |
 | | `weight` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | Weight stored per version |
-| | `ValidRange` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | Full range stored per version |
+| | `ActivePeriod` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | Full range stored per version |
 | **NodeFragment** | `id` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
 | | `timestamp` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
 | | `content` | ❌ | ✅ | Key (timestamp) | 🔒 Append-only | Immutable once written |
-| | `ValidRange` | ❌ | ✅ | Stored with fragment | 🔒 Append-only | Immutable once written |
+| | `ActivePeriod` | ❌ | ✅ | Stored with fragment | 🔒 Append-only | Immutable once written |
 | **EdgeFragment** | `src,dst,name` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
 | | `timestamp` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
 | | `content` | ❌ | ✅ | Key (timestamp) | 🔒 Append-only | Immutable once written |
-| | `ValidRange` | ❌ | ✅ | Stored with fragment | 🔒 Append-only | Immutable once written |
+| | `ActivePeriod` | ❌ | ✅ | Stored with fragment | 🔒 Append-only | Immutable once written |
 
 ### Legend
 
@@ -107,7 +107,7 @@ Enable temporal versioning for the graph database:
 **NodeVersionHistory value (40 bytes):**
 ```
 ┌──────────┬─────────────┬──────────┬───────────────┐
-│ UpdatedAt│ SummaryHash │ NameHash │ ValidRange │
+│ UpdatedAt│ SummaryHash │ NameHash │ ActivePeriod │
 │  8 bytes │   8 bytes   │ 8 bytes  │   16 bytes    │
 └──────────┴─────────────┴──────────┴───────────────┘
 ```
@@ -115,7 +115,7 @@ Enable temporal versioning for the graph database:
 **EdgeVersionHistory value (40 bytes):**
 ```
 ┌──────────┬─────────────┬────────────┬───────────────┐
-│ UpdatedAt│ SummaryHash │ EdgeWeight │ ValidRange │
+│ UpdatedAt│ SummaryHash │ EdgeWeight │ ActivePeriod │
 │  8 bytes │   8 bytes   │  8 bytes   │   16 bytes    │
 └──────────┴─────────────┴────────────┴───────────────┘
 ```
@@ -144,12 +144,12 @@ pub type EdgeWeight = f64;
 | Dimension | Fields | Stored In | Purpose |
 |-----------|--------|-----------|---------|
 | **System Time** | `ValidSince` (key), `ValidUntil` (value) | Entity CF key/value | When this version existed in the database. Used for audit trails, time-travel queries, and rollback. |
-| **Application Time** | `ValidRange` (value) | Entity CF value + VersionHistory | When the entity is valid in the business domain (e.g., "promo runs Dec 1-7"). |
+| **Application Time** | `ActivePeriod` (value) | Entity CF value + VersionHistory | When the entity is valid in the business domain (e.g., "promo runs Dec 1-7"). |
 
 **These are independent:**
-- Changing `ValidRange` (business validity) creates a new VERSION (increments version counter)
+- Changing `ActivePeriod` (business validity) creates a new VERSION (increments version counter)
 - `ValidSince`/`ValidUntil` track WHEN that version change happened in the database
-- You can time-travel to see "what ValidRange did we have on Nov 18?" (system time query)
+- You can time-travel to see "what ActivePeriod did we have on Nov 18?" (system time query)
 - You can filter by "is this entity active on Dec 5?" (application time query)
 
 See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time) for detailed examples.
@@ -158,15 +158,15 @@ See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time
 
 | CF | BEFORE CfKey | BEFORE CfValue | AFTER CfKey | AFTER CfValue | Delta |
 |----|--------------|----------------|-------------|---------------|-------|
-| **Nodes** | `(Id)` 16B | `(ValidRange?, NameHash, SummaryHash?, Version, Deleted)` | `(Id, ValidSince)` 24B | `(ValidUntil, ValidRange?, NameHash, SummaryHash?, Version, Deleted)` | Key +8B |
-| **ForwardEdges** | `(SrcId, DstId, NameHash)` 40B | `(ValidRange?, Weight?, SummaryHash?, Version, Deleted)` | `(SrcId, DstId, NameHash, ValidSince)` 48B | `(ValidUntil, ValidRange?, Weight?, SummaryHash?, Version, Deleted)` | Key +8B |
-| **ReverseEdges** | `(DstId, SrcId, NameHash)` 40B | `(ValidRange?)` | `(DstId, SrcId, NameHash, ValidSince)` 48B | `(ValidUntil, ValidRange?)` | Key +8B |
+| **Nodes** | `(Id)` 16B | `(ActivePeriod?, NameHash, SummaryHash?, Version, Deleted)` | `(Id, ValidSince)` 24B | `(ValidUntil, ActivePeriod?, NameHash, SummaryHash?, Version, Deleted)` | Key +8B |
+| **ForwardEdges** | `(SrcId, DstId, NameHash)` 40B | `(ActivePeriod?, Weight?, SummaryHash?, Version, Deleted)` | `(SrcId, DstId, NameHash, ValidSince)` 48B | `(ValidUntil, ActivePeriod?, Weight?, SummaryHash?, Version, Deleted)` | Key +8B |
+| **ReverseEdges** | `(DstId, SrcId, NameHash)` 40B | `(ActivePeriod?)` | `(DstId, SrcId, NameHash, ValidSince)` 48B | `(ValidUntil, ActivePeriod?)` | Key +8B |
 | **NodeSummaries** | `(SummaryHash)` 8B | `(RefCount, NodeSummary)` | `(SummaryHash)` 8B | `(NodeSummary)` | RefCount removed |
 | **EdgeSummaries** | `(SummaryHash)` 8B | `(RefCount, EdgeSummary)` | `(SummaryHash)` 8B | `(EdgeSummary)` | RefCount removed |
-| **NodeVersionHistory** | N/A | N/A | `(Id, ValidSince, Version)` 28B | `(UpdatedAt, SummaryHash, NameHash, ValidRange)` 40B | **NEW** |
-| **EdgeVersionHistory** | N/A | N/A | `(SrcId, DstId, NameHash, ValidSince, Version)` 52B | `(UpdatedAt, SummaryHash, Weight, ValidRange)` 40B | **NEW** |
-| **NodeFragments** | `(Id, TimestampMilli)` 24B | `(ValidRange?, FragmentContent)` | *unchanged* | *unchanged* | None |
-| **EdgeFragments** | `(SrcId, DstId, NameHash, TimestampMilli)` 48B | `(ValidRange?, FragmentContent)` | *unchanged* | *unchanged* | None |
+| **NodeVersionHistory** | N/A | N/A | `(Id, ValidSince, Version)` 28B | `(UpdatedAt, SummaryHash, NameHash, ActivePeriod)` 40B | **NEW** |
+| **EdgeVersionHistory** | N/A | N/A | `(SrcId, DstId, NameHash, ValidSince, Version)` 52B | `(UpdatedAt, SummaryHash, Weight, ActivePeriod)` 40B | **NEW** |
+| **NodeFragments** | `(Id, TimestampMilli)` 24B | `(ActivePeriod?, FragmentContent)` | *unchanged* | *unchanged* | None |
+| **EdgeFragments** | `(SrcId, DstId, NameHash, TimestampMilli)` 48B | `(ActivePeriod?, FragmentContent)` | *unchanged* | *unchanged* | None |
 | **NodeSummaryIndex** | `(SummaryHash, Id, Version)` 28B | `(Marker)` 1B | *unchanged* | *unchanged* | None |
 | **EdgeSummaryIndex** | `(SummaryHash, SrcId, DstId, NameHash, Version)` 52B | `(Marker)` 1B | *unchanged* | *unchanged* | None |
 
@@ -190,7 +190,7 @@ pub struct NodeCfKey(
 
 pub struct NodeCfValue(
     pub Option<ValidUntil>,       // System time: when this version stopped being valid (None = current)
-    pub Option<ValidRange>,    // Application time: business validity period
+    pub Option<ActivePeriod>,    // Application time: business validity period
     pub NameHash,                 // 8 bytes
     pub Option<SummaryHash>,      // Content hash for vector search
     pub Version,                  // Monotonic version counter
@@ -210,7 +210,7 @@ pub struct ForwardEdgeCfKey(
 
 pub struct ForwardEdgeCfValue(
     pub Option<ValidUntil>,       // System time: when this version stopped being valid
-    pub Option<ValidRange>,    // Application time: business validity period
+    pub Option<ActivePeriod>,    // Application time: business validity period
     pub Option<EdgeWeight>,       // Weight
     pub Option<SummaryHash>,      // Content hash
     pub Version,                  // Monotonic version counter
@@ -230,7 +230,7 @@ pub struct ReverseEdgeCfKey(
 
 pub struct ReverseEdgeCfValue(
     pub Option<ValidUntil>,       // System time: denormalized for fast filtering
-    pub Option<ValidRange>,    // Application time: denormalized for business time queries
+    pub Option<ActivePeriod>,    // Application time: denormalized for business time queries
 );
 /// NOTE: Update both ForwardEdges and ReverseEdges in same transaction
 
@@ -261,9 +261,9 @@ pub struct NodeVersionHistoryCfValue(
     pub UpdatedAt,       // 8 bytes - timestamp of this version
     pub SummaryHash,     // 8 bytes - content hash
     pub NameHash,        // 8 bytes - node name at this version
-    pub ValidRange,   // 16 bytes - (start, end) business validity
+    pub ActivePeriod,   // 16 bytes - (start, end) business validity
 );  // Total: 40 bytes
-/// (claude, 2026-02-05) EXPANDED: Added NameHash and ValidRange for full rollback.
+/// (claude, 2026-02-05) EXPANDED: Added NameHash and ActivePeriod for full rollback.
 
 /// Edge version history - stores full snapshot for rollback
 pub struct EdgeVersionHistoryCfKey(
@@ -278,10 +278,10 @@ pub struct EdgeVersionHistoryCfValue(
     pub UpdatedAt,       // 8 bytes - timestamp of this version
     pub SummaryHash,     // 8 bytes - content hash
     pub EdgeWeight,      // 8 bytes - f64, NaN = None
-    pub ValidRange,   // 16 bytes - (start, end) business validity
+    pub ActivePeriod,   // 16 bytes - (start, end) business validity
 );  // Total: 40 bytes
 /// (codex, 2026-02-05) UpdatedAt enables time→version mapping for `as_of` queries.
-/// (claude, 2026-02-05) EXPANDED: Added Weight and ValidRange for full rollback.
+/// (claude, 2026-02-05) EXPANDED: Added Weight and ActivePeriod for full rollback.
 
 // ============================================================
 // FRAGMENT CFs (UNCHANGED - already temporal via timestamp key)
@@ -292,7 +292,7 @@ pub struct NodeFragmentCfKey(
 );  // Total: 24 bytes
 
 pub struct NodeFragmentCfValue(
-    pub Option<ValidRange>,
+    pub Option<ActivePeriod>,
     pub FragmentContent,
 );
 
@@ -304,7 +304,7 @@ pub struct EdgeFragmentCfKey(
 );  // Total: 48 bytes
 
 pub struct EdgeFragmentCfValue(
-    pub Option<ValidRange>,
+    pub Option<ActivePeriod>,
     pub FragmentContent,
 );
 
@@ -358,7 +358,7 @@ For nullable fields (`weight`, `temporal_range`), updates use `Option<Option<T>>
 | `Some(None)` | Clear field (set to null) | `new_weight: Some(None)` → remove weight |
 | `Some(Some(v))` | Set field to value | `new_weight: Some(Some(0.5))` → set weight to 0.5 |
 
-This avoids sentinel values like `ValidRange(0, MAX)` to represent "always valid" when you really want "no constraint".
+This avoids sentinel values like `ActivePeriod(0, MAX)` to represent "always valid" when you really want "no constraint".
 
 ### Edge Mutations
 
@@ -371,7 +371,7 @@ pub struct AddEdge {
     pub name: String,
     pub summary: EdgeSummary,
     pub weight: Option<EdgeWeight>,
-    pub temporal_range: Option<ValidRange>,  // Business validity period
+    pub temporal_range: Option<ActivePeriod>,  // Business validity period
     pub valid_since: Option<TimestampMilli>,    // System time (default: now)
 }
 
@@ -392,7 +392,7 @@ pub struct UpdateEdge {
     // Content changes (None = keep current)
     pub new_summary: Option<EdgeSummary>,
     pub new_weight: Option<Option<EdgeWeight>>,           // None=keep, Some(None)=clear, Some(v)=set
-    pub new_temporal_range: Option<Option<ValidRange>>, // None=keep, Some(None)=clear, Some(v)=set
+    pub new_temporal_range: Option<Option<ActivePeriod>>, // None=keep, Some(None)=clear, Some(v)=set
 
     // Optimistic locking
     pub expected_version: Version,
@@ -432,7 +432,7 @@ pub struct AddNode {
     pub id: Id,
     pub name: String,
     pub summary: NodeSummary,
-    pub temporal_range: Option<ValidRange>,  // Business validity period
+    pub temporal_range: Option<ActivePeriod>,  // Business validity period
     pub valid_since: Option<TimestampMilli>,    // System time (default: now)
 }
 
@@ -441,7 +441,7 @@ pub struct UpdateNode {
     pub id: Id,
     pub new_name: Option<String>,
     pub new_summary: Option<NodeSummary>,
-    pub new_temporal_range: Option<Option<ValidRange>>,  // None=keep, Some(None)=clear, Some(v)=set
+    pub new_temporal_range: Option<Option<ActivePeriod>>,  // None=keep, Some(None)=clear, Some(v)=set
     pub expected_version: Version,
 }
 
@@ -458,14 +458,14 @@ pub struct RestoreNode {
 }
 ```
 
-### API Migration: ValidRange Updates
+### API Migration: ActivePeriod Updates
 
 **BEFORE (current API):**
 ```rust
-/// Patches ValidRange directly - no versioning, no optimistic locking
+/// Patches ActivePeriod directly - no versioning, no optimistic locking
 pub struct UpdateNodeValidSinceUntil {
     pub id: Id,
-    pub temporal_range: ValidRange,
+    pub temporal_range: ActivePeriod,
     pub reason: String,
 }
 
@@ -473,7 +473,7 @@ pub struct UpdateEdgeValidSinceUntil {
     pub src_id: Id,
     pub dst_id: Id,
     pub name: EdgeName,
-    pub temporal_range: ValidRange,
+    pub temporal_range: ActivePeriod,
     pub reason: String,
 }
 ```
@@ -487,14 +487,14 @@ Use `UpdateNode` and `UpdateEdge` with `new_temporal_range` instead:
 // BEFORE: No version tracking
 UpdateNodeValidSinceUntil {
     id: alice,
-    temporal_range: ValidRange(Dec1, Dec10),
+    temporal_range: ActivePeriod(Dec1, Dec10),
     reason: "extended promo",
 }
 
 // AFTER: Version tracked, history preserved
 UpdateNode {
     id: alice,
-    new_temporal_range: Some(ValidRange(Dec1, Dec10)),
+    new_temporal_range: Some(ActivePeriod(Dec1, Dec10)),
     expected_version: 1,
     ..Default::default()
 }
@@ -523,14 +523,14 @@ pub struct AddEdgeFragment {
     pub dst: Id,
     pub name: String,
     pub content: FragmentContent,
-    pub valid_range: Option<ValidRange>,
+    pub valid_range: Option<ActivePeriod>,
 }
 
 /// Add fragment to node (append-only, no versioning needed)
 pub struct AddNodeFragment {
     pub id: Id,
     pub content: FragmentContent,
-    pub valid_range: Option<ValidRange>,
+    pub valid_range: Option<ActivePeriod>,
 }
 ```
 
@@ -1148,7 +1148,7 @@ EdgeVersionHistory:   3M × 92 bytes = 276 MB
 EdgeSummaryIndex:     3M × 53 bytes = 159 MB
 Total overhead:       ~451 MB for 1M edges
 ```
-(claude, 2026-02-05, UPDATED: EdgeVersionHistory expanded from 68→92 bytes to include Weight and ValidRange for full rollback capability. Trade-off: +72 MB per 1M edges for complete audit trail.)
+(claude, 2026-02-05, UPDATED: EdgeVersionHistory expanded from 68→92 bytes to include Weight and ActivePeriod for full rollback capability. Trade-off: +72 MB per 1M edges for complete audit trail.)
 
 ### GC Changes
 
@@ -1226,7 +1226,7 @@ This design uses a **bitemporal model** with two orthogonal temporal dimensions:
 | Dimension | Field | Purpose | Example |
 |-----------|-------|---------|---------|
 | **System Time** | `ValidSince`, `ValidUntil` | When this version existed in the DB | "Record created Nov 15, superseded Nov 20" |
-| **Application Time** | `ValidRange` | When the entity is valid in the real world | "Promo runs Dec 1-7, 2025" |
+| **Application Time** | `ActivePeriod` | When the entity is valid in the real world | "Promo runs Dec 1-7, 2025" |
 
 These are **semantically orthogonal**:
 - **System time** enables audit trails, time-travel queries, and rollback
@@ -1244,7 +1244,7 @@ t=Nov15: AddNode {
     id: HolidaySale,
     name: "promo",
     summary: { discount: "20%", items: ["electronics"] },
-    valid_range: ValidRange(Dec1, Dec7)  // APPLICATION TIME
+    valid_range: ActivePeriod(Dec1, Dec7)  // APPLICATION TIME
 }
 
 === Nodes CF ===
@@ -1259,7 +1259,7 @@ t=Nov15: AddNode {
 t=Nov20: UpdateNode {
     id: HolidaySale,
     new_summary: { discount: "20%", items: ["electronics"], extended: true },
-    new_temporal_range: ValidRange(Dec1, Dec10),  // Changed!
+    new_temporal_range: ActivePeriod(Dec1, Dec10),  // Changed!
     expected_version: 1
 }
 
@@ -1284,10 +1284,10 @@ Q2: "What was the promo config on Nov 18?" (time-travel, SYSTEM TIME)
     → HolidaySale v1: discount=20%, runs Dec 1-7  // Before extension
 
 Q3: "Is the promo active on Dec 5?" (APPLICATION TIME check)
-    → Yes, Dec 5 is within ValidRange(Dec1, Dec10)
+    → Yes, Dec 5 is within ActivePeriod(Dec1, Dec10)
 
 Q4: "Is the promo active on Dec 15?"
-    → No, Dec 15 is outside ValidRange
+    → No, Dec 15 is outside ActivePeriod
 ```
 
 ### Example 13: Contract with Effective Dates and Amendments
@@ -1299,7 +1299,7 @@ A contract between OrgA and OrgB has an effective period, and amendments create 
 t=Jan1: AddEdge {
     src: OrgA, dst: OrgB, name: "contract",
     summary: { terms: "Standard", value: "$100K" },
-    valid_range: ValidRange(Feb1, Jan31NextYear)  // APPLICATION TIME
+    valid_range: ActivePeriod(Feb1, Jan31NextYear)  // APPLICATION TIME
 }
 
 === ForwardEdges CF ===
@@ -1315,7 +1315,7 @@ t=Mar15: UpdateEdge {
     new_summary: { terms: "Amended", value: "$150K" },
     expected_version: 1
 }
-// Note: ValidRange unchanged - contract still runs Feb 1 - Jan 31
+// Note: ActivePeriod unchanged - contract still runs Feb 1 - Jan 31
 
 === ForwardEdges CF (after amendment) ===
 (OrgA, OrgB, "contract", valid_since=Jan1) → (
@@ -1337,11 +1337,11 @@ Q2: "What were the contract terms before the amendment?" (SYSTEM TIME rollback)
     → EdgeAtVersion(v=1): terms="Standard", value=$100K
 
 Q3: "Is the contract in force on Dec 15?" (APPLICATION TIME)
-    → Yes, Dec 15 is within ValidRange(Feb1, Jan31)
+    → Yes, Dec 15 is within ActivePeriod(Feb1, Jan31)
 
 Q4: "Rollback to pre-amendment terms"
     → RestoreEdge { as_of: Feb1 }
-    → Creates v=3 with hash=0xAAA (original terms), same ValidRange
+    → Creates v=3 with hash=0xAAA (original terms), same ActivePeriod
 ```
 
 ### Example 14: Event with Moving Date Window
@@ -1353,14 +1353,14 @@ An "Annual Conference" edge tracks a recurring event where the business dates ch
 t=Jun1: AddEdge {
     src: Company, dst: Venue, name: "annual_conference",
     summary: { year: 2025, attendees: 500 },
-    valid_range: ValidRange(Sep15_2025, Sep17_2025)  // 3-day event
+    valid_range: ActivePeriod(Sep15_2025, Sep17_2025)  // 3-day event
 }
 
 === Sep 10: Venue conflict, reschedule to Oct ===
 t=Sep10: UpdateEdge {
     src: Company, dst: Venue, name: "annual_conference",
     new_summary: { year: 2025, attendees: 500, rescheduled: true },
-    new_temporal_range: ValidRange(Oct20_2025, Oct22_2025),  // New dates
+    new_temporal_range: ActivePeriod(Oct20_2025, Oct22_2025),  // New dates
     expected_version: 1
 }
 
@@ -1371,10 +1371,10 @@ t=Sep10: UpdateEdge {
 === Queries ===
 
 Q1: "When was the conference originally scheduled?"
-    → Time-travel to Sep 1: ValidRange(Sep15, Sep17)
+    → Time-travel to Sep 1: ActivePeriod(Sep15, Sep17)
 
 Q2: "When is the conference now?"
-    → Current: ValidRange(Oct20, Oct22)
+    → Current: ActivePeriod(Oct20, Oct22)
 
 Q3: "Show all schedule changes" (audit)
     → EdgeHistory: v1 (Sep 15-17), v2 (Oct 20-22)
@@ -1385,9 +1385,9 @@ Q3: "Show all schedule changes" (audit)
 | Query Type | Uses | Returns |
 |------------|------|---------|
 | "What did we know on date X?" | System time (`ValidSince`) | Version active at X |
-| "Is this entity active on date X?" | Application time (`ValidRange`) | Boolean check |
+| "Is this entity active on date X?" | Application time (`ActivePeriod`) | Boolean check |
 | "Show all changes to this entity" | System time (Edge/NodeVersionHistory) | All versions with timestamps |
-| "Find entities active during period P" | Application time scan | Entities where ValidRange overlaps P |
+| "Find entities active during period P" | Application time scan | Entities where ActivePeriod overlaps P |
 
 (claude, 2026-02-05, added to clarify bitemporal model)
 

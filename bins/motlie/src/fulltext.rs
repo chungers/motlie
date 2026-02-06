@@ -855,7 +855,7 @@ impl TablePrinter {
 }
 
 /// Format a temporal range's start time as a string
-fn format_since(valid_range: &Option<motlie_db::ValidRange>, format: OutputFormat) -> String {
+fn format_since(valid_range: &Option<motlie_db::ActivePeriod>, format: OutputFormat) -> String {
     match valid_range {
         None => format_empty_timestamp(format),
         Some(range) => match range.0 {
@@ -866,7 +866,7 @@ fn format_since(valid_range: &Option<motlie_db::ValidRange>, format: OutputForma
 }
 
 /// Format a temporal range's end time as a string
-fn format_until(valid_range: &Option<motlie_db::ValidRange>, format: OutputFormat) -> String {
+fn format_until(valid_range: &Option<motlie_db::ActivePeriod>, format: OutputFormat) -> String {
     match valid_range {
         None => format_empty_timestamp(format),
         Some(range) => match range.1 {

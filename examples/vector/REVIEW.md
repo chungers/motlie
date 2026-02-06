@@ -320,7 +320,7 @@ At 1B vectors with <64GB RAM, the **read path becomes critical**. The design doc
 
 #### 4.1 Temporal Aspects (motlie_db Unique Feature)
 
-The motlie_db graph storage includes `ValidRange` support (see `libs/db/src/lib.rs:55-110`). This enables:
+The motlie_db graph storage includes `ActivePeriod` support (see `libs/db/src/lib.rs:55-110`). This enables:
 
 - **Vector Versioning:** Track when vectors were valid (useful for ML model updates)
 - **Point-in-Time Search:** Query "what were the nearest neighbors as of timestamp T?"
@@ -449,7 +449,7 @@ Query: "Find 10 nearest neighbors valid at time T"
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ Phase 3: Temporal Visibility Check (Graph RocksDB)                      │
-│   Query: MultiGet on graph CF for ValidRange                         │
+│   Query: MultiGet on graph CF for ActivePeriod                         │
 │   Filter: is_valid_at(temporal_range, query_time)                       │
 │   Cost: ~50-100μs for batch of 200 (MultiGet + block cache)             │
 │   Output: ~N candidates that pass temporal filter                       │
@@ -612,7 +612,7 @@ Implications for default parameters:
 │  │ • Nodes        │  │ • Text search  │  │ • Geometric similarity     │ │
 │  │ • Edges        │  │ • doc_id → ULID│  │ • internal_id → ULID       │ │
 │  │ • Fragments    │  │                │  │ • Temporal-agnostic        │ │
-│  │ • ValidRange│  │                │  │                            │ │
+│  │ • ActivePeriod│  │                │  │                            │ │
 │  │ • Visibility   │  │                │  │                            │ │
 │  └───────┬────────┘  └───────┬────────┘  └─────────────┬──────────────┘ │
 │          │                   │                         │                │

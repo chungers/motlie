@@ -223,7 +223,7 @@ pub trait MutationCodec {
 /// ```rust,ignore
 /// // Zero-copy access (hot path)
 /// let archived = Nodes::value_archived(&value_bytes)?;
-/// if archived.temporal_range.as_ref().map_or(true, |tr| tr.is_valid_at(now)) {
+/// if archived.temporal_range.as_ref().map_or(true, |tr| tr.is_active_at(now)) {
 ///     // Use archived data directly without allocation
 /// }
 ///

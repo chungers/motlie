@@ -108,7 +108,7 @@ impl MotlieMcpServer {
     #[tool(description = "Update the temporal validity range of a node")]
     async fn update_node_valid_range(
         &self,
-        Parameters(params): Parameters<UpdateNodeValidRangeParams>,
+        Parameters(params): Parameters<UpdateNodeActivePeriodParams>,
     ) -> Result<CallToolResult, McpError> {
         params.call(&self.resource).await
     }
@@ -116,7 +116,7 @@ impl MotlieMcpServer {
     #[tool(description = "Update the temporal validity range of an edge")]
     async fn update_edge_valid_range(
         &self,
-        Parameters(params): Parameters<UpdateEdgeValidRangeParams>,
+        Parameters(params): Parameters<UpdateEdgeActivePeriodParams>,
     ) -> Result<CallToolResult, McpError> {
         params.call(&self.resource).await
     }
