@@ -16,7 +16,7 @@ use motlie_db::query::{
     EdgeDetails, EdgeFragments, Edges, IncomingEdges, NodeById, NodeFragments, Nodes,
     OutgoingEdges, Runnable as QueryRunnable,
 };
-use motlie_db::{ValidRange, DataUrl, Id, TimestampMilli};
+use motlie_db::{ActivePeriod, DataUrl, Id, TimestampMilli};
 use rmcp::{model::*, ErrorData as McpError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -37,8 +37,8 @@ pub struct TemporalRangeParam {
 }
 
 impl TemporalRangeParam {
-    fn to_schema(self) -> ValidRange {
-        ValidRange(
+    fn to_schema(self) -> ActivePeriod {
+        ActivePeriod(
             Some(TimestampMilli(self.valid_since)),
             Some(TimestampMilli(self.valid_until)),
         )
@@ -272,7 +272,7 @@ impl ToolCall for AddEdgeFragmentParams {
 
 /// Parameters for updating node temporal validity
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct UpdateNodeValidRangeParams {
+pub struct UpdateNodeActivePeriodParams {
     /// Node UUID
     pub id: String,
     /// New temporal validity range
@@ -282,7 +282,7 @@ pub struct UpdateNodeValidRangeParams {
 }
 
 #[async_trait]
-impl ToolCall for UpdateNodeValidRangeParams {
+impl ToolCall for UpdateNodeActivePeriodParams {
     type Resource = DbResource;
 
     async fn call(self, res: &DbResource) -> Result<CallToolResult, McpError> {
@@ -320,7 +320,7 @@ impl ToolCall for UpdateNodeValidRangeParams {
 
 /// Parameters for updating edge temporal validity
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct UpdateEdgeValidRangeParams {
+pub struct UpdateEdgeActivePeriodParams {
     /// Source node UUID
     pub src_id: String,
     /// Destination node UUID
@@ -334,7 +334,7 @@ pub struct UpdateEdgeValidRangeParams {
 }
 
 #[async_trait]
-impl ToolCall for UpdateEdgeValidRangeParams {
+impl ToolCall for UpdateEdgeActivePeriodParams {
     type Resource = DbResource;
 
     async fn call(self, res: &DbResource) -> Result<CallToolResult, McpError> {

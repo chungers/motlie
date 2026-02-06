@@ -69,82 +69,153 @@ pub struct Id([u8; 16]);
 #[archive_attr(derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord))]
 pub struct TimestampMilli(pub u64);
 
-/// Type alias for the start timestamp of a valid temporal range
-pub type StartTimestamp = TimestampMilli;
+/// Type alias for when an entity becomes active in the business domain.
+/// Part of the **application time** dimension in the bitemporal model.
+pub type ActiveFrom = TimestampMilli;
 
-/// Type alias for the until timestamp of a valid temporal range
-pub type UntilTimestamp = TimestampMilli;
+/// Type alias for when an entity ceases to be active in the business domain.
+/// Part of the **application time** dimension in the bitemporal model.
+pub type ActiveUntil = TimestampMilli;
 
-/// Support for temporal queries - defines when a record is valid
+/// Application-time validity period for business entities.
 ///
-/// A `ValidRange` specifies the time window during which a record
-/// (node, edge, fragment) is considered valid:
-/// - `(Some(start), None)` - Valid from `start` onwards (inclusive)
-/// - `(None, Some(until))` - Valid until `until` (exclusive)
-/// - `(Some(start), Some(until))` - Valid between `start` (inclusive) and `until` (exclusive)
-/// - `(None, None)` - Always valid (no time constraints)
+/// # Bitemporal Model
+///
+/// This database uses a **bitemporal model** with two orthogonal time dimensions:
+///
+/// | Dimension | Fields | Purpose |
+/// |-----------|--------|---------|
+/// | **System Time** | `ValidSince` (key), `ValidUntil` (value) | When a version existed in the database |
+/// | **Application Time** | `ActiveFrom`, `ActiveUntil` (in `ActivePeriod`) | When an entity is active in the business domain |
+///
+/// ## System Time vs Application Time
+///
+/// - **System Time** (`ValidSince`/`ValidUntil`): Automatically managed by the database.
+///   Tracks when each version was written and superseded. Used for time-travel queries
+///   and rollback ("show me the database state as of last Tuesday").
+///
+/// - **Application Time** (`ActivePeriod`): User-specified business validity.
+///   Represents when an entity is considered active in the real world
+///   ("this employee contract is active from Jan 1 to Dec 31").
+///
+/// ## ActivePeriod Semantics
+///
+/// An `ActivePeriod` specifies when a record (node, edge, fragment) is considered
+/// active in the business domain:
+///
+/// - `(Some(from), None)` - Active from `from` onwards (inclusive, no end)
+/// - `(None, Some(until))` - Active until `until` (exclusive, no start)
+/// - `(Some(from), Some(until))` - Active between `from` (inclusive) and `until` (exclusive)
+/// - `(None, None)` - Always active (no time constraints)
 ///
 /// # Example
 /// ```
-/// use motlie_db::{ValidRange, TimestampMilli};
+/// use motlie_db::{ActivePeriod, TimestampMilli};
 ///
-/// // Create a range valid from a specific time
-/// let range = ValidRange::valid_from(TimestampMilli(1000));
+/// // Employee contract active for calendar year 2024
+/// let contract_period = ActivePeriod::active_between(
+///     TimestampMilli(1704067200000), // Jan 1, 2024
+///     TimestampMilli(1735689600000), // Jan 1, 2025
+/// );
 ///
-/// // Check if a timestamp is within the range
-/// let ts = TimestampMilli(1500);
-/// assert!(range.unwrap().is_valid_at(ts));
+/// // Check if contract is active at a given time
+/// let query_time = TimestampMilli(1720000000000); // July 2024
+/// assert!(contract_period.unwrap().is_active_at(query_time));
 /// ```
-/// Temporal validity range.
+///
 /// Has rkyv derives for use in hot CF values.
 #[derive(Archive, RkyvDeserialize, RkyvSerialize)]
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[archive(check_bytes)]
 #[archive_attr(derive(Debug, Clone, Copy, PartialEq, Eq))]
-pub struct ValidRange(pub Option<StartTimestamp>, pub Option<UntilTimestamp>);
+pub struct ActivePeriod(pub Option<ActiveFrom>, pub Option<ActiveUntil>);
 
-impl ValidRange {
-    /// Create a new temporal range with no constraints (always valid)
-    pub fn always_valid() -> Option<Self> {
+impl ActivePeriod {
+    /// Create an always-active period (no time constraints).
+    pub fn always_active() -> Option<Self> {
         None
     }
 
-    /// Create a temporal range valid from a start time (inclusive)
-    pub fn valid_from(start: TimestampMilli) -> Option<Self> {
-        Some(ValidRange(Some(start), None))
+    /// Create a period active from a start time onwards (inclusive, no end).
+    pub fn active_from(from: TimestampMilli) -> Option<Self> {
+        Some(ActivePeriod(Some(from), None))
     }
 
-    /// Create a temporal range valid until an end time (exclusive)
-    pub fn valid_until(until: TimestampMilli) -> Option<Self> {
-        Some(ValidRange(None, Some(until)))
+    /// Create a period active until an end time (exclusive, no start).
+    pub fn active_until(until: TimestampMilli) -> Option<Self> {
+        Some(ActivePeriod(None, Some(until)))
     }
 
-    /// Create a temporal range valid between start (inclusive) and until (exclusive)
-    pub fn valid_between(start: TimestampMilli, until: TimestampMilli) -> Option<Self> {
-        Some(ValidRange(Some(start), Some(until)))
+    /// Create a period active between `from` (inclusive) and `until` (exclusive).
+    pub fn active_between(from: TimestampMilli, until: TimestampMilli) -> Option<Self> {
+        Some(ActivePeriod(Some(from), Some(until)))
     }
 
-    /// Check if a timestamp is valid according to this temporal range
-    pub fn is_valid_at(&self, query_time: TimestampMilli) -> bool {
-        let after_start = match self.0 {
+    /// Check if this period is active at the given query time.
+    ///
+    /// Returns true if `query_time` falls within `[ActiveFrom, ActiveUntil)`.
+    pub fn is_active_at(&self, query_time: TimestampMilli) -> bool {
+        let after_from = match self.0 {
             None => true,
-            Some(start) => query_time.0 >= start.0,
+            Some(from) => query_time.0 >= from.0,
         };
         let before_until = match self.1 {
             None => true,
             Some(until) => query_time.0 < until.0,
         };
-        after_start && before_until
+        after_from && before_until
+    }
+
+    // Backwards compatibility aliases
+    #[doc(hidden)]
+    #[deprecated(since = "0.2.0", note = "Use always_active() instead")]
+    pub fn always_valid() -> Option<Self> {
+        Self::always_active()
+    }
+
+    #[doc(hidden)]
+    #[deprecated(since = "0.2.0", note = "Use active_from() instead")]
+    pub fn valid_from(start: TimestampMilli) -> Option<Self> {
+        Self::active_from(start)
+    }
+
+    #[doc(hidden)]
+    #[deprecated(since = "0.2.0", note = "Use active_until() instead")]
+    pub fn valid_until(until: TimestampMilli) -> Option<Self> {
+        Self::active_until(until)
+    }
+
+    #[doc(hidden)]
+    #[deprecated(since = "0.2.0", note = "Use active_between() instead")]
+    pub fn valid_between(start: TimestampMilli, until: TimestampMilli) -> Option<Self> {
+        Self::active_between(start, until)
+    }
+
+    #[doc(hidden)]
+    #[deprecated(since = "0.2.0", note = "Use is_active_at() instead")]
+    pub fn is_valid_at(&self, query_time: TimestampMilli) -> bool {
+        self.is_active_at(query_time)
     }
 }
 
-/// Helper function to check if a record is valid at a given time
-/// Returns true if temporal_range is None (always valid) or if query_time falls within range
-pub fn is_valid_at_time(temporal_range: &Option<ValidRange>, query_time: TimestampMilli) -> bool {
-    match temporal_range {
-        None => true, // No temporal constraint = always valid
-        Some(range) => range.is_valid_at(query_time),
+/// Check if a record is active at a given time.
+///
+/// Returns true if `active_period` is None (always active) or if `query_time`
+/// falls within the period's `[ActiveFrom, ActiveUntil)` range.
+///
+/// This is part of the **application time** dimension in the bitemporal model.
+pub fn is_active_at_time(active_period: &Option<ActivePeriod>, query_time: TimestampMilli) -> bool {
+    match active_period {
+        None => true, // No temporal constraint = always active
+        Some(period) => period.is_active_at(query_time),
     }
+}
+
+/// Backwards compatibility alias.
+#[doc(hidden)]
+#[deprecated(since = "0.2.0", note = "Use is_active_at_time() instead")]
+pub fn is_valid_at_time(temporal_range: &Option<ActivePeriod>, query_time: TimestampMilli) -> bool {
+    is_active_at_time(temporal_range, query_time)
 }
 
 impl TimestampMilli {

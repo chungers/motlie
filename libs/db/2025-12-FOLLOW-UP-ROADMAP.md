@@ -173,7 +173,7 @@ ReverseEdgeCfKey(DstId, SrcId, EdgeName) // 32 bytes + len(EdgeName)
 
 **Nodes store name in value** (already optimal for keys):
 ```rust
-NodeCfValue(ValidRange, NodeName, NodeSummary)  // Name in value, not key
+NodeCfValue(ActivePeriod, NodeName, NodeSummary)  // Name in value, not key
 ```
 
 ### Typical Name Length Analysis
@@ -743,19 +743,19 @@ impl<'de> Deserialize<'de> for SummaryHash {
 ```
 Before (current - after Phase 1):
 ├── names           (NameHash → Name)  ~50 bytes
-├── nodes           (Id → ValidRange + NameHash + Summary)  ~200-500 bytes
-├── forward_edges   (Src+Dst+NameHash → ValidRange + Weight + Summary)  ~200-500 bytes
-├── reverse_edges   (Dst+Src+NameHash → ValidRange)  ~30 bytes
+├── nodes           (Id → ActivePeriod + NameHash + Summary)  ~200-500 bytes
+├── forward_edges   (Src+Dst+NameHash → ActivePeriod + Weight + Summary)  ~200-500 bytes
+├── reverse_edges   (Dst+Src+NameHash → ActivePeriod)  ~30 bytes
 ├── node_fragments  (Id+Ts → Content)  variable
 └── edge_fragments  (Src+Dst+NameHash+Ts → Content)  variable
 
 After (Phase 2):
 ├── names           (NameHash → Name)  ~50 bytes [unchanged]
-├── nodes           (Id → ValidRange + NameHash + SummaryHash?)  ~26 bytes [HOT]
+├── nodes           (Id → ActivePeriod + NameHash + SummaryHash?)  ~26 bytes [HOT]
 ├── node_summaries  (SummaryHash → NodeSummary)  variable [COLD, NEW]
-├── forward_edges   (Src+Dst+NameHash → ValidRange + Weight + SummaryHash?)  ~35 bytes [HOT]
+├── forward_edges   (Src+Dst+NameHash → ActivePeriod + Weight + SummaryHash?)  ~35 bytes [HOT]
 ├── edge_summaries  (SummaryHash → EdgeSummary)  variable [COLD, NEW]
-├── reverse_edges   (Dst+Src+NameHash → ValidRange)  ~30 bytes [HOT]
+├── reverse_edges   (Dst+Src+NameHash → ActivePeriod)  ~30 bytes [HOT]
 ├── node_fragments  (Id+Ts → Content)  variable [COLD, unchanged]
 └── edge_fragments  (Src+Dst+NameHash+Ts → Content)  variable [COLD, unchanged]
 ```
@@ -770,7 +770,7 @@ pub(crate) struct NodeCfKey(pub(crate) Id);
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeCfValue(
-    pub(crate) Option<ValidRange>,
+    pub(crate) Option<ActivePeriod>,
     pub(crate) NameHash, // Node name stored as hash; full name in Names CF
     pub(crate) NodeSummary,
 );
@@ -786,7 +786,7 @@ pub(crate) struct NodeCfKey(pub(crate) Id);
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NodeCfValue(
-    pub(crate) Option<ValidRange>,
+    pub(crate) Option<ActivePeriod>,
     pub(crate) NameHash,              // Node name hash; full name in Names CF
     pub(crate) Option<SummaryHash>,   // Content hash; full summary in NodeSummaries CF
 );
@@ -814,7 +814,7 @@ pub(crate) struct ForwardEdgeCfKey(
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<ValidRange>, // Field 0: Temporal validity
+    pub(crate) Option<ActivePeriod>, // Field 0: Temporal validity
     pub(crate) Option<f64>,           // Field 1: Optional weight
     pub(crate) EdgeSummary,           // Field 2: Edge summary (inline)
 );
@@ -834,7 +834,7 @@ pub(crate) struct ForwardEdgeCfKey(
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<ValidRange>, // Field 0: Temporal validity
+    pub(crate) Option<ActivePeriod>, // Field 0: Temporal validity
     pub(crate) Option<f64>,           // Field 1: Optional weight
     pub(crate) Option<SummaryHash>,   // Field 2: Content hash; full summary in EdgeSummaries CF
 );
@@ -1050,7 +1050,7 @@ impl OutgoingEdges {
    - RocksDB has CRC32 checksums, but rkyv validation catches schema mismatches
 
 3. **Nested type handling:** All types used in rkyv-enabled structs need derives:
-   - `ValidRange` → add rkyv derives
+   - `ActivePeriod` → add rkyv derives
    - `TimestampMilli(u64)` → add rkyv derives (wrapper around u64)
    - `NameHash([u8; 8])` → add rkyv derives
    - `SummaryHash([u8; 8])` → add rkyv derives
@@ -1101,7 +1101,7 @@ pub struct TimestampMilli(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[archive(check_bytes)]
 #[archive_attr(derive(Debug, PartialEq, Eq))]
-pub struct ValidRange(pub Option<TimestampMilli>, pub Option<TimestampMilli>);
+pub struct ActivePeriod(pub Option<TimestampMilli>, pub Option<TimestampMilli>);
 
 /// 8-byte name hash (xxHash64).
 /// Must have rkyv derives for use in hot CF values.
@@ -1133,7 +1133,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 #[derive(Debug, Clone)]
 #[archive(check_bytes)]
 pub(crate) struct NodeCfValue {
-    pub temporal_range: Option<ValidRange>,
+    pub temporal_range: Option<ActivePeriod>,
     pub name_hash: NameHash,
     pub summary_hash: Option<SummaryHash>,
 }
@@ -1144,7 +1144,7 @@ pub(crate) struct NodeCfValue {
 #[derive(Debug, Clone)]
 #[archive(check_bytes)]
 pub(crate) struct ForwardEdgeCfValue {
-    pub temporal_range: Option<ValidRange>,
+    pub temporal_range: Option<ActivePeriod>,
     pub weight: Option<f64>,
     pub summary_hash: Option<SummaryHash>,
 }
@@ -1155,7 +1155,7 @@ pub(crate) struct ForwardEdgeCfValue {
 #[derive(Debug, Clone)]
 #[archive(check_bytes)]
 pub(crate) struct ReverseEdgeCfValue {
-    pub temporal_range: Option<ValidRange>,
+    pub temporal_range: Option<ActivePeriod>,
 }
 ```
 
@@ -1219,7 +1219,7 @@ pub(crate) trait HotColumnFamilyRecord {
 ```rust
 // libs/db/src/graph/schema.rs
 
-impl ArchivedValidRange {
+impl ArchivedActivePeriod {
     /// Check if this temporal range is valid at the given timestamp.
     ///
     /// Works directly on archived data without deserialization.
@@ -1369,7 +1369,7 @@ impl MutationExecutor for AddEdge {
 |------|-------------|-------|
 | 3.1 | Add `rkyv = "0.7"` dependency | `Cargo.toml` |
 | 3.2 | Add rkyv derives to `TimestampMilli` | `src/lib.rs` or `src/graph/schema.rs` |
-| 3.3 | Add rkyv derives to `ValidRange` | `src/graph/schema.rs` |
+| 3.3 | Add rkyv derives to `ActivePeriod` | `src/graph/schema.rs` |
 | 3.4 | Add rkyv derives to `NameHash` | `src/graph/name_hash.rs` |
 | 3.5 | Add rkyv derives to `SummaryHash` | `src/graph/summary_hash.rs` |
 | 3.6 | Define `HotColumnFamilyRecord` trait | `src/graph/mod.rs` |
@@ -2319,7 +2319,7 @@ The HNSW2 production design (`examples/vector/HNSW2.md`) aligns with completed d
 | HNSW2 Requirement | Database Support |
 |-------------------|------------------|
 | Hierarchical graph storage | ✅ Graph API with edge types |
-| Temporal versioning | ✅ ValidRange in hot CFs |
+| Temporal versioning | ✅ ActivePeriod in hot CFs |
 | Vector blob storage | ✅ Content-addressable fragments |
 | Concurrent updates | ✅ Transaction API |
 | Read-after-write | ✅ Flush API |

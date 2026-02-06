@@ -26,9 +26,9 @@ use super::name_hash::NameHash;
 use super::summary_hash::SummaryHash;
 use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord};
 use super::schema::{
-    self, is_valid_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
+    self, is_active_at_time, DstId, EdgeName, EdgeSummary, EdgeSummaries, EdgeSummaryCfKey,
     FragmentContent, Names, NameCfKey, NodeName, NodeSummary, NodeSummaries, NodeSummaryCfKey,
-    SrcId, ValidRange,
+    SrcId, ActivePeriod,
 };
 use super::Storage;
 use crate::{Id, TimestampMilli};
@@ -197,7 +197,7 @@ pub struct NodeRecord {
     pub id: Id,
     pub name: NodeName,
     pub summary: NodeSummary,
-    pub valid_range: Option<ValidRange>,
+    pub valid_range: Option<ActivePeriod>,
 }
 
 /// A forward edge record as seen by scan visitors.
@@ -208,7 +208,7 @@ pub struct EdgeRecord {
     pub name: EdgeName,
     pub summary: EdgeSummary,
     pub weight: Option<f64>,
-    pub valid_range: Option<ValidRange>,
+    pub valid_range: Option<ActivePeriod>,
 }
 
 /// A reverse edge record as seen by scan visitors (index only, no summary/weight).
@@ -217,7 +217,7 @@ pub struct ReverseEdgeRecord {
     pub dst_id: DstId,
     pub src_id: SrcId,
     pub name: EdgeName,
-    pub valid_range: Option<ValidRange>,
+    pub valid_range: Option<ActivePeriod>,
 }
 
 /// A node fragment record as seen by scan visitors.
@@ -226,7 +226,7 @@ pub struct NodeFragmentRecord {
     pub node_id: Id,
     pub timestamp: TimestampMilli,
     pub content: FragmentContent,
-    pub valid_range: Option<ValidRange>,
+    pub valid_range: Option<ActivePeriod>,
 }
 
 /// An edge fragment record as seen by scan visitors.
@@ -237,7 +237,7 @@ pub struct EdgeFragmentRecord {
     pub edge_name: EdgeName,
     pub timestamp: TimestampMilli,
     pub content: FragmentContent,
-    pub valid_range: Option<ValidRange>,
+    pub valid_range: Option<ActivePeriod>,
 }
 
 
@@ -343,7 +343,7 @@ where
     CF: ColumnFamily,
     V: Visitor<R>,
     F: Fn(&[u8], &[u8]) -> Result<R>,
-    G: Fn(&R) -> &Option<ValidRange>,
+    G: Fn(&R) -> &Option<ActivePeriod>,
 {
     let direction = if reverse {
         Direction::Reverse
@@ -388,7 +388,7 @@ where
 
             // Check temporal validity if reference time is specified
             if let Some(ref_ts) = reference_ts_millis {
-                if !is_valid_at_time(get_valid_range(&record), ref_ts) {
+                if !is_active_at_time(get_valid_range(&record), ref_ts) {
                     continue; // Skip invalid records but don't count them
                 }
             }
@@ -423,7 +423,7 @@ where
 
             // Check temporal validity if reference time is specified
             if let Some(ref_ts) = reference_ts_millis {
-                if !is_valid_at_time(get_valid_range(&record), ref_ts) {
+                if !is_active_at_time(get_valid_range(&record), ref_ts) {
                     continue; // Skip invalid records but don't count them
                 }
             }
@@ -456,7 +456,7 @@ where
     CF: HotColumnFamilyRecord,
     V: Visitor<R>,
     F: Fn(&[u8], &[u8]) -> Result<R>,
-    G: Fn(&R) -> &Option<ValidRange>,
+    G: Fn(&R) -> &Option<ActivePeriod>,
 {
     let direction = if reverse {
         Direction::Reverse
@@ -501,7 +501,7 @@ where
 
             // Check temporal validity if reference time is specified
             if let Some(ref_ts) = reference_ts_millis {
-                if !is_valid_at_time(get_valid_range(&record), ref_ts) {
+                if !is_active_at_time(get_valid_range(&record), ref_ts) {
                     continue; // Skip invalid records but don't count them
                 }
             }
@@ -536,7 +536,7 @@ where
 
             // Check temporal validity if reference time is specified
             if let Some(ref_ts) = reference_ts_millis {
-                if !is_valid_at_time(get_valid_range(&record), ref_ts) {
+                if !is_active_at_time(get_valid_range(&record), ref_ts) {
                     continue; // Skip invalid records but don't count them
                 }
             }

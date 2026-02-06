@@ -647,8 +647,8 @@ pub struct OutgoingEdges {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ValidRange in the record
-    /// Records without a ValidRange (None) are considered always valid
+    /// Temporal validity is always checked against the ActivePeriod in the record
+    /// Records without a ActivePeriod (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
@@ -679,8 +679,8 @@ pub struct IncomingEdges {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ValidRange in the record
-    /// Records without a ValidRange (None) are considered always valid
+    /// Temporal validity is always checked against the ActivePeriod in the record
+    /// Records without a ActivePeriod (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
@@ -1411,7 +1411,7 @@ impl QueryExecutor for NodeByIdDispatch {
             .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
         // Always check temporal validity
-        if !schema::is_valid_at_time(&value.0, ref_time) {
+        if !schema::is_active_at_time(&value.0, ref_time) {
             return Err(anyhow::anyhow!(
                 "Node {} not valid at time {}",
                 id,
@@ -1484,7 +1484,7 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
                     match schema::Nodes::value_from_bytes(&value_bytes) {
                         Ok(value) => {
                             // Check temporal validity - skip invalid nodes
-                            if schema::is_valid_at_time(&value.0, ref_time) {
+                            if schema::is_active_at_time(&value.0, ref_time) {
                                 valid_entries.push((*id, value.1, value.2));
                             } else {
                                 tracing::trace!(
@@ -1590,7 +1590,7 @@ impl QueryExecutor for NodeFragmentsByIdTimeRangeDispatch {
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
             // Always check temporal validity - skip invalid fragments
-            if !schema::is_valid_at_time(&value.0, ref_time) {
+            if !schema::is_active_at_time(&value.0, ref_time) {
                 continue;
             }
 
@@ -1685,7 +1685,7 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch {
                     .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
             // Always check temporal validity - skip invalid fragments
-            if !schema::is_valid_at_time(&value.0, ref_time) {
+            if !schema::is_active_at_time(&value.0, ref_time) {
                 continue;
             }
 
@@ -1763,7 +1763,7 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
         // Always check temporal validity
-        if !schema::is_valid_at_time(&value.0, ref_time) {
+        if !schema::is_active_at_time(&value.0, ref_time) {
             return Err(anyhow::anyhow!(
                 "Edge not valid at time {}: source={}, dest={}, name={}",
                 ref_time.0,
@@ -1833,7 +1833,7 @@ impl QueryExecutor for OutgoingEdgesDispatch {
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
                 // Always check temporal validity - skip invalid edges
-                if !schema::is_valid_at_time(&value.0, ref_time) {
+                if !schema::is_active_at_time(&value.0, ref_time) {
                     continue;
                 }
 
@@ -1875,7 +1875,7 @@ impl QueryExecutor for OutgoingEdgesDispatch {
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
                 // Always check temporal validity - skip invalid edges
-                if !schema::is_valid_at_time(&value.0, ref_time) {
+                if !schema::is_active_at_time(&value.0, ref_time) {
                     continue;
                 }
 
@@ -1956,7 +1956,7 @@ impl QueryExecutor for IncomingEdgesDispatch {
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
                 // Always check temporal validity - skip invalid edges
-                if !schema::is_valid_at_time(&value.0, ref_time) {
+                if !schema::is_active_at_time(&value.0, ref_time) {
                     continue;
                 }
 
@@ -2025,7 +2025,7 @@ impl QueryExecutor for IncomingEdgesDispatch {
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
                 // Always check temporal validity - skip invalid edges
-                if !schema::is_valid_at_time(&value.0, ref_time) {
+                if !schema::is_active_at_time(&value.0, ref_time) {
                     continue;
                 }
 
@@ -2171,7 +2171,7 @@ impl TransactionQueryExecutor for NodeById {
             .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
         // Check temporal validity
-        if !schema::is_valid_at_time(&value.0, ref_time) {
+        if !schema::is_active_at_time(&value.0, ref_time) {
             return Err(anyhow::anyhow!(
                 "Node {} not valid at time {}",
                 self.id,
@@ -2222,7 +2222,7 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
             if let Some(value_bytes) = txn.get_cf(cf, &key_bytes)? {
                 match schema::Nodes::value_from_bytes(&value_bytes) {
                     Ok(value) => {
-                        if schema::is_valid_at_time(&value.0, ref_time) {
+                        if schema::is_active_at_time(&value.0, ref_time) {
                             entries_with_hash.push((*id, value.1, value.2));
                         }
                     }
@@ -2305,7 +2305,7 @@ impl TransactionQueryExecutor for NodeFragmentsByIdTimeRange {
                 schema::NodeFragments::value_from_bytes(&value_bytes)?;
 
             // Check temporal validity
-            if schema::is_valid_at_time(&value.0, ref_time) {
+            if schema::is_active_at_time(&value.0, ref_time) {
                 results.push((ts, value.1));
             }
         }
@@ -2391,7 +2391,7 @@ impl TransactionQueryExecutor for EdgeFragmentsByIdTimeRange {
                 schema::EdgeFragments::value_from_bytes(&value_bytes)?;
 
             // Check temporal validity
-            if schema::is_valid_at_time(&value.0, ref_time) {
+            if schema::is_active_at_time(&value.0, ref_time) {
                 results.push((ts, value.1));
             }
         }
@@ -2455,7 +2455,7 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
             schema::ForwardEdges::value_from_bytes(&value_bytes)?;
 
         // Check temporal validity
-        if !schema::is_valid_at_time(&value.0, ref_time) {
+        if !schema::is_active_at_time(&value.0, ref_time) {
             return Err(anyhow::anyhow!(
                 "Edge {} -> {} ({}) not valid at time {}",
                 self.source_id,
@@ -2520,7 +2520,7 @@ impl TransactionQueryExecutor for OutgoingEdges {
                 schema::ForwardEdges::value_from_bytes(&value_bytes)?;
 
             // Check temporal validity
-            if schema::is_valid_at_time(&value.0, ref_time) {
+            if schema::is_active_at_time(&value.0, ref_time) {
                 edges_with_hash.push((value.1, key.0, key.1, key.2));
             }
         }
@@ -2594,7 +2594,7 @@ impl TransactionQueryExecutor for IncomingEdges {
                 schema::ReverseEdges::value_from_bytes(&value_bytes)?;
 
             // Check temporal validity
-            if schema::is_valid_at_time(&value.0, ref_time) {
+            if schema::is_active_at_time(&value.0, ref_time) {
                 let dest_id = key.0;
                 let source_id = key.1;
                 let edge_name_hash = key.2;
@@ -2682,7 +2682,7 @@ impl TransactionQueryExecutor for AllNodes {
             let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)?;
 
             // Check temporal validity
-            if schema::is_valid_at_time(&value.0, ref_time) {
+            if schema::is_active_at_time(&value.0, ref_time) {
                 // Resolve NameHash to String (uses cache)
                 let node_name = resolve_name_from_txn(txn, txn_db, value.1, cache)?;
                 // Resolve SummaryHash to NodeSummary (from cold CF)
@@ -2756,7 +2756,7 @@ impl TransactionQueryExecutor for AllEdges {
                 schema::ForwardEdges::value_from_bytes(&value_bytes)?;
 
             // Check temporal validity
-            if schema::is_valid_at_time(&value.0, ref_time) {
+            if schema::is_active_at_time(&value.0, ref_time) {
                 edges_with_hash.push((value.1, key.0, key.1, key.2));
             }
         }
@@ -3681,7 +3681,7 @@ mod tests {
         use crate::writer::Runnable as MutationRunnable;
         use super::super::schema::EdgeSummary;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
-        use crate::{Id, ValidRange, TimestampMilli};
+        use crate::{Id, ActivePeriod, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -3745,7 +3745,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(1000),
             content: DataUrl::from_markdown("Valid from 1000 to 3000"),
-            valid_range: ValidRange::valid_between(TimestampMilli(1000), TimestampMilli(3000)),
+            valid_range: ActivePeriod::active_between(TimestampMilli(1000), TimestampMilli(3000)),
         }
         .run(&writer)
         .await
@@ -3758,7 +3758,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(2000),
             content: DataUrl::from_markdown("Valid from 2000 to 5000"),
-            valid_range: ValidRange::valid_between(TimestampMilli(2000), TimestampMilli(5000)),
+            valid_range: ActivePeriod::active_between(TimestampMilli(2000), TimestampMilli(5000)),
         }
         .run(&writer)
         .await

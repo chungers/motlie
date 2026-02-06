@@ -542,7 +542,7 @@ UpdateEdgeValidSinceUntil {
     src_id: source,
     dst_id: target,
     name: edge_name,
-    temporal_range: ValidRange::valid_until(TimestampMilli::now()),
+    temporal_range: ActivePeriod::valid_until(TimestampMilli::now()),
     reason: "pruned".to_string(),
 }
 ```
@@ -1965,7 +1965,7 @@ AddNodeVector {
 
 ### 10. 🟢 Inline Edge Payload (Small Vectors)
 
-**Current State**: Edge values store `(ValidRange, Option<f64>, EdgeSummary)`.
+**Current State**: Edge values store `(ActivePeriod, Option<f64>, EdgeSummary)`.
 
 **Needed**: Option to store small payload data directly in edges.
 
