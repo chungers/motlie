@@ -143,13 +143,13 @@ Defined in `schema.rs`. The graph uses 5 column families:
 
 | Column Family | Key | Value | Purpose |
 |---------------|-----|-------|---------|
-| `nodes` | `(Id)` | `(ValidRange?, NodeName, NodeSummary)` | Node metadata |
-| `node-fragments` | `(Id, TimestampMilli)` | `(ValidRange?, FragmentContent)` | Node content fragments |
-| `outgoing-edges` | `(SrcId, DstId, EdgeName)` | `(ValidRange?, Weight?, EdgeSummary)` | Edges by source |
-| `incoming-edges` | `(DstId, SrcId, EdgeName)` | `(ValidRange?)` | Reverse edge index with denormalized temporal range |
-| `edge-fragments` | `(SrcId, DstId, EdgeName, TimestampMilli)` | `(ValidRange?, FragmentContent)` | Edge content fragments |
+| `nodes` | `(Id)` | `(ActivePeriod?, NodeName, NodeSummary)` | Node metadata |
+| `node-fragments` | `(Id, TimestampMilli)` | `(ActivePeriod?, FragmentContent)` | Node content fragments |
+| `outgoing-edges` | `(SrcId, DstId, EdgeName)` | `(ActivePeriod?, Weight?, EdgeSummary)` | Edges by source |
+| `incoming-edges` | `(DstId, SrcId, EdgeName)` | `(ActivePeriod?)` | Reverse edge index with denormalized temporal range |
+| `edge-fragments` | `(SrcId, DstId, EdgeName, TimestampMilli)` | `(ActivePeriod?, FragmentContent)` | Edge content fragments |
 
-**Note**: `incoming-edges` denormalizes `ValidRange` for fast inbound scans with temporal filtering. Temporal range updates must write both `outgoing-edges` and `incoming-edges` in the same transaction.
+**Note**: `incoming-edges` denormalizes `ActivePeriod` for fast inbound scans with temporal filtering. Temporal range updates must write both `outgoing-edges` and `incoming-edges` in the same transaction.
 
 **Note**: Name-based lookups (finding nodes/edges by name) are handled by the fulltext search module using Tantivy indexing.
 

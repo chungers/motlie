@@ -20,7 +20,7 @@ use motlie_db::mutation::{
 use motlie_db::query::{NodeFragments, OutgoingEdges, Runnable as QueryRunnable};
 use motlie_db::reader::Reader;
 use motlie_db::writer::Writer;
-use motlie_db::{ValidRange, DataUrl, Id, ReadWriteHandles, Storage, StorageConfig, TimestampMilli};
+use motlie_db::{ActivePeriod, DataUrl, Id, ReadWriteHandles, Storage, StorageConfig, TimestampMilli};
 use rand::Rng;
 use serde_json;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -316,21 +316,21 @@ pub async fn add_vector_edge(
     .await
 }
 
-/// Prune an edge by setting its valid_until timestamp
+/// Prune an edge by setting its active_until timestamp
 pub async fn prune_edge(
     writer: &Writer,
     source: Id,
     target: Id,
     edge_name: &str,
 ) -> Result<()> {
-    // ValidRange::valid_until returns Option<ValidRange>, we need to unwrap
-    // since the mutation field expects ValidRange directly
+    // ActivePeriod::valid_until returns Option<ActivePeriod>, we need to unwrap
+    // since the mutation field expects ActivePeriod directly
     let now = TimestampMilli::now();
     UpdateEdgeValidSinceUntil {
         src_id: source,
         dst_id: target,
         name: edge_name.to_string(),
-        temporal_range: ValidRange(None, Some(now)),
+        temporal_range: ActivePeriod(None, Some(now)),
         reason: "pruned".to_string(),
     }
     .run(writer)

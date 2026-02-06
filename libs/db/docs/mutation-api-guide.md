@@ -291,7 +291,7 @@ AddNode {
 - `id: Id` - Unique identifier for the node (ULID)
 - `name: String` - Human-readable name
 - `ts_millis: TimestampMilli` - Creation timestamp
-- `valid_range: Option<ValidRange>` - Optional validity period
+- `valid_range: Option<ActivePeriod>` - Optional validity period
 
 ### 2. AddEdge
 
@@ -318,7 +318,7 @@ AddEdge {
 - `target_node_id: Id` - Target node
 - `name: String` - Edge type/name
 - `ts_millis: TimestampMilli` - Creation timestamp
-- `valid_range: Option<ValidRange>` - Optional validity period
+- `valid_range: Option<ActivePeriod>` - Optional validity period
 - `summary: EdgeSummary` - Summary information for the edge (fragment counts, timestamps)
 - `weight: Option<f64>` - Optional weight for weighted graph algorithms
 
@@ -343,7 +343,7 @@ AddNodeFragment {
 - `id: Id` - Node ID this fragment belongs to
 - `ts_millis: TimestampMilli` - Fragment timestamp
 - `content: DataUrl` - Fragment content (text, JSON, binary, etc.)
-- `valid_range: Option<ValidRange>` - Optional validity period
+- `valid_range: Option<ActivePeriod>` - Optional validity period
 
 ### 4. AddEdgeFragment
 
@@ -370,18 +370,18 @@ AddEdgeFragment {
 - `edge_name: String` - Edge name/type
 - `ts_millis: TimestampMilli` - Fragment timestamp
 - `content: DataUrl` - Fragment content (text, JSON, binary, etc.)
-- `valid_range: Option<ValidRange>` - Optional validity period
+- `valid_range: Option<ActivePeriod>` - Optional validity period
 
 ### 5. UpdateNodeValidSinceUntil
 
 Update the temporal validity range of a node:
 
 ```rust
-use motlie_db::{UpdateNodeValidSinceUntil, Id, TimestampMilli, ValidRange, MutationRunnable};
+use motlie_db::{UpdateNodeValidSinceUntil, Id, TimestampMilli, ActivePeriod, MutationRunnable};
 
 UpdateNodeValidSinceUntil {
     id: node_id,
-    temporal_range: ValidRange {
+    temporal_range: ActivePeriod {
         valid_from: TimestampMilli::now(),
         valid_to: Some(future_timestamp),
     },
@@ -393,7 +393,7 @@ UpdateNodeValidSinceUntil {
 
 **Fields**:
 - `id: Id` - Node ID to update
-- `temporal_range: ValidRange` - New temporal validity range
+- `temporal_range: ActivePeriod` - New temporal validity range
 - `reason: String` - Reason for the update
 
 ### 6. UpdateEdgeValidSinceUntil
@@ -401,13 +401,13 @@ UpdateNodeValidSinceUntil {
 Update the temporal validity range of an edge (using topology instead of edge ID):
 
 ```rust
-use motlie_db::{UpdateEdgeValidSinceUntil, Id, TimestampMilli, ValidRange, MutationRunnable};
+use motlie_db::{UpdateEdgeValidSinceUntil, Id, TimestampMilli, ActivePeriod, MutationRunnable};
 
 UpdateEdgeValidSinceUntil {
     src_id: alice_id,
     dst_id: bob_id,
     name: "follows".to_string(),
-    temporal_range: ValidRange {
+    temporal_range: ActivePeriod {
         valid_from: TimestampMilli::now(),
         valid_to: Some(future_timestamp),
     },
@@ -421,7 +421,7 @@ UpdateEdgeValidSinceUntil {
 - `src_id: Id` - Source node ID
 - `dst_id: Id` - Destination node ID
 - `name: String` - Edge name/type
-- `temporal_range: ValidRange` - New temporal validity range
+- `temporal_range: ActivePeriod` - New temporal validity range
 - `reason: String` - Reason for the update
 
 ### 7. UpdateEdgeWeight
@@ -609,7 +609,7 @@ async fn update_user_conditionally(
 ### Pattern 6: Temporal Validity
 
 ```rust
-use motlie_db::schema::ValidRange;
+use motlie_db::schema::ActivePeriod;
 
 async fn create_limited_time_offer(
     writer: &Writer,
@@ -622,7 +622,7 @@ async fn create_limited_time_offer(
         id: offer_id,
         name: offer_name,
         ts_millis: TimestampMilli::now(),
-        valid_range: Some(ValidRange {
+        valid_range: Some(ActivePeriod {
             valid_from: TimestampMilli::now(),
             valid_to: Some(valid_until),
         }),
@@ -897,7 +897,7 @@ UpdateEdgeValidSinceUntil {
     src_id: alice_id,
     dst_id: bob_id,
     name: "follows".to_string(),
-    temporal_range: ValidRange {
+    temporal_range: ActivePeriod {
         valid_from: TimestampMilli::now(),
         valid_to: Some(future_timestamp),
     },

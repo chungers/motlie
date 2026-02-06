@@ -332,7 +332,7 @@ handles.writer().flush().await?;
 |------|-------------|
 | `Id` | 128-bit ULID identifier with lexicographic ordering |
 | `TimestampMilli` | Millisecond-precision timestamp |
-| `ValidRange` | Validity window (start, until) for temporal queries |
+| `ActivePeriod` | Validity window (start, until) for temporal queries |
 | `DataUrl` | RFC 2397 data URL for content storage (text, markdown, JSON, images) |
 
 ### Storage Types (`motlie_db`)
@@ -603,7 +603,7 @@ See the `examples/` directory for complete implementations:
 
 ```
 src/
-├── lib.rs              # Core types (Id, TimestampMilli, DataUrl, ValidRange)
+├── lib.rs              # Core types (Id, TimestampMilli, DataUrl, ActivePeriod)
 ├── storage.rs          # Unified storage (Storage<Mode>, ReadOnlyHandles, ReadWriteHandles)
 ├── reader.rs           # Unified reader infrastructure (Reader, ReaderConfig, ReaderBuilder)
 ├── writer.rs           # Unified writer infrastructure (Writer, WriterConfig, WriterBuilder)

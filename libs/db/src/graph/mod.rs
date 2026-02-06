@@ -116,12 +116,12 @@ use writer::Processor;
 
 
 
-/// Trait implemented by column families that supports patching of ValidRange.
-pub(crate) trait ValidRangePatchable {
+/// Trait implemented by column families that supports patching of ActivePeriod.
+pub(crate) trait ActivePeriodPatchable {
     fn patch_valid_range(
         &self,
         old_value: &[u8],
-        new_range: schema::ValidRange,
+        new_range: schema::ActivePeriod,
     ) -> Result<Vec<u8>, anyhow::Error>;
 }
 

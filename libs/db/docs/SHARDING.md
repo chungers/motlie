@@ -1380,7 +1380,7 @@ pub enum UnifiedQuery {
 | Edge Storage | Bidirectional: ForwardEdges + ReverseEdges |
 | Name Handling | xxHash64 interning via NameCache |
 | Summary Storage | Content-addressed via SummaryHash |
-| Temporal Support | ValidRange on nodes, edges, fragments |
+| Temporal Support | ActivePeriod on nodes, edges, fragments |
 | Hot/Cold Separation | Metadata hot, content cold |
 
 ### Fulltext Subsystem Key Characteristics
