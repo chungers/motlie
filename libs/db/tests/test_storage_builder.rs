@@ -143,8 +143,11 @@ fn test_shared_storage_cf_names_list() {
     assert!(all_cfs.contains(&"vector/pending"));
     assert!(all_cfs.contains(&"vector/lifecycle_counts"));
 
-    // Total: 19 CFs (8 graph + 11 vector)
-    assert_eq!(all_cfs.len(), 19);
+    // Total: 22 CFs (11 graph + 11 vector)
+    // Graph CFs: names, nodes, node_summaries, node_summary_index, forward_edges,
+    //            reverse_edges, edge_summaries, edge_summary_index, node_fragments,
+    //            edge_fragments, graph_meta
+    assert_eq!(all_cfs.len(), 22);
 }
 
 #[test]

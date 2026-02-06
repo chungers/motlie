@@ -9,7 +9,7 @@ use crate::graph::schema::{EdgeSummary, NodeFragments, Nodes, ALL_COLUMN_FAMILIE
 use crate::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer, spawn_mutation_consumer_with_next, WriterConfig,
 };
-use crate::{Id, TemporalRange, TimestampMilli};
+use crate::{Id, ValidRange, TimestampMilli};
 use rocksdb::DB;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -145,7 +145,7 @@ use tokio::time::Duration;
 
         UpdateNodeValidSinceUntil {
             id: node_id,
-            temporal_range: TemporalRange(None, None),
+            temporal_range: ValidRange(None, None),
             reason: "test node invalidation".to_string(),
         }
         .run(&writer)
@@ -156,7 +156,7 @@ use tokio::time::Duration;
             src_id: edge_src_id,
             dst_id: edge_dst_id,
             name: edge_name,
-            temporal_range: TemporalRange(None, None),
+            temporal_range: ValidRange(None, None),
             reason: "test edge invalidation".to_string(),
         }
         .run(&writer)
@@ -1222,6 +1222,8 @@ use tokio::time::Duration;
             None,
             name_hash,
             summary_hash,
+            1,     // version
+            false, // deleted
         );
 
         // Serialize and compress
@@ -1291,9 +1293,9 @@ use tokio::time::Duration;
         let summary = DataUrl::from_markdown("Node summary content for testing");
         let hash = SummaryHash::from_summary(&summary).unwrap();
 
-        // Create CF key and value
+        // Create CF key and value (refcount=1, summary)
         let key = NodeSummaryCfKey(hash);
-        let value = NodeSummaryCfValue(summary.clone());
+        let value = NodeSummaryCfValue(1, summary.clone());
 
         // Serialize
         let key_bytes = NodeSummaries::key_to_bytes(&key);
@@ -1304,9 +1306,10 @@ use tokio::time::Duration;
         let recovered_value = NodeSummaries::value_from_bytes(&value_bytes).unwrap();
 
         assert_eq!(key.0, recovered_key.0, "Key hash should match");
+        assert_eq!(value.0, recovered_value.0, "Refcount should match");
         assert_eq!(
-            value.0.decode_string().unwrap(),
-            recovered_value.0.decode_string().unwrap(),
+            value.1.decode_string().unwrap(),
+            recovered_value.1.decode_string().unwrap(),
             "Value summary should match"
         );
     }
@@ -1321,9 +1324,9 @@ use tokio::time::Duration;
         let summary = DataUrl::from_markdown("Edge summary content for testing");
         let hash = SummaryHash::from_summary(&summary).unwrap();
 
-        // Create CF key and value
+        // Create CF key and value (refcount=1, summary)
         let key = EdgeSummaryCfKey(hash);
-        let value = EdgeSummaryCfValue(summary.clone());
+        let value = EdgeSummaryCfValue(1, summary.clone());
 
         // Serialize
         let key_bytes = EdgeSummaries::key_to_bytes(&key);
@@ -1334,9 +1337,10 @@ use tokio::time::Duration;
         let recovered_value = EdgeSummaries::value_from_bytes(&value_bytes).unwrap();
 
         assert_eq!(key.0, recovered_key.0, "Key hash should match");
+        assert_eq!(value.0, recovered_value.0, "Refcount should match");
         assert_eq!(
-            value.0.decode_string().unwrap(),
-            recovered_value.0.decode_string().unwrap(),
+            value.1.decode_string().unwrap(),
+            recovered_value.1.decode_string().unwrap(),
             "Value summary should match"
         );
     }
@@ -1733,11 +1737,11 @@ use tokio::time::Duration;
             "Should have exactly 1 summary entry (shared by both nodes)"
         );
 
-        // Verify the summary content
+        // Verify the summary content (.1 is the summary, .0 is the refcount)
         let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash1));
         let summary_raw = txn.get_cf(&summary_cf, &summary_key).unwrap().unwrap();
         let summary_value: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&summary_raw).unwrap();
-        let decoded: String = summary_value.0.decode_string().unwrap();
+        let decoded: String = summary_value.1.decode_string().unwrap();
         assert!(
             decoded.contains("shared summary"),
             "Summary content should match"
@@ -1755,15 +1759,15 @@ use tokio::time::Duration;
         // by directly writing to the CFs)
         let txn = txn_db.transaction();
 
-        // Write new summary to NodeSummaries CF
+        // Write new summary to NodeSummaries CF (refcount=1, summary)
         let new_hash = SummaryHash::from_summary(&new_summary).unwrap();
         let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(new_hash));
-        let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(new_summary.clone())).unwrap();
+        let summary_value = NodeSummaries::value_to_bytes(&NodeSummaryCfValue(1, new_summary.clone())).unwrap();
         txn.put_cf(&summary_cf, &summary_key, &summary_value).unwrap();
 
-        // Update node1 to point to new summary_hash
+        // Update node1 to point to new summary_hash (preserve version, increment if needed)
         let cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
-        let new_value1 = NodeCfValue(value1.0, value1.1, Some(new_hash));
+        let new_value1 = NodeCfValue(value1.0, value1.1, Some(new_hash), value1.3, value1.4);
         let value_bytes = Nodes::value_to_bytes(&new_value1).unwrap();
         txn.put_cf(&cf, &key1, &value_bytes).unwrap();
 
@@ -1807,21 +1811,21 @@ use tokio::time::Duration;
             "Nodes should now point to different summaries"
         );
 
-        // Verify node1's summary content
+        // Verify node1's summary content (.1 is the summary, .0 is the refcount)
         let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(node1_hash));
         let summary_raw = txn.get_cf(&summary_cf, &summary_key).unwrap().unwrap();
         let summary_value: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&summary_raw).unwrap();
-        let decoded: String = summary_value.0.decode_string().unwrap();
+        let decoded: String = summary_value.1.decode_string().unwrap();
         assert!(
             decoded.contains("NEW summary"),
             "Node1 should have new summary content"
         );
 
-        // Verify node2's summary content
+        // Verify node2's summary content (.1 is the summary, .0 is the refcount)
         let summary_key = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(node2_hash));
         let summary_raw = txn.get_cf(&summary_cf, &summary_key).unwrap().unwrap();
         let summary_value: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&summary_raw).unwrap();
-        let decoded: String = summary_value.0.decode_string().unwrap();
+        let decoded: String = summary_value.1.decode_string().unwrap();
         assert!(
             decoded.contains("shared summary"),
             "Node2 should still have original summary content"
@@ -1840,18 +1844,18 @@ use tokio::time::Duration;
         use crate::graph::schema::{NodeCfValue, Nodes};
         use crate::graph::name_hash::NameHash;
         use crate::graph::summary_hash::SummaryHash;
-        use crate::{DataUrl, TemporalRange, TimestampMilli};
+        use crate::{DataUrl, ValidRange, TimestampMilli};
 
         // Create a NodeCfValue with all fields populated
         let name_hash = NameHash::from_name("test_node");
         let summary = DataUrl::from_text("Test summary content");
         let summary_hash = SummaryHash::from_summary(&summary).unwrap();
-        let temporal_range = TemporalRange::valid_between(
+        let temporal_range = ValidRange::valid_between(
             TimestampMilli(1000),
             TimestampMilli(2000),
         );
 
-        let original = NodeCfValue(temporal_range, name_hash, Some(summary_hash));
+        let original = NodeCfValue(temporal_range, name_hash, Some(summary_hash), 1, false);
 
         // Serialize with rkyv
         let bytes = Nodes::value_to_bytes(&original).expect("rkyv serialize");
@@ -1860,7 +1864,7 @@ use tokio::time::Duration;
         let recovered: NodeCfValue = Nodes::value_from_bytes(&bytes).expect("rkyv deserialize");
 
         // Verify all fields match
-        assert_eq!(original.0, recovered.0, "TemporalRange should match");
+        assert_eq!(original.0, recovered.0, "ValidRange should match");
         assert_eq!(original.1, recovered.1, "NameHash should match");
         assert_eq!(original.2, recovered.2, "SummaryHash should match");
     }
@@ -1871,14 +1875,14 @@ use tokio::time::Duration;
         use crate::graph::schema::{NodeCfValue, Nodes};
         use crate::graph::name_hash::NameHash;
         use crate::graph::summary_hash::SummaryHash;
-        use crate::{DataUrl, TemporalRange, TimestampMilli};
+        use crate::{DataUrl, ValidRange, TimestampMilli};
 
         let name_hash = NameHash::from_name("zero_copy_node");
         let summary = DataUrl::from_text("Zero copy test");
         let summary_hash = SummaryHash::from_summary(&summary).unwrap();
-        let temporal_range = TemporalRange::valid_from(TimestampMilli(5000));
+        let temporal_range = ValidRange::valid_from(TimestampMilli(5000));
 
-        let original = NodeCfValue(temporal_range.clone(), name_hash, Some(summary_hash));
+        let original = NodeCfValue(temporal_range.clone(), name_hash, Some(summary_hash), 1, false);
         let bytes = Nodes::value_to_bytes(&original).expect("serialize");
 
         // Access archived data without full deserialization
@@ -1901,16 +1905,16 @@ use tokio::time::Duration;
     fn test_rkyv_forward_edge_value_round_trip() {
         use crate::graph::schema::{ForwardEdgeCfValue, ForwardEdges};
         use crate::graph::summary_hash::SummaryHash;
-        use crate::{DataUrl, TemporalRange, TimestampMilli};
+        use crate::{DataUrl, ValidRange, TimestampMilli};
 
         let summary = DataUrl::from_text("Edge summary");
         let summary_hash = SummaryHash::from_summary(&summary).unwrap();
-        let temporal_range = TemporalRange::valid_between(
+        let temporal_range = ValidRange::valid_between(
             TimestampMilli(100),
             TimestampMilli(200),
         );
 
-        let original = ForwardEdgeCfValue(temporal_range, Some(3.14), Some(summary_hash));
+        let original = ForwardEdgeCfValue(temporal_range, Some(3.14), Some(summary_hash), 1, false);
 
         // Serialize with rkyv
         let bytes = ForwardEdges::value_to_bytes(&original).expect("rkyv serialize");
@@ -1919,7 +1923,7 @@ use tokio::time::Duration;
         let recovered: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&bytes).expect("rkyv deserialize");
 
         // Verify all fields match
-        assert_eq!(original.0, recovered.0, "TemporalRange should match");
+        assert_eq!(original.0, recovered.0, "ValidRange should match");
         assert_eq!(original.1, recovered.1, "Weight should match");
         assert_eq!(original.2, recovered.2, "SummaryHash should match");
     }
@@ -1930,7 +1934,7 @@ use tokio::time::Duration;
         use crate::graph::schema::{ForwardEdgeCfValue, ForwardEdges};
 
         let weight = Some(2.718);
-        let original = ForwardEdgeCfValue(None, weight, None);
+        let original = ForwardEdgeCfValue(None, weight, None, 1, false);
         let bytes = ForwardEdges::value_to_bytes(&original).expect("serialize");
 
         // Access archived data without full deserialization
@@ -1945,9 +1949,9 @@ use tokio::time::Duration;
     #[test]
     fn test_rkyv_reverse_edge_value_round_trip() {
         use crate::graph::schema::{ReverseEdgeCfValue, ReverseEdges};
-        use crate::{TemporalRange, TimestampMilli};
+        use crate::{ValidRange, TimestampMilli};
 
-        let temporal_range = TemporalRange::valid_until(TimestampMilli(9999));
+        let temporal_range = ValidRange::valid_until(TimestampMilli(9999));
 
         let original = ReverseEdgeCfValue(temporal_range);
 
@@ -1958,7 +1962,7 @@ use tokio::time::Duration;
         let recovered: ReverseEdgeCfValue = ReverseEdges::value_from_bytes(&bytes).expect("rkyv deserialize");
 
         // Verify temporal range matches
-        assert_eq!(original.0, recovered.0, "TemporalRange should match");
+        assert_eq!(original.0, recovered.0, "ValidRange should match");
     }
 
     /// Test rkyv handles None values correctly
@@ -1969,19 +1973,23 @@ use tokio::time::Duration;
 
         // NodeCfValue with None summary_hash
         let name_hash = NameHash::from_name("no_summary");
-        let node_value = NodeCfValue(None, name_hash, None);
+        let node_value = NodeCfValue(None, name_hash, None, 1, false);
         let bytes = Nodes::value_to_bytes(&node_value).expect("serialize");
         let recovered: NodeCfValue = Nodes::value_from_bytes(&bytes).expect("deserialize");
-        assert!(recovered.0.is_none(), "TemporalRange should be None");
+        assert!(recovered.0.is_none(), "ValidRange should be None");
         assert!(recovered.2.is_none(), "SummaryHash should be None");
+        assert_eq!(recovered.3, 1, "Version should be 1");
+        assert!(!recovered.4, "Deleted should be false");
 
         // ForwardEdgeCfValue with all None
-        let edge_value = ForwardEdgeCfValue(None, None, None);
+        let edge_value = ForwardEdgeCfValue(None, None, None, 1, false);
         let bytes = ForwardEdges::value_to_bytes(&edge_value).expect("serialize");
         let recovered: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&bytes).expect("deserialize");
-        assert!(recovered.0.is_none(), "TemporalRange should be None");
+        assert!(recovered.0.is_none(), "ValidRange should be None");
         assert!(recovered.1.is_none(), "Weight should be None");
         assert!(recovered.2.is_none(), "SummaryHash should be None");
+        assert_eq!(recovered.3, 1, "Version should be 1");
+        assert!(!recovered.4, "Deleted should be false");
     }
 
     /// Test rkyv serialized size is reasonable
@@ -1993,13 +2001,13 @@ use tokio::time::Duration;
         use crate::DataUrl;
 
         // NodeCfValue with rkyv includes alignment padding
-        // Fields: TemporalRange (Option), NameHash (8), Option<SummaryHash> (8)
-        // rkyv aligned size is typically 64 bytes for this structure
+        // Fields: ValidRange (Option), NameHash (8), Option<SummaryHash> (8), Version (4), bool (1)
+        // rkyv aligned size is typically 64-80 bytes for this structure
         let name_hash = NameHash::from_name("test");
-        let node_value = NodeCfValue(None, name_hash, None);
+        let node_value = NodeCfValue(None, name_hash, None, 1, false);
         let bytes = Nodes::value_to_bytes(&node_value).expect("serialize");
         assert!(
-            bytes.len() <= 80,
+            bytes.len() <= 96,
             "NodeCfValue size should be reasonable: got {} bytes",
             bytes.len()
         );
@@ -2009,10 +2017,10 @@ use tokio::time::Duration;
         // ForwardEdgeCfValue with all fields
         let summary = DataUrl::from_text("x");
         let summary_hash = SummaryHash::from_summary(&summary).unwrap();
-        let edge_value = ForwardEdgeCfValue(None, Some(1.0), Some(summary_hash));
+        let edge_value = ForwardEdgeCfValue(None, Some(1.0), Some(summary_hash), 1, false);
         let bytes = ForwardEdges::value_to_bytes(&edge_value).expect("serialize");
         assert!(
-            bytes.len() <= 80,
+            bytes.len() <= 96,
             "ForwardEdgeCfValue size should be reasonable: got {} bytes",
             bytes.len()
         );
@@ -2062,4 +2070,1018 @@ use tokio::time::Duration;
         assert_eq!(reverse_key.1, recovered.1, "Src ID should match");
         assert_eq!(reverse_key.2, recovered.2, "NameHash should match");
     }
+
+// ============================================================================
+// CONTENT-ADDRESS Tests
+// ============================================================================
+
+mod content_address_tests {
+    use super::*;
+    use crate::graph::schema::{
+        NodeSummary, EdgeSummary, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+        EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
+    };
+    use crate::graph::SummaryHash;
+
+    /// Test that nodes are created with version=1 and deleted=false
+    #[tokio::test]
+    async fn test_node_initial_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let node_id = Id::new();
+        let node_args = AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli::now(),
+            name: "test_node".to_string(),
+            valid_range: None,
+            summary: NodeSummary::from_text("initial summary"),
+        };
+        node_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify node was created with version=1
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+        let nodes_cf = txn_db.cf_handle(Nodes::CF_NAME).unwrap();
+
+        let key_bytes = Nodes::key_to_bytes(&crate::graph::schema::NodeCfKey(node_id));
+        let value_bytes = txn_db.get_cf(nodes_cf, &key_bytes).unwrap().unwrap();
+        let value: crate::graph::schema::NodeCfValue = Nodes::value_from_bytes(&value_bytes).unwrap();
+
+        assert_eq!(value.3, 1, "Initial version should be 1");
+        assert!(!value.4, "Initial deleted flag should be false");
+    }
+
+    /// Test that edges are created with version=1 and deleted=false
+    #[tokio::test]
+    async fn test_edge_initial_version() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let src_id = Id::new();
+        let dst_id = Id::new();
+        let edge_args = AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: TimestampMilli::now(),
+            name: "test_edge".to_string(),
+            summary: EdgeSummary::from_text("initial summary"),
+            weight: Some(1.0),
+            valid_range: None,
+        };
+        edge_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify edge was created with version=1
+        use crate::graph::schema::{ForwardEdges, ForwardEdgeCfKey, ForwardEdgeCfValue};
+        use crate::graph::NameHash;
+
+        let storage = {
+            let mut s = Storage::readwrite(&db_path);
+            s.ready().unwrap();
+            s
+        };
+        let txn_db = storage.transaction_db().unwrap();
+        let edges_cf = txn_db.cf_handle(ForwardEdges::CF_NAME).unwrap();
+
+        let name_hash = NameHash::from_name("test_edge");
+        let key = ForwardEdgeCfKey(src_id, dst_id, name_hash);
+        let key_bytes = ForwardEdges::key_to_bytes(&key);
+        let value_bytes = txn_db.get_cf(edges_cf, &key_bytes).unwrap().unwrap();
+        let value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes).unwrap();
+
+        assert_eq!(value.3, 1, "Initial version should be 1");
+        assert!(!value.4, "Initial deleted flag should be false");
+    }
+
+    /// Test that AddNode writes a CURRENT index entry
+    #[tokio::test]
+    async fn test_node_index_entry_current_marker() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let node_id = Id::new();
+        let summary = NodeSummary::from_text("test summary for indexing");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let node_args = AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli::now(),
+            name: "indexed_node".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        };
+        node_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify index entry exists with CURRENT marker
+        let storage = {
+            let mut s = Storage::readwrite(&db_path);
+            s.ready().unwrap();
+            s
+        };
+        let txn_db = storage.transaction_db().unwrap();
+        let index_cf = txn_db.cf_handle(NodeSummaryIndex::CF_NAME).unwrap();
+
+        let index_key = NodeSummaryIndexCfKey(summary_hash, node_id, 1);
+        let index_key_bytes = NodeSummaryIndex::key_to_bytes(&index_key);
+        let index_value_bytes = txn_db.get_cf(index_cf, &index_key_bytes).unwrap().unwrap();
+        let index_value: NodeSummaryIndexCfValue = NodeSummaryIndex::value_from_bytes(&index_value_bytes).unwrap();
+
+        assert!(index_value.is_current(), "Index entry should have CURRENT marker");
+    }
+
+    /// Test that AddEdge writes a CURRENT index entry
+    #[tokio::test]
+    async fn test_edge_index_entry_current_marker() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let src_id = Id::new();
+        let dst_id = Id::new();
+        let summary = EdgeSummary::from_text("test edge summary");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let edge_args = AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: TimestampMilli::now(),
+            name: "indexed_edge".to_string(),
+            summary: summary.clone(),
+            weight: None,
+            valid_range: None,
+        };
+        edge_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify index entry exists with CURRENT marker
+        use crate::graph::NameHash;
+        let storage = {
+            let mut s = Storage::readwrite(&db_path);
+            s.ready().unwrap();
+            s
+        };
+        let txn_db = storage.transaction_db().unwrap();
+        let index_cf = txn_db.cf_handle(EdgeSummaryIndex::CF_NAME).unwrap();
+
+        let name_hash = NameHash::from_name("indexed_edge");
+        let index_key = EdgeSummaryIndexCfKey(summary_hash, src_id, dst_id, name_hash, 1);
+        let index_key_bytes = EdgeSummaryIndex::key_to_bytes(&index_key);
+        let index_value_bytes = txn_db.get_cf(index_cf, &index_key_bytes).unwrap().unwrap();
+        let index_value: EdgeSummaryIndexCfValue = EdgeSummaryIndex::value_from_bytes(&index_value_bytes).unwrap();
+
+        assert!(index_value.is_current(), "Index entry should have CURRENT marker");
+    }
+
+    /// Test reverse lookup - nodes with same summary hash create multiple index entries
+    #[tokio::test]
+    async fn test_node_reverse_lookup() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config.clone(), &db_path);
+
+        // Create two nodes with same summary
+        let summary = NodeSummary::from_text("shared summary content");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let node1_id = Id::new();
+        let node1_args = AddNode {
+            id: node1_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node1".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        };
+        node1_args.run(&writer).await.unwrap();
+
+        let node2_id = Id::new();
+        let node2_args = AddNode {
+            id: node2_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node2".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        };
+        node2_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify both nodes created index entries by prefix scanning
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+        let index_cf = txn_db.cf_handle(NodeSummaryIndex::CF_NAME).unwrap();
+
+        // Prefix scan by hash
+        let hash_prefix = summary_hash.as_bytes();
+        let mut found_ids = Vec::new();
+        let iter = txn_db.prefix_iterator_cf(index_cf, hash_prefix);
+        for item in iter {
+            let (key_bytes, value_bytes) = item.unwrap();
+            if !key_bytes.starts_with(hash_prefix) {
+                break;
+            }
+            let index_key: NodeSummaryIndexCfKey = NodeSummaryIndex::key_from_bytes(&key_bytes).unwrap();
+            let index_value: NodeSummaryIndexCfValue = NodeSummaryIndex::value_from_bytes(&value_bytes).unwrap();
+            if index_value.is_current() {
+                found_ids.push(index_key.1);
+            }
+        }
+
+        assert_eq!(found_ids.len(), 2, "Should find both nodes with same summary hash");
+        assert!(found_ids.contains(&node1_id), "Should contain node1");
+        assert!(found_ids.contains(&node2_id), "Should contain node2");
+    }
+
+    /// Test reverse lookup - edges with same summary hash create multiple index entries
+    #[tokio::test]
+    async fn test_edge_reverse_lookup() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config.clone(), &db_path);
+
+        // Create two edges with same summary
+        let summary = EdgeSummary::from_text("shared edge summary");
+        let summary_hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let edge1_args = AddEdge {
+            source_node_id: Id::new(),
+            target_node_id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "edge1".to_string(),
+            summary: summary.clone(),
+            weight: None,
+            valid_range: None,
+        };
+        edge1_args.run(&writer).await.unwrap();
+
+        let edge2_args = AddEdge {
+            source_node_id: Id::new(),
+            target_node_id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "edge2".to_string(),
+            summary: summary.clone(),
+            weight: None,
+            valid_range: None,
+        };
+        edge2_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify both edges created index entries by prefix scanning
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+        let index_cf = txn_db.cf_handle(EdgeSummaryIndex::CF_NAME).unwrap();
+
+        // Prefix scan by hash
+        let hash_prefix = summary_hash.as_bytes();
+        let mut count = 0;
+        let iter = txn_db.prefix_iterator_cf(index_cf, hash_prefix);
+        for item in iter {
+            let (key_bytes, value_bytes) = item.unwrap();
+            if !key_bytes.starts_with(hash_prefix) {
+                break;
+            }
+            let index_value: EdgeSummaryIndexCfValue = EdgeSummaryIndex::value_from_bytes(&value_bytes).unwrap();
+            if index_value.is_current() {
+                count += 1;
+            }
+        }
+
+        assert_eq!(count, 2, "Should find both edges with same summary hash");
+    }
+
+    /// Test GC configuration defaults
+    #[test]
+    fn test_gc_config_defaults() {
+        use crate::graph::gc::GraphGcConfig;
+        use std::time::Duration;
+
+        let config = GraphGcConfig::default();
+        assert_eq!(config.interval, Duration::from_secs(60));
+        assert_eq!(config.batch_size, 1000);
+        assert_eq!(config.versions_to_keep, 2);
+        assert!(config.process_on_startup);
+    }
+
+    /// Test repair configuration defaults
+    #[test]
+    fn test_repair_config_defaults() {
+        use crate::graph::repair::RepairConfig;
+        use std::time::Duration;
+
+        let config = RepairConfig::default();
+        assert_eq!(config.interval, Duration::from_secs(3600));
+        assert_eq!(config.batch_size, 10000);
+        assert!(!config.auto_fix);
+        assert!(!config.process_on_startup);
+    }
+
+    /// Test GC metrics tracking
+    #[test]
+    fn test_gc_metrics() {
+        use crate::graph::gc::GcMetrics;
+        use std::sync::atomic::Ordering;
+
+        let metrics = GcMetrics::new();
+        metrics.node_index_entries_deleted.fetch_add(10, Ordering::Relaxed);
+        metrics.edge_index_entries_deleted.fetch_add(5, Ordering::Relaxed);
+        metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.node_index_entries_deleted, 10);
+        assert_eq!(snapshot.edge_index_entries_deleted, 5);
+        assert_eq!(snapshot.cycles_completed, 1);
+        assert_eq!(snapshot.total_deleted(), 15);
+    }
+
+    /// Test repair metrics tracking
+    #[test]
+    fn test_repair_metrics() {
+        use crate::graph::repair::RepairMetrics;
+        use std::sync::atomic::Ordering;
+
+        let metrics = RepairMetrics::new();
+        metrics.missing_reverse.fetch_add(5, Ordering::Relaxed);
+        metrics.orphan_reverse.fetch_add(3, Ordering::Relaxed);
+        metrics.forward_checked.fetch_add(100, Ordering::Relaxed);
+        metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.missing_reverse, 5);
+        assert_eq!(snapshot.orphan_reverse, 3);
+        assert_eq!(snapshot.total_inconsistencies(), 8);
+        assert!(!snapshot.is_consistent());
+    }
+
+    /// Test Version type
+    #[test]
+    fn test_version_type() {
+        use crate::graph::schema::Version;
+        let v: Version = 1;
+        assert_eq!(v, 1u32);
+
+        // Test increment doesn't panic at normal values
+        let v2: Version = v + 1;
+        assert_eq!(v2, 2);
+    }
+
+    /// Test NodeSummaryIndexCfValue marker semantics
+    #[test]
+    fn test_index_marker_semantics() {
+        let current = NodeSummaryIndexCfValue(NodeSummaryIndexCfValue::CURRENT);
+        let stale = NodeSummaryIndexCfValue(NodeSummaryIndexCfValue::STALE);
+
+        assert!(current.is_current());
+        assert!(!stale.is_current());
+    }
+
+    // =========================================================================
+    // RefCount Invariant Tests
+    // =========================================================================
+    //
+    // These tests verify the critical RefCount invariant:
+    //   refcount = number of live entities referencing this summary
+    //
+    // Mutations that affect refcount:
+    // - AddNode:       increment refcount for summary hash
+    // - AddEdge:       increment refcount for summary hash
+    // - UpdateNode:    increment new hash, decrement old hash
+    // - UpdateEdge:    increment new hash, decrement old hash
+    // - DeleteNode:    decrement refcount for current hash
+    // - DeleteEdge:    decrement refcount for current hash
+    //
+    // When refcount reaches 0, the summary row is deleted.
+    // =========================================================================
+
+    use crate::graph::schema::{
+        NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue,
+        EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue,
+    };
+    use crate::graph::mutation::{UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge};
+
+    /// Helper to get node summary refcount from storage
+    fn get_node_summary_refcount(
+        txn_db: &rocksdb::TransactionDB,
+        hash: SummaryHash,
+    ) -> Option<u32> {
+        let cf = txn_db.cf_handle(NodeSummaries::CF_NAME)?;
+        let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
+        txn_db.get_cf(cf, &key_bytes).ok()?.map(|bytes| {
+            let value: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&bytes).unwrap();
+            value.0 // refcount
+        })
+    }
+
+    /// Helper to get edge summary refcount from storage
+    fn get_edge_summary_refcount(
+        txn_db: &rocksdb::TransactionDB,
+        hash: SummaryHash,
+    ) -> Option<u32> {
+        let cf = txn_db.cf_handle(EdgeSummaries::CF_NAME)?;
+        let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
+        txn_db.get_cf(cf, &key_bytes).ok()?.map(|bytes| {
+            let value: EdgeSummaryCfValue = EdgeSummaries::value_from_bytes(&bytes).unwrap();
+            value.0 // refcount
+        })
+    }
+
+    /// Test: AddNode increments refcount from 0 to 1 (creates row)
+    #[tokio::test]
+    async fn test_add_node_increments_refcount() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let summary = NodeSummary::from_text("unique summary for refcount test");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let node_args = AddNode {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "refcount_node".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        };
+        node_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        let refcount = get_node_summary_refcount(txn_db, hash);
+        assert_eq!(refcount, Some(1), "AddNode should create summary with refcount=1");
+    }
+
+    /// Test: Two nodes with same summary → refcount=2
+    #[tokio::test]
+    async fn test_two_nodes_same_summary_refcount_is_two() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let summary = NodeSummary::from_text("shared summary for two nodes");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+
+        // Add first node
+        AddNode {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "node1".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        }.run(&writer).await.unwrap();
+
+        // Add second node with same summary
+        AddNode {
+            id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "node2".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        let refcount = get_node_summary_refcount(txn_db, hash);
+        assert_eq!(refcount, Some(2), "Two nodes sharing summary should have refcount=2");
+    }
+
+    /// Test: AddEdge increments refcount from 0 to 1 (creates row)
+    #[tokio::test]
+    async fn test_add_edge_increments_refcount() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let summary = EdgeSummary::from_text("edge summary for refcount test");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let edge_args = AddEdge {
+            source_node_id: Id::new(),
+            target_node_id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "refcount_edge".to_string(),
+            summary: summary.clone(),
+            weight: None,
+            valid_range: None,
+        };
+        edge_args.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        let refcount = get_edge_summary_refcount(txn_db, hash);
+        assert_eq!(refcount, Some(1), "AddEdge should create summary with refcount=1");
+    }
+
+    /// Test: Two edges with same summary → refcount=2
+    #[tokio::test]
+    async fn test_two_edges_same_summary_refcount_is_two() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let summary = EdgeSummary::from_text("shared edge summary");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+
+        // Add first edge
+        AddEdge {
+            source_node_id: Id::new(),
+            target_node_id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "edge1".to_string(),
+            summary: summary.clone(),
+            weight: None,
+            valid_range: None,
+        }.run(&writer).await.unwrap();
+
+        // Add second edge with same summary
+        AddEdge {
+            source_node_id: Id::new(),
+            target_node_id: Id::new(),
+            ts_millis: TimestampMilli::now(),
+            name: "edge2".to_string(),
+            summary: summary.clone(),
+            weight: None,
+            valid_range: None,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        let refcount = get_edge_summary_refcount(txn_db, hash);
+        assert_eq!(refcount, Some(2), "Two edges sharing summary should have refcount=2");
+    }
+
+    /// Test: UpdateNodeSummary increments new hash, decrements old hash
+    #[tokio::test]
+    async fn test_update_node_summary_adjusts_refcounts() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let old_summary = NodeSummary::from_text("original summary");
+        let new_summary = NodeSummary::from_text("updated summary");
+        let old_hash = SummaryHash::from_summary(&old_summary).unwrap();
+        let new_hash = SummaryHash::from_summary(&new_summary).unwrap();
+
+        let node_id = Id::new();
+
+        // Add node with original summary (refcount=1)
+        AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli::now(),
+            name: "update_test_node".to_string(),
+            valid_range: None,
+            summary: old_summary.clone(),
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Update node summary (old refcount→0, new refcount→1)
+        UpdateNodeSummary {
+            id: node_id,
+            new_summary: new_summary.clone(),
+            expected_version: 1,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        // Old summary should be deleted (refcount=0)
+        let old_refcount = get_node_summary_refcount(txn_db, old_hash);
+        assert_eq!(old_refcount, None, "Old summary should be deleted when refcount reaches 0");
+
+        // New summary should exist with refcount=1
+        let new_refcount = get_node_summary_refcount(txn_db, new_hash);
+        assert_eq!(new_refcount, Some(1), "New summary should have refcount=1");
+    }
+
+    /// Test: UpdateEdgeSummary increments new hash, decrements old hash
+    #[tokio::test]
+    async fn test_update_edge_summary_adjusts_refcounts() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let old_summary = EdgeSummary::from_text("original edge summary");
+        let new_summary = EdgeSummary::from_text("updated edge summary");
+        let old_hash = SummaryHash::from_summary(&old_summary).unwrap();
+        let new_hash = SummaryHash::from_summary(&new_summary).unwrap();
+
+        let src_id = Id::new();
+        let dst_id = Id::new();
+        let edge_name = "update_test_edge".to_string();
+
+        // Add edge with original summary (refcount=1)
+        AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: TimestampMilli::now(),
+            name: edge_name.clone(),
+            summary: old_summary.clone(),
+            weight: None,
+            valid_range: None,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Update edge summary (old refcount→0, new refcount→1)
+        UpdateEdgeSummary {
+            src_id,
+            dst_id,
+            name: edge_name.clone(),
+            new_summary: new_summary.clone(),
+            expected_version: 1,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        // Old summary should be deleted (refcount=0)
+        let old_refcount = get_edge_summary_refcount(txn_db, old_hash);
+        assert_eq!(old_refcount, None, "Old edge summary should be deleted when refcount reaches 0");
+
+        // New summary should exist with refcount=1
+        let new_refcount = get_edge_summary_refcount(txn_db, new_hash);
+        assert_eq!(new_refcount, Some(1), "New edge summary should have refcount=1");
+    }
+
+    /// Test: DeleteNode decrements refcount (single reference → deletion)
+    #[tokio::test]
+    async fn test_delete_node_decrements_refcount() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let summary = NodeSummary::from_text("summary to be deleted");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+        let node_id = Id::new();
+
+        // Add node (refcount=1)
+        AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli::now(),
+            name: "delete_test_node".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Delete node (refcount→0 → row deleted)
+        DeleteNode {
+            id: node_id,
+            expected_version: 1,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        // Summary should be deleted (refcount=0)
+        let refcount = get_node_summary_refcount(txn_db, hash);
+        assert_eq!(refcount, None, "Summary should be deleted when last reference is removed");
+    }
+
+    /// Test: DeleteEdge decrements refcount (single reference → deletion)
+    #[tokio::test]
+    async fn test_delete_edge_decrements_refcount() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let summary = EdgeSummary::from_text("edge summary to be deleted");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+        let src_id = Id::new();
+        let dst_id = Id::new();
+        let edge_name = "delete_test_edge".to_string();
+
+        // Add edge (refcount=1)
+        AddEdge {
+            source_node_id: src_id,
+            target_node_id: dst_id,
+            ts_millis: TimestampMilli::now(),
+            name: edge_name.clone(),
+            summary: summary.clone(),
+            weight: None,
+            valid_range: None,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Delete edge (refcount→0 → row deleted)
+        DeleteEdge {
+            src_id,
+            dst_id,
+            name: edge_name.clone(),
+            expected_version: 1,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        // Summary should be deleted (refcount=0)
+        let refcount = get_edge_summary_refcount(txn_db, hash);
+        assert_eq!(refcount, None, "Edge summary should be deleted when last reference is removed");
+    }
+
+    /// Test: Shared summary survives when only one node is deleted
+    #[tokio::test]
+    async fn test_shared_summary_survives_partial_deletion() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let summary = NodeSummary::from_text("shared summary that should survive");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+
+        let node1_id = Id::new();
+        let node2_id = Id::new();
+
+        // Add two nodes with same summary (refcount=2)
+        AddNode {
+            id: node1_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node1".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        }.run(&writer).await.unwrap();
+
+        AddNode {
+            id: node2_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node2".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Delete only node1 (refcount→1)
+        DeleteNode {
+            id: node1_id,
+            expected_version: 1,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        // Summary should still exist with refcount=1
+        let refcount = get_node_summary_refcount(txn_db, hash);
+        assert_eq!(refcount, Some(1), "Summary should survive with refcount=1 after one node deleted");
+    }
+
+    /// Test: Update to same summary content (same hash) doesn't change refcount
+    #[tokio::test]
+    async fn test_update_to_same_hash_is_noop_for_refcount() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let summary = NodeSummary::from_text("identical summary content");
+        let hash = SummaryHash::from_summary(&summary).unwrap();
+        let node_id = Id::new();
+
+        // Add node (refcount=1)
+        AddNode {
+            id: node_id,
+            ts_millis: TimestampMilli::now(),
+            name: "same_hash_test".to_string(),
+            valid_range: None,
+            summary: summary.clone(),
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Update to same content (same hash) - inc+dec should balance to refcount=1
+        UpdateNodeSummary {
+            id: node_id,
+            new_summary: summary.clone(),
+            expected_version: 1,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        // Refcount should still be 1 (increment then decrement for same hash)
+        let refcount = get_node_summary_refcount(txn_db, hash);
+        assert_eq!(refcount, Some(1), "Update to same hash should result in refcount=1");
+    }
+
+    /// Integration test: Complex lifecycle with multiple operations
+    #[tokio::test]
+    async fn test_refcount_complex_lifecycle() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test_db");
+
+        let config = WriterConfig::default();
+        let (writer, receiver) = create_mutation_writer(config.clone());
+        let consumer_handle = spawn_mutation_consumer(receiver, config, &db_path);
+
+        let summary_a = NodeSummary::from_text("Summary A");
+        let summary_b = NodeSummary::from_text("Summary B");
+        let summary_c = NodeSummary::from_text("Summary C");
+        let hash_a = SummaryHash::from_summary(&summary_a).unwrap();
+        let hash_b = SummaryHash::from_summary(&summary_b).unwrap();
+        let hash_c = SummaryHash::from_summary(&summary_c).unwrap();
+
+        let node1_id = Id::new();
+        let node2_id = Id::new();
+        let node3_id = Id::new();
+
+        // Step 1: Add 3 nodes - two with summary A, one with summary B
+        // hash_a: refcount=2, hash_b: refcount=1
+        AddNode {
+            id: node1_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node1".to_string(),
+            valid_range: None,
+            summary: summary_a.clone(),
+        }.run(&writer).await.unwrap();
+
+        AddNode {
+            id: node2_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node2".to_string(),
+            valid_range: None,
+            summary: summary_a.clone(),
+        }.run(&writer).await.unwrap();
+
+        AddNode {
+            id: node3_id,
+            ts_millis: TimestampMilli::now(),
+            name: "node3".to_string(),
+            valid_range: None,
+            summary: summary_b.clone(),
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Step 2: Update node1 from A to C
+        // hash_a: refcount=1, hash_b: refcount=1, hash_c: refcount=1
+        UpdateNodeSummary {
+            id: node1_id,
+            new_summary: summary_c.clone(),
+            expected_version: 1,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Step 3: Delete node2 (last A reference)
+        // hash_a: deleted, hash_b: refcount=1, hash_c: refcount=1
+        DeleteNode {
+            id: node2_id,
+            expected_version: 1,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Step 4: Update node3 from B to C
+        // hash_a: deleted, hash_b: deleted, hash_c: refcount=2
+        UpdateNodeSummary {
+            id: node3_id,
+            new_summary: summary_c.clone(),
+            expected_version: 1,
+        }.run(&writer).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(writer);
+        consumer_handle.await.unwrap().unwrap();
+
+        // Verify final state
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let txn_db = storage.transaction_db().unwrap();
+
+        let refcount_a = get_node_summary_refcount(txn_db, hash_a);
+        let refcount_b = get_node_summary_refcount(txn_db, hash_b);
+        let refcount_c = get_node_summary_refcount(txn_db, hash_c);
+
+        assert_eq!(refcount_a, None, "Summary A should be deleted");
+        assert_eq!(refcount_b, None, "Summary B should be deleted");
+        assert_eq!(refcount_c, Some(2), "Summary C should have refcount=2 (node1 and node3)");
+    }
+}
 

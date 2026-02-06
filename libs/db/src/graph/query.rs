@@ -140,7 +140,7 @@ fn resolve_node_summary(
     match value_bytes {
         Some(bytes) => {
             let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
+            Ok(value.1) // .1 is the summary, .0 is the refcount
         }
         None => Ok(NodeSummary::from_text("")),
     }
@@ -175,7 +175,7 @@ fn resolve_edge_summary(
     match value_bytes {
         Some(bytes) => {
             let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
+            Ok(value.1) // .1 is the summary, .0 is the refcount
         }
         None => Ok(EdgeSummary::from_text("")),
     }
@@ -200,7 +200,7 @@ fn resolve_edge_summary_from_txn(
     match txn.get_cf(summaries_cf, &key_bytes)? {
         Some(bytes) => {
             let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
+            Ok(value.1) // .1 is the summary, .0 is the refcount
         }
         None => Ok(EdgeSummary::from_text("")),
     }
@@ -225,7 +225,7 @@ fn resolve_node_summary_from_txn(
     match txn.get_cf(summaries_cf, &key_bytes)? {
         Some(bytes) => {
             let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.0)
+            Ok(value.1) // .1 is the summary, .0 is the refcount
         }
         None => Ok(NodeSummary::from_text("")),
     }
@@ -394,6 +394,9 @@ pub enum Query {
     IncomingEdges(IncomingEdgesDispatch),
     AllNodes(AllNodesDispatch),
     AllEdges(AllEdgesDispatch),
+    // CONTENT-ADDRESS reverse lookup queries
+    NodesBySummaryHash(NodesBySummaryHashDispatch),
+    EdgesBySummaryHash(EdgesBySummaryHashDispatch),
 }
 
 impl std::fmt::Display for Query {
@@ -426,6 +429,16 @@ impl std::fmt::Display for Query {
             Query::IncomingEdges(q) => write!(f, "IncomingEdges: id={}", q.params.id),
             Query::AllNodes(q) => write!(f, "AllNodes: limit={}", q.params.limit),
             Query::AllEdges(q) => write!(f, "AllEdges: limit={}", q.params.limit),
+            Query::NodesBySummaryHash(q) => write!(
+                f,
+                "NodesBySummaryHash: hash={:?}, current_only={}",
+                q.params.hash, q.params.current_only
+            ),
+            Query::EdgesBySummaryHash(q) => write!(
+                f,
+                "EdgesBySummaryHash: hash={:?}, current_only={}",
+                q.params.hash, q.params.current_only
+            ),
         }
     }
 }
@@ -441,6 +454,8 @@ crate::impl_query_processor!(
     IncomingEdgesDispatch,
     AllNodesDispatch,
     AllEdgesDispatch,
+    NodesBySummaryHashDispatch,
+    EdgesBySummaryHashDispatch,
 );
 
 #[async_trait::async_trait]
@@ -456,6 +471,8 @@ impl QueryProcessor for Query {
             Query::IncomingEdges(q) => q.process_and_send(processor).await,
             Query::AllNodes(q) => q.process_and_send(processor).await,
             Query::AllEdges(q) => q.process_and_send(processor).await,
+            Query::NodesBySummaryHash(q) => q.process_and_send(processor).await,
+            Query::EdgesBySummaryHash(q) => q.process_and_send(processor).await,
         }
     }
 }
@@ -630,8 +647,8 @@ pub struct OutgoingEdges {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the TemporalRange in the record
-    /// Records without a TemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the ValidRange in the record
+    /// Records without a ValidRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
@@ -662,8 +679,8 @@ pub struct IncomingEdges {
 
     /// Reference timestamp for temporal validity checks
     /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the TemporalRange in the record
-    /// Records without a TemporalRange (None) are considered always valid
+    /// Temporal validity is always checked against the ValidRange in the record
+    /// Records without a ValidRange (None) are considered always valid
     pub reference_ts_millis: Option<TimestampMilli>,
 }
 
@@ -2756,6 +2773,293 @@ impl TransactionQueryExecutor for AllEdges {
 }
 
 // ============================================================================
+// Reverse Lookup Query Types (CONTENT-ADDRESS)
+// ============================================================================
+// (claude, 2026-02-02, in-progress) CONTENT-ADDRESS reverse lookup APIs
+
+/// Query parameters for finding nodes by summary hash.
+///
+/// Returns all (node_id, version, is_current) tuples that have the given summary hash.
+/// Use `current_only: true` to filter to only current versions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodesBySummaryHash {
+    /// The summary hash to search for
+    pub hash: SummaryHash,
+
+    /// If true, only return current versions (marker = CURRENT)
+    pub current_only: bool,
+}
+
+/// Result type for reverse node lookup
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeSummaryLookupResult {
+    /// The node ID
+    pub node_id: Id,
+    /// The version at which this hash was set
+    pub version: schema::Version,
+    /// Whether this is the current version (marker = CURRENT)
+    pub is_current: bool,
+}
+
+/// Internal dispatch wrapper for NodesBySummaryHash query execution.
+#[derive(Debug)]
+pub(crate) struct NodesBySummaryHashDispatch {
+    pub(crate) params: NodesBySummaryHash,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<NodeSummaryLookupResult>>>,
+}
+
+impl NodesBySummaryHashDispatch {
+    pub(crate) fn new(
+        params: NodesBySummaryHash,
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<Vec<NodeSummaryLookupResult>>>,
+    ) -> Self {
+        Self {
+            params,
+            timeout,
+            result_tx,
+        }
+    }
+
+    /// Send the result back to the client (consumes self).
+    pub(crate) fn send_result(self, result: Result<Vec<NodeSummaryLookupResult>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+impl NodesBySummaryHash {
+    /// Create a new query for all nodes (any version) with the given hash.
+    pub fn all(hash: SummaryHash) -> Self {
+        Self {
+            hash,
+            current_only: false,
+        }
+    }
+
+    /// Create a new query for only current nodes with the given hash.
+    pub fn current(hash: SummaryHash) -> Self {
+        Self {
+            hash,
+            current_only: true,
+        }
+    }
+}
+
+/// Query parameters for finding edges by summary hash.
+///
+/// Returns all (edge_key, version, is_current) tuples that have the given summary hash.
+/// Use `current_only: true` to filter to only current versions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgesBySummaryHash {
+    /// The summary hash to search for
+    pub hash: SummaryHash,
+
+    /// If true, only return current versions (marker = CURRENT)
+    pub current_only: bool,
+}
+
+/// Result type for reverse edge lookup
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeSummaryLookupResult {
+    /// Source node ID
+    pub src_id: SrcId,
+    /// Destination node ID
+    pub dst_id: DstId,
+    /// Edge name hash (use resolve_name to get full name)
+    pub name_hash: NameHash,
+    /// The version at which this hash was set
+    pub version: schema::Version,
+    /// Whether this is the current version (marker = CURRENT)
+    pub is_current: bool,
+}
+
+/// Internal dispatch wrapper for EdgesBySummaryHash query execution.
+#[derive(Debug)]
+pub(crate) struct EdgesBySummaryHashDispatch {
+    pub(crate) params: EdgesBySummaryHash,
+    pub(crate) timeout: Duration,
+    pub(crate) result_tx: oneshot::Sender<Result<Vec<EdgeSummaryLookupResult>>>,
+}
+
+impl EdgesBySummaryHashDispatch {
+    pub(crate) fn new(
+        params: EdgesBySummaryHash,
+        timeout: Duration,
+        result_tx: oneshot::Sender<Result<Vec<EdgeSummaryLookupResult>>>,
+    ) -> Self {
+        Self {
+            params,
+            timeout,
+            result_tx,
+        }
+    }
+
+    /// Send the result back to the client (consumes self).
+    pub(crate) fn send_result(self, result: Result<Vec<EdgeSummaryLookupResult>>) {
+        let _ = self.result_tx.send(result);
+    }
+}
+
+impl EdgesBySummaryHash {
+    /// Create a new query for all edges (any version) with the given hash.
+    pub fn all(hash: SummaryHash) -> Self {
+        Self {
+            hash,
+            current_only: false,
+        }
+    }
+
+    /// Create a new query for only current edges with the given hash.
+    pub fn current(hash: SummaryHash) -> Self {
+        Self {
+            hash,
+            current_only: true,
+        }
+    }
+}
+
+// ============================================================================
+// Runnable Implementations for Reverse Lookup Queries
+// ============================================================================
+
+#[async_trait::async_trait]
+impl Runnable<super::Reader> for NodesBySummaryHash {
+    type Output = Vec<NodeSummaryLookupResult>;
+
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = oneshot::channel();
+        let dispatch = NodesBySummaryHashDispatch::new(self, timeout, result_tx);
+        reader.send_query(Query::NodesBySummaryHash(dispatch)).await?;
+        result_rx.await?
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable<super::Reader> for EdgesBySummaryHash {
+    type Output = Vec<EdgeSummaryLookupResult>;
+
+    async fn run(self, reader: &super::Reader, timeout: Duration) -> Result<Self::Output> {
+        let (result_tx, result_rx) = oneshot::channel();
+        let dispatch = EdgesBySummaryHashDispatch::new(self, timeout, result_tx);
+        reader.send_query(Query::EdgesBySummaryHash(dispatch)).await?;
+        result_rx.await?
+    }
+}
+
+// ============================================================================
+// QueryExecutor Implementations for Reverse Lookup Queries
+// ============================================================================
+
+#[async_trait::async_trait]
+impl QueryExecutor for NodesBySummaryHashDispatch {
+    type Output = Vec<NodeSummaryLookupResult>;
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        use schema::NodeSummaryIndex;
+
+        let params = &self.params;
+        tracing::debug!(hash = ?params.hash, current_only = params.current_only, "Executing NodesBySummaryHash query");
+
+        let txn_db = storage.transaction_db()?;
+        let cf = txn_db
+            .cf_handle(NodeSummaryIndex::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
+
+        // Use prefix scan with just the hash (8 bytes)
+        let prefix = params.hash.as_bytes();
+        let iter = txn_db.prefix_iterator_cf(cf, prefix);
+
+        let mut results = Vec::new();
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+
+            // Check if key still starts with our prefix (prefix iterator may overrun)
+            if key_bytes.len() < 8 || &key_bytes[0..8] != prefix {
+                break;
+            }
+
+            let index_key = NodeSummaryIndex::key_from_bytes(&key_bytes)?;
+            let index_value = NodeSummaryIndex::value_from_bytes(&value_bytes)?;
+
+            let is_current = index_value.is_current();
+
+            // Filter by current_only if requested
+            if params.current_only && !is_current {
+                continue;
+            }
+
+            results.push(NodeSummaryLookupResult {
+                node_id: index_key.1,
+                version: index_key.2,
+                is_current,
+            });
+        }
+
+        Ok(results)
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+#[async_trait::async_trait]
+impl QueryExecutor for EdgesBySummaryHashDispatch {
+    type Output = Vec<EdgeSummaryLookupResult>;
+
+    async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
+        use schema::EdgeSummaryIndex;
+
+        let params = &self.params;
+        tracing::debug!(hash = ?params.hash, current_only = params.current_only, "Executing EdgesBySummaryHash query");
+
+        let txn_db = storage.transaction_db()?;
+        let cf = txn_db
+            .cf_handle(EdgeSummaryIndex::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
+
+        // Use prefix scan with just the hash (8 bytes)
+        let prefix = params.hash.as_bytes();
+        let iter = txn_db.prefix_iterator_cf(cf, prefix);
+
+        let mut results = Vec::new();
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+
+            // Check if key still starts with our prefix (prefix iterator may overrun)
+            if key_bytes.len() < 8 || &key_bytes[0..8] != prefix {
+                break;
+            }
+
+            let index_key = EdgeSummaryIndex::key_from_bytes(&key_bytes)?;
+            let index_value = EdgeSummaryIndex::value_from_bytes(&value_bytes)?;
+
+            let is_current = index_value.is_current();
+
+            // Filter by current_only if requested
+            if params.current_only && !is_current {
+                continue;
+            }
+
+            results.push(EdgeSummaryLookupResult {
+                src_id: index_key.1,
+                dst_id: index_key.2,
+                name_hash: index_key.3,
+                version: index_key.4,
+                is_current,
+            });
+        }
+
+        Ok(results)
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -3377,7 +3681,7 @@ mod tests {
         use crate::writer::Runnable as MutationRunnable;
         use super::super::schema::EdgeSummary;
         use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
-        use crate::{Id, TemporalRange, TimestampMilli};
+        use crate::{Id, ValidRange, TimestampMilli};
         use std::ops::Bound;
         use tempfile::TempDir;
 
@@ -3441,7 +3745,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(1000),
             content: DataUrl::from_markdown("Valid from 1000 to 3000"),
-            valid_range: TemporalRange::valid_between(TimestampMilli(1000), TimestampMilli(3000)),
+            valid_range: ValidRange::valid_between(TimestampMilli(1000), TimestampMilli(3000)),
         }
         .run(&writer)
         .await
@@ -3454,7 +3758,7 @@ mod tests {
             edge_name: edge_name.to_string(),
             ts_millis: TimestampMilli(2000),
             content: DataUrl::from_markdown("Valid from 2000 to 5000"),
-            valid_range: TemporalRange::valid_between(TimestampMilli(2000), TimestampMilli(5000)),
+            valid_range: ValidRange::valid_between(TimestampMilli(2000), TimestampMilli(5000)),
         }
         .run(&writer)
         .await

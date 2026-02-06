@@ -429,7 +429,7 @@ mod tests {
         // Now update its temporal range (which should delete the document)
         let update = Mutation::UpdateNodeValidSinceUntil(UpdateNodeValidSinceUntil {
             id: node_id,
-            temporal_range: crate::TemporalRange(
+            temporal_range: crate::ValidRange(
                 Some(TimestampMilli(0)),
                 Some(TimestampMilli(1000)),
             ),
@@ -761,7 +761,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(now),
                 name: "currently_valid".to_string(),
-                valid_range: Some(crate::TemporalRange(
+                valid_range: Some(crate::ValidRange(
                     Some(TimestampMilli(past)),
                     Some(TimestampMilli(future)),
                 )),
@@ -772,7 +772,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(now),
                 name: "expired".to_string(),
-                valid_range: Some(crate::TemporalRange(
+                valid_range: Some(crate::ValidRange(
                     Some(TimestampMilli(past - 86400_000)),
                     Some(TimestampMilli(past)),
                 )),
@@ -783,7 +783,7 @@ mod tests {
                 id: Id::new(),
                 ts_millis: TimestampMilli(now),
                 name: "future".to_string(),
-                valid_range: Some(crate::TemporalRange(Some(TimestampMilli(future)), None)),
+                valid_range: Some(crate::ValidRange(Some(TimestampMilli(future)), None)),
                 summary: crate::graph::schema::NodeSummary::from_text("not yet valid"),
             }),
         ];
