@@ -9,7 +9,7 @@ use crate::graph::schema::{EdgeSummary, NodeFragments, Nodes, ALL_COLUMN_FAMILIE
 use crate::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer, spawn_mutation_consumer_with_next, WriterConfig,
 };
-use crate::{Id, ValidRange, TimestampMilli};
+use crate::{Id, ActivePeriod, TimestampMilli};
 use rocksdb::DB;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -145,7 +145,7 @@ use tokio::time::Duration;
 
         UpdateNodeValidSinceUntil {
             id: node_id,
-            temporal_range: ValidRange(None, None),
+            temporal_range: ActivePeriod(None, None),
             reason: "test node invalidation".to_string(),
         }
         .run(&writer)
@@ -156,7 +156,7 @@ use tokio::time::Duration;
             src_id: edge_src_id,
             dst_id: edge_dst_id,
             name: edge_name,
-            temporal_range: ValidRange(None, None),
+            temporal_range: ActivePeriod(None, None),
             reason: "test edge invalidation".to_string(),
         }
         .run(&writer)
@@ -1844,13 +1844,13 @@ use tokio::time::Duration;
         use crate::graph::schema::{NodeCfValue, Nodes};
         use crate::graph::name_hash::NameHash;
         use crate::graph::summary_hash::SummaryHash;
-        use crate::{DataUrl, ValidRange, TimestampMilli};
+        use crate::{DataUrl, ActivePeriod, TimestampMilli};
 
         // Create a NodeCfValue with all fields populated
         let name_hash = NameHash::from_name("test_node");
         let summary = DataUrl::from_text("Test summary content");
         let summary_hash = SummaryHash::from_summary(&summary).unwrap();
-        let temporal_range = ValidRange::valid_between(
+        let temporal_range = ActivePeriod::active_between(
             TimestampMilli(1000),
             TimestampMilli(2000),
         );
@@ -1864,7 +1864,7 @@ use tokio::time::Duration;
         let recovered: NodeCfValue = Nodes::value_from_bytes(&bytes).expect("rkyv deserialize");
 
         // Verify all fields match
-        assert_eq!(original.0, recovered.0, "ValidRange should match");
+        assert_eq!(original.0, recovered.0, "ActivePeriod should match");
         assert_eq!(original.1, recovered.1, "NameHash should match");
         assert_eq!(original.2, recovered.2, "SummaryHash should match");
     }
@@ -1875,12 +1875,12 @@ use tokio::time::Duration;
         use crate::graph::schema::{NodeCfValue, Nodes};
         use crate::graph::name_hash::NameHash;
         use crate::graph::summary_hash::SummaryHash;
-        use crate::{DataUrl, ValidRange, TimestampMilli};
+        use crate::{DataUrl, ActivePeriod, TimestampMilli};
 
         let name_hash = NameHash::from_name("zero_copy_node");
         let summary = DataUrl::from_text("Zero copy test");
         let summary_hash = SummaryHash::from_summary(&summary).unwrap();
-        let temporal_range = ValidRange::valid_from(TimestampMilli(5000));
+        let temporal_range = ActivePeriod::active_from(TimestampMilli(5000));
 
         let original = NodeCfValue(temporal_range.clone(), name_hash, Some(summary_hash), 1, false);
         let bytes = Nodes::value_to_bytes(&original).expect("serialize");
@@ -1905,11 +1905,11 @@ use tokio::time::Duration;
     fn test_rkyv_forward_edge_value_round_trip() {
         use crate::graph::schema::{ForwardEdgeCfValue, ForwardEdges};
         use crate::graph::summary_hash::SummaryHash;
-        use crate::{DataUrl, ValidRange, TimestampMilli};
+        use crate::{DataUrl, ActivePeriod, TimestampMilli};
 
         let summary = DataUrl::from_text("Edge summary");
         let summary_hash = SummaryHash::from_summary(&summary).unwrap();
-        let temporal_range = ValidRange::valid_between(
+        let temporal_range = ActivePeriod::active_between(
             TimestampMilli(100),
             TimestampMilli(200),
         );
@@ -1923,7 +1923,7 @@ use tokio::time::Duration;
         let recovered: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&bytes).expect("rkyv deserialize");
 
         // Verify all fields match
-        assert_eq!(original.0, recovered.0, "ValidRange should match");
+        assert_eq!(original.0, recovered.0, "ActivePeriod should match");
         assert_eq!(original.1, recovered.1, "Weight should match");
         assert_eq!(original.2, recovered.2, "SummaryHash should match");
     }
@@ -1949,9 +1949,9 @@ use tokio::time::Duration;
     #[test]
     fn test_rkyv_reverse_edge_value_round_trip() {
         use crate::graph::schema::{ReverseEdgeCfValue, ReverseEdges};
-        use crate::{ValidRange, TimestampMilli};
+        use crate::{ActivePeriod, TimestampMilli};
 
-        let temporal_range = ValidRange::valid_until(TimestampMilli(9999));
+        let temporal_range = ActivePeriod::active_until(TimestampMilli(9999));
 
         let original = ReverseEdgeCfValue(temporal_range);
 
@@ -1962,7 +1962,7 @@ use tokio::time::Duration;
         let recovered: ReverseEdgeCfValue = ReverseEdges::value_from_bytes(&bytes).expect("rkyv deserialize");
 
         // Verify temporal range matches
-        assert_eq!(original.0, recovered.0, "ValidRange should match");
+        assert_eq!(original.0, recovered.0, "ActivePeriod should match");
     }
 
     /// Test rkyv handles None values correctly
@@ -1976,7 +1976,7 @@ use tokio::time::Duration;
         let node_value = NodeCfValue(None, name_hash, None, 1, false);
         let bytes = Nodes::value_to_bytes(&node_value).expect("serialize");
         let recovered: NodeCfValue = Nodes::value_from_bytes(&bytes).expect("deserialize");
-        assert!(recovered.0.is_none(), "ValidRange should be None");
+        assert!(recovered.0.is_none(), "ActivePeriod should be None");
         assert!(recovered.2.is_none(), "SummaryHash should be None");
         assert_eq!(recovered.3, 1, "Version should be 1");
         assert!(!recovered.4, "Deleted should be false");
@@ -1985,7 +1985,7 @@ use tokio::time::Duration;
         let edge_value = ForwardEdgeCfValue(None, None, None, 1, false);
         let bytes = ForwardEdges::value_to_bytes(&edge_value).expect("serialize");
         let recovered: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&bytes).expect("deserialize");
-        assert!(recovered.0.is_none(), "ValidRange should be None");
+        assert!(recovered.0.is_none(), "ActivePeriod should be None");
         assert!(recovered.1.is_none(), "Weight should be None");
         assert!(recovered.2.is_none(), "SummaryHash should be None");
         assert_eq!(recovered.3, 1, "Version should be 1");
@@ -2001,7 +2001,7 @@ use tokio::time::Duration;
         use crate::DataUrl;
 
         // NodeCfValue with rkyv includes alignment padding
-        // Fields: ValidRange (Option), NameHash (8), Option<SummaryHash> (8), Version (4), bool (1)
+        // Fields: ActivePeriod (Option), NameHash (8), Option<SummaryHash> (8), Version (4), bool (1)
         // rkyv aligned size is typically 64-80 bytes for this structure
         let name_hash = NameHash::from_name("test");
         let node_value = NodeCfValue(None, name_hash, None, 1, false);
