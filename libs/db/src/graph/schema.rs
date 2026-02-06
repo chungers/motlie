@@ -58,8 +58,25 @@ use crate::TimestampMilli;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-// Re-export TemporalRange and related types from crate root for convenience
-pub use crate::{is_valid_at_time, StartTimestamp, TemporalRange, UntilTimestamp};
+// Re-export ValidRange and related types from crate root for convenience
+pub use crate::{is_valid_at_time, StartTimestamp, ValidRange, UntilTimestamp};
+
+// ============================================================================
+// Version Type for Optimistic Locking (CONTENT-ADDRESS design)
+// ============================================================================
+
+/// Entity version number for optimistic locking.
+/// u32 provides 4 billion versions per entity - sufficient for 136 years at 1 update/sec.
+/// (claude, 2026-02-02, in-progress)
+pub type Version = u32;
+
+/// Maximum version value. If reached, reject further updates with Error::VersionOverflow.
+pub const VERSION_MAX: Version = u32::MAX;
+
+/// Reference count for content-addressed summaries.
+/// u32 allows billions of references while bounding storage overhead to 4 bytes.
+/// Used to enable safe GC of shared summary content.
+pub type RefCount = u32;
 
 // ============================================================================
 // Names Column Family (for name interning)
@@ -148,20 +165,23 @@ pub(crate) struct Nodes;
 pub(crate) struct NodeCfKey(pub(crate) Id);
 
 /// Node value - optimized for graph traversal (hot path)
-/// Size: ~26 bytes (vs ~200-500 bytes with inline summary)
+/// Size: ~31 bytes (vs ~200-500 bytes with inline summary)
+/// (claude, 2026-02-02, in-progress) Added version and deleted for CONTENT-ADDRESS
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct NodeCfValue(
-    pub(crate) Option<TemporalRange>,
+    pub(crate) Option<ValidRange>,
     pub(crate) NameHash,            // Node name hash; full name in Names CF
     pub(crate) Option<SummaryHash>, // Content hash; full summary in NodeSummaries CF
+    pub(crate) Version,             // Monotonic version for optimistic locking (starts at 1)
+    pub(crate) bool,                // Deleted flag (tombstone) for soft deletes
 );
 
 impl ValidRangePatchable for Nodes {
     fn patch_valid_range(
         &self,
         old_value: &[u8],
-        new_range: TemporalRange,
+        new_range: ValidRange,
     ) -> Result<Vec<u8>, anyhow::Error> {
         use crate::graph::HotColumnFamilyRecord;
 
@@ -183,7 +203,7 @@ impl ValidRangePatchable for ForwardEdges {
     fn patch_valid_range(
         &self,
         old_value: &[u8],
-        new_range: TemporalRange,
+        new_range: ValidRange,
     ) -> Result<Vec<u8>, anyhow::Error> {
         use crate::graph::HotColumnFamilyRecord;
 
@@ -200,7 +220,7 @@ impl ValidRangePatchable for ReverseEdges {
     fn patch_valid_range(
         &self,
         old_value: &[u8],
-        new_range: TemporalRange,
+        new_range: ValidRange,
     ) -> Result<Vec<u8>, anyhow::Error> {
         use crate::graph::HotColumnFamilyRecord;
 
@@ -229,13 +249,16 @@ pub(crate) struct ForwardEdgeCfKey(
 );
 
 /// Forward edge value - optimized for graph traversal (hot path)
-/// Size: ~35 bytes (vs ~200-500 bytes with inline summary)
+/// Size: ~40 bytes (vs ~200-500 bytes with inline summary)
+/// (claude, 2026-02-02, in-progress) Added version and deleted for CONTENT-ADDRESS
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<TemporalRange>, // Field 0: Temporal validity
+    pub(crate) Option<ValidRange>, // Field 0: Temporal validity
     pub(crate) Option<f64>,           // Field 1: Optional weight
     pub(crate) Option<SummaryHash>,   // Field 2: Content hash; full summary in EdgeSummaries CF
+    pub(crate) Version,               // Field 3: Monotonic version for optimistic locking
+    pub(crate) bool,                  // Field 4: Deleted flag (tombstone)
 );
 
 /// Reverse edges column family (index only).
@@ -250,7 +273,7 @@ pub(crate) struct ReverseEdgeCfKey(
 /// Size: ~17 bytes
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
-pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<TemporalRange>);
+pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<ValidRange>);
 
 /// Edge fragments column family.
 pub struct EdgeFragments;
@@ -262,7 +285,7 @@ pub struct EdgeFragmentCfKey(
     pub TimestampMilli,
 );
 #[derive(Serialize, Deserialize)]
-pub struct EdgeFragmentCfValue(pub Option<TemporalRange>, pub FragmentContent);
+pub struct EdgeFragmentCfValue(pub Option<ValidRange>, pub FragmentContent);
 
 pub type NodeName = String;
 pub type EdgeName = String;
@@ -298,6 +321,7 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for Nodes {
 
 impl Nodes {
     /// Create key-value pair from AddNode mutation.
+    /// (claude, 2026-02-02, in-progress) Updated for CONTENT-ADDRESS: version=1, deleted=false
     pub fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
         let key = NodeCfKey(args.id);
         let name_hash = NameHash::from_name(&args.name);
@@ -309,7 +333,8 @@ impl Nodes {
             None
         };
 
-        let value = NodeCfValue(args.valid_range.clone(), name_hash, summary_hash);
+        // New nodes start at version 1, not deleted
+        let value = NodeCfValue(args.valid_range.clone(), name_hash, summary_hash, 1, false);
         (key, value)
     }
 
@@ -345,7 +370,7 @@ pub struct NodeFragments;
 #[derive(Serialize, Deserialize)]
 pub struct NodeFragmentCfKey(pub Id, pub TimestampMilli);
 #[derive(Serialize, Deserialize)]
-pub struct NodeFragmentCfValue(pub Option<TemporalRange>, pub FragmentContent);
+pub struct NodeFragmentCfValue(pub Option<ValidRange>, pub FragmentContent);
 
 impl ColumnFamily for NodeFragments {
     const CF_NAME: &'static str = "graph/node_fragments";
@@ -535,6 +560,7 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for ForwardEdges {
 
 impl ForwardEdges {
     /// Create key-value pair from AddEdge mutation.
+    /// (claude, 2026-02-02, in-progress) Updated for CONTENT-ADDRESS: version=1, deleted=false
     pub fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let name_hash = NameHash::from_name(&args.name);
         let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, name_hash);
@@ -546,7 +572,8 @@ impl ForwardEdges {
             None
         };
 
-        let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, summary_hash);
+        // New edges start at version 1, not deleted
+        let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, summary_hash, 1, false);
         (key, value)
     }
 
@@ -697,16 +724,20 @@ impl HotColumnFamilyRecord for ReverseEdges {
 ///
 /// Stores node summary content keyed by content hash (SummaryHash).
 /// Content-addressable: identical summaries stored once, referenced by hash.
+/// RefCount enables safe GC when all references are removed.
 ///
 /// Key: SummaryHash (8 bytes, content-addressable)
-/// Value: NodeSummary (DataUrl, rmp_serde + LZ4 compressed)
+/// Value: (RefCount, NodeSummary) - refcount + content
 pub(crate) struct NodeSummaries;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct NodeSummaryCfKey(pub(crate) SummaryHash);
 
+/// Value stores refcount + summary to enable safe GC of shared content.
+/// Field 0: RefCount - number of entities referencing this summary
+/// Field 1: NodeSummary - the actual summary content
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct NodeSummaryCfValue(pub(crate) NodeSummary);
+pub(crate) struct NodeSummaryCfValue(pub(crate) RefCount, pub(crate) NodeSummary);
 
 impl ColumnFamily for NodeSummaries {
     const CF_NAME: &'static str = "graph/node_summaries";
@@ -764,16 +795,20 @@ impl ColumnFamilySerde for NodeSummaries {
 ///
 /// Stores edge summary content keyed by content hash (SummaryHash).
 /// Content-addressable: identical summaries stored once, referenced by hash.
+/// RefCount enables safe GC when all references are removed.
 ///
 /// Key: SummaryHash (8 bytes, content-addressable)
-/// Value: EdgeSummary (DataUrl, rmp_serde + LZ4 compressed)
+/// Value: (RefCount, EdgeSummary) - refcount + content
 pub(crate) struct EdgeSummaries;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct EdgeSummaryCfKey(pub(crate) SummaryHash);
 
+/// Value stores refcount + summary to enable safe GC of shared content.
+/// Field 0: RefCount - number of entities referencing this summary
+/// Field 1: EdgeSummary - the actual summary content
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EdgeSummaryCfValue(pub(crate) EdgeSummary);
+pub(crate) struct EdgeSummaryCfValue(pub(crate) RefCount, pub(crate) EdgeSummary);
 
 impl ColumnFamily for EdgeSummaries {
     const CF_NAME: &'static str = "graph/edge_summaries";
@@ -827,17 +862,449 @@ impl ColumnFamilySerde for EdgeSummaries {
     // value_to_bytes and value_from_bytes use default impl (MessagePack + LZ4)
 }
 
+// ============================================================================
+// Reverse Index Column Families (CONTENT-ADDRESS design)
+// (claude, 2026-02-02, in-progress)
+// ============================================================================
+
+/// NodeSummaryIndex column family - reverse lookup from SummaryHash to nodes.
+///
+/// Key: (SummaryHash, Id, Version) = 28 bytes
+/// Value: 1-byte marker (CURRENT=0x01, STALE=0x00)
+///
+/// Enables: "find all nodes with this content hash"
+pub(crate) struct NodeSummaryIndex;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct NodeSummaryIndexCfKey(
+    pub(crate) SummaryHash, // 8 bytes - prefix for hash lookup
+    pub(crate) Id,          // 16 bytes - node_id
+    pub(crate) Version,     // 4 bytes - version
+);
+
+/// 1-byte marker: 0x01 = current, 0x00 = stale
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub(crate) struct NodeSummaryIndexCfValue(pub(crate) u8);
+
+impl NodeSummaryIndexCfValue {
+    pub const CURRENT: u8 = 0x01;
+    pub const STALE: u8 = 0x00;
+
+    pub fn current() -> Self {
+        Self(Self::CURRENT)
+    }
+
+    pub fn stale() -> Self {
+        Self(Self::STALE)
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.0 == Self::CURRENT
+    }
+}
+
+impl ColumnFamily for NodeSummaryIndex {
+    const CF_NAME: &'static str = "graph/node_summary_index";
+}
+
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for NodeSummaryIndex {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        // Enable bloom filter for prefix lookups
+        block_opts.set_bloom_filter(10.0, false);
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [summary_hash (8)] + [node_id (16)] + [version (4)] = 28 bytes
+        // Use 8-byte prefix to scan all nodes with a given hash
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl ColumnFamilySerde for NodeSummaryIndex {
+    type Key = NodeSummaryIndexCfKey;
+    type Value = NodeSummaryIndexCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // Layout: [summary_hash (8)] + [node_id (16)] + [version (4)] = 28 bytes
+        let mut bytes = Vec::with_capacity(28);
+        bytes.extend_from_slice(key.0.as_bytes());
+        bytes.extend_from_slice(&key.1.into_bytes());
+        bytes.extend_from_slice(&key.2.to_be_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
+        if bytes.len() != 28 {
+            anyhow::bail!(
+                "Invalid NodeSummaryIndexCfKey length: expected 28, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(&bytes[0..8]);
+
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(&bytes[8..24]);
+
+        let mut version_bytes = [0u8; 4];
+        version_bytes.copy_from_slice(&bytes[24..28]);
+        let version = u32::from_be_bytes(version_bytes);
+
+        Ok(NodeSummaryIndexCfKey(
+            SummaryHash::from_bytes(hash_bytes),
+            Id::from_bytes(id_bytes),
+            version,
+        ))
+    }
+
+    fn value_to_bytes(value: &Self::Value) -> anyhow::Result<Vec<u8>> {
+        Ok(vec![value.0])
+    }
+
+    fn value_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Value> {
+        if bytes.len() != 1 {
+            anyhow::bail!(
+                "Invalid NodeSummaryIndexCfValue length: expected 1, got {}",
+                bytes.len()
+            );
+        }
+        Ok(NodeSummaryIndexCfValue(bytes[0]))
+    }
+}
+
+/// EdgeSummaryIndex column family - reverse lookup from SummaryHash to edges.
+///
+/// Key: (SummaryHash, SrcId, DstId, NameHash, Version) = 52 bytes
+/// Value: 1-byte marker (CURRENT=0x01, STALE=0x00)
+///
+/// Enables: "find all edges with this content hash"
+pub(crate) struct EdgeSummaryIndex;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct EdgeSummaryIndexCfKey(
+    pub(crate) SummaryHash, // 8 bytes - prefix for hash lookup
+    pub(crate) SrcId,       // 16 bytes
+    pub(crate) DstId,       // 16 bytes
+    pub(crate) NameHash,    // 8 bytes
+    pub(crate) Version,     // 4 bytes
+);
+
+/// 1-byte marker: 0x01 = current, 0x00 = stale
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub(crate) struct EdgeSummaryIndexCfValue(pub(crate) u8);
+
+impl EdgeSummaryIndexCfValue {
+    pub const CURRENT: u8 = 0x01;
+    pub const STALE: u8 = 0x00;
+
+    pub fn current() -> Self {
+        Self(Self::CURRENT)
+    }
+
+    pub fn stale() -> Self {
+        Self(Self::STALE)
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.0 == Self::CURRENT
+    }
+}
+
+impl ColumnFamily for EdgeSummaryIndex {
+    const CF_NAME: &'static str = "graph/edge_summary_index";
+}
+
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for EdgeSummaryIndex {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        // Enable bloom filter for prefix lookups
+        block_opts.set_bloom_filter(10.0, false);
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [summary_hash (8)] + [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [version (4)] = 52 bytes
+        // Use 8-byte prefix to scan all edges with a given hash
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(8));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl ColumnFamilySerde for EdgeSummaryIndex {
+    type Key = EdgeSummaryIndexCfKey;
+    type Value = EdgeSummaryIndexCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // Layout: [summary_hash (8)] + [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [version (4)] = 52 bytes
+        let mut bytes = Vec::with_capacity(52);
+        bytes.extend_from_slice(key.0.as_bytes());
+        bytes.extend_from_slice(&key.1.into_bytes());
+        bytes.extend_from_slice(&key.2.into_bytes());
+        bytes.extend_from_slice(key.3.as_bytes());
+        bytes.extend_from_slice(&key.4.to_be_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
+        if bytes.len() != 52 {
+            anyhow::bail!(
+                "Invalid EdgeSummaryIndexCfKey length: expected 52, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(&bytes[0..8]);
+
+        let mut src_id_bytes = [0u8; 16];
+        src_id_bytes.copy_from_slice(&bytes[8..24]);
+
+        let mut dst_id_bytes = [0u8; 16];
+        dst_id_bytes.copy_from_slice(&bytes[24..40]);
+
+        let mut name_hash_bytes = [0u8; 8];
+        name_hash_bytes.copy_from_slice(&bytes[40..48]);
+
+        let mut version_bytes = [0u8; 4];
+        version_bytes.copy_from_slice(&bytes[48..52]);
+        let version = u32::from_be_bytes(version_bytes);
+
+        Ok(EdgeSummaryIndexCfKey(
+            SummaryHash::from_bytes(hash_bytes),
+            Id::from_bytes(src_id_bytes),
+            Id::from_bytes(dst_id_bytes),
+            NameHash::from_bytes(name_hash_bytes),
+            version,
+        ))
+    }
+
+    fn value_to_bytes(value: &Self::Value) -> anyhow::Result<Vec<u8>> {
+        Ok(vec![value.0])
+    }
+
+    fn value_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Value> {
+        if bytes.len() != 1 {
+            anyhow::bail!(
+                "Invalid EdgeSummaryIndexCfValue length: expected 1, got {}",
+                bytes.len()
+            );
+        }
+        Ok(EdgeSummaryIndexCfValue(bytes[0]))
+    }
+}
+
+// ============================================================================
+// GraphMeta Column Family - Graph-level metadata (GC cursors, future config)
+// (claude, 2026-02-02, implemented) CONTENT-ADDRESS GC cursor persistence
+// ============================================================================
+
+/// GraphMeta column family - stores graph-level metadata.
+///
+/// Key: discriminant byte (1 byte)
+/// Value: field-dependent payload (cursor bytes for GC cursors)
+///
+/// Pattern borrowed from vector::GraphMeta for consistency.
+pub(crate) struct GraphMeta;
+
+/// GraphMeta field enum - discriminated union for different metadata fields.
+///
+/// Each variant stores a different type of graph-level metadata.
+/// The discriminant byte is stored in the key, the value bytes depend on variant.
+#[derive(Debug, Clone)]
+pub(crate) enum GraphMetaField {
+    /// GC cursor for NodeSummaries CF - stores last processed key bytes
+    GcCursorNodeSummaries(Vec<u8>),      // 0x00
+    /// GC cursor for EdgeSummaries CF
+    GcCursorEdgeSummaries(Vec<u8>),      // 0x01
+    /// GC cursor for NodeSummaryIndex CF
+    GcCursorNodeSummaryIndex(Vec<u8>),   // 0x02
+    /// GC cursor for EdgeSummaryIndex CF
+    GcCursorEdgeSummaryIndex(Vec<u8>),   // 0x03
+    /// GC cursor for Node tombstones
+    GcCursorNodeTombstones(Vec<u8>),     // 0x04
+    /// GC cursor for Edge tombstones
+    GcCursorEdgeTombstones(Vec<u8>),     // 0x05
+}
+
+impl GraphMetaField {
+    /// Get the discriminant byte for key serialization
+    pub fn discriminant(&self) -> u8 {
+        match self {
+            Self::GcCursorNodeSummaries(_) => 0x00,
+            Self::GcCursorEdgeSummaries(_) => 0x01,
+            Self::GcCursorNodeSummaryIndex(_) => 0x02,
+            Self::GcCursorEdgeSummaryIndex(_) => 0x03,
+            Self::GcCursorNodeTombstones(_) => 0x04,
+            Self::GcCursorEdgeTombstones(_) => 0x05,
+        }
+    }
+
+    /// Create a field variant from discriminant (with empty payload)
+    pub fn from_discriminant(d: u8) -> anyhow::Result<Self> {
+        match d {
+            0x00 => Ok(Self::GcCursorNodeSummaries(vec![])),
+            0x01 => Ok(Self::GcCursorEdgeSummaries(vec![])),
+            0x02 => Ok(Self::GcCursorNodeSummaryIndex(vec![])),
+            0x03 => Ok(Self::GcCursorEdgeSummaryIndex(vec![])),
+            0x04 => Ok(Self::GcCursorNodeTombstones(vec![])),
+            0x05 => Ok(Self::GcCursorEdgeTombstones(vec![])),
+            _ => anyhow::bail!("Unknown GraphMetaField discriminant: {}", d),
+        }
+    }
+
+    /// Get the inner cursor bytes
+    pub fn cursor_bytes(&self) -> &[u8] {
+        match self {
+            Self::GcCursorNodeSummaries(v)
+            | Self::GcCursorEdgeSummaries(v)
+            | Self::GcCursorNodeSummaryIndex(v)
+            | Self::GcCursorEdgeSummaryIndex(v)
+            | Self::GcCursorNodeTombstones(v)
+            | Self::GcCursorEdgeTombstones(v) => v,
+        }
+    }
+}
+
+/// GraphMeta key: just the discriminant byte (1 byte total)
+#[derive(Debug, Clone)]
+pub(crate) struct GraphMetaCfKey(pub(crate) GraphMetaField);
+
+impl GraphMetaCfKey {
+    /// Create key for NodeSummaries GC cursor
+    pub fn gc_cursor_node_summaries() -> Self {
+        Self(GraphMetaField::GcCursorNodeSummaries(vec![]))
+    }
+
+    /// Create key for EdgeSummaries GC cursor
+    pub fn gc_cursor_edge_summaries() -> Self {
+        Self(GraphMetaField::GcCursorEdgeSummaries(vec![]))
+    }
+
+    /// Create key for NodeSummaryIndex GC cursor
+    pub fn gc_cursor_node_summary_index() -> Self {
+        Self(GraphMetaField::GcCursorNodeSummaryIndex(vec![]))
+    }
+
+    /// Create key for EdgeSummaryIndex GC cursor
+    pub fn gc_cursor_edge_summary_index() -> Self {
+        Self(GraphMetaField::GcCursorEdgeSummaryIndex(vec![]))
+    }
+
+    /// Create key for Node tombstones GC cursor
+    pub fn gc_cursor_node_tombstones() -> Self {
+        Self(GraphMetaField::GcCursorNodeTombstones(vec![]))
+    }
+
+    /// Create key for Edge tombstones GC cursor
+    pub fn gc_cursor_edge_tombstones() -> Self {
+        Self(GraphMetaField::GcCursorEdgeTombstones(vec![]))
+    }
+}
+
+/// GraphMeta value: wraps the field with actual cursor data
+#[derive(Debug, Clone)]
+pub(crate) struct GraphMetaCfValue(pub(crate) GraphMetaField);
+
+impl ColumnFamily for GraphMeta {
+    const CF_NAME: &'static str = "graph/meta";
+}
+
+impl ColumnFamilyConfig<super::subsystem::GraphBlockCacheConfig> for GraphMeta {
+    fn cf_options(cache: &rocksdb::Cache, config: &super::subsystem::GraphBlockCacheConfig) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl GraphMeta {
+    /// Serialize key: just the discriminant byte
+    pub fn key_to_bytes(key: &GraphMetaCfKey) -> Vec<u8> {
+        vec![key.0.discriminant()]
+    }
+
+    /// Deserialize key from bytes
+    pub fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<GraphMetaCfKey> {
+        if bytes.len() != 1 {
+            anyhow::bail!("Invalid GraphMetaCfKey length: expected 1, got {}", bytes.len());
+        }
+        let field = GraphMetaField::from_discriminant(bytes[0])?;
+        Ok(GraphMetaCfKey(field))
+    }
+
+    /// Serialize value: just the cursor bytes (variable length)
+    pub fn value_to_bytes(value: &GraphMetaCfValue) -> Vec<u8> {
+        value.0.cursor_bytes().to_vec()
+    }
+
+    /// Deserialize value using key's field variant for type info
+    pub fn value_from_bytes(key: &GraphMetaCfKey, bytes: &[u8]) -> anyhow::Result<GraphMetaCfValue> {
+        let field = match key.0.discriminant() {
+            0x00 => GraphMetaField::GcCursorNodeSummaries(bytes.to_vec()),
+            0x01 => GraphMetaField::GcCursorEdgeSummaries(bytes.to_vec()),
+            0x02 => GraphMetaField::GcCursorNodeSummaryIndex(bytes.to_vec()),
+            0x03 => GraphMetaField::GcCursorEdgeSummaryIndex(bytes.to_vec()),
+            0x04 => GraphMetaField::GcCursorNodeTombstones(bytes.to_vec()),
+            0x05 => GraphMetaField::GcCursorEdgeTombstones(bytes.to_vec()),
+            d => anyhow::bail!("Unknown discriminant: {}", d),
+        };
+        Ok(GraphMetaCfValue(field))
+    }
+}
+
 /// All column families used in the database.
 /// This is the authoritative list that should be used when opening the database.
+/// (claude, 2026-02-02, in-progress) Added reverse index CFs for CONTENT-ADDRESS
 pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     Names::CF_NAME,
     Nodes::CF_NAME,
     NodeFragments::CF_NAME,
-    NodeSummaries::CF_NAME, // Phase 2: Cold CF for node summaries
+    NodeSummaries::CF_NAME,      // Phase 2: Cold CF for node summaries
+    NodeSummaryIndex::CF_NAME,   // CONTENT-ADDRESS: Reverse index hash→nodes
     EdgeFragments::CF_NAME,
-    EdgeSummaries::CF_NAME, // Phase 2: Cold CF for edge summaries
+    EdgeSummaries::CF_NAME,      // Phase 2: Cold CF for edge summaries
+    EdgeSummaryIndex::CF_NAME,   // CONTENT-ADDRESS: Reverse index hash→edges
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
+    GraphMeta::CF_NAME,          // CONTENT-ADDRESS: Graph-level metadata (GC cursors)
 ];
 
 #[cfg(test)]
@@ -954,14 +1421,14 @@ mod tests {
 
     #[test]
     fn test_temporal_range_always_valid() {
-        let range = TemporalRange::always_valid();
+        let range = ValidRange::always_valid();
         assert!(range.is_none(), "always_valid should return None");
     }
 
     #[test]
     fn test_temporal_range_valid_from() {
         let start = TimestampMilli(1000);
-        let range = TemporalRange::valid_from(start);
+        let range = ValidRange::valid_from(start);
 
         assert!(range.is_some());
         let range = range.unwrap();
@@ -972,7 +1439,7 @@ mod tests {
     #[test]
     fn test_temporal_range_valid_until() {
         let until = TimestampMilli(2000);
-        let range = TemporalRange::valid_until(until);
+        let range = ValidRange::valid_until(until);
 
         assert!(range.is_some());
         let range = range.unwrap();
@@ -984,7 +1451,7 @@ mod tests {
     fn test_temporal_range_valid_between() {
         let start = TimestampMilli(1000);
         let until = TimestampMilli(2000);
-        let range = TemporalRange::valid_between(start, until);
+        let range = ValidRange::valid_between(start, until);
 
         assert!(range.is_some());
         let range = range.unwrap();
@@ -994,7 +1461,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_with_start_only() {
-        let range = TemporalRange(Some(TimestampMilli(1000)), None);
+        let range = ValidRange(Some(TimestampMilli(1000)), None);
 
         // Before start - invalid
         assert!(!range.is_valid_at(TimestampMilli(999)));
@@ -1009,7 +1476,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_with_until_only() {
-        let range = TemporalRange(None, Some(TimestampMilli(2000)));
+        let range = ValidRange(None, Some(TimestampMilli(2000)));
 
         // Before until - valid
         assert!(range.is_valid_at(TimestampMilli(0)));
@@ -1024,7 +1491,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_with_both_boundaries() {
-        let range = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
+        let range = ValidRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
 
         // Before start - invalid
         assert!(!range.is_valid_at(TimestampMilli(999)));
@@ -1045,7 +1512,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_with_no_boundaries() {
-        let range = TemporalRange(None, None);
+        let range = ValidRange(None, None);
 
         // Always valid regardless of timestamp
         assert!(range.is_valid_at(TimestampMilli(0)));
@@ -1055,7 +1522,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_time_with_none() {
-        let temporal_range: Option<TemporalRange> = None;
+        let temporal_range: Option<ValidRange> = None;
 
         // None means always valid
         assert!(is_valid_at_time(&temporal_range, TimestampMilli(0)));
@@ -1065,7 +1532,7 @@ mod tests {
 
     #[test]
     fn test_is_valid_at_time_with_range() {
-        let temporal_range = Some(TemporalRange(
+        let temporal_range = Some(ValidRange(
             Some(TimestampMilli(1000)),
             Some(TimestampMilli(2000)),
         ));
@@ -1086,30 +1553,30 @@ mod tests {
     #[test]
     fn test_is_valid_at_time_edge_cases() {
         // Test with start only
-        let from_only = Some(TemporalRange(Some(TimestampMilli(100)), None));
+        let from_only = Some(ValidRange(Some(TimestampMilli(100)), None));
         assert!(!is_valid_at_time(&from_only, TimestampMilli(99)));
         assert!(is_valid_at_time(&from_only, TimestampMilli(100)));
         assert!(is_valid_at_time(&from_only, TimestampMilli(u64::MAX)));
 
         // Test with until only
-        let until_only = Some(TemporalRange(None, Some(TimestampMilli(200))));
+        let until_only = Some(ValidRange(None, Some(TimestampMilli(200))));
         assert!(is_valid_at_time(&until_only, TimestampMilli(0)));
         assert!(is_valid_at_time(&until_only, TimestampMilli(199)));
         assert!(!is_valid_at_time(&until_only, TimestampMilli(200)));
 
         // Test with no constraints (Some with both None)
-        let no_constraints = Some(TemporalRange(None, None));
+        let no_constraints = Some(ValidRange(None, None));
         assert!(is_valid_at_time(&no_constraints, TimestampMilli(0)));
         assert!(is_valid_at_time(&no_constraints, TimestampMilli(u64::MAX)));
     }
 
     #[test]
     fn test_temporal_range_serialization() {
-        // Test that TemporalRange can be serialized and deserialized
-        let range = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
+        // Test that ValidRange can be serialized and deserialized
+        let range = ValidRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
 
         let serialized = rmp_serde::to_vec(&range).expect("Should serialize");
-        let deserialized: TemporalRange =
+        let deserialized: ValidRange =
             rmp_serde::from_slice(&serialized).expect("Should deserialize");
 
         assert_eq!(range, deserialized);
@@ -1117,12 +1584,12 @@ mod tests {
 
     #[test]
     fn test_temporal_range_clone_and_equality() {
-        let range1 = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
+        let range1 = ValidRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2000)));
         let range2 = range1.clone();
 
         assert_eq!(range1, range2);
 
-        let range3 = TemporalRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2001)));
+        let range3 = ValidRange(Some(TimestampMilli(1000)), Some(TimestampMilli(2001)));
         assert_ne!(range1, range3);
     }
 }

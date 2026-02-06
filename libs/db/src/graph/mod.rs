@@ -36,6 +36,12 @@ pub mod writer;
 /// Scan API for iterating over column families with pagination support.
 pub mod scan;
 
+/// Garbage collection for stale summary index entries and tombstones.
+pub mod gc;
+
+/// Repair module for graph index consistency checking.
+pub mod repair;
+
 #[cfg(test)]
 mod tests;
 
@@ -43,11 +49,16 @@ mod tests;
 pub use mutation::{
     AddEdge, AddEdgeFragment, AddNode, AddNodeFragment, Mutation, MutationBatch,
     UpdateEdgeValidSinceUntil, UpdateEdgeWeight, UpdateNodeValidSinceUntil,
+    // CONTENT-ADDRESS: Update/Delete mutations with optimistic locking
+    UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge,
 };
 pub use crate::writer::Runnable;
 pub use query::{
     EdgeFragmentsByIdTimeRange, EdgeSummaryBySrcDstName, IncomingEdges, NodeById,
     NodeFragmentsByIdTimeRange, OutgoingEdges, Query, TransactionQueryExecutor,
+    // CONTENT-ADDRESS reverse lookup query types
+    NodesBySummaryHash, NodeSummaryLookupResult,
+    EdgesBySummaryHash, EdgeSummaryLookupResult,
 };
 pub use transaction::Transaction;
 pub use crate::reader::Runnable as QueryRunnable;
@@ -71,10 +82,16 @@ pub use reader::{
 };
 pub use name_hash::{NameCache, NameHash};
 pub use summary_hash::SummaryHash;
-pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, SrcId};
+pub use schema::{DstId, EdgeName, EdgeSummary, FragmentContent, NodeName, NodeSummary, RefCount, SrcId, Version};
 
 // Subsystem exports for use with rocksdb::Storage<S> and StorageBuilder
 pub use subsystem::{GraphBlockCacheConfig, NameCacheConfig, Subsystem};
+
+// CONTENT-ADDRESS: Garbage collection for stale index entries
+pub use gc::{GraphGarbageCollector, GraphGcConfig, GcMetrics, GcMetricsSnapshot};
+
+// CONTENT-ADDRESS: Repair for forward/reverse edge consistency
+pub use repair::{GraphRepairer, RepairConfig, RepairMetrics, RepairMetricsSnapshot};
 
 /// Storage type alias using generic rocksdb::Storage
 pub type Storage = crate::rocksdb::Storage<Subsystem>;
@@ -99,12 +116,12 @@ use writer::Processor;
 
 
 
-/// Trait implemented by column families that supports patching of TemporalRange.
+/// Trait implemented by column families that supports patching of ValidRange.
 pub(crate) trait ValidRangePatchable {
     fn patch_valid_range(
         &self,
         old_value: &[u8],
-        new_range: schema::TemporalRange,
+        new_range: schema::ValidRange,
     ) -> Result<Vec<u8>, anyhow::Error>;
 }
 

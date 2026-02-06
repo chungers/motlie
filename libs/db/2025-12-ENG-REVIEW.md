@@ -49,7 +49,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 #[archive(check_bytes)]
 pub struct ForwardEdgeCfValue {
     // rkyv will layout these fields so they can be read directly from the byte buffer
-    pub valid_range: Option<TemporalRange>,
+    pub valid_range: Option<ValidRange>,
     pub weight: Option<f64>,
     // String/DataUrl data is stored inline but accessed via pointer logic
     pub summary: EdgeSummary, 
@@ -227,7 +227,7 @@ Split `ForwardEdges` into two Column Families:
 // Key: [src_id][dst_id][name]
 // Value:
 struct ForwardEdgeHot {
-    valid_range: Option<TemporalRange>,
+    valid_range: Option<ValidRange>,
     weight: Option<f64>,
     // Optional: flag to indicate if summary exists
     has_summary: bool, 
@@ -596,7 +596,7 @@ The graph storage schema stores heterogeneous data together:
 ```rust
 // Current: Hot and cold data mixed
 struct ForwardEdgeCfValue(
-    Option<TemporalRange>,  // Hot: 10-20 bytes, accessed every traversal
+    Option<ValidRange>,  // Hot: 10-20 bytes, accessed every traversal
     Option<f64>,             // Hot: 8 bytes, accessed every traversal
     EdgeSummary,             // Cold: variable, rarely accessed
 );
@@ -856,7 +856,7 @@ The review **correctly identifies** the schema layout issue. From `libs/db/src/g
 
 ```rust
 pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<TemporalRange>,  // ~10-20 bytes
+    pub(crate) Option<ValidRange>,  // ~10-20 bytes
     pub(crate) Option<f64>,             // ~8 bytes
     pub(crate) EdgeSummary,             // DataUrl - variable, potentially large
 );

@@ -76,6 +76,11 @@ impl Processor for Index {
                 Mutation::UpdateNodeValidSinceUntil(m) => m.index(&mut writer, fields)?,
                 Mutation::UpdateEdgeValidSinceUntil(m) => m.index(&mut writer, fields)?,
                 Mutation::UpdateEdgeWeight(m) => m.index(&mut writer, fields)?,
+                // CONTENT-ADDRESS: Update/Delete mutations
+                Mutation::UpdateNodeSummary(m) => m.index(&mut writer, fields)?,
+                Mutation::UpdateEdgeSummary(m) => m.index(&mut writer, fields)?,
+                Mutation::DeleteNode(m) => m.index(&mut writer, fields)?,
+                Mutation::DeleteEdge(m) => m.index(&mut writer, fields)?,
                 // Flush is graph-only - no-op for fulltext
                 // (fulltext flush would require a separate mechanism in future phases)
                 Mutation::Flush(_) => {}

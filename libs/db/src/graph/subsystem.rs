@@ -11,6 +11,7 @@ use crate::rocksdb::{BlockCacheConfig, DbAccess, RocksdbSubsystem, StorageSubsys
 use crate::SubsystemProvider;
 use motlie_core::telemetry::SubsystemInfo;
 
+use super::gc::{GraphGarbageCollector, GraphGcConfig};
 use super::name_hash::{NameCache, NameHash};
 use super::reader::{create_query_reader, spawn_consumer as spawn_query_consumer, Consumer as QueryConsumer, ReaderConfig, Reader};
 use super::schema::{self, ALL_COLUMN_FAMILIES};
@@ -49,6 +50,12 @@ pub struct Subsystem {
     /// Optional writer for graceful shutdown flush.
     /// Registered via `set_writer()` after storage initialization.
     writer: RwLock<Option<Writer>>,
+    /// Optional garbage collector for stale index cleanup.
+    /// Started via `start_gc()` independently of `start()`.
+    gc: RwLock<Option<Arc<GraphGarbageCollector>>>,
+    /// Consumer task handles for graceful shutdown.
+    /// Joined after writer channel closes to ensure clean exit.
+    consumer_handles: RwLock<Vec<tokio::task::JoinHandle<anyhow::Result<()>>>>,
 }
 
 impl Subsystem {
@@ -58,6 +65,8 @@ impl Subsystem {
             cache: Arc::new(NameCache::new()),
             prewarm_config: NameCacheConfig::default(),
             writer: RwLock::new(None),
+            gc: RwLock::new(None),
+            consumer_handles: RwLock::new(Vec::new()),
         }
     }
 
@@ -112,6 +121,7 @@ impl Subsystem {
     /// 2. Spawns mutation consumer (1 worker)
     /// 3. Spawns query consumers (configurable workers)
     /// 4. Registers Writer for automatic shutdown flush
+    /// 5. Optionally starts garbage collector for stale index cleanup
     ///
     /// # Arguments
     ///
@@ -119,6 +129,7 @@ impl Subsystem {
     /// * `writer_config` - Configuration for mutation writer
     /// * `reader_config` - Configuration for query reader
     /// * `num_query_workers` - Number of parallel query workers
+    /// * `gc_config` - Optional GC config; `None` disables garbage collection
     ///
     /// # Returns
     ///
@@ -127,7 +138,7 @@ impl Subsystem {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use motlie_db::graph::{Subsystem, WriterConfig, ReaderConfig};
+    /// use motlie_db::graph::{Subsystem, WriterConfig, ReaderConfig, GraphGcConfig};
     /// use motlie_db::storage_builder::StorageBuilder;
     ///
     /// // Create subsystem and build storage
@@ -138,27 +149,41 @@ impl Subsystem {
     ///     .with_rocksdb(subsystem.clone())
     ///     .build()?;
     ///
-    /// // Start with managed lifecycle
+    /// // Start with managed lifecycle (with GC enabled)
     /// let (writer, reader) = subsystem.start(
     ///     storage.graph_storage().clone(),
     ///     WriterConfig::default(),
     ///     ReaderConfig::default(),
     ///     4,  // 4 query workers
+    ///     Some(GraphGcConfig::default()),  // Enable GC with defaults
+    /// );
+    ///
+    /// // Or start without GC (stale entries accumulate until GC enabled)
+    /// let (writer, reader) = subsystem.start(
+    ///     storage.graph_storage().clone(),
+    ///     WriterConfig::default(),
+    ///     ReaderConfig::default(),
+    ///     4,
+    ///     None,  // No GC
     /// );
     ///
     /// // Use writer and reader...
     /// AddNode { ... }.run(&writer).await?;
     /// let result = GetNode { ... }.run(&reader, timeout).await?;
     ///
-    /// // Shutdown automatically flushes pending mutations
+    /// // Shutdown automatically flushes pending mutations and stops GC
     /// storage.shutdown()?;
     /// ```
     ///
     /// # Lifecycle
     ///
     /// When `on_shutdown()` is called (typically via `storage.shutdown()`),
-    /// the subsystem will automatically flush any pending mutations before
-    /// returning. This ensures data durability without manual flush calls.
+    /// the subsystem will:
+    /// 1. Flush any pending mutations
+    /// 2. Join consumer tasks
+    /// 3. Stop garbage collector (if running)
+    ///
+    /// This ensures data durability and clean shutdown.
     ///
     /// # Alternative: Manual Lifecycle
     ///
@@ -175,26 +200,62 @@ impl Subsystem {
         writer_config: WriterConfig,
         reader_config: ReaderConfig,
         num_query_workers: usize,
+        gc_config: Option<GraphGcConfig>,
     ) -> (Writer, Reader) {
         // Create graph processor - Graph is Clone (holds Arc<Storage>)
-        let graph = Graph::new(storage);
+        let graph = Graph::new(storage.clone());
 
         // Create and spawn mutation consumer
         let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
         let mutation_consumer = MutationConsumer::new(mutation_receiver, writer_config, graph.clone());
-        let _mutation_handle = spawn_mutation_consumer(mutation_consumer);
+        let mutation_handle = spawn_mutation_consumer(mutation_consumer);
 
         // Create and spawn query consumers
         let (reader, query_receiver) = create_query_reader(reader_config.clone());
+        let mut query_handles = Vec::with_capacity(num_query_workers);
         for _ in 0..num_query_workers {
             let consumer = QueryConsumer::new(query_receiver.clone(), reader_config.clone(), graph.clone());
-            let _query_handle = spawn_query_consumer(consumer);
+            query_handles.push(spawn_query_consumer(consumer));
+        }
+
+        // Store consumer handles for graceful shutdown
+        {
+            let mut handles = self.consumer_handles.write().expect("consumer_handles lock poisoned");
+            handles.push(mutation_handle);
+            handles.extend(query_handles);
         }
 
         // Register writer for shutdown flush
         self.set_writer(writer.clone());
 
+        // Start garbage collector if configured
+        if let Some(config) = gc_config {
+            let gc = Arc::new(GraphGarbageCollector::new(storage, config));
+            let _handle = gc.clone().spawn_worker();
+            *self.gc.write().expect("gc lock poisoned") = Some(gc);
+        }
+
         (writer, reader)
+    }
+
+    /// Get GC metrics if garbage collector is running.
+    ///
+    /// Returns `None` if GC was not started (i.e., `start()` was called with `gc_config: None`).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// if let Some(metrics) = subsystem.gc_metrics() {
+    ///     let snapshot = metrics.snapshot();
+    ///     println!("Deleted {} stale index entries", snapshot.total_deleted());
+    /// }
+    /// ```
+    pub fn gc_metrics(&self) -> Option<Arc<super::gc::GcMetrics>> {
+        self.gc
+            .read()
+            .expect("gc lock poisoned")
+            .as_ref()
+            .map(|gc| gc.metrics().clone())
     }
 
     /// Internal method to prewarm the name cache.
@@ -262,6 +323,11 @@ impl Subsystem {
                 <schema::NodeSummaries as ColumnFamily>::CF_NAME,
                 <schema::NodeSummaries as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
+            // CONTENT-ADDRESS: Reverse index hash→nodes (claude, 2026-02-02)
+            ColumnFamilyDescriptor::new(
+                <schema::NodeSummaryIndex as ColumnFamily>::CF_NAME,
+                <schema::NodeSummaryIndex as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
+            ),
             ColumnFamilyDescriptor::new(
                 <schema::EdgeFragments as ColumnFamily>::CF_NAME,
                 <schema::EdgeFragments as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
@@ -270,6 +336,11 @@ impl Subsystem {
                 <schema::EdgeSummaries as ColumnFamily>::CF_NAME,
                 <schema::EdgeSummaries as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
+            // CONTENT-ADDRESS: Reverse index hash→edges (claude, 2026-02-02)
+            ColumnFamilyDescriptor::new(
+                <schema::EdgeSummaryIndex as ColumnFamily>::CF_NAME,
+                <schema::EdgeSummaryIndex as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
+            ),
             ColumnFamilyDescriptor::new(
                 <schema::ForwardEdges as ColumnFamily>::CF_NAME,
                 <schema::ForwardEdges as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
@@ -277,6 +348,11 @@ impl Subsystem {
             ColumnFamilyDescriptor::new(
                 <schema::ReverseEdges as ColumnFamily>::CF_NAME,
                 <schema::ReverseEdges as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
+            ),
+            // CONTENT-ADDRESS: Graph-level metadata (GC cursors) (claude, 2026-02-02)
+            ColumnFamilyDescriptor::new(
+                <schema::GraphMeta as ColumnFamily>::CF_NAME,
+                <schema::GraphMeta as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
         ]
     }
@@ -319,7 +395,7 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
     fn on_shutdown(&self) -> Result<()> {
         tracing::info!(subsystem = "graph", "Shutting down");
 
-        // Best-effort flush of pending mutations
+        // 1. Flush pending mutations (closes channel, signals consumers to exit)
         if let Some(writer) = self.writer.read().expect("writer lock poisoned").as_ref() {
             if !writer.is_closed() {
                 tracing::debug!(subsystem = "graph", "Flushing pending mutations");
@@ -347,6 +423,37 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
                     }
                 }
             }
+        }
+
+        // 2. Join consumer tasks (cooperative shutdown - channels are closed)
+        // Consumers exit naturally when recv() returns None, so joins should complete quickly.
+        let handles = std::mem::take(&mut *self.consumer_handles.write().expect("consumer_handles lock poisoned"));
+        if !handles.is_empty() {
+            tracing::debug!(subsystem = "graph", count = handles.len(), "Joining consumer tasks");
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime_handle) => {
+                    for (i, handle) in handles.into_iter().enumerate() {
+                        match runtime_handle.block_on(handle) {
+                            Ok(Ok(())) => tracing::debug!(subsystem = "graph", consumer = i, "Consumer joined"),
+                            Ok(Err(e)) => tracing::warn!(subsystem = "graph", consumer = i, error = %e, "Consumer returned error"),
+                            Err(_) => tracing::warn!(subsystem = "graph", consumer = i, "Consumer task panicked"),
+                        }
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        subsystem = "graph",
+                        "No tokio runtime available for joining consumer tasks"
+                    );
+                }
+            }
+        }
+
+        // 3. Shutdown GC last (can continue cleaning while other components shut down)
+        if let Some(gc) = self.gc.write().expect("gc lock poisoned").take() {
+            tracing::debug!(subsystem = "graph", "Shutting down garbage collector");
+            gc.shutdown();
+            tracing::debug!(subsystem = "graph", "Garbage collector shut down");
         }
 
         Ok(())

@@ -896,10 +896,10 @@ type NameHashBytes = [u8; 8];
 
 fn deserialize_node_value(bytes: &[u8]) -> Result<(NameHashBytes, String)> {
     #[derive(serde::Deserialize)]
-    struct TemporalRange(Option<u64>, Option<u64>);
+    struct ValidRange(Option<u64>, Option<u64>);
 
     #[derive(serde::Deserialize)]
-    struct NodeCfValue(Option<TemporalRange>, NameHashBytes, NodeSummary);
+    struct NodeCfValue(Option<ValidRange>, NameHashBytes, NodeSummary);
 
     #[derive(serde::Deserialize)]
     struct NodeSummary(DataUrl);
@@ -964,10 +964,10 @@ fn deserialize_forward_edge_key(bytes: &[u8]) -> Result<(IdBytes, IdBytes, NameH
 
 fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
-    struct TemporalRange(Option<u64>, Option<u64>);
+    struct ValidRange(Option<u64>, Option<u64>);
 
     #[derive(serde::Deserialize)]
-    struct EdgeCfValue(Option<TemporalRange>, IdBytes, IdBytes, String, EdgeSummary);
+    struct EdgeCfValue(Option<ValidRange>, IdBytes, IdBytes, String, EdgeSummary);
 
     #[derive(serde::Deserialize)]
     struct EdgeSummary(DataUrl);
@@ -995,10 +995,10 @@ fn deserialize_edge_value(bytes: &[u8]) -> Result<String> {
 
 fn deserialize_fragment_value(bytes: &[u8]) -> Result<String> {
     #[derive(serde::Deserialize)]
-    struct TemporalRange(Option<u64>, Option<u64>);
+    struct ValidRange(Option<u64>, Option<u64>);
 
     #[derive(serde::Deserialize)]
-    struct FragmentCfValue(Option<TemporalRange>, FragmentContent);
+    struct FragmentCfValue(Option<ValidRange>, FragmentContent);
 
     #[derive(serde::Deserialize)]
     struct FragmentContent(DataUrl);
