@@ -34,11 +34,11 @@ The current implementation uses **5 column families**:
 
 | Column Family | Key Format | Value Format | Purpose |
 |---------------|------------|--------------|---------|
-| `nodes` | `[Id:16]` | `(TemporalRange, Name, Summary)` | Vector node metadata |
-| `node_fragments` | `[Id:16][Timestamp:8]` | `(TemporalRange, Content)` | Vector embeddings (as DataUrl) |
-| `forward_edges` | `[SrcId:16][DstId:16][Name:var]` | `(TemporalRange, Weight, Summary)` | Graph edges (src → dst) |
-| `reverse_edges` | `[DstId:16][SrcId:16][Name:var]` | `(TemporalRange)` | Reverse index (dst → src) |
-| `edge_fragments` | `[SrcId:16][DstId:16][Name:var][Ts:8]` | `(TemporalRange, Content)` | Edge metadata |
+| `nodes` | `[Id:16]` | `(ValidRange, Name, Summary)` | Vector node metadata |
+| `node_fragments` | `[Id:16][Timestamp:8]` | `(ValidRange, Content)` | Vector embeddings (as DataUrl) |
+| `forward_edges` | `[SrcId:16][DstId:16][Name:var]` | `(ValidRange, Weight, Summary)` | Graph edges (src → dst) |
+| `reverse_edges` | `[DstId:16][SrcId:16][Name:var]` | `(ValidRange)` | Reverse index (dst → src) |
+| `edge_fragments` | `[SrcId:16][DstId:16][Name:var][Ts:8]` | `(ValidRange, Content)` | Edge metadata |
 
 **Key Design Decisions:**
 
@@ -64,7 +64,7 @@ pub struct AddNodeFragment {
     pub id: Id,                    // Node ID
     pub ts_millis: TimestampMilli, // Timestamp for ordering
     pub content: DataUrl,          // Vector as base64-encoded JSON
-    pub valid_range: Option<TemporalRange>,
+    pub valid_range: Option<ValidRange>,
 }
 ```
 
@@ -82,7 +82,7 @@ Edges are stored in both `forward_edges` and `reverse_edges`:
 ```rust
 // libs/db/src/graph/schema.rs:77-85
 pub struct ForwardEdgeCfValue(
-    pub Option<TemporalRange>, // Temporal validity
+    pub Option<ValidRange>, // Temporal validity
     pub Option<f64>,           // Edge weight (distance)
     pub EdgeSummary,           // Edge metadata
 );

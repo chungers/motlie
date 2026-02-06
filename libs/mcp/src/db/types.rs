@@ -16,7 +16,7 @@ use motlie_db::query::{
     EdgeDetails, EdgeFragments, Edges, IncomingEdges, NodeById, NodeFragments, Nodes,
     OutgoingEdges, Runnable as QueryRunnable,
 };
-use motlie_db::{DataUrl, Id, TemporalRange, TimestampMilli};
+use motlie_db::{ValidRange, DataUrl, Id, TimestampMilli};
 use rmcp::{model::*, ErrorData as McpError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -37,8 +37,8 @@ pub struct TemporalRangeParam {
 }
 
 impl TemporalRangeParam {
-    fn to_schema(self) -> TemporalRange {
-        TemporalRange(
+    fn to_schema(self) -> ValidRange {
+        ValidRange(
             Some(TimestampMilli(self.valid_since)),
             Some(TimestampMilli(self.valid_until)),
         )

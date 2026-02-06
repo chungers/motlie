@@ -50,7 +50,7 @@ pub const VERSION_MAX: Version = u32::MAX;
 pub struct NodeCfKey(pub Id);  // 16 bytes
 
 pub struct NodeCfValue(
-    pub Option<TemporalRange>,
+    pub Option<ValidRange>,
     pub NameHash,
     pub Option<SummaryHash>,  // Content hash for vector search matching
     pub Version,               // Version (monotonic, starts at 1) [NEW]
@@ -69,7 +69,7 @@ pub struct ForwardEdgeCfKey(
 );  // Total: 40 bytes
 
 pub struct ForwardEdgeCfValue(
-    pub Option<TemporalRange>,
+    pub Option<ValidRange>,
     pub Option<f64>,           // weight
     pub Option<SummaryHash>,   // Content hash
     pub Version,               // Version [NEW]
@@ -92,9 +92,9 @@ pub struct ForwardEdgeCfValue(
 ```rust
 pub struct ReverseEdgeCfKey(pub DstId, pub SrcId, pub NameHash);  // 40 bytes
 
-pub struct ReverseEdgeCfValue(pub Option<TemporalRange>);
+pub struct ReverseEdgeCfValue(pub Option<ValidRange>);
 // ReverseEdges is primarily an index for "find edges TO this node".
-// TemporalRange is denormalized here for fast inbound scans with time filtering.
+// ValidRange is denormalized here for fast inbound scans with time filtering.
 // Other edge details (weight, summary, version) remain authoritative in ForwardEdges.
 
 **Consistency rule:** whenever an edge's temporal range is updated, update both ForwardEdges and ReverseEdges in the same transaction to keep this denormalized field in sync.
@@ -191,10 +191,10 @@ Fragments use timestamp for append-only semantics. No GC. (codex, 2026-02-02, va
 
 ```rust
 pub struct NodeFragmentCfKey(pub Id, pub TimestampMilli);  // 24 bytes
-pub struct NodeFragmentCfValue(pub Option<TemporalRange>, pub FragmentContent);
+pub struct NodeFragmentCfValue(pub Option<ValidRange>, pub FragmentContent);
 
 pub struct EdgeFragmentCfKey(pub SrcId, pub DstId, pub NameHash, pub TimestampMilli);  // 48 bytes
-pub struct EdgeFragmentCfValue(pub Option<TemporalRange>, pub FragmentContent);
+pub struct EdgeFragmentCfValue(pub Option<ValidRange>, pub FragmentContent);
 ```
 
 ---
@@ -531,7 +531,7 @@ fn insert_edge(
     let edge_value = ForwardEdgeCfValue(None, weight, Some(summary_hash), version, deleted);
     txn.put_cf(forward_edges_cf, edge_key, edge_value)?;
 
-    // 4. Write reverse edge (HOT) - denormalized TemporalRange for inbound scans
+    // 4. Write reverse edge (HOT) - denormalized ValidRange for inbound scans
     let reverse_key = ReverseEdgeCfKey(dst, src, name_hash);
     let reverse_value = ReverseEdgeCfValue(None);
     txn.put_cf(reverse_edges_cf, reverse_key, reverse_value)?;
@@ -683,7 +683,7 @@ fn update_edge(
     let new_value = ForwardEdgeCfValue(current.0, current.1, Some(new_hash), new_version, current.4);
     txn.put_cf(forward_edges_cf, edge_key, new_value)?;
 
-    // Note: Reverse edge key unchanged. TemporalRange is updated via temporal mutations.
+    // Note: Reverse edge key unchanged. ValidRange is updated via temporal mutations.
 
     // 6. Write new summary (COLD) - content-addressed
     let summary_key = EdgeSummaryCfKey(new_hash);

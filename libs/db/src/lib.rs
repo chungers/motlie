@@ -77,7 +77,7 @@ pub type UntilTimestamp = TimestampMilli;
 
 /// Support for temporal queries - defines when a record is valid
 ///
-/// A `TemporalRange` specifies the time window during which a record
+/// A `ValidRange` specifies the time window during which a record
 /// (node, edge, fragment) is considered valid:
 /// - `(Some(start), None)` - Valid from `start` onwards (inclusive)
 /// - `(None, Some(until))` - Valid until `until` (exclusive)
@@ -86,10 +86,10 @@ pub type UntilTimestamp = TimestampMilli;
 ///
 /// # Example
 /// ```
-/// use motlie_db::{TemporalRange, TimestampMilli};
+/// use motlie_db::{ValidRange, TimestampMilli};
 ///
 /// // Create a range valid from a specific time
-/// let range = TemporalRange::valid_from(TimestampMilli(1000));
+/// let range = ValidRange::valid_from(TimestampMilli(1000));
 ///
 /// // Check if a timestamp is within the range
 /// let ts = TimestampMilli(1500);
@@ -101,9 +101,9 @@ pub type UntilTimestamp = TimestampMilli;
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[archive(check_bytes)]
 #[archive_attr(derive(Debug, Clone, Copy, PartialEq, Eq))]
-pub struct TemporalRange(pub Option<StartTimestamp>, pub Option<UntilTimestamp>);
+pub struct ValidRange(pub Option<StartTimestamp>, pub Option<UntilTimestamp>);
 
-impl TemporalRange {
+impl ValidRange {
     /// Create a new temporal range with no constraints (always valid)
     pub fn always_valid() -> Option<Self> {
         None
@@ -111,17 +111,17 @@ impl TemporalRange {
 
     /// Create a temporal range valid from a start time (inclusive)
     pub fn valid_from(start: TimestampMilli) -> Option<Self> {
-        Some(TemporalRange(Some(start), None))
+        Some(ValidRange(Some(start), None))
     }
 
     /// Create a temporal range valid until an end time (exclusive)
     pub fn valid_until(until: TimestampMilli) -> Option<Self> {
-        Some(TemporalRange(None, Some(until)))
+        Some(ValidRange(None, Some(until)))
     }
 
     /// Create a temporal range valid between start (inclusive) and until (exclusive)
     pub fn valid_between(start: TimestampMilli, until: TimestampMilli) -> Option<Self> {
-        Some(TemporalRange(Some(start), Some(until)))
+        Some(ValidRange(Some(start), Some(until)))
     }
 
     /// Check if a timestamp is valid according to this temporal range
@@ -140,7 +140,7 @@ impl TemporalRange {
 
 /// Helper function to check if a record is valid at a given time
 /// Returns true if temporal_range is None (always valid) or if query_time falls within range
-pub fn is_valid_at_time(temporal_range: &Option<TemporalRange>, query_time: TimestampMilli) -> bool {
+pub fn is_valid_at_time(temporal_range: &Option<ValidRange>, query_time: TimestampMilli) -> bool {
     match temporal_range {
         None => true, // No temporal constraint = always valid
         Some(range) => range.is_valid_at(query_time),
