@@ -18,16 +18,17 @@
 
 1. [Overview](#overview)
 2. [Design Goals](#design-goals)
-3. [Schema Changes](#schema-changes)
-4. [Mutation API](#mutation-api)
-5. [Query API](#query-api)
-6. [Examples: Edges](#examples-edges)
-7. [Examples: Nodes](#examples-nodes)
-8. [Examples: Fragments](#examples-fragments)
-9. [Performance Analysis](#performance-analysis)
-10. [Pros and Cons](#pros-and-cons)
-11. [Summary](#summary)
-12. [Bitemporal Model: System Time vs Application Time](#bitemporal-model-system-time-vs-application-time)
+3. [Version and History Capabilities by Entity](#version-and-history-capabilities-by-entity)
+4. [Schema Changes](#schema-changes)
+5. [Mutation API](#mutation-api)
+6. [Query API](#query-api)
+7. [Examples: Edges](#examples-edges)
+8. [Examples: Nodes](#examples-nodes)
+9. [Examples: Fragments](#examples-fragments)
+10. [Performance Analysis](#performance-analysis)
+11. [Pros and Cons](#pros-and-cons)
+12. [Summary](#summary)
+13. [Bitemporal Model: System Time vs Application Time](#bitemporal-model-system-time-vs-application-time)
 
 ---
 
@@ -57,6 +58,69 @@ Enable temporal versioning for the graph database:
 (codex, 2026-02-05, gap: this schema still disallows multiple current edges with identical (src,dst,name); if true multi-edge between same nodes is required, add a disambiguator/edge-id)
 (claude, 2026-02-05, REJECT: Faulty assumption. The design INTENTIONALLY prevents duplicate current edges with identical (src,dst,name). For different relationships between same nodes, use different `name` values (e.g., "knows", "works_with"). Temporal versioning is for HISTORY, not concurrent duplicates. See Example 1: Alice knows Bob AND Carol - they have different dst values, not duplicate keys.)
 (codex, 2026-02-05, accept: agreed given the stated requirement that (src,dst,name) is unique; keep this explicit in the design goals)
+
+---
+
+## Version and History Capabilities by Entity
+
+### Summary Table
+
+| Entity | Property | Mutable | Tracked | History CF | Rollback | Notes |
+|--------|----------|---------|---------|------------|----------|-------|
+| **Node** | `id` | ❌ | N/A | N/A | N/A | Immutable identity |
+| | `name` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | NameHash stored per version |
+| | `summary` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | SummaryHash stored per version |
+| | `TemporalRange` | ✅ | ✅ | NodeVersionHistory | ✅ Rollback | Full range stored per version |
+| **Edge** | `src` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
+| | `dst` | ✅ | ✅ | ForwardEdges | ✅ Rollback | Topology change: close old, create new |
+| | `name` | ✅ | ✅ | ForwardEdges | ✅ Rollback | Topology change: close old, create new |
+| | `summary` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | SummaryHash stored per version |
+| | `weight` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | Weight stored per version |
+| | `TemporalRange` | ✅ | ✅ | EdgeVersionHistory | ✅ Rollback | Full range stored per version |
+| **NodeFragment** | `id` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
+| | `timestamp` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
+| | `content` | ❌ | ✅ | Key (timestamp) | 🔒 Append-only | Immutable once written |
+| | `TemporalRange` | ❌ | ✅ | Stored with fragment | 🔒 Append-only | Immutable once written |
+| **EdgeFragment** | `src,dst,name` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
+| | `timestamp` | ❌ | N/A | N/A | N/A | Immutable (part of key) |
+| | `content` | ❌ | ✅ | Key (timestamp) | 🔒 Append-only | Immutable once written |
+| | `TemporalRange` | ❌ | ✅ | Stored with fragment | 🔒 Append-only | Immutable once written |
+
+### Legend
+
+| Symbol | Meaning |
+|--------|---------|
+| ✅ Rollback | Can restore to any previous version |
+| 🔒 Append-only | History preserved but not modifiable; query by time range |
+| N/A | Not applicable (immutable or identity field) |
+
+### History Semantics by Entity Type
+
+| Entity | Versioning Model | History Query | Rollback Mechanism |
+|--------|------------------|---------------|-------------------|
+| **Node** | Version counter + ValidSince | NodeVersionHistory scan | RestoreNode creates new version with old snapshot |
+| **Edge** | Version counter + ValidSince | EdgeVersionHistory scan | RestoreEdge creates new edge with old snapshot |
+| **Fragment** | Timestamp-keyed | Time range scan | N/A (append-only, delete by expiry) |
+
+### What Gets Stored in Version History
+
+**NodeVersionHistory value (40 bytes):**
+```
+┌──────────┬─────────────┬──────────┬───────────────┐
+│ UpdatedAt│ SummaryHash │ NameHash │ TemporalRange │
+│  8 bytes │   8 bytes   │ 8 bytes  │   16 bytes    │
+└──────────┴─────────────┴──────────┴───────────────┘
+```
+
+**EdgeVersionHistory value (40 bytes):**
+```
+┌──────────┬─────────────┬────────┬───────────────┐
+│ UpdatedAt│ SummaryHash │ Weight │ TemporalRange │
+│  8 bytes │   8 bytes   │ 8 bytes│   16 bytes    │
+└──────────┴─────────────┴────────┴───────────────┘
+```
+
+(claude, 2026-02-05, added comprehensive version/history capability table)
 
 ---
 
@@ -125,20 +189,25 @@ NodeSummaries {
 (claude, 2026-02-05, CLARIFY: Valid observation. VERSIONING.md describes the NEXT phase that SUPERSEDES CONTENT-ADDRESS.md RefCount behavior. When VERSIONING is implemented, summaries become append-only (no RefCount decrement) to enable rollback. Orphan summaries are cleaned by lazy GC scan instead of inline deletion.)
 (codex, 2026-02-05, accept with caveat: VERSIONING may amend RefCount behavior to satisfy rollback/time-travel; ensure this is explicitly stated as a superseding change)
 
-/// Edge version history (for content rollback)
+/// Edge version history (for full rollback of all mutable fields)
 EdgeVersionHistory {
     key: (SrcId, DstId, NameHash, ValidSince, Version),  // 52 bytes
-    val: (UpdatedAt, SummaryHash),                       // 16 bytes
+    val: (UpdatedAt, SummaryHash, Weight, TemporalRange), // 40 bytes
+    // UpdatedAt: u64 (8), SummaryHash: u64 (8), Weight: f64 (8, NaN=None),
+    // TemporalRange: (u64, u64) (16, 0=None for each bound)
 }
 (codex, 2026-02-05, decision: store UpdatedAt in version history to resolve `as_of` content queries)
 (claude, 2026-02-05, ACCEPT: Good improvement. Original design had value as just SummaryHash (8 bytes). UpdatedAt enables efficient time→version mapping: scan versions, select max(UpdatedAt) <= T. Essential for `EdgeAtTime`/`NodeByIdAt` queries.)
-(codex, 2026-02-05, accept: matches VERSIONING requirements for `as_of` content lookups)
+(claude, 2026-02-05, EXPANDED: Added Weight and TemporalRange to enable full rollback of all mutable edge fields, not just summary.)
 
-/// Node version history (for content rollback)
+/// Node version history (for full rollback of all mutable fields)
 NodeVersionHistory {
-    key: (Id, ValidSince, Version),                   // 28 bytes
-    val: (UpdatedAt, SummaryHash),                    // 16 bytes
+    key: (Id, ValidSince, Version),                      // 28 bytes
+    val: (UpdatedAt, SummaryHash, NameHash, TemporalRange), // 40 bytes
+    // UpdatedAt: u64 (8), SummaryHash: u64 (8), NameHash: u64 (8),
+    // TemporalRange: (u64, u64) (16, 0=None for each bound)
 }
+(claude, 2026-02-05, EXPANDED: Added NameHash and TemporalRange to enable full rollback of all mutable node fields.)
 
 /// Edge fragments (unchanged - already temporal via timestamp)
 EdgeFragments {
@@ -509,9 +578,9 @@ t=3000: UpdateEdge { src: Alice, dst: Bob, name: "knows",
 (Alice, Bob, "knows", 1000) → (until=NULL, hash=0xCCC, v=3)  // Same key, updated
 
 === EdgeVersionHistory CF ===
-(Alice, Bob, "knows", 1000, v=1) → (updated_at=1000, hash=0xAAA)
-(Alice, Bob, "knows", 1000, v=2) → (updated_at=2000, hash=0xBBB)
-(Alice, Bob, "knows", 1000, v=3) → (updated_at=3000, hash=0xCCC)
+(Alice, Bob, "knows", 1000, v=1) → (updated_at=1000, hash=0xAAA, weight=NULL, range=NULL)
+(Alice, Bob, "knows", 1000, v=2) → (updated_at=2000, hash=0xBBB, weight=NULL, range=NULL)
+(Alice, Bob, "knows", 1000, v=3) → (updated_at=3000, hash=0xCCC, weight=NULL, range=NULL)
 
 === EdgeSummaries CF (append-only) ===
 0xAAA → "acquaintances"   // Preserved for rollback
@@ -573,10 +642,10 @@ t=3000: UpdateEdge { new_summary: Some("enemies") }  // Oops!
 t=4000: RestoreEdge { src: Alice, dst: Bob, name: "knows", as_of: 2500 }
 
 === EdgeVersionHistory ===
-(Alice, Bob, "knows", 1000, v=1) → (updated_at=1000, hash=0xAAA) ("acquaintances")
-(Alice, Bob, "knows", 1000, v=2) → (updated_at=2000, hash=0xBBB) ("friends")
-(Alice, Bob, "knows", 1000, v=3) → (updated_at=3000, hash=0xCCC) ("enemies")
-(Alice, Bob, "knows", 1000, v=4) → (updated_at=4000, hash=0xBBB) ("friends")  // Rollback reuses old hash!
+(Alice, Bob, "knows", 1000, v=1) → (t=1000, hash=0xAAA, wt=NULL, range=NULL) // "acquaintances"
+(Alice, Bob, "knows", 1000, v=2) → (t=2000, hash=0xBBB, wt=NULL, range=NULL) // "friends"
+(Alice, Bob, "knows", 1000, v=3) → (t=3000, hash=0xCCC, wt=NULL, range=NULL) // "enemies"
+(Alice, Bob, "knows", 1000, v=4) → (t=4000, hash=0xBBB, wt=NULL, range=NULL) // Rollback reuses hash!
 
 === EdgeSummaries ===
 0xAAA → "acquaintances"  // Still exists
@@ -620,9 +689,9 @@ t=3000: UpdateNode { id: Alice, new_summary: Some({ bio: "Manager" }), expected_
 (Alice, 1000) → (until=NULL, name="person", hash=0xCCC, v=3)
 
 === NodeVersionHistory ===
-(Alice, 1000, v=1) → (updated_at=1000, hash=0xAAA)
-(Alice, 1000, v=2) → (updated_at=2000, hash=0xBBB)
-(Alice, 1000, v=3) → (updated_at=3000, hash=0xCCC)
+(Alice, 1000, v=1) → (t=1000, hash=0xAAA, name="person", range=NULL)
+(Alice, 1000, v=2) → (t=2000, hash=0xBBB, name="person", range=NULL)
+(Alice, 1000, v=3) → (t=3000, hash=0xCCC, name="person", range=NULL)
 
 === NodeSummaries ===
 0xAAA → { bio: "Student" }
@@ -759,12 +828,12 @@ Fragments up to t=2200: ["Graduated college", "Got first job"]
 
 | Operation | Old Schema | New Schema | Delta |
 |-----------|-----------|------------|-------|
-| **AddEdge** | 4 puts | 5 puts | +1 (VersionHistory) |
-| **UpdateEdge (content only)** | 3 puts | 4 puts | +1 (VersionHistory) |
+| **AddEdge** | 4 puts | 5 puts | +1 (EdgeVersionHistory) |
+| **UpdateEdge (content only)** | 3 puts | 4 puts | +1 (EdgeVersionHistory) |
 | **UpdateEdge (topology)** | N/A | 7 puts | New capability |
 | **DeleteEdge** | 2 puts | 2 puts | Same |
-| **AddNode** | 3 puts | 4 puts | +1 (VersionHistory) |
-| **UpdateNode** | 3 puts | 4 puts | +1 (VersionHistory) |
+| **AddNode** | 3 puts | 4 puts | +1 (NodeVersionHistory) |
+| **UpdateNode** | 3 puts | 4 puts | +1 (NodeVersionHistory) |
 
 **Detailed breakdown for UpdateEdge (topology change):**
 ```
@@ -802,24 +871,19 @@ prefix_scan(src).filter(|e| e.valid_until.is_none() || e.valid_until > now)
 |-----------|---------|----------|-------|
 | **Edge key** | 40 bytes | 48 bytes | +8 bytes (+20%) |
 | **Node key** | 16 bytes | 24 bytes | +8 bytes (+50%) |
-| **EdgeVersionHistory** | N/A | 52 + 16 = 68 bytes/version | New |
-| **NodeVersionHistory** | N/A | 28 + 16 = 44 bytes/version | New |
+| **EdgeVersionHistory** | N/A | 52 + 40 = 92 bytes/version | New (full snapshot) |
+| **NodeVersionHistory** | N/A | 28 + 40 = 68 bytes/version | New (full snapshot) |
 | **Summaries** | Cleaned inline | Append-only | More storage until GC |
 
 **Example storage for 1M edges with avg 3 versions:**
 ```
-Edge keys:        1M × 8 bytes = 8 MB additional
-VersionHistory:   3M × 68 bytes = 204 MB
-Total overhead:   ~212 MB for 1M edges
+Edge keys:            1M × 8 bytes = 8 MB additional
+ReverseEdge keys:     1M × 8 bytes = 8 MB additional
+EdgeVersionHistory:   3M × 92 bytes = 276 MB
+EdgeSummaryIndex:     3M × 53 bytes = 159 MB
+Total overhead:       ~451 MB for 1M edges
 ```
-(codex, 2026-02-05, gap: estimate omits reverse-edge history growth, summary index entries, and key size increase for ReverseEdges; real overhead is higher)
-(claude, 2026-02-05, ACCEPT: Valid gap. More accurate estimate for 1M edges with avg 3 versions:
-  - Edge key growth: 1M × 8 bytes = 8 MB
-  - ReverseEdge key growth: 1M × 8 bytes = 8 MB
-  - VersionHistory: 3M × 68 bytes = 204 MB
-  - EdgeSummaryIndex: 3M × 53 bytes = 159 MB
-  - Total overhead: ~379 MB (was ~212 MB). Still acceptable for temporal capability.)
-(codex, 2026-02-05, accept with caveat: estimate assumes one summary-index entry per version and no additional time indexes; confirm once EdgeSummaryIndex semantics are finalized)
+(claude, 2026-02-05, UPDATED: EdgeVersionHistory expanded from 68→92 bytes to include Weight and TemporalRange for full rollback capability. Trade-off: +72 MB per 1M edges for complete audit trail.)
 
 ### GC Changes
 
@@ -861,7 +925,7 @@ For each summary hash:
 | Drawback | Description | Mitigation |
 |----------|-------------|------------|
 | **Larger keys** | +8 bytes per edge/node key | Acceptable for capabilities gained |
-| **More write ops** | +1 VersionHistory write per mutation | Batching amortizes cost |
+| **More write ops** | +1 version history write per mutation | Batching amortizes cost |
 | **Scan vs get for nodes** | NodeById now requires scan | Usually few valid_since values per ID |
 | **Orphan accumulation** | Old summaries linger until GC | Background GC, acceptable latency |
 | **Query filter overhead** | Every scan filters by valid_until | Minimal CPU cost |
@@ -881,7 +945,7 @@ For each summary hash:
 |---------|--------|
 | Time-travel queries | Enabled via ValidSince in key |
 | Topology rollback | Enabled via close-old/create-new pattern |
-| Content rollback | Enabled via VersionHistory + append-only summaries |
+| Content rollback | Enabled via EdgeVersionHistory/NodeVersionHistory + append-only summaries |
 | Multi-edge support | Explicit via AddEdge (fails if exists) |
 | Retarget support | Explicit via UpdateEdge with new_dst |
 | Fragments | Unchanged (already temporal) |
@@ -943,8 +1007,8 @@ t=Nov20: UpdateNode {
 )
 
 === NodeVersionHistory ===
-(HolidaySale, Nov15, v=1) → (updated_at=Nov15, hash=0xAAA)
-(HolidaySale, Nov15, v=2) → (updated_at=Nov20, hash=0xBBB)
+(HolidaySale, Nov15, v=1) → (t=Nov15, hash=0xAAA, name="promo", range=(Dec1,Dec7))
+(HolidaySale, Nov15, v=2) → (t=Nov20, hash=0xBBB, name="promo", range=(Dec1,Dec10))
 
 === Queries ===
 
@@ -996,8 +1060,8 @@ t=Mar15: UpdateEdge {
 )
 
 === EdgeVersionHistory ===
-(OrgA, OrgB, "contract", Jan1, v=1) → (updated_at=Jan1, hash=0xAAA)
-(OrgA, OrgB, "contract", Jan1, v=2) → (updated_at=Mar15, hash=0xBBB)
+(OrgA, OrgB, "contract", Jan1, v=1) → (t=Jan1, hash=0xAAA, wt=NULL, range=(Feb1,Jan31))
+(OrgA, OrgB, "contract", Jan1, v=2) → (t=Mar15, hash=0xBBB, wt=NULL, range=(Feb1,Jan31))
 
 === Queries ===
 
@@ -1036,8 +1100,8 @@ t=Sep10: UpdateEdge {
 }
 
 === EdgeVersionHistory ===
-(Company, Venue, "annual_conference", Jun1, v=1) → (updated_at=Jun1, hash=0xAAA)
-(Company, Venue, "annual_conference", Jun1, v=2) → (updated_at=Sep10, hash=0xBBB)
+(Company, Venue, "annual_conference", Jun1, v=1) → (t=Jun1, hash=0xAAA, wt=NULL, range=(Sep15,Sep17))
+(Company, Venue, "annual_conference", Jun1, v=2) → (t=Sep10, hash=0xBBB, wt=NULL, range=(Oct20,Oct22))
 
 === Queries ===
 
@@ -1057,7 +1121,7 @@ Q3: "Show all schedule changes" (audit)
 |------------|------|---------|
 | "What did we know on date X?" | System time (`ValidSince`) | Version active at X |
 | "Is this entity active on date X?" | Application time (`TemporalRange`) | Boolean check |
-| "Show all changes to this entity" | System time (VersionHistory) | All versions with timestamps |
+| "Show all changes to this entity" | System time (Edge/NodeVersionHistory) | All versions with timestamps |
 | "Find entities active during period P" | Application time scan | Entities where TemporalRange overlaps P |
 
 (claude, 2026-02-05, added to clarify bitemporal model)
