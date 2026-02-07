@@ -283,6 +283,7 @@ pub struct EdgeSummaryCfValue(pub EdgeSummary);
 // Serialization: MessagePack + LZ4 (ColumnFamilySerde)
 // Rationale: Accessed during rollback/time-travel queries, not hot traversal path.
 // Values contain variable-length ActivePeriod; compression beneficial.
+/// (claude, 2026-02-06, implemented: schema.rs NodeVersionHistory, EdgeVersionHistory CFs added)
 
 /// Node version history - stores full snapshot for rollback
 pub struct NodeVersionHistoryCfKey(
@@ -368,6 +369,7 @@ pub struct EdgeSummaryIndexCfValue(pub u8);  // CURRENT=0x01, STALE=0x00
 // Serialization: MessagePack + LZ4 (ColumnFamilySerde)
 // Rationale: Only accessed by background GC worker, not query path.
 // Tiny 1-byte values; compression overhead negligible.
+/// (claude, 2026-02-06, implemented: schema.rs OrphanSummaries CF added)
 
 /// Tracks summaries with RefCount=0 for deferred deletion.
 /// Time-ordered key enables retention-based GC scanning.

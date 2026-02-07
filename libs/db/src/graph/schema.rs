@@ -67,7 +67,6 @@ pub use crate::{is_active_at_time, ActiveFrom, ActivePeriod, ActiveUntil};
 
 /// Entity version number for optimistic locking.
 /// u32 provides 4 billion versions per entity - sufficient for 136 years at 1 update/sec.
-/// (claude, 2026-02-02, in-progress)
 pub type Version = u32;
 
 /// Maximum version value. If reached, reject further updates with Error::VersionOverflow.
@@ -76,7 +75,21 @@ pub const VERSION_MAX: Version = u32::MAX;
 /// Reference count for content-addressed summaries.
 /// u32 allows billions of references while bounding storage overhead to 4 bytes.
 /// Used to enable safe GC of shared summary content.
+/// (claude, 2026-02-06, deprecated: VERSIONING uses OrphanSummaries CF instead)
 pub type RefCount = u32;
+
+// ============================================================================
+// Temporal Type Aliases (VERSIONING design)
+// ============================================================================
+/// (claude, 2026-02-06, in-progress: VERSIONING temporal types)
+
+/// System time: when this version became valid in the database.
+/// Part of entity keys for time-travel queries.
+pub type ValidSince = TimestampMilli;
+
+/// System time: when this version stopped being valid in the database.
+/// Stored in entity values; None means version is current.
+pub type ValidUntil = TimestampMilli;
 
 // ============================================================================
 // Names Column Family (for name interning)
@@ -1128,8 +1141,332 @@ impl ColumnFamilySerde for EdgeSummaryIndex {
 }
 
 // ============================================================================
+// Version History CFs (COLD - VERSIONING design for rollback/time-travel)
+// ============================================================================
+/// (claude, 2026-02-06, in-progress: VERSIONING version history CFs)
+
+/// NodeVersionHistory column family - stores version snapshots for rollback.
+///
+/// Key: (Id, ValidSince, Version) - 28 bytes
+/// Value: (UpdatedAt, SummaryHash, NameHash, ActivePeriod) - 40 bytes
+///
+/// Enables:
+/// - Time-travel queries: find version active at time T
+/// - Content rollback: restore node to previous version
+pub(crate) struct NodeVersionHistory;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct NodeVersionHistoryCfKey(
+    pub(crate) Id,          // 16 bytes
+    pub(crate) ValidSince,  // 8 bytes
+    pub(crate) Version,     // 4 bytes
+);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct NodeVersionHistoryCfValue(
+    pub(crate) TimestampMilli,        // UpdatedAt: when this version was created
+    pub(crate) Option<SummaryHash>,   // Content hash at this version
+    pub(crate) NameHash,              // Node name at this version
+    pub(crate) Option<ActivePeriod>,  // Business validity at this version
+);
+
+impl ColumnFamily for NodeVersionHistory {
+    const CF_NAME: &'static str = "graph/node_version_history";
+}
+
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for NodeVersionHistory {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.fragment_block_size); // COLD CF
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        block_opts.set_bloom_filter(10.0, false);
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [id (16)] + [valid_since (8)] + [version (4)] = 28 bytes
+        // Use 16-byte prefix to scan all versions of a node
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl ColumnFamilySerde for NodeVersionHistory {
+    type Key = NodeVersionHistoryCfKey;
+    type Value = NodeVersionHistoryCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // Layout: [id (16)] + [valid_since (8)] + [version (4)] = 28 bytes
+        let mut bytes = Vec::with_capacity(28);
+        bytes.extend_from_slice(&key.0.into_bytes());
+        bytes.extend_from_slice(&key.1 .0.to_be_bytes());
+        bytes.extend_from_slice(&key.2.to_be_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
+        if bytes.len() != 28 {
+            anyhow::bail!(
+                "Invalid NodeVersionHistoryCfKey length: expected 28, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(&bytes[0..16]);
+
+        let mut valid_since_bytes = [0u8; 8];
+        valid_since_bytes.copy_from_slice(&bytes[16..24]);
+        let valid_since = TimestampMilli(u64::from_be_bytes(valid_since_bytes));
+
+        let mut version_bytes = [0u8; 4];
+        version_bytes.copy_from_slice(&bytes[24..28]);
+        let version = u32::from_be_bytes(version_bytes);
+
+        Ok(NodeVersionHistoryCfKey(
+            Id::from_bytes(id_bytes),
+            valid_since,
+            version,
+        ))
+    }
+    // value_to_bytes and value_from_bytes use default impl (MessagePack + LZ4)
+}
+
+/// EdgeVersionHistory column family - stores version snapshots for rollback.
+///
+/// Key: (SrcId, DstId, NameHash, ValidSince, Version) - 52 bytes
+/// Value: (UpdatedAt, SummaryHash, Weight, ActivePeriod) - 40 bytes
+///
+/// Enables:
+/// - Time-travel queries: find version active at time T
+/// - Content rollback: restore edge to previous version
+pub(crate) struct EdgeVersionHistory;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct EdgeVersionHistoryCfKey(
+    pub(crate) SrcId,       // 16 bytes
+    pub(crate) DstId,       // 16 bytes
+    pub(crate) NameHash,    // 8 bytes
+    pub(crate) ValidSince,  // 8 bytes
+    pub(crate) Version,     // 4 bytes
+);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct EdgeVersionHistoryCfValue(
+    pub(crate) TimestampMilli,        // UpdatedAt: when this version was created
+    pub(crate) Option<SummaryHash>,   // Content hash at this version
+    pub(crate) Option<f64>,           // Weight at this version
+    pub(crate) Option<ActivePeriod>,  // Business validity at this version
+);
+
+impl ColumnFamily for EdgeVersionHistory {
+    const CF_NAME: &'static str = "graph/edge_version_history";
+}
+
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for EdgeVersionHistory {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.fragment_block_size); // COLD CF
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        block_opts.set_bloom_filter(10.0, false);
+        opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [valid_since (8)] + [version (4)] = 52 bytes
+        // Use 40-byte prefix to scan all versions of an edge (src, dst, name)
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(40));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
+        opts
+    }
+}
+
+impl ColumnFamilySerde for EdgeVersionHistory {
+    type Key = EdgeVersionHistoryCfKey;
+    type Value = EdgeVersionHistoryCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // Layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [valid_since (8)] + [version (4)] = 52 bytes
+        let mut bytes = Vec::with_capacity(52);
+        bytes.extend_from_slice(&key.0.into_bytes());
+        bytes.extend_from_slice(&key.1.into_bytes());
+        bytes.extend_from_slice(key.2.as_bytes());
+        bytes.extend_from_slice(&key.3 .0.to_be_bytes());
+        bytes.extend_from_slice(&key.4.to_be_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
+        if bytes.len() != 52 {
+            anyhow::bail!(
+                "Invalid EdgeVersionHistoryCfKey length: expected 52, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut src_id_bytes = [0u8; 16];
+        src_id_bytes.copy_from_slice(&bytes[0..16]);
+
+        let mut dst_id_bytes = [0u8; 16];
+        dst_id_bytes.copy_from_slice(&bytes[16..32]);
+
+        let mut name_hash_bytes = [0u8; 8];
+        name_hash_bytes.copy_from_slice(&bytes[32..40]);
+
+        let mut valid_since_bytes = [0u8; 8];
+        valid_since_bytes.copy_from_slice(&bytes[40..48]);
+        let valid_since = TimestampMilli(u64::from_be_bytes(valid_since_bytes));
+
+        let mut version_bytes = [0u8; 4];
+        version_bytes.copy_from_slice(&bytes[48..52]);
+        let version = u32::from_be_bytes(version_bytes);
+
+        Ok(EdgeVersionHistoryCfKey(
+            Id::from_bytes(src_id_bytes),
+            Id::from_bytes(dst_id_bytes),
+            NameHash::from_bytes(name_hash_bytes),
+            valid_since,
+            version,
+        ))
+    }
+    // value_to_bytes and value_from_bytes use default impl (MessagePack + LZ4)
+}
+
+// ============================================================================
+// OrphanSummaries CF (COLD - VERSIONING design for deferred GC)
+// ============================================================================
+/// (claude, 2026-02-06, in-progress: VERSIONING orphan tracking for rollback)
+
+/// SummaryKind discriminant for OrphanSummaries CF.
+/// Identifies whether orphan is from NodeSummaries or EdgeSummaries.
+#[repr(u8)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryKind {
+    Node = 0,
+    Edge = 1,
+}
+
+/// OrphanSummaries column family - tracks summaries with RefCount=0 for deferred deletion.
+///
+/// Key: (TimestampMilli, SummaryHash) - 16 bytes, time-ordered for retention scan
+/// Value: (SummaryKind) - 1 byte discriminant
+///
+/// Enables:
+/// - Rollback: summaries preserved until retention expires
+/// - Efficient GC: O(orphans) scan instead of O(all_summaries)
+pub(crate) struct OrphanSummaries;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct OrphanSummaryCfKey(
+    pub(crate) TimestampMilli,  // 8 bytes - when RefCount became 0
+    pub(crate) SummaryHash,     // 8 bytes - which summary
+);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct OrphanSummaryCfValue(pub(crate) SummaryKind);
+
+impl ColumnFamily for OrphanSummaries {
+    const CF_NAME: &'static str = "graph/orphan_summaries";
+}
+
+impl ColumnFamilyConfig<GraphBlockCacheConfig> for OrphanSummaries {
+    fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        let mut opts = rocksdb::Options::default();
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+
+        block_opts.set_block_cache(cache);
+        block_opts.set_block_size(config.graph_block_size);
+
+        if config.cache_index_and_filter_blocks {
+            block_opts.set_cache_index_and_filter_blocks(true);
+        }
+        if config.pin_l0_filter_and_index {
+            block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        }
+
+        opts.set_block_based_table_factory(&block_opts);
+        opts
+    }
+}
+
+impl ColumnFamilySerde for OrphanSummaries {
+    type Key = OrphanSummaryCfKey;
+    type Value = OrphanSummaryCfValue;
+
+    fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
+        // Layout: [timestamp (8)] + [summary_hash (8)] = 16 bytes
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(&key.0 .0.to_be_bytes());
+        bytes.extend_from_slice(key.1.as_bytes());
+        bytes
+    }
+
+    fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
+        if bytes.len() != 16 {
+            anyhow::bail!(
+                "Invalid OrphanSummaryCfKey length: expected 16, got {}",
+                bytes.len()
+            );
+        }
+
+        let mut ts_bytes = [0u8; 8];
+        ts_bytes.copy_from_slice(&bytes[0..8]);
+        let timestamp = TimestampMilli(u64::from_be_bytes(ts_bytes));
+
+        let mut hash_bytes = [0u8; 8];
+        hash_bytes.copy_from_slice(&bytes[8..16]);
+
+        Ok(OrphanSummaryCfKey(
+            timestamp,
+            SummaryHash::from_bytes(hash_bytes),
+        ))
+    }
+
+    fn value_to_bytes(value: &Self::Value) -> anyhow::Result<Vec<u8>> {
+        Ok(vec![value.0 as u8])
+    }
+
+    fn value_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Value> {
+        if bytes.len() != 1 {
+            anyhow::bail!(
+                "Invalid OrphanSummaryCfValue length: expected 1, got {}",
+                bytes.len()
+            );
+        }
+        let kind = match bytes[0] {
+            0 => SummaryKind::Node,
+            1 => SummaryKind::Edge,
+            _ => anyhow::bail!("Invalid SummaryKind discriminant: {}", bytes[0]),
+        };
+        Ok(OrphanSummaryCfValue(kind))
+    }
+}
+
+// ============================================================================
 // GraphMeta Column Family - Graph-level metadata (GC cursors, future config)
-// (claude, 2026-02-02, implemented) CONTENT-ADDRESS GC cursor persistence
 // ============================================================================
 
 /// GraphMeta column family - stores graph-level metadata.
@@ -1292,19 +1629,22 @@ impl GraphMeta {
 
 /// All column families used in the database.
 /// This is the authoritative list that should be used when opening the database.
-/// (claude, 2026-02-02, in-progress) Added reverse index CFs for CONTENT-ADDRESS
+/// (claude, 2026-02-06, in-progress: VERSIONING added version history and orphan CFs)
 pub(crate) const ALL_COLUMN_FAMILIES: &[&str] = &[
     Names::CF_NAME,
     Nodes::CF_NAME,
     NodeFragments::CF_NAME,
-    NodeSummaries::CF_NAME,      // Phase 2: Cold CF for node summaries
-    NodeSummaryIndex::CF_NAME,   // CONTENT-ADDRESS: Reverse index hash→nodes
+    NodeSummaries::CF_NAME,          // COLD: node summary content
+    NodeSummaryIndex::CF_NAME,       // COLD: reverse index hash→nodes
+    NodeVersionHistory::CF_NAME,     // COLD: VERSIONING version snapshots
     EdgeFragments::CF_NAME,
-    EdgeSummaries::CF_NAME,      // Phase 2: Cold CF for edge summaries
-    EdgeSummaryIndex::CF_NAME,   // CONTENT-ADDRESS: Reverse index hash→edges
+    EdgeSummaries::CF_NAME,          // COLD: edge summary content
+    EdgeSummaryIndex::CF_NAME,       // COLD: reverse index hash→edges
+    EdgeVersionHistory::CF_NAME,     // COLD: VERSIONING version snapshots
     ForwardEdges::CF_NAME,
     ReverseEdges::CF_NAME,
-    GraphMeta::CF_NAME,          // CONTENT-ADDRESS: Graph-level metadata (GC cursors)
+    OrphanSummaries::CF_NAME,        // COLD: VERSIONING deferred GC tracking
+    GraphMeta::CF_NAME,              // Graph-level metadata (GC cursors)
 ];
 
 #[cfg(test)]

@@ -323,10 +323,15 @@ impl Subsystem {
                 <schema::NodeSummaries as ColumnFamily>::CF_NAME,
                 <schema::NodeSummaries as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
-            // CONTENT-ADDRESS: Reverse index hash→nodes (claude, 2026-02-02)
+            // Reverse index hash→nodes
             ColumnFamilyDescriptor::new(
                 <schema::NodeSummaryIndex as ColumnFamily>::CF_NAME,
                 <schema::NodeSummaryIndex as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
+            ),
+            // (claude, 2026-02-06, in-progress: VERSIONING node version history)
+            ColumnFamilyDescriptor::new(
+                <schema::NodeVersionHistory as ColumnFamily>::CF_NAME,
+                <schema::NodeVersionHistory as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::EdgeFragments as ColumnFamily>::CF_NAME,
@@ -336,10 +341,15 @@ impl Subsystem {
                 <schema::EdgeSummaries as ColumnFamily>::CF_NAME,
                 <schema::EdgeSummaries as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
-            // CONTENT-ADDRESS: Reverse index hash→edges (claude, 2026-02-02)
+            // Reverse index hash→edges
             ColumnFamilyDescriptor::new(
                 <schema::EdgeSummaryIndex as ColumnFamily>::CF_NAME,
                 <schema::EdgeSummaryIndex as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
+            ),
+            // (claude, 2026-02-06, in-progress: VERSIONING edge version history)
+            ColumnFamilyDescriptor::new(
+                <schema::EdgeVersionHistory as ColumnFamily>::CF_NAME,
+                <schema::EdgeVersionHistory as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
             ColumnFamilyDescriptor::new(
                 <schema::ForwardEdges as ColumnFamily>::CF_NAME,
@@ -349,7 +359,12 @@ impl Subsystem {
                 <schema::ReverseEdges as ColumnFamily>::CF_NAME,
                 <schema::ReverseEdges as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
             ),
-            // CONTENT-ADDRESS: Graph-level metadata (GC cursors) (claude, 2026-02-02)
+            // (claude, 2026-02-06, in-progress: VERSIONING orphan tracking for deferred GC)
+            ColumnFamilyDescriptor::new(
+                <schema::OrphanSummaries as ColumnFamily>::CF_NAME,
+                <schema::OrphanSummaries as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
+            ),
+            // Graph-level metadata (GC cursors)
             ColumnFamilyDescriptor::new(
                 <schema::GraphMeta as ColumnFamily>::CF_NAME,
                 <schema::GraphMeta as ColumnFamilyConfig<GraphBlockCacheConfig>>::cf_options(block_cache, &graph_config),
