@@ -85,6 +85,77 @@ The graph module separates **internal sync execution** from **public async APIs*
 
 ---
 
+## Internal Processor API (Synchronous)
+
+This is the **internal, synchronous** API used by the async consumers. It is the source of truth for graph operations and is **not channel-buffered**.
+
+### Methods
+
+| Method | Purpose |
+|--------|---------|
+| `Processor::new(storage: Arc<Storage>)` | Create Processor with Storage + NameCache |
+| `Processor::with_cache(storage: Arc<Storage>, name_cache: Arc<NameCache>)` | Create Processor with explicit cache |
+| `Processor::storage(&self) -> &Arc<Storage>` | Access underlying storage |
+| `Processor::name_cache(&self) -> &Arc<NameCache>` | Access NameCache |
+| `Processor::transaction_db(&self) -> Result<&TransactionDB>` | Access TransactionDB |
+| `Processor::process_mutations(&self, mutations: &[Mutation]) -> Result<()>` | Execute batch atomically (sync) |
+| `Processor::execute_mutation(&self, mutation: &Mutation) -> Result<()>` | Execute single mutation (sync) |
+
+### Internal Usage Examples
+
+#### Direct synchronous batch write
+
+```rust
+use motlie_db::graph::{Processor, Storage};
+use motlie_db::graph::mutation::Mutation;
+use std::sync::Arc;
+
+let mut storage = Storage::readwrite(&db_path);
+storage.ready()?;
+let processor = Processor::new(Arc::new(storage));
+
+let mutations: Vec<Mutation> = vec![
+    // AddNode { ... }.into(),
+    // AddEdge { ... }.into(),
+];
+
+processor.process_mutations(&mutations)?;
+```
+
+#### Direct synchronous single mutation
+
+```rust
+use motlie_db::graph::{Processor, Storage};
+use motlie_db::graph::mutation::Mutation;
+use std::sync::Arc;
+
+let mut storage = Storage::readwrite(&db_path);
+storage.ready()?;
+let processor = Processor::new(Arc::new(storage));
+
+let mutation: Mutation = /* AddNode { ... }.into() */;
+processor.execute_mutation(&mutation)?;
+```
+
+### Relationship to Async APIs
+
+The async layer is a **thin, buffered wrapper**:
+
+```
+Writer (async MPSC)
+  └─ Consumer (async loop)
+      └─ Processor::process_mutations(...)  // sync core
+
+Reader (async MPMC)
+  └─ Consumer pool (async loops)
+      └─ Query::process_and_send(...) → QueryExecutor::execute(storage)
+         (Processor provides storage access)
+```
+
+The async APIs exist for **backpressure and concurrency**, not different semantics.
+
+---
+
 ## Part 1: Storage + Processor
 
 ### Storage
