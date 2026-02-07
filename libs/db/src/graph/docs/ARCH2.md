@@ -1284,6 +1284,17 @@ INVARIANTS:
 (codex, 2026-02-07, eval: on_ready()/NameCache prewarm should be in Phase 1/2, not Phase 4, because vector prewarms caches before consumers start; delaying this weakens alignment.)
 (codex, 2026-02-07, eval: include a sweep for all Graph call sites across crates/bins/examples; vector has no public Graph facade and the refactor should remove those usage patterns explicitly.)
 
+### Vector Alignment Checklist
+
+- [ ] `Writer` holds `Arc<Processor>` (not just Consumer) like vector::Writer
+- [ ] `Reader` holds `Arc<Processor>` (or explicit Processor-backed consumer) like vector::Reader
+- [ ] Async Processor trait removed; sync Processor methods used by Consumers
+- [ ] Processor owns caches (NameCache) instead of Storage
+- [ ] `spawn_*_with_storage()` helpers construct Processor internally
+- [ ] `spawn_*_with_processor()` helpers are pub(crate) for shared use
+- [ ] `Graph` facade removed or optional; no external call sites depend on it
+- [ ] on_ready() prewarm occurs before consumers start (vector-style)
+
 ### Phase 1: Fix Critical Bugs (PREREQUISITE)
 
 These must be fixed before starting the main refactor to avoid compounding instability.
