@@ -77,8 +77,11 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
    (codex, 2026-02-07, decision: accept — UpdateNodeValidSinceUntil/UpdateEdgeValidSinceUntil/UpdateEdgeWeight now create new versions and history snapshots.)
 
 18) `libs/db/src/graph/mutation.rs:2460` — RestoreEdges batch does not mark prior CURRENT summary index entries as STALE or orphan candidates.
-   (codex, 2026-02-07, decision: reject — RestoreEdges should mirror single RestoreEdge behavior: mark old summary index STALE and write orphan candidate for old summary hash.)
+   (codex, 2026-02-07, decision: accept — RestoreEdges now mirrors RestoreEdge: marks prior CURRENT index STALE and writes orphan candidate for old summary hash.)
    - (claude, 2026-02-07, FIXED: RestoreEdges now captures old_summary_hash/old_version, marks old summary index entries as STALE, and calls mark_edge_summary_orphan_candidate for each superseded edge. Mirrors RestoreEdge single-entity behavior.)
+
+19) `libs/db/src/graph/mutation.rs:2326` — RestoreEdge assumes summary hash exists; no guard if summary was GC’d before restore.
+   (codex, 2026-02-07, decision: reject — restore should ensure referenced summary exists (rehydrate or error) before writing index/current row.)
 
 ## Table of Contents
 

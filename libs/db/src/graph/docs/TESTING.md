@@ -65,6 +65,7 @@ VERSIONING Behavioral Tests (missing)
   - Restore marks prior CURRENT summary index entry as STALE.
   - Restore does not leave multiple CURRENT markers.
   - RestoreEdges batch also marks prior CURRENT entries STALE and records orphan candidates.
+  - Restore fails or rehydrates if referenced summary hash is missing (GC’d).
 
 Index and Denormalization Tests (missing)
 - Reverse edge temporal denormalization:
