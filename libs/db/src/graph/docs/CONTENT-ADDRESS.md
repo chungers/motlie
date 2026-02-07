@@ -567,17 +567,18 @@ summary row. To safely GC these rows, `NodeSummaryCfValue` and
   - increment refcount(H2)
   - decrement refcount(H1)
   - if refcount(H1) reaches 0, delete the summary row.
-- **Delete (tombstone, hash H):** decrement refcount(H); delete row if it reaches 0.
+- **Delete (tombstone, hash H):** Mark summary as orphan candidate (deferred to GC).
 
 (codex, 2026-02-03, validated) (claude, 2026-02-02, IMPLEMENTED in mutation.rs)
+(claude, 2026-02-06, UPDATED for VERSIONING: RefCount replaced with OrphanSummaries-based GC)
 
-**Implementation details:**
-- Helper functions: `increment_node_summary_refcount()`, `decrement_node_summary_refcount()`,
-  `increment_edge_summary_refcount()`, `decrement_edge_summary_refcount()`
+**Implementation details (VERSIONING):**
+- Helper functions: `ensure_node_summary()`, `ensure_edge_summary()` - idempotent create-if-not-exists
+- Orphan candidate functions: `mark_node_summary_orphan_candidate()`, `mark_edge_summary_orphan_candidate()`
 - All mutations (AddNode, AddEdge, UpdateNodeSummary, UpdateEdgeSummary, DeleteNode, DeleteEdge)
-  use these helpers to maintain refcount invariant
-- When refcount reaches 0, summary row is deleted in the same transaction
-- This eliminates need for background orphan summary scans in GC
+  use these helpers
+- Actual summary deletion is deferred to GC via OrphanSummaries CF scanning
+- This supports rollback by allowing orphaned summaries to be reclaimed only after retention period
 
 ### Update Node
 

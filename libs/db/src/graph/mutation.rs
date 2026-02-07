@@ -412,20 +412,23 @@ fn write_name_to_cf_cached(
 }
 
 // ============================================================================
-// RefCount Helper Functions for Content-Addressed Summaries
+// Summary Helper Functions for Content-Addressed Summaries
 // ============================================================================
+// (VERSIONING: RefCount replaced with OrphanSummaries-based GC)
 
 use super::summary_hash::SummaryHash;
-use super::schema::{NodeSummary, EdgeSummary, RefCount};
+use super::schema::{NodeSummary, EdgeSummary};
 
-/// Increment refcount for a node summary, creating the row if it doesn't exist.
-/// Returns the new refcount.
-fn increment_node_summary_refcount(
+/// Ensure a node summary exists in the summaries CF.
+/// (VERSIONING: No refcount - OrphanSummaries handles deferred deletion)
+///
+/// This is idempotent - if the summary already exists, this is a no-op.
+fn ensure_node_summary(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     hash: SummaryHash,
     summary: &NodeSummary,
-) -> Result<RefCount> {
+) -> Result<()> {
     use super::schema::{NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
 
     let cf = txn_db
@@ -433,67 +436,49 @@ fn increment_node_summary_refcount(
         .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
     let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
 
-    // Read existing value (if any)
-    let new_refcount = match txn.get_cf(cf, &key_bytes)? {
-        Some(existing_bytes) => {
-            let existing: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&existing_bytes)?;
-            existing.0.saturating_add(1)
-        }
-        None => 1, // First reference
-    };
+    // Check if summary already exists
+    if txn.get_cf(cf, &key_bytes)?.is_some() {
+        // Summary already exists - content-addressed, so data is identical
+        tracing::trace!(hash = ?hash, "Node summary already exists");
+        return Ok(());
+    }
 
-    // Write with updated refcount
-    let value = NodeSummaryCfValue(new_refcount, summary.clone());
+    // Create new summary entry
+    let value = NodeSummaryCfValue(summary.clone());
     let value_bytes = NodeSummaries::value_to_bytes(&value)?;
     txn.put_cf(cf, key_bytes, value_bytes)?;
 
-    tracing::trace!(hash = ?hash, refcount = new_refcount, "Incremented node summary refcount");
-    Ok(new_refcount)
+    tracing::trace!(hash = ?hash, "Created node summary");
+    Ok(())
 }
 
-/// Decrement refcount for a node summary, deleting the row if it reaches 0.
-/// Returns the new refcount (0 means deleted).
-fn decrement_node_summary_refcount(
-    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
-    txn_db: &rocksdb::TransactionDB,
+/// Mark a node summary as potentially orphaned.
+/// (VERSIONING: Actual deletion is deferred to GC via OrphanSummaries CF)
+///
+/// This is a no-op for now - GC will scan for orphaned summaries.
+#[allow(unused_variables)]
+fn mark_node_summary_orphan_candidate(
+    _txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    _txn_db: &rocksdb::TransactionDB,
     hash: SummaryHash,
-) -> Result<RefCount> {
-    use super::schema::{NodeSummaries, NodeSummaryCfKey, NodeSummaryCfValue};
-
-    let cf = txn_db
-        .cf_handle(NodeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
-    let key_bytes = NodeSummaries::key_to_bytes(&NodeSummaryCfKey(hash));
-
-    // Read existing value
-    let existing_bytes = txn.get_cf(cf, &key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("Cannot decrement refcount: NodeSummary not found for hash {:?}", hash))?;
-    let existing: NodeSummaryCfValue = NodeSummaries::value_from_bytes(&existing_bytes)?;
-    let new_refcount = existing.0.saturating_sub(1);
-
-    if new_refcount == 0 {
-        // Delete the row
-        txn.delete_cf(cf, key_bytes)?;
-        tracing::trace!(hash = ?hash, "Deleted node summary (refcount reached 0)");
-    } else {
-        // Write with decremented refcount
-        let value = NodeSummaryCfValue(new_refcount, existing.1);
-        let value_bytes = NodeSummaries::value_to_bytes(&value)?;
-        txn.put_cf(cf, key_bytes, value_bytes)?;
-        tracing::trace!(hash = ?hash, refcount = new_refcount, "Decremented node summary refcount");
-    }
-
-    Ok(new_refcount)
+) -> Result<()> {
+    // VERSIONING: Deletion is deferred to GC.
+    // GC will scan OrphanSummaries CF and delete summaries with no references.
+    // For now, this is a no-op - the GC scan handles orphan detection.
+    tracing::trace!(hash = ?hash, "Marked node summary as orphan candidate (deferred to GC)");
+    Ok(())
 }
 
-/// Increment refcount for an edge summary, creating the row if it doesn't exist.
-/// Returns the new refcount.
-fn increment_edge_summary_refcount(
+/// Ensure an edge summary exists in the summaries CF.
+/// (VERSIONING: No refcount - OrphanSummaries handles deferred deletion)
+///
+/// This is idempotent - if the summary already exists, this is a no-op.
+fn ensure_edge_summary(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     hash: SummaryHash,
     summary: &EdgeSummary,
-) -> Result<RefCount> {
+) -> Result<()> {
     use super::schema::{EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
 
     let cf = txn_db
@@ -501,61 +486,157 @@ fn increment_edge_summary_refcount(
         .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
     let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
 
-    // Read existing value (if any)
-    let new_refcount = match txn.get_cf(cf, &key_bytes)? {
-        Some(existing_bytes) => {
-            let existing: EdgeSummaryCfValue = EdgeSummaries::value_from_bytes(&existing_bytes)?;
-            existing.0.saturating_add(1)
-        }
-        None => 1, // First reference
-    };
+    // Check if summary already exists
+    if txn.get_cf(cf, &key_bytes)?.is_some() {
+        // Summary already exists - content-addressed, so data is identical
+        tracing::trace!(hash = ?hash, "Edge summary already exists");
+        return Ok(());
+    }
 
-    // Write with updated refcount
-    let value = EdgeSummaryCfValue(new_refcount, summary.clone());
+    // Create new summary entry
+    let value = EdgeSummaryCfValue(summary.clone());
     let value_bytes = EdgeSummaries::value_to_bytes(&value)?;
     txn.put_cf(cf, key_bytes, value_bytes)?;
 
-    tracing::trace!(hash = ?hash, refcount = new_refcount, "Incremented edge summary refcount");
-    Ok(new_refcount)
+    tracing::trace!(hash = ?hash, "Created edge summary");
+    Ok(())
 }
 
-/// Decrement refcount for an edge summary, deleting the row if it reaches 0.
-/// Returns the new refcount (0 means deleted).
-fn decrement_edge_summary_refcount(
+/// Mark an edge summary as potentially orphaned.
+/// (VERSIONING: Actual deletion is deferred to GC via OrphanSummaries CF)
+///
+/// This is a no-op for now - GC will scan for orphaned summaries.
+#[allow(unused_variables)]
+fn mark_edge_summary_orphan_candidate(
+    _txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    _txn_db: &rocksdb::TransactionDB,
+    hash: SummaryHash,
+) -> Result<()> {
+    // VERSIONING: Deletion is deferred to GC.
+    // GC will scan OrphanSummaries CF and delete summaries with no references.
+    // For now, this is a no-op - the GC scan handles orphan detection.
+    tracing::trace!(hash = ?hash, "Marked edge summary as orphan candidate (deferred to GC)");
+    Ok(())
+}
+
+/// Helper function to find the current version of a node.
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan for current version)
+///
+/// Returns (full_key_bytes, value) for the current version (ValidUntil = None).
+fn find_current_node_version(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
-    hash: SummaryHash,
-) -> Result<RefCount> {
-    use super::schema::{EdgeSummaries, EdgeSummaryCfKey, EdgeSummaryCfValue};
+    node_id: Id,
+) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    use super::schema::Nodes;
 
-    let cf = txn_db
-        .cf_handle(EdgeSummaries::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
-    let key_bytes = EdgeSummaries::key_to_bytes(&EdgeSummaryCfKey(hash));
+    let nodes_cf = txn_db
+        .cf_handle(Nodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
 
-    // Read existing value
-    let existing_bytes = txn.get_cf(cf, &key_bytes)?
-        .ok_or_else(|| anyhow::anyhow!("Cannot decrement refcount: EdgeSummary not found for hash {:?}", hash))?;
-    let existing: EdgeSummaryCfValue = EdgeSummaries::value_from_bytes(&existing_bytes)?;
-    let new_refcount = existing.0.saturating_sub(1);
+    // Prefix scan on node_id (first 16 bytes)
+    let prefix = node_id.into_bytes().to_vec();
+    let iter = txn.prefix_iterator_cf(nodes_cf, &prefix);
 
-    if new_refcount == 0 {
-        // Delete the row
-        txn.delete_cf(cf, key_bytes)?;
-        tracing::trace!(hash = ?hash, "Deleted edge summary (refcount reached 0)");
-    } else {
-        // Write with decremented refcount
-        let value = EdgeSummaryCfValue(new_refcount, existing.1);
-        let value_bytes = EdgeSummaries::value_to_bytes(&value)?;
-        txn.put_cf(cf, key_bytes, value_bytes)?;
-        tracing::trace!(hash = ?hash, refcount = new_refcount, "Decremented edge summary refcount");
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        // Stop if we've gone past our prefix
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: schema::NodeCfValue = Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+        // Current version has ValidUntil = None
+        if value.0.is_none() {
+            return Ok(Some((key_bytes.to_vec(), value)));
+        }
     }
+    Ok(None)
+}
 
-    Ok(new_refcount)
+/// Helper function to find the current version of a forward edge.
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan for current version)
+///
+/// Returns (full_key_bytes, value) for the current version (ValidUntil = None).
+fn find_current_forward_edge_version(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    src_id: Id,
+    dst_id: Id,
+    name_hash: NameHash,
+) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
+    use super::schema::ForwardEdges;
+
+    let forward_cf = txn_db
+        .cf_handle(ForwardEdges::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+
+    // Prefix scan on (src_id, dst_id, name_hash) = 40 bytes
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(&src_id.into_bytes());
+    prefix.extend_from_slice(&dst_id.into_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
+    let iter = txn.prefix_iterator_cf(forward_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        // Stop if we've gone past our prefix
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: schema::ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+        // Current version has ValidUntil = None (field 0)
+        if value.0.is_none() {
+            return Ok(Some((key_bytes.to_vec(), value)));
+        }
+    }
+    Ok(None)
+}
+
+/// Helper function to find the current version of a reverse edge.
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan for current version)
+///
+/// Returns (full_key_bytes, value) for the current version (ValidUntil = None).
+fn find_current_reverse_edge_version(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    dst_id: Id,
+    src_id: Id,
+    name_hash: NameHash,
+) -> Result<Option<(Vec<u8>, schema::ReverseEdgeCfValue)>> {
+    use super::schema::ReverseEdges;
+
+    let reverse_cf = txn_db
+        .cf_handle(ReverseEdges::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
+
+    // Prefix scan on (dst_id, src_id, name_hash) = 40 bytes
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(&dst_id.into_bytes());
+    prefix.extend_from_slice(&src_id.into_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
+    let iter = txn.prefix_iterator_cf(reverse_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        // Stop if we've gone past our prefix
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: schema::ReverseEdgeCfValue = ReverseEdges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize reverse edge value: {}", e))?;
+        // Current version has ValidUntil = None (field 0)
+        if value.0.is_none() {
+            return Ok(Some((key_bytes.to_vec(), value)));
+        }
+    }
+    Ok(None)
 }
 
 /// Helper function to update ActivePeriod for a single node.
 /// Updates the Nodes CF.
+/// (claude, 2026-02-06, in-progress: VERSIONING uses prefix scan)
 fn update_node_valid_range(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
@@ -563,15 +644,16 @@ fn update_node_valid_range(
     new_range: schema::ActivePeriod,
 ) -> Result<()> {
     use super::ActivePeriodPatchable;
-    use super::schema::{NodeCfKey, Nodes};
+    use super::schema::Nodes;
+
+    // Find current version via prefix scan
+    let (node_key_bytes, _current_value) = find_current_node_version(txn, txn_db, node_id)?
+        .ok_or_else(|| anyhow::anyhow!("Node not found for id: {}", node_id))?;
 
     // Patch Nodes CF
     let nodes_cf = txn_db
         .cf_handle(Nodes::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-
-    let node_key = NodeCfKey(node_id);
-    let node_key_bytes = Nodes::key_to_bytes(&node_key);
 
     let node_value_bytes = txn
         .get_cf(nodes_cf, &node_key_bytes)?
@@ -586,6 +668,7 @@ fn update_node_valid_range(
 
 /// Helper function to update ActivePeriod for a single edge in ForwardEdges and ReverseEdges CFs.
 /// This is the core logic shared by UpdateEdgeValidSinceUntil and UpdateNodeValidSinceUntil.
+/// (claude, 2026-02-06, in-progress: VERSIONING uses prefix scan)
 ///
 /// Note: This function accepts a NameHash directly. The caller is responsible for
 /// computing the hash from the edge name string.
@@ -598,19 +681,25 @@ fn update_edge_valid_range(
     new_range: schema::ActivePeriod,
 ) -> Result<()> {
     use super::ActivePeriodPatchable;
-    use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
+    use super::schema::{ForwardEdges, ReverseEdges};
+
+    // Find current forward edge via prefix scan
+    let (forward_key_bytes, _forward_value) = find_current_forward_edge_version(txn, txn_db, src_id, dst_id, name_hash)?
+        .ok_or_else(|| anyhow::anyhow!(
+            "ForwardEdge not found: src={}, dst={}, name_hash={}",
+            src_id,
+            dst_id,
+            name_hash
+        ))?;
 
     // Patch ForwardEdges CF
     let forward_cf = txn_db
         .cf_handle(ForwardEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
 
-    let forward_key = ForwardEdgeCfKey(src_id, dst_id, name_hash);
-    let forward_key_bytes = ForwardEdges::key_to_bytes(&forward_key);
-
     let forward_value_bytes = txn.get_cf(forward_cf, &forward_key_bytes)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "ForwardEdge not found: src={}, dst={}, name_hash={}",
+            "ForwardEdge value not found: src={}, dst={}, name_hash={}",
             src_id,
             dst_id,
             name_hash
@@ -621,17 +710,23 @@ fn update_edge_valid_range(
     let patched_forward_bytes = forward_edges.patch_valid_range(&forward_value_bytes, new_range)?;
     txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
 
+    // Find current reverse edge via prefix scan
+    let (reverse_key_bytes, _reverse_value) = find_current_reverse_edge_version(txn, txn_db, dst_id, src_id, name_hash)?
+        .ok_or_else(|| anyhow::anyhow!(
+            "ReverseEdge not found: src={}, dst={}, name_hash={}",
+            src_id,
+            dst_id,
+            name_hash
+        ))?;
+
     // Patch ReverseEdges CF
     let reverse_cf = txn_db
         .cf_handle(ReverseEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
 
-    let reverse_key = ReverseEdgeCfKey(dst_id, src_id, name_hash);
-    let reverse_key_bytes = ReverseEdges::key_to_bytes(&reverse_key);
-
     let reverse_value_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "ReverseEdge not found: src={}, dst={}, name_hash={}",
+            "ReverseEdge value not found: src={}, dst={}, name_hash={}",
             src_id,
             dst_id,
             name_hash
@@ -645,7 +740,8 @@ fn update_edge_valid_range(
     Ok(())
 }
 
-/// Helper function to find all edges connected to a node.
+/// Helper function to find all current edges connected to a node.
+/// (claude, 2026-02-06, in-progress: VERSIONING only returns current edges with ValidUntil=None)
 /// Returns a deduplicated list of (src_id, dst_id, name_hash) tuples.
 fn find_connected_edges(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -653,9 +749,12 @@ fn find_connected_edges(
     node_id: Id,
 ) -> Result<Vec<(Id, Id, NameHash)>> {
 
-    use super::schema::{ForwardEdgeCfKey, ForwardEdges, ReverseEdgeCfKey, ReverseEdges};
+    use super::schema::{
+        ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges,
+        ReverseEdgeCfKey, ReverseEdgeCfValue, ReverseEdges,
+    };
 
-    let mut edge_topologies = Vec::new();
+    let mut edge_topologies = std::collections::HashSet::new();
 
     // Find outgoing edges (where this node is the source)
     let forward_cf = txn_db
@@ -665,10 +764,19 @@ fn find_connected_edges(
     let forward_iter = txn.prefix_iterator_cf(forward_cf, &forward_prefix);
 
     for item in forward_iter {
-        let (key_bytes, _) = item?;
+        let (key_bytes, value_bytes) = item?;
+        // Stop if we've gone past our prefix (src_id = 16 bytes)
+        if !key_bytes.starts_with(&forward_prefix) {
+            break;
+        }
         let key: ForwardEdgeCfKey = ForwardEdges::key_from_bytes(&key_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize ForwardEdge key: {}", e))?;
-        edge_topologies.push((key.0, key.1, key.2));
+        let value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize ForwardEdge value: {}", e))?;
+        // Only include current versions (ValidUntil = None at index 0)
+        if value.0.is_none() {
+            edge_topologies.insert((key.0, key.1, key.2));
+        }
     }
 
     // Find incoming edges (where this node is the destination)
@@ -679,16 +787,23 @@ fn find_connected_edges(
     let reverse_iter = txn.prefix_iterator_cf(reverse_cf, &reverse_prefix);
 
     for item in reverse_iter {
-        let (key_bytes, _) = item?;
+        let (key_bytes, value_bytes) = item?;
+        // Stop if we've gone past our prefix (dst_id = 16 bytes)
+        if !key_bytes.starts_with(&reverse_prefix) {
+            break;
+        }
         let key: ReverseEdgeCfKey = ReverseEdges::key_from_bytes(&key_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize ReverseEdge key: {}", e))?;
+        let value: ReverseEdgeCfValue = ReverseEdges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize ReverseEdge value: {}", e))?;
+        // Only include current versions (ValidUntil = None at index 0)
         // ReverseEdgeCfKey is (dst_id, src_id, name_hash), extract as (src_id, dst_id, name_hash)
-        edge_topologies.push((key.1, key.0, key.2));
+        if value.0.is_none() {
+            edge_topologies.insert((key.1, key.0, key.2));
+        }
     }
 
-    // Deduplicate edges
-    let unique_edges: std::collections::HashSet<_> = edge_topologies.into_iter().collect();
-    Ok(unique_edges.into_iter().collect())
+    Ok(edge_topologies.into_iter().collect())
 }
 
 // ============================================================================
@@ -716,7 +831,7 @@ impl MutationExecutor for AddNode {
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
                 // Increment refcount (creates row if missing)
-                increment_node_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
+                ensure_node_summary(txn, txn_db, summary_hash, &self.summary)?;
 
                 // Write reverse index entry with CURRENT marker (version=1 for new nodes)
                 let index_cf = txn_db
@@ -760,7 +875,7 @@ impl MutationExecutor for AddNode {
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
                 // Increment refcount (creates row if missing)
-                increment_node_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
+                ensure_node_summary(txn, txn_db, summary_hash, &self.summary)?;
 
                 // Write reverse index entry with CURRENT marker (version=1 for new nodes)
                 let index_cf = txn_db
@@ -811,7 +926,7 @@ impl MutationExecutor for AddEdge {
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
                 // Increment refcount (creates row if missing)
-                increment_edge_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
+                ensure_edge_summary(txn, txn_db, summary_hash, &self.summary)?;
 
                 // Write reverse index entry with CURRENT marker (version=1 for new edges)
                 let index_cf = txn_db
@@ -874,7 +989,7 @@ impl MutationExecutor for AddEdge {
         if !self.summary.is_empty() {
             if let Ok(summary_hash) = SummaryHash::from_summary(&self.summary) {
                 // Increment refcount (creates row if missing)
-                increment_edge_summary_refcount(txn, txn_db, summary_hash, &self.summary)?;
+                ensure_edge_summary(txn, txn_db, summary_hash, &self.summary)?;
 
                 // Write reverse index entry with CURRENT marker (version=1 for new edges)
                 let index_cf = txn_db
@@ -1049,6 +1164,7 @@ impl MutationExecutor for UpdateEdgeValidSinceUntil {
 }
 
 impl MutationExecutor for UpdateEdgeWeight {
+    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and field index 2)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -1062,8 +1178,7 @@ impl MutationExecutor for UpdateEdgeWeight {
             "Executing UpdateEdgeWeight mutation"
         );
 
-
-        use super::schema::{ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges};
+        use super::schema::{ForwardEdgeCfValue, ForwardEdges};
 
         let cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
             anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
@@ -1071,19 +1186,13 @@ impl MutationExecutor for UpdateEdgeWeight {
 
         // Compute hash from edge name
         let name_hash = NameHash::from_name(&self.name);
-        let key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash);
-        let key_bytes = ForwardEdges::key_to_bytes(&key);
 
-        // Read current value
-        let current_value_bytes = txn
-            .get_cf(cf, &key_bytes)?
+        // Find current edge via prefix scan
+        let (key_bytes, mut value) = find_current_forward_edge_version(txn, txn_db, self.src_id, self.dst_id, name_hash)?
             .ok_or_else(|| anyhow::anyhow!("Edge not found for update"))?;
 
-        // Deserialize, modify weight field, reserialize
-        let mut value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&current_value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize: {}", e))?;
-
-        value.1 = Some(self.weight); // Update weight (field 1)
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+        value.2 = Some(self.weight); // Update weight (field 2)
 
         let new_value_bytes = ForwardEdges::value_to_bytes(&value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))?;
@@ -1100,6 +1209,7 @@ impl MutationExecutor for UpdateEdgeWeight {
 // ============================================================================
 
 impl MutationExecutor for UpdateNodeSummary {
+    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -1112,26 +1222,22 @@ impl MutationExecutor for UpdateNodeSummary {
         );
 
         use super::schema::{
-            NodeCfKey, NodeCfValue, Nodes,
+            NodeCfValue, Nodes,
             NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue, VERSION_MAX,
         };
 
-        // 1. Read current node
+        // 1. Find current node version via prefix scan
         let nodes_cf = txn_db
             .cf_handle(Nodes::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-        let node_key = NodeCfKey(self.id);
-        let node_key_bytes = Nodes::key_to_bytes(&node_key);
 
-        let current_bytes = txn
-            .get_cf(nodes_cf, &node_key_bytes)?
+        let (node_key_bytes, current) = find_current_node_version(txn, txn_db, self.id)?
             .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
-        let current: NodeCfValue = Nodes::value_from_bytes(&current_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize node: {}", e))?;
 
-        let current_version = current.3;
-        let old_hash = current.2;
-        let is_deleted = current.4;
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+        let current_version = current.4;
+        let old_hash = current.3;
+        let is_deleted = current.5;
 
         // 2. Check if already deleted
         if is_deleted {
@@ -1157,15 +1263,15 @@ impl MutationExecutor for UpdateNodeSummary {
         let new_version = current_version + 1;
         let new_hash = SummaryHash::from_summary(&self.new_summary)?;
 
-        // 6. Increment refcount for new summary (creates row if missing)
-        increment_node_summary_refcount(txn, txn_db, new_hash, &self.new_summary)?;
+        // 6. Ensure new summary exists (idempotent, content-addressed)
+        ensure_node_summary(txn, txn_db, new_hash, &self.new_summary)?;
 
-        // 7. Decrement refcount for old summary (deletes row if refcount reaches 0)
+        // 7. Mark old summary as orphan candidate (deferred to GC)
         if let Some(old_h) = old_hash {
-            decrement_node_summary_refcount(txn, txn_db, old_h)?;
+            mark_node_summary_orphan_candidate(txn, txn_db, old_h)?;
         }
 
-        // 9. Flip old index entry to STALE (if exists)
+        // 8. Flip old index entry to STALE (if exists)
         if let Some(old_h) = old_hash {
             let index_cf = txn_db
                 .cf_handle(NodeSummaryIndex::CF_NAME)
@@ -1176,7 +1282,7 @@ impl MutationExecutor for UpdateNodeSummary {
             txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
         }
 
-        // 10. Write new index entry with CURRENT marker
+        // 9. Write new index entry with CURRENT marker
         let index_cf = txn_db
             .cf_handle(NodeSummaryIndex::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
@@ -1185,11 +1291,40 @@ impl MutationExecutor for UpdateNodeSummary {
         let current_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
         txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
 
-        // 11. Update Nodes CF with new version and summary hash
-        let new_node_value = NodeCfValue(current.0, current.1, Some(new_hash), new_version, false);
+        // 10. VERSIONING: Mark old version as superseded and create new version
+        // The key includes ValidSince, so we need to:
+        // a) Update old row: set ValidUntil = now
+        // b) Create new row with ValidSince = now and ValidUntil = None
+        let now = crate::TimestampMilli::now();
+
+        // 10a. Update old row's ValidUntil to mark it as superseded
+        let old_node_value = NodeCfValue(
+            Some(now),          // ValidUntil = now (this version is no longer current)
+            current.1,          // ActivePeriod
+            current.2,          // NameHash
+            current.3,          // SummaryHash (keep old hash)
+            current.4,          // Version (keep old version)
+            current.5,          // Deleted
+        );
+        let old_node_bytes = Nodes::value_to_bytes(&old_node_value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize old node version: {}", e))?;
+        txn.put_cf(nodes_cf, &node_key_bytes, old_node_bytes)?;
+
+        // 10b. Create new row with new ValidSince
+        use super::schema::NodeCfKey;
+        let new_node_key = NodeCfKey(self.id, now);
+        let new_node_key_bytes = Nodes::key_to_bytes(&new_node_key);
+        let new_node_value = NodeCfValue(
+            None,               // ValidUntil = None (current version)
+            current.1,          // ActivePeriod (preserve)
+            current.2,          // NameHash (preserve)
+            Some(new_hash),     // SummaryHash (new)
+            new_version,        // Version
+            false,              // Deleted
+        );
         let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize node: {}", e))?;
-        txn.put_cf(nodes_cf, node_key_bytes, new_node_bytes)?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize new node version: {}", e))?;
+        txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
 
         tracing::info!(
             id = %self.id,
@@ -1203,6 +1338,7 @@ impl MutationExecutor for UpdateNodeSummary {
 }
 
 impl MutationExecutor for UpdateEdgeSummary {
+    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -1217,28 +1353,24 @@ impl MutationExecutor for UpdateEdgeSummary {
         );
 
         use super::schema::{
-            ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges,
+            ForwardEdgeCfValue, ForwardEdges,
             EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue, VERSION_MAX,
         };
 
         let name_hash = NameHash::from_name(&self.name);
 
-        // 1. Read current edge
+        // 1. Find current edge via prefix scan
         let forward_cf = txn_db
             .cf_handle(ForwardEdges::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-        let edge_key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash);
-        let edge_key_bytes = ForwardEdges::key_to_bytes(&edge_key);
 
-        let current_bytes = txn
-            .get_cf(forward_cf, &edge_key_bytes)?
+        let (edge_key_bytes, current) = find_current_forward_edge_version(txn, txn_db, self.src_id, self.dst_id, name_hash)?
             .ok_or_else(|| anyhow::anyhow!("Edge not found: {}→{}", self.src_id, self.dst_id))?;
-        let current: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&current_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge: {}", e))?;
 
-        let current_version = current.3;
-        let old_hash = current.2;
-        let is_deleted = current.4;
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+        let current_version = current.4;
+        let old_hash = current.3;
+        let is_deleted = current.5;
 
         // 2. Check if already deleted
         if is_deleted {
@@ -1265,12 +1397,12 @@ impl MutationExecutor for UpdateEdgeSummary {
         let new_version = current_version + 1;
         let new_hash = SummaryHash::from_summary(&self.new_summary)?;
 
-        // 6. Increment refcount for new summary (creates row if missing)
-        increment_edge_summary_refcount(txn, txn_db, new_hash, &self.new_summary)?;
+        // 6. Ensure new summary exists (idempotent, content-addressed)
+        ensure_edge_summary(txn, txn_db, new_hash, &self.new_summary)?;
 
-        // 7. Decrement refcount for old summary (deletes row if refcount reaches 0)
+        // 7. Mark old summary as orphan candidate (deferred to GC)
         if let Some(old_h) = old_hash {
-            decrement_edge_summary_refcount(txn, txn_db, old_h)?;
+            mark_edge_summary_orphan_candidate(txn, txn_db, old_h)?;
         }
 
         // 8. Flip old index entry to STALE (if exists)
@@ -1293,11 +1425,38 @@ impl MutationExecutor for UpdateEdgeSummary {
         let current_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
         txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
 
-        // 10. Update ForwardEdges CF with new version and summary hash
-        let new_edge_value = ForwardEdgeCfValue(current.0, current.1, Some(new_hash), new_version, false);
+        // 10. VERSIONING: Mark old version as superseded and create new version
+        // (Same pattern as UpdateNodeSummary for time-travel support)
+        let now = crate::TimestampMilli::now();
+
+        // 10a. Update old row's ValidUntil to mark it as superseded
+        let old_edge_value = ForwardEdgeCfValue(
+            Some(now),          // ValidUntil = now (this version is no longer current)
+            current.1.clone(),  // ActivePeriod
+            current.2,          // Weight
+            current.3,          // SummaryHash (keep old hash)
+            current.4,          // Version (keep old version)
+            current.5,          // Deleted
+        );
+        let old_edge_bytes = ForwardEdges::value_to_bytes(&old_edge_value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize old edge version: {}", e))?;
+        txn.put_cf(forward_cf, &edge_key_bytes, old_edge_bytes)?;
+
+        // 10b. Create new row with new ValidSince
+        use super::schema::ForwardEdgeCfKey;
+        let new_edge_key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash, now);
+        let new_edge_key_bytes = ForwardEdges::key_to_bytes(&new_edge_key);
+        let new_edge_value = ForwardEdgeCfValue(
+            None,               // ValidUntil = None (current version)
+            current.1,          // ActivePeriod (preserve)
+            current.2,          // Weight (preserve)
+            Some(new_hash),     // SummaryHash (new)
+            new_version,        // Version
+            false,              // Deleted
+        );
         let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize edge: {}", e))?;
-        txn.put_cf(forward_cf, edge_key_bytes, new_edge_bytes)?;
+            .map_err(|e| anyhow::anyhow!("Failed to serialize new edge version: {}", e))?;
+        txn.put_cf(forward_cf, new_edge_key_bytes, new_edge_bytes)?;
 
         tracing::info!(
             src = %self.src_id,
@@ -1312,6 +1471,7 @@ impl MutationExecutor for UpdateEdgeSummary {
 }
 
 impl MutationExecutor for DeleteNode {
+    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -1324,26 +1484,22 @@ impl MutationExecutor for DeleteNode {
         );
 
         use super::schema::{
-            NodeCfKey, NodeCfValue, Nodes,
+            NodeCfValue, Nodes,
             NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue, VERSION_MAX,
         };
 
-        // 1. Read current node
+        // 1. Find current node version via prefix scan
         let nodes_cf = txn_db
             .cf_handle(Nodes::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-        let node_key = NodeCfKey(self.id);
-        let node_key_bytes = Nodes::key_to_bytes(&node_key);
 
-        let current_bytes = txn
-            .get_cf(nodes_cf, &node_key_bytes)?
+        let (node_key_bytes, current) = find_current_node_version(txn, txn_db, self.id)?
             .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
-        let current: NodeCfValue = Nodes::value_from_bytes(&current_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize node: {}", e))?;
 
-        let current_version = current.3;
-        let current_hash = current.2;
-        let is_deleted = current.4;
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+        let current_version = current.4;
+        let current_hash = current.3;
+        let is_deleted = current.5;
 
         // 2. Check if already deleted
         if is_deleted {
@@ -1365,16 +1521,43 @@ impl MutationExecutor for DeleteNode {
             return Err(anyhow::anyhow!("Version overflow for node: {}", self.id));
         }
 
-        // 5. Increment version and set deleted flag
+        // 5. VERSIONING: Mark old version as superseded and create new tombstone version
+        // (Same pattern as UpdateNodeSummary for time-travel support)
+        let now = crate::TimestampMilli::now();
         let new_version = current_version + 1;
-        let new_node_value = NodeCfValue(current.0, current.1, current.2, new_version, true);
-        let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize node: {}", e))?;
-        txn.put_cf(nodes_cf, &node_key_bytes, new_node_bytes)?;
 
-        // 6. Decrement refcount for the summary (deletes row if refcount reaches 0)
+        // 5a. Update old row's ValidUntil to mark it as superseded
+        let old_node_value = NodeCfValue(
+            Some(now),          // ValidUntil = now (this version is no longer current)
+            current.1.clone(),  // ActivePeriod
+            current.2,          // NameHash
+            current.3,          // SummaryHash (keep old hash)
+            current.4,          // Version (keep old version)
+            current.5,          // Deleted (keep old value = false)
+        );
+        let old_node_bytes = Nodes::value_to_bytes(&old_node_value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize old node version: {}", e))?;
+        txn.put_cf(nodes_cf, &node_key_bytes, old_node_bytes)?;
+
+        // 5b. Create new row with new ValidSince and deleted=true
+        use super::schema::NodeCfKey;
+        let new_node_key = NodeCfKey(self.id, now);
+        let new_node_key_bytes = Nodes::key_to_bytes(&new_node_key);
+        let new_node_value = NodeCfValue(
+            None,               // ValidUntil = None (current version)
+            current.1,          // ActivePeriod (preserve)
+            current.2,          // NameHash (preserve)
+            current.3,          // SummaryHash (preserve)
+            new_version,        // Version
+            true,               // Deleted = true (tombstone)
+        );
+        let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize new node version: {}", e))?;
+        txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
+
+        // 6. Mark summary as orphan candidate (deferred to GC)
         if let Some(hash) = current_hash {
-            decrement_node_summary_refcount(txn, txn_db, hash)?;
+            mark_node_summary_orphan_candidate(txn, txn_db, hash)?;
         }
 
         // 7. Flip current index entry to STALE
@@ -1400,6 +1583,7 @@ impl MutationExecutor for DeleteNode {
 }
 
 impl MutationExecutor for DeleteEdge {
+    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -1414,28 +1598,24 @@ impl MutationExecutor for DeleteEdge {
         );
 
         use super::schema::{
-            ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges,
+            ForwardEdgeCfValue, ForwardEdges,
             EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue, VERSION_MAX,
         };
 
         let name_hash = NameHash::from_name(&self.name);
 
-        // 1. Read current edge
+        // 1. Find current edge via prefix scan
         let forward_cf = txn_db
             .cf_handle(ForwardEdges::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-        let edge_key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash);
-        let edge_key_bytes = ForwardEdges::key_to_bytes(&edge_key);
 
-        let current_bytes = txn
-            .get_cf(forward_cf, &edge_key_bytes)?
+        let (edge_key_bytes, current) = find_current_forward_edge_version(txn, txn_db, self.src_id, self.dst_id, name_hash)?
             .ok_or_else(|| anyhow::anyhow!("Edge not found: {}→{}", self.src_id, self.dst_id))?;
-        let current: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&current_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge: {}", e))?;
 
-        let current_version = current.3;
-        let current_hash = current.2;
-        let is_deleted = current.4;
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+        let current_version = current.4;
+        let current_hash = current.3;
+        let is_deleted = current.5;
 
         // 2. Check if already deleted
         if is_deleted {
@@ -1458,16 +1638,43 @@ impl MutationExecutor for DeleteEdge {
             return Err(anyhow::anyhow!("Version overflow for edge: {}→{}", self.src_id, self.dst_id));
         }
 
-        // 5. Increment version and set deleted flag
+        // 5. VERSIONING: Mark old version as superseded and create new tombstone version
+        // (Same pattern as DeleteNode for time-travel support)
+        let now = crate::TimestampMilli::now();
         let new_version = current_version + 1;
-        let new_edge_value = ForwardEdgeCfValue(current.0, current.1, current.2, new_version, true);
-        let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize edge: {}", e))?;
-        txn.put_cf(forward_cf, &edge_key_bytes, new_edge_bytes)?;
 
-        // 6. Decrement refcount for the summary (deletes row if refcount reaches 0)
+        // 5a. Update old row's ValidUntil to mark it as superseded
+        let old_edge_value = ForwardEdgeCfValue(
+            Some(now),          // ValidUntil = now (this version is no longer current)
+            current.1.clone(),  // ActivePeriod
+            current.2,          // Weight
+            current.3,          // SummaryHash
+            current.4,          // Version (keep old version)
+            current.5,          // Deleted (keep old value = false)
+        );
+        let old_edge_bytes = ForwardEdges::value_to_bytes(&old_edge_value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize old edge version: {}", e))?;
+        txn.put_cf(forward_cf, &edge_key_bytes, old_edge_bytes)?;
+
+        // 5b. Create new row with new ValidSince and deleted=true
+        use super::schema::ForwardEdgeCfKey;
+        let new_edge_key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash, now);
+        let new_edge_key_bytes = ForwardEdges::key_to_bytes(&new_edge_key);
+        let new_edge_value = ForwardEdgeCfValue(
+            None,               // ValidUntil = None (current version)
+            current.1,          // ActivePeriod (preserve)
+            current.2,          // Weight (preserve)
+            current.3,          // SummaryHash (preserve)
+            new_version,        // Version
+            true,               // Deleted = true (tombstone)
+        );
+        let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize new edge version: {}", e))?;
+        txn.put_cf(forward_cf, new_edge_key_bytes, new_edge_bytes)?;
+
+        // 6. Mark summary as orphan candidate (deferred to GC)
         if let Some(hash) = current_hash {
-            decrement_edge_summary_refcount(txn, txn_db, hash)?;
+            mark_edge_summary_orphan_candidate(txn, txn_db, hash)?;
         }
 
         // 7. Flip current index entry to STALE
