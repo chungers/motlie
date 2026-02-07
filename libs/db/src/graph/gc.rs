@@ -9,6 +9,7 @@
 //! Summary rows include a RefCount field that tracks how many entities reference them.
 //! When RefCount reaches 0, the summary row is deleted inline by the mutation executor.
 //! This eliminates the need for expensive background scans to find orphan summaries.
+// (codex, 2026-02-07, eval: VERSIONING now adds OrphanSummaries + deferred deletion; this header is outdated relative to the new GC plan and should be updated to avoid conflicting guidance.)
 //!
 //! # What GC Still Handles
 //!

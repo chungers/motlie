@@ -837,6 +837,7 @@ pub(crate) struct NodeSummaryCfKey(pub(crate) SummaryHash);
 /// (claude, 2026-02-06, in-progress: VERSIONING removed RefCount - use OrphanSummaries for GC)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct NodeSummaryCfValue(pub(crate) NodeSummary);
+// (codex, 2026-02-07, eval: VERSIONING GC section now assumes RefCount + OrphanSummaries; this value has no RefCount field, so GC cannot validate 0-refcount before deletion.)
 
 impl ColumnFamily for NodeSummaries {
     const CF_NAME: &'static str = "graph/node_summaries";
@@ -907,6 +908,7 @@ pub(crate) struct EdgeSummaryCfKey(pub(crate) SummaryHash);
 /// (claude, 2026-02-06, in-progress: VERSIONING removed RefCount - use OrphanSummaries for GC)
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct EdgeSummaryCfValue(pub(crate) EdgeSummary);
+// (codex, 2026-02-07, eval: VERSIONING rollback window relies on deferred deletion; without RefCount in value, orphan tracking must be entirely index-driven and is currently unspecified.)
 
 impl ColumnFamily for EdgeSummaries {
     const CF_NAME: &'static str = "graph/edge_summaries";

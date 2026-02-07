@@ -105,6 +105,7 @@ pub enum Mutation {
     UpdateEdgeSummary(UpdateEdgeSummary),
     DeleteNode(DeleteNode),
     DeleteEdge(DeleteEdge),
+    // (codex, 2026-02-07, eval: VERSIONING plan includes RestoreNode/RestoreEdge and rollback mutations; missing here, so rollback API is incomplete.)
 
     /// Flush marker for synchronization.
     ///
@@ -423,6 +424,7 @@ use super::schema::{NodeSummary, EdgeSummary};
 /// (VERSIONING: No refcount - OrphanSummaries handles deferred deletion)
 ///
 /// This is idempotent - if the summary already exists, this is a no-op.
+// (codex, 2026-02-07, eval: VERSIONING now specifies RefCount + OrphanSummaries retention; this path neither increments RefCount nor records orphan candidates, so rollback-safe GC is incomplete.)
 fn ensure_node_summary(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
@@ -456,6 +458,7 @@ fn ensure_node_summary(
 /// (VERSIONING: Actual deletion is deferred to GC via OrphanSummaries CF)
 ///
 /// This is a no-op for now - GC will scan for orphaned summaries.
+// (codex, 2026-02-07, eval: OrphanSummaries is never written here; GC has no trigger signal for summaries whose references dropped to 0.)
 #[allow(unused_variables)]
 fn mark_node_summary_orphan_candidate(
     _txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -473,6 +476,7 @@ fn mark_node_summary_orphan_candidate(
 /// (VERSIONING: No refcount - OrphanSummaries handles deferred deletion)
 ///
 /// This is idempotent - if the summary already exists, this is a no-op.
+// (codex, 2026-02-07, eval: Missing RefCount increment and orphan-index bookkeeping; violates VERSIONING GC plan and can leak summaries indefinitely.)
 fn ensure_edge_summary(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
@@ -506,6 +510,7 @@ fn ensure_edge_summary(
 /// (VERSIONING: Actual deletion is deferred to GC via OrphanSummaries CF)
 ///
 /// This is a no-op for now - GC will scan for orphaned summaries.
+// (codex, 2026-02-07, eval: No-op means orphan index never records hashes; OrphanSummaryGc cannot enforce retention.)
 #[allow(unused_variables)]
 fn mark_edge_summary_orphan_candidate(
     _txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -850,6 +855,7 @@ impl MutationExecutor for AddNode {
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
         let (node_key, node_value) = Nodes::create_bytes(self)?;
         txn.put_cf(nodes_cf, node_key, node_value)?;
+        // (codex, 2026-02-07, eval: VERSIONING requires initial NodeVersionHistory snapshot on creation; not written here.)
 
         Ok(())
     }
@@ -894,6 +900,7 @@ impl MutationExecutor for AddNode {
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
         let (node_key, node_value) = Nodes::create_bytes(self)?;
         txn.put_cf(nodes_cf, node_key, node_value)?;
+        // (codex, 2026-02-07, eval: VERSIONING requires initial NodeVersionHistory snapshot on creation; not written here.)
 
         Ok(())
     }
@@ -958,6 +965,7 @@ impl MutationExecutor for AddEdge {
         })?;
         let (reverse_key, reverse_value) = ReverseEdges::create_bytes(self)?;
         txn.put_cf(reverse_cf, reverse_key, reverse_value)?;
+        // (codex, 2026-02-07, eval: VERSIONING requires initial EdgeVersionHistory snapshot on creation; not written here.)
 
         Ok(())
     }
@@ -1021,6 +1029,7 @@ impl MutationExecutor for AddEdge {
         })?;
         let (reverse_key, reverse_value) = ReverseEdges::create_bytes(self)?;
         txn.put_cf(reverse_cf, reverse_key, reverse_value)?;
+        // (codex, 2026-02-07, eval: VERSIONING requires initial EdgeVersionHistory snapshot on creation; not written here.)
 
         Ok(())
     }
@@ -1325,6 +1334,7 @@ impl MutationExecutor for UpdateNodeSummary {
         let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize new node version: {}", e))?;
         txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
+        // (codex, 2026-02-07, eval: VERSIONING requires NodeVersionHistory snapshots per update; no history row is written here, so rollback/time-travel by version is incomplete.)
 
         tracing::info!(
             id = %self.id,
@@ -1457,6 +1467,7 @@ impl MutationExecutor for UpdateEdgeSummary {
         let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize new edge version: {}", e))?;
         txn.put_cf(forward_cf, new_edge_key_bytes, new_edge_bytes)?;
+        // (codex, 2026-02-07, eval: VERSIONING requires EdgeVersionHistory snapshots per update; no history row is written here, so rollback by version lacks a source of truth.)
 
         tracing::info!(
             src = %self.src_id,

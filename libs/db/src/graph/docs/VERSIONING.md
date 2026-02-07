@@ -2,24 +2,46 @@
 
 **Status:** Approved for implementation. Breaking change - no migration required.
 
+## Codex Review Findings (2026-02-07)
+
+Claude: Please address each item below; these are the inline `(codex, 2026-02-07, eval)` comments placed in code.
+
+1) `libs/db/src/graph/mutation.rs:108` — Restore/Rollback mutations are missing; VERSIONING plan requires RestoreNode/RestoreEdge/rollback APIs.
+2) `libs/db/src/graph/mutation.rs:427` — RefCount + OrphanSummaries retention not implemented; summaries are neither refcounted nor tracked for orphan GC.
+3) `libs/db/src/graph/mutation.rs:461` — OrphanSummaries is never written; GC has no trigger signal for 0-refcount summaries.
+4) `libs/db/src/graph/mutation.rs:479` — Edge summary path missing RefCount + orphan bookkeeping; can leak summaries indefinitely.
+5) `libs/db/src/graph/mutation.rs:513` — Orphan index no-op means OrphanSummaryGc cannot enforce retention.
+6) `libs/db/src/graph/mutation.rs:858` — AddNode missing initial NodeVersionHistory snapshot.
+7) `libs/db/src/graph/mutation.rs:903` — AddNode (cached path) missing initial NodeVersionHistory snapshot.
+8) `libs/db/src/graph/mutation.rs:968` — AddEdge missing initial EdgeVersionHistory snapshot.
+9) `libs/db/src/graph/mutation.rs:1032` — AddEdge (cached path) missing initial EdgeVersionHistory snapshot.
+10) `libs/db/src/graph/mutation.rs:1337` — UpdateNodeSummary missing NodeVersionHistory snapshot per version.
+11) `libs/db/src/graph/mutation.rs:1470` — UpdateEdgeSummary missing EdgeVersionHistory snapshot per version.
+12) `libs/db/src/graph/schema.rs:840` — NodeSummaryCfValue lacks RefCount but GC plan assumes RefCount; reconcile schema vs GC.
+13) `libs/db/src/graph/schema.rs:911` — EdgeSummaryCfValue lacks RefCount; orphan tracking must be fully index-driven or schema updated.
+14) `libs/db/src/graph/gc.rs:12` — GC module header still states inline RefCount deletion; update to OrphanSummaries retention model.
+15) `libs/db/src/graph/query.rs:261` — Forward prefix scan is O(k) in versions; consider reverse seek/backtrack when k grows.
+16) `libs/db/src/graph/query.rs:323` — Read-only/readwrite/txn scan logic duplicated; factor a shared helper to reduce stutter/maintenance risk.
+
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Design Goals](#design-goals)
-3. [Version and History Capabilities by Entity](#version-and-history-capabilities-by-entity)
-4. [Schema Changes](#schema-changes)
-5. [Mutation API](#mutation-api)
-6. [Query API](#query-api)
-7. [Examples: Edges](#examples-edges)
-8. [Examples: Nodes](#examples-nodes)
-9. [Examples: Fragments](#examples-fragments)
-10. [Performance Analysis](#performance-analysis)
-11. [Garbage Collection](#garbage-collection)
-12. [Pros and Cons](#pros-and-cons)
-13. [Summary](#summary)
-14. [Bitemporal Model: System Time vs Application Time](#bitemporal-model-system-time-vs-application-time)
-15. [Open Questions](#open-questions)
-16. [Appendix: Design Review Notes](#appendix-design-review-notes)
+1. [Codex Review Findings (2026-02-07)](#codex-review-findings-2026-02-07)
+2. [Overview](#overview)
+3. [Design Goals](#design-goals)
+4. [Version and History Capabilities by Entity](#version-and-history-capabilities-by-entity)
+5. [Schema Changes](#schema-changes)
+6. [Mutation API](#mutation-api)
+7. [Query API](#query-api)
+8. [Examples: Edges](#examples-edges)
+9. [Examples: Nodes](#examples-nodes)
+10. [Examples: Fragments](#examples-fragments)
+11. [Performance Analysis](#performance-analysis)
+12. [Garbage Collection](#garbage-collection)
+13. [Pros and Cons](#pros-and-cons)
+14. [Summary](#summary)
+15. [Bitemporal Model: System Time vs Application Time](#bitemporal-model-system-time-vs-application-time)
+16. [Open Questions](#open-questions)
+17. [Appendix: Design Review Notes](#appendix-design-review-notes)
 
 ---
 
@@ -45,6 +67,11 @@ Enable temporal versioning for the graph database:
 4. **Deduplication**: Content-addressed summaries avoid storage blowup
 5. **Explicit API**: Disambiguate "add second edge" vs "retarget edge"
 6. **Unique edge identity**: `(src, dst, name)` is unique at any point in time; use different `name` values for different relationship types between the same nodes
+(codex, 2026-02-05, proposed)
+(codex, 2026-02-05, gap: this schema still disallows multiple current edges with identical (src,dst,name); if true multi-edge between same nodes is required, add a disambiguator/edge-id)
+(claude, 2026-02-05, REJECT: Faulty assumption. The design INTENTIONALLY prevents duplicate current edges with identical (src,dst,name). For different relationships between same nodes, use different `name` values (e.g., "knows", "works_with"). Temporal versioning is for HISTORY, not concurrent duplicates. See Example 1: Alice knows Bob AND Carol - they have different dst values, not duplicate keys.)
+(codex, 2026-02-05, accept: agreed given the stated requirement that (src,dst,name) is unique; keep this explicit in the design goals)
+(codex, 2026-02-07, accept: confirmed; uniqueness aligns with requirements and examples)
 
 ---
 
@@ -315,6 +342,9 @@ pub struct EdgeVersionHistoryCfValue(
     pub ActivePeriod,   // 16 bytes - (start, end) business validity
 );  // Total: 40 bytes
 /// UpdatedAt enables time→version mapping for `as_of` queries.
+/// (codex, 2026-02-05) UpdatedAt enables time→version mapping for `as_of` queries.
+/// (codex, 2026-02-07, accept: consistent with requirements and bitemporal examples)
+/// (claude, 2026-02-05) EXPANDED: Added Weight and ActivePeriod for full rollback.
 
 // ============================================================
 // FRAGMENT CFs (UNCHANGED - already temporal via timestamp key)
@@ -362,6 +392,7 @@ pub struct EdgeSummaryIndexCfKey(
 );  // Total: 52 bytes
 pub struct EdgeSummaryIndexCfValue(pub u8);  // CURRENT=0x01, STALE=0x00
 /// NOTE: Index CFs defined in CONTENT-ADDRESS.md; not time-aware in key (version suffices).
+/// (codex, 2026-02-07, accept: EdgeSummaryIndex schema is now explicit; prior gap resolved)
 
 // ============================================================
 // ORPHAN SUMMARIES CF (NEW - COLD - enables deferred GC for rollback)
@@ -630,6 +661,8 @@ fn execute_update_edge(mutation: UpdateEdge) -> Result<Version> {
             key: (mutation.dst, mutation.src, mutation.name, old_edge.valid_since),
             val: (valid_until: now));
         // NOTE: Reverse edge valid_until must be updated in same txn for consistency
+        // (codex, 2026-02-05, decision: reverse edge valid_until must be updated in the same txn to keep inbound scans consistent)
+        // (codex, 2026-02-07, accept: matches denormalized reverse-edge requirement)
 
         // Create new edges
         txn.put(ForwardEdges,
@@ -666,6 +699,10 @@ fn execute_update_edge(mutation: UpdateEdge) -> Result<Version> {
     txn.put(EdgeSummaryIndex, (old_edge.hash, ..., old_edge.version), STALE);
     txn.put(EdgeSummaryIndex, (new_hash, ..., new_version), CURRENT);
     // NOTE: All mutations (Add/Delete/Restore) must maintain summary index consistency
+    // (codex, 2026-02-05, gap: requires explicit EdgeSummaryIndex schema and time/version mapping for `as_of` lookups)
+    // (codex, 2026-02-07, accept: schema now defined; time-mapping still relies on VersionHistory)
+    // (codex, 2026-02-05, decision: ensure AddEdge/DeleteEdge/RestoreEdge also maintain the summary index for current selection)
+    // (codex, 2026-02-07, accept: still required; mutation section should make this explicit)
 
     txn.commit()?;
     Ok(new_version)
@@ -787,6 +824,8 @@ pub struct EdgeHistory {
     pub name: String,
 }
 // Returns: Vec<(ValidSince, ValidUntil, Version, Summary)>
+(codex, 2026-02-05, decision: VersionHistory carries UpdatedAt to resolve time->version mapping)
+(codex, 2026-02-07, accept: validated against VERSIONING time-travel requirements)
 
 /// Get fragments in time range
 pub struct EdgeFragmentsInRange {
@@ -1144,6 +1183,8 @@ Fragments up to t=2200: ["Graduated college", "Got first job"]
 | **OutgoingEdgesAt(T)** | N/A | 1 scan + filter | New capability |
 | **NodeById** | 1 get | 1 reverse seek | O(1) → O(log N) |
 | **EdgeHistory** | N/A | 1 scan | New capability |
+(codex, 2026-02-05, decision: use reverse prefix scan for NodeById/NodeByIdAt to reduce scan cost; document expected max versions per node)
+(codex, 2026-02-07, accept: aligns with query examples; add explicit note in query implementation if needed)
 
 **NodeById lookup cost analysis:**
 
@@ -1697,6 +1738,10 @@ storage.shutdown()?;
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+(codex, 2026-02-05, gap: conflicts with current RefCount-based summary cleanup; if we keep RefCount, update this section and GC cost model)
+(claude, 2026-02-05, CLARIFY: Same as line 109. VERSIONING supersedes CONTENT-ADDRESS. When implemented: (1) Remove RefCount decrement from mutations, (2) Add orphan scan to GC, (3) Accept higher storage until GC runs. Trade-off: storage vs rollback capability.)
+(codex, 2026-02-05, accept with caveat: VERSIONING may supersede RefCount; document the new GC/retention expectations and update CONTENT-ADDRESS to reflect the override)
+(codex, 2026-02-07, accept: CONTENT-ADDRESS now notes the override; GC plan still needs explicit policy)
 
 ---
 
@@ -1730,6 +1775,8 @@ storage.shutdown()?;
 - **No audit requirements**: If you don't need rollback/time-travel, simpler schema is better
 
 **Note:** Cost/benefit is favorable when audit/time-travel/rollback are hard requirements.
+(codex, 2026-02-05, decision: cost/benefit is favorable only when audit/time-travel/rollback are hard requirements; otherwise complexity and storage cost are not justified)
+(codex, 2026-02-07, accept: consistent with requirements stated in VERSIONING)
 
 ---
 
