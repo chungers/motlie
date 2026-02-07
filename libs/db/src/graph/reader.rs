@@ -89,13 +89,15 @@ impl<T: QueryExecutor> QueryWithTimeout for T {
 
 // ============================================================================
 // Processor Trait - bridges query execution to storage
-// (codex, 2026-02-07, eval: comment still references Graph; Graph removed in ARCH2 refactor.)
+// (claude, 2026-02-07, FIXED: Updated comment - Processor provides storage access per codex eval)
 // ============================================================================
 
 /// Trait for processing different types of queries.
 ///
 /// This trait provides access to storage. Query types implement QueryExecutor
 /// to execute themselves against storage, following the same pattern as mutations.
+/// The `graph::Processor` struct implements this trait, serving as the central
+/// state hub for all graph operations.
 pub trait Processor: Send + Sync {
     /// Get access to the underlying storage
     /// Query types use this to execute themselves via QueryExecutor::execute()

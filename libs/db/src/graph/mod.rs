@@ -5,8 +5,9 @@
 //!
 //! ## Module Structure
 //!
-//! - `mod.rs` - Storage and module exports
-// (codex, 2026-02-07, eval: module header still references Graph struct; Graph has been removed.)
+//! - `mod.rs` - Storage, Processor, and module exports
+//! - `processor.rs` - Processor struct (central state hub with Storage + NameCache)
+// (claude, 2026-02-07, FIXED: Updated header to reflect Graph→Processor migration per codex eval)
 //! - `schema.rs` - RocksDB schema definitions (column families)
 //! - `mutation.rs` - Mutation types (AddNode, AddEdge, etc.)
 //! - `writer.rs` - Writer infrastructure and mutation consumers
