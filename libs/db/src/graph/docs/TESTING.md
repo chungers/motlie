@@ -152,3 +152,227 @@ Post-Refactor (ARCH2) Testing Adjustments
 - Subsystem lifecycle: start/stop idempotence, GC join, no tokio-blocking in GC thread.
 - Transaction API: Writer.transaction uses Processor and preserves read-your-writes.
 - Metrics/info: Processor/Subsystem metrics exposed and remain stable after refactor.
+
+---
+
+## Test Coverage Analysis (claude, 2026-02-07)
+
+### Current Test Inventory
+
+| File | Test Count | Coverage Area |
+|------|------------|---------------|
+| `tests.rs` | 83 | Storage lifecycle, CRUD, summary, refcount, time-travel |
+| `query.rs` | 14 | Query execution, timeouts, pagination |
+| `gc.rs` | 8 | GC config, lifecycle, metrics |
+| `schema.rs` | 14 | CF serialization, key/value encoding |
+| `mutation.rs` | 2 | Consumer wiring |
+| `processor.rs` | 3 | Processor creation, cache |
+| `subsystem.rs` | 6 | Subsystem config, lifecycle |
+| `scan.rs` | 8 | Scan iteration, pagination |
+| `name_hash.rs` | 20 | Name hashing, cache |
+| `summary_hash.rs` | 10 | Summary hashing |
+| `transaction.rs` | 1 | Transaction empty check |
+| `repair.rs` | 5 | Repair config, metrics |
+| `reader.rs` | 2 | Reader closed detection |
+| `writer.rs` | 2 | Writer closed detection |
+
+### Coverage Status by TESTING.md Section
+
+#### Baseline (pre-VERSIONING) - Status
+
+| Requirement | Status | Location | Notes |
+|-------------|--------|----------|-------|
+| Node CRUD | ✅ | tests.rs | test_add_node_with_summary_and_query |
+| Edge CRUD | ✅ | tests.rs | test_add_edge_with_summary_and_query |
+| Summary writes | ✅ | tests.rs | test_node_summaries_cf_round_trip |
+| Summary index | ✅ | tests.rs | test_node_index_entry_current_marker |
+| Reverse edge index | ❌ | MISSING | Need: dst→incoming edges validation |
+| Forward + reverse consistency | ❌ | MISSING | Need: atomic txn writes both sides |
+| Fragment append | ❌ | MISSING | Need: fragment CF idempotency |
+| Fragment search | ❌ | MISSING | Need: bm25 smoke test |
+| Delete semantics | ✅ | tests.rs | test_delete_node_marks_orphan |
+| Error handling | ❌ | MISSING | Need: missing node/edge error paths |
+| Serialization | ✅ | tests.rs | test_rkyv_* tests (6 tests) |
+| Lifecycle | ✅ | tests.rs | test_storage_lifecycle |
+| GC lifecycle | ✅ | gc.rs | test_gc_start_shutdown_lifecycle |
+| Metrics/info | ✅ | tests.rs | test_gc_metrics, test_repair_metrics |
+
+#### VERSIONING - Status
+
+| Requirement | Status | Location | Notes |
+|-------------|--------|----------|-------|
+| VersionHistory create | ✅ | tests.rs | test_node_initial_version |
+| VersionHistory update | ❌ | MISSING | Need: update writes history entry |
+| VersionHistory delete | ❌ | MISSING | Need: delete writes tombstone history |
+| Restore by version | ❌ | MISSING | Need: restore returns correct snapshot |
+| Restore CURRENT marker | ❌ | MISSING | Need: no multiple CURRENT markers |
+| Restore summary reuse | ❌ | MISSING | Need: reuses existing hash if present |
+| Time travel AsOf | ✅ | tests.rs | test_point_in_time_node_query |
+| Validity range | ✅ | tests.rs | test_active_period_filtering |
+| Weight history | ❌ | MISSING | Need: weight updates create version |
+| RestoreEdges batch | ❌ | MISSING | Need: batch marks STALE, records orphans |
+| Restore missing summary | ❌ | MISSING | Need: fail if summary GC'd |
+
+#### Index and Denormalization - Status
+
+| Requirement | Status | Location | Notes |
+|-------------|--------|----------|-------|
+| Reverse edge temporal | ❌ | MISSING | Need: forward update→reverse update |
+| CURRENT/STALE markers | ✅ | tests.rs | test_node_index_entry_current_marker |
+| Hash prefix scans | ❌ | MISSING | Need: prefix scan returns all entities |
+| Padded version ordering | ❌ | MISSING | Need: reverse scan yields latest first |
+
+#### GC and Storage - Status
+
+| Requirement | Status | Location | Notes |
+|-------------|--------|----------|-------|
+| Orphan summary tracking | ✅ | tests.rs | test_delete_node_marks_orphan |
+| GC retention | ❌ | MISSING | Need: GC respects retention window |
+| Shared summary safety | ✅ | tests.rs | test_shared_summary_survives_partial_deletion |
+| Fragment GC | ✅ | DESIGN | Fragments are append-only (no GC) |
+
+#### Concurrency and Atomicity - Status
+
+| Requirement | Status | Location | Notes |
+|-------------|--------|----------|-------|
+| Concurrent updates | ❌ | MISSING | Need: two writers same node/edge |
+| Multi-step txn atomicity | ❌ | MISSING | Need: forward+reverse+summary atomic |
+| Idempotency | ❌ | MISSING | Need: replay same mutation safe |
+| Shutdown under load | ❌ | MISSING | Need: no CF corruption |
+
+#### ARCH2 Post-Refactor - Status
+
+| Requirement | Status | Location | Notes |
+|-------------|--------|----------|-------|
+| Processor API tests | ✅ | processor.rs | test_processor_creation |
+| Consumer wiring | ✅ | tests.rs | test_graph_consumer_basic_processing |
+| Facade removal | ✅ | VERIFIED | Graph struct removed |
+| Cache ownership | ❌ | MISSING | Need: NameCache shared access test |
+| Subsystem lifecycle | ✅ | subsystem.rs | test_subsystem_new |
+| Transaction API | ✅ | test_transaction_api.rs | Integration tests |
+| Metrics/info | ✅ | tests.rs | test_gc_metrics |
+
+---
+
+## Test Cleanup and Refactoring Proposal (claude, 2026-02-07)
+
+### Phase 1: Fill Critical Gaps (Priority: HIGH)
+
+1. **Reverse Edge Consistency Test** (`tests.rs`)
+   - Add `test_reverse_edge_index_consistency`
+   - Verify: add edge → forward CF has entry AND reverse CF has entry
+   - Verify: IncomingEdges query returns added edge
+
+2. **Forward+Reverse Atomic Test** (`tests.rs`)
+   - Add `test_forward_reverse_atomic_commit`
+   - Verify: single txn writes both CFs or neither
+
+3. **Error Handling Tests** (`tests.rs`)
+   - Add `test_query_missing_node_returns_error`
+   - Add `test_query_missing_edge_returns_error`
+   - Verify: NodeById with unknown ID returns descriptive error
+
+4. **NameCache Shared Access Test** (`processor.rs`)
+   - Add `test_processor_namecache_shared_across_consumers`
+   - Verify: Writer and Reader share same cache via Processor
+
+### Phase 2: VERSIONING Behavioral Validation (Priority: MEDIUM)
+
+5. **VersionHistory Update Test** (`tests.rs`)
+   - Add `test_node_update_creates_version_history`
+   - Add `test_edge_update_creates_version_history`
+   - Verify: UpdateNodeSummary → new history entry with ValidSince
+
+6. **Restore Semantics Tests** (`tests.rs`)
+   - Add `test_restore_node_returns_correct_version`
+   - Add `test_restore_marks_prior_current_as_stale`
+   - Add `test_restore_fails_if_summary_gc_deleted`
+
+7. **Weight History Test** (`tests.rs`)
+   - Add `test_edge_weight_update_creates_version`
+   - Verify: UpdateEdgeWeight → new version (no in-place mutation)
+
+8. **RestoreEdges Batch Test** (`tests.rs`)
+   - Add `test_restore_edges_batch_marks_stale`
+   - Add `test_restore_edges_skips_missing_summaries`
+
+### Phase 3: Index and Scan Validation (Priority: MEDIUM)
+
+9. **Hash Prefix Scan Test** (`query.rs`)
+   - Add `test_summary_hash_prefix_scan`
+   - Verify: NodesBySummaryHash returns all entities with same hash
+
+10. **Padded Version Ordering Test** (`scan.rs`)
+    - Add `test_version_scan_returns_latest_first`
+    - Verify: reverse scan with padded ordering
+
+### Phase 4: Concurrency Tests (Priority: LOW)
+
+11. **Concurrent Writers Test** (`tests.rs` or integration test)
+    - Add `test_concurrent_writers_same_node`
+    - Verify: two writers update same node → history consistent
+
+12. **Idempotency Test** (`tests.rs`)
+    - Add `test_replay_mutation_idempotent`
+    - Verify: replaying AddNode with same ID doesn't corrupt
+
+### Phase 5: Test Infrastructure Cleanup
+
+13. **Fixture Helpers** - Create `test_fixtures.rs`:
+    - `TestNode::builder()` - deterministic node creation
+    - `TestEdge::builder()` - deterministic edge creation
+    - `TestClock` - injectable clock for deterministic timestamps
+    - `TestIdGenerator` - stable ID generation for assertions
+
+14. **Consolidate Storage Helpers** - Reduce duplication:
+    - Extract `setup_readwrite_storage()` helper
+    - Extract `setup_processor_with_writer()` helper
+    - Use temp_dir fixtures consistently
+
+### Cleanup Actions
+
+15. **Remove Redundant Tests**:
+    - `test_storage_ready_multiple_times` duplicates `test_storage_ready_idempotency`
+    - Merge `test_storage_readonly_basic` with `test_storage_multiple_readonly_instances`
+
+16. **Rename for Clarity**:
+    - `test_graph_consumer_*` → `test_mutation_consumer_*` (Graph removed)
+    - `test_consumer_basic` (query.rs) → `test_query_consumer_basic`
+
+17. **Add Missing Doc Comments**:
+    - Each test should document what invariant it validates
+    - Use `/// Validates: <invariant>` format
+
+---
+
+## Test Execution Groups
+
+### Fast Tests (< 1s each, run on every commit)
+- Serialization: rkyv, key/value encoding
+- Config: defaults, builders
+- Pure functions: hashing, name resolution
+
+### Integration Tests (< 5s each, run on PR)
+- CRUD operations
+- Time travel queries
+- Lifecycle tests
+
+### Stress Tests (> 5s, run nightly)
+- Concurrent writers
+- Large batch mutations
+- GC under load
+
+---
+
+## Acceptance Criteria (updated)
+
+- [ ] All Baseline tests implemented (14 items)
+- [ ] All VERSIONING tests implemented (11 items)
+- [ ] All Index tests implemented (4 items)
+- [ ] All GC tests implemented (4 items)
+- [ ] All Concurrency tests implemented (4 items)
+- [ ] All ARCH2 tests implemented (7 items)
+- [ ] Test fixtures created and used consistently
+- [ ] Redundant tests consolidated
+- [ ] Tests renamed for clarity post-Graph removal
+- [ ] Each test documents invariant validated
