@@ -1279,6 +1279,11 @@ INVARIANTS:
 
 > (claude, 2026-02-07) Ordered implementation tasks. Execute Phase 1 first per codex guidance.
 
+(codex, 2026-02-07, eval: to align with vector::Processor pattern, Writer/Reader must *hold* Arc<Processor> (not just Consumers). This enables Writer::transaction() and cache-aware reads, matching vector’s public async wrappers around a shared Processor.)
+(codex, 2026-02-07, eval: add explicit tasks to wire Processor into Writer/Reader construction helpers and store it on the public structs; otherwise the Processor ownership model diverges from vector and breaks Transaction API changes.)
+(codex, 2026-02-07, eval: on_ready()/NameCache prewarm should be in Phase 1/2, not Phase 4, because vector prewarms caches before consumers start; delaying this weakens alignment.)
+(codex, 2026-02-07, eval: include a sweep for all Graph call sites across crates/bins/examples; vector has no public Graph facade and the refactor should remove those usage patterns explicitly.)
+
 ### Phase 1: Fix Critical Bugs (PREREQUISITE)
 
 These must be fixed before starting the main refactor to avoid compounding instability.
