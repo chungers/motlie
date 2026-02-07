@@ -1286,14 +1286,16 @@ INVARIANTS:
 
 ### Vector Alignment Checklist
 
-- [ ] `Writer` holds `Arc<Processor>` (not just Consumer) like vector::Writer
-- [ ] `Reader` holds `Arc<Processor>` (or explicit Processor-backed consumer) like vector::Reader
+> (claude, 2026-02-07) Updated based on codex feedback and vector crate analysis.
+
+- [ ] `Writer` holds `Arc<Processor>` for `transaction()` support (graph-specific; vector::Writer has no transactions)
+- [ ] `Reader` holds `Arc<Processor>` like vector::Reader (line 90) for cache-aware reads
 - [ ] Async Processor trait removed; sync Processor methods used by Consumers
 - [ ] Processor owns caches (NameCache) instead of Storage
 - [ ] `spawn_*_with_storage()` helpers construct Processor internally
 - [ ] `spawn_*_with_processor()` helpers are pub(crate) for shared use
-- [ ] `Graph` facade removed or optional; no external call sites depend on it
-- [ ] on_ready() prewarm occurs before consumers start (vector-style)
+- [ ] `Graph` facade removed; all call sites migrated (~15 in query.rs tests)
+- [ ] on_ready() prewarm occurs before consumers start (Phase 1, not Phase 4)
 
 ### Phase 1: Fix Critical Bugs (PREREQUISITE)
 
@@ -1378,6 +1380,18 @@ Add tests for:
 
 - [ ] P1.5 complete
 
+#### P1.6: Setup NameCache Prewarm in on_ready()
+
+> (claude, 2026-02-07) Per codex: prewarm must occur before consumers start (vector-style).
+
+**File:** `libs/db/src/graph/subsystem.rs`
+
+- Ensure `on_ready()` prewarms NameCache from Names CF
+- This must happen BEFORE `start()` spawns consumers
+- Matches vector pattern where caches are warmed before consumers access them
+
+- [ ] P1.6 complete
+
 ---
 
 ### Phase 2: Create Processor
@@ -1405,25 +1419,47 @@ impl Processor {
 
 #### P2.2: Update `graph::writer` module
 
+> (claude, 2026-02-07) Per codex: Writer must hold Arc<Processor> for transaction() support.
+
 **File:** `libs/db/src/graph/writer.rs`
 
 - Remove `Processor` async trait
 - Update `Consumer` to hold `Arc<processor::Processor>`
-- Add `spawn_mutation_consumer_with_storage()` helper
-- Add `spawn_mutation_consumer_with_processor()` (pub(crate))
+- **Update `Writer` to hold `processor: Option<Arc<Processor>>`** (replaces `storage` field)
+- Update `Writer::transaction()` to use `processor.transaction_db()` and `processor.name_cache()`
 
 - [ ] P2.2 complete
 
 #### P2.3: Update `graph::reader` module
 
+> (claude, 2026-02-07) Per codex: Reader must hold Arc<Processor> like vector::Reader (line 90).
+
 **File:** `libs/db/src/graph/reader.rs`
 
-- Update `Reader` to optionally hold `Arc<Processor>`
+- **Update `Reader` to hold `processor: Arc<Processor>`** (not optional - like vector::Reader)
+- Add `Reader::processor()` method returning `&Arc<Processor>` (like vector::Reader:118)
 - Update `Consumer` to use Processor for cache access
 - Add `create_reader_with_storage()` helper
 - Add `spawn_query_consumers_with_storage()` helper
 
 - [ ] P2.3 complete
+
+#### P2.4: Add Construction Helpers
+
+> (claude, 2026-02-07) Per codex: explicit helpers for Processor wiring.
+
+**Files:** `libs/db/src/graph/writer.rs`, `libs/db/src/graph/reader.rs`
+
+Writer helpers:
+- `spawn_mutation_consumer_with_storage()` - public, creates Processor internally
+- `spawn_mutation_consumer_with_processor()` - pub(crate), for shared Processor
+
+Reader helpers:
+- `create_reader_with_storage()` - public, creates Processor internally
+- `spawn_query_consumers_with_storage()` - public, creates Processor internally
+- `spawn_query_consumers_with_processor()` - pub(crate), for shared Processor
+
+- [ ] P2.4 complete
 
 ---
 
@@ -1454,44 +1490,86 @@ impl Processor {
 **File:** `libs/db/src/graph/transaction.rs`
 
 - Update `Writer::transaction()` to use Processor
+- Transaction gets `txn_db` and `name_cache` from Processor
 
 - [ ] P3.3 complete
+
+#### P3.4: Sweep Graph Call Sites
+
+> (claude, 2026-02-07) Per codex: remove all Graph usage patterns explicitly.
+
+**Files:** Multiple
+
+Known call sites to migrate:
+- `libs/db/src/graph/query.rs` - ~15 test cases using `Graph::new(Arc::new(storage))`
+- `libs/db/src/query.rs` - uses `graph::reader::Processor` trait (rename/update)
+- Any examples/bins using Graph directly
+
+Migration pattern:
+```rust
+// Before:
+let graph = Graph::new(Arc::new(storage));
+
+// After:
+let processor = Arc::new(Processor::new(storage));
+// Or use spawn_*_with_storage() helpers
+```
+
+- [ ] P3.4 complete
 
 ---
 
 ### Phase 4: Validation
 
-#### P4.1: Update tests
+#### P4.1: Verify all tests pass
 
-- Migrate tests from Graph to Processor/Writer/Reader patterns
+- Run full test suite: `cargo test -p motlie-db`
+- Ensure no regressions from refactor
 
 - [ ] P4.1 complete
 
 #### P4.2: Update examples and benchmarks
 
+- Migrate any examples using Graph to Writer/Reader patterns
+- Update benchmarks if they use Graph directly
+
 - [ ] P4.2 complete
 
-#### P4.3: Verify all tests pass
+#### P4.3: Verify shutdown ordering: flush → consumers → GC
+
+- Confirm lifecycle tests from P1.5 pass
+- Verify no panics or races during shutdown
 
 - [ ] P4.3 complete
-
-#### P4.4: Verify NameCache pre-warm in on_ready()
-
-- [ ] P4.4 complete
-
-#### P4.5: Verify shutdown ordering: flush → consumers → GC
-
-- [ ] P4.5 complete
 
 ---
 
 ### Execution Summary
 
+> (claude, 2026-02-07) Updated per codex feedback.
+
 ```
-Phase 1 (P1.1-P1.5): Fix GC/Lifecycle Bugs - DO FIRST
-Phase 2 (P2.1-P2.3): Create Processor
-Phase 3 (P3.1-P3.3): Integration
-Phase 4 (P4.1-P4.5): Validation
+Phase 1 (P1.1-P1.6): Fix GC/Lifecycle Bugs + Prewarm Setup - DO FIRST
+  ├─ P1.1-P1.4: GC worker handle, shutdown join, std::thread, subsystem update
+  ├─ P1.5: Lifecycle tests
+  └─ P1.6: NameCache prewarm in on_ready() (before consumers start)
+
+Phase 2 (P2.1-P2.4): Create Processor + Wire Writer/Reader
+  ├─ P2.1: Create processor.rs
+  ├─ P2.2: Writer holds Arc<Processor> (for transaction())
+  ├─ P2.3: Reader holds Arc<Processor> (like vector::Reader)
+  └─ P2.4: Construction helpers (spawn_*_with_storage/processor)
+
+Phase 3 (P3.1-P3.4): Integration + Graph Removal
+  ├─ P3.1: Update subsystem.rs
+  ├─ P3.2: Remove Graph struct
+  ├─ P3.3: Update Transaction API
+  └─ P3.4: Sweep Graph call sites (~15 in query.rs tests)
+
+Phase 4 (P4.1-P4.3): Validation
+  ├─ P4.1: Verify all tests pass
+  ├─ P4.2: Update examples/benchmarks
+  └─ P4.3: Verify shutdown ordering
 ```
 
 ### Success Criteria
@@ -1500,6 +1578,8 @@ Phase 4 (P4.1-P4.5): Validation
 2. **No public `Graph` type:** Users construct via `spawn_*` helpers only
 3. **Processor is pub(crate):** Internal implementation detail
 4. **Shared caches:** NameCache owned by Processor, not Storage
-5. **Consistent with vector:** Same construction patterns
-6. **All tests pass:** No behavioral changes
-7. **API stability:** Writer/Reader public interfaces unchanged
+5. **Writer holds Arc<Processor>:** Enables transaction() support
+6. **Reader holds Arc<Processor>:** Like vector::Reader for cache-aware reads
+7. **Prewarm before consumers:** on_ready() warms caches before start()
+8. **All tests pass:** No behavioral changes
+9. **API stability:** Writer/Reader public interfaces unchanged
