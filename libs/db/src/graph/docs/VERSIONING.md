@@ -172,6 +172,23 @@ See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time
 | **EdgeSummaryIndex** | `(SummaryHash, SrcId, DstId, NameHash, Version)` 52B | `(Marker)` 1B | *unchanged* | *unchanged* | None |
 | **OrphanSummaries** | N/A | N/A | `(TimestampMilli, SummaryHash)` 16B | `(SummaryKind)` 1B | **NEW** |
 
+**Serialization Strategy (HOT vs COLD):**
+
+| CF | Tier | Serialization | Rationale |
+|----|------|---------------|-----------|
+| **Nodes** | HOT | rkyv (zero-copy) | Traversal hot path |
+| **ForwardEdges** | HOT | rkyv (zero-copy) | Traversal hot path |
+| **ReverseEdges** | HOT | rkyv (zero-copy) | Traversal hot path |
+| **NodeSummaries** | COLD | MessagePack + LZ4 | Large text, infrequent access |
+| **EdgeSummaries** | COLD | MessagePack + LZ4 | Large text, infrequent access |
+| **NodeVersionHistory** | COLD | MessagePack + LZ4 | Rollback/time-travel only |
+| **EdgeVersionHistory** | COLD | MessagePack + LZ4 | Rollback/time-travel only |
+| **NodeFragments** | COLD | MessagePack + LZ4 | Large content, sequential access |
+| **EdgeFragments** | COLD | MessagePack + LZ4 | Large content, sequential access |
+| **NodeSummaryIndex** | COLD | MessagePack + LZ4 | GC/reverse lookup only |
+| **EdgeSummaryIndex** | COLD | MessagePack + LZ4 | GC/reverse lookup only |
+| **OrphanSummaries** | COLD | MessagePack + LZ4 | Background GC only |
+
 ### Complete CF Schema (AFTER)
 
 ```rust
@@ -250,8 +267,12 @@ pub struct EdgeSummaryCfKey(pub SummaryHash);  // 8 bytes
 pub struct EdgeSummaryCfValue(pub EdgeSummary);
 
 // ============================================================
-// VERSION HISTORY CFs (NEW - enables full rollback)
+// VERSION HISTORY CFs (NEW - COLD - enables full rollback)
 // ============================================================
+// Serialization: MessagePack + LZ4 (ColumnFamilySerde)
+// Rationale: Accessed during rollback/time-travel queries, not hot traversal path.
+// Values contain variable-length ActivePeriod; compression beneficial.
+
 /// Node version history - stores full snapshot for rollback
 pub struct NodeVersionHistoryCfKey(
     pub Id,          // 16 bytes
@@ -333,8 +354,12 @@ pub struct EdgeSummaryIndexCfValue(pub u8);  // CURRENT=0x01, STALE=0x00
 /// NOTE: Index CFs defined in CONTENT-ADDRESS.md; not time-aware in key (version suffices).
 
 // ============================================================
-// ORPHAN SUMMARIES CF (NEW - enables deferred GC for rollback)
+// ORPHAN SUMMARIES CF (NEW - COLD - enables deferred GC for rollback)
 // ============================================================
+// Serialization: MessagePack + LZ4 (ColumnFamilySerde)
+// Rationale: Only accessed by background GC worker, not query path.
+// Tiny 1-byte values; compression overhead negligible.
+
 /// Tracks summaries with RefCount=0 for deferred deletion.
 /// Time-ordered key enables retention-based GC scanning.
 pub struct OrphanSummaries;
@@ -445,8 +470,8 @@ pub struct RestoreEdge {
     pub as_of: TimestampMilli,
 }
 
-/// Rollback all outgoing edges from src to state at a previous time.
-pub struct RollbackEdges {
+/// Restore all outgoing edges from src to state at a previous time.
+pub struct RestoreEdges {
     pub src: Id,
     pub name: Option<String>,  // None = all edge names
     pub as_of: TimestampMilli,
@@ -874,7 +899,7 @@ Alice's best_friend changed multiple times, then rolls back:
 t=1000: AddEdge { src: Alice, dst: Bob, name: "best_friend", summary: "besties" }
 t=2000: UpdateEdge { new_dst: Some(Carol) }   // Bob → Carol
 t=3000: UpdateEdge { new_dst: Some(Dave) }    // Carol → Dave
-t=4000: RollbackEdges { src: Alice, name: "best_friend", as_of: 1500 }
+t=4000: RestoreEdges { src: Alice, name: "best_friend", as_of: 1500 }
 
 === ForwardEdges CF after t=4000 ===
 (Alice, Bob,   "best_friend", 1000) → (until=2000, v=1)  // Historical
