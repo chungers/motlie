@@ -1272,3 +1272,218 @@ INVARIANTS:
 **Why:** The target architecture is well specified and aligns with vector. The main risk is refactoring on top of unstable lifecycle behavior (GC thread management, shutdown order). Fixing those first reduces churn and regression risk.
 
 (codex, 2026-02-07, eval: start after GC/lifecycle fixes; otherwise proceed in the task order above.)
+
+---
+
+## Execution Plan
+
+> (claude, 2026-02-07) Ordered implementation tasks. Execute Phase 1 first per codex guidance.
+
+### Phase 1: Fix Critical Bugs (PREREQUISITE)
+
+These must be fixed before starting the main refactor to avoid compounding instability.
+
+#### P1.1: Fix GC Worker Handle Capture
+
+**File:** `libs/db/src/graph/gc.rs`
+
+**Current (BROKEN):**
+```rust
+// subsystem.rs:234
+let _handle = gc.clone().spawn_worker();  // Handle discarded!
+```
+
+**Fix:**
+- Add `worker_handle: Option<std::thread::JoinHandle<()>>` field to `GraphGarbageCollector`
+- Store handle internally instead of returning it
+- Change from `Arc<Self>` pattern to owned `Self` with embedded handle
+
+- [ ] P1.1 complete
+
+#### P1.2: Fix GC Shutdown to Join Worker
+
+**File:** `libs/db/src/graph/gc.rs`
+
+**Current (BROKEN):**
+```rust
+pub fn shutdown(&self) {
+    self.shutdown.store(true, Ordering::SeqCst);  // Only signals, doesn't wait!
+}
+```
+
+**Fix:**
+```rust
+/// Shutdown GC and wait for worker to complete.
+/// Takes ownership to prevent use-after-shutdown.
+pub fn shutdown(mut self) {
+    self.shutdown.store(true, Ordering::SeqCst);
+    if let Some(handle) = self.worker_handle.take() {
+        let _ = handle.join();
+    }
+}
+```
+
+- [ ] P1.2 complete
+
+#### P1.3: Change GC from tokio::spawn to std::thread
+
+**File:** `libs/db/src/graph/gc.rs`
+
+**Current (WRONG):**
+```rust
+pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // Blocking RocksDB operations inside async context!
+    })
+}
+```
+
+**Fix:** Use `std::thread::spawn` for blocking work. Create internal `GcWorker` struct that runs in the thread.
+
+- [ ] P1.3 complete
+
+#### P1.4: Update Subsystem to Use New GC Pattern
+
+**File:** `libs/db/src/graph/subsystem.rs`
+
+- Change `start()` to use `GraphGarbageCollector::start()` instead of `spawn_worker()`
+- Change `on_shutdown()` - `gc.shutdown()` now blocks until worker completes
+
+- [ ] P1.4 complete
+
+#### P1.5: Add Lifecycle Tests
+
+**File:** `libs/db/src/graph/tests.rs`
+
+Add tests for:
+- Subsystem start/stop idempotence
+- GC shutdown joins worker
+- Shutdown ordering: flush → consumers → GC
+
+- [ ] P1.5 complete
+
+---
+
+### Phase 2: Create Processor
+
+#### P2.1: Create `graph::processor::Processor` struct
+
+**File:** `libs/db/src/graph/processor.rs` (NEW)
+
+```rust
+pub(crate) struct Processor {
+    storage: Arc<Storage>,
+    name_cache: Arc<NameCache>,
+    gc_config: Option<GraphGcConfig>,
+}
+
+impl Processor {
+    pub fn new(storage: Arc<Storage>) -> Self { ... }
+    pub fn storage(&self) -> &Arc<Storage> { ... }
+    pub fn name_cache(&self) -> &Arc<NameCache> { ... }
+    pub fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> { ... }
+}
+```
+
+- [ ] P2.1 complete
+
+#### P2.2: Update `graph::writer` module
+
+**File:** `libs/db/src/graph/writer.rs`
+
+- Remove `Processor` async trait
+- Update `Consumer` to hold `Arc<processor::Processor>`
+- Add `spawn_mutation_consumer_with_storage()` helper
+- Add `spawn_mutation_consumer_with_processor()` (pub(crate))
+
+- [ ] P2.2 complete
+
+#### P2.3: Update `graph::reader` module
+
+**File:** `libs/db/src/graph/reader.rs`
+
+- Update `Reader` to optionally hold `Arc<Processor>`
+- Update `Consumer` to use Processor for cache access
+- Add `create_reader_with_storage()` helper
+- Add `spawn_query_consumers_with_storage()` helper
+
+- [ ] P2.3 complete
+
+---
+
+### Phase 3: Integration
+
+#### P3.1: Update `graph::subsystem` module
+
+**File:** `libs/db/src/graph/subsystem.rs`
+
+- Create shared `Processor` in `start()`
+- Pass Processor to Writer/Reader consumers
+- Store `Processor` for shutdown cleanup
+
+- [ ] P3.1 complete
+
+#### P3.2: Remove `Graph` struct
+
+**File:** `libs/db/src/graph/mod.rs`
+
+- Delete `pub struct Graph`
+- Delete `impl Processor for Graph`
+- Update module exports
+
+- [ ] P3.2 complete
+
+#### P3.3: Update Transaction API
+
+**File:** `libs/db/src/graph/transaction.rs`
+
+- Update `Writer::transaction()` to use Processor
+
+- [ ] P3.3 complete
+
+---
+
+### Phase 4: Validation
+
+#### P4.1: Update tests
+
+- Migrate tests from Graph to Processor/Writer/Reader patterns
+
+- [ ] P4.1 complete
+
+#### P4.2: Update examples and benchmarks
+
+- [ ] P4.2 complete
+
+#### P4.3: Verify all tests pass
+
+- [ ] P4.3 complete
+
+#### P4.4: Verify NameCache pre-warm in on_ready()
+
+- [ ] P4.4 complete
+
+#### P4.5: Verify shutdown ordering: flush → consumers → GC
+
+- [ ] P4.5 complete
+
+---
+
+### Execution Summary
+
+```
+Phase 1 (P1.1-P1.5): Fix GC/Lifecycle Bugs - DO FIRST
+Phase 2 (P2.1-P2.3): Create Processor
+Phase 3 (P3.1-P3.3): Integration
+Phase 4 (P4.1-P4.5): Validation
+```
+
+### Success Criteria
+
+1. **GC lifecycle fixed:** Worker handle stored, shutdown joins, uses std::thread
+2. **No public `Graph` type:** Users construct via `spawn_*` helpers only
+3. **Processor is pub(crate):** Internal implementation detail
+4. **Shared caches:** NameCache owned by Processor, not Storage
+5. **Consistent with vector:** Same construction patterns
+6. **All tests pass:** No behavioral changes
+7. **API stability:** Writer/Reader public interfaces unchanged
