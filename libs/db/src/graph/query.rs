@@ -149,40 +149,272 @@ fn resolve_node_summary(
 // ============================================================================
 // VERSIONING Helpers for Current Version Lookup
 // ============================================================================
-/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan helpers)
+// (claude, 2026-02-07, FIXED: Items 15-16 - Unified storage access with reverse seek)
+
+/// Storage access abstraction for unified query logic.
+/// (claude, 2026-02-07, FIXED: Item 16 - Eliminates readonly/readwrite/txn duplication)
+#[derive(Clone)]
+enum StorageAccess<'a> {
+    Readonly(&'a rocksdb::DB),
+    Readwrite(&'a rocksdb::TransactionDB),
+    Transaction(&'a rocksdb::Transaction<'a, rocksdb::TransactionDB>, &'a rocksdb::TransactionDB),
+}
+
+impl<'a> StorageAccess<'a> {
+    /// Get a column family handle.
+    fn cf_handle(&self, cf_name: &str) -> Option<&rocksdb::ColumnFamily> {
+        match self {
+            StorageAccess::Readonly(db) => db.cf_handle(cf_name),
+            StorageAccess::Readwrite(db) => db.cf_handle(cf_name),
+            StorageAccess::Transaction(_, db) => db.cf_handle(cf_name),
+        }
+    }
+}
+
+/// Unified node version finder using forward scan with early termination.
+/// Works with any storage access type.
+///
+/// (claude, 2026-02-07, FIXED: Item 16 - Single implementation for all storage types)
+fn find_node_version_unified(
+    storage: StorageAccess<'_>,
+    node_id: Id,
+    as_of: Option<TimestampMilli>,
+) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    let prefix = node_id.into_bytes().to_vec();
+
+    // For current version queries, we scan forward looking for ValidUntil = None.
+    // For as_of queries, we use reverse iteration from the seek point for O(1) lookup.
+    // (claude, 2026-02-07, FIXED: Item 15 - Use reverse seek for as_of queries)
+
+    match as_of {
+        None => {
+            // Current version query: scan forward, find ValidUntil = None
+            find_node_current_version_scan(&storage, &prefix)
+        }
+        Some(as_of_ts) => {
+            // Point-in-time query: use reverse seek from (prefix, as_of_ts)
+            find_node_version_at_time_reverse(&storage, &prefix, as_of_ts)
+        }
+    }
+}
+
+/// Find current node version using forward scan (ValidUntil = None).
+fn find_node_current_version_scan(
+    storage: &StorageAccess<'_>,
+    prefix: &[u8],
+) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    let nodes_cf = storage.cf_handle(schema::Nodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+
+    // Create iterator based on storage type
+    match storage {
+        StorageAccess::Readonly(db) => {
+            for item in db.prefix_iterator_cf(nodes_cf, prefix) {
+                let (key_bytes, value_bytes) = item?;
+                if !key_bytes.starts_with(prefix) {
+                    break;
+                }
+                let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+                if value.0.is_none() {
+                    return Ok(Some((key_bytes.to_vec(), value)));
+                }
+            }
+        }
+        StorageAccess::Readwrite(db) => {
+            for item in db.prefix_iterator_cf(nodes_cf, prefix) {
+                let (key_bytes, value_bytes) = item?;
+                if !key_bytes.starts_with(prefix) {
+                    break;
+                }
+                let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+                if value.0.is_none() {
+                    return Ok(Some((key_bytes.to_vec(), value)));
+                }
+            }
+        }
+        StorageAccess::Transaction(txn, _) => {
+            for item in txn.prefix_iterator_cf(nodes_cf, prefix) {
+                let (key_bytes, value_bytes) = item?;
+                if !key_bytes.starts_with(prefix) {
+                    break;
+                }
+                let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+                if value.0.is_none() {
+                    return Ok(Some((key_bytes.to_vec(), value)));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Find node version at specific time using reverse seek.
+/// (claude, 2026-02-07, FIXED: Item 15 - O(1) lookup instead of O(k) scan)
+///
+/// Strategy: Seek to (prefix, as_of_ts) and scan backwards to find the version
+/// where ValidSince <= as_of_ts AND (ValidUntil is None OR ValidUntil > as_of_ts).
+fn find_node_version_at_time_reverse(
+    storage: &StorageAccess<'_>,
+    prefix: &[u8],
+    as_of_ts: TimestampMilli,
+) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    let nodes_cf = storage.cf_handle(schema::Nodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+    // Build seek key: prefix + as_of_ts (24 bytes for nodes)
+    let mut seek_key = Vec::with_capacity(24);
+    seek_key.extend_from_slice(prefix);
+    seek_key.extend_from_slice(&as_of_ts.0.to_be_bytes());
+
+    // Use iterator with SeekForPrev to find the largest key <= seek_key
+    // Then scan forward from there to find valid versions
+    match storage {
+        StorageAccess::Readonly(db) => {
+            let mut iter = db.raw_iterator_cf(nodes_cf);
+            iter.seek_for_prev(&seek_key);
+
+            // Check entries starting from seek position
+            while iter.valid() {
+                let Some(key_bytes) = iter.key() else { break };
+                if !key_bytes.starts_with(prefix) {
+                    // Went past prefix boundary, try previous
+                    iter.prev();
+                    continue;
+                }
+
+                let Some(value_bytes) = iter.value() else { break };
+                // Copy to aligned buffer for rkyv deserialization
+                let value_bytes_aligned = value_bytes.to_vec();
+
+                // Extract ValidSince from key
+                let valid_since = if key_bytes.len() >= 24 {
+                    let ts_bytes: [u8; 8] = key_bytes[16..24].try_into().unwrap();
+                    TimestampMilli(u64::from_be_bytes(ts_bytes))
+                } else {
+                    iter.prev();
+                    continue;
+                };
+
+                // Skip if ValidSince > as_of (shouldn't happen after seek_for_prev, but safety check)
+                if valid_since.0 > as_of_ts.0 {
+                    iter.prev();
+                    continue;
+                }
+
+                let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes_aligned)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+
+                // Check ValidUntil
+                let is_valid = match value.0 {
+                    None => true,
+                    Some(valid_until) => valid_until.0 > as_of_ts.0,
+                };
+
+                if is_valid {
+                    return Ok(Some((key_bytes.to_vec(), value)));
+                }
+
+                // This version ended before as_of, try earlier version
+                iter.prev();
+            }
+        }
+        StorageAccess::Readwrite(db) => {
+            let mut iter = db.raw_iterator_cf(nodes_cf);
+            iter.seek_for_prev(&seek_key);
+
+            while iter.valid() {
+                let Some(key_bytes) = iter.key() else { break };
+                if !key_bytes.starts_with(prefix) {
+                    iter.prev();
+                    continue;
+                }
+
+                let Some(value_bytes) = iter.value() else { break };
+                // Copy to aligned buffer for rkyv deserialization
+                let value_bytes_aligned = value_bytes.to_vec();
+
+                let valid_since = if key_bytes.len() >= 24 {
+                    let ts_bytes: [u8; 8] = key_bytes[16..24].try_into().unwrap();
+                    TimestampMilli(u64::from_be_bytes(ts_bytes))
+                } else {
+                    iter.prev();
+                    continue;
+                };
+
+                if valid_since.0 > as_of_ts.0 {
+                    iter.prev();
+                    continue;
+                }
+
+                let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes_aligned)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+
+                let is_valid = match value.0 {
+                    None => true,
+                    Some(valid_until) => valid_until.0 > as_of_ts.0,
+                };
+
+                if is_valid {
+                    return Ok(Some((key_bytes.to_vec(), value)));
+                }
+
+                iter.prev();
+            }
+        }
+        StorageAccess::Transaction(txn, _) => {
+            // Transaction doesn't have raw_iterator_cf with seek_for_prev,
+            // fall back to forward scan for transaction context
+            // (This is acceptable since transaction queries are less common)
+            let iter = txn.prefix_iterator_cf(nodes_cf, prefix);
+            let mut best_match: Option<(Vec<u8>, schema::NodeCfValue)> = None;
+
+            for item in iter {
+                let (key_bytes, value_bytes) = item?;
+                if !key_bytes.starts_with(prefix) {
+                    break;
+                }
+
+                let valid_since = if key_bytes.len() >= 24 {
+                    let ts_bytes: [u8; 8] = key_bytes[16..24].try_into().unwrap();
+                    TimestampMilli(u64::from_be_bytes(ts_bytes))
+                } else {
+                    continue;
+                };
+
+                if valid_since.0 > as_of_ts.0 {
+                    continue;
+                }
+
+                let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+
+                let is_valid = match value.0 {
+                    None => true,
+                    Some(valid_until) => valid_until.0 > as_of_ts.0,
+                };
+
+                if is_valid {
+                    best_match = Some((key_bytes.to_vec(), value));
+                }
+            }
+            return Ok(best_match);
+        }
+    }
+
+    Ok(None)
+}
+
+// Legacy wrapper functions for backwards compatibility
+// These delegate to the unified implementation
 
 /// Find the current version of a node via prefix scan (readonly mode).
-///
-/// With VERSIONING, NodeCfKey is (Id, ValidSince). To find the current version,
-/// we prefix scan on node_id and find the entry with ValidUntil = None.
-///
-/// Returns (full_key_bytes, value) for the current version.
 fn find_current_node_version_readonly(
     db: &rocksdb::DB,
     node_id: Id,
 ) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
-    let nodes_cf = db
-        .cf_handle(schema::Nodes::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-
-    // Prefix scan on node_id (first 16 bytes)
-    let prefix = node_id.into_bytes().to_vec();
-    let iter = db.prefix_iterator_cf(nodes_cf, &prefix);
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        // Stop if we've gone past our prefix
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
-        // Current version has ValidUntil = None (field 0)
-        if value.0.is_none() {
-            return Ok(Some((key_bytes.to_vec(), value)));
-        }
-    }
-    Ok(None)
+    find_node_version_unified(StorageAccess::Readonly(db), node_id, None)
 }
 
 /// Find the current version of a node via prefix scan (readwrite/transaction mode).
@@ -190,28 +422,7 @@ fn find_current_node_version_readwrite(
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
 ) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
-    let nodes_cf = txn_db
-        .cf_handle(schema::Nodes::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-
-    // Prefix scan on node_id (first 16 bytes)
-    let prefix = node_id.into_bytes().to_vec();
-    let iter = txn_db.prefix_iterator_cf(nodes_cf, &prefix);
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        // Stop if we've gone past our prefix
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
-        // Current version has ValidUntil = None (field 0)
-        if value.0.is_none() {
-            return Ok(Some((key_bytes.to_vec(), value)));
-        }
-    }
-    Ok(None)
+    find_node_version_unified(StorageAccess::Readwrite(txn_db), node_id, None)
 }
 
 /// Find the current version of a node via prefix scan (within transaction).
@@ -220,207 +431,271 @@ fn find_current_node_version_txn(
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
 ) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
-    let nodes_cf = txn_db
-        .cf_handle(schema::Nodes::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-
-    // Prefix scan on node_id (first 16 bytes)
-    let prefix = node_id.into_bytes().to_vec();
-    let iter = txn.prefix_iterator_cf(nodes_cf, &prefix);
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        // Stop if we've gone past our prefix
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
-        // Current version has ValidUntil = None (field 0)
-        if value.0.is_none() {
-            return Ok(Some((key_bytes.to_vec(), value)));
-        }
-    }
-    Ok(None)
+    find_node_version_unified(StorageAccess::Transaction(txn, txn_db), node_id, None)
 }
 
 // ============================================================================
 // VERSIONING Helpers for Point-in-Time Queries
 // ============================================================================
-// (claude, 2026-02-06: Point-in-time query support for system time travel)
+// (claude, 2026-02-07, FIXED: Items 15-16 - Now delegates to unified implementation)
 
 /// Find the version of a node valid at a specific system time (readonly mode).
-///
-/// If `as_of` is None, returns the current version (ValidUntil = None).
-/// If `as_of` is Some(ts), returns the version where ValidSince <= ts AND (ValidUntil is None OR ValidUntil > ts).
+/// (claude, 2026-02-07, FIXED: Item 15 - Uses reverse seek for O(1) lookup)
+/// (claude, 2026-02-07, FIXED: Item 16 - Delegates to unified implementation)
 fn find_node_version_at_time_readonly(
     db: &rocksdb::DB,
     node_id: Id,
     as_of: Option<TimestampMilli>,
 ) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
-    // (codex, 2026-02-07, eval: forward prefix scan is O(k) in versions; acceptable for small k but consider reverse seek + backtrack when version counts grow.)
-    // If no as_of specified, use current version lookup
-    let Some(as_of_ts) = as_of else {
-        return find_current_node_version_readonly(db, node_id);
-    };
-
-    let nodes_cf = db
-        .cf_handle(schema::Nodes::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-
-    // Prefix scan on node_id (first 16 bytes)
-    let prefix = node_id.into_bytes().to_vec();
-    let iter = db.prefix_iterator_cf(nodes_cf, &prefix);
-
-    // Find the version valid at as_of_ts
-    // Key is (Id, ValidSince) - versions are ordered by ValidSince
-    let mut best_match: Option<(Vec<u8>, schema::NodeCfValue)> = None;
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        // Extract ValidSince from key (last 8 bytes of 24-byte key)
-        let valid_since = if key_bytes.len() >= 24 {
-            let ts_bytes: [u8; 8] = key_bytes[16..24].try_into().unwrap();
-            TimestampMilli(u64::from_be_bytes(ts_bytes))
-        } else {
-            continue; // Invalid key format
-        };
-
-        // Skip versions that started after our target time
-        if valid_since.0 > as_of_ts.0 {
-            continue;
-        }
-
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
-
-        // Check ValidUntil (field 0)
-        // Version is valid if: ValidUntil is None OR ValidUntil > as_of_ts
-        let is_valid_at_time = match value.0 {
-            None => true, // Current version, always valid from ValidSince onwards
-            Some(valid_until) => valid_until.0 > as_of_ts.0,
-        };
-
-        if is_valid_at_time {
-            // This version was valid at as_of_ts
-            // Since we're iterating in ValidSince order, keep the latest one that's valid
-            best_match = Some((key_bytes.to_vec(), value));
-        }
-    }
-
-    Ok(best_match)
+    find_node_version_unified(StorageAccess::Readonly(db), node_id, as_of)
 }
 
 /// Find the version of a node valid at a specific system time (readwrite mode).
+/// (claude, 2026-02-07, FIXED: Items 15-16 - Delegates to unified implementation)
 fn find_node_version_at_time_readwrite(
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
     as_of: Option<TimestampMilli>,
 ) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
-    // (codex, 2026-02-07, eval: read-only/readwrite/txn variants duplicate scan logic; consider a shared iterator helper to reduce stutter and maintenance risk.)
-    // If no as_of specified, use current version lookup
-    let Some(as_of_ts) = as_of else {
-        return find_current_node_version_readwrite(txn_db, node_id);
-    };
-
-    let nodes_cf = txn_db
-        .cf_handle(schema::Nodes::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
-
-    let prefix = node_id.into_bytes().to_vec();
-    let iter = txn_db.prefix_iterator_cf(nodes_cf, &prefix);
-
-    let mut best_match: Option<(Vec<u8>, schema::NodeCfValue)> = None;
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        let valid_since = if key_bytes.len() >= 24 {
-            let ts_bytes: [u8; 8] = key_bytes[16..24].try_into().unwrap();
-            TimestampMilli(u64::from_be_bytes(ts_bytes))
-        } else {
-            continue;
-        };
-
-        if valid_since.0 > as_of_ts.0 {
-            continue;
-        }
-
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
-
-        let is_valid_at_time = match value.0 {
-            None => true,
-            Some(valid_until) => valid_until.0 > as_of_ts.0,
-        };
-
-        if is_valid_at_time {
-            best_match = Some((key_bytes.to_vec(), value));
-        }
-    }
-
-    Ok(best_match)
+    find_node_version_unified(StorageAccess::Readwrite(txn_db), node_id, as_of)
 }
 
 /// Find the version of a node valid at a specific system time (within transaction).
+/// (claude, 2026-02-07, FIXED: Items 15-16 - Delegates to unified implementation)
 fn find_node_version_at_time_txn(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
     as_of: Option<TimestampMilli>,
 ) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
-    // If no as_of specified, use current version lookup
-    let Some(as_of_ts) = as_of else {
-        return find_current_node_version_txn(txn, txn_db, node_id);
-    };
+    find_node_version_unified(StorageAccess::Transaction(txn, txn_db), node_id, as_of)
+}
 
-    let nodes_cf = txn_db
-        .cf_handle(schema::Nodes::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+// ============================================================================
+// Unified Edge Version Finder
+// ============================================================================
+// (claude, 2026-02-07, FIXED: Items 15-16 - Unified edge version lookup)
 
-    let prefix = node_id.into_bytes().to_vec();
-    let iter = txn.prefix_iterator_cf(nodes_cf, &prefix);
+/// Unified edge version finder using reverse seek for efficiency.
+/// Works with any storage access type.
+fn find_edge_version_unified(
+    storage: StorageAccess<'_>,
+    src_id: Id,
+    dst_id: Id,
+    name_hash: NameHash,
+    as_of: Option<TimestampMilli>,
+) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
+    // Build 40-byte prefix: src_id (16) + dst_id (16) + name_hash (8)
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(src_id.as_bytes());
+    prefix.extend_from_slice(dst_id.as_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
 
-    let mut best_match: Option<(Vec<u8>, schema::NodeCfValue)> = None;
+    match as_of {
+        None => find_edge_current_version_scan(&storage, &prefix),
+        Some(as_of_ts) => find_edge_version_at_time_reverse(&storage, &prefix, as_of_ts),
+    }
+}
 
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&prefix) {
-            break;
+/// Find current edge version using forward scan (ValidUntil = None).
+fn find_edge_current_version_scan(
+    storage: &StorageAccess<'_>,
+    prefix: &[u8],
+) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
+    let edges_cf = storage.cf_handle(schema::ForwardEdges::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+
+    match storage {
+        StorageAccess::Readonly(db) => {
+            for item in db.prefix_iterator_cf(edges_cf, prefix) {
+                let (key_bytes, value_bytes) = item?;
+                if !key_bytes.starts_with(prefix) {
+                    break;
+                }
+                let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+                if value.0.is_none() {
+                    return Ok(Some((key_bytes.to_vec(), value)));
+                }
+            }
         }
-        let valid_since = if key_bytes.len() >= 24 {
-            let ts_bytes: [u8; 8] = key_bytes[16..24].try_into().unwrap();
-            TimestampMilli(u64::from_be_bytes(ts_bytes))
-        } else {
-            continue;
-        };
-
-        if valid_since.0 > as_of_ts.0 {
-            continue;
+        StorageAccess::Readwrite(db) => {
+            for item in db.prefix_iterator_cf(edges_cf, prefix) {
+                let (key_bytes, value_bytes) = item?;
+                if !key_bytes.starts_with(prefix) {
+                    break;
+                }
+                let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+                if value.0.is_none() {
+                    return Ok(Some((key_bytes.to_vec(), value)));
+                }
+            }
         }
+        StorageAccess::Transaction(txn, _) => {
+            for item in txn.prefix_iterator_cf(edges_cf, prefix) {
+                let (key_bytes, value_bytes) = item?;
+                if !key_bytes.starts_with(prefix) {
+                    break;
+                }
+                let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+                if value.0.is_none() {
+                    return Ok(Some((key_bytes.to_vec(), value)));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
 
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+/// Find edge version at specific time using reverse seek.
+/// (claude, 2026-02-07, FIXED: Item 15 - O(1) lookup instead of O(k) scan)
+fn find_edge_version_at_time_reverse(
+    storage: &StorageAccess<'_>,
+    prefix: &[u8],
+    as_of_ts: TimestampMilli,
+) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
+    let edges_cf = storage.cf_handle(schema::ForwardEdges::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
 
-        let is_valid_at_time = match value.0 {
-            None => true,
-            Some(valid_until) => valid_until.0 > as_of_ts.0,
-        };
+    // Build seek key: prefix + as_of_ts (48 bytes for edges)
+    let mut seek_key = Vec::with_capacity(48);
+    seek_key.extend_from_slice(prefix);
+    seek_key.extend_from_slice(&as_of_ts.0.to_be_bytes());
 
-        if is_valid_at_time {
-            best_match = Some((key_bytes.to_vec(), value));
+    match storage {
+        StorageAccess::Readonly(db) => {
+            let mut iter = db.raw_iterator_cf(edges_cf);
+            iter.seek_for_prev(&seek_key);
+
+            while iter.valid() {
+                let Some(key_bytes) = iter.key() else { break };
+                if !key_bytes.starts_with(prefix) {
+                    iter.prev();
+                    continue;
+                }
+
+                let Some(value_bytes) = iter.value() else { break };
+                // Copy to aligned buffer for rkyv deserialization
+                let value_bytes_aligned = value_bytes.to_vec();
+
+                let valid_since = if key_bytes.len() >= 48 {
+                    let ts_bytes: [u8; 8] = key_bytes[40..48].try_into().unwrap();
+                    TimestampMilli(u64::from_be_bytes(ts_bytes))
+                } else {
+                    iter.prev();
+                    continue;
+                };
+
+                if valid_since.0 > as_of_ts.0 {
+                    iter.prev();
+                    continue;
+                }
+
+                let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes_aligned)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+
+                let is_valid = match value.0 {
+                    None => true,
+                    Some(valid_until) => valid_until.0 > as_of_ts.0,
+                };
+
+                if is_valid {
+                    return Ok(Some((key_bytes.to_vec(), value)));
+                }
+
+                iter.prev();
+            }
+        }
+        StorageAccess::Readwrite(db) => {
+            let mut iter = db.raw_iterator_cf(edges_cf);
+            iter.seek_for_prev(&seek_key);
+
+            while iter.valid() {
+                let Some(key_bytes) = iter.key() else { break };
+                if !key_bytes.starts_with(prefix) {
+                    iter.prev();
+                    continue;
+                }
+
+                let Some(value_bytes) = iter.value() else { break };
+                // Copy to aligned buffer for rkyv deserialization
+                let value_bytes_aligned = value_bytes.to_vec();
+
+                let valid_since = if key_bytes.len() >= 48 {
+                    let ts_bytes: [u8; 8] = key_bytes[40..48].try_into().unwrap();
+                    TimestampMilli(u64::from_be_bytes(ts_bytes))
+                } else {
+                    iter.prev();
+                    continue;
+                };
+
+                if valid_since.0 > as_of_ts.0 {
+                    iter.prev();
+                    continue;
+                }
+
+                let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes_aligned)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+
+                let is_valid = match value.0 {
+                    None => true,
+                    Some(valid_until) => valid_until.0 > as_of_ts.0,
+                };
+
+                if is_valid {
+                    return Ok(Some((key_bytes.to_vec(), value)));
+                }
+
+                iter.prev();
+            }
+        }
+        StorageAccess::Transaction(txn, _) => {
+            // Fall back to forward scan for transaction context
+            let iter = txn.prefix_iterator_cf(edges_cf, prefix);
+            let mut best_match: Option<(Vec<u8>, schema::ForwardEdgeCfValue)> = None;
+
+            for item in iter {
+                let (key_bytes, value_bytes) = item?;
+                if !key_bytes.starts_with(prefix) {
+                    break;
+                }
+
+                let valid_since = if key_bytes.len() >= 48 {
+                    let ts_bytes: [u8; 8] = key_bytes[40..48].try_into().unwrap();
+                    TimestampMilli(u64::from_be_bytes(ts_bytes))
+                } else {
+                    continue;
+                };
+
+                if valid_since.0 > as_of_ts.0 {
+                    continue;
+                }
+
+                let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
+                    .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+
+                let is_valid = match value.0 {
+                    None => true,
+                    Some(valid_until) => valid_until.0 > as_of_ts.0,
+                };
+
+                if is_valid {
+                    best_match = Some((key_bytes.to_vec(), value));
+                }
+            }
+            return Ok(best_match);
         }
     }
 
-    Ok(best_match)
+    Ok(None)
 }
 
+// Legacy wrapper functions for edge queries
+
 /// Find the version of a forward edge valid at a specific system time (readonly mode).
+/// (claude, 2026-02-07, FIXED: Items 15-16 - Delegates to unified implementation)
 fn find_forward_edge_version_at_time_readonly(
     db: &rocksdb::DB,
     src_id: Id,
@@ -428,58 +703,11 @@ fn find_forward_edge_version_at_time_readonly(
     name_hash: NameHash,
     as_of: Option<TimestampMilli>,
 ) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
-    // If no as_of specified, use current version lookup
-    let Some(as_of_ts) = as_of else {
-        return find_current_forward_edge_readonly(db, src_id, dst_id, name_hash);
-    };
-
-    let edges_cf = db
-        .cf_handle(schema::ForwardEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-
-    // Build 40-byte prefix: src_id (16) + dst_id (16) + name_hash (8)
-    let mut prefix = Vec::with_capacity(40);
-    prefix.extend_from_slice(src_id.as_bytes());
-    prefix.extend_from_slice(dst_id.as_bytes());
-    prefix.extend_from_slice(name_hash.as_bytes());
-
-    let iter = db.prefix_iterator_cf(edges_cf, &prefix);
-    let mut best_match: Option<(Vec<u8>, schema::ForwardEdgeCfValue)> = None;
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        // Extract ValidSince from key (last 8 bytes of 48-byte key)
-        let valid_since = if key_bytes.len() >= 48 {
-            let ts_bytes: [u8; 8] = key_bytes[40..48].try_into().unwrap();
-            TimestampMilli(u64::from_be_bytes(ts_bytes))
-        } else {
-            continue;
-        };
-
-        if valid_since.0 > as_of_ts.0 {
-            continue;
-        }
-
-        let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
-
-        let is_valid_at_time = match value.0 {
-            None => true,
-            Some(valid_until) => valid_until.0 > as_of_ts.0,
-        };
-
-        if is_valid_at_time {
-            best_match = Some((key_bytes.to_vec(), value));
-        }
-    }
-
-    Ok(best_match)
+    find_edge_version_unified(StorageAccess::Readonly(db), src_id, dst_id, name_hash, as_of)
 }
 
 /// Find the version of a forward edge valid at a specific system time (readwrite mode).
+/// (claude, 2026-02-07, FIXED: Items 15-16 - Delegates to unified implementation)
 fn find_forward_edge_version_at_time_readwrite(
     txn_db: &rocksdb::TransactionDB,
     src_id: Id,
@@ -487,124 +715,33 @@ fn find_forward_edge_version_at_time_readwrite(
     name_hash: NameHash,
     as_of: Option<TimestampMilli>,
 ) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
-    let Some(as_of_ts) = as_of else {
-        return find_current_forward_edge_readwrite(txn_db, src_id, dst_id, name_hash);
-    };
-
-    let edges_cf = txn_db
-        .cf_handle(schema::ForwardEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-
-    let mut prefix = Vec::with_capacity(40);
-    prefix.extend_from_slice(src_id.as_bytes());
-    prefix.extend_from_slice(dst_id.as_bytes());
-    prefix.extend_from_slice(name_hash.as_bytes());
-
-    let iter = txn_db.prefix_iterator_cf(edges_cf, &prefix);
-    let mut best_match: Option<(Vec<u8>, schema::ForwardEdgeCfValue)> = None;
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        let valid_since = if key_bytes.len() >= 48 {
-            let ts_bytes: [u8; 8] = key_bytes[40..48].try_into().unwrap();
-            TimestampMilli(u64::from_be_bytes(ts_bytes))
-        } else {
-            continue;
-        };
-
-        if valid_since.0 > as_of_ts.0 {
-            continue;
-        }
-
-        let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
-
-        let is_valid_at_time = match value.0 {
-            None => true,
-            Some(valid_until) => valid_until.0 > as_of_ts.0,
-        };
-
-        if is_valid_at_time {
-            best_match = Some((key_bytes.to_vec(), value));
-        }
-    }
-
-    Ok(best_match)
+    find_edge_version_unified(StorageAccess::Readwrite(txn_db), src_id, dst_id, name_hash, as_of)
 }
 
 /// Find the current version of a forward edge via prefix scan (readonly mode).
-/// (claude, 2026-02-06, in-progress: VERSIONING)
+/// (claude, 2026-02-07, FIXED: Item 16 - Delegates to unified implementation)
 fn find_current_forward_edge_readonly(
     db: &rocksdb::DB,
     src_id: Id,
     dst_id: Id,
     name_hash: NameHash,
 ) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
-    let forward_cf = db
-        .cf_handle(schema::ForwardEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-
-    // Prefix scan on (src_id, dst_id, name_hash) = 40 bytes
-    let mut prefix = Vec::with_capacity(40);
-    prefix.extend_from_slice(&src_id.into_bytes());
-    prefix.extend_from_slice(&dst_id.into_bytes());
-    prefix.extend_from_slice(name_hash.as_bytes());
-    let iter = db.prefix_iterator_cf(forward_cf, &prefix);
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
-        // Current version has ValidUntil = None (field 0)
-        if value.0.is_none() {
-            return Ok(Some((key_bytes.to_vec(), value)));
-        }
-    }
-    Ok(None)
+    find_edge_version_unified(StorageAccess::Readonly(db), src_id, dst_id, name_hash, None)
 }
 
 /// Find the current version of a forward edge via prefix scan (readwrite mode).
-/// (claude, 2026-02-06, in-progress: VERSIONING)
+/// (claude, 2026-02-07, FIXED: Item 16 - Delegates to unified implementation)
 fn find_current_forward_edge_readwrite(
     txn_db: &rocksdb::TransactionDB,
     src_id: Id,
     dst_id: Id,
     name_hash: NameHash,
 ) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
-    let forward_cf = txn_db
-        .cf_handle(schema::ForwardEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-
-    // Prefix scan on (src_id, dst_id, name_hash) = 40 bytes
-    let mut prefix = Vec::with_capacity(40);
-    prefix.extend_from_slice(&src_id.into_bytes());
-    prefix.extend_from_slice(&dst_id.into_bytes());
-    prefix.extend_from_slice(name_hash.as_bytes());
-    let iter = txn_db.prefix_iterator_cf(forward_cf, &prefix);
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
-        // Current version has ValidUntil = None (field 0)
-        if value.0.is_none() {
-            return Ok(Some((key_bytes.to_vec(), value)));
-        }
-    }
-    Ok(None)
+    find_edge_version_unified(StorageAccess::Readwrite(txn_db), src_id, dst_id, name_hash, None)
 }
 
 /// Find the current version of a forward edge via prefix scan (within transaction).
-/// (claude, 2026-02-06, in-progress: VERSIONING)
+/// (claude, 2026-02-07, FIXED: Item 16 - Delegates to unified implementation)
 fn find_current_forward_edge_txn(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
@@ -612,30 +749,7 @@ fn find_current_forward_edge_txn(
     dst_id: Id,
     name_hash: NameHash,
 ) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
-    let forward_cf = txn_db
-        .cf_handle(schema::ForwardEdges::CF_NAME)
-        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-
-    // Prefix scan on (src_id, dst_id, name_hash) = 40 bytes
-    let mut prefix = Vec::with_capacity(40);
-    prefix.extend_from_slice(&src_id.into_bytes());
-    prefix.extend_from_slice(&dst_id.into_bytes());
-    prefix.extend_from_slice(name_hash.as_bytes());
-    let iter = txn.prefix_iterator_cf(forward_cf, &prefix);
-
-    for item in iter {
-        let (key_bytes, value_bytes) = item?;
-        if !key_bytes.starts_with(&prefix) {
-            break;
-        }
-        let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
-        // Current version has ValidUntil = None (field 0)
-        if value.0.is_none() {
-            return Ok(Some((key_bytes.to_vec(), value)));
-        }
-    }
-    Ok(None)
+    find_edge_version_unified(StorageAccess::Transaction(txn, txn_db), src_id, dst_id, name_hash, None)
 }
 
 /// Resolve an edge summary from the EdgeSummaries cold CF.

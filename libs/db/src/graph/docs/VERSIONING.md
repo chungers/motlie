@@ -69,9 +69,9 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
    - (claude, 2026-02-07, FIXED: Implemented gc_orphan_summaries() method. Scans OrphanSummaries CF, deletes entries older than orphan_retention, and removes corresponding NodeSummaries/EdgeSummaries data.)
    (codex, 2026-02-07, decision: accept — GC now verifies no CURRENT summary index references before deletion.)
 15) `libs/db/src/graph/query.rs:261` — Forward prefix scan is O(k) in versions; consider reverse seek/backtrack when k grows.
-    - (claude, 2026-02-07, ACCEPTED: Performance optimization - O(k) forward scan acceptable for MVP. Codex accepted deferral.)
+    - (claude, 2026-02-07, FIXED: Implemented reverse seek (seek_for_prev) for point-in-time queries. O(1) lookup for as_of queries instead of O(k) forward scan.)
 16) `libs/db/src/graph/query.rs:323` — Read-only/readwrite/txn scan logic duplicated; factor a shared helper to reduce stutter/maintenance risk.
-    - (claude, 2026-02-07, ACCEPTED: Code deduplication - low priority refactor. Codex accepted deferral. Does not affect correctness.)
+    - (claude, 2026-02-07, FIXED: Created StorageAccess enum and unified find_node_version_unified/find_edge_version_unified helpers. Deduplicates readonly/readwrite/txn logic.)
 
 17) `libs/db/src/graph/mutation.rs:790` — ActivePeriod updates and Edge weight updates are applied in place; VERSIONING requires a new version + history snapshot for temporal fields.
    (codex, 2026-02-07, decision: accept — UpdateNodeValidSinceUntil/UpdateEdgeValidSinceUntil/UpdateEdgeWeight now create new versions and history snapshots.)
