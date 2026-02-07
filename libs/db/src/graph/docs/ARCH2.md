@@ -61,10 +61,11 @@ public entry point, which makes it harder to:
 
 ---
 
-## Recent Implementation Changes (as of 2026-02-03)
+## Recent Implementation Changes (as of 2026-02-07)
 
 - **Subsystem-managed lifecycle**: `Subsystem::start(...)` now wires Writer/Reader, spawns consumers, optionally starts GC, and manages shutdown ordering (flush → join consumers → stop GC). `graph/subsystem.rs`
-- **GC and RefCount**: GC is integrated for stale index cleanup; summaries are content-addressed with RefCount deleted inline by mutations, removing orphan summary scans. `graph/gc.rs`, `graph/mutation.rs`, `graph/schema.rs`
+- **GC and RefCount (current + versioning changes)**: GC is integrated for stale index cleanup; VERSIONING adds OrphanSummaries CF + OrphanSummaryGc to defer deletion when RefCount→0 (retention window for rollback). This replaces inline deletion with an orphan index scan. `graph/gc.rs`, `graph/subsystem.rs`, `graph/schema.rs`
+- **VERSIONING design underway**: VERSIONING introduces ValidSince/ValidUntil, VersionHistory CFs, bitemporal semantics (system time + business ActivePeriod), and orphan-index-based GC for rollback. This increases the amount of core sync logic that should live behind an internal Processor. `graph/docs/VERSIONING.md`
 - **Public APIs unchanged**: Writer/Reader are still the public async channel APIs; `Graph` remains the processor used by consumers.
 
 These changes improve robustness and lifecycle management but **do not yet introduce** an internal `graph::processor::Processor` or hide `Graph` behind the public APIs.
@@ -80,6 +81,7 @@ Responsibilities:
 - Owns `Arc<Storage>`
 - Owns shared caches (e.g., name cache, future graph caches)
 - Exposes synchronous methods for core graph operations
+- Encapsulates VERSIONING semantics (ValidSince/ValidUntil, VersionHistory writes, reverse-edge denormalization, summary index maintenance, RefCount + orphan index writes, and GC hooks)
 
 ### 2) Update graph mutation path
 
@@ -87,6 +89,7 @@ Responsibilities:
 - Add helper functions mirroring vector:
   - `spawn_mutation_consumer_with_storage(...)`
   - `spawn_mutation_consumer_with_processor(...)` (pub(crate))
+- Ensure mutation helpers cover VERSIONING workflows (content update, topology change, rollback, orphan index updates) without exposing sync internals
 
 ### 3) Update graph query path
 
@@ -94,12 +97,14 @@ Responsibilities:
 - Provide reader construction helpers:
   - `create_reader_with_storage(...)`
   - `spawn_query_consumers_with_storage(...)`
+- Centralize time-travel query logic inside Processor (current vs as_of filtering, reverse scans, version lookup)
 
 ### 4) Keep `Graph` as facade (optional)
 
 - `Graph` can wrap an `Arc<Processor>` or `Arc<Storage>`
 - Public API can remain stable while internal implementation migrates
 - **Desired outcome:** the refactor should make it possible to remove `Graph` entirely over time, leaving `Processor` + public async `Writer`/`Reader` as the primary entry points
+- VERSIONING increases the value of this separation by keeping complex temporal + GC logic off the async boundary
 
 ---
 

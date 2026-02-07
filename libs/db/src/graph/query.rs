@@ -258,6 +258,7 @@ fn find_node_version_at_time_readonly(
     node_id: Id,
     as_of: Option<TimestampMilli>,
 ) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    // (codex, 2026-02-07, eval: forward prefix scan is O(k) in versions; acceptable for small k but consider reverse seek + backtrack when version counts grow.)
     // If no as_of specified, use current version lookup
     let Some(as_of_ts) = as_of else {
         return find_current_node_version_readonly(db, node_id);
@@ -319,6 +320,7 @@ fn find_node_version_at_time_readwrite(
     node_id: Id,
     as_of: Option<TimestampMilli>,
 ) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    // (codex, 2026-02-07, eval: read-only/readwrite/txn variants duplicate scan logic; consider a shared iterator helper to reduce stutter and maintenance risk.)
     // If no as_of specified, use current version lookup
     let Some(as_of_ts) = as_of else {
         return find_current_node_version_readwrite(txn_db, node_id);
