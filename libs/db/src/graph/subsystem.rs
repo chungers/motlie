@@ -238,6 +238,7 @@ impl Subsystem {
         // Start garbage collector if configured
         if let Some(config) = gc_config {
             let gc = Arc::new(GraphGarbageCollector::new(storage, config));
+            // (codex, 2026-02-07, eval: this still uses the Arc + spawn_worker tokio path; ARCH2 Phase 1 requires GraphGarbageCollector::start() with std::thread and owned handle.)
             let _handle = gc.clone().spawn_worker();
             *self.gc.write().expect("gc lock poisoned") = Some(gc);
         }

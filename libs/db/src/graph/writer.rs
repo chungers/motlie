@@ -326,6 +326,7 @@ impl Writer {
 
     /// Check if transactions are supported by this writer.
     pub fn supports_transactions(&self) -> bool {
+        // (codex, 2026-02-07, eval: this reports false for Writer::with_processor() because storage is None; should consult processor.storage() when present.)
         self.storage
             .as_ref()
             .map(|s| s.is_transactional())
