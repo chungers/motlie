@@ -74,12 +74,12 @@ impl QueryExecutor for Nodes {
 | **Mutation Consumers** | |
 | `spawn_mutation_consumer(receiver, config, path)` | Single mutation consumer |
 | `spawn_mutation_consumer_with_next(receiver, config, path, next_tx)` | Mutation consumer that chains to next |
-| `spawn_mutation_consumer_with_graph(receiver, config, graph)` | Mutation consumer with existing Graph |
+| `spawn_mutation_consumer_with_receiver(receiver, config, processor)` | Mutation consumer with existing Processor |
 | **Query Consumers** | |
-| `spawn_query_consumer(receiver, config, path)` | Single query consumer with new Graph |
-| `spawn_query_consumer_with_graph(receiver, config, graph)` | Query consumer with existing Graph |
-| `spawn_query_consumer_pool_shared(receiver, graph, n)` | Pool sharing one Arc\<Graph\> |
-| `spawn_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual readonly Graphs |
+| `spawn_query_consumer(receiver, config, path)` | Single query consumer with new Processor |
+| `spawn_query_consumer_with_processor(receiver, config, processor)` | Query consumer with existing Processor |
+| `spawn_query_consumer_pool_shared(receiver, processor, n)` | Pool sharing one Arc\<Processor\> |
+| `spawn_query_consumer_pool_readonly(receiver, config, path, n)` | Pool with individual readonly Processors |
 
 ### Fulltext Module
 
@@ -102,7 +102,7 @@ impl QueryExecutor for Nodes {
 ```rust
 use motlie_db::graph::{
     create_query_reader, spawn_query_consumer_pool_shared,
-    Graph, Storage, WriterConfig, ReaderConfig,
+    Processor, Storage, WriterConfig, ReaderConfig,
 };
 use motlie_db::fulltext::{
     create_query_reader as create_fulltext_query_reader,
