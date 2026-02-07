@@ -49,14 +49,85 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+use super::name_hash::NameHash;
 use super::schema::{
     GraphMeta, GraphMetaCfKey, GraphMetaCfValue, GraphMetaField,
     NodeSummaryIndex, EdgeSummaryIndex,
-    Nodes, NodeCfKey, NodeCfValue,
-    ForwardEdges, ForwardEdgeCfKey, ForwardEdgeCfValue,
+    Nodes, NodeCfValue,
+    ForwardEdges,
     Version,
 };
 use super::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord, Storage};
+use crate::Id;
+
+// ============================================================================
+// VERSIONING Helpers for GC
+// ============================================================================
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan helper for GC)
+
+/// Find the current version of a node via prefix scan (within transaction).
+/// Returns the current version number and deleted flag.
+fn find_current_node_version_for_gc(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    nodes_cf: &impl rocksdb::AsColumnFamilyRef,
+    node_id: Id,
+) -> Result<Option<(Version, bool)>> {
+    // Prefix scan on node_id (first 16 bytes)
+    let prefix = node_id.into_bytes().to_vec();
+    let iter = txn.prefix_iterator_cf(nodes_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        // Stop if we've gone past our prefix
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: NodeCfValue = Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+        // Current version has ValidUntil = None (field 0)
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+        if value.0.is_none() {
+            return Ok(Some((value.4, value.5)));
+        }
+    }
+    Ok(None)
+}
+
+/// Find the current version of an edge via prefix scan (within transaction).
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan helper for GC)
+/// Returns the current version number and deleted flag.
+fn find_current_edge_version_for_gc(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    edges_cf: &impl rocksdb::AsColumnFamilyRef,
+    src_id: Id,
+    dst_id: Id,
+    name_hash: NameHash,
+) -> Result<Option<(Version, bool)>> {
+    use super::schema::{ForwardEdgeCfValue, ForwardEdges};
+
+    // Prefix scan on (src_id, dst_id, name_hash) = 40 bytes
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(&src_id.into_bytes());
+    prefix.extend_from_slice(&dst_id.into_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
+    let iter = txn.prefix_iterator_cf(edges_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        // Stop if we've gone past our prefix
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+        // Current version has ValidUntil = None (field 0)
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+        if value.0.is_none() {
+            return Ok(Some((value.4, value.5)));
+        }
+    }
+    Ok(None)
+}
 
 // ============================================================================
 // Configuration
@@ -339,15 +410,9 @@ impl GraphGarbageCollector {
             let node_id = index_key.1;
             let version = index_key.2;
 
-            // Look up current node version
-            let node_key = NodeCfKey(node_id);
-            let node_key_bytes = Nodes::key_to_bytes(&node_key);
-
-            match txn.get_cf(nodes_cf, &node_key_bytes)? {
-                Some(node_bytes) => {
-                    let node: NodeCfValue = Nodes::value_from_bytes(&node_bytes)?;
-                    let current_version = node.3;
-                    let is_deleted = node.4;
+            // Look up current node version via prefix scan (VERSIONING)
+            match find_current_node_version_for_gc(&txn, nodes_cf, node_id)? {
+                Some((current_version, is_deleted)) => {
                     let min_keep = current_version.saturating_sub(n - 1);
 
                     // Delete if version is too old OR node is tombstoned
@@ -441,15 +506,10 @@ impl GraphGarbageCollector {
             let name_hash = index_key.3;
             let version = index_key.4;
 
-            // Look up current edge version
-            let edge_key = ForwardEdgeCfKey(src_id, dst_id, name_hash);
-            let edge_key_bytes = ForwardEdges::key_to_bytes(&edge_key);
-
-            match txn.get_cf(edges_cf, &edge_key_bytes)? {
-                Some(edge_bytes) => {
-                    let edge: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&edge_bytes)?;
-                    let current_version = edge.3;
-                    let is_deleted = edge.4;
+            // Look up current edge version via prefix scan
+            // (claude, 2026-02-06, in-progress: VERSIONING uses prefix scan)
+            match find_current_edge_version_for_gc(&txn, edges_cf, src_id, dst_id, name_hash)? {
+                Some((current_version, is_deleted)) => {
                     let min_keep = current_version.saturating_sub(n - 1);
 
                     // Delete if version is too old OR edge is tombstoned

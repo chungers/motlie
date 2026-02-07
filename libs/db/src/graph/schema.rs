@@ -172,25 +172,34 @@ impl ColumnFamilySerde for Names {
 /// - Value contains `Option<SummaryHash>` instead of inline `NodeSummary`
 /// - Full summary content is stored in `NodeSummaries` CF (COLD)
 /// - Value size reduced from ~200-500 bytes to ~26 bytes
+///
+/// (claude, 2026-02-06, in-progress: VERSIONING added ValidSince to key)
 pub(crate) struct Nodes;
 
+/// Node key with ValidSince for time-travel queries.
+/// (claude, 2026-02-06, in-progress: VERSIONING updated key layout)
 #[derive(Serialize, Deserialize)]
-pub(crate) struct NodeCfKey(pub(crate) Id);
+pub(crate) struct NodeCfKey(
+    pub(crate) Id,          // 16 bytes
+    pub(crate) ValidSince,  // 8 bytes - when this version became valid
+);  // Total: 24 bytes
 
 /// Node value - optimized for graph traversal (hot path)
-/// Size: ~31 bytes (vs ~200-500 bytes with inline summary)
-/// (claude, 2026-02-02, in-progress) Added version and deleted for CONTENT-ADDRESS
+/// Size: ~39 bytes (vs ~200-500 bytes with inline summary)
+/// (claude, 2026-02-06, in-progress: VERSIONING added ValidUntil for soft-delete)
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct NodeCfValue(
-    pub(crate) Option<ActivePeriod>,
-    pub(crate) NameHash,            // Node name hash; full name in Names CF
-    pub(crate) Option<SummaryHash>, // Content hash; full summary in NodeSummaries CF
-    pub(crate) Version,             // Monotonic version for optimistic locking (starts at 1)
-    pub(crate) bool,                // Deleted flag (tombstone) for soft deletes
+    pub(crate) Option<ValidUntil>,   // System time when this version stopped being valid (None = current)
+    pub(crate) Option<ActivePeriod>, // Business validity (application time)
+    pub(crate) NameHash,             // Node name hash; full name in Names CF
+    pub(crate) Option<SummaryHash>,  // Content hash; full summary in NodeSummaries CF
+    pub(crate) Version,              // Monotonic version for optimistic locking (starts at 1)
+    pub(crate) bool,                 // Deleted flag (tombstone) for soft deletes
 );
 
 impl ActivePeriodPatchable for Nodes {
+    /// (claude, 2026-02-06, in-progress: VERSIONING ActivePeriod is now at index 1)
     fn patch_valid_range(
         &self,
         old_value: &[u8],
@@ -200,7 +209,7 @@ impl ActivePeriodPatchable for Nodes {
 
         let mut value = Nodes::value_from_bytes(old_value)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-        value.0 = Some(new_range);
+        value.1 = Some(new_range);  // ActivePeriod is now at index 1
         Nodes::value_to_bytes(&value)
             .map(|aligned_vec| aligned_vec.to_vec())
             .map_err(|e| anyhow::anyhow!("Failed to serialize value: {}", e))
@@ -213,6 +222,7 @@ pub type SrcId = Id;
 pub type DstId = Id;
 
 impl ActivePeriodPatchable for ForwardEdges {
+    /// (claude, 2026-02-06, in-progress: VERSIONING ActivePeriod is now at index 1)
     fn patch_valid_range(
         &self,
         old_value: &[u8],
@@ -222,7 +232,7 @@ impl ActivePeriodPatchable for ForwardEdges {
 
         let mut value = ForwardEdges::value_from_bytes(old_value)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-        value.0 = Some(new_range);
+        value.1 = Some(new_range);  // ActivePeriod is now at index 1
         ForwardEdges::value_to_bytes(&value)
             .map(|aligned_vec| aligned_vec.to_vec())
             .map_err(|e| anyhow::anyhow!("Failed to serialize value: {}", e))
@@ -230,6 +240,7 @@ impl ActivePeriodPatchable for ForwardEdges {
 }
 
 impl ActivePeriodPatchable for ReverseEdges {
+    /// (claude, 2026-02-06, in-progress: VERSIONING ActivePeriod is now at index 1)
     fn patch_valid_range(
         &self,
         old_value: &[u8],
@@ -239,7 +250,7 @@ impl ActivePeriodPatchable for ReverseEdges {
 
         let mut value = ReverseEdges::value_from_bytes(old_value)
             .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-        value.0 = Some(new_range);
+        value.1 = Some(new_range);  // ActivePeriod is now at index 1
         ReverseEdges::value_to_bytes(&value)
             .map(|aligned_vec| aligned_vec.to_vec())
             .map_err(|e| anyhow::anyhow!("Failed to serialize value: {}", e))
@@ -252,41 +263,57 @@ impl ActivePeriodPatchable for ReverseEdges {
 /// - Value contains `Option<SummaryHash>` instead of inline `EdgeSummary`
 /// - Full summary content is stored in `EdgeSummaries` CF (COLD)
 /// - Value size reduced from ~200-500 bytes to ~35 bytes
+///
+/// (claude, 2026-02-06, in-progress: VERSIONING added ValidSince to key)
 pub(crate) struct ForwardEdges;
 
+/// Forward edge key with ValidSince for time-travel queries.
+/// (claude, 2026-02-06, in-progress: VERSIONING updated key layout)
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ForwardEdgeCfKey(
-    pub(crate) SrcId,
-    pub(crate) DstId,
-    pub(crate) NameHash, // Edge name hash; full name in Names CF
-);
+    pub(crate) SrcId,       // 16 bytes
+    pub(crate) DstId,       // 16 bytes
+    pub(crate) NameHash,    // 8 bytes - Edge name hash; full name in Names CF
+    pub(crate) ValidSince,  // 8 bytes - when this version became valid
+);  // Total: 48 bytes
 
 /// Forward edge value - optimized for graph traversal (hot path)
-/// Size: ~40 bytes (vs ~200-500 bytes with inline summary)
-/// (claude, 2026-02-02, in-progress) Added version and deleted for CONTENT-ADDRESS
+/// Size: ~48 bytes (vs ~200-500 bytes with inline summary)
+/// (claude, 2026-02-06, in-progress: VERSIONING added ValidUntil for soft-delete)
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
 pub(crate) struct ForwardEdgeCfValue(
-    pub(crate) Option<ActivePeriod>, // Field 0: Temporal validity
-    pub(crate) Option<f64>,           // Field 1: Optional weight
-    pub(crate) Option<SummaryHash>,   // Field 2: Content hash; full summary in EdgeSummaries CF
-    pub(crate) Version,               // Field 3: Monotonic version for optimistic locking
-    pub(crate) bool,                  // Field 4: Deleted flag (tombstone)
+    pub(crate) Option<ValidUntil>,   // Field 0: System time when version stopped being valid (None = current)
+    pub(crate) Option<ActivePeriod>, // Field 1: Business validity (application time)
+    pub(crate) Option<f64>,          // Field 2: Optional weight
+    pub(crate) Option<SummaryHash>,  // Field 3: Content hash; full summary in EdgeSummaries CF
+    pub(crate) Version,              // Field 4: Monotonic version for optimistic locking
+    pub(crate) bool,                 // Field 5: Deleted flag (tombstone)
 );
 
 /// Reverse edges column family (index only).
+/// (claude, 2026-02-06, in-progress: VERSIONING added ValidSince to key)
 pub(crate) struct ReverseEdges;
+
+/// Reverse edge key with ValidSince for time-travel queries.
+/// (claude, 2026-02-06, in-progress: VERSIONING updated key layout)
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ReverseEdgeCfKey(
-    pub(crate) DstId,
-    pub(crate) SrcId,
-    pub(crate) NameHash, // Edge name stored as hash; full name in Names CF
-);
+    pub(crate) DstId,       // 16 bytes
+    pub(crate) SrcId,       // 16 bytes
+    pub(crate) NameHash,    // 8 bytes - Edge name stored as hash; full name in Names CF
+    pub(crate) ValidSince,  // 8 bytes - when this version became valid
+);  // Total: 48 bytes
+
 /// Reverse edge value - minimal for reverse lookups
-/// Size: ~17 bytes
+/// Size: ~25 bytes
+/// (claude, 2026-02-06, in-progress: VERSIONING added ValidUntil)
 #[derive(Archive, RkyvDeserialize, RkyvSerialize, Serialize, Deserialize)]
 #[archive(check_bytes)]
-pub(crate) struct ReverseEdgeCfValue(pub(crate) Option<ActivePeriod>);
+pub(crate) struct ReverseEdgeCfValue(
+    pub(crate) Option<ValidUntil>,   // Field 0: System time when version stopped being valid (None = current)
+    pub(crate) Option<ActivePeriod>, // Field 1: Business validity (application time)
+);
 
 /// Edge fragments column family.
 pub struct EdgeFragments;
@@ -312,7 +339,10 @@ impl ColumnFamily for Nodes {
 
 impl ColumnFamilyConfig<GraphBlockCacheConfig> for Nodes {
     /// Configure RocksDB options with shared block cache.
+    /// (claude, 2026-02-06, in-progress: VERSIONING 16-byte prefix for node_id)
     fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
+        use rocksdb::SliceTransform;
+
         let mut opts = rocksdb::Options::default();
         let mut block_opts = rocksdb::BlockBasedOptions::default();
 
@@ -328,15 +358,22 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for Nodes {
         }
 
         opts.set_block_based_table_factory(&block_opts);
+
+        // Key layout: [id (16)] + [valid_since (8)] = 24 bytes
+        // Use 16-byte prefix to scan all versions of a node
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+        opts.set_memtable_prefix_bloom_ratio(0.2);
+
         opts
     }
 }
 
 impl Nodes {
     /// Create key-value pair from AddNode mutation.
-    /// (claude, 2026-02-02, in-progress) Updated for CONTENT-ADDRESS: version=1, deleted=false
+    /// (claude, 2026-02-06, in-progress: VERSIONING key includes ValidSince, value includes ValidUntil)
     pub fn record_from(args: &AddNode) -> (NodeCfKey, NodeCfValue) {
-        let key = NodeCfKey(args.id);
+        // ValidSince = mutation timestamp (when this version becomes valid)
+        let key = NodeCfKey(args.id, args.ts_millis);
         let name_hash = NameHash::from_name(&args.name);
 
         // Compute summary hash if summary is non-empty
@@ -346,8 +383,15 @@ impl Nodes {
             None
         };
 
-        // New nodes start at version 1, not deleted
-        let value = NodeCfValue(args.valid_range.clone(), name_hash, summary_hash, 1, false);
+        // New nodes: ValidUntil=None (current), version=1, not deleted
+        let value = NodeCfValue(
+            None,                      // ValidUntil: None = current version
+            args.valid_range.clone(),  // ActivePeriod (business validity)
+            name_hash,
+            summary_hash,
+            1,                         // version
+            false,                     // deleted
+        );
         (key, value)
     }
 
@@ -364,17 +408,28 @@ impl HotColumnFamilyRecord for Nodes {
     type Key = NodeCfKey;
     type Value = NodeCfValue;
 
+    /// (claude, 2026-02-06, in-progress: VERSIONING 24-byte key)
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        key.0.into_bytes().to_vec()
+        // Layout: [id (16)] + [valid_since (8)] = 24 bytes
+        let mut bytes = Vec::with_capacity(24);
+        bytes.extend_from_slice(&key.0.into_bytes());
+        bytes.extend_from_slice(&key.1 .0.to_be_bytes());
+        bytes
     }
 
+    /// (claude, 2026-02-06, in-progress: VERSIONING 24-byte key)
     fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
-        if bytes.len() != 16 {
-            anyhow::bail!("Invalid NodeCfKey length: expected 16, got {}", bytes.len());
+        if bytes.len() != 24 {
+            anyhow::bail!("Invalid NodeCfKey length: expected 24, got {}", bytes.len());
         }
         let mut id_bytes = [0u8; 16];
-        id_bytes.copy_from_slice(bytes);
-        Ok(NodeCfKey(Id::from_bytes(id_bytes)))
+        id_bytes.copy_from_slice(&bytes[0..16]);
+
+        let mut valid_since_bytes = [0u8; 8];
+        valid_since_bytes.copy_from_slice(&bytes[16..24]);
+        let valid_since = TimestampMilli(u64::from_be_bytes(valid_since_bytes));
+
+        Ok(NodeCfKey(Id::from_bytes(id_bytes), valid_since))
     }
 }
 
@@ -543,6 +598,7 @@ impl ColumnFamily for ForwardEdges {
 
 impl ColumnFamilyConfig<GraphBlockCacheConfig> for ForwardEdges {
     /// Configure RocksDB options with shared block cache.
+    /// (claude, 2026-02-06, in-progress: VERSIONING key now 48 bytes)
     fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
         use rocksdb::SliceTransform;
 
@@ -562,9 +618,9 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for ForwardEdges {
 
         opts.set_block_based_table_factory(&block_opts);
 
-        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes
-        // Use 16-byte prefix to scan all edges from a source node
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+        // Key layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [valid_since (8)] = 48 bytes
+        // Use 40-byte prefix (src_id + dst_id + name_hash) to scan all versions of an edge
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(40));
         opts.set_memtable_prefix_bloom_ratio(0.2);
 
         opts
@@ -573,10 +629,11 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for ForwardEdges {
 
 impl ForwardEdges {
     /// Create key-value pair from AddEdge mutation.
-    /// (claude, 2026-02-02, in-progress) Updated for CONTENT-ADDRESS: version=1, deleted=false
+    /// (claude, 2026-02-06, in-progress: VERSIONING key includes ValidSince, value includes ValidUntil)
     pub fn record_from(args: &AddEdge) -> (ForwardEdgeCfKey, ForwardEdgeCfValue) {
         let name_hash = NameHash::from_name(&args.name);
-        let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, name_hash);
+        // ValidSince = mutation timestamp (when this version becomes valid)
+        let key = ForwardEdgeCfKey(args.source_node_id, args.target_node_id, name_hash, args.ts_millis);
 
         // Compute summary hash if summary is non-empty
         let summary_hash = if !args.summary.is_empty() {
@@ -585,8 +642,15 @@ impl ForwardEdges {
             None
         };
 
-        // New edges start at version 1, not deleted
-        let value = ForwardEdgeCfValue(args.valid_range.clone(), args.weight, summary_hash, 1, false);
+        // New edges: ValidUntil=None (current), version=1, not deleted
+        let value = ForwardEdgeCfValue(
+            None,                      // ValidUntil: None = current version
+            args.valid_range.clone(),  // ActivePeriod (business validity)
+            args.weight,
+            summary_hash,
+            1,                         // version
+            false,                     // deleted
+        );
         (key, value)
     }
 
@@ -603,20 +667,23 @@ impl HotColumnFamilyRecord for ForwardEdges {
     type Key = ForwardEdgeCfKey;
     type Value = ForwardEdgeCfValue;
 
+    /// (claude, 2026-02-06, in-progress: VERSIONING 48-byte key)
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // ForwardEdgeCfKey(SrcId, DstId, NameHash)
-        // Layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] = 40 bytes
-        let mut bytes = Vec::with_capacity(40);
+        // ForwardEdgeCfKey(SrcId, DstId, NameHash, ValidSince)
+        // Layout: [src_id (16)] + [dst_id (16)] + [name_hash (8)] + [valid_since (8)] = 48 bytes
+        let mut bytes = Vec::with_capacity(48);
         bytes.extend_from_slice(&key.0.into_bytes());
         bytes.extend_from_slice(&key.1.into_bytes());
         bytes.extend_from_slice(key.2.as_bytes());
+        bytes.extend_from_slice(&key.3 .0.to_be_bytes());
         bytes
     }
 
+    /// (claude, 2026-02-06, in-progress: VERSIONING 48-byte key)
     fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
-        if bytes.len() != 40 {
+        if bytes.len() != 48 {
             anyhow::bail!(
-                "Invalid ForwardEdgeCfKey length: expected 40, got {}",
+                "Invalid ForwardEdgeCfKey length: expected 48, got {}",
                 bytes.len()
             );
         }
@@ -630,10 +697,15 @@ impl HotColumnFamilyRecord for ForwardEdges {
         let mut name_hash_bytes = [0u8; 8];
         name_hash_bytes.copy_from_slice(&bytes[32..40]);
 
+        let mut valid_since_bytes = [0u8; 8];
+        valid_since_bytes.copy_from_slice(&bytes[40..48]);
+        let valid_since = TimestampMilli(u64::from_be_bytes(valid_since_bytes));
+
         Ok(ForwardEdgeCfKey(
             Id::from_bytes(src_id_bytes),
             Id::from_bytes(dst_id_bytes),
             NameHash::from_bytes(name_hash_bytes),
+            valid_since,
         ))
     }
 }
@@ -644,6 +716,7 @@ impl ColumnFamily for ReverseEdges {
 
 impl ColumnFamilyConfig<GraphBlockCacheConfig> for ReverseEdges {
     /// Configure RocksDB options with shared block cache.
+    /// (claude, 2026-02-06, in-progress: VERSIONING key now 48 bytes)
     fn cf_options(cache: &rocksdb::Cache, config: &GraphBlockCacheConfig) -> rocksdb::Options {
         use rocksdb::SliceTransform;
 
@@ -663,9 +736,9 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for ReverseEdges {
 
         opts.set_block_based_table_factory(&block_opts);
 
-        // Key layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes
-        // Use 16-byte prefix to scan all edges to a destination node
-        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(16));
+        // Key layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] + [valid_since (8)] = 48 bytes
+        // Use 40-byte prefix (dst_id + src_id + name_hash) to scan all versions of an edge
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(40));
         opts.set_memtable_prefix_bloom_ratio(0.2);
 
         opts
@@ -674,10 +747,16 @@ impl ColumnFamilyConfig<GraphBlockCacheConfig> for ReverseEdges {
 
 impl ReverseEdges {
     /// Create key-value pair from AddEdge mutation.
+    /// (claude, 2026-02-06, in-progress: VERSIONING key includes ValidSince, value includes ValidUntil)
     pub fn record_from(args: &AddEdge) -> (ReverseEdgeCfKey, ReverseEdgeCfValue) {
         let name_hash = NameHash::from_name(&args.name);
-        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, name_hash);
-        let value = ReverseEdgeCfValue(args.valid_range.clone());
+        // ValidSince = mutation timestamp (when this version becomes valid)
+        let key = ReverseEdgeCfKey(args.target_node_id, args.source_node_id, name_hash, args.ts_millis);
+        // New edges: ValidUntil=None (current)
+        let value = ReverseEdgeCfValue(
+            None,                      // ValidUntil: None = current version
+            args.valid_range.clone(),  // ActivePeriod (business validity)
+        );
         (key, value)
     }
 
@@ -694,20 +773,23 @@ impl HotColumnFamilyRecord for ReverseEdges {
     type Key = ReverseEdgeCfKey;
     type Value = ReverseEdgeCfValue;
 
+    /// (claude, 2026-02-06, in-progress: VERSIONING 48-byte key)
     fn key_to_bytes(key: &Self::Key) -> Vec<u8> {
-        // ReverseEdgeCfKey(DstId, SrcId, NameHash)
-        // Layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] = 40 bytes
-        let mut bytes = Vec::with_capacity(40);
+        // ReverseEdgeCfKey(DstId, SrcId, NameHash, ValidSince)
+        // Layout: [dst_id (16)] + [src_id (16)] + [name_hash (8)] + [valid_since (8)] = 48 bytes
+        let mut bytes = Vec::with_capacity(48);
         bytes.extend_from_slice(&key.0.into_bytes());
         bytes.extend_from_slice(&key.1.into_bytes());
         bytes.extend_from_slice(key.2.as_bytes());
+        bytes.extend_from_slice(&key.3 .0.to_be_bytes());
         bytes
     }
 
+    /// (claude, 2026-02-06, in-progress: VERSIONING 48-byte key)
     fn key_from_bytes(bytes: &[u8]) -> anyhow::Result<Self::Key> {
-        if bytes.len() != 40 {
+        if bytes.len() != 48 {
             anyhow::bail!(
-                "Invalid ReverseEdgeCfKey length: expected 40, got {}",
+                "Invalid ReverseEdgeCfKey length: expected 48, got {}",
                 bytes.len()
             );
         }
@@ -721,10 +803,15 @@ impl HotColumnFamilyRecord for ReverseEdges {
         let mut name_hash_bytes = [0u8; 8];
         name_hash_bytes.copy_from_slice(&bytes[32..40]);
 
+        let mut valid_since_bytes = [0u8; 8];
+        valid_since_bytes.copy_from_slice(&bytes[40..48]);
+        let valid_since = TimestampMilli(u64::from_be_bytes(valid_since_bytes));
+
         Ok(ReverseEdgeCfKey(
             Id::from_bytes(dst_id_bytes),
             Id::from_bytes(src_id_bytes),
             NameHash::from_bytes(name_hash_bytes),
+            valid_since,
         ))
     }
 }
@@ -737,20 +824,19 @@ impl HotColumnFamilyRecord for ReverseEdges {
 ///
 /// Stores node summary content keyed by content hash (SummaryHash).
 /// Content-addressable: identical summaries stored once, referenced by hash.
-/// RefCount enables safe GC when all references are removed.
 ///
+/// (claude, 2026-02-06, in-progress: VERSIONING replaced RefCount with OrphanSummaries CF)
 /// Key: SummaryHash (8 bytes, content-addressable)
-/// Value: (RefCount, NodeSummary) - refcount + content
+/// Value: NodeSummary - the summary content
 pub(crate) struct NodeSummaries;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct NodeSummaryCfKey(pub(crate) SummaryHash);
 
-/// Value stores refcount + summary to enable safe GC of shared content.
-/// Field 0: RefCount - number of entities referencing this summary
-/// Field 1: NodeSummary - the actual summary content
+/// Value stores just the summary content.
+/// (claude, 2026-02-06, in-progress: VERSIONING removed RefCount - use OrphanSummaries for GC)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct NodeSummaryCfValue(pub(crate) RefCount, pub(crate) NodeSummary);
+pub(crate) struct NodeSummaryCfValue(pub(crate) NodeSummary);
 
 impl ColumnFamily for NodeSummaries {
     const CF_NAME: &'static str = "graph/node_summaries";
@@ -808,20 +894,19 @@ impl ColumnFamilySerde for NodeSummaries {
 ///
 /// Stores edge summary content keyed by content hash (SummaryHash).
 /// Content-addressable: identical summaries stored once, referenced by hash.
-/// RefCount enables safe GC when all references are removed.
 ///
+/// (claude, 2026-02-06, in-progress: VERSIONING replaced RefCount with OrphanSummaries CF)
 /// Key: SummaryHash (8 bytes, content-addressable)
-/// Value: (RefCount, EdgeSummary) - refcount + content
+/// Value: EdgeSummary - the summary content
 pub(crate) struct EdgeSummaries;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct EdgeSummaryCfKey(pub(crate) SummaryHash);
 
-/// Value stores refcount + summary to enable safe GC of shared content.
-/// Field 0: RefCount - number of entities referencing this summary
-/// Field 1: EdgeSummary - the actual summary content
+/// Value stores just the summary content.
+/// (claude, 2026-02-06, in-progress: VERSIONING removed RefCount - use OrphanSummaries for GC)
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct EdgeSummaryCfValue(pub(crate) RefCount, pub(crate) EdgeSummary);
+pub(crate) struct EdgeSummaryCfValue(pub(crate) EdgeSummary);
 
 impl ColumnFamily for EdgeSummaries {
     const CF_NAME: &'static str = "graph/edge_summaries";

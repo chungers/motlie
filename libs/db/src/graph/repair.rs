@@ -283,17 +283,25 @@ impl GraphRepairer {
             last_key = Some(key_bytes.to_vec());
             checked += 1;
 
-            // Parse forward edge key
+            // Parse forward edge key and value
+            // (claude, 2026-02-06, in-progress: VERSIONING field indices updated)
             let fwd_key: ForwardEdgeCfKey = ForwardEdges::key_from_bytes(&key_bytes)?;
             let fwd_value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&value_bytes)?;
 
+            // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+            // Skip non-current versions
+            if fwd_value.0.is_some() {
+                continue;
+            }
             // Skip deleted edges
-            if fwd_value.4 {
+            if fwd_value.5 {
                 continue;
             }
 
-            // Construct corresponding reverse key
-            let rev_key = ReverseEdgeCfKey(fwd_key.1, fwd_key.0, fwd_key.2);
+            // Construct corresponding reverse key (with same ValidSince)
+            // ForwardEdgeCfKey: (SrcId, DstId, NameHash, ValidSince)
+            // ReverseEdgeCfKey: (DstId, SrcId, NameHash, ValidSince)
+            let rev_key = ReverseEdgeCfKey(fwd_key.1, fwd_key.0, fwd_key.2, fwd_key.3);
             let rev_key_bytes = ReverseEdges::key_to_bytes(&rev_key);
 
             // Check if reverse entry exists
@@ -302,7 +310,8 @@ impl GraphRepairer {
 
                 if self.config.auto_fix {
                     // Create missing reverse entry
-                    let rev_value = ReverseEdgeCfValue(fwd_value.0.clone());
+                    // ReverseEdgeCfValue: (ValidUntil, ActivePeriod)
+                    let rev_value = ReverseEdgeCfValue(fwd_value.0.clone(), fwd_value.1.clone());
                     let rev_value_bytes = ReverseEdges::value_to_bytes(&rev_value)?;
                     txn.put_cf(reverse_cf, rev_key_bytes, rev_value_bytes)?;
                     fixed += 1;
@@ -375,18 +384,22 @@ impl GraphRepairer {
             checked += 1;
 
             // Parse reverse edge key
+            // (claude, 2026-02-06, in-progress: VERSIONING field indices updated)
             let rev_key: ReverseEdgeCfKey = ReverseEdges::key_from_bytes(&key_bytes)?;
 
-            // Construct corresponding forward key
-            let fwd_key = ForwardEdgeCfKey(rev_key.1, rev_key.0, rev_key.2);
+            // Construct corresponding forward key (with same ValidSince)
+            // ReverseEdgeCfKey: (DstId, SrcId, NameHash, ValidSince)
+            // ForwardEdgeCfKey: (SrcId, DstId, NameHash, ValidSince)
+            let fwd_key = ForwardEdgeCfKey(rev_key.1, rev_key.0, rev_key.2, rev_key.3);
             let fwd_key_bytes = ForwardEdges::key_to_bytes(&fwd_key);
 
             // Check if forward entry exists
             match txn.get_cf(forward_cf, &fwd_key_bytes)? {
                 Some(fwd_value_bytes) => {
                     // Forward exists - check if it's deleted
+                    // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
                     let fwd_value: ForwardEdgeCfValue = ForwardEdges::value_from_bytes(&fwd_value_bytes)?;
-                    if fwd_value.4 {
+                    if fwd_value.5 {
                         // Forward edge is tombstoned, reverse is orphan
                         orphans += 1;
 

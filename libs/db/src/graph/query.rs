@@ -140,10 +140,500 @@ fn resolve_node_summary(
     match value_bytes {
         Some(bytes) => {
             let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.1) // .1 is the summary, .0 is the refcount
+            Ok(value.0) // .0 is the summary (no refcount in VERSIONING)
         }
         None => Ok(NodeSummary::from_text("")),
     }
+}
+
+// ============================================================================
+// VERSIONING Helpers for Current Version Lookup
+// ============================================================================
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan helpers)
+
+/// Find the current version of a node via prefix scan (readonly mode).
+///
+/// With VERSIONING, NodeCfKey is (Id, ValidSince). To find the current version,
+/// we prefix scan on node_id and find the entry with ValidUntil = None.
+///
+/// Returns (full_key_bytes, value) for the current version.
+fn find_current_node_version_readonly(
+    db: &rocksdb::DB,
+    node_id: Id,
+) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    let nodes_cf = db
+        .cf_handle(schema::Nodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+
+    // Prefix scan on node_id (first 16 bytes)
+    let prefix = node_id.into_bytes().to_vec();
+    let iter = db.prefix_iterator_cf(nodes_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        // Stop if we've gone past our prefix
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+        // Current version has ValidUntil = None (field 0)
+        if value.0.is_none() {
+            return Ok(Some((key_bytes.to_vec(), value)));
+        }
+    }
+    Ok(None)
+}
+
+/// Find the current version of a node via prefix scan (readwrite/transaction mode).
+fn find_current_node_version_readwrite(
+    txn_db: &rocksdb::TransactionDB,
+    node_id: Id,
+) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    let nodes_cf = txn_db
+        .cf_handle(schema::Nodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+
+    // Prefix scan on node_id (first 16 bytes)
+    let prefix = node_id.into_bytes().to_vec();
+    let iter = txn_db.prefix_iterator_cf(nodes_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        // Stop if we've gone past our prefix
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+        // Current version has ValidUntil = None (field 0)
+        if value.0.is_none() {
+            return Ok(Some((key_bytes.to_vec(), value)));
+        }
+    }
+    Ok(None)
+}
+
+/// Find the current version of a node via prefix scan (within transaction).
+fn find_current_node_version_txn(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    node_id: Id,
+) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    let nodes_cf = txn_db
+        .cf_handle(schema::Nodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+
+    // Prefix scan on node_id (first 16 bytes)
+    let prefix = node_id.into_bytes().to_vec();
+    let iter = txn.prefix_iterator_cf(nodes_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        // Stop if we've gone past our prefix
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+        // Current version has ValidUntil = None (field 0)
+        if value.0.is_none() {
+            return Ok(Some((key_bytes.to_vec(), value)));
+        }
+    }
+    Ok(None)
+}
+
+// ============================================================================
+// VERSIONING Helpers for Point-in-Time Queries
+// ============================================================================
+// (claude, 2026-02-06: Point-in-time query support for system time travel)
+
+/// Find the version of a node valid at a specific system time (readonly mode).
+///
+/// If `as_of` is None, returns the current version (ValidUntil = None).
+/// If `as_of` is Some(ts), returns the version where ValidSince <= ts AND (ValidUntil is None OR ValidUntil > ts).
+fn find_node_version_at_time_readonly(
+    db: &rocksdb::DB,
+    node_id: Id,
+    as_of: Option<TimestampMilli>,
+) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    // If no as_of specified, use current version lookup
+    let Some(as_of_ts) = as_of else {
+        return find_current_node_version_readonly(db, node_id);
+    };
+
+    let nodes_cf = db
+        .cf_handle(schema::Nodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+
+    // Prefix scan on node_id (first 16 bytes)
+    let prefix = node_id.into_bytes().to_vec();
+    let iter = db.prefix_iterator_cf(nodes_cf, &prefix);
+
+    // Find the version valid at as_of_ts
+    // Key is (Id, ValidSince) - versions are ordered by ValidSince
+    let mut best_match: Option<(Vec<u8>, schema::NodeCfValue)> = None;
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        // Extract ValidSince from key (last 8 bytes of 24-byte key)
+        let valid_since = if key_bytes.len() >= 24 {
+            let ts_bytes: [u8; 8] = key_bytes[16..24].try_into().unwrap();
+            TimestampMilli(u64::from_be_bytes(ts_bytes))
+        } else {
+            continue; // Invalid key format
+        };
+
+        // Skip versions that started after our target time
+        if valid_since.0 > as_of_ts.0 {
+            continue;
+        }
+
+        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+
+        // Check ValidUntil (field 0)
+        // Version is valid if: ValidUntil is None OR ValidUntil > as_of_ts
+        let is_valid_at_time = match value.0 {
+            None => true, // Current version, always valid from ValidSince onwards
+            Some(valid_until) => valid_until.0 > as_of_ts.0,
+        };
+
+        if is_valid_at_time {
+            // This version was valid at as_of_ts
+            // Since we're iterating in ValidSince order, keep the latest one that's valid
+            best_match = Some((key_bytes.to_vec(), value));
+        }
+    }
+
+    Ok(best_match)
+}
+
+/// Find the version of a node valid at a specific system time (readwrite mode).
+fn find_node_version_at_time_readwrite(
+    txn_db: &rocksdb::TransactionDB,
+    node_id: Id,
+    as_of: Option<TimestampMilli>,
+) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    // If no as_of specified, use current version lookup
+    let Some(as_of_ts) = as_of else {
+        return find_current_node_version_readwrite(txn_db, node_id);
+    };
+
+    let nodes_cf = txn_db
+        .cf_handle(schema::Nodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+
+    let prefix = node_id.into_bytes().to_vec();
+    let iter = txn_db.prefix_iterator_cf(nodes_cf, &prefix);
+
+    let mut best_match: Option<(Vec<u8>, schema::NodeCfValue)> = None;
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let valid_since = if key_bytes.len() >= 24 {
+            let ts_bytes: [u8; 8] = key_bytes[16..24].try_into().unwrap();
+            TimestampMilli(u64::from_be_bytes(ts_bytes))
+        } else {
+            continue;
+        };
+
+        if valid_since.0 > as_of_ts.0 {
+            continue;
+        }
+
+        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+
+        let is_valid_at_time = match value.0 {
+            None => true,
+            Some(valid_until) => valid_until.0 > as_of_ts.0,
+        };
+
+        if is_valid_at_time {
+            best_match = Some((key_bytes.to_vec(), value));
+        }
+    }
+
+    Ok(best_match)
+}
+
+/// Find the version of a node valid at a specific system time (within transaction).
+fn find_node_version_at_time_txn(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    node_id: Id,
+    as_of: Option<TimestampMilli>,
+) -> Result<Option<(Vec<u8>, schema::NodeCfValue)>> {
+    // If no as_of specified, use current version lookup
+    let Some(as_of_ts) = as_of else {
+        return find_current_node_version_txn(txn, txn_db, node_id);
+    };
+
+    let nodes_cf = txn_db
+        .cf_handle(schema::Nodes::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+
+    let prefix = node_id.into_bytes().to_vec();
+    let iter = txn.prefix_iterator_cf(nodes_cf, &prefix);
+
+    let mut best_match: Option<(Vec<u8>, schema::NodeCfValue)> = None;
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let valid_since = if key_bytes.len() >= 24 {
+            let ts_bytes: [u8; 8] = key_bytes[16..24].try_into().unwrap();
+            TimestampMilli(u64::from_be_bytes(ts_bytes))
+        } else {
+            continue;
+        };
+
+        if valid_since.0 > as_of_ts.0 {
+            continue;
+        }
+
+        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize node value: {}", e))?;
+
+        let is_valid_at_time = match value.0 {
+            None => true,
+            Some(valid_until) => valid_until.0 > as_of_ts.0,
+        };
+
+        if is_valid_at_time {
+            best_match = Some((key_bytes.to_vec(), value));
+        }
+    }
+
+    Ok(best_match)
+}
+
+/// Find the version of a forward edge valid at a specific system time (readonly mode).
+fn find_forward_edge_version_at_time_readonly(
+    db: &rocksdb::DB,
+    src_id: Id,
+    dst_id: Id,
+    name_hash: NameHash,
+    as_of: Option<TimestampMilli>,
+) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
+    // If no as_of specified, use current version lookup
+    let Some(as_of_ts) = as_of else {
+        return find_current_forward_edge_readonly(db, src_id, dst_id, name_hash);
+    };
+
+    let edges_cf = db
+        .cf_handle(schema::ForwardEdges::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+
+    // Build 40-byte prefix: src_id (16) + dst_id (16) + name_hash (8)
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(src_id.as_bytes());
+    prefix.extend_from_slice(dst_id.as_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
+
+    let iter = db.prefix_iterator_cf(edges_cf, &prefix);
+    let mut best_match: Option<(Vec<u8>, schema::ForwardEdgeCfValue)> = None;
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        // Extract ValidSince from key (last 8 bytes of 48-byte key)
+        let valid_since = if key_bytes.len() >= 48 {
+            let ts_bytes: [u8; 8] = key_bytes[40..48].try_into().unwrap();
+            TimestampMilli(u64::from_be_bytes(ts_bytes))
+        } else {
+            continue;
+        };
+
+        if valid_since.0 > as_of_ts.0 {
+            continue;
+        }
+
+        let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+
+        let is_valid_at_time = match value.0 {
+            None => true,
+            Some(valid_until) => valid_until.0 > as_of_ts.0,
+        };
+
+        if is_valid_at_time {
+            best_match = Some((key_bytes.to_vec(), value));
+        }
+    }
+
+    Ok(best_match)
+}
+
+/// Find the version of a forward edge valid at a specific system time (readwrite mode).
+fn find_forward_edge_version_at_time_readwrite(
+    txn_db: &rocksdb::TransactionDB,
+    src_id: Id,
+    dst_id: Id,
+    name_hash: NameHash,
+    as_of: Option<TimestampMilli>,
+) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
+    let Some(as_of_ts) = as_of else {
+        return find_current_forward_edge_readwrite(txn_db, src_id, dst_id, name_hash);
+    };
+
+    let edges_cf = txn_db
+        .cf_handle(schema::ForwardEdges::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(src_id.as_bytes());
+    prefix.extend_from_slice(dst_id.as_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
+
+    let iter = txn_db.prefix_iterator_cf(edges_cf, &prefix);
+    let mut best_match: Option<(Vec<u8>, schema::ForwardEdgeCfValue)> = None;
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let valid_since = if key_bytes.len() >= 48 {
+            let ts_bytes: [u8; 8] = key_bytes[40..48].try_into().unwrap();
+            TimestampMilli(u64::from_be_bytes(ts_bytes))
+        } else {
+            continue;
+        };
+
+        if valid_since.0 > as_of_ts.0 {
+            continue;
+        }
+
+        let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+
+        let is_valid_at_time = match value.0 {
+            None => true,
+            Some(valid_until) => valid_until.0 > as_of_ts.0,
+        };
+
+        if is_valid_at_time {
+            best_match = Some((key_bytes.to_vec(), value));
+        }
+    }
+
+    Ok(best_match)
+}
+
+/// Find the current version of a forward edge via prefix scan (readonly mode).
+/// (claude, 2026-02-06, in-progress: VERSIONING)
+fn find_current_forward_edge_readonly(
+    db: &rocksdb::DB,
+    src_id: Id,
+    dst_id: Id,
+    name_hash: NameHash,
+) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
+    let forward_cf = db
+        .cf_handle(schema::ForwardEdges::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+
+    // Prefix scan on (src_id, dst_id, name_hash) = 40 bytes
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(&src_id.into_bytes());
+    prefix.extend_from_slice(&dst_id.into_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
+    let iter = db.prefix_iterator_cf(forward_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+        // Current version has ValidUntil = None (field 0)
+        if value.0.is_none() {
+            return Ok(Some((key_bytes.to_vec(), value)));
+        }
+    }
+    Ok(None)
+}
+
+/// Find the current version of a forward edge via prefix scan (readwrite mode).
+/// (claude, 2026-02-06, in-progress: VERSIONING)
+fn find_current_forward_edge_readwrite(
+    txn_db: &rocksdb::TransactionDB,
+    src_id: Id,
+    dst_id: Id,
+    name_hash: NameHash,
+) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
+    let forward_cf = txn_db
+        .cf_handle(schema::ForwardEdges::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+
+    // Prefix scan on (src_id, dst_id, name_hash) = 40 bytes
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(&src_id.into_bytes());
+    prefix.extend_from_slice(&dst_id.into_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
+    let iter = txn_db.prefix_iterator_cf(forward_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+        // Current version has ValidUntil = None (field 0)
+        if value.0.is_none() {
+            return Ok(Some((key_bytes.to_vec(), value)));
+        }
+    }
+    Ok(None)
+}
+
+/// Find the current version of a forward edge via prefix scan (within transaction).
+/// (claude, 2026-02-06, in-progress: VERSIONING)
+fn find_current_forward_edge_txn(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    src_id: Id,
+    dst_id: Id,
+    name_hash: NameHash,
+) -> Result<Option<(Vec<u8>, schema::ForwardEdgeCfValue)>> {
+    let forward_cf = txn_db
+        .cf_handle(schema::ForwardEdges::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+
+    // Prefix scan on (src_id, dst_id, name_hash) = 40 bytes
+    let mut prefix = Vec::with_capacity(40);
+    prefix.extend_from_slice(&src_id.into_bytes());
+    prefix.extend_from_slice(&dst_id.into_bytes());
+    prefix.extend_from_slice(name_hash.as_bytes());
+    let iter = txn.prefix_iterator_cf(forward_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: schema::ForwardEdgeCfValue = schema::ForwardEdges::value_from_bytes(&value_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize edge value: {}", e))?;
+        // Current version has ValidUntil = None (field 0)
+        if value.0.is_none() {
+            return Ok(Some((key_bytes.to_vec(), value)));
+        }
+    }
+    Ok(None)
 }
 
 /// Resolve an edge summary from the EdgeSummaries cold CF.
@@ -175,7 +665,7 @@ fn resolve_edge_summary(
     match value_bytes {
         Some(bytes) => {
             let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.1) // .1 is the summary, .0 is the refcount
+            Ok(value.0) // .0 is the summary (no refcount in VERSIONING)
         }
         None => Ok(EdgeSummary::from_text("")),
     }
@@ -200,7 +690,7 @@ fn resolve_edge_summary_from_txn(
     match txn.get_cf(summaries_cf, &key_bytes)? {
         Some(bytes) => {
             let value = EdgeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.1) // .1 is the summary, .0 is the refcount
+            Ok(value.0) // .0 is the summary (no refcount in VERSIONING)
         }
         None => Ok(EdgeSummary::from_text("")),
     }
@@ -225,7 +715,7 @@ fn resolve_node_summary_from_txn(
     match txn.get_cf(summaries_cf, &key_bytes)? {
         Some(bytes) => {
             let value = NodeSummaries::value_from_bytes(&bytes)?;
-            Ok(value.1) // .1 is the summary, .0 is the refcount
+            Ok(value.0) // .0 is the summary (no refcount in VERSIONING)
         }
         None => Ok(NodeSummary::from_text("")),
     }
@@ -482,14 +972,26 @@ impl QueryProcessor for Query {
 /// This struct contains only user-facing parameters and can be:
 /// - Constructed via struct initialization
 /// - Cloned and reused
+///
+/// # Time Dimensions
+///
+/// The graph supports two orthogonal time dimensions:
+/// - **System time** (`as_of_system_time`): When versions were created/superseded (ValidSince/ValidUntil)
+/// - **Application time** (`reference_ts_millis`): Business validity (ActivePeriod)
 #[derive(Debug, Clone, PartialEq)]
 pub struct NodeById {
     /// The entity ID to search for
     pub id: Id,
 
-    /// Reference timestamp for temporal validity checks
-    /// If None, defaults to current time in the query executor
+    /// Reference timestamp for ActivePeriod (application/business time) validity checks.
+    /// If None, defaults to current time in the query executor.
+    /// Records without an ActivePeriod (None) are considered always valid.
     pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Point-in-time query for system time (ValidSince/ValidUntil).
+    /// If None, returns the current version (ValidUntil = None).
+    /// If Some(ts), returns the version that was valid at that system time.
+    pub as_of_system_time: Option<TimestampMilli>,
 }
 
 /// Internal dispatch wrapper for NodeById query execution.
@@ -519,9 +1021,13 @@ pub struct NodesByIdsMulti {
     /// Node IDs to look up
     pub ids: Vec<Id>,
 
-    /// Reference timestamp for temporal validity checks
-    /// If None, defaults to current time in the query executor
+    /// Reference timestamp for ActivePeriod (application time) validity checks.
+    /// If None, defaults to current time in the query executor.
     pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Point-in-time query for system time (ValidSince/ValidUntil).
+    /// If None, returns the current version. If Some(ts), returns versions valid at that time.
+    pub as_of_system_time: Option<TimestampMilli>,
 }
 
 /// Internal dispatch wrapper for NodesByIdsMulti query execution.
@@ -608,9 +1114,13 @@ pub struct EdgeSummaryBySrcDstName {
     /// Edge name
     pub name: String,
 
-    /// Reference timestamp for temporal validity checks
-    /// If None, defaults to current time in the query executor
+    /// Reference timestamp for ActivePeriod (application time) validity checks.
+    /// If None, defaults to current time in the query executor.
     pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Point-in-time query for system time (ValidSince/ValidUntil).
+    /// If None, returns current version. If Some(ts), returns version valid at that time.
+    pub as_of_system_time: Option<TimestampMilli>,
 }
 
 /// Internal dispatch wrapper for EdgeSummaryBySrcDstName query execution.
@@ -645,11 +1155,14 @@ pub struct OutgoingEdges {
     /// The node ID to search for
     pub id: Id,
 
-    /// Reference timestamp for temporal validity checks
-    /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ActivePeriod in the record
-    /// Records without a ActivePeriod (None) are considered always valid
+    /// Reference timestamp for ActivePeriod (application time) validity checks.
+    /// If None, defaults to current time in the query executor.
+    /// Records without an ActivePeriod (None) are considered always valid.
     pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Point-in-time query for system time (ValidSince/ValidUntil).
+    /// If None, returns current versions. If Some(ts), returns versions valid at that time.
+    pub as_of_system_time: Option<TimestampMilli>,
 }
 
 /// Internal dispatch wrapper for OutgoingEdges query execution.
@@ -677,11 +1190,14 @@ pub struct IncomingEdges {
     /// The node ID to search for
     pub id: DstId,
 
-    /// Reference timestamp for temporal validity checks
-    /// If None, defaults to current time in the query executor
-    /// Temporal validity is always checked against the ActivePeriod in the record
-    /// Records without a ActivePeriod (None) are considered always valid
+    /// Reference timestamp for ActivePeriod (application time) validity checks.
+    /// If None, defaults to current time in the query executor.
+    /// Records without an ActivePeriod (None) are considered always valid.
     pub reference_ts_millis: Option<TimestampMilli>,
+
+    /// Point-in-time query for system time (ValidSince/ValidUntil).
+    /// If None, returns current versions. If Some(ts), returns versions valid at that time.
+    pub as_of_system_time: Option<TimestampMilli>,
 }
 
 /// Internal dispatch wrapper for IncomingEdges query execution.
@@ -783,11 +1299,21 @@ pub(crate) struct AllEdgesDispatch {
 }
 
 impl NodeById {
-    /// Create a new query request.
+    /// Create a new query request for the current version.
     pub fn new(id: Id, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             id,
             reference_ts_millis,
+            as_of_system_time: None,
+        }
+    }
+
+    /// Create a point-in-time query at a specific system time.
+    pub fn as_of(id: Id, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
+        Self {
+            id,
+            reference_ts_millis,
+            as_of_system_time: Some(system_time),
         }
     }
 }
@@ -827,12 +1353,29 @@ impl NodeByIdDispatch {
     }
 }
 
+impl NodeById {
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<(NodeName, NodeSummary)> {
+        NodeByIdDispatch::execute_params(self, storage).await
+    }
+}
+
 impl NodesByIdsMulti {
-    /// Create a new batch query request.
+    /// Create a new batch query request for current versions.
     pub fn new(ids: Vec<Id>, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             ids,
             reference_ts_millis,
+            as_of_system_time: None,
+        }
+    }
+
+    /// Create a point-in-time batch query at a specific system time.
+    pub fn as_of(ids: Vec<Id>, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
+        Self {
+            ids,
+            reference_ts_millis,
+            as_of_system_time: Some(system_time),
         }
     }
 }
@@ -993,7 +1536,7 @@ impl EdgeFragmentsByIdTimeRangeDispatch {
 }
 
 impl EdgeSummaryBySrcDstName {
-    /// Create a new query request.
+    /// Create a new query request for the current version.
     pub fn new(
         source_id: SrcId,
         dest_id: DstId,
@@ -1005,6 +1548,24 @@ impl EdgeSummaryBySrcDstName {
             dest_id,
             name,
             reference_ts_millis,
+            as_of_system_time: None,
+        }
+    }
+
+    /// Create a point-in-time query at a specific system time.
+    pub fn as_of(
+        source_id: SrcId,
+        dest_id: DstId,
+        name: String,
+        system_time: TimestampMilli,
+        reference_ts_millis: Option<TimestampMilli>,
+    ) -> Self {
+        Self {
+            source_id,
+            dest_id,
+            name,
+            reference_ts_millis,
+            as_of_system_time: Some(system_time),
         }
     }
 }
@@ -1047,12 +1608,29 @@ impl EdgeSummaryBySrcDstNameDispatch {
     }
 }
 
+impl EdgeSummaryBySrcDstName {
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<(EdgeSummary, Option<f64>)> {
+        EdgeSummaryBySrcDstNameDispatch::execute_params(self, storage).await
+    }
+}
+
 impl OutgoingEdges {
-    /// Create a new query request.
+    /// Create a new query request for current versions.
     pub fn new(id: Id, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             id,
             reference_ts_millis,
+            as_of_system_time: None,
+        }
+    }
+
+    /// Create a point-in-time query at a specific system time.
+    pub fn as_of(id: Id, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
+        Self {
+            id,
+            reference_ts_millis,
+            as_of_system_time: Some(system_time),
         }
     }
 }
@@ -1093,11 +1671,21 @@ impl OutgoingEdgesDispatch {
 }
 
 impl IncomingEdges {
-    /// Create a new query request.
+    /// Create a new query request for current versions.
     pub fn new(id: DstId, reference_ts_millis: Option<TimestampMilli>) -> Self {
         Self {
             id,
             reference_ts_millis,
+            as_of_system_time: None,
+        }
+    }
+
+    /// Create a point-in-time query at a specific system time.
+    pub fn as_of(id: DstId, system_time: TimestampMilli, reference_ts_millis: Option<TimestampMilli>) -> Self {
+        Self {
+            id,
+            reference_ts_millis,
+            as_of_system_time: Some(system_time),
         }
     }
 }
@@ -1373,45 +1961,52 @@ impl Runnable<super::Reader> for AllEdges {
 }
 
 /// Implement QueryExecutor for NodeByIdDispatch
+/// (claude, 2026-02-06: VERSIONING with point-in-time query support)
 #[async_trait::async_trait]
 impl QueryExecutor for NodeByIdDispatch {
     type Output = (NodeName, NodeSummary);
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         let params = &self.params;
-        tracing::debug!(id = %params.id, "Executing NodeById query");
+        tracing::debug!(
+            id = %params.id,
+            as_of = ?params.as_of_system_time,
+            "Executing NodeById query"
+        );
 
-        // Default None to current time for temporal validity checks
+        // Default None to current time for ActivePeriod validity checks
         let ref_time = params
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
         let id = params.id;
 
-        let key = schema::NodeCfKey(id);
-        let key_bytes = schema::Nodes::key_to_bytes(&key);
-
-        // Handle both readonly and readwrite modes
-        let value_bytes = if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-            })?;
-            db.get_cf(cf, key_bytes)?
+        // Find version via prefix scan (VERSIONING)
+        // If as_of_system_time is Some, find version valid at that time
+        // Otherwise find current version (ValidUntil = None)
+        let (_key_bytes, value) = if let Ok(db) = storage.db() {
+            find_node_version_at_time_readonly(db, id, params.as_of_system_time)?
         } else {
             let txn_db = storage.transaction_db()?;
-            let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-            })?;
-            txn_db.get_cf(cf, key_bytes)?
-        };
+            find_node_version_at_time_readwrite(txn_db, id, params.as_of_system_time)?
+        }
+        .ok_or_else(|| {
+            if params.as_of_system_time.is_some() {
+                anyhow::anyhow!("Node {} not found at system time {:?}", id, params.as_of_system_time)
+            } else {
+                anyhow::anyhow!("Node not found: {}", id)
+            }
+        })?;
 
-        let value_bytes = value_bytes.ok_or_else(|| anyhow::anyhow!("Node not found: {}", id))?;
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+        // Check if deleted (only for current time queries, not time-travel)
+        // For time-travel queries, we want to see the node's state at that past time
+        if params.as_of_system_time.is_none() && value.5 {
+            return Err(anyhow::anyhow!("Node {} has been deleted", id));
+        }
 
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-        // Always check temporal validity
-        if !schema::is_active_at_time(&value.0, ref_time) {
+        // Check temporal validity (ActivePeriod at index 1)
+        if !schema::is_active_at_time(&value.1, ref_time) {
             return Err(anyhow::anyhow!(
                 "Node {} not valid at time {}",
                 id,
@@ -1419,11 +2014,11 @@ impl QueryExecutor for NodeByIdDispatch {
             ));
         }
 
-        // Resolve NameHash to String (uses cache)
-        let node_name = resolve_name(storage, value.1)?;
+        // Resolve NameHash to String (uses cache) - NameHash is at index 2
+        let node_name = resolve_name(storage, value.2)?;
 
-        // Resolve summary from cold CF
-        let summary = resolve_node_summary(storage, value.2)?;
+        // Resolve summary from cold CF - SummaryHash is at index 3
+        let summary = resolve_node_summary(storage, value.3)?;
 
         Ok((node_name, summary))
     }
@@ -1435,7 +2030,7 @@ impl QueryExecutor for NodeByIdDispatch {
 
 /// Implement QueryExecutor for NodesByIdsMultiDispatch
 ///
-/// Uses RocksDB's `multi_get_cf()` for efficient batch lookups.
+/// (claude, 2026-02-06: VERSIONING with point-in-time query support)
 /// Missing nodes and temporally invalid nodes are silently omitted from results.
 #[async_trait::async_trait]
 impl QueryExecutor for NodesByIdsMultiDispatch {
@@ -1443,7 +2038,11 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
 
     async fn execute(&self, storage: &Storage) -> Result<Self::Output> {
         let params = &self.params;
-        tracing::debug!(count = params.ids.len(), "Executing NodesByIdsMulti query");
+        tracing::debug!(
+            count = params.ids.len(),
+            as_of = ?params.as_of_system_time,
+            "Executing NodesByIdsMulti query"
+        );
 
         if params.ids.is_empty() {
             return Ok(Vec::new());
@@ -1454,49 +2053,36 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        // Prepare keys for batch lookup
-        let keys: Vec<Vec<u8>> = params
-            .ids
-            .iter()
-            .map(|id| schema::Nodes::key_to_bytes(&schema::NodeCfKey(*id)))
-            .collect();
-
-        // Use multi_get_cf for batch lookup - handles both readonly and readwrite modes
-        let results: Vec<Result<Option<Vec<u8>>, rocksdb::Error>> = if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-            })?;
-            db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())))
-        } else {
-            let txn_db = storage.transaction_db()?;
-            let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-            })?;
-            txn_db.multi_get_cf(keys.iter().map(|k| (&cf, k.as_slice())))
-        };
-
-        // Parse results, skipping missing entries and temporally invalid nodes
+        // With VERSIONING, we need prefix scans for each ID to find version at time
         // Collect valid entries with their NameHash and SummaryHash first, then resolve
-        let mut valid_entries: Vec<(Id, NameHash, Option<SummaryHash>)> = Vec::with_capacity(results.len());
-        for (id, result) in params.ids.iter().zip(results) {
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+        let mut valid_entries: Vec<(Id, NameHash, Option<SummaryHash>)> = Vec::with_capacity(params.ids.len());
+
+        for id in &params.ids {
+            let result = if let Ok(db) = storage.db() {
+                find_node_version_at_time_readonly(db, *id, params.as_of_system_time)
+            } else {
+                let txn_db = storage.transaction_db()?;
+                find_node_version_at_time_readwrite(txn_db, *id, params.as_of_system_time)
+            };
+
             match result {
-                Ok(Some(value_bytes)) => {
-                    match schema::Nodes::value_from_bytes(&value_bytes) {
-                        Ok(value) => {
-                            // Check temporal validity - skip invalid nodes
-                            if schema::is_active_at_time(&value.0, ref_time) {
-                                valid_entries.push((*id, value.1, value.2));
-                            } else {
-                                tracing::trace!(
-                                    id = %id,
-                                    "Skipping node: not valid at time {}",
-                                    ref_time.0
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(id = %id, error = %e, "Failed to deserialize node value");
-                        }
+                Ok(Some((_key_bytes, value))) => {
+                    // Skip deleted nodes
+                    if value.5 {
+                        tracing::trace!(id = %id, "Skipping node: deleted");
+                        continue;
+                    }
+                    // Check temporal validity (ActivePeriod is at index 1)
+                    if schema::is_active_at_time(&value.1, ref_time) {
+                        // NameHash at index 2, SummaryHash at index 3
+                        valid_entries.push((*id, value.2, value.3));
+                    } else {
+                        tracing::trace!(
+                            id = %id,
+                            "Skipping node: not valid at time {}",
+                            ref_time.0
+                        );
                     }
                 }
                 Ok(None) => {
@@ -1504,7 +2090,7 @@ impl QueryExecutor for NodesByIdsMultiDispatch {
                     tracing::trace!(id = %id, "Node not found");
                 }
                 Err(e) => {
-                    tracing::warn!(id = %id, error = %e, "RocksDB error fetching node");
+                    tracing::warn!(id = %id, error = %e, "Error fetching node");
                 }
             }
         }
@@ -1701,6 +2287,7 @@ impl QueryExecutor for EdgeFragmentsByIdTimeRangeDispatch {
 }
 
 /// Implement QueryExecutor for EdgeSummaryBySrcDstNameDispatch
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 #[async_trait::async_trait]
 impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
     type Output = (EdgeSummary, Option<f64>);
@@ -1725,45 +2312,48 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
         // Convert edge name to NameHash for key construction
         let name_hash = NameHash::from_name(name);
 
-        let key = schema::ForwardEdgeCfKey(source_id, dest_id, name_hash);
-        let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
-
-        let value_bytes = if let Ok(db) = storage.db() {
-            let cf = db.cf_handle(schema::ForwardEdges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::ForwardEdges::CF_NAME
-                )
-            })?;
-            db.get_cf(cf, key_bytes)?
+        // Find edge version via prefix scan (point-in-time if as_of_system_time is set)
+        let value = if let Ok(db) = storage.db() {
+            find_forward_edge_version_at_time_readonly(db, source_id, dest_id, name_hash, params.as_of_system_time)?
+                .map(|(_, v)| v)
         } else {
             let txn_db = storage.transaction_db()?;
-            let cf = txn_db
-                .cf_handle(schema::ForwardEdges::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Column family '{}' not found",
-                        schema::ForwardEdges::CF_NAME
-                    )
-                })?;
-            txn_db.get_cf(cf, key_bytes)?
+            find_forward_edge_version_at_time_readwrite(txn_db, source_id, dest_id, name_hash, params.as_of_system_time)?
+                .map(|(_, v)| v)
         };
 
-        let value_bytes = value_bytes.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Edge not found: source={}, dest={}, name={}",
+        let value = value.ok_or_else(|| {
+            if params.as_of_system_time.is_some() {
+                anyhow::anyhow!(
+                    "Edge not found at system time {:?}: source={}, dest={}, name={}",
+                    params.as_of_system_time,
+                    source_id,
+                    dest_id,
+                    name
+                )
+            } else {
+                anyhow::anyhow!(
+                    "Edge not found: source={}, dest={}, name={}",
+                    source_id,
+                    dest_id,
+                    name
+                )
+            }
+        })?;
+
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+        // Check if deleted (only for current time queries, not time-travel)
+        if params.as_of_system_time.is_none() && value.5 {
+            return Err(anyhow::anyhow!(
+                "Edge deleted: source={}, dest={}, name={}",
                 source_id,
                 dest_id,
                 name
-            )
-        })?;
+            ));
+        }
 
-        let value: schema::ForwardEdgeCfValue =
-            schema::ForwardEdges::value_from_bytes(&value_bytes)
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
-
-        // Always check temporal validity
-        if !schema::is_active_at_time(&value.0, ref_time) {
+        // Check temporal validity (ActivePeriod at index 1)
+        if !schema::is_active_at_time(&value.1, ref_time) {
             return Err(anyhow::anyhow!(
                 "Edge not valid at time {}: source={}, dest={}, name={}",
                 ref_time.0,
@@ -1773,10 +2363,10 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
             ));
         }
 
-        // ForwardEdgeCfValue is (temporal_range, weight, summary_hash)
+        // Field order: ValidUntil, ActivePeriod, Weight, SummaryHash, Version, Deleted
         // Return (summary, weight) - resolve summary from cold CF
-        let summary = resolve_edge_summary(storage, value.2)?;
-        Ok((summary, value.1))
+        let summary = resolve_edge_summary(storage, value.3)?;
+        Ok((summary, value.2))
     }
 
     fn timeout(&self) -> Duration {
@@ -1786,6 +2376,7 @@ impl QueryExecutor for EdgeSummaryBySrcDstNameDispatch {
 
 /// Implement QueryExecutor for OutgoingEdgesDispatch
 #[async_trait::async_trait]
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl QueryExecutor for OutgoingEdgesDispatch {
     type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
@@ -1799,7 +2390,8 @@ impl QueryExecutor for OutgoingEdgesDispatch {
             .unwrap_or_else(|| TimestampMilli::now());
 
         let id = params.id;
-        // Collect edges with NameHash first, then resolve to String
+        // Use HashSet for deduplication with versioned keys
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
         let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
         let prefix = id.into_bytes();
 
@@ -1818,29 +2410,41 @@ impl QueryExecutor for OutgoingEdgesDispatch {
 
             for item in iter {
                 let (key_bytes, value_bytes) = item?;
+                // Stop if we've gone past our prefix (src_id = 16 bytes)
+                if !key_bytes.starts_with(&prefix) {
+                    break;
+                }
+
                 let key: schema::ForwardEdgeCfKey =
                     schema::ForwardEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let source_id = key.0;
-                if source_id != id {
-                    break;
-                }
-
-                // Deserialize and check temporal validity
                 let value: schema::ForwardEdgeCfValue =
                     schema::ForwardEdges::value_from_bytes(&value_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-                // Always check temporal validity - skip invalid edges
-                if !schema::is_active_at_time(&value.0, ref_time) {
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+                // Skip non-current versions
+                if value.0.is_some() {
+                    continue;
+                }
+                // Skip deleted edges
+                if value.5 {
+                    continue;
+                }
+                // Check temporal validity (ActivePeriod at index 1)
+                if !schema::is_active_at_time(&value.1, ref_time) {
                     continue;
                 }
 
+                let source_id = key.0;
                 let dest_id = key.1;
                 let edge_name_hash = key.2;
-                let weight = value.1;
-                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
+                let edge_topology = (source_id, dest_id, edge_name_hash);
+                if seen_edges.insert(edge_topology) {
+                    let weight = value.2;
+                    edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
+                }
             }
         } else {
             let txn_db = storage.transaction_db()?;
@@ -1860,29 +2464,41 @@ impl QueryExecutor for OutgoingEdgesDispatch {
 
             for item in iter {
                 let (key_bytes, value_bytes) = item?;
+                // Stop if we've gone past our prefix (src_id = 16 bytes)
+                if !key_bytes.starts_with(&prefix) {
+                    break;
+                }
+
                 let key: schema::ForwardEdgeCfKey =
                     schema::ForwardEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let source_id = key.0;
-                if source_id != id {
-                    break;
-                }
-
-                // Deserialize and check temporal validity
                 let value: schema::ForwardEdgeCfValue =
                     schema::ForwardEdges::value_from_bytes(&value_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-                // Always check temporal validity - skip invalid edges
-                if !schema::is_active_at_time(&value.0, ref_time) {
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+                // Skip non-current versions
+                if value.0.is_some() {
+                    continue;
+                }
+                // Skip deleted edges
+                if value.5 {
+                    continue;
+                }
+                // Check temporal validity (ActivePeriod at index 1)
+                if !schema::is_active_at_time(&value.1, ref_time) {
                     continue;
                 }
 
+                let source_id = key.0;
                 let dest_id = key.1;
                 let edge_name_hash = key.2;
-                let weight = value.1;
-                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
+                let edge_topology = (source_id, dest_id, edge_name_hash);
+                if seen_edges.insert(edge_topology) {
+                    let weight = value.2;
+                    edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
+                }
             }
         }
 
@@ -1901,6 +2517,7 @@ impl QueryExecutor for OutgoingEdgesDispatch {
 }
 
 /// Implement QueryExecutor for IncomingEdgesDispatch
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 #[async_trait::async_trait]
 impl QueryExecutor for IncomingEdgesDispatch {
     type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
@@ -1915,7 +2532,8 @@ impl QueryExecutor for IncomingEdgesDispatch {
             .unwrap_or_else(|| TimestampMilli::now());
 
         let id = params.id;
-        // Collect edges with NameHash, then resolve to String
+        // Use HashSet for deduplication with versioned keys
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
         let mut edges_with_hash: Vec<(Option<f64>, DstId, SrcId, NameHash)> = Vec::new();
         let prefix = id.into_bytes();
 
@@ -1927,13 +2545,6 @@ impl QueryExecutor for IncomingEdgesDispatch {
                 )
             })?;
 
-            let forward_cf = db.cf_handle(schema::ForwardEdges::CF_NAME).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::ForwardEdges::CF_NAME
-                )
-            })?;
-
             let iter = db.iterator_cf(
                 reverse_cf,
                 rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
@@ -1941,42 +2552,48 @@ impl QueryExecutor for IncomingEdgesDispatch {
 
             for item in iter {
                 let (key_bytes, value_bytes) = item?;
+                // Stop if we've gone past our prefix (dst_id = 16 bytes)
+                if !key_bytes.starts_with(&prefix) {
+                    break;
+                }
+
                 let key: schema::ReverseEdgeCfKey =
                     schema::ReverseEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let dest_id = key.0;
-                if dest_id != id {
-                    break;
-                }
-
-                // Deserialize and check temporal validity
                 let value: schema::ReverseEdgeCfValue =
                     schema::ReverseEdges::value_from_bytes(&value_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-                // Always check temporal validity - skip invalid edges
-                if !schema::is_active_at_time(&value.0, ref_time) {
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod
+                // Skip non-current versions
+                if value.0.is_some() {
+                    continue;
+                }
+                // Check temporal validity (ActivePeriod at index 1)
+                if !schema::is_active_at_time(&value.1, ref_time) {
                     continue;
                 }
 
+                let dest_id = key.0;
                 let source_id = key.1;
                 let edge_name_hash = key.2;
 
-                // Lookup weight from ForwardEdges CF
-                // ReverseEdgeCfKey is (dst_id, src_id, NameHash)
-                // ForwardEdgeCfKey is (src_id, dst_id, NameHash)
-                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
-                let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
+                // Deduplication check
+                let edge_topology = (source_id, dest_id, edge_name_hash);
+                if !seen_edges.insert(edge_topology) {
+                    continue;
+                }
 
-                let weight = if let Some(forward_value_bytes) =
-                    db.get_cf(forward_cf, forward_key_bytes)?
+                // Lookup weight from ForwardEdges CF via prefix scan
+                let weight = if let Some((_, forward_value)) =
+                    find_current_forward_edge_readonly(db, source_id, dest_id, edge_name_hash)?
                 {
-                    let forward_value: schema::ForwardEdgeCfValue =
-                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes).map_err(
-                            |e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e),
-                        )?;
-                    forward_value.1 // Extract weight from field 1
+                    // Skip if deleted
+                    if forward_value.5 {
+                        continue;
+                    }
+                    forward_value.2 // Extract weight from field 2
                 } else {
                     None
                 };
@@ -1994,15 +2611,6 @@ impl QueryExecutor for IncomingEdgesDispatch {
                     )
                 })?;
 
-            let forward_cf = txn_db
-                .cf_handle(schema::ForwardEdges::CF_NAME)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Column family '{}' not found",
-                        schema::ForwardEdges::CF_NAME
-                    )
-                })?;
-
             let iter = txn_db.iterator_cf(
                 reverse_cf,
                 rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
@@ -2010,42 +2618,48 @@ impl QueryExecutor for IncomingEdgesDispatch {
 
             for item in iter {
                 let (key_bytes, value_bytes) = item?;
+                // Stop if we've gone past our prefix (dst_id = 16 bytes)
+                if !key_bytes.starts_with(&prefix) {
+                    break;
+                }
+
                 let key: schema::ReverseEdgeCfKey =
                     schema::ReverseEdges::key_from_bytes(&key_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize key: {}", e))?;
 
-                let dest_id = key.0;
-                if dest_id != id {
-                    break;
-                }
-
-                // Deserialize and check temporal validity
                 let value: schema::ReverseEdgeCfValue =
                     schema::ReverseEdges::value_from_bytes(&value_bytes)
                         .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
 
-                // Always check temporal validity - skip invalid edges
-                if !schema::is_active_at_time(&value.0, ref_time) {
+                // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod
+                // Skip non-current versions
+                if value.0.is_some() {
+                    continue;
+                }
+                // Check temporal validity (ActivePeriod at index 1)
+                if !schema::is_active_at_time(&value.1, ref_time) {
                     continue;
                 }
 
+                let dest_id = key.0;
                 let source_id = key.1;
                 let edge_name_hash = key.2;
 
-                // Lookup weight from ForwardEdges CF
-                // ReverseEdgeCfKey is (dst_id, src_id, NameHash)
-                // ForwardEdgeCfKey is (src_id, dst_id, NameHash)
-                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
-                let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
+                // Deduplication check
+                let edge_topology = (source_id, dest_id, edge_name_hash);
+                if !seen_edges.insert(edge_topology) {
+                    continue;
+                }
 
-                let weight = if let Some(forward_value_bytes) =
-                    txn_db.get_cf(forward_cf, forward_key_bytes)?
+                // Lookup weight from ForwardEdges CF via prefix scan
+                let weight = if let Some((_, forward_value)) =
+                    find_current_forward_edge_readwrite(txn_db, source_id, dest_id, edge_name_hash)?
                 {
-                    let forward_value: schema::ForwardEdgeCfValue =
-                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes).map_err(
-                            |e| anyhow::anyhow!("Failed to deserialize forward edge value: {}", e),
-                        )?;
-                    forward_value.1 // Extract weight from field 1
+                    // Skip if deleted
+                    if forward_value.5 {
+                        continue;
+                    }
+                    forward_value.2 // Extract weight from field 2
                 } else {
                     None
                 };
@@ -2139,6 +2753,7 @@ impl QueryExecutor for AllEdgesDispatch {
 // ============================================================================
 
 /// Implement TransactionQueryExecutor for NodeById
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan for current version)
 impl TransactionQueryExecutor for NodeById {
     type Output = (NodeName, NodeSummary);
 
@@ -2155,23 +2770,18 @@ impl TransactionQueryExecutor for NodeById {
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let key = schema::NodeCfKey(self.id);
-        let key_bytes = schema::Nodes::key_to_bytes(&key);
-
-        let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-        })?;
-
-        // Use txn.get_cf to see uncommitted writes
-        let value_bytes = txn
-            .get_cf(cf, &key_bytes)?
+        // Find current version via prefix scan (VERSIONING)
+        let (_key_bytes, value) = find_current_node_version_txn(txn, txn_db, self.id)?
             .ok_or_else(|| anyhow::anyhow!("Node not found: {}", self.id))?;
 
-        let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize value: {}", e))?;
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
+        // Check if deleted
+        if value.5 {
+            return Err(anyhow::anyhow!("Node {} has been deleted", self.id));
+        }
 
-        // Check temporal validity
-        if !schema::is_active_at_time(&value.0, ref_time) {
+        // Check temporal validity (ActivePeriod is at index 1)
+        if !schema::is_active_at_time(&value.1, ref_time) {
             return Err(anyhow::anyhow!(
                 "Node {} not valid at time {}",
                 self.id,
@@ -2179,15 +2789,16 @@ impl TransactionQueryExecutor for NodeById {
             ));
         }
 
-        // Resolve NameHash to String (uses cache)
-        let node_name = resolve_name_from_txn(txn, txn_db, value.1, cache)?;
-        // Resolve SummaryHash to NodeSummary (from cold CF)
-        let summary = resolve_node_summary_from_txn(txn, txn_db, value.2)?;
+        // Resolve NameHash to String (uses cache) - NameHash is at index 2
+        let node_name = resolve_name_from_txn(txn, txn_db, value.2, cache)?;
+        // Resolve SummaryHash to NodeSummary (from cold CF) - SummaryHash is at index 3
+        let summary = resolve_node_summary_from_txn(txn, txn_db, value.3)?;
         Ok((node_name, summary))
     }
 }
 
 /// Implement TransactionQueryExecutor for NodesByIdsMulti
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan for current versions)
 impl TransactionQueryExecutor for NodesByIdsMulti {
     type Output = Vec<(Id, NodeName, NodeSummary)>;
 
@@ -2207,28 +2818,29 @@ impl TransactionQueryExecutor for NodesByIdsMulti {
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let cf = txn_db.cf_handle(schema::Nodes::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", schema::Nodes::CF_NAME)
-        })?;
-
         // Collect entries with NameHash and SummaryHash first
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
         let mut entries_with_hash: Vec<(Id, NameHash, Option<SummaryHash>)> = Vec::with_capacity(self.ids.len());
 
         for id in &self.ids {
-            let key = schema::NodeCfKey(*id);
-            let key_bytes = schema::Nodes::key_to_bytes(&key);
-
-            // Use txn.get_cf for each key (transaction doesn't have multi_get)
-            if let Some(value_bytes) = txn.get_cf(cf, &key_bytes)? {
-                match schema::Nodes::value_from_bytes(&value_bytes) {
-                    Ok(value) => {
-                        if schema::is_active_at_time(&value.0, ref_time) {
-                            entries_with_hash.push((*id, value.1, value.2));
-                        }
+            // Find current version via prefix scan (VERSIONING)
+            match find_current_node_version_txn(txn, txn_db, *id) {
+                Ok(Some((_key_bytes, value))) => {
+                    // Skip deleted nodes
+                    if value.5 {
+                        continue;
                     }
-                    Err(e) => {
-                        tracing::warn!(id = %id, error = %e, "Failed to deserialize node value");
+                    // Check temporal validity (ActivePeriod is at index 1)
+                    if schema::is_active_at_time(&value.1, ref_time) {
+                        // NameHash at index 2, SummaryHash at index 3
+                        entries_with_hash.push((*id, value.2, value.3));
                     }
+                }
+                Ok(None) => {
+                    // Node not found - silently skip
+                }
+                Err(e) => {
+                    tracing::warn!(id = %id, error = %e, "Failed to find node version");
                 }
             }
         }
@@ -2401,6 +3013,7 @@ impl TransactionQueryExecutor for EdgeFragmentsByIdTimeRange {
 }
 
 /// Implement TransactionQueryExecutor for EdgeSummaryBySrcDstName
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
     type Output = (EdgeSummary, Option<f64>);
 
@@ -2421,27 +3034,11 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
             .reference_ts_millis
             .unwrap_or_else(|| TimestampMilli::now());
 
-        let cf = txn_db
-            .cf_handle(schema::ForwardEdges::CF_NAME)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::ForwardEdges::CF_NAME
-                )
-            })?;
-
         // Convert edge name to NameHash for key construction
         let name_hash = NameHash::from_name(&self.name);
 
-        let key = schema::ForwardEdgeCfKey(
-            self.source_id,
-            self.dest_id,
-            name_hash,
-        );
-        let key_bytes = schema::ForwardEdges::key_to_bytes(&key);
-
-        let value_bytes = txn
-            .get_cf(cf, &key_bytes)?
+        // Find current edge version via prefix scan
+        let (_, value) = find_current_forward_edge_txn(txn, txn_db, self.source_id, self.dest_id, name_hash)?
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Edge not found: {} -> {} ({})",
@@ -2451,11 +3048,19 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
                 )
             })?;
 
-        let value: schema::ForwardEdgeCfValue =
-            schema::ForwardEdges::value_from_bytes(&value_bytes)?;
+        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+        // Check if deleted
+        if value.5 {
+            return Err(anyhow::anyhow!(
+                "Edge deleted: {} -> {} ({})",
+                self.source_id,
+                self.dest_id,
+                self.name
+            ));
+        }
 
-        // Check temporal validity
-        if !schema::is_active_at_time(&value.0, ref_time) {
+        // Check temporal validity (ActivePeriod at index 1)
+        if !schema::is_active_at_time(&value.1, ref_time) {
             return Err(anyhow::anyhow!(
                 "Edge {} -> {} ({}) not valid at time {}",
                 self.source_id,
@@ -2466,12 +3071,13 @@ impl TransactionQueryExecutor for EdgeSummaryBySrcDstName {
         }
 
         // Resolve SummaryHash to EdgeSummary (from cold CF)
-        let summary = resolve_edge_summary_from_txn(txn, txn_db, value.2)?;
-        Ok((summary, value.1))
+        let summary = resolve_edge_summary_from_txn(txn, txn_db, value.3)?;
+        Ok((summary, value.2))
     }
 }
 
 /// Implement TransactionQueryExecutor for OutgoingEdges
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl TransactionQueryExecutor for OutgoingEdges {
     type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
@@ -2498,30 +3104,48 @@ impl TransactionQueryExecutor for OutgoingEdges {
 
         // Use source ID as prefix for iteration
         let prefix = self.id.into_bytes();
-        // Collect edges with NameHash first
+        // Use HashSet for deduplication with versioned keys
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
         let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
 
-        let iter = txn.iterator_cf(
-            cf,
-            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-        );
+        // NOTE: We use iterator_cf instead of prefix_iterator_cf because the CF has a
+        // 40-byte prefix extractor but we're searching with a 16-byte prefix (src_id only).
+        // Using prefix_iterator with mismatched prefix length causes bloom filter issues.
+        let iter = txn.iterator_cf(cf, rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward));
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
-
-            let key: schema::ForwardEdgeCfKey = schema::ForwardEdges::key_from_bytes(&key_bytes)?;
-
-            // Check if still same source
-            if key.0 != self.id {
+            // Stop if we've gone past our prefix (src_id = 16 bytes)
+            if !key_bytes.starts_with(&prefix) {
                 break;
             }
+
+            let key: schema::ForwardEdgeCfKey = schema::ForwardEdges::key_from_bytes(&key_bytes)?;
 
             let value: schema::ForwardEdgeCfValue =
                 schema::ForwardEdges::value_from_bytes(&value_bytes)?;
 
-            // Check temporal validity
-            if schema::is_active_at_time(&value.0, ref_time) {
-                edges_with_hash.push((value.1, key.0, key.1, key.2));
+            // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+            // Skip non-current versions
+            if value.0.is_some() {
+                continue;
+            }
+            // Skip deleted edges
+            if value.5 {
+                continue;
+            }
+            // Check temporal validity (ActivePeriod at index 1)
+            if !schema::is_active_at_time(&value.1, ref_time) {
+                continue;
+            }
+
+            let source_id = key.0;
+            let dest_id = key.1;
+            let edge_name_hash = key.2;
+            let edge_topology = (source_id, dest_id, edge_name_hash);
+            if seen_edges.insert(edge_topology) {
+                let weight = value.2;
+                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
             }
         }
 
@@ -2537,6 +3161,7 @@ impl TransactionQueryExecutor for OutgoingEdges {
 }
 
 /// Implement TransactionQueryExecutor for IncomingEdges
+/// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and new field indices)
 impl TransactionQueryExecutor for IncomingEdges {
     type Output = Vec<(Option<f64>, DstId, SrcId, EdgeName)>;
 
@@ -2561,60 +3186,63 @@ impl TransactionQueryExecutor for IncomingEdges {
                 )
             })?;
 
-        let forward_cf = txn_db
-            .cf_handle(schema::ForwardEdges::CF_NAME)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Column family '{}' not found",
-                    schema::ForwardEdges::CF_NAME
-                )
-            })?;
-
         // Use destination ID as prefix for iteration
         let prefix = self.id.into_bytes();
-        // Collect edges with NameHash first
+        // Use HashSet for deduplication with versioned keys
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
         let mut edges_with_hash: Vec<(Option<f64>, DstId, SrcId, NameHash)> = Vec::new();
 
-        let iter = txn.iterator_cf(
-            reverse_cf,
-            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
-        );
+        // NOTE: We use iterator_cf instead of prefix_iterator_cf because the CF has a
+        // 40-byte prefix extractor but we're searching with a 16-byte prefix (dst_id only).
+        // Using prefix_iterator with mismatched prefix length causes bloom filter issues.
+        let iter = txn.iterator_cf(reverse_cf, rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward));
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
-
-            let key: schema::ReverseEdgeCfKey = schema::ReverseEdges::key_from_bytes(&key_bytes)?;
-
-            // Check if still same destination
-            if key.0 != self.id {
+            // Stop if we've gone past our prefix (dst_id = 16 bytes)
+            if !key_bytes.starts_with(&prefix) {
                 break;
             }
+
+            let key: schema::ReverseEdgeCfKey = schema::ReverseEdges::key_from_bytes(&key_bytes)?;
 
             let value: schema::ReverseEdgeCfValue =
                 schema::ReverseEdges::value_from_bytes(&value_bytes)?;
 
-            // Check temporal validity
-            if schema::is_active_at_time(&value.0, ref_time) {
-                let dest_id = key.0;
-                let source_id = key.1;
-                let edge_name_hash = key.2;
-
-                // Lookup weight from ForwardEdges CF
-                let forward_key = schema::ForwardEdgeCfKey(source_id, dest_id, edge_name_hash);
-                let forward_key_bytes = schema::ForwardEdges::key_to_bytes(&forward_key);
-
-                let weight = if let Some(forward_value_bytes) =
-                    txn.get_cf(forward_cf, &forward_key_bytes)?
-                {
-                    let forward_value: schema::ForwardEdgeCfValue =
-                        schema::ForwardEdges::value_from_bytes(&forward_value_bytes)?;
-                    forward_value.1
-                } else {
-                    None
-                };
-
-                edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
+            // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod
+            // Skip non-current versions
+            if value.0.is_some() {
+                continue;
             }
+            // Check temporal validity (ActivePeriod at index 1)
+            if !schema::is_active_at_time(&value.1, ref_time) {
+                continue;
+            }
+
+            let dest_id = key.0;
+            let source_id = key.1;
+            let edge_name_hash = key.2;
+
+            // Deduplication check
+            let edge_topology = (source_id, dest_id, edge_name_hash);
+            if !seen_edges.insert(edge_topology) {
+                continue;
+            }
+
+            // Lookup weight from ForwardEdges CF via prefix scan
+            let weight = if let Some((_, forward_value)) =
+                find_current_forward_edge_txn(txn, txn_db, source_id, dest_id, edge_name_hash)?
+            {
+                // Skip if deleted
+                if forward_value.5 {
+                    continue;
+                }
+                forward_value.2 // Extract weight from field 2
+            } else {
+                None
+            };
+
+            edges_with_hash.push((weight, dest_id, source_id, edge_name_hash));
         }
 
         // Resolve NameHashes to Strings (uses cache)
@@ -2629,6 +3257,7 @@ impl TransactionQueryExecutor for IncomingEdges {
 }
 
 /// Implement TransactionQueryExecutor for AllNodes
+/// (claude, 2026-02-06, in-progress: VERSIONING iteration with deduplication)
 impl TransactionQueryExecutor for AllNodes {
     type Output = Vec<(Id, NodeName, NodeSummary)>;
 
@@ -2650,11 +3279,15 @@ impl TransactionQueryExecutor for AllNodes {
 
         let mut results = Vec::with_capacity(self.limit);
 
-        // Determine start position - need to create bytes outside the if-let
-        // to avoid lifetime issues
+        // With VERSIONING, key is (Id, ValidSince). Cursor is just the Id.
+        // We use Id prefix (16 bytes) for positioning, skipping past all versions
+        // Field indices: 0=ValidUntil, 1=ActivePeriod, 2=NameHash, 3=SummaryHash, 4=Version, 5=Deleted
         let start_bytes: Option<Vec<u8>> = self.last.as_ref().map(|cursor| {
-            let start_key = schema::NodeCfKey(*cursor);
-            schema::Nodes::key_to_bytes(&start_key)
+            // Create a prefix that starts after all versions of the cursor ID
+            // by appending max timestamp
+            let mut bytes = cursor.into_bytes().to_vec();
+            bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+            bytes
         });
 
         let iter = if let Some(ref bytes) = start_bytes {
@@ -2663,32 +3296,46 @@ impl TransactionQueryExecutor for AllNodes {
             txn.iterator_cf(cf, rocksdb::IteratorMode::Start)
         };
 
-        let mut skip_first = self.last.is_some();
+        let mut last_node_id: Option<Id> = None;
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
-
-            // Skip the cursor position itself
-            if skip_first {
-                skip_first = false;
-                continue;
-            }
 
             if results.len() >= self.limit {
                 break;
             }
 
             let key: schema::NodeCfKey = schema::Nodes::key_from_bytes(&key_bytes)?;
+            let node_id = key.0;
+
+            // Skip duplicate node_ids (we already saw this node's current version)
+            if last_node_id == Some(node_id) {
+                continue;
+            }
+
             let value: schema::NodeCfValue = schema::Nodes::value_from_bytes(&value_bytes)?;
 
-            // Check temporal validity
-            if schema::is_active_at_time(&value.0, ref_time) {
-                // Resolve NameHash to String (uses cache)
-                let node_name = resolve_name_from_txn(txn, txn_db, value.1, cache)?;
-                // Resolve SummaryHash to NodeSummary (from cold CF)
-                let summary = resolve_node_summary_from_txn(txn, txn_db, value.2)?;
-                results.push((key.0, node_name, summary));
+            // Only process current versions (ValidUntil = None)
+            if value.0.is_some() {
+                continue;
             }
+
+            // Skip deleted nodes
+            if value.5 {
+                last_node_id = Some(node_id);
+                continue;
+            }
+
+            // Check temporal validity (ActivePeriod at index 1)
+            if schema::is_active_at_time(&value.1, ref_time) {
+                // Resolve NameHash to String (uses cache) - index 2
+                let node_name = resolve_name_from_txn(txn, txn_db, value.2, cache)?;
+                // Resolve SummaryHash to NodeSummary (from cold CF) - index 3
+                let summary = resolve_node_summary_from_txn(txn, txn_db, value.3)?;
+                results.push((node_id, node_name, summary));
+            }
+
+            last_node_id = Some(node_id);
         }
 
         Ok(results)
@@ -2696,6 +3343,7 @@ impl TransactionQueryExecutor for AllNodes {
 }
 
 /// Implement TransactionQueryExecutor for AllEdges
+/// (claude, 2026-02-06, in-progress: VERSIONING iteration with deduplication)
 impl TransactionQueryExecutor for AllEdges {
     type Output = Vec<(Option<f64>, SrcId, DstId, EdgeName)>;
 
@@ -2720,12 +3368,17 @@ impl TransactionQueryExecutor for AllEdges {
                 )
             })?;
 
-        // Determine start position - need to create bytes outside the if-let
-        // to avoid lifetime issues. Convert name to NameHash for cursor.
+        // With VERSIONING, key is (SrcId, DstId, NameHash, ValidSince). Cursor is (SrcId, DstId, Name).
+        // Create a prefix that starts after all versions of the cursor edge.
         let start_bytes: Option<Vec<u8>> = self.last.as_ref().map(|(src, dst, name)| {
             let name_hash = NameHash::from_name(name);
-            let start_key = schema::ForwardEdgeCfKey(*src, *dst, name_hash);
-            schema::ForwardEdges::key_to_bytes(&start_key)
+            // Append max timestamp to skip all versions of cursor edge
+            let mut bytes = Vec::with_capacity(48);
+            bytes.extend_from_slice(&src.into_bytes());
+            bytes.extend_from_slice(&dst.into_bytes());
+            bytes.extend_from_slice(name_hash.as_bytes());
+            bytes.extend_from_slice(&u64::MAX.to_be_bytes());
+            bytes
         });
 
         let iter = if let Some(ref bytes) = start_bytes {
@@ -2734,18 +3387,12 @@ impl TransactionQueryExecutor for AllEdges {
             txn.iterator_cf(cf, rocksdb::IteratorMode::Start)
         };
 
-        let mut skip_first = self.last.is_some();
-        // Collect edges with NameHash first
+        // Use HashSet for deduplication with versioned keys
+        let mut seen_edges: std::collections::HashSet<(Id, Id, NameHash)> = std::collections::HashSet::new();
         let mut edges_with_hash: Vec<(Option<f64>, SrcId, DstId, NameHash)> = Vec::new();
 
         for item in iter {
             let (key_bytes, value_bytes) = item?;
-
-            // Skip the cursor position itself
-            if skip_first {
-                skip_first = false;
-                continue;
-            }
 
             if edges_with_hash.len() >= self.limit {
                 break;
@@ -2755,9 +3402,27 @@ impl TransactionQueryExecutor for AllEdges {
             let value: schema::ForwardEdgeCfValue =
                 schema::ForwardEdges::value_from_bytes(&value_bytes)?;
 
-            // Check temporal validity
-            if schema::is_active_at_time(&value.0, ref_time) {
-                edges_with_hash.push((value.1, key.0, key.1, key.2));
+            // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+            // Skip non-current versions
+            if value.0.is_some() {
+                continue;
+            }
+            // Skip deleted edges
+            if value.5 {
+                continue;
+            }
+            // Check temporal validity (ActivePeriod at index 1)
+            if !schema::is_active_at_time(&value.1, ref_time) {
+                continue;
+            }
+
+            let source_id = key.0;
+            let dest_id = key.1;
+            let edge_name_hash = key.2;
+            let edge_topology = (source_id, dest_id, edge_name_hash);
+            if seen_edges.insert(edge_topology) {
+                let weight = value.2;
+                edges_with_hash.push((weight, source_id, dest_id, edge_name_hash));
             }
         }
 
