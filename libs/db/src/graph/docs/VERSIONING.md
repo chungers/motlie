@@ -1,18 +1,6 @@
 # VERSIONING: Temporal Graph with Time-Travel and Rollback
 
-**Decision:** Approved to begin execution for this breaking-change design. No migration/backward-compat/deprecation required. (codex, 2026-02-05, accepted)
-
-## Review of Codex Annotations (claude, 2026-02-05)
-
-| Annotation | Location | Verdict | Notes |
-|------------|----------|---------|-------|
-| Multi-edge gap | Line 44 | **REJECT** | Faulty assumption - design intentionally prevents duplicate (src,dst,name) |
-| UpdatedAt in VersionHistory | Lines 114-119 | **ACCEPT** | Good improvement for time→version mapping |
-| RefCount conflict | Lines 109, 812 | **CLARIFY** | Valid observation - VERSIONING supersedes CONTENT-ADDRESS RefCount |
-| EdgeSummaryIndex gap | Line 136 | **ACCEPT** | Schema defined in CONTENT-ADDRESS.md, cross-ref needed |
-| Storage overhead gap | Line 794 | **ACCEPT** | Estimate corrected to ~379 MB |
-| Open Questions | Lines 865-888 | **ACCEPT** | Reasonable items to track before implementation |
-| Fragment guidance | Lines 639-680 | **ACCEPT** | Good practical examples |
+**Status:** Approved for implementation. Breaking change - no migration required.
 
 ## Table of Contents
 
@@ -30,6 +18,8 @@
 12. [Pros and Cons](#pros-and-cons)
 13. [Summary](#summary)
 14. [Bitemporal Model: System Time vs Application Time](#bitemporal-model-system-time-vs-application-time)
+15. [Open Questions](#open-questions)
+16. [Appendix: Design Review Notes](#appendix-design-review-notes)
 
 ---
 
@@ -44,7 +34,6 @@ Enable temporal versioning for the graph database:
 | Content rollback | No | Yes |
 | Multi-edge support | Implicit | Explicit |
 | Audit history | Partial | Full |
-(codex, 2026-02-05, proposed)
 
 ---
 
@@ -55,10 +44,7 @@ Enable temporal versioning for the graph database:
 3. **Audit**: Preserve full history of all changes
 4. **Deduplication**: Content-addressed summaries avoid storage blowup
 5. **Explicit API**: Disambiguate "add second edge" vs "retarget edge"
-(codex, 2026-02-05, proposed)
-(codex, 2026-02-05, gap: this schema still disallows multiple current edges with identical (src,dst,name); if true multi-edge between same nodes is required, add a disambiguator/edge-id)
-(claude, 2026-02-05, REJECT: Faulty assumption. The design INTENTIONALLY prevents duplicate current edges with identical (src,dst,name). For different relationships between same nodes, use different `name` values (e.g., "knows", "works_with"). Temporal versioning is for HISTORY, not concurrent duplicates. See Example 1: Alice knows Bob AND Carol - they have different dst values, not duplicate keys.)
-(codex, 2026-02-05, accept: agreed given the stated requirement that (src,dst,name) is unique; keep this explicit in the design goals)
+6. **Unique edge identity**: `(src, dst, name)` is unique at any point in time; use different `name` values for different relationship types between the same nodes
 
 ---
 
@@ -121,7 +107,6 @@ Enable temporal versioning for the graph database:
 └──────────┴─────────────┴────────────┴───────────────┘
 ```
 
-(claude, 2026-02-05, added comprehensive version/history capability table)
 
 ---
 
@@ -259,8 +244,8 @@ pub struct ReverseEdgeCfValue(
 /// Node summaries - RefCount REMOVED for append-only rollback support
 pub struct NodeSummaryCfKey(pub SummaryHash);  // 8 bytes
 pub struct NodeSummaryCfValue(pub NodeSummary);
-/// (claude, 2026-02-05) VERSIONING supersedes CONTENT-ADDRESS RefCount behavior.
-/// Summaries are append-only; orphans cleaned by lazy GC scan.
+/// Summaries are append-only; orphans cleaned by OrphanSummaries GC.
+/// See [Garbage Collection](#garbage-collection) section.
 
 /// Edge summaries - RefCount REMOVED for append-only rollback support
 pub struct EdgeSummaryCfKey(pub SummaryHash);  // 8 bytes
@@ -286,7 +271,6 @@ pub struct NodeVersionHistoryCfValue(
     pub NameHash,        // 8 bytes - node name at this version
     pub ActivePeriod,   // 16 bytes - (start, end) business validity
 );  // Total: 40 bytes
-/// (claude, 2026-02-05) EXPANDED: Added NameHash and ActivePeriod for full rollback.
 
 /// Edge version history - stores full snapshot for rollback
 pub struct EdgeVersionHistoryCfKey(
@@ -303,8 +287,7 @@ pub struct EdgeVersionHistoryCfValue(
     pub EdgeWeight,      // 8 bytes - f64, NaN = None
     pub ActivePeriod,   // 16 bytes - (start, end) business validity
 );  // Total: 40 bytes
-/// (codex, 2026-02-05) UpdatedAt enables time→version mapping for `as_of` queries.
-/// (claude, 2026-02-05) EXPANDED: Added Weight and ActivePeriod for full rollback.
+/// UpdatedAt enables time→version mapping for `as_of` queries.
 
 // ============================================================
 // FRAGMENT CFs (UNCHANGED - already temporal via timestamp key)
@@ -382,7 +365,7 @@ pub enum SummaryKind {
 }
 
 pub struct OrphanSummaryCfValue(pub SummaryKind);  // 1 byte
-/// (claude, 2026-02-06) Orphan index enables rollback by deferring summary deletion.
+/// See [Garbage Collection](#garbage-collection) for orphan GC design.
 ```
 
 ### Temporal Semantics
@@ -396,7 +379,6 @@ pub struct OrphanSummaryCfValue(pub SummaryKind);  // 1 byte
 **Entity is current if:** `valid_until.is_none() || valid_until > now()`
 
 **Entity is valid at time T if:** `valid_since <= T && (valid_until.is_none() || valid_until > T)`
-(codex, 2026-02-05, proposed)
 
 ---
 
@@ -619,7 +601,7 @@ fn execute_update_edge(mutation: UpdateEdge) -> Result<Version> {
         txn.put(ReverseEdges,
             key: (mutation.dst, mutation.src, mutation.name, old_edge.valid_since),
             val: (valid_until: now));
-        // (codex, 2026-02-05, decision: reverse edge valid_until must be updated in the same txn to keep inbound scans consistent)
+        // NOTE: Reverse edge valid_until must be updated in same txn for consistency
 
         // Create new edges
         txn.put(ForwardEdges,
@@ -655,8 +637,7 @@ fn execute_update_edge(mutation: UpdateEdge) -> Result<Version> {
     // Update summary index
     txn.put(EdgeSummaryIndex, (old_edge.hash, ..., old_edge.version), STALE);
     txn.put(EdgeSummaryIndex, (new_hash, ..., new_version), CURRENT);
-    // (codex, 2026-02-05, gap: requires explicit EdgeSummaryIndex schema and time/version mapping for `as_of` lookups)
-    // (codex, 2026-02-05, decision: ensure AddEdge/DeleteEdge/RestoreEdge also maintain the summary index for current selection)
+    // NOTE: All mutations (Add/Delete/Restore) must maintain summary index consistency
 
     txn.commit()?;
     Ok(new_version)
@@ -739,7 +720,6 @@ fn get_node_by_id_at(db: &DB, id: Id, at: TimestampMilli) -> Result<Option<Node>
 }
 ```
 
-(claude, 2026-02-05, added implementation detail for temporal node lookups)
 
 ### Time-Travel Queries
 
@@ -779,7 +759,6 @@ pub struct EdgeHistory {
     pub name: String,
 }
 // Returns: Vec<(ValidSince, ValidUntil, Version, Summary)>
-(codex, 2026-02-05, decision: VersionHistory carries UpdatedAt to resolve time->version mapping)
 
 /// Get fragments in time range
 pub struct EdgeFragmentsInRange {
@@ -1137,7 +1116,6 @@ Fragments up to t=2200: ["Graduated college", "Got first job"]
 | **OutgoingEdgesAt(T)** | N/A | 1 scan + filter | New capability |
 | **NodeById** | 1 get | 1 reverse seek | O(1) → O(log N) |
 | **EdgeHistory** | N/A | 1 scan | New capability |
-(codex, 2026-02-05, decision: use reverse prefix scan for NodeById/NodeByIdAt to reduce scan cost; document expected max versions per node)
 
 **NodeById lookup cost analysis:**
 
@@ -1173,7 +1151,6 @@ options.set_prefix_extractor(SliceTransform::create_fixed_prefix(16)); // Id = 1
 options.set_memtable_prefix_bloom_ratio(0.1);
 ```
 
-(claude, 2026-02-05, added NodeById seek cost analysis)
 
 **Filter cost:** Each edge scan now filters by `valid_until`:
 ```rust
@@ -1202,7 +1179,6 @@ EdgeVersionHistory:   3M × 92 bytes = 276 MB
 EdgeSummaryIndex:     3M × 53 bytes = 159 MB
 Total overhead:       ~451 MB for 1M edges
 ```
-(claude, 2026-02-05, UPDATED: EdgeVersionHistory expanded from 68→92 bytes to include Weight and ActivePeriod for full rollback capability. Trade-off: +72 MB per 1M edges for complete audit trail.)
 
 ### GC Changes
 
@@ -1217,11 +1193,6 @@ Total overhead:       ~451 MB for 1M edges
 **Key insight:** Keep RefCount tracking but defer deletion. When RefCount→0, add to OrphanSummaries CF instead of deleting. GC scans only the orphan index (tiny), not all summaries.
 
 See [Garbage Collection](#garbage-collection) section for full design.
-
-(codex, 2026-02-05, gap: conflicts with current RefCount-based summary cleanup; if we keep RefCount, update this section and GC cost model)
-(claude, 2026-02-05, CLARIFY: Same as line 109. VERSIONING supersedes CONTENT-ADDRESS. When implemented: (1) Keep RefCount tracking but don't delete inline, (2) Add OrphanSummaries CF for deferred deletion, (3) GC scans orphan index with retention window. Trade-off: storage vs rollback capability.)
-(claude, 2026-02-06, RESOLVED: Orphan Index design added - keeps RefCount for O(orphans) GC scan while enabling rollback.)
-(codex, 2026-02-05, accept with caveat: VERSIONING may supersede RefCount; document the new GC/retention expectations and update CONTENT-ADDRESS to reflect the override)
 
 ---
 
@@ -1466,7 +1437,6 @@ impl Default for OrphanGcConfig {
 }
 ```
 
-(claude, 2026-02-06, designed orphan index GC to enable rollback while preserving RefCount tracking)
 
 ### Subsystem Integration
 
@@ -1699,7 +1669,6 @@ storage.shutdown()?;
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-(claude, 2026-02-06, added subsystem integration for orphan GC lifecycle management)
 
 ---
 
@@ -1731,7 +1700,8 @@ storage.shutdown()?;
 - **High-frequency updates**: If edges update 1000s of times/sec, history accumulates fast
 - **Storage-constrained**: History consumes storage until GC
 - **No audit requirements**: If you don't need rollback/time-travel, simpler schema is better
-(codex, 2026-02-05, decision: cost/benefit is favorable only when audit/time-travel/rollback are hard requirements; otherwise complexity and storage cost are not justified)
+
+**Note:** Cost/benefit is favorable when audit/time-travel/rollback are hard requirements.
 
 ---
 
@@ -1746,9 +1716,6 @@ storage.shutdown()?;
 | Multi-edge support | Explicit via AddEdge (fails if exists) |
 | Retarget support | Explicit via UpdateEdge with new_dst |
 | Fragments | Unchanged (already temporal) |
-
-(claude, 2026-02-04, designed)
-(claude, 2026-02-06, added Orphan Index GC design)
 
 ---
 
@@ -1922,32 +1889,54 @@ Q3: "Show all schedule changes" (audit)
 | "Show all changes to this entity" | System time (Edge/NodeVersionHistory) | All versions with timestamps |
 | "Find entities active during period P" | Application time scan | Entities where ActivePeriod overlaps P |
 
-(claude, 2026-02-05, added to clarify bitemporal model)
-
 ---
 
 ## Open Questions
 
 1. **EdgeSummaryIndex schema and time semantics**
-   - Analysis: The design references `EdgeSummaryIndex` but does not define key/value layout or how "current" vs historical entries map to time-travel queries.
-   - Recommendation: Define the schema explicitly (key order, marker bit, and time/version mapping) before implementation to avoid divergent indexing behavior. (codex, 2026-02-05, decision)
+   - Define key/value layout and how "current" vs historical entries map to time-travel queries
+   - Decision: Define schema explicitly before implementation
 
 2. **Time-to-version lookup for `EdgeAtTime` / `NodeByIdAt`**
-   - Analysis: We can scan versions and select the max `UpdatedAt <= T`, but this is O(k) per edge where k=versions. Acceptable if k stays small.
-   - Recommendation: Start with scan-by-version using `UpdatedAt`; add a time-ordered index only if version counts grow or latency targets are missed. (codex, 2026-02-05, decision)
+   - O(k) scan per edge where k=versions; acceptable if k stays small
+   - Decision: Start with scan-by-version using `UpdatedAt`; add time-ordered index only if needed
 
-3. **Summary/fragment index maintenance on updates and rollbacks**
-   - Analysis: When content updates or rollbacks occur, summary/fragment indexes must be updated to avoid stale retrieval. The current doc does not detail which indexes are updated in each mutation.
-   - Recommendation: Enumerate index maintenance steps per mutation (Add/Update/Delete/Restore) before implementation to keep retrieval consistent. (codex, 2026-02-05, decision)
+3. **Summary/fragment index maintenance on updates and restores**
+   - Enumerate index maintenance steps per mutation (Add/Update/Delete/Restore)
+   - Decision: Document before implementation
 
 4. **History retention/GC policy**
-   - Analysis: The design supports full history but does not define retention bounds or GC triggers, which affects storage and compliance.
-   - Recommendation: Treat history as unbounded for MVP; add optional retention policies later once workload patterns are known. (codex, 2026-02-05, decision)
+   - Decision: Unbounded history for MVP; add retention policies later based on workload
 
 5. **Concurrency semantics and conflict resolution**
-   - Analysis: The design uses optimistic version checks, but does not specify behavior for concurrent writers updating topology vs content at the same time.
-   - Recommendation: Define conflict rules (e.g., version mismatch aborts; topology changes always close prior current row) to keep transactions deterministic. (codex, 2026-02-05, decision)
+   - Decision: Version mismatch aborts; topology changes always close prior row
 
-6. **Restore/rollback interval behavior**
-   - Analysis: Restores currently create new `valid_since` intervals; reopening an old interval is not described.
-   - Recommendation: Keep "new interval on restore" as the rule for audit clarity, and document it explicitly. (codex, 2026-02-05, decision)
+6. **Restore interval behavior**
+   - Decision: Restores create new `valid_since` intervals (never reopen old intervals)
+
+---
+
+## Appendix: Design Review Notes
+
+This section captures the design review discussion for historical reference.
+
+### Review Summary (2026-02-05)
+
+| Topic | Verdict | Resolution |
+|-------|---------|------------|
+| Multi-edge constraint | REJECT gap claim | Design intentionally prevents duplicate `(src,dst,name)`; use different `name` values |
+| UpdatedAt in VersionHistory | ACCEPT | Added to enable time→version mapping |
+| RefCount conflict | RESOLVED | Orphan Index design keeps RefCount but defers deletion; see [GC section](#garbage-collection) |
+| EdgeSummaryIndex schema | ACCEPT | Schema defined in CONTENT-ADDRESS.md |
+| Storage overhead | ACCEPT | Corrected to ~451 MB for 1M edges with 3 versions |
+| Fragment guidance | ACCEPT | Examples added in [Examples: Fragments](#examples-fragments) |
+
+### Key Design Decisions
+
+1. **Edge identity is `(src, dst, name)`** - Unique at any point in time. For different relationship types between the same nodes, use different `name` values.
+
+2. **Temporal versioning is for HISTORY, not concurrent duplicates** - Multiple "current" edges between same nodes must have different `name` values.
+
+3. **Orphan Index supersedes inline RefCount deletion** - Enables rollback by preserving summaries until GC retention expires.
+
+4. **Restores create new intervals** - Never reopen old `valid_since` intervals; always create new ones for audit clarity.
