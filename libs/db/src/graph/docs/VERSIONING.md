@@ -1611,14 +1611,14 @@ impl Subsystem {
         // Start stale index GC (existing)
         if let Some(config) = gc_config {
             let gc = Arc::new(GraphGarbageCollector::new(storage.clone(), config));
-            let _handle = gc.clone().spawn_worker();
+            let _gc = GraphGarbageCollector::start(storage.clone(), config);
             *self.gc.write().unwrap() = Some(gc);
         }
 
         // Start orphan summary GC (NEW)
         if let Some(config) = orphan_gc_config {
             let orphan_gc = Arc::new(OrphanSummaryGc::new(storage.clone(), config));
-            let _handle = orphan_gc.clone().spawn_worker();
+            let _orphan_gc = GraphGarbageCollector::start(storage.clone(), config);
             *self.orphan_gc.write().unwrap() = Some(orphan_gc);
         }
 
@@ -1681,7 +1681,7 @@ impl OrphanSummaryGc {
     }
 
     /// Spawn background worker that runs GC cycles at configured interval.
-    pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+    // legacy spawn_worker removed; use start() + owned shutdown()
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(self.config.interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

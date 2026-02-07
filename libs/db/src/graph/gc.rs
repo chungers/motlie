@@ -44,7 +44,7 @@
 //! println!("Deleted {} stale index entries", metrics.node_index_entries_deleted);
 //!
 //! // Or start background worker
-//! let handle = gc.spawn_worker();
+//! gc.shutdown();
 //! // ... later ...
 //! gc.shutdown();
 //! handle.await?;
@@ -506,48 +506,9 @@ impl GraphGarbageCollector {
 
     /// Signal shutdown without waiting (for backwards compatibility).
     ///
-    /// Prefer `shutdown(self)` or `shutdown_arc()` which wait for the worker.
+    /// Prefer `shutdown(self)` which waits for the worker.
     pub fn signal_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
-    }
-
-    /// Shutdown GC from an Arc reference.
-    ///
-    /// Attempts to unwrap the Arc and perform a clean shutdown with thread join.
-    /// If other references exist, signals shutdown and waits briefly for the worker.
-    ///
-    /// (claude, 2026-02-07, FIXED: P1.4 compatibility - handle Arc-wrapped GC)
-    pub fn shutdown_arc(gc: Arc<Self>) {
-        tracing::info!("GC: initiating shutdown (from Arc)");
-
-        // Signal shutdown first (visible to worker immediately)
-        gc.shutdown.store(true, Ordering::SeqCst);
-
-        // Try to get sole ownership for clean thread join
-        match Arc::try_unwrap(gc) {
-            Ok(mut gc) => {
-                // We have sole ownership - join the thread
-                if let Some(handle) = gc.worker_handle.take() {
-                    if let Err(e) = handle.join() {
-                        tracing::error!("GC worker thread panicked: {:?}", e);
-                    }
-                }
-                tracing::info!("GC: shutdown complete (owned)");
-            }
-            Err(arc) => {
-                // Other references exist - give worker time to notice shutdown
-                // The thread will exit on next iteration when it sees shutdown flag
-                tracing::warn!(
-                    "GC shutdown called but Arc has {} other references - worker will drain",
-                    Arc::strong_count(&arc) - 1
-                );
-                // (codex, 2026-02-07, eval: shutdown_arc does not join when Arc is shared; with spawn_worker(), the worker holds Arc, so this is best-effort and may still race storage shutdown.)
-                // (claude, 2026-02-07, FIXED: Subsystem now uses owned GC via start() which guarantees join. shutdown_arc remains for legacy callers.)
-                // Brief wait to let worker notice shutdown
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                tracing::info!("GC: shutdown signaled (shared)");
-            }
-        }
     }
 
     /// Check if shutdown has been signaled.
@@ -937,37 +898,6 @@ impl GraphGarbageCollector {
         Ok((node_deleted, edge_deleted))
     }
 
-    /// Spawn background GC worker.
-    ///
-    /// Returns a JoinHandle that completes when shutdown is signaled.
-    pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
-        // (codex, 2026-02-07, eval: this legacy tokio::spawn path reintroduces blocking GC work on the async runtime; ARCH2 intends std::thread with owned handle. Subsystem still calls this.)
-        // (claude, 2026-02-07, FIXED: Subsystem now uses start() with std::thread. spawn_worker retained for backward compat but deprecated in favor of start().)
-        let gc = self;
-        tokio::spawn(async move {
-            if gc.config.process_on_startup {
-                if let Err(e) = gc.run_cycle() {
-                    tracing::error!(error = %e, "GC startup cycle failed");
-                }
-            }
-
-            let mut interval = tokio::time::interval(gc.config.interval);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            loop {
-                interval.tick().await;
-
-                if gc.is_shutdown() {
-                    tracing::info!("GC worker shutting down");
-                    break;
-                }
-
-                if let Err(e) = gc.run_cycle() {
-                    tracing::error!(error = %e, "GC cycle failed");
-                }
-            }
-        })
-    }
 }
 
 // ============================================================================
@@ -1072,47 +1002,6 @@ mod tests {
         gc.shutdown();
 
         // Storage Arc remains valid for cleanup
-        drop(storage_arc);
-    }
-
-    #[test]
-    fn test_gc_shutdown_arc() {
-        use tempfile::TempDir;
-        use crate::graph::Storage;
-
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("gc_arc_test");
-
-        // Create and ready storage, then wrap in Arc
-        let mut storage = Storage::readwrite(&db_path);
-        storage.ready().unwrap();
-        let storage_arc = Arc::new(storage);
-
-        // Start GC
-        let config = GraphGcConfig::default()
-            .with_interval(Duration::from_millis(100));
-
-        let gc = GraphGarbageCollector::start(storage_arc.clone(), config);
-
-        // Wrap in Arc (simulating subsystem ownership)
-        let gc_arc = Arc::new(gc);
-
-        // Get metrics reference before shutdown
-        let _metrics = gc_arc.metrics().clone();
-
-        // Extract inner GC for shutdown
-        // Note: shutdown_arc handles Arc unwrap or signal+wait
-        match Arc::try_unwrap(gc_arc) {
-            Ok(gc) => {
-                gc.shutdown();
-            }
-            Err(arc) => {
-                // Would happen if there are other references
-                GraphGarbageCollector::shutdown_arc(arc);
-            }
-        }
-
-        // Storage Arc remains valid
         drop(storage_arc);
     }
 

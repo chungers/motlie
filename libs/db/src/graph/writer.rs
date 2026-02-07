@@ -188,9 +188,6 @@ pub struct Writer {
     /// Processor for creating transactions (optional - only present when configured)
     /// (claude, 2026-02-07, FIXED: P2.2 - Writer holds Arc<Processor> instead of Storage)
     processor: Option<Arc<GraphProcessor>>,
-    /// Legacy storage field for backward compatibility during transition
-    /// TODO: Remove after all call sites migrated to processor
-    storage: Option<Arc<Storage>>,
     /// Optional sender for transaction mutation forwarding (e.g., to fulltext)
     transaction_forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
 }
@@ -200,7 +197,6 @@ impl std::fmt::Debug for Writer {
         f.debug_struct("Writer")
             .field("sender", &"<mpsc::Sender>")
             .field("processor", &self.processor.as_ref().map(|_| "<Arc<Processor>>"))
-            .field("storage", &self.storage.as_ref().map(|_| "<Arc<Storage>>"))
             .field(
                 "transaction_forward_to",
                 &self.transaction_forward_to.as_ref().map(|_| "<mpsc::Sender>"),
@@ -213,12 +209,11 @@ impl Writer {
     /// Create a new MutationWriter with the given sender.
     ///
     /// This creates a basic writer without transaction support.
-    /// Use `with_processor()` or `with_storage()` to enable transaction features.
+    /// Use `with_processor()` to enable transaction features.
     pub fn new(sender: mpsc::Sender<Vec<Mutation>>) -> Self {
         Writer {
             sender,
             processor: None,
-            storage: None,
             transaction_forward_to: None,
         }
     }
@@ -229,19 +224,6 @@ impl Writer {
         Writer {
             sender,
             processor: Some(processor),
-            storage: None,
-            transaction_forward_to: None,
-        }
-    }
-
-    /// Create a new MutationWriter with storage for transaction support.
-    /// (Backward compatible - creates Processor internally)
-    pub fn with_storage(sender: mpsc::Sender<Vec<Mutation>>, storage: Arc<Storage>) -> Self {
-        let processor = Arc::new(GraphProcessor::new(storage.clone()));
-        Writer {
-            sender,
-            processor: Some(processor),
-            storage: Some(storage), // Keep for backward compat
             transaction_forward_to: None,
         }
     }
@@ -250,14 +232,6 @@ impl Writer {
     /// (claude, 2026-02-07, FIXED: P2.2 - Processor setter)
     pub(crate) fn set_processor(&mut self, processor: Arc<GraphProcessor>) {
         self.processor = Some(processor);
-    }
-
-    /// Set the storage for transaction support.
-    /// (Backward compatible - creates Processor internally)
-    pub fn set_storage(&mut self, storage: Arc<Storage>) {
-        let processor = Arc::new(GraphProcessor::new(storage.clone()));
-        self.processor = Some(processor);
-        self.storage = Some(storage);
     }
 
     /// Set the sender for transaction mutation forwarding.
@@ -325,13 +299,8 @@ impl Writer {
     }
 
     /// Check if transactions are supported by this writer.
-    /// (claude, 2026-02-07, FIXED: Check processor.storage() when storage is None per codex review)
     pub fn supports_transactions(&self) -> bool {
-        // First check direct storage reference
-        if let Some(s) = &self.storage {
-            return s.is_transactional();
-        }
-        // Fall back to processor's storage if available
+        // Check processor's storage if available
         if let Some(p) = &self.processor {
             return p.storage().is_transactional();
         }
