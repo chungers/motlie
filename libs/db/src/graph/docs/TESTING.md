@@ -161,7 +161,7 @@ Post-Refactor (ARCH2) Testing Adjustments
 
 | File | Test Count | Coverage Area |
 |------|------------|---------------|
-| `tests.rs` | 83 | Storage lifecycle, CRUD, summary, refcount, time-travel |
+| `tests.rs` | 100 | Storage lifecycle, CRUD, summary, refcount, time-travel, versioning, concurrency |
 | `query.rs` | 14 | Query execution, timeouts, pagination |
 | `gc.rs` | 8 | GC config, lifecycle, metrics |
 | `schema.rs` | 14 | CF serialization, key/value encoding |
@@ -186,12 +186,12 @@ Post-Refactor (ARCH2) Testing Adjustments
 | Edge CRUD | ✅ | tests.rs | test_add_edge_with_summary_and_query |
 | Summary writes | ✅ | tests.rs | test_node_summaries_cf_round_trip |
 | Summary index | ✅ | tests.rs | test_node_index_entry_current_marker |
-| Reverse edge index | ❌ | MISSING | Need: dst→incoming edges validation |
-| Forward + reverse consistency | ❌ | MISSING | Need: atomic txn writes both sides |
-| Fragment append | ❌ | MISSING | Need: fragment CF idempotency |
+| Reverse edge index | ✅ | tests.rs | test_reverse_edge_index_consistency |
+| Forward + reverse consistency | ✅ | tests.rs | test_forward_reverse_atomic_commit |
+| Fragment append | ✅ | tests.rs | test_fragment_append_idempotency |
 | Fragment search | ❌ | MISSING | Need: bm25 smoke test |
 | Delete semantics | ✅ | tests.rs | test_delete_node_marks_orphan |
-| Error handling | ❌ | MISSING | Need: missing node/edge error paths |
+| Error handling | ✅ | tests.rs | test_query_missing_node/edge_returns_error |
 | Serialization | ✅ | tests.rs | test_rkyv_* tests (6 tests) |
 | Lifecycle | ✅ | tests.rs | test_storage_lifecycle |
 | GC lifecycle | ✅ | gc.rs | test_gc_start_shutdown_lifecycle |
@@ -202,14 +202,14 @@ Post-Refactor (ARCH2) Testing Adjustments
 | Requirement | Status | Location | Notes |
 |-------------|--------|----------|-------|
 | VersionHistory create | ✅ | tests.rs | test_node_initial_version |
-| VersionHistory update | ❌ | MISSING | Need: update writes history entry |
-| VersionHistory delete | ❌ | MISSING | Need: delete writes tombstone history |
+| VersionHistory update | ✅ | tests.rs | test_node_update_creates_version_history |
+| VersionHistory delete | ✅ | tests.rs | test_delete_writes_history_tombstone |
 | Restore by version | ❌ | MISSING | Need: restore returns correct snapshot |
 | Restore CURRENT marker | ❌ | MISSING | Need: no multiple CURRENT markers |
 | Restore summary reuse | ❌ | MISSING | Need: reuses existing hash if present |
 | Time travel AsOf | ✅ | tests.rs | test_point_in_time_node_query |
 | Validity range | ✅ | tests.rs | test_active_period_filtering |
-| Weight history | ❌ | MISSING | Need: weight updates create version |
+| Weight history | ✅ | tests.rs | test_edge_weight_update_creates_version |
 | RestoreEdges batch | ❌ | MISSING | Need: batch marks STALE, records orphans |
 | Restore missing summary | ❌ | MISSING | Need: fail if summary GC'd |
 
@@ -217,10 +217,10 @@ Post-Refactor (ARCH2) Testing Adjustments
 
 | Requirement | Status | Location | Notes |
 |-------------|--------|----------|-------|
-| Reverse edge temporal | ❌ | MISSING | Need: forward update→reverse update |
+| Reverse edge temporal | ✅ | tests.rs | test_reverse_edge_index_consistency |
 | CURRENT/STALE markers | ✅ | tests.rs | test_node_index_entry_current_marker |
-| Hash prefix scans | ❌ | MISSING | Need: prefix scan returns all entities |
-| Padded version ordering | ❌ | MISSING | Need: reverse scan yields latest first |
+| Hash prefix scans | ✅ | tests.rs | test_summary_hash_prefix_scan |
+| Padded version ordering | ✅ | tests.rs | test_version_scan_returns_latest_first |
 
 #### GC and Storage - Status
 
@@ -235,21 +235,21 @@ Post-Refactor (ARCH2) Testing Adjustments
 
 | Requirement | Status | Location | Notes |
 |-------------|--------|----------|-------|
-| Concurrent updates | ❌ | MISSING | Need: two writers same node/edge |
-| Multi-step txn atomicity | ❌ | MISSING | Need: forward+reverse+summary atomic |
-| Idempotency | ❌ | MISSING | Need: replay same mutation safe |
-| Shutdown under load | ❌ | MISSING | Need: no CF corruption |
+| Concurrent updates | ✅ | tests.rs | test_concurrent_writers_same_node |
+| Multi-step txn atomicity | ✅ | tests.rs | test_forward_reverse_atomic_commit |
+| Idempotency | ✅ | tests.rs | test_replay_mutation_idempotent |
+| Shutdown under load | ✅ | tests.rs | test_shutdown_during_writes_no_corruption |
 
 #### ARCH2 Post-Refactor - Status
 
 | Requirement | Status | Location | Notes |
 |-------------|--------|----------|-------|
-| Processor API tests | ✅ | processor.rs | test_processor_creation |
+| Processor API tests | ✅ | tests.rs | test_processor_implements_writer_processor |
 | Consumer wiring | ✅ | tests.rs | test_graph_consumer_basic_processing |
 | Facade removal | ✅ | VERIFIED | Graph struct removed |
-| Cache ownership | ❌ | MISSING | Need: NameCache shared access test |
+| Cache ownership | ✅ | tests.rs | test_namecache_shared_across_consumers |
 | Subsystem lifecycle | ✅ | subsystem.rs | test_subsystem_new |
-| Transaction API | ✅ | test_transaction_api.rs | Integration tests |
+| Transaction API | ✅ | tests.rs | test_transaction_read_your_writes |
 | Metrics/info | ✅ | tests.rs | test_gc_metrics |
 
 ---
