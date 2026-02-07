@@ -6,7 +6,7 @@ This module provides RocksDB-based graph storage with async query/mutation proce
 
 ```
 graph/
-├── mod.rs       # Storage, Graph struct, module exports
+├── mod.rs       # Storage, Processor, module exports
 ├── schema.rs    # Column family definitions, key/value types
 ├── mutation.rs  # Mutation types (AddNode, AddEdge, etc.)
 ├── writer.rs    # Writer/MutationConsumer infrastructure
@@ -40,7 +40,7 @@ storage.ready()?;
 storage.try_catch_up_with_primary()?;
 ```
 
-### Graph
+### Processor
 
 `Processor` wraps `Arc<Storage>` and provides the execution interface:
 
@@ -126,15 +126,15 @@ let result = NodeById::new(node_id, None)
 |----------|-------------|
 | `spawn_mutation_consumer(receiver, config, path)` | Creates storage and processes mutations |
 | `spawn_mutation_consumer_with_next(receiver, config, path, next_tx)` | Chains to next consumer |
-| `spawn_mutation_consumer_with_graph(receiver, config, graph)` | Uses existing Arc\<Graph\> |
+| `spawn_mutation_consumer_with_receiver(receiver, config, processor)` | Uses existing Arc\<Processor\> |
 
 ### Query Consumers
 
 | Function | Description |
 |----------|-------------|
 | `spawn_query_consumer(receiver, config, path)` | Creates storage and processes queries |
-| `spawn_query_consumer_with_graph(receiver, config, graph)` | Uses existing Arc\<Graph\> |
-| `spawn_query_consumer_pool_shared(receiver, graph, n)` | N workers sharing one Graph |
+| `spawn_query_consumer_with_processor(receiver, config, processor)` | Uses existing Arc\<Processor\> |
+| `spawn_query_consumer_pool_shared(receiver, processor, n)` | N workers sharing one Processor |
 | `spawn_query_consumer_pool_readonly(receiver, config, path, n)` | N workers with own readonly storage |
 
 ## Schema
