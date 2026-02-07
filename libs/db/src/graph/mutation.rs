@@ -2567,8 +2567,16 @@ impl MutationExecutor for RestoreEdges {
             };
 
             // Find current version to supersede
+            // (claude, 2026-02-07, FIXED: Codex Item 18 - track old summary for STALE marking)
             let mut new_version = 1u32;
+            let mut old_summary_hash: Option<SummaryHash> = None;
+            let mut old_version: schema::Version = 0;
+
             if let Some((current_key_bytes, current)) = find_current_forward_edge_version(txn, txn_db, self.src_id, dst_id, name_hash)? {
+                // Capture old summary info for STALE marking
+                old_summary_hash = current.3;
+                old_version = current.4;
+
                 // Mark old forward edge as superseded
                 let old_edge_value = ForwardEdgeCfValue(
                     Some(now),
@@ -2620,6 +2628,18 @@ impl MutationExecutor for RestoreEdges {
             // Remove reused summary from orphans
             if let Some(hash) = history_value.1 {
                 remove_summary_from_orphans(txn, txn_db, hash)?;
+            }
+
+            // (claude, 2026-02-07, FIXED: Codex Item 18 - mark old summary index STALE and orphan candidate)
+            // Mark old summary index entry as STALE (if exists)
+            if let Some(old_hash) = old_summary_hash {
+                let old_index_key = EdgeSummaryIndexCfKey(old_hash, self.src_id, dst_id, name_hash, old_version);
+                let old_index_key_bytes = EdgeSummaryIndex::key_to_bytes(&old_index_key);
+                let stale_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
+                txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
+
+                // Mark old summary as orphan candidate (may be shared, GC will verify)
+                mark_edge_summary_orphan_candidate(txn, txn_db, old_hash)?;
             }
 
             // Write summary index entry
