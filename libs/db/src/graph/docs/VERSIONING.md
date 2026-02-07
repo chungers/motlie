@@ -144,6 +144,7 @@ See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time
 
 | CF | BEFORE CfKey | BEFORE CfValue | AFTER CfKey | AFTER CfValue | Delta |
 |----|--------------|----------------|-------------|---------------|-------|
+| **Names** | `(NameHash)` 8B | `(String)` | *unchanged* | *unchanged* | None |
 | **Nodes** | `(Id)` 16B | `(ActivePeriod?, NameHash, SummaryHash?, Version, Deleted)` | `(Id, ValidSince)` 24B | `(ValidUntil, ActivePeriod?, NameHash, SummaryHash?, Version, Deleted)` | Key +8B |
 | **ForwardEdges** | `(SrcId, DstId, NameHash)` 40B | `(ActivePeriod?, Weight?, SummaryHash?, Version, Deleted)` | `(SrcId, DstId, NameHash, ValidSince)` 48B | `(ValidUntil, ActivePeriod?, Weight?, SummaryHash?, Version, Deleted)` | Key +8B |
 | **ReverseEdges** | `(DstId, SrcId, NameHash)` 40B | `(ActivePeriod?)` | `(DstId, SrcId, NameHash, ValidSince)` 48B | `(ValidUntil, ActivePeriod?)` | Key +8B |
@@ -161,6 +162,7 @@ See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time
 
 | CF | Tier | Serialization | Rationale |
 |----|------|---------------|-----------|
+| **Names** | COLD | MessagePack + LZ4 | Name interning lookup; cached in memory |
 | **Nodes** | HOT | rkyv (zero-copy) | Traversal hot path |
 | **ForwardEdges** | HOT | rkyv (zero-copy) | Traversal hot path |
 | **ReverseEdges** | HOT | rkyv (zero-copy) | Traversal hot path |
@@ -182,6 +184,30 @@ See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time
 // ============================================================
 pub type ValidSince = TimestampMilli;
 pub type ValidUntil = TimestampMilli;
+
+// ============================================================
+// NAMES CF (COLD - name interning, unchanged by VERSIONING)
+// ============================================================
+// Serialization: MessagePack + LZ4 (ColumnFamilySerde)
+// Rationale: Name resolution lookups; NameCache provides in-memory caching.
+//
+// NOTE: No RefCount needed (unlike Summaries) because:
+// - Small values (~5-20 bytes per name)
+// - High reuse (many entities share "knows", "person", etc.)
+// - Edge names are immutable (part of key identity, can't orphan)
+// - Node names rarely change
+// - Append-only is acceptable; storage overhead negligible
+
+/// Names CF stores NameHash → String mappings for name interning.
+/// Variable-length names are replaced with fixed 8-byte hashes in keys.
+pub struct Names;
+
+impl ColumnFamily for Names {
+    const CF_NAME: &'static str = "graph/names";
+}
+
+pub struct NameCfKey(pub NameHash);    // 8 bytes
+pub struct NameCfValue(pub String);     // Variable length, no RefCount
 
 // ============================================================
 // NODES CF
