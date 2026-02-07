@@ -50,7 +50,7 @@ pub trait Processor {
     fn storage(&self) -> &Storage;
 }
 
-/// Implement Processor for Index (mirrors graph::Graph implementing query::Processor)
+/// Implement Processor for Index (mirrors graph::Processor implementing reader::Processor)
 impl Processor for Index {
     fn storage(&self) -> &Storage {
         Index::storage(self)

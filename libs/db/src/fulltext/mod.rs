@@ -49,10 +49,10 @@ pub use writer::{
 
 /// Full-text search processor using Tantivy, wrapping Arc<Storage>.
 ///
-/// Following the same pattern as `graph::Graph` wrapping `Arc<graph::Storage>`,
+/// Following the same pattern as `graph::Processor` wrapping `Arc<graph::Storage>`,
 /// this type provides the interface for both mutation processing and query processing.
 ///
-/// # Usage Pattern (matches graph::Graph)
+/// # Usage Pattern (matches graph::Processor)
 /// ```no_run
 /// use motlie_db::fulltext::{Storage, Index};
 /// use std::sync::Arc;
@@ -83,7 +83,7 @@ impl Index {
     /// Create a new Index from Arc<Storage>.
     ///
     /// The Storage should already be `ready()` before creating the Index.
-    /// This follows the same pattern as `graph::Graph::new(Arc<Storage>)`.
+    /// This follows the same pattern as `graph::Processor::new(Arc<Storage>)`.
     pub fn new(storage: Arc<Storage>) -> Self {
         Self { storage }
     }

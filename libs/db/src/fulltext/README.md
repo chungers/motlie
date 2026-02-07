@@ -285,7 +285,7 @@ let (r1, r2, r3) = tokio::join!(client1, client2, client3);
                     │                      │         │              │        ││
                     │                      │         ▼              ▼        ││
                     │                      │    ┌─────────────────────┐      ││
-                    │                      │    │   Arc<Graph>        │      ││
+                    │                      │    │  Arc<Processor>     │      ││
                     │                      │    │   (shared Storage)  │      ││
                     │                      │    └─────────────────────┘      ││
                     │                      └─────────────────────────────────┘│
@@ -310,11 +310,11 @@ let (r1, r2, r3) = tokio::join!(client1, client2, client3);
 
 ## Key Design Principles
 
-1. **Separation of Storage and Processor**: `Storage` handles the underlying database, while `Graph`/`Index` provides the query/mutation interface.
+1. **Separation of Storage and Processor**: `Storage` handles the underlying database, while `Processor`/`Index` provides the query/mutation interface.
 
 2. **Readonly vs Readwrite Modes**: Readonly mode allows multiple concurrent readers. Readwrite mode provides exclusive write access.
 
-3. **Arc-based Sharing**: Multiple query consumers share a single `Arc<Graph>` or `Arc<Index>`, minimizing memory usage and ensuring consistency.
+3. **Arc-based Sharing**: Multiple query consumers share a single `Arc<Processor>` or `Arc<Index>`, minimizing memory usage and ensuring consistency.
 
 4. **Channel-based Communication**: MPMC (multi-producer, multi-consumer) channels enable concurrent query processing.
 
