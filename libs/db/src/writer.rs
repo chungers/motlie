@@ -370,9 +370,9 @@ impl WriterBuilder {
         let (mut graph_writer, graph_rx) =
             graph::writer::create_mutation_writer(self.config.graph.clone());
 
-        // Configure the writer with storage for transaction support
+        // Configure the writer with processor for transaction support
         // and forward transaction mutations to fulltext
-        graph_writer.set_storage(self.graph.storage().clone());
+        graph_writer.set_processor(self.graph.clone());
         graph_writer.set_transaction_forward_to(fulltext_tx.clone());
 
         // Spawn graph consumer with chaining to fulltext

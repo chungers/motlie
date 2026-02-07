@@ -6,6 +6,7 @@
 
 > (claude, 2026-02-07) These bugs exist in the current graph crate and MUST be
 > fixed as part of this refactor. Do not close this work until all are resolved.
+> (codex, 2026-02-07, eval: legacy `spawn_worker`/`shutdown_arc` paths removed; GC now starts via `GraphGarbageCollector::start()` with owned shutdown + join.)
 
 ### BUG 1: GC Worker Handle Discarded
 
@@ -13,7 +14,7 @@
 
 ```rust
 // CURRENT (BROKEN):
-let _handle = gc.clone().spawn_worker();  // ← HANDLE DISCARDED!
+let _handle = gc.clone().spawn_worker();  // ← HANDLE DISCARDED! (legacy path)
 *self.gc.write().expect("gc lock") = Some(gc);
 ```
 
@@ -69,7 +70,7 @@ pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
 - [x] `subsystem.rs` no longer discards GC worker handle (P1.1 DONE)
 - [x] `gc.shutdown()` blocks until worker thread completes (P1.2 DONE)
 - [x] GC uses `std::thread::spawn` not `tokio::spawn` (P1.3 DONE)
-- [x] Shutdown order: flush → consumers → GC (GC last) (P1.4 DONE - uses shutdown_arc)
+- [x] Shutdown order: flush → consumers → GC (GC last) (P1.4 DONE - uses owned shutdown)
 - [x] No panics or errors during `cargo test` shutdown sequences (P1.5 DONE - lifecycle tests pass)
 
 ---
@@ -882,7 +883,7 @@ The vector subsystem manages component lifecycle with explicit ownership:
 ```rust
 // Current (BROKEN):
 let gc = Arc::new(GraphGarbageCollector::new(storage, config));
-let _handle = gc.clone().spawn_worker();  // ← Handle discarded!
+let _handle = gc.clone().spawn_worker();  // ← Handle discarded! (legacy path)
 *self.gc.write() = Some(gc);
 ```
 
@@ -1308,7 +1309,7 @@ These must be fixed before starting the main refactor to avoid compounding insta
 **Current (BROKEN):**
 ```rust
 // subsystem.rs:234
-let _handle = gc.clone().spawn_worker();  // Handle discarded!
+let _handle = gc.clone().spawn_worker();  // Handle discarded! (legacy path)
 ```
 
 **Fix:**
@@ -1349,7 +1350,7 @@ pub fn shutdown(mut self) {
 
 **Current (WRONG):**
 ```rust
-pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> { // legacy path
     tokio::spawn(async move {
         // Blocking RocksDB operations inside async context!
     })
@@ -1364,10 +1365,10 @@ pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
 
 **File:** `libs/db/src/graph/subsystem.rs`
 
-- Change `start()` to use `GraphGarbageCollector::start()` instead of `spawn_worker()`
+- Change `start()` to use `GraphGarbageCollector::start()` instead of legacy `spawn_worker()`
 - Change `on_shutdown()` - `gc.shutdown()` now blocks until worker completes
 
-- [x] P1.4 complete (claude, 2026-02-07) - Subsystem uses shutdown_arc() for Arc-wrapped GC
+- [x] P1.4 complete (claude, 2026-02-07) - Subsystem uses owned GC shutdown()
 
 #### P1.5: Add Lifecycle Tests
 

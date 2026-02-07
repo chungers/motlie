@@ -88,7 +88,8 @@ impl<T: QueryExecutor> QueryWithTimeout for T {
 }
 
 // ============================================================================
-// Processor Trait - bridges Graph to QueryExecutor
+// Processor Trait - bridges query execution to storage
+// (codex, 2026-02-07, eval: comment still references Graph; Graph removed in ARCH2 refactor.)
 // ============================================================================
 
 /// Trait for processing different types of queries.
