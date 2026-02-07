@@ -378,6 +378,7 @@ impl GcMetricsSnapshot {
 ///
 /// # VERSIONING: Deferred Deletion
 /// (claude, 2026-02-07, FIXED: Updated doc to reflect OrphanSummaries GC)
+/// (claude, 2026-02-07, FIXED: P1.1-P1.3 - Store worker handle, use std::thread, shutdown joins)
 ///
 /// Summary rows are NOT deleted inline when their entity is updated/deleted.
 /// Instead, orphan candidates are written to OrphanSummaries CF. GC scans
@@ -388,16 +389,95 @@ pub struct GraphGarbageCollector {
     config: GraphGcConfig,
     shutdown: Arc<AtomicBool>,
     metrics: Arc<GcMetrics>,
+    /// Worker thread handle for shutdown join.
+    /// (claude, 2026-02-07, FIXED: P1.1 - Store handle instead of discarding)
+    worker_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl GraphGarbageCollector {
-    /// Create a new garbage collector.
+    /// Create a new garbage collector (without starting worker).
+    ///
+    /// Use `start()` to create and start a GC with embedded worker thread.
     pub fn new(storage: Arc<Storage>, config: GraphGcConfig) -> Self {
         Self {
             storage,
             config,
             shutdown: Arc::new(AtomicBool::new(false)),
             metrics: Arc::new(GcMetrics::new()),
+            worker_handle: None,
+        }
+    }
+
+    /// Create and start a garbage collector with embedded worker thread.
+    ///
+    /// This is the recommended way to create a GC for production use.
+    /// The worker thread runs GC cycles at the configured interval.
+    ///
+    /// (claude, 2026-02-07, FIXED: P1.1-P1.3 - Use std::thread, store handle)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let gc = GraphGarbageCollector::start(storage, config);
+    /// // ... later ...
+    /// gc.shutdown(); // Blocks until worker completes
+    /// ```
+    pub fn start(storage: Arc<Storage>, config: GraphGcConfig) -> Self {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let metrics = Arc::new(GcMetrics::new());
+
+        // Clone for the worker thread
+        let worker_storage = storage.clone();
+        let worker_config = config.clone();
+        let worker_shutdown = shutdown.clone();
+        let worker_metrics = metrics.clone();
+
+        // Spawn worker thread (not tokio task - blocking RocksDB work)
+        // (claude, 2026-02-07, FIXED: P1.3 - Use std::thread instead of tokio::spawn)
+        let worker_handle = std::thread::spawn(move || {
+            tracing::info!("GC worker thread started");
+
+            // Run startup cycle if configured
+            if worker_config.process_on_startup {
+                if let Err(e) = Self::run_cycle_inner(
+                    &worker_storage,
+                    &worker_config,
+                    &worker_metrics,
+                ) {
+                    tracing::error!(error = %e, "GC startup cycle failed");
+                }
+            }
+
+            // Main loop
+            loop {
+                // Sleep for interval
+                std::thread::sleep(worker_config.interval);
+
+                // Check shutdown flag
+                if worker_shutdown.load(Ordering::SeqCst) {
+                    tracing::info!("GC worker thread shutting down");
+                    break;
+                }
+
+                // Run GC cycle
+                if let Err(e) = Self::run_cycle_inner(
+                    &worker_storage,
+                    &worker_config,
+                    &worker_metrics,
+                ) {
+                    tracing::error!(error = %e, "GC cycle failed");
+                }
+            }
+
+            tracing::info!("GC worker thread exited");
+        });
+
+        Self {
+            storage,
+            config,
+            shutdown,
+            metrics,
+            worker_handle: Some(worker_handle),
         }
     }
 
@@ -406,9 +486,66 @@ impl GraphGarbageCollector {
         &self.metrics
     }
 
-    /// Signal shutdown to the GC worker.
-    pub fn shutdown(&self) {
+    /// Shutdown GC and wait for worker thread to complete.
+    ///
+    /// Takes ownership to prevent use-after-shutdown.
+    ///
+    /// (claude, 2026-02-07, FIXED: P1.2 - Shutdown joins worker thread)
+    pub fn shutdown(mut self) {
+        tracing::info!("GC: initiating shutdown");
         self.shutdown.store(true, Ordering::SeqCst);
+
+        if let Some(handle) = self.worker_handle.take() {
+            if let Err(e) = handle.join() {
+                tracing::error!("GC worker thread panicked: {:?}", e);
+            }
+        }
+
+        tracing::info!("GC: shutdown complete");
+    }
+
+    /// Signal shutdown without waiting (for backwards compatibility).
+    ///
+    /// Prefer `shutdown(self)` or `shutdown_arc()` which wait for the worker.
+    pub fn signal_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    /// Shutdown GC from an Arc reference.
+    ///
+    /// Attempts to unwrap the Arc and perform a clean shutdown with thread join.
+    /// If other references exist, signals shutdown and waits briefly for the worker.
+    ///
+    /// (claude, 2026-02-07, FIXED: P1.4 compatibility - handle Arc-wrapped GC)
+    pub fn shutdown_arc(gc: Arc<Self>) {
+        tracing::info!("GC: initiating shutdown (from Arc)");
+
+        // Signal shutdown first (visible to worker immediately)
+        gc.shutdown.store(true, Ordering::SeqCst);
+
+        // Try to get sole ownership for clean thread join
+        match Arc::try_unwrap(gc) {
+            Ok(mut gc) => {
+                // We have sole ownership - join the thread
+                if let Some(handle) = gc.worker_handle.take() {
+                    if let Err(e) = handle.join() {
+                        tracing::error!("GC worker thread panicked: {:?}", e);
+                    }
+                }
+                tracing::info!("GC: shutdown complete (owned)");
+            }
+            Err(arc) => {
+                // Other references exist - give worker time to notice shutdown
+                // The thread will exit on next iteration when it sees shutdown flag
+                tracing::warn!(
+                    "GC shutdown called but Arc has {} other references - worker will drain",
+                    Arc::strong_count(&arc) - 1
+                );
+                // Brief wait to let worker notice shutdown
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                tracing::info!("GC: shutdown signaled (shared)");
+            }
+        }
     }
 
     /// Check if shutdown has been signaled.
@@ -421,21 +558,32 @@ impl GraphGarbageCollector {
     /// Processes up to `batch_size` entries from each index CF,
     /// deleting stale entries based on version retention policy.
     pub fn run_cycle(&self) -> Result<GcMetricsSnapshot> {
-        let before = self.metrics.snapshot();
+        Self::run_cycle_inner(&self.storage, &self.config, &self.metrics)
+    }
+
+    /// Internal GC cycle implementation (can be called from worker thread).
+    ///
+    /// (claude, 2026-02-07, FIXED: P1.3 - Extracted for use by std::thread worker)
+    fn run_cycle_inner(
+        storage: &Arc<Storage>,
+        config: &GraphGcConfig,
+        metrics: &Arc<GcMetrics>,
+    ) -> Result<GcMetricsSnapshot> {
+        let before = metrics.snapshot();
 
         // GC stale node summary index entries
-        self.gc_node_summary_index()?;
+        Self::gc_node_summary_index_inner(storage, config, metrics)?;
 
         // GC stale edge summary index entries
-        self.gc_edge_summary_index()?;
+        Self::gc_edge_summary_index_inner(storage, config, metrics)?;
 
         // GC orphan summaries (VERSIONING: deferred deletion with retention)
         // (claude, 2026-02-07, FIXED: Added orphan summary GC per VERSIONING)
-        self.gc_orphan_summaries()?;
+        Self::gc_orphan_summaries_inner(storage, config, metrics)?;
 
-        self.metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
+        metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
 
-        let after = self.metrics.snapshot();
+        let after = metrics.snapshot();
 
         tracing::info!(
             node_index_deleted = after.node_index_entries_deleted - before.node_index_entries_deleted,
@@ -453,7 +601,17 @@ impl GraphGarbageCollector {
     ///
     /// Scans from cursor position, deletes STALE entries for old versions.
     fn gc_node_summary_index(&self) -> Result<u64> {
-        let txn_db = self.storage.transaction_db()?;
+        Self::gc_node_summary_index_inner(&self.storage, &self.config, &self.metrics)
+    }
+
+    /// Internal implementation of node summary index GC.
+    /// (claude, 2026-02-07, FIXED: P1.3 - Extracted for use by std::thread worker)
+    fn gc_node_summary_index_inner(
+        storage: &Arc<Storage>,
+        config: &GraphGcConfig,
+        metrics: &Arc<GcMetrics>,
+    ) -> Result<u64> {
+        let txn_db = storage.transaction_db()?;
         let txn = txn_db.transaction();
         let mut deleted = 0u64;
         let mut processed = 0usize;
@@ -476,7 +634,7 @@ impl GraphGarbageCollector {
             .get_cf(meta_cf, &cursor_key_bytes)?
             .unwrap_or_default();
 
-        let n = self.config.versions_to_keep as Version;
+        let n = config.versions_to_keep as Version;
 
         // Create iterator from cursor position
         let iter = if start_key.is_empty() {
@@ -491,7 +649,7 @@ impl GraphGarbageCollector {
         let mut last_key: Option<Vec<u8>> = None;
 
         for item in iter {
-            if processed >= self.config.batch_size {
+            if processed >= config.batch_size {
                 break;
             }
 
@@ -540,14 +698,24 @@ impl GraphGarbageCollector {
         }
 
         txn.commit()?;
-        self.metrics.node_index_entries_deleted.fetch_add(deleted, Ordering::Relaxed);
+        metrics.node_index_entries_deleted.fetch_add(deleted, Ordering::Relaxed);
 
         Ok(deleted)
     }
 
     /// GC stale entries from EdgeSummaryIndex CF.
     fn gc_edge_summary_index(&self) -> Result<u64> {
-        let txn_db = self.storage.transaction_db()?;
+        Self::gc_edge_summary_index_inner(&self.storage, &self.config, &self.metrics)
+    }
+
+    /// Internal implementation of edge summary index GC.
+    /// (claude, 2026-02-07, FIXED: P1.3 - Extracted for use by std::thread worker)
+    fn gc_edge_summary_index_inner(
+        storage: &Arc<Storage>,
+        config: &GraphGcConfig,
+        metrics: &Arc<GcMetrics>,
+    ) -> Result<u64> {
+        let txn_db = storage.transaction_db()?;
         let txn = txn_db.transaction();
         let mut deleted = 0u64;
         let mut processed = 0usize;
@@ -570,7 +738,7 @@ impl GraphGarbageCollector {
             .get_cf(meta_cf, &cursor_key_bytes)?
             .unwrap_or_default();
 
-        let n = self.config.versions_to_keep as Version;
+        let n = config.versions_to_keep as Version;
 
         // Create iterator from cursor position
         let iter = if start_key.is_empty() {
@@ -585,7 +753,7 @@ impl GraphGarbageCollector {
         let mut last_key: Option<Vec<u8>> = None;
 
         for item in iter {
-            if processed >= self.config.batch_size {
+            if processed >= config.batch_size {
                 break;
             }
 
@@ -608,7 +776,6 @@ impl GraphGarbageCollector {
             let version = index_key.4;
 
             // Look up current edge version via prefix scan
-            // (claude, 2026-02-06, in-progress: VERSIONING uses prefix scan)
             match find_current_edge_version_for_gc(&txn, edges_cf, src_id, dst_id, name_hash)? {
                 Some((current_version, is_deleted)) => {
                     let min_keep = current_version.saturating_sub(n - 1);
@@ -637,7 +804,7 @@ impl GraphGarbageCollector {
         }
 
         txn.commit()?;
-        self.metrics.edge_index_entries_deleted.fetch_add(deleted, Ordering::Relaxed);
+        metrics.edge_index_entries_deleted.fetch_add(deleted, Ordering::Relaxed);
 
         Ok(deleted)
     }
@@ -650,16 +817,25 @@ impl GraphGarbageCollector {
     /// Before deleting, verifies no CURRENT entries in the summary index reference this hash.
     /// Also deletes the summary data from NodeSummaries/EdgeSummaries CFs.
     fn gc_orphan_summaries(&self) -> Result<(u64, u64)> {
+        Self::gc_orphan_summaries_inner(&self.storage, &self.config, &self.metrics)
+    }
+
+    /// Internal implementation of orphan summary GC.
+    /// (claude, 2026-02-07, FIXED: P1.3 - Extracted for use by std::thread worker)
+    fn gc_orphan_summaries_inner(
+        storage: &Arc<Storage>,
+        config: &GraphGcConfig,
+        metrics: &Arc<GcMetrics>,
+    ) -> Result<(u64, u64)> {
         use super::schema::{
-            OrphanSummaries, OrphanSummaryCfKey, OrphanSummaryCfValue, SummaryKind,
+            OrphanSummaries, SummaryKind,
             NodeSummaries, NodeSummaryCfKey,
             EdgeSummaries, EdgeSummaryCfKey,
-            NodeSummaryIndex, NodeSummaryIndexCfValue,
-            EdgeSummaryIndex, EdgeSummaryIndexCfValue,
+            NodeSummaryIndex,
+            EdgeSummaryIndex,
         };
-        use super::summary_hash::SummaryHash;
 
-        let txn_db = self.storage.transaction_db()?;
+        let txn_db = storage.transaction_db()?;
         let txn = txn_db.transaction();
         let mut node_deleted = 0u64;
         let mut edge_deleted = 0u64;
@@ -684,7 +860,7 @@ impl GraphGarbageCollector {
 
         // Calculate cutoff time (entries older than this are eligible)
         let now = crate::TimestampMilli::now();
-        let retention_millis = self.config.orphan_retention.as_millis() as u64;
+        let retention_millis = config.orphan_retention.as_millis() as u64;
         let cutoff = crate::TimestampMilli(now.0.saturating_sub(retention_millis));
 
         // Scan from start - OrphanSummaries is time-ordered
@@ -693,7 +869,7 @@ impl GraphGarbageCollector {
         let mut orphan_keys_to_delete: Vec<Vec<u8>> = Vec::new();
 
         for item in iter {
-            if processed >= self.config.batch_size {
+            if processed >= config.batch_size {
                 break;
             }
 
@@ -715,7 +891,6 @@ impl GraphGarbageCollector {
             }
 
             // Check if summary is still referenced by any CURRENT entity before deleting
-            // (claude, 2026-02-07, FIXED: Verify no current references per Codex review)
             match orphan_value.0 {
                 SummaryKind::Node => {
                     // Check if any CURRENT entries in NodeSummaryIndex reference this hash
@@ -754,8 +929,8 @@ impl GraphGarbageCollector {
 
         txn.commit()?;
 
-        self.metrics.orphan_node_summaries_deleted.fetch_add(node_deleted, Ordering::Relaxed);
-        self.metrics.orphan_edge_summaries_deleted.fetch_add(edge_deleted, Ordering::Relaxed);
+        metrics.orphan_node_summaries_deleted.fetch_add(node_deleted, Ordering::Relaxed);
+        metrics.orphan_edge_summaries_deleted.fetch_add(edge_deleted, Ordering::Relaxed);
 
         Ok((node_deleted, edge_deleted))
     }
@@ -855,5 +1030,148 @@ mod tests {
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.node_index_entries_deleted, 0);
+    }
+
+    // ========================================================================
+    // Lifecycle Tests (P1.5)
+    // (claude, 2026-02-07, FIXED: Added lifecycle tests per ARCH2 P1.5)
+    // ========================================================================
+
+    #[test]
+    fn test_gc_start_shutdown_lifecycle() {
+        use tempfile::TempDir;
+        use crate::graph::Storage;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("gc_lifecycle_test");
+
+        // Create and ready storage, then wrap in Arc
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let storage_arc = Arc::new(storage);
+
+        // Start GC with short interval for testing
+        let config = GraphGcConfig::default()
+            .with_interval(Duration::from_millis(50))
+            .with_batch_size(10);
+
+        let gc = GraphGarbageCollector::start(storage_arc.clone(), config);
+
+        // Let GC run a couple cycles
+        std::thread::sleep(Duration::from_millis(150));
+
+        // Verify at least one cycle ran
+        let metrics = gc.metrics().snapshot();
+        assert!(metrics.cycles_completed >= 1, "GC should have completed at least 1 cycle");
+
+        // Shutdown - should block until worker completes
+        gc.shutdown();
+
+        // Storage Arc remains valid for cleanup
+        drop(storage_arc);
+    }
+
+    #[test]
+    fn test_gc_shutdown_arc() {
+        use tempfile::TempDir;
+        use crate::graph::Storage;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("gc_arc_test");
+
+        // Create and ready storage, then wrap in Arc
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let storage_arc = Arc::new(storage);
+
+        // Start GC
+        let config = GraphGcConfig::default()
+            .with_interval(Duration::from_millis(100));
+
+        let gc = GraphGarbageCollector::start(storage_arc.clone(), config);
+
+        // Wrap in Arc (simulating subsystem ownership)
+        let gc_arc = Arc::new(gc);
+
+        // Get metrics reference before shutdown
+        let _metrics = gc_arc.metrics().clone();
+
+        // Extract inner GC for shutdown
+        // Note: shutdown_arc handles Arc unwrap or signal+wait
+        match Arc::try_unwrap(gc_arc) {
+            Ok(gc) => {
+                gc.shutdown();
+            }
+            Err(arc) => {
+                // Would happen if there are other references
+                GraphGarbageCollector::shutdown_arc(arc);
+            }
+        }
+
+        // Storage Arc remains valid
+        drop(storage_arc);
+    }
+
+    #[test]
+    fn test_gc_signal_shutdown_non_blocking() {
+        use tempfile::TempDir;
+        use crate::graph::Storage;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("gc_signal_test");
+
+        // Create and ready storage, then wrap in Arc
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let storage_arc = Arc::new(storage);
+
+        // Start GC with short interval so shutdown is quick
+        let config = GraphGcConfig::default()
+            .with_interval(Duration::from_millis(50));
+
+        let gc = GraphGarbageCollector::start(storage_arc.clone(), config);
+
+        // Signal shutdown (non-blocking)
+        gc.signal_shutdown();
+
+        // Verify shutdown flag is set
+        assert!(gc.is_shutdown(), "Shutdown flag should be set after signal_shutdown");
+
+        // Worker will exit on next iteration - shutdown to join
+        gc.shutdown();
+
+        // Storage Arc remains valid
+        drop(storage_arc);
+    }
+
+    #[test]
+    fn test_gc_new_without_start() {
+        use tempfile::TempDir;
+        use crate::graph::Storage;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("gc_new_test");
+
+        // Create and ready storage, then wrap in Arc
+        let mut storage = Storage::readwrite(&db_path);
+        storage.ready().unwrap();
+        let storage_arc = Arc::new(storage);
+
+        // Create GC without starting worker
+        let config = GraphGcConfig::default();
+        let gc = GraphGarbageCollector::new(storage_arc.clone(), config);
+
+        // Should have no worker handle
+        assert!(!gc.is_shutdown(), "Shutdown flag should not be set initially");
+
+        // Can run a single cycle manually
+        let result = gc.run_cycle();
+        assert!(result.is_ok(), "run_cycle should succeed");
+
+        // Shutdown (no-op since no worker)
+        gc.shutdown();
+
+        // Storage Arc remains valid
+        drop(storage_arc);
     }
 }

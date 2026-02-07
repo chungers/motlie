@@ -13,10 +13,11 @@ use motlie_core::telemetry::SubsystemInfo;
 
 use super::gc::{GraphGarbageCollector, GraphGcConfig};
 use super::name_hash::{NameCache, NameHash};
-use super::reader::{create_query_reader, spawn_consumer as spawn_query_consumer, Consumer as QueryConsumer, ReaderConfig, Reader};
+use super::processor::Processor as GraphProcessor;
+use super::reader::{spawn_query_consumers_with_processor, ReaderConfig, Reader};
 use super::schema::{self, ALL_COLUMN_FAMILIES};
-use super::writer::{create_mutation_writer, spawn_consumer as spawn_mutation_consumer, Consumer as MutationConsumer, WriterConfig, Writer};
-use super::{ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde, Graph, Storage};
+use super::writer::{spawn_mutation_consumer_with_processor, WriterConfig, Writer};
+use super::{ColumnFamily, ColumnFamilyConfig, ColumnFamilySerde, Storage};
 
 // ============================================================================
 // Graph Subsystem
@@ -189,9 +190,8 @@ impl Subsystem {
     ///
     /// If you need more control, use the raw components directly:
     /// ```rust,ignore
-    /// let (writer, receiver) = create_mutation_writer(config);
-    /// let graph = Arc::new(Graph::new(storage));
-    /// spawn_mutation_consumer(...);
+    /// use motlie_db::graph::writer::spawn_mutation_consumer_with_storage;
+    /// let (writer, handle) = spawn_mutation_consumer_with_storage(storage.clone(), config);
     /// // You are responsible for calling writer.flush() before shutdown
     /// ```
     pub fn start(
@@ -202,27 +202,34 @@ impl Subsystem {
         num_query_workers: usize,
         gc_config: Option<GraphGcConfig>,
     ) -> (Writer, Reader) {
-        // Create graph processor - Graph is Clone (holds Arc<Storage>)
-        let graph = Graph::new(storage.clone());
+        // Create shared processor (owns Storage + NameCache)
+        // Following vector crate pattern: single Processor shared by Writer and Reader
+        let processor = Arc::new(GraphProcessor::new(storage.clone()));
 
-        // Create and spawn mutation consumer
-        let (writer, mutation_receiver) = create_mutation_writer(writer_config.clone());
-        let mutation_consumer = MutationConsumer::new(mutation_receiver, writer_config, graph.clone());
-        let mutation_handle = spawn_mutation_consumer(mutation_consumer);
+        // Spawn mutation consumer with shared processor
+        let (writer, mutation_handle) = spawn_mutation_consumer_with_processor(
+            processor.clone(),
+            writer_config,
+        );
 
-        // Create and spawn query consumers
-        let (reader, query_receiver) = create_query_reader(reader_config.clone());
-        let mut query_handles = Vec::with_capacity(num_query_workers);
-        for _ in 0..num_query_workers {
-            let consumer = QueryConsumer::new(query_receiver.clone(), reader_config.clone(), graph.clone());
-            query_handles.push(spawn_query_consumer(consumer));
-        }
+        // Spawn query consumers with shared processor
+        let (reader, query_handles) = spawn_query_consumers_with_processor(
+            processor,
+            reader_config,
+            num_query_workers,
+        );
 
         // Store consumer handles for graceful shutdown
         {
             let mut handles = self.consumer_handles.write().expect("consumer_handles lock poisoned");
             handles.push(mutation_handle);
-            handles.extend(query_handles);
+            // Convert Vec<JoinHandle<()>> to Vec<JoinHandle<Result<()>>>
+            handles.extend(query_handles.into_iter().map(|h| {
+                tokio::spawn(async move {
+                    h.await.map_err(|e| anyhow::anyhow!("Query consumer panicked: {}", e))?;
+                    Ok(())
+                })
+            }));
         }
 
         // Register writer for shutdown flush
@@ -467,7 +474,7 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
         // 3. Shutdown GC last (can continue cleaning while other components shut down)
         if let Some(gc) = self.gc.write().expect("gc lock poisoned").take() {
             tracing::debug!(subsystem = "graph", "Shutting down garbage collector");
-            gc.shutdown();
+            GraphGarbageCollector::shutdown_arc(gc);
             tracing::debug!(subsystem = "graph", "Garbage collector shut down");
         }
 

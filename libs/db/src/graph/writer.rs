@@ -20,14 +20,14 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use super::mutation::{FlushMarker, Mutation};
+use super::name_hash::NameCache;
+use super::processor::Processor as GraphProcessor;
 use super::transaction::Transaction;
 use super::Storage;
 
 // ============================================================================
 // MutationExecutor Trait
 // ============================================================================
-
-use super::name_hash::NameCache;
 
 /// Trait for mutations to execute themselves directly against storage.
 ///
@@ -185,7 +185,11 @@ impl Default for WriterConfig {
 #[derive(Clone)]
 pub struct Writer {
     sender: mpsc::Sender<Vec<Mutation>>,
-    /// Storage for creating transactions (optional - only present in read-write mode)
+    /// Processor for creating transactions (optional - only present when configured)
+    /// (claude, 2026-02-07, FIXED: P2.2 - Writer holds Arc<Processor> instead of Storage)
+    processor: Option<Arc<GraphProcessor>>,
+    /// Legacy storage field for backward compatibility during transition
+    /// TODO: Remove after all call sites migrated to processor
     storage: Option<Arc<Storage>>,
     /// Optional sender for transaction mutation forwarding (e.g., to fulltext)
     transaction_forward_to: Option<mpsc::Sender<Vec<Mutation>>>,
@@ -195,6 +199,7 @@ impl std::fmt::Debug for Writer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Writer")
             .field("sender", &"<mpsc::Sender>")
+            .field("processor", &self.processor.as_ref().map(|_| "<Arc<Processor>>"))
             .field("storage", &self.storage.as_ref().map(|_| "<Arc<Storage>>"))
             .field(
                 "transaction_forward_to",
@@ -208,27 +213,50 @@ impl Writer {
     /// Create a new MutationWriter with the given sender.
     ///
     /// This creates a basic writer without transaction support.
-    /// Use `with_storage()` or `with_transaction_forward_to()` to
-    /// enable transaction features.
+    /// Use `with_processor()` or `with_storage()` to enable transaction features.
     pub fn new(sender: mpsc::Sender<Vec<Mutation>>) -> Self {
         Writer {
             sender,
+            processor: None,
+            storage: None,
+            transaction_forward_to: None,
+        }
+    }
+
+    /// Create a new MutationWriter with processor for transaction support.
+    /// (claude, 2026-02-07, FIXED: P2.2 - Primary construction with Processor)
+    pub(crate) fn with_processor(sender: mpsc::Sender<Vec<Mutation>>, processor: Arc<GraphProcessor>) -> Self {
+        Writer {
+            sender,
+            processor: Some(processor),
             storage: None,
             transaction_forward_to: None,
         }
     }
 
     /// Create a new MutationWriter with storage for transaction support.
+    /// (Backward compatible - creates Processor internally)
     pub fn with_storage(sender: mpsc::Sender<Vec<Mutation>>, storage: Arc<Storage>) -> Self {
+        let processor = Arc::new(GraphProcessor::new(storage.clone()));
         Writer {
             sender,
-            storage: Some(storage),
+            processor: Some(processor),
+            storage: Some(storage), // Keep for backward compat
             transaction_forward_to: None,
         }
     }
 
+    /// Set the processor for transaction support.
+    /// (claude, 2026-02-07, FIXED: P2.2 - Processor setter)
+    pub(crate) fn set_processor(&mut self, processor: Arc<GraphProcessor>) {
+        self.processor = Some(processor);
+    }
+
     /// Set the storage for transaction support.
+    /// (Backward compatible - creates Processor internally)
     pub fn set_storage(&mut self, storage: Arc<Storage>) {
+        let processor = Arc::new(GraphProcessor::new(storage.clone()));
+        self.processor = Some(processor);
         self.storage = Some(storage);
     }
 
@@ -240,11 +268,17 @@ impl Writer {
         self.transaction_forward_to = Some(sender);
     }
 
+    /// Get the processor if configured.
+    /// (claude, 2026-02-07, FIXED: P2.2 - Processor accessor)
+    pub(crate) fn processor(&self) -> Option<&Arc<GraphProcessor>> {
+        self.processor.as_ref()
+    }
+
     /// Begin a transaction for read-your-writes semantics.
     ///
     /// The returned Transaction allows interleaved writes and reads
     /// within a single atomic scope. Transaction lifetime is tied to
-    /// the Writer's storage.
+    /// the Writer's processor/storage.
     ///
     /// # Example
     ///
@@ -274,17 +308,18 @@ impl Writer {
     /// # Errors
     ///
     /// Returns error if:
-    /// - Storage is not configured (writer created without storage)
+    /// - Processor/Storage is not configured
     /// - Storage is not in read-write mode
     pub fn transaction(&self) -> Result<Transaction<'_>> {
-        let storage = self
-            .storage
+        // (claude, 2026-02-07, FIXED: P2.2/P3.3 - Use processor for transactions)
+        let processor = self
+            .processor
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Writer not configured with storage for transactions"))?;
+            .ok_or_else(|| anyhow::anyhow!("Writer not configured with processor for transactions"))?;
 
-        let txn_db = storage.transaction_db()?;
+        let txn_db = processor.transaction_db()?;
         let txn = txn_db.transaction();
-        let name_cache = storage.cache().clone();
+        let name_cache = processor.name_cache().clone();
 
         Ok(Transaction::new(txn, txn_db, self.transaction_forward_to.clone(), name_cache))
     }
@@ -645,15 +680,20 @@ pub fn spawn_consumer<P: Processor + 'static>(
 }
 
 // ============================================================================
-// Graph-specific Consumer Functions
+// Graph-specific Consumer Functions (Legacy)
 // ============================================================================
+// These functions use the deprecated Graph struct for backward compatibility.
+// New code should use spawn_mutation_consumer_with_storage() or
+// spawn_mutation_consumer_with_processor() instead.
 
 use std::path::Path;
 use tokio::task::JoinHandle;
 
+#[allow(deprecated)]
 use super::Graph;
 
 /// Create a new graph mutation consumer
+#[allow(deprecated)]
 pub fn create_mutation_consumer(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
@@ -667,6 +707,7 @@ pub fn create_mutation_consumer(
 }
 
 /// Create a new graph mutation consumer that chains to another processor
+#[allow(deprecated)]
 pub fn create_mutation_consumer_with_next(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
@@ -681,6 +722,7 @@ pub fn create_mutation_consumer_with_next(
 }
 
 /// Spawn the graph mutation consumer as a background task
+#[allow(deprecated)]
 pub fn spawn_mutation_consumer(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
@@ -691,6 +733,7 @@ pub fn spawn_mutation_consumer(
 }
 
 /// Spawn the graph mutation consumer as a background task with chaining to next processor
+#[allow(deprecated)]
 pub fn spawn_mutation_consumer_with_next(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
@@ -713,6 +756,7 @@ pub fn spawn_mutation_consumer_with_next(
 ///
 /// # Returns
 /// A JoinHandle for the spawned consumer task
+#[allow(deprecated)]
 pub fn spawn_mutation_consumer_with_graph(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
@@ -720,6 +764,74 @@ pub fn spawn_mutation_consumer_with_graph(
 ) -> JoinHandle<Result<()>> {
     let consumer = Consumer::new(receiver, config, (*graph).clone());
     spawn_consumer(consumer)
+}
+
+// ============================================================================
+// Processor-based Consumer Functions (ARCH2 Pattern)
+// (claude, 2026-02-07, FIXED: P2.4 - Construction helpers)
+// ============================================================================
+
+/// Spawn a mutation consumer with storage.
+///
+/// This is the primary public construction helper.
+/// Creates Processor internally and spawns consumer task.
+///
+/// # Arguments
+/// * `storage` - Shared storage instance
+/// * `config` - Writer configuration
+///
+/// # Returns
+/// Tuple of (Writer, JoinHandle) for the spawned consumer
+pub fn spawn_mutation_consumer_with_storage(
+    storage: Arc<Storage>,
+    config: WriterConfig,
+) -> (Writer, JoinHandle<Result<()>>) {
+    let processor = Arc::new(GraphProcessor::new(storage));
+    spawn_mutation_consumer_with_processor(processor, config)
+}
+
+/// Spawn a mutation consumer with existing processor.
+///
+/// Used when Processor is shared (e.g., with Reader).
+/// This is pub(crate) - use spawn_mutation_consumer_with_storage for public API.
+///
+/// # Arguments
+/// * `processor` - Shared GraphProcessor instance
+/// * `config` - Writer configuration
+///
+/// # Returns
+/// Tuple of (Writer, JoinHandle) for the spawned consumer
+pub(crate) fn spawn_mutation_consumer_with_processor(
+    processor: Arc<GraphProcessor>,
+    config: WriterConfig,
+) -> (Writer, JoinHandle<Result<()>>) {
+    let (sender, receiver) = mpsc::channel(config.channel_buffer_size);
+    let writer = Writer::with_processor(sender, processor.clone());
+
+    // Create consumer with processor (implements writer::Processor trait)
+    let consumer = Consumer::new(receiver, config, processor);
+    let handle = spawn_consumer(consumer);
+
+    (writer, handle)
+}
+
+/// Create a mutation writer and spawn consumer with processor, also returning the processor.
+///
+/// Convenience helper that returns all components for subsystem integration.
+///
+/// # Arguments
+/// * `storage` - Shared storage instance
+/// * `config` - Writer configuration
+///
+/// # Returns
+/// Tuple of (Writer, Arc<GraphProcessor>, JoinHandle)
+pub(crate) fn create_mutation_writer_with_processor(
+    storage: Arc<Storage>,
+    config: WriterConfig,
+) -> (Writer, Arc<GraphProcessor>, JoinHandle<Result<()>>) {
+    let processor = Arc::new(GraphProcessor::new(storage));
+    let (writer, handle) = spawn_mutation_consumer_with_processor(processor.clone(), config);
+    (writer, processor, handle)
 }
 
 // ============================================================================

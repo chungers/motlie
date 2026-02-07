@@ -325,12 +325,14 @@ impl Deref for Writer {
 ///     .with_config(config)
 ///     .build();
 /// ```
+#[allow(deprecated)]
 pub struct WriterBuilder {
     graph: Arc<graph::Graph>,
     fulltext: Arc<fulltext::Index>,
     config: WriterConfig,
 }
 
+#[allow(deprecated)]
 impl WriterBuilder {
     /// Create a new WriterBuilder.
     ///
@@ -391,6 +393,7 @@ impl WriterBuilder {
 // ============================================================================
 
 /// Spawn the graph mutation consumer with chaining to fulltext.
+#[allow(deprecated)]
 fn spawn_graph_consumer_with_next(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: graph::writer::WriterConfig,
@@ -426,6 +429,7 @@ fn spawn_fulltext_consumer(
 ///
 /// # Returns
 /// A tuple of (Writer, handles)
+#[allow(deprecated)]
 pub fn create_writer(
     graph: Arc<graph::Graph>,
     fulltext: Arc<fulltext::Index>,
@@ -442,6 +446,7 @@ pub fn create_writer(
 ///
 /// # Returns
 /// A tuple of (Writer, handles)
+#[allow(deprecated)]
 pub fn create_writer_with_config(
     graph: Arc<graph::Graph>,
     fulltext: Arc<fulltext::Index>,
