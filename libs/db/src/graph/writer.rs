@@ -561,6 +561,23 @@ impl<P: Processor> Consumer<P> {
                         "Processing DeleteEdge"
                     );
                 }
+                // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge logging - Codex Item 1)
+                Mutation::RestoreNode(args) => {
+                    tracing::debug!(
+                        id = %args.id,
+                        target_version = args.target_version,
+                        "Processing RestoreNode"
+                    );
+                }
+                Mutation::RestoreEdge(args) => {
+                    tracing::debug!(
+                        src = %args.src_id,
+                        dst = %args.dst_id,
+                        name = %args.name,
+                        target_version = args.target_version,
+                        "Processing RestoreEdge"
+                    );
+                }
                 Mutation::Flush(_) => {
                     tracing::debug!("Processing Flush marker");
                 }

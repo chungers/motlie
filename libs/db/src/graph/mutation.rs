@@ -106,6 +106,9 @@ pub enum Mutation {
     DeleteNode(DeleteNode),
     DeleteEdge(DeleteEdge),
     // (codex, 2026-02-07, eval: VERSIONING plan includes RestoreNode/RestoreEdge and rollback mutations; missing here, so rollback API is incomplete.)
+    // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge mutations below)
+    RestoreNode(RestoreNode),
+    RestoreEdge(RestoreEdge),
 
     /// Flush marker for synchronization.
     ///
@@ -320,6 +323,40 @@ pub struct DeleteEdge {
 
     /// Expected version for optimistic locking
     pub expected_version: schema::Version,
+}
+
+// (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge for VERSIONING rollback API)
+
+/// Restore a deleted node to a specific version.
+///
+/// VERSIONING rollback: Finds the specified version in NodeVersionHistory,
+/// creates a new current version with that state, and clears the deleted flag.
+#[derive(Debug, Clone)]
+pub struct RestoreNode {
+    /// The UUID of the Node to restore
+    pub id: Id,
+
+    /// The version to restore to (from NodeVersionHistory)
+    pub target_version: schema::Version,
+}
+
+/// Restore a deleted edge to a specific version.
+///
+/// VERSIONING rollback: Finds the specified version in EdgeVersionHistory,
+/// creates a new current version with that state, and clears the deleted flag.
+#[derive(Debug, Clone)]
+pub struct RestoreEdge {
+    /// The UUID of the source Node
+    pub src_id: Id,
+
+    /// The UUID of the destination Node
+    pub dst_id: Id,
+
+    /// The name of the Edge
+    pub name: schema::EdgeName,
+
+    /// The version to restore to (from EdgeVersionHistory)
+    pub target_version: schema::Version,
 }
 
 // ============================================================================
@@ -825,10 +862,11 @@ impl MutationExecutor for AddNode {
 
         use super::schema::{
             Nodes, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+            NodeVersionHistory, NodeVersionHistoryCfKey, NodeVersionHistoryCfValue,
         };
 
         // Write name to Names CF (idempotent)
-        write_name_to_cf(txn, txn_db, &self.name)?;
+        let name_hash = write_name_to_cf(txn, txn_db, &self.name)?;
 
         // Write summary to NodeSummaries CF (cold) if non-empty
         // Increment refcount (or create with refcount=1)
@@ -855,7 +893,27 @@ impl MutationExecutor for AddNode {
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
         let (node_key, node_value) = Nodes::create_bytes(self)?;
         txn.put_cf(nodes_cf, node_key, node_value)?;
-        // (codex, 2026-02-07, eval: VERSIONING requires initial NodeVersionHistory snapshot on creation; not written here.)
+
+        // (claude, 2026-02-07, FIXED: Added initial NodeVersionHistory snapshot - Codex Items 6-7)
+        // Write initial version snapshot to NodeVersionHistory CF for rollback support
+        let history_cf = txn_db
+            .cf_handle(NodeVersionHistory::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeVersionHistory CF not found"))?;
+        let summary_hash = if !self.summary.is_empty() {
+            SummaryHash::from_summary(&self.summary).ok()
+        } else {
+            None
+        };
+        let history_key = NodeVersionHistoryCfKey(self.id, self.ts_millis, 1); // version=1 for new nodes
+        let history_key_bytes = NodeVersionHistory::key_to_bytes(&history_key);
+        let history_value = NodeVersionHistoryCfValue(
+            self.ts_millis,     // UpdatedAt = creation time
+            summary_hash,       // SummaryHash
+            name_hash,          // NameHash
+            self.valid_range.clone(), // ActivePeriod
+        );
+        let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
+        txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
         Ok(())
     }
@@ -870,10 +928,11 @@ impl MutationExecutor for AddNode {
 
         use super::schema::{
             Nodes, NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+            NodeVersionHistory, NodeVersionHistoryCfKey, NodeVersionHistoryCfValue,
         };
 
         // Write name to Names CF with cache optimization
-        write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
+        let name_hash = write_name_to_cf_cached(txn, txn_db, &self.name, cache)?;
 
         // Write summary to NodeSummaries CF (cold) if non-empty
         // Increment refcount (or create with refcount=1)
@@ -900,7 +959,27 @@ impl MutationExecutor for AddNode {
             .ok_or_else(|| anyhow::anyhow!("Column family '{}' not found", Nodes::CF_NAME))?;
         let (node_key, node_value) = Nodes::create_bytes(self)?;
         txn.put_cf(nodes_cf, node_key, node_value)?;
-        // (codex, 2026-02-07, eval: VERSIONING requires initial NodeVersionHistory snapshot on creation; not written here.)
+
+        // (claude, 2026-02-07, FIXED: Added initial NodeVersionHistory snapshot - Codex Items 6-7)
+        // Write initial version snapshot to NodeVersionHistory CF for rollback support
+        let history_cf = txn_db
+            .cf_handle(NodeVersionHistory::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeVersionHistory CF not found"))?;
+        let summary_hash = if !self.summary.is_empty() {
+            SummaryHash::from_summary(&self.summary).ok()
+        } else {
+            None
+        };
+        let history_key = NodeVersionHistoryCfKey(self.id, self.ts_millis, 1); // version=1 for new nodes
+        let history_key_bytes = NodeVersionHistory::key_to_bytes(&history_key);
+        let history_value = NodeVersionHistoryCfValue(
+            self.ts_millis,     // UpdatedAt = creation time
+            summary_hash,       // SummaryHash
+            name_hash,          // NameHash
+            self.valid_range.clone(), // ActivePeriod
+        );
+        let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
+        txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
         Ok(())
     }
@@ -922,6 +1001,7 @@ impl MutationExecutor for AddEdge {
         use super::schema::{
             ForwardEdges, ReverseEdges,
             EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
+            EdgeVersionHistory, EdgeVersionHistoryCfKey, EdgeVersionHistoryCfValue,
         };
 
         // Write name to Names CF (idempotent)
@@ -965,7 +1045,33 @@ impl MutationExecutor for AddEdge {
         })?;
         let (reverse_key, reverse_value) = ReverseEdges::create_bytes(self)?;
         txn.put_cf(reverse_cf, reverse_key, reverse_value)?;
-        // (codex, 2026-02-07, eval: VERSIONING requires initial EdgeVersionHistory snapshot on creation; not written here.)
+
+        // (claude, 2026-02-07, FIXED: Added initial EdgeVersionHistory snapshot - Codex Items 8-9)
+        // Write initial version snapshot to EdgeVersionHistory CF for rollback support
+        let history_cf = txn_db
+            .cf_handle(EdgeVersionHistory::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeVersionHistory CF not found"))?;
+        let summary_hash = if !self.summary.is_empty() {
+            SummaryHash::from_summary(&self.summary).ok()
+        } else {
+            None
+        };
+        let history_key = EdgeVersionHistoryCfKey(
+            self.source_node_id,
+            self.target_node_id,
+            name_hash,
+            self.ts_millis, // ValidSince
+            1,              // version=1 for new edges
+        );
+        let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
+        let history_value = EdgeVersionHistoryCfValue(
+            self.ts_millis,     // UpdatedAt = creation time
+            summary_hash,       // SummaryHash
+            self.weight,        // Weight
+            self.valid_range.clone(), // ActivePeriod
+        );
+        let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
+        txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
         Ok(())
     }
@@ -986,6 +1092,7 @@ impl MutationExecutor for AddEdge {
         use super::schema::{
             ForwardEdges, ReverseEdges,
             EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
+            EdgeVersionHistory, EdgeVersionHistoryCfKey, EdgeVersionHistoryCfValue,
         };
 
         // Write name to Names CF with cache optimization
@@ -1029,7 +1136,33 @@ impl MutationExecutor for AddEdge {
         })?;
         let (reverse_key, reverse_value) = ReverseEdges::create_bytes(self)?;
         txn.put_cf(reverse_cf, reverse_key, reverse_value)?;
-        // (codex, 2026-02-07, eval: VERSIONING requires initial EdgeVersionHistory snapshot on creation; not written here.)
+
+        // (claude, 2026-02-07, FIXED: Added initial EdgeVersionHistory snapshot - Codex Items 8-9)
+        // Write initial version snapshot to EdgeVersionHistory CF for rollback support
+        let history_cf = txn_db
+            .cf_handle(EdgeVersionHistory::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeVersionHistory CF not found"))?;
+        let summary_hash = if !self.summary.is_empty() {
+            SummaryHash::from_summary(&self.summary).ok()
+        } else {
+            None
+        };
+        let history_key = EdgeVersionHistoryCfKey(
+            self.source_node_id,
+            self.target_node_id,
+            name_hash,
+            self.ts_millis, // ValidSince
+            1,              // version=1 for new edges
+        );
+        let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
+        let history_value = EdgeVersionHistoryCfValue(
+            self.ts_millis,     // UpdatedAt = creation time
+            summary_hash,       // SummaryHash
+            self.weight,        // Weight
+            self.valid_range.clone(), // ActivePeriod
+        );
+        let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
+        txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
         Ok(())
     }
@@ -1233,6 +1366,7 @@ impl MutationExecutor for UpdateNodeSummary {
         use super::schema::{
             NodeCfValue, Nodes,
             NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue, VERSION_MAX,
+            NodeVersionHistory, NodeVersionHistoryCfKey, NodeVersionHistoryCfValue,
         };
 
         // 1. Find current node version via prefix scan
@@ -1334,7 +1468,22 @@ impl MutationExecutor for UpdateNodeSummary {
         let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize new node version: {}", e))?;
         txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
-        // (codex, 2026-02-07, eval: VERSIONING requires NodeVersionHistory snapshots per update; no history row is written here, so rollback/time-travel by version is incomplete.)
+
+        // (claude, 2026-02-07, FIXED: Added NodeVersionHistory snapshot - Codex Item 10)
+        // Write version history entry for rollback support
+        let history_cf = txn_db
+            .cf_handle(NodeVersionHistory::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeVersionHistory CF not found"))?;
+        let history_key = NodeVersionHistoryCfKey(self.id, now, new_version);
+        let history_key_bytes = NodeVersionHistory::key_to_bytes(&history_key);
+        let history_value = NodeVersionHistoryCfValue(
+            now,                // UpdatedAt
+            Some(new_hash),     // SummaryHash (new)
+            current.2,          // NameHash (preserved)
+            current.1.clone(),  // ActivePeriod (preserved)
+        );
+        let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
+        txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
         tracing::info!(
             id = %self.id,
@@ -1365,6 +1514,7 @@ impl MutationExecutor for UpdateEdgeSummary {
         use super::schema::{
             ForwardEdgeCfValue, ForwardEdges,
             EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue, VERSION_MAX,
+            EdgeVersionHistory, EdgeVersionHistoryCfKey, EdgeVersionHistoryCfValue,
         };
 
         let name_hash = NameHash::from_name(&self.name);
@@ -1467,7 +1617,22 @@ impl MutationExecutor for UpdateEdgeSummary {
         let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize new edge version: {}", e))?;
         txn.put_cf(forward_cf, new_edge_key_bytes, new_edge_bytes)?;
-        // (codex, 2026-02-07, eval: VERSIONING requires EdgeVersionHistory snapshots per update; no history row is written here, so rollback by version lacks a source of truth.)
+
+        // (claude, 2026-02-07, FIXED: Added EdgeVersionHistory snapshot - Codex Item 11)
+        // Write version history entry for rollback support
+        let history_cf = txn_db
+            .cf_handle(EdgeVersionHistory::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeVersionHistory CF not found"))?;
+        let history_key = EdgeVersionHistoryCfKey(self.src_id, self.dst_id, name_hash, now, new_version);
+        let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
+        let history_value = EdgeVersionHistoryCfValue(
+            now,                // UpdatedAt
+            Some(new_hash),     // SummaryHash (new)
+            current.2,          // Weight (preserved)
+            current.1.clone(),  // ActivePeriod (preserved)
+        );
+        let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
+        txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
         tracing::info!(
             src = %self.src_id,
@@ -1711,6 +1876,279 @@ impl MutationExecutor for DeleteEdge {
     }
 }
 
+// (claude, 2026-02-07, FIXED: Added MutationExecutor for RestoreNode/RestoreEdge - Codex Item 1)
+impl MutationExecutor for RestoreNode {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        tracing::debug!(
+            id = %self.id,
+            target_version = self.target_version,
+            "Executing RestoreNode mutation"
+        );
+
+        use super::schema::{
+            NodeCfKey, NodeCfValue, Nodes,
+            NodeVersionHistory, NodeVersionHistoryCfKey, NodeVersionHistoryCfValue,
+            NodeSummaryIndex, NodeSummaryIndexCfKey, NodeSummaryIndexCfValue,
+        };
+
+        // 1. Find the target version in NodeVersionHistory
+        let history_cf = txn_db
+            .cf_handle(NodeVersionHistory::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeVersionHistory CF not found"))?;
+
+        // Scan all versions of this node to find target_version
+        let prefix = self.id.into_bytes().to_vec();
+        let iter = txn.prefix_iterator_cf(history_cf, &prefix);
+
+        let mut target_history: Option<(NodeVersionHistoryCfKey, NodeVersionHistoryCfValue)> = None;
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+            if !key_bytes.starts_with(&prefix) {
+                break;
+            }
+            let key: NodeVersionHistoryCfKey = NodeVersionHistory::key_from_bytes(&key_bytes)?;
+            if key.2 == self.target_version {
+                let value: NodeVersionHistoryCfValue = NodeVersionHistory::value_from_bytes(&value_bytes)?;
+                target_history = Some((key, value));
+                break;
+            }
+        }
+
+        let (_history_key, history_value) = target_history
+            .ok_or_else(|| anyhow::anyhow!(
+                "Version {} not found in NodeVersionHistory for node {}",
+                self.target_version,
+                self.id
+            ))?;
+
+        // 2. Find current node version (if exists) and mark as superseded
+        let nodes_cf = txn_db
+            .cf_handle(Nodes::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+
+        let now = crate::TimestampMilli::now();
+        let mut new_version = 1u32;
+
+        if let Some((current_key_bytes, current)) = find_current_node_version(txn, txn_db, self.id)? {
+            // Mark old row as superseded
+            let old_node_value = NodeCfValue(
+                Some(now),          // ValidUntil = now
+                current.1.clone(),  // ActivePeriod
+                current.2,          // NameHash
+                current.3,          // SummaryHash
+                current.4,          // Version
+                current.5,          // Deleted
+            );
+            let old_node_bytes = Nodes::value_to_bytes(&old_node_value)?;
+            txn.put_cf(nodes_cf, &current_key_bytes, old_node_bytes)?;
+            new_version = current.4 + 1;
+        }
+
+        // 3. Create new node with restored state
+        let new_node_key = NodeCfKey(self.id, now);
+        let new_node_key_bytes = Nodes::key_to_bytes(&new_node_key);
+        let new_node_value = NodeCfValue(
+            None,               // ValidUntil = None (current)
+            history_value.3,    // ActivePeriod from history
+            history_value.2,    // NameHash from history
+            history_value.1,    // SummaryHash from history
+            new_version,        // New version
+            false,              // Not deleted
+        );
+        let new_node_bytes = Nodes::value_to_bytes(&new_node_value)?;
+        txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
+
+        // 4. Write new summary index entry with CURRENT marker
+        if let Some(hash) = history_value.1 {
+            let index_cf = txn_db
+                .cf_handle(NodeSummaryIndex::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
+            let new_index_key = NodeSummaryIndexCfKey(hash, self.id, new_version);
+            let new_index_key_bytes = NodeSummaryIndex::key_to_bytes(&new_index_key);
+            let current_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::current())?;
+            txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
+        }
+
+        // 5. Write NodeVersionHistory entry for the new version
+        let new_history_key = NodeVersionHistoryCfKey(self.id, now, new_version);
+        let new_history_key_bytes = NodeVersionHistory::key_to_bytes(&new_history_key);
+        let new_history_value = NodeVersionHistoryCfValue(
+            now,                // UpdatedAt
+            history_value.1,    // SummaryHash (restored)
+            history_value.2,    // NameHash (restored)
+            history_value.3,    // ActivePeriod (restored)
+        );
+        let new_history_value_bytes = NodeVersionHistory::value_to_bytes(&new_history_value)?;
+        txn.put_cf(history_cf, new_history_key_bytes, new_history_value_bytes)?;
+
+        tracing::info!(
+            id = %self.id,
+            target_version = self.target_version,
+            new_version = new_version,
+            "RestoreNode completed"
+        );
+
+        Ok(())
+    }
+}
+
+impl MutationExecutor for RestoreEdge {
+    fn execute(
+        &self,
+        txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+        txn_db: &rocksdb::TransactionDB,
+    ) -> Result<()> {
+        tracing::debug!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            name = %self.name,
+            target_version = self.target_version,
+            "Executing RestoreEdge mutation"
+        );
+
+        use super::schema::{
+            ForwardEdgeCfKey, ForwardEdgeCfValue, ForwardEdges,
+            ReverseEdgeCfKey, ReverseEdgeCfValue, ReverseEdges,
+            EdgeVersionHistory, EdgeVersionHistoryCfKey, EdgeVersionHistoryCfValue,
+            EdgeSummaryIndex, EdgeSummaryIndexCfKey, EdgeSummaryIndexCfValue,
+        };
+
+        let name_hash = NameHash::from_name(&self.name);
+
+        // 1. Find the target version in EdgeVersionHistory
+        let history_cf = txn_db
+            .cf_handle(EdgeVersionHistory::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeVersionHistory CF not found"))?;
+
+        // Build prefix for this edge (src, dst, name_hash) = 40 bytes
+        let mut prefix = Vec::with_capacity(40);
+        prefix.extend_from_slice(&self.src_id.into_bytes());
+        prefix.extend_from_slice(&self.dst_id.into_bytes());
+        prefix.extend_from_slice(name_hash.as_bytes());
+
+        let iter = txn.prefix_iterator_cf(history_cf, &prefix);
+
+        let mut target_history: Option<(EdgeVersionHistoryCfKey, EdgeVersionHistoryCfValue)> = None;
+        for item in iter {
+            let (key_bytes, value_bytes) = item?;
+            if !key_bytes.starts_with(&prefix) {
+                break;
+            }
+            let key: EdgeVersionHistoryCfKey = EdgeVersionHistory::key_from_bytes(&key_bytes)?;
+            if key.4 == self.target_version {
+                let value: EdgeVersionHistoryCfValue = EdgeVersionHistory::value_from_bytes(&value_bytes)?;
+                target_history = Some((key, value));
+                break;
+            }
+        }
+
+        let (_history_key, history_value) = target_history
+            .ok_or_else(|| anyhow::anyhow!(
+                "Version {} not found in EdgeVersionHistory for edge {}→{}",
+                self.target_version,
+                self.src_id,
+                self.dst_id
+            ))?;
+
+        // 2. Find current edge version (if exists) and mark as superseded
+        let forward_cf = txn_db
+            .cf_handle(ForwardEdges::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+        let reverse_cf = txn_db
+            .cf_handle(ReverseEdges::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
+
+        let now = crate::TimestampMilli::now();
+        let mut new_version = 1u32;
+
+        if let Some((current_key_bytes, current)) = find_current_forward_edge_version(txn, txn_db, self.src_id, self.dst_id, name_hash)? {
+            // Mark old forward edge as superseded
+            let old_edge_value = ForwardEdgeCfValue(
+                Some(now),          // ValidUntil = now
+                current.1.clone(),  // ActivePeriod
+                current.2,          // Weight
+                current.3,          // SummaryHash
+                current.4,          // Version
+                current.5,          // Deleted
+            );
+            let old_edge_bytes = ForwardEdges::value_to_bytes(&old_edge_value)?;
+            txn.put_cf(forward_cf, &current_key_bytes, old_edge_bytes)?;
+            new_version = current.4 + 1;
+
+            // Mark old reverse edge as superseded
+            if let Some((reverse_key_bytes, reverse)) = find_current_reverse_edge_version(txn, txn_db, self.dst_id, self.src_id, name_hash)? {
+                let old_reverse_value = ReverseEdgeCfValue(
+                    Some(now),          // ValidUntil = now
+                    reverse.1.clone(),  // ActivePeriod
+                );
+                let old_reverse_bytes = ReverseEdges::value_to_bytes(&old_reverse_value)?;
+                txn.put_cf(reverse_cf, &reverse_key_bytes, old_reverse_bytes)?;
+            }
+        }
+
+        // 3. Create new forward edge with restored state
+        let new_forward_key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash, now);
+        let new_forward_key_bytes = ForwardEdges::key_to_bytes(&new_forward_key);
+        let new_forward_value = ForwardEdgeCfValue(
+            None,               // ValidUntil = None (current)
+            history_value.3.clone(), // ActivePeriod from history
+            history_value.2,    // Weight from history
+            history_value.1,    // SummaryHash from history
+            new_version,        // New version
+            false,              // Not deleted
+        );
+        let new_forward_bytes = ForwardEdges::value_to_bytes(&new_forward_value)?;
+        txn.put_cf(forward_cf, new_forward_key_bytes, new_forward_bytes)?;
+
+        // 4. Create new reverse edge
+        let new_reverse_key = ReverseEdgeCfKey(self.dst_id, self.src_id, name_hash, now);
+        let new_reverse_key_bytes = ReverseEdges::key_to_bytes(&new_reverse_key);
+        let new_reverse_value = ReverseEdgeCfValue(
+            None,               // ValidUntil = None (current)
+            history_value.3.clone(), // ActivePeriod from history
+        );
+        let new_reverse_bytes = ReverseEdges::value_to_bytes(&new_reverse_value)?;
+        txn.put_cf(reverse_cf, new_reverse_key_bytes, new_reverse_bytes)?;
+
+        // 5. Write new summary index entry with CURRENT marker
+        if let Some(hash) = history_value.1 {
+            let index_cf = txn_db
+                .cf_handle(EdgeSummaryIndex::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
+            let new_index_key = EdgeSummaryIndexCfKey(hash, self.src_id, self.dst_id, name_hash, new_version);
+            let new_index_key_bytes = EdgeSummaryIndex::key_to_bytes(&new_index_key);
+            let current_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::current())?;
+            txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
+        }
+
+        // 6. Write EdgeVersionHistory entry for the new version
+        let new_history_key = EdgeVersionHistoryCfKey(self.src_id, self.dst_id, name_hash, now, new_version);
+        let new_history_key_bytes = EdgeVersionHistory::key_to_bytes(&new_history_key);
+        let new_history_value = EdgeVersionHistoryCfValue(
+            now,                // UpdatedAt
+            history_value.1,    // SummaryHash (restored)
+            history_value.2,    // Weight (restored)
+            history_value.3,    // ActivePeriod (restored)
+        );
+        let new_history_value_bytes = EdgeVersionHistory::value_to_bytes(&new_history_value)?;
+        txn.put_cf(history_cf, new_history_key_bytes, new_history_value_bytes)?;
+
+        tracing::info!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            target_version = self.target_version,
+            new_version = new_version,
+            "RestoreEdge completed"
+        );
+
+        Ok(())
+    }
+}
+
 impl Mutation {
     /// Execute this mutation directly against storage.
     /// Delegates to the specific mutation type's executor.
@@ -1732,6 +2170,9 @@ impl Mutation {
             Mutation::UpdateEdgeSummary(m) => m.execute(txn, txn_db),
             Mutation::DeleteNode(m) => m.execute(txn, txn_db),
             Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
+            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge dispatch)
+            Mutation::RestoreNode(m) => m.execute(txn, txn_db),
+            Mutation::RestoreEdge(m) => m.execute(txn, txn_db),
             // Flush is not a storage operation - it's handled by the consumer
             // for synchronization purposes only
             Mutation::Flush(_) => Ok(()),
@@ -1762,6 +2203,9 @@ impl Mutation {
             Mutation::UpdateEdgeSummary(m) => m.execute(txn, txn_db),
             Mutation::DeleteNode(m) => m.execute(txn, txn_db),
             Mutation::DeleteEdge(m) => m.execute(txn, txn_db),
+            // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge dispatch - Codex Item 1)
+            Mutation::RestoreNode(m) => m.execute(txn, txn_db),
+            Mutation::RestoreEdge(m) => m.execute(txn, txn_db),
             Mutation::Flush(_) => Ok(()),
         }
     }
@@ -1859,6 +2303,21 @@ impl Runnable for DeleteEdge {
     }
 }
 
+// (claude, 2026-02-07, FIXED: Added Runnable impls for RestoreNode/RestoreEdge)
+#[async_trait::async_trait]
+impl Runnable for RestoreNode {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::RestoreNode(self)]).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Runnable for RestoreEdge {
+    async fn run(self, writer: &Writer) -> Result<()> {
+        writer.send(vec![Mutation::RestoreEdge(self)]).await
+    }
+}
+
 // ============================================================================
 // From Trait - Automatic conversion to Mutation enum
 // ============================================================================
@@ -1927,6 +2386,19 @@ impl From<DeleteNode> for Mutation {
 impl From<DeleteEdge> for Mutation {
     fn from(m: DeleteEdge) -> Self {
         Mutation::DeleteEdge(m)
+    }
+}
+
+// (claude, 2026-02-07, FIXED: Added From impls for RestoreNode/RestoreEdge)
+impl From<RestoreNode> for Mutation {
+    fn from(m: RestoreNode) -> Self {
+        Mutation::RestoreNode(m)
+    }
+}
+
+impl From<RestoreEdge> for Mutation {
+    fn from(m: RestoreEdge) -> Self {
+        Mutation::RestoreEdge(m)
     }
 }
 

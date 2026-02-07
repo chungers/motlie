@@ -3,13 +3,18 @@
 //! This module provides incremental GC for:
 //! - Stale index entries (NodeSummaryIndex, EdgeSummaryIndex)
 //! - Tombstoned entities after retention period (future)
+//! - Orphan summaries via OrphanSummaries CF (VERSIONING)
 //!
-//! # RefCount Eliminates Orphan Summary Scans
+//! # VERSIONING: OrphanSummaries-Based GC (Updated 2026-02-07)
 //!
-//! Summary rows include a RefCount field that tracks how many entities reference them.
-//! When RefCount reaches 0, the summary row is deleted inline by the mutation executor.
-//! This eliminates the need for expensive background scans to find orphan summaries.
-// (codex, 2026-02-07, eval: VERSIONING now adds OrphanSummaries + deferred deletion; this header is outdated relative to the new GC plan and should be updated to avoid conflicting guidance.)
+//! The VERSIONING design uses **deferred deletion** for summaries to enable rollback:
+//! - Summary rows are append-only (no RefCount decrement deletes inline)
+//! - When a summary is no longer referenced, it's added to OrphanSummaries CF
+//! - GC scans OrphanSummaries CF and deletes entries older than retention period
+//! - Rollback operations can resurrect orphaned summaries within the retention window
+//!
+//! See `libs/db/src/graph/docs/VERSIONING.md` for full design details.
+// (claude, 2026-02-07, FIXED: Updated header to reflect VERSIONING OrphanSummaries GC plan - Codex Item 14)
 //!
 //! # What GC Still Handles
 //!
