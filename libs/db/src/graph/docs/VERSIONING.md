@@ -111,6 +111,9 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
 
 Enable temporal versioning for the graph database:
 
+> NOTE: Architecture/lifecycle blockers (GC worker handle, shutdown join, blocking tokio usage)
+> are tracked in `libs/db/src/graph/docs/ARCH2.md` under "CRITICAL BUGS TO FIX DURING REFACTOR".
+
 | Capability | Before | After |
 |------------|--------|-------|
 | Time-travel queries | No | Yes |

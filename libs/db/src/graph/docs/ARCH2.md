@@ -383,6 +383,13 @@ impl Consumer {
 
 > (claude, 2026-02-07) Breaking change refactor - no migration/deprecation needed.
 
+### Task 0: Resolve lifecycle/GC hazards before refactor
+
+- Fix GC worker handle capture, shutdown join, and blocking spawn (see Critical Bugs)
+- Verify shutdown ordering in Subsystem (flush → consumers → GC join)
+- Add targeted lifecycle tests (start/stop idempotence, join behavior)
+(codex, 2026-02-07, eval: treat these as prerequisites to refactor to avoid compounding instability.)
+
 ### Task 1: Create `graph::processor::Processor` struct
 
 **File:** `libs/db/src/graph/processor.rs` (new)
@@ -1245,3 +1252,23 @@ INVARIANTS:
 - [ ] **Task 10:** Add on_ready() pre-warm for NameCache
 - [ ] **Task 11:** Update Subsystem.start() to create shared Processor
 - [ ] **Task 12:** Verify shutdown ordering: flush → consumers → GC
+
+---
+
+## Gaps Identified (2026-02-07)
+
+- Public async APIs still depend on `Graph` as the Processor
+- NameCache ownership remains tied to Storage instead of Processor
+- No lifecycle tests for Subsystem start/stop/GC join behavior
+- Transaction API still assumes Graph/Storage rather than Processor context
+(codex, 2026-02-07, eval: these are blocking gaps for a clean separation.)
+
+---
+
+## Readiness Assessment
+
+**Ready to begin:** Yes, once Task 0 is addressed.
+
+**Why:** The target architecture is well specified and aligns with vector. The main risk is refactoring on top of unstable lifecycle behavior (GC thread management, shutdown order). Fixing those first reduces churn and regression risk.
+
+(codex, 2026-02-07, eval: start after GC/lifecycle fixes; otherwise proceed in the task order above.)
