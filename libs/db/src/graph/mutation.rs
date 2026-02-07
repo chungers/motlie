@@ -750,6 +750,7 @@ fn update_edge_valid_range(
 
     let forward_edges = ForwardEdges;
     let patched_forward_bytes = forward_edges.patch_valid_range(&forward_value_bytes, new_range)?;
+    // (codex, 2026-02-07, decision: ActivePeriod changes are applied in place; VERSIONING states ActivePeriod changes create a new version + history snapshot.)
     txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
 
     // Find current reverse edge via prefix scan
@@ -777,6 +778,7 @@ fn update_edge_valid_range(
 
     let reverse_edges = ReverseEdges;
     let patched_reverse_bytes = reverse_edges.patch_valid_range(&reverse_value_bytes, new_range)?;
+    // (codex, 2026-02-07, decision: reverse edge ActivePeriod is updated in place; should be tied to new version to keep forward/reverse consistency.)
     txn.put_cf(reverse_cf, &reverse_key_bytes, patched_reverse_bytes)?;
 
     Ok(())
@@ -1334,6 +1336,7 @@ impl MutationExecutor for UpdateEdgeWeight {
             .ok_or_else(|| anyhow::anyhow!("Edge not found for update"))?;
 
         // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
+        // (codex, 2026-02-07, decision: this updates weight in place without creating a new version/history; VERSIONING expects weight changes to be versioned.)
         value.2 = Some(self.weight); // Update weight (field 2)
 
         let new_value_bytes = ForwardEdges::value_to_bytes(&value)
@@ -1468,6 +1471,7 @@ impl MutationExecutor for UpdateNodeSummary {
         let new_node_bytes = Nodes::value_to_bytes(&new_node_value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize new node version: {}", e))?;
         txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
+        // (codex, 2026-02-07, decision: VERSIONING expects NodeVersionHistory snapshot for delete/tombstone version; missing here.)
 
         // (claude, 2026-02-07, FIXED: Added NodeVersionHistory snapshot - Codex Item 10)
         // Write version history entry for rollback support
@@ -1617,6 +1621,7 @@ impl MutationExecutor for UpdateEdgeSummary {
         let new_edge_bytes = ForwardEdges::value_to_bytes(&new_edge_value)
             .map_err(|e| anyhow::anyhow!("Failed to serialize new edge version: {}", e))?;
         txn.put_cf(forward_cf, new_edge_key_bytes, new_edge_bytes)?;
+        // (codex, 2026-02-07, decision: VERSIONING expects EdgeVersionHistory snapshot for delete/tombstone version; missing here.)
 
         // (claude, 2026-02-07, FIXED: Added EdgeVersionHistory snapshot - Codex Item 11)
         // Write version history entry for rollback support
@@ -1901,6 +1906,7 @@ impl MutationExecutor for RestoreNode {
             .ok_or_else(|| anyhow::anyhow!("NodeVersionHistory CF not found"))?;
 
         // Scan all versions of this node to find target_version
+        // (codex, 2026-02-07, decision: target_version is ambiguous across ValidSince ranges; consider including ValidSince or UpdatedAt in RestoreNode params to disambiguate.)
         let prefix = self.id.into_bytes().to_vec();
         let iter = txn.prefix_iterator_cf(history_cf, &prefix);
 
@@ -1924,6 +1930,7 @@ impl MutationExecutor for RestoreNode {
                 self.target_version,
                 self.id
             ))?;
+        // (codex, 2026-02-07, decision: restore should ensure referenced summary hash exists in NodeSummaries before writing index/current row.)
 
         // 2. Find current node version (if exists) and mark as superseded
         let nodes_cf = txn_db
@@ -1963,6 +1970,7 @@ impl MutationExecutor for RestoreNode {
         txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
 
         // 4. Write new summary index entry with CURRENT marker
+        // (codex, 2026-02-07, decision: existing CURRENT index entry is not marked STALE here; may leave multiple CURRENT entries for same node/version lineage.)
         if let Some(hash) = history_value.1 {
             let index_cf = txn_db
                 .cf_handle(NodeSummaryIndex::CF_NAME)
@@ -2020,6 +2028,7 @@ impl MutationExecutor for RestoreEdge {
         let name_hash = NameHash::from_name(&self.name);
 
         // 1. Find the target version in EdgeVersionHistory
+        // (codex, 2026-02-07, decision: target_version is ambiguous across ValidSince ranges; consider adding ValidSince/UpdatedAt to RestoreEdge params to avoid restoring the wrong version.)
         let history_cf = txn_db
             .cf_handle(EdgeVersionHistory::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("EdgeVersionHistory CF not found"))?;
@@ -2053,6 +2062,7 @@ impl MutationExecutor for RestoreEdge {
                 self.src_id,
                 self.dst_id
             ))?;
+        // (codex, 2026-02-07, decision: restore should ensure referenced summary hash exists in EdgeSummaries before writing index/current row.)
 
         // 2. Find current edge version (if exists) and mark as superseded
         let forward_cf = txn_db
@@ -2115,6 +2125,7 @@ impl MutationExecutor for RestoreEdge {
         txn.put_cf(reverse_cf, new_reverse_key_bytes, new_reverse_bytes)?;
 
         // 5. Write new summary index entry with CURRENT marker
+        // (codex, 2026-02-07, decision: existing CURRENT index entry is not marked STALE here; can leave multiple CURRENT entries for the edge.)
         if let Some(hash) = history_value.1 {
             let index_cf = txn_db
                 .cf_handle(EdgeSummaryIndex::CF_NAME)

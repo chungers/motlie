@@ -15,6 +15,7 @@
 //!
 //! See `libs/db/src/graph/docs/VERSIONING.md` for full design details.
 // (claude, 2026-02-07, FIXED: Updated header to reflect VERSIONING OrphanSummaries GC plan - Codex Item 14)
+// (codex, 2026-02-07, decision: header reflects intended design, but OrphanSummaries tracking/worker is not implemented in this module yet.)
 //!
 //! # What GC Still Handles
 //!

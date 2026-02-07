@@ -20,6 +20,7 @@ let _handle = gc.clone().spawn_worker();  // ← HANDLE DISCARDED!
 **Impact:** The GC worker runs detached. Subsystem has no way to join it on shutdown.
 
 **Fix:** Store handle in GarbageCollector struct (see vector::GarbageCollector pattern).
+(codex, 2026-02-07, decision: verified in `libs/db/src/graph/subsystem.rs:234` — handle is discarded.)
 
 ---
 
@@ -39,6 +40,7 @@ if let Some(gc) = self.gc.write().expect("gc lock").take() {
 **Impact:** Race condition. GC worker can outlive Storage, causing use-after-free or panics.
 
 **Fix:** `shutdown(self)` must join worker thread before returning (see vector::GarbageCollector::shutdown).
+(codex, 2026-02-07, decision: verified in `libs/db/src/graph/subsystem.rs:468-470` — shutdown does not join.)
 
 ---
 
@@ -58,6 +60,7 @@ pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
 **Impact:** Blocking RocksDB I/O inside tokio task blocks the async runtime. Should use `std::thread` for blocking work.
 
 **Fix:** Use `std::thread::spawn` and return `std::thread::JoinHandle<()>` (see vector::GarbageCollector::start).
+(codex, 2026-02-07, decision: verified in `libs/db/src/graph/gc.rs:553` — uses `tokio::spawn` for blocking RocksDB work.)
 
 ---
 
