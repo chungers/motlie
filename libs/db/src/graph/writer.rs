@@ -325,12 +325,17 @@ impl Writer {
     }
 
     /// Check if transactions are supported by this writer.
+    /// (claude, 2026-02-07, FIXED: Check processor.storage() when storage is None per codex review)
     pub fn supports_transactions(&self) -> bool {
-        // (codex, 2026-02-07, eval: this reports false for Writer::with_processor() because storage is None; should consult processor.storage() when present.)
-        self.storage
-            .as_ref()
-            .map(|s| s.is_transactional())
-            .unwrap_or(false)
+        // First check direct storage reference
+        if let Some(s) = &self.storage {
+            return s.is_transactional();
+        }
+        // Fall back to processor's storage if available
+        if let Some(p) = &self.processor {
+            return p.storage().is_transactional();
+        }
+        false
     }
 
     /// Send a batch of mutations to be processed asynchronously.
