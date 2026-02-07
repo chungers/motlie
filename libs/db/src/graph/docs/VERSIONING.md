@@ -26,9 +26,10 @@
 8. [Examples: Nodes](#examples-nodes)
 9. [Examples: Fragments](#examples-fragments)
 10. [Performance Analysis](#performance-analysis)
-11. [Pros and Cons](#pros-and-cons)
-12. [Summary](#summary)
-13. [Bitemporal Model: System Time vs Application Time](#bitemporal-model-system-time-vs-application-time)
+11. [Garbage Collection](#garbage-collection)
+12. [Pros and Cons](#pros-and-cons)
+13. [Summary](#summary)
+14. [Bitemporal Model: System Time vs Application Time](#bitemporal-model-system-time-vs-application-time)
 
 ---
 
@@ -169,6 +170,7 @@ See [Bitemporal Model section](#bitemporal-model-system-time-vs-application-time
 | **EdgeFragments** | `(SrcId, DstId, NameHash, TimestampMilli)` 48B | `(ActivePeriod?, FragmentContent)` | *unchanged* | *unchanged* | None |
 | **NodeSummaryIndex** | `(SummaryHash, Id, Version)` 28B | `(Marker)` 1B | *unchanged* | *unchanged* | None |
 | **EdgeSummaryIndex** | `(SummaryHash, SrcId, DstId, NameHash, Version)` 52B | `(Marker)` 1B | *unchanged* | *unchanged* | None |
+| **OrphanSummaries** | N/A | N/A | `(TimestampMilli, SummaryHash)` 16B | `(SummaryKind)` 1B | **NEW** |
 
 ### Complete CF Schema (AFTER)
 
@@ -329,6 +331,33 @@ pub struct EdgeSummaryIndexCfKey(
 );  // Total: 52 bytes
 pub struct EdgeSummaryIndexCfValue(pub u8);  // CURRENT=0x01, STALE=0x00
 /// NOTE: Index CFs defined in CONTENT-ADDRESS.md; not time-aware in key (version suffices).
+
+// ============================================================
+// ORPHAN SUMMARIES CF (NEW - enables deferred GC for rollback)
+// ============================================================
+/// Tracks summaries with RefCount=0 for deferred deletion.
+/// Time-ordered key enables retention-based GC scanning.
+pub struct OrphanSummaries;
+
+impl ColumnFamily for OrphanSummaries {
+    const CF_NAME: &'static str = "graph/orphan_summaries";
+}
+
+/// Key: time-ordered for retention scan
+pub struct OrphanSummaryCfKey(
+    pub TimestampMilli,  // 8 bytes - when RefCount became 0
+    pub SummaryHash,     // 8 bytes - which summary
+);  // Total: 16 bytes
+
+/// Value: discriminant to select target CF for deletion
+#[repr(u8)]
+pub enum SummaryKind {
+    Node = 0,
+    Edge = 1,
+}
+
+pub struct OrphanSummaryCfValue(pub SummaryKind);  // 1 byte
+/// (claude, 2026-02-06) Orphan index enables rollback by deferring summary deletion.
 ```
 
 ### Temporal Semantics
@@ -1152,23 +1181,500 @@ Total overhead:       ~451 MB for 1M edges
 
 ### GC Changes
 
-| Aspect | Old (RefCount) | New (Orphan Scan) |
-|--------|---------------|-------------------|
-| Summary cleanup | Inline (immediate) | Background GC |
-| Write cost | +1 get/put per update | None |
-| Orphan accumulation | None | Until GC runs |
-| Rollback support | No | Yes |
+| Aspect | Old (RefCount Inline) | New (Orphan Index) |
+|--------|----------------------|-------------------|
+| Summary cleanup | Inline (immediate delete) | Background GC after retention |
+| Write cost | 1 put (update RefCount) | 1 put + 1 orphan index write |
+| GC scan cost | None needed | O(orphans in window) |
+| Orphan accumulation | None | Until retention expires |
+| Rollback support | ❌ No | ✅ Yes |
 
-**Orphan GC scan cost:**
-```
-For each summary hash:
-  - Check if ANY index entry references it
-  - If none: delete summary
-  - O(summaries × index_scan)
-```
+**Key insight:** Keep RefCount tracking but defer deletion. When RefCount→0, add to OrphanSummaries CF instead of deleting. GC scans only the orphan index (tiny), not all summaries.
+
+See [Garbage Collection](#garbage-collection) section for full design.
+
 (codex, 2026-02-05, gap: conflicts with current RefCount-based summary cleanup; if we keep RefCount, update this section and GC cost model)
-(claude, 2026-02-05, CLARIFY: Same as line 109. VERSIONING supersedes CONTENT-ADDRESS. When implemented: (1) Remove RefCount decrement from mutations, (2) Add orphan scan to GC, (3) Accept higher storage until GC runs. Trade-off: storage vs rollback capability.)
+(claude, 2026-02-05, CLARIFY: Same as line 109. VERSIONING supersedes CONTENT-ADDRESS. When implemented: (1) Keep RefCount tracking but don't delete inline, (2) Add OrphanSummaries CF for deferred deletion, (3) GC scans orphan index with retention window. Trade-off: storage vs rollback capability.)
+(claude, 2026-02-06, RESOLVED: Orphan Index design added - keeps RefCount for O(orphans) GC scan while enabling rollback.)
 (codex, 2026-02-05, accept with caveat: VERSIONING may supersede RefCount; document the new GC/retention expectations and update CONTENT-ADDRESS to reflect the override)
+
+---
+
+## Garbage Collection
+
+### Problem: RefCount Breaks Rollback
+
+The current CONTENT-ADDRESS design uses RefCount for immediate summary cleanup:
+
+```rust
+// Current: decrement and delete inline when RefCount reaches 0
+if new_refcount == 0 {
+    txn.delete_cf(summaries_cf, &key)?;  // Summary DELETED
+}
+```
+
+This breaks rollback because old summaries are destroyed:
+
+```
+t=1000: Create node → summary 0xAAA, RefCount=1
+t=2000: Update node → 0xAAA RefCount→0, DELETED; 0xBBB RefCount=1
+t=3000: Rollback to t=1000 → needs 0xAAA, but it's GONE
+```
+
+### Solution: Orphan Index with Deferred Deletion
+
+Keep RefCount tracking but defer deletion to background GC. When RefCount reaches 0, add to an orphan tracking index instead of deleting immediately.
+
+**Design Principles:**
+1. **RefCount still tracks references** - increment/decrement logic unchanged
+2. **No inline deletion** - when RefCount→0, add to orphan index instead
+3. **Retention window** - orphans kept for configurable period before deletion
+4. **O(orphans) GC scan** - only scan orphan index, not all summaries
+
+### Schema: OrphanSummaries CF
+
+Single CF for both node and edge orphan tracking using a discriminant:
+
+```rust
+// ============================================================
+// ORPHAN SUMMARIES CF (NEW - enables deferred GC for rollback)
+// ============================================================
+pub struct OrphanSummaries;
+
+impl ColumnFamily for OrphanSummaries {
+    const CF_NAME: &'static str = "graph/orphan_summaries";
+}
+
+/// Key: time-ordered for retention-based scanning
+pub struct OrphanSummaryCfKey(
+    pub TimestampMilli,  // 8 bytes - when RefCount became 0
+    pub SummaryHash,     // 8 bytes - which summary is orphaned
+);  // Total: 16 bytes
+
+/// Value: discriminant to identify source CF for deletion
+#[repr(u8)]
+#[derive(Serialize, Deserialize)]
+pub enum SummaryKind {
+    Node = 0,
+    Edge = 1,
+}
+
+pub struct OrphanSummaryCfValue(pub SummaryKind);  // 1 byte
+```
+
+### Mutation Workflow
+
+| Event | RefCount Change | Orphan Index Action |
+|-------|-----------------|---------------------|
+| Create entity with summary | 0 → 1 | None |
+| Update to new summary | old: N → N-1, new: 0 → 1 | If old becomes 0: add `(now, old_hash)` |
+| Delete entity | N → N-1 | If becomes 0: add `(now, hash)` |
+| Rollback reuses old summary | 0 → 1 | Remove `(*, hash)` from orphan index |
+| RefCount stays > 0 | N → M (M > 0) | None |
+
+**Mutation pseudocode:**
+
+```rust
+fn decrement_summary_refcount(txn: &Transaction, hash: SummaryHash, kind: SummaryKind) -> Result<()> {
+    let key = NodeSummaryCfKey(hash);
+    let mut value = txn.get_cf(summaries_cf, &key)?;
+
+    value.ref_count -= 1;
+    txn.put_cf(summaries_cf, &key, &value)?;
+
+    // NEW: Track orphan instead of deleting
+    if value.ref_count == 0 {
+        let orphan_key = OrphanSummaryCfKey(now(), hash);
+        let orphan_value = OrphanSummaryCfValue(kind);
+        txn.put_cf(orphan_cf, &orphan_key, &orphan_value)?;
+    }
+
+    Ok(())
+}
+
+fn increment_summary_refcount(txn: &Transaction, hash: SummaryHash, kind: SummaryKind) -> Result<()> {
+    let key = NodeSummaryCfKey(hash);
+
+    match txn.get_cf(summaries_cf, &key)? {
+        Some(mut value) => {
+            let was_orphan = value.ref_count == 0;
+            value.ref_count += 1;
+            txn.put_cf(summaries_cf, &key, &value)?;
+
+            // NEW: Remove from orphan index if resurrected
+            if was_orphan {
+                // Scan orphan index for this hash and delete
+                remove_from_orphan_index(txn, hash)?;
+            }
+        }
+        None => {
+            // Create new summary row
+            txn.put_cf(summaries_cf, &key, (ref_count: 1, summary))?;
+        }
+    }
+
+    Ok(())
+}
+```
+
+### GC Workflow
+
+```rust
+/// GC orphan summaries older than retention period.
+/// Complexity: O(orphans_in_window) - only scans orphan index, not all summaries
+fn gc_orphan_summaries(
+    &self,
+    retention: Duration,  // e.g., 7 days
+) -> Result<GcOrphanMetrics> {
+    let txn = db.transaction();
+    let cutoff = now() - retention;
+    let mut deleted = 0;
+    let mut skipped = 0;
+
+    // Scan orphan index (tiny CF, time-ordered by key)
+    let iter = txn.iterator_cf(orphan_cf, IteratorMode::Start);
+
+    for (key_bytes, value_bytes) in iter {
+        let key = OrphanSummaryCfKey::from_bytes(&key_bytes)?;
+        let value = OrphanSummaryCfValue::from_bytes(&value_bytes)?;
+
+        let (orphaned_at, hash) = (key.0, key.1);
+
+        // Stop when we hit entries within retention window
+        if orphaned_at > cutoff {
+            break;  // Time-ordered keys, all remaining are newer
+        }
+
+        // Select target CF based on discriminant
+        let summaries_cf = match value.0 {
+            SummaryKind::Node => node_summaries_cf,
+            SummaryKind::Edge => edge_summaries_cf,
+        };
+
+        // Verify still orphan (RefCount=0) before deleting
+        // (handles race: rollback might have resurrected it)
+        if let Some(summary_value) = txn.get_cf(summaries_cf, &hash)? {
+            if summary_value.ref_count == 0 {
+                txn.delete_cf(summaries_cf, &hash)?;
+                deleted += 1;
+            } else {
+                skipped += 1;  // Resurrected, just remove from orphan index
+            }
+        }
+
+        // Always remove from orphan index
+        txn.delete_cf(orphan_cf, &key_bytes)?;
+    }
+
+    txn.commit()?;
+
+    Ok(GcOrphanMetrics { deleted, skipped })
+}
+```
+
+### Properties
+
+| Property | Value |
+|----------|-------|
+| **GC scan cost** | O(orphans in retention window) |
+| **Mutation overhead** | +1 small write (16+1 bytes) when RefCount→0 |
+| **Lookup by hash** | O(1) unchanged (hash in key, not RefCount) |
+| **Rollback window** | Configurable retention period |
+| **Storage overhead** | ~17 bytes per orphan candidate |
+| **Unified time order** | Node and edge orphans processed by age, not kind |
+
+### Rollback Safety Example
+
+```
+t=1000: Create node → summary 0xAAA, RefCount=1
+t=2000: Update node → 0xAAA RefCount→0
+        OrphanSummaries: (2000, 0xAAA) → Node
+        0xBBB RefCount=1
+t=3000: Rollback to t=1000
+        Increment 0xAAA RefCount→1
+        Remove (2000, 0xAAA) from orphan index
+        Summary 0xAAA preserved, rollback succeeds!
+
+t=4000: GC runs with retention=7 days
+        (2000, 0xAAA) already removed, nothing to delete
+        Rollback was safe
+```
+
+### Comparison: RefCount Inline vs Orphan Index
+
+| Aspect | RefCount Inline (Current) | Orphan Index (VERSIONING) |
+|--------|---------------------------|---------------------------|
+| Summary cleanup | Immediate on RefCount=0 | After retention period |
+| Write cost per update | 1 put (update RefCount) | 1 put + 1 orphan write |
+| GC scan cost | None needed | O(orphans) |
+| Rollback support | ❌ No (summary deleted) | ✅ Yes (retention window) |
+| Storage until GC | Minimal | Orphans accumulate |
+| Complexity | Simple | Moderate |
+
+### Configuration
+
+```rust
+pub struct OrphanGcConfig {
+    /// Retention period before orphan summaries are deleted.
+    /// This is the rollback window - summaries can be restored within this period.
+    /// Default: 7 days
+    pub retention: Duration,
+
+    /// Maximum orphans to process per GC cycle.
+    /// Bounds GC latency.
+    /// Default: 10000
+    pub batch_size: usize,
+
+    /// Interval between GC cycles.
+    /// Default: 1 hour
+    pub interval: Duration,
+}
+
+impl Default for OrphanGcConfig {
+    fn default() -> Self {
+        Self {
+            retention: Duration::from_secs(7 * 24 * 60 * 60),  // 7 days
+            batch_size: 10000,
+            interval: Duration::from_secs(60 * 60),  // 1 hour
+        }
+    }
+}
+```
+
+(claude, 2026-02-06, designed orphan index GC to enable rollback while preserving RefCount tracking)
+
+### Subsystem Integration
+
+The orphan GC integrates with the existing `graph::Subsystem` lifecycle pattern. The subsystem already manages:
+- Writer/Reader with channel-based consumers
+- Stale index GC via `GraphGarbageCollector`
+- Graceful shutdown with flush and join
+
+**Extended Subsystem Fields:**
+
+```rust
+pub struct Subsystem {
+    // ... existing fields ...
+
+    /// Stale index GC (existing) - cleans NodeSummaryIndex/EdgeSummaryIndex
+    gc: RwLock<Option<Arc<GraphGarbageCollector>>>,
+
+    /// Orphan summary GC (NEW) - cleans RefCount=0 summaries after retention
+    orphan_gc: RwLock<Option<Arc<OrphanSummaryGc>>>,
+}
+```
+
+**Extended `start()` Method:**
+
+```rust
+impl Subsystem {
+    pub fn start(
+        &self,
+        storage: Arc<Storage>,
+        writer_config: WriterConfig,
+        reader_config: ReaderConfig,
+        num_query_workers: usize,
+        gc_config: Option<GraphGcConfig>,
+        orphan_gc_config: Option<OrphanGcConfig>,  // NEW
+    ) -> (Writer, Reader) {
+        // ... existing writer/reader setup ...
+
+        // Start stale index GC (existing)
+        if let Some(config) = gc_config {
+            let gc = Arc::new(GraphGarbageCollector::new(storage.clone(), config));
+            let _handle = gc.clone().spawn_worker();
+            *self.gc.write().unwrap() = Some(gc);
+        }
+
+        // Start orphan summary GC (NEW)
+        if let Some(config) = orphan_gc_config {
+            let orphan_gc = Arc::new(OrphanSummaryGc::new(storage.clone(), config));
+            let _handle = orphan_gc.clone().spawn_worker();
+            *self.orphan_gc.write().unwrap() = Some(orphan_gc);
+        }
+
+        (writer, reader)
+    }
+}
+```
+
+**Extended `on_shutdown()` Method:**
+
+```rust
+impl SubsystemProvider<TransactionDB> for Subsystem {
+    fn on_shutdown(&self) -> Result<()> {
+        // 1. Flush pending mutations (existing)
+        // 2. Join consumer tasks (existing)
+
+        // 3. Shutdown stale index GC (existing)
+        if let Some(gc) = self.gc.write().unwrap().take() {
+            gc.shutdown();
+        }
+
+        // 4. Shutdown orphan summary GC (NEW)
+        // Orphan GC runs last - can continue cleaning while other components stop
+        if let Some(orphan_gc) = self.orphan_gc.write().unwrap().take() {
+            tracing::debug!(subsystem = "graph", "Shutting down orphan summary GC");
+            orphan_gc.shutdown();
+        }
+
+        Ok(())
+    }
+}
+```
+
+**OrphanSummaryGc Worker:**
+
+```rust
+pub struct OrphanSummaryGc {
+    storage: Arc<Storage>,
+    config: OrphanGcConfig,
+    shutdown: Arc<AtomicBool>,
+    metrics: Arc<OrphanGcMetrics>,
+}
+
+impl OrphanSummaryGc {
+    pub fn new(storage: Arc<Storage>, config: OrphanGcConfig) -> Self {
+        Self {
+            storage,
+            config,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            metrics: Arc::new(OrphanGcMetrics::new()),
+        }
+    }
+
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    pub fn metrics(&self) -> &Arc<OrphanGcMetrics> {
+        &self.metrics
+    }
+
+    /// Spawn background worker that runs GC cycles at configured interval.
+    pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(self.config.interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                if self.shutdown.load(Ordering::SeqCst) {
+                    tracing::info!("Orphan GC worker shutting down");
+                    break;
+                }
+
+                match self.run_cycle() {
+                    Ok(metrics) => {
+                        if metrics.deleted > 0 {
+                            tracing::info!(
+                                deleted = metrics.deleted,
+                                skipped = metrics.skipped,
+                                "Orphan GC cycle completed"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Orphan GC cycle failed");
+                    }
+                }
+            }
+        })
+    }
+
+    /// Run a single GC cycle, processing up to batch_size orphans.
+    pub fn run_cycle(&self) -> Result<GcOrphanMetrics> {
+        // Implementation as shown in GC Workflow section
+        gc_orphan_summaries(&self.storage, &self.config)
+    }
+}
+```
+
+**Metrics:**
+
+```rust
+#[derive(Debug, Default)]
+pub struct OrphanGcMetrics {
+    pub summaries_deleted: AtomicU64,
+    pub summaries_skipped: AtomicU64,  // Resurrected before GC
+    pub cycles_completed: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GcOrphanMetricsSnapshot {
+    pub deleted: u64,
+    pub skipped: u64,
+}
+```
+
+**Usage Example:**
+
+```rust
+use motlie_db::graph::{Subsystem, WriterConfig, ReaderConfig, GraphGcConfig, OrphanGcConfig};
+
+// Create subsystem
+let subsystem = Arc::new(Subsystem::new());
+let storage = StorageBuilder::new(path)
+    .with_rocksdb(subsystem.clone())
+    .build()?;
+
+// Start with both GC workers
+let (writer, reader) = subsystem.start(
+    storage.graph_storage().clone(),
+    WriterConfig::default(),
+    ReaderConfig::default(),
+    4,  // query workers
+    Some(GraphGcConfig::default()),      // Stale index GC
+    Some(OrphanGcConfig::default()),     // Orphan summary GC (7-day retention)
+);
+
+// Check orphan GC metrics
+if let Some(metrics) = subsystem.orphan_gc_metrics() {
+    let snapshot = metrics.snapshot();
+    println!("Deleted {} orphan summaries", snapshot.summaries_deleted);
+}
+
+// Graceful shutdown flushes mutations and stops both GC workers
+storage.shutdown()?;
+```
+
+**Lifecycle Diagram:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Subsystem.start()                         │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Create Writer + Reader channels                              │
+│  2. Spawn mutation consumer (1 worker)                           │
+│  3. Spawn query consumers (N workers)                            │
+│  4. Spawn GraphGarbageCollector worker (stale index)             │
+│  5. Spawn OrphanSummaryGc worker (orphan summaries)      [NEW]   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Normal Operation                            │
+├─────────────────────────────────────────────────────────────────┤
+│  Writer ──► Mutation Consumer ──► Graph (RocksDB)                │
+│  Reader ──► Query Consumers ──► Graph (RocksDB)                  │
+│                                                                  │
+│  GraphGarbageCollector: every 60s, clean stale index entries     │
+│  OrphanSummaryGc: every 1h, clean orphans older than 7 days      │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Subsystem.on_shutdown()                       │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Flush pending mutations (close writer channel)              │
+│  2. Join consumer tasks (wait for channel drain)                │
+│  3. Signal GraphGarbageCollector shutdown                        │
+│  4. Signal OrphanSummaryGc shutdown                      [NEW]   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+(claude, 2026-02-06, added subsystem integration for orphan GC lifecycle management)
 
 ---
 
@@ -1211,11 +1717,13 @@ For each summary hash:
 | Time-travel queries | Enabled via ValidSince in key |
 | Topology rollback | Enabled via close-old/create-new pattern |
 | Content rollback | Enabled via EdgeVersionHistory/NodeVersionHistory + append-only summaries |
+| Summary GC | Orphan Index with retention-based deletion (enables rollback) |
 | Multi-edge support | Explicit via AddEdge (fails if exists) |
 | Retarget support | Explicit via UpdateEdge with new_dst |
 | Fragments | Unchanged (already temporal) |
 
 (claude, 2026-02-04, designed)
+(claude, 2026-02-06, added Orphan Index GC design)
 
 ---
 
