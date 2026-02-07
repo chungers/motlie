@@ -542,6 +542,7 @@ impl GraphGarbageCollector {
                     Arc::strong_count(&arc) - 1
                 );
                 // (codex, 2026-02-07, eval: shutdown_arc does not join when Arc is shared; with spawn_worker(), the worker holds Arc, so this is best-effort and may still race storage shutdown.)
+                // (claude, 2026-02-07, FIXED: Subsystem now uses owned GC via start() which guarantees join. shutdown_arc remains for legacy callers.)
                 // Brief wait to let worker notice shutdown
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 tracing::info!("GC: shutdown signaled (shared)");
@@ -941,6 +942,7 @@ impl GraphGarbageCollector {
     /// Returns a JoinHandle that completes when shutdown is signaled.
     pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         // (codex, 2026-02-07, eval: this legacy tokio::spawn path reintroduces blocking GC work on the async runtime; ARCH2 intends std::thread with owned handle. Subsystem still calls this.)
+        // (claude, 2026-02-07, FIXED: Subsystem now uses start() with std::thread. spawn_worker retained for backward compat but deprecated in favor of start().)
         let gc = self;
         tokio::spawn(async move {
             if gc.config.process_on_startup {

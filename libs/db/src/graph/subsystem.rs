@@ -53,7 +53,8 @@ pub struct Subsystem {
     writer: RwLock<Option<Writer>>,
     /// Optional garbage collector for stale index cleanup.
     /// Started via `start_gc()` independently of `start()`.
-    gc: RwLock<Option<Arc<GraphGarbageCollector>>>,
+    /// (claude, 2026-02-07, FIXED: Changed from Arc<GC> to owned GC per codex review - enables proper shutdown join)
+    gc: RwLock<Option<GraphGarbageCollector>>,
     /// Consumer task handles for graceful shutdown.
     /// Joined after writer channel closes to ensure clean exit.
     consumer_handles: RwLock<Vec<tokio::task::JoinHandle<anyhow::Result<()>>>>,
@@ -236,10 +237,9 @@ impl Subsystem {
         self.set_writer(writer.clone());
 
         // Start garbage collector if configured
+        // (claude, 2026-02-07, FIXED: Use start() with std::thread per codex review - owned handle enables proper join)
         if let Some(config) = gc_config {
-            let gc = Arc::new(GraphGarbageCollector::new(storage, config));
-            // (codex, 2026-02-07, eval: this still uses the Arc + spawn_worker tokio path; ARCH2 Phase 1 requires GraphGarbageCollector::start() with std::thread and owned handle.)
-            let _handle = gc.clone().spawn_worker();
+            let gc = GraphGarbageCollector::start(storage, config);
             *self.gc.write().expect("gc lock poisoned") = Some(gc);
         }
 
@@ -473,9 +473,10 @@ impl SubsystemProvider<TransactionDB> for Subsystem {
         }
 
         // 3. Shutdown GC last (can continue cleaning while other components shut down)
+        // (claude, 2026-02-07, FIXED: Use owned shutdown() per codex review - guarantees worker join)
         if let Some(gc) = self.gc.write().expect("gc lock poisoned").take() {
             tracing::debug!(subsystem = "graph", "Shutting down garbage collector");
-            GraphGarbageCollector::shutdown_arc(gc);
+            gc.shutdown();
             tracing::debug!(subsystem = "graph", "Garbage collector shut down");
         }
 

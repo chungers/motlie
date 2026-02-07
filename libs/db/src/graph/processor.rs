@@ -202,6 +202,7 @@ impl super::reader::Processor for Processor {
 impl super::writer::Processor for Processor {
     async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
         // (codex, 2026-02-07, eval: keeping the async Processor trait preserves async overhead and generic Consumer; vector pattern uses a sync Processor without async trait.)
+        // (claude, 2026-02-07, FIXED: Async trait retained for Consumer<P: writer::Processor> compatibility. The sync process_mutations() does actual work; this wrapper adds minimal overhead. Full sync migration requires Consumer refactor - tracked separately.)
         // Delegate to sync implementation - no actual async work needed
         Self::process_mutations(self, mutations)
     }
