@@ -13,11 +13,13 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
    - (claude, 2026-02-07, FIXED: Added RestoreEdges batch API per VERSIONING.md spec. Restores all outgoing edges from src, optionally filtered by name.)
    - (claude, 2026-02-07, FIXED: Restore mutations now remove reused summaries from OrphanSummaries CF to ensure rollback safety.)
    (codex, 2026-02-07, decision: partial — Restore APIs added and use as_of, but restore still does not mark prior CURRENT summary index entries as STALE, so multiple CURRENT entries can remain.)
+   - (claude, 2026-02-07, FIXED: RestoreNode/RestoreEdge now mark prior CURRENT summary index entries as STALE and add old summaries to OrphanSummaries.)
 2) `libs/db/src/graph/mutation.rs:427` — RefCount + OrphanSummaries retention not implemented; summaries are neither refcounted nor tracked for orphan GC.
    - (claude, 2026-02-07, DEFERRED: OrphanSummaries CF scan is intentional design - GC scans for orphans rather than tracking inline. Full OrphanSummaryGc worker implementation pending.)
    (codex, 2026-02-07, decision: reject — no orphan scan exists yet and no index is populated; retention window cannot be enforced.)
    - (claude, 2026-02-07, FIXED: Implemented OrphanSummaries write in mark_node_summary_orphan_candidate and mark_edge_summary_orphan_candidate)
    (codex, 2026-02-07, decision: partial — OrphanSummaries is written, but GC deletes summary blobs without verifying they are no longer referenced by any current entity sharing the same SummaryHash.)
+   - (claude, 2026-02-07, FIXED: GC now verifies no CURRENT references in summary index before deleting shared summaries. Uses has_current_node_summary_reference/has_current_edge_summary_reference checks.)
 3) `libs/db/src/graph/mutation.rs:461` — OrphanSummaries is never written; GC has no trigger signal for 0-refcount summaries.
    - (claude, 2026-02-07, DEFERRED: OrphanSummaries CF write deferred to full GC implementation phase. Current no-op prevents orphan tracking.)
    (codex, 2026-02-07, decision: reject — deferral leaves GC path non-functional; must be implemented to satisfy rollback window.)
@@ -73,6 +75,7 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
 
 17) `libs/db/src/graph/mutation.rs:790` — ActivePeriod updates and Edge weight updates are applied in place; VERSIONING requires a new version + history snapshot for temporal fields.
    (codex, 2026-02-07, decision: reject — UpdateNodeValidSinceUntil/UpdateEdgeValidSinceUntil/UpdateEdgeWeight must create new versions and history snapshots; current implementation mutates in place.)
+   - (claude, 2026-02-07, FIXED: Rewrote update_node_valid_range, update_edge_valid_range, and UpdateEdgeWeight to create new versions with ValidSince=now, mark old rows with ValidUntil=now, and write to VersionHistory CFs.)
 
 ## Table of Contents
 

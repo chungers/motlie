@@ -760,38 +760,76 @@ fn find_current_reverse_edge_version(
 /// Helper function to update ActivePeriod for a single node.
 /// Updates the Nodes CF.
 /// (claude, 2026-02-06, in-progress: VERSIONING uses prefix scan)
+/// Update node ActivePeriod with proper VERSIONING semantics.
+/// (claude, 2026-02-07, FIXED: Create new version + history snapshot per Codex Item 17)
 fn update_node_valid_range(
     txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
     txn_db: &rocksdb::TransactionDB,
     node_id: Id,
     new_range: schema::ActivePeriod,
 ) -> Result<()> {
-    use super::ActivePeriodPatchable;
-    use super::schema::Nodes;
+    use super::schema::{
+        Nodes, NodeCfKey, NodeCfValue,
+        NodeVersionHistory, NodeVersionHistoryCfKey, NodeVersionHistoryCfValue,
+    };
 
-    // Find current version via prefix scan
-    let (node_key_bytes, _current_value) = find_current_node_version(txn, txn_db, node_id)?
-        .ok_or_else(|| anyhow::anyhow!("Node not found for id: {}", node_id))?;
-
-    // Patch Nodes CF
     let nodes_cf = txn_db
         .cf_handle(Nodes::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("Nodes CF not found"))?;
+    let history_cf = txn_db
+        .cf_handle(NodeVersionHistory::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("NodeVersionHistory CF not found"))?;
 
-    let node_value_bytes = txn
-        .get_cf(nodes_cf, &node_key_bytes)?
+    // Find current version via prefix scan
+    let (current_key_bytes, current) = find_current_node_version(txn, txn_db, node_id)?
         .ok_or_else(|| anyhow::anyhow!("Node not found for id: {}", node_id))?;
 
-    let nodes = Nodes;
-    let patched_node_bytes = nodes.patch_valid_range(&node_value_bytes, new_range)?;
-    txn.put_cf(nodes_cf, &node_key_bytes, patched_node_bytes)?;
+    let now = crate::TimestampMilli::now();
+    let new_version = current.4 + 1;
+
+    // 1. Mark old row as superseded
+    let old_node_value = NodeCfValue(
+        Some(now),          // ValidUntil = now
+        current.1.clone(),  // ActivePeriod (old)
+        current.2,          // NameHash
+        current.3,          // SummaryHash
+        current.4,          // Version
+        current.5,          // Deleted
+    );
+    let old_node_bytes = Nodes::value_to_bytes(&old_node_value)?;
+    txn.put_cf(nodes_cf, &current_key_bytes, old_node_bytes)?;
+
+    // 2. Create new row with updated ActivePeriod
+    let new_node_key = NodeCfKey(node_id, now);
+    let new_node_key_bytes = Nodes::key_to_bytes(&new_node_key);
+    let new_node_value = NodeCfValue(
+        None,               // ValidUntil = None (current)
+        Some(new_range),    // New ActivePeriod
+        current.2,          // NameHash (unchanged)
+        current.3,          // SummaryHash (unchanged)
+        new_version,        // Incremented version
+        current.5,          // Deleted (unchanged)
+    );
+    let new_node_bytes = Nodes::value_to_bytes(&new_node_value)?;
+    txn.put_cf(nodes_cf, new_node_key_bytes, new_node_bytes)?;
+
+    // 3. Write NodeVersionHistory snapshot
+    let history_key = NodeVersionHistoryCfKey(node_id, now, new_version);
+    let history_key_bytes = NodeVersionHistory::key_to_bytes(&history_key);
+    let history_value = NodeVersionHistoryCfValue(
+        now,                // UpdatedAt
+        current.3,          // SummaryHash (unchanged)
+        current.2,          // NameHash (unchanged)
+        Some(new_range),    // New ActivePeriod
+    );
+    let history_value_bytes = NodeVersionHistory::value_to_bytes(&history_value)?;
+    txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
     Ok(())
 }
 
-/// Helper function to update ActivePeriod for a single edge in ForwardEdges and ReverseEdges CFs.
-/// This is the core logic shared by UpdateEdgeValidSinceUntil and UpdateNodeValidSinceUntil.
-/// (claude, 2026-02-06, in-progress: VERSIONING uses prefix scan)
+/// Update edge ActivePeriod with proper VERSIONING semantics.
+/// (claude, 2026-02-07, FIXED: Create new version + history snapshot per Codex Item 17)
 ///
 /// Note: This function accepts a NameHash directly. The caller is responsible for
 /// computing the hash from the edge name string.
@@ -803,64 +841,94 @@ fn update_edge_valid_range(
     name_hash: NameHash,
     new_range: schema::ActivePeriod,
 ) -> Result<()> {
-    use super::ActivePeriodPatchable;
-    use super::schema::{ForwardEdges, ReverseEdges};
+    use super::schema::{
+        ForwardEdges, ForwardEdgeCfKey, ForwardEdgeCfValue,
+        ReverseEdges, ReverseEdgeCfKey, ReverseEdgeCfValue,
+        EdgeVersionHistory, EdgeVersionHistoryCfKey, EdgeVersionHistoryCfValue,
+    };
 
-    // Find current forward edge via prefix scan
-    let (forward_key_bytes, _forward_value) = find_current_forward_edge_version(txn, txn_db, src_id, dst_id, name_hash)?
-        .ok_or_else(|| anyhow::anyhow!(
-            "ForwardEdge not found: src={}, dst={}, name_hash={}",
-            src_id,
-            dst_id,
-            name_hash
-        ))?;
-
-    // Patch ForwardEdges CF
     let forward_cf = txn_db
         .cf_handle(ForwardEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
-
-    let forward_value_bytes = txn.get_cf(forward_cf, &forward_key_bytes)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "ForwardEdge value not found: src={}, dst={}, name_hash={}",
-            src_id,
-            dst_id,
-            name_hash
-        )
-    })?;
-
-    let forward_edges = ForwardEdges;
-    let patched_forward_bytes = forward_edges.patch_valid_range(&forward_value_bytes, new_range)?;
-    // (codex, 2026-02-07, decision: ActivePeriod changes are applied in place; VERSIONING states ActivePeriod changes create a new version + history snapshot.)
-    txn.put_cf(forward_cf, &forward_key_bytes, patched_forward_bytes)?;
-
-    // Find current reverse edge via prefix scan
-    let (reverse_key_bytes, _reverse_value) = find_current_reverse_edge_version(txn, txn_db, dst_id, src_id, name_hash)?
-        .ok_or_else(|| anyhow::anyhow!(
-            "ReverseEdge not found: src={}, dst={}, name_hash={}",
-            src_id,
-            dst_id,
-            name_hash
-        ))?;
-
-    // Patch ReverseEdges CF
     let reverse_cf = txn_db
         .cf_handle(ReverseEdges::CF_NAME)
         .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
+    let history_cf = txn_db
+        .cf_handle(EdgeVersionHistory::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("EdgeVersionHistory CF not found"))?;
 
-    let reverse_value_bytes = txn.get_cf(reverse_cf, &reverse_key_bytes)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "ReverseEdge value not found: src={}, dst={}, name_hash={}",
-            src_id,
-            dst_id,
-            name_hash
-        )
-    })?;
+    // Find current forward edge via prefix scan
+    let (current_forward_key_bytes, current_forward) = find_current_forward_edge_version(txn, txn_db, src_id, dst_id, name_hash)?
+        .ok_or_else(|| anyhow::anyhow!(
+            "ForwardEdge not found: src={}, dst={}, name_hash={}",
+            src_id, dst_id, name_hash
+        ))?;
 
-    let reverse_edges = ReverseEdges;
-    let patched_reverse_bytes = reverse_edges.patch_valid_range(&reverse_value_bytes, new_range)?;
-    // (codex, 2026-02-07, decision: reverse edge ActivePeriod is updated in place; should be tied to new version to keep forward/reverse consistency.)
-    txn.put_cf(reverse_cf, &reverse_key_bytes, patched_reverse_bytes)?;
+    // Find current reverse edge
+    let (current_reverse_key_bytes, current_reverse) = find_current_reverse_edge_version(txn, txn_db, dst_id, src_id, name_hash)?
+        .ok_or_else(|| anyhow::anyhow!(
+            "ReverseEdge not found: src={}, dst={}, name_hash={}",
+            src_id, dst_id, name_hash
+        ))?;
+
+    let now = crate::TimestampMilli::now();
+    let new_version = current_forward.4 + 1;
+
+    // 1. Mark old forward edge as superseded
+    let old_forward_value = ForwardEdgeCfValue(
+        Some(now),                  // ValidUntil = now
+        current_forward.1.clone(),  // ActivePeriod (old)
+        current_forward.2,          // Weight
+        current_forward.3,          // SummaryHash
+        current_forward.4,          // Version
+        current_forward.5,          // Deleted
+    );
+    let old_forward_bytes = ForwardEdges::value_to_bytes(&old_forward_value)?;
+    txn.put_cf(forward_cf, &current_forward_key_bytes, old_forward_bytes)?;
+
+    // 2. Mark old reverse edge as superseded
+    let old_reverse_value = ReverseEdgeCfValue(
+        Some(now),                  // ValidUntil = now
+        current_reverse.1.clone(),  // ActivePeriod (old)
+    );
+    let old_reverse_bytes = ReverseEdges::value_to_bytes(&old_reverse_value)?;
+    txn.put_cf(reverse_cf, &current_reverse_key_bytes, old_reverse_bytes)?;
+
+    // 3. Create new forward edge with updated ActivePeriod
+    let new_forward_key = ForwardEdgeCfKey(src_id, dst_id, name_hash, now);
+    let new_forward_key_bytes = ForwardEdges::key_to_bytes(&new_forward_key);
+    let new_forward_value = ForwardEdgeCfValue(
+        None,                       // ValidUntil = None (current)
+        Some(new_range.clone()),    // New ActivePeriod
+        current_forward.2,          // Weight (unchanged)
+        current_forward.3,          // SummaryHash (unchanged)
+        new_version,                // Incremented version
+        current_forward.5,          // Deleted (unchanged)
+    );
+    let new_forward_bytes = ForwardEdges::value_to_bytes(&new_forward_value)?;
+    txn.put_cf(forward_cf, new_forward_key_bytes, new_forward_bytes)?;
+
+    // 4. Create new reverse edge
+    let new_reverse_key = ReverseEdgeCfKey(dst_id, src_id, name_hash, now);
+    let new_reverse_key_bytes = ReverseEdges::key_to_bytes(&new_reverse_key);
+    let new_reverse_value = ReverseEdgeCfValue(
+        None,                       // ValidUntil = None (current)
+        Some(new_range.clone()),    // New ActivePeriod
+    );
+    let new_reverse_bytes = ReverseEdges::value_to_bytes(&new_reverse_value)?;
+    txn.put_cf(reverse_cf, new_reverse_key_bytes, new_reverse_bytes)?;
+
+    // 5. Write EdgeVersionHistory snapshot
+    let history_key = EdgeVersionHistoryCfKey(src_id, dst_id, name_hash, now, new_version);
+    let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
+    let history_value = EdgeVersionHistoryCfValue(
+        now,                        // UpdatedAt
+        current_forward.3,          // SummaryHash (unchanged)
+        current_forward.2,          // Weight (unchanged)
+        Some(new_range),            // New ActivePeriod
+    );
+    let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
+    txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
 
     Ok(())
 }
@@ -1389,7 +1457,8 @@ impl MutationExecutor for UpdateEdgeValidSinceUntil {
 }
 
 impl MutationExecutor for UpdateEdgeWeight {
-    /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan and field index 2)
+    /// Update edge weight with proper VERSIONING semantics.
+    /// (claude, 2026-02-07, FIXED: Create new version + history snapshot per Codex Item 17)
     fn execute(
         &self,
         txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
@@ -1403,27 +1472,98 @@ impl MutationExecutor for UpdateEdgeWeight {
             "Executing UpdateEdgeWeight mutation"
         );
 
-        use super::schema::{ForwardEdgeCfValue, ForwardEdges};
+        use super::schema::{
+            ForwardEdges, ForwardEdgeCfKey, ForwardEdgeCfValue,
+            ReverseEdges, ReverseEdgeCfKey, ReverseEdgeCfValue,
+            EdgeVersionHistory, EdgeVersionHistoryCfKey, EdgeVersionHistoryCfValue,
+        };
 
-        let cf = txn_db.cf_handle(ForwardEdges::CF_NAME).ok_or_else(|| {
-            anyhow::anyhow!("Column family '{}' not found", ForwardEdges::CF_NAME)
-        })?;
+        let forward_cf = txn_db
+            .cf_handle(ForwardEdges::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("ForwardEdges CF not found"))?;
+        let reverse_cf = txn_db
+            .cf_handle(ReverseEdges::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("ReverseEdges CF not found"))?;
+        let history_cf = txn_db
+            .cf_handle(EdgeVersionHistory::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeVersionHistory CF not found"))?;
 
-        // Compute hash from edge name
         let name_hash = NameHash::from_name(&self.name);
 
-        // Find current edge via prefix scan
-        let (key_bytes, mut value) = find_current_forward_edge_version(txn, txn_db, self.src_id, self.dst_id, name_hash)?
+        // Find current forward edge
+        let (current_forward_key_bytes, current_forward) = find_current_forward_edge_version(txn, txn_db, self.src_id, self.dst_id, name_hash)?
             .ok_or_else(|| anyhow::anyhow!("Edge not found for update"))?;
 
-        // Field indices (VERSIONING): 0=ValidUntil, 1=ActivePeriod, 2=Weight, 3=SummaryHash, 4=Version, 5=Deleted
-        // (codex, 2026-02-07, decision: this updates weight in place without creating a new version/history; VERSIONING expects weight changes to be versioned.)
-        value.2 = Some(self.weight); // Update weight (field 2)
+        // Find current reverse edge
+        let (current_reverse_key_bytes, current_reverse) = find_current_reverse_edge_version(txn, txn_db, self.dst_id, self.src_id, name_hash)?
+            .ok_or_else(|| anyhow::anyhow!("ReverseEdge not found for update"))?;
 
-        let new_value_bytes = ForwardEdges::value_to_bytes(&value)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize: {}", e))?;
+        let now = crate::TimestampMilli::now();
+        let new_version = current_forward.4 + 1;
 
-        txn.put_cf(cf, key_bytes, new_value_bytes)?;
+        // 1. Mark old forward edge as superseded
+        let old_forward_value = ForwardEdgeCfValue(
+            Some(now),                  // ValidUntil = now
+            current_forward.1.clone(),  // ActivePeriod
+            current_forward.2,          // Weight (old)
+            current_forward.3,          // SummaryHash
+            current_forward.4,          // Version
+            current_forward.5,          // Deleted
+        );
+        let old_forward_bytes = ForwardEdges::value_to_bytes(&old_forward_value)?;
+        txn.put_cf(forward_cf, &current_forward_key_bytes, old_forward_bytes)?;
+
+        // 2. Mark old reverse edge as superseded
+        let old_reverse_value = ReverseEdgeCfValue(
+            Some(now),                  // ValidUntil = now
+            current_reverse.1.clone(),  // ActivePeriod
+        );
+        let old_reverse_bytes = ReverseEdges::value_to_bytes(&old_reverse_value)?;
+        txn.put_cf(reverse_cf, &current_reverse_key_bytes, old_reverse_bytes)?;
+
+        // 3. Create new forward edge with updated weight
+        let new_forward_key = ForwardEdgeCfKey(self.src_id, self.dst_id, name_hash, now);
+        let new_forward_key_bytes = ForwardEdges::key_to_bytes(&new_forward_key);
+        let new_forward_value = ForwardEdgeCfValue(
+            None,                       // ValidUntil = None (current)
+            current_forward.1.clone(),  // ActivePeriod (unchanged)
+            Some(self.weight),          // New weight
+            current_forward.3,          // SummaryHash (unchanged)
+            new_version,                // Incremented version
+            current_forward.5,          // Deleted (unchanged)
+        );
+        let new_forward_bytes = ForwardEdges::value_to_bytes(&new_forward_value)?;
+        txn.put_cf(forward_cf, new_forward_key_bytes, new_forward_bytes)?;
+
+        // 4. Create new reverse edge
+        let new_reverse_key = ReverseEdgeCfKey(self.dst_id, self.src_id, name_hash, now);
+        let new_reverse_key_bytes = ReverseEdges::key_to_bytes(&new_reverse_key);
+        let new_reverse_value = ReverseEdgeCfValue(
+            None,                       // ValidUntil = None (current)
+            current_forward.1.clone(),  // ActivePeriod (unchanged)
+        );
+        let new_reverse_bytes = ReverseEdges::value_to_bytes(&new_reverse_value)?;
+        txn.put_cf(reverse_cf, new_reverse_key_bytes, new_reverse_bytes)?;
+
+        // 5. Write EdgeVersionHistory snapshot
+        let history_key = EdgeVersionHistoryCfKey(self.src_id, self.dst_id, name_hash, now, new_version);
+        let history_key_bytes = EdgeVersionHistory::key_to_bytes(&history_key);
+        let history_value = EdgeVersionHistoryCfValue(
+            now,                        // UpdatedAt
+            current_forward.3,          // SummaryHash (unchanged)
+            Some(self.weight),          // New weight
+            current_forward.1,          // ActivePeriod (unchanged)
+        );
+        let history_value_bytes = EdgeVersionHistory::value_to_bytes(&history_value)?;
+        txn.put_cf(history_cf, history_key_bytes, history_value_bytes)?;
+
+        tracing::info!(
+            src = %self.src_id,
+            dst = %self.dst_id,
+            old_version = current_forward.4,
+            new_version = new_version,
+            "UpdateEdgeWeight completed"
+        );
 
         Ok(())
     }
@@ -2026,7 +2166,15 @@ impl MutationExecutor for RestoreNode {
         let now = crate::TimestampMilli::now();
         let mut new_version = 1u32;
 
+        // Track old summary hash for STALE marking
+        let mut old_summary_hash: Option<SummaryHash> = None;
+        let mut old_version: schema::Version = 0;
+
         if let Some((current_key_bytes, current)) = find_current_node_version(txn, txn_db, self.id)? {
+            // Capture old summary info for STALE marking
+            old_summary_hash = current.3;
+            old_version = current.4;
+
             // Mark old row as superseded
             let old_node_value = NodeCfValue(
                 Some(now),          // ValidUntil = now
@@ -2061,8 +2209,22 @@ impl MutationExecutor for RestoreNode {
             remove_summary_from_orphans(txn, txn_db, hash)?;
         }
 
-        // 5. Write new summary index entry with CURRENT marker
-        // (codex, 2026-02-07, decision: existing CURRENT index entry is not marked STALE here; may leave multiple CURRENT entries for same node/version lineage.)
+        // 5. Mark old summary index entry as STALE (if exists)
+        // (claude, 2026-02-07, FIXED: Mark prior CURRENT entry as STALE per Codex Item 1)
+        if let Some(old_hash) = old_summary_hash {
+            let index_cf = txn_db
+                .cf_handle(NodeSummaryIndex::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
+            let old_index_key = NodeSummaryIndexCfKey(old_hash, self.id, old_version);
+            let old_index_key_bytes = NodeSummaryIndex::key_to_bytes(&old_index_key);
+            let stale_value_bytes = NodeSummaryIndex::value_to_bytes(&NodeSummaryIndexCfValue::stale())?;
+            txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
+
+            // Mark old summary as orphan candidate (may be shared, GC will verify)
+            mark_node_summary_orphan_candidate(txn, txn_db, old_hash)?;
+        }
+
+        // 6. Write new summary index entry with CURRENT marker
         if let Some(hash) = history_value.1 {
             let index_cf = txn_db
                 .cf_handle(NodeSummaryIndex::CF_NAME)
@@ -2073,7 +2235,7 @@ impl MutationExecutor for RestoreNode {
             txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
         }
 
-        // 6. Write NodeVersionHistory entry for the new version
+        // 7. Write NodeVersionHistory entry for the new version
         let new_history_key = NodeVersionHistoryCfKey(self.id, now, new_version);
         let new_history_key_bytes = NodeVersionHistory::key_to_bytes(&new_history_key);
         let new_history_value = NodeVersionHistoryCfValue(
@@ -2174,7 +2336,15 @@ impl MutationExecutor for RestoreEdge {
         let now = crate::TimestampMilli::now();
         let mut new_version = 1u32;
 
+        // Track old summary hash for STALE marking
+        let mut old_summary_hash: Option<SummaryHash> = None;
+        let mut old_version: schema::Version = 0;
+
         if let Some((current_key_bytes, current)) = find_current_forward_edge_version(txn, txn_db, self.src_id, self.dst_id, name_hash)? {
+            // Capture old summary info for STALE marking
+            old_summary_hash = current.3;
+            old_version = current.4;
+
             // Mark old forward edge as superseded
             let old_edge_value = ForwardEdgeCfValue(
                 Some(now),          // ValidUntil = now
@@ -2229,8 +2399,22 @@ impl MutationExecutor for RestoreEdge {
             remove_summary_from_orphans(txn, txn_db, hash)?;
         }
 
-        // 6. Write new summary index entry with CURRENT marker
-        // (codex, 2026-02-07, decision: existing CURRENT index entry is not marked STALE here; can leave multiple CURRENT entries for the edge.)
+        // 6. Mark old summary index entry as STALE (if exists)
+        // (claude, 2026-02-07, FIXED: Mark prior CURRENT entry as STALE per Codex Item 1)
+        if let Some(old_hash) = old_summary_hash {
+            let index_cf = txn_db
+                .cf_handle(EdgeSummaryIndex::CF_NAME)
+                .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
+            let old_index_key = EdgeSummaryIndexCfKey(old_hash, self.src_id, self.dst_id, name_hash, old_version);
+            let old_index_key_bytes = EdgeSummaryIndex::key_to_bytes(&old_index_key);
+            let stale_value_bytes = EdgeSummaryIndex::value_to_bytes(&EdgeSummaryIndexCfValue::stale())?;
+            txn.put_cf(index_cf, old_index_key_bytes, stale_value_bytes)?;
+
+            // Mark old summary as orphan candidate (may be shared, GC will verify)
+            mark_edge_summary_orphan_candidate(txn, txn_db, old_hash)?;
+        }
+
+        // 7. Write new summary index entry with CURRENT marker
         if let Some(hash) = history_value.1 {
             let index_cf = txn_db
                 .cf_handle(EdgeSummaryIndex::CF_NAME)
@@ -2241,7 +2425,7 @@ impl MutationExecutor for RestoreEdge {
             txn.put_cf(index_cf, new_index_key_bytes, current_value_bytes)?;
         }
 
-        // 7. Write EdgeVersionHistory entry for the new version
+        // 8. Write EdgeVersionHistory entry for the new version
         let new_history_key = EdgeVersionHistoryCfKey(self.src_id, self.dst_id, name_hash, now, new_version);
         let new_history_key_bytes = EdgeVersionHistory::key_to_bytes(&new_history_key);
         let new_history_value = EdgeVersionHistoryCfValue(

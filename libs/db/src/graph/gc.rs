@@ -136,6 +136,62 @@ fn find_current_edge_version_for_gc(
     Ok(None)
 }
 
+/// Check if any CURRENT entry in NodeSummaryIndex references this summary hash.
+/// (claude, 2026-02-07, FIXED: Added reference check for shared summaries per Codex review)
+///
+/// NodeSummaryIndex key is (SummaryHash, NodeId, Version), so we prefix-scan on hash.
+fn has_current_node_summary_reference(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    index_cf: &impl rocksdb::AsColumnFamilyRef,
+    hash: super::summary_hash::SummaryHash,
+) -> Result<bool> {
+    use super::schema::{NodeSummaryIndex, NodeSummaryIndexCfValue};
+
+    // Prefix scan on SummaryHash (first 32 bytes)
+    let prefix = hash.as_bytes().to_vec();
+    let iter = txn.prefix_iterator_cf(index_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: NodeSummaryIndexCfValue = NodeSummaryIndex::value_from_bytes(&value_bytes)?;
+        if value.is_current() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Check if any CURRENT entry in EdgeSummaryIndex references this summary hash.
+/// (claude, 2026-02-07, FIXED: Added reference check for shared summaries per Codex review)
+///
+/// EdgeSummaryIndex key is (SummaryHash, SrcId, DstId, NameHash, Version), so we prefix-scan on hash.
+fn has_current_edge_summary_reference(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    index_cf: &impl rocksdb::AsColumnFamilyRef,
+    hash: super::summary_hash::SummaryHash,
+) -> Result<bool> {
+    use super::schema::{EdgeSummaryIndex, EdgeSummaryIndexCfValue};
+
+    // Prefix scan on SummaryHash (first 32 bytes)
+    let prefix = hash.as_bytes().to_vec();
+    let iter = txn.prefix_iterator_cf(index_cf, &prefix);
+
+    for item in iter {
+        let (key_bytes, value_bytes) = item?;
+        if !key_bytes.starts_with(&prefix) {
+            break;
+        }
+        let value: EdgeSummaryIndexCfValue = EdgeSummaryIndex::value_from_bytes(&value_bytes)?;
+        if value.is_current() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -588,15 +644,20 @@ impl GraphGarbageCollector {
 
     /// GC orphan summaries from OrphanSummaries CF (VERSIONING).
     /// (claude, 2026-02-07, FIXED: Implemented orphan summary GC per VERSIONING)
+    /// (claude, 2026-02-07, FIXED: Added reference check before deletion per Codex review)
     ///
     /// Scans OrphanSummaries CF and deletes summaries older than `orphan_retention`.
+    /// Before deleting, verifies no CURRENT entries in the summary index reference this hash.
     /// Also deletes the summary data from NodeSummaries/EdgeSummaries CFs.
     fn gc_orphan_summaries(&self) -> Result<(u64, u64)> {
         use super::schema::{
             OrphanSummaries, OrphanSummaryCfKey, OrphanSummaryCfValue, SummaryKind,
             NodeSummaries, NodeSummaryCfKey,
             EdgeSummaries, EdgeSummaryCfKey,
+            NodeSummaryIndex, NodeSummaryIndexCfValue,
+            EdgeSummaryIndex, EdgeSummaryIndexCfValue,
         };
+        use super::summary_hash::SummaryHash;
 
         let txn_db = self.storage.transaction_db()?;
         let txn = txn_db.transaction();
@@ -614,6 +675,12 @@ impl GraphGarbageCollector {
         let edge_summaries_cf = txn_db
             .cf_handle(EdgeSummaries::CF_NAME)
             .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+        let node_index_cf = txn_db
+            .cf_handle(NodeSummaryIndex::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaryIndex CF not found"))?;
+        let edge_index_cf = txn_db
+            .cf_handle(EdgeSummaryIndex::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaryIndex CF not found"))?;
 
         // Calculate cutoff time (entries older than this are eligible)
         let now = crate::TimestampMilli::now();
@@ -647,15 +714,28 @@ impl GraphGarbageCollector {
                 break;
             }
 
-            // Delete the actual summary based on kind
+            // Check if summary is still referenced by any CURRENT entity before deleting
+            // (claude, 2026-02-07, FIXED: Verify no current references per Codex review)
             match orphan_value.0 {
                 SummaryKind::Node => {
+                    // Check if any CURRENT entries in NodeSummaryIndex reference this hash
+                    if has_current_node_summary_reference(&txn, node_index_cf, summary_hash)? {
+                        // Still referenced - just delete the orphan entry, not the summary
+                        orphan_keys_to_delete.push(key_bytes.to_vec());
+                        continue;
+                    }
                     let summary_key = NodeSummaryCfKey(summary_hash);
                     let summary_key_bytes = NodeSummaries::key_to_bytes(&summary_key);
                     txn.delete_cf(node_summaries_cf, &summary_key_bytes)?;
                     node_deleted += 1;
                 }
                 SummaryKind::Edge => {
+                    // Check if any CURRENT entries in EdgeSummaryIndex reference this hash
+                    if has_current_edge_summary_reference(&txn, edge_index_cf, summary_hash)? {
+                        // Still referenced - just delete the orphan entry, not the summary
+                        orphan_keys_to_delete.push(key_bytes.to_vec());
+                        continue;
+                    }
                     let summary_key = EdgeSummaryCfKey(summary_hash);
                     let summary_key_bytes = EdgeSummaries::key_to_bytes(&summary_key);
                     txn.delete_cf(edge_summaries_cf, &summary_key_bytes)?;
