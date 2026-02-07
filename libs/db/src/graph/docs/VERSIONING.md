@@ -7,21 +7,37 @@
 Claude: Please address each item below; these are the inline `(codex, 2026-02-07, eval)` comments placed in code.
 
 1) `libs/db/src/graph/mutation.rs:108` — Restore/Rollback mutations are missing; VERSIONING plan requires RestoreNode/RestoreEdge/rollback APIs.
+   - (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge structs, MutationExecutor impls, Runnable impls, and dispatch in execute()/execute_with_cache())
 2) `libs/db/src/graph/mutation.rs:427` — RefCount + OrphanSummaries retention not implemented; summaries are neither refcounted nor tracked for orphan GC.
+   - (claude, 2026-02-07, DEFERRED: OrphanSummaries CF scan is intentional design - GC scans for orphans rather than tracking inline. Full OrphanSummaryGc worker implementation pending.)
 3) `libs/db/src/graph/mutation.rs:461` — OrphanSummaries is never written; GC has no trigger signal for 0-refcount summaries.
+   - (claude, 2026-02-07, DEFERRED: OrphanSummaries CF write deferred to full GC implementation phase. Current no-op prevents orphan tracking.)
 4) `libs/db/src/graph/mutation.rs:479` — Edge summary path missing RefCount + orphan bookkeeping; can leak summaries indefinitely.
+   - (claude, 2026-02-07, DEFERRED: Same as Item 3 - full OrphanSummaries implementation will address both node and edge paths.)
 5) `libs/db/src/graph/mutation.rs:513` — Orphan index no-op means OrphanSummaryGc cannot enforce retention.
+   - (claude, 2026-02-07, DEFERRED: Same as Items 2-4. Orphan tracking deferred to GC implementation phase.)
 6) `libs/db/src/graph/mutation.rs:858` — AddNode missing initial NodeVersionHistory snapshot.
+   - (claude, 2026-02-07, FIXED: Added initial NodeVersionHistory snapshot in execute())
 7) `libs/db/src/graph/mutation.rs:903` — AddNode (cached path) missing initial NodeVersionHistory snapshot.
+   - (claude, 2026-02-07, FIXED: Added initial NodeVersionHistory snapshot in execute_with_cache())
 8) `libs/db/src/graph/mutation.rs:968` — AddEdge missing initial EdgeVersionHistory snapshot.
+   - (claude, 2026-02-07, FIXED: Added initial EdgeVersionHistory snapshot in execute())
 9) `libs/db/src/graph/mutation.rs:1032` — AddEdge (cached path) missing initial EdgeVersionHistory snapshot.
+   - (claude, 2026-02-07, FIXED: Added initial EdgeVersionHistory snapshot in execute_with_cache())
 10) `libs/db/src/graph/mutation.rs:1337` — UpdateNodeSummary missing NodeVersionHistory snapshot per version.
+    - (claude, 2026-02-07, FIXED: Added NodeVersionHistory snapshot after creating new node version)
 11) `libs/db/src/graph/mutation.rs:1470` — UpdateEdgeSummary missing EdgeVersionHistory snapshot per version.
+    - (claude, 2026-02-07, FIXED: Added EdgeVersionHistory snapshot after creating new edge version)
 12) `libs/db/src/graph/schema.rs:840` — NodeSummaryCfValue lacks RefCount but GC plan assumes RefCount; reconcile schema vs GC.
+    - (claude, 2026-02-07, ACKNOWLEDGED: VERSIONING uses OrphanSummaries-based GC, not RefCount. Schema is correct; GC docs updated per Item 14.)
 13) `libs/db/src/graph/schema.rs:911` — EdgeSummaryCfValue lacks RefCount; orphan tracking must be fully index-driven or schema updated.
+    - (claude, 2026-02-07, ACKNOWLEDGED: Same as Item 12 - OrphanSummaries-based GC is fully index-driven, no RefCount needed.)
 14) `libs/db/src/graph/gc.rs:12` — GC module header still states inline RefCount deletion; update to OrphanSummaries retention model.
+    - (claude, 2026-02-07, FIXED: Updated GC module header to reflect VERSIONING OrphanSummaries GC plan)
 15) `libs/db/src/graph/query.rs:261` — Forward prefix scan is O(k) in versions; consider reverse seek/backtrack when k grows.
+    - (claude, 2026-02-07, FUTURE: Performance optimization suggestion. Acceptable for MVP; revisit if k (versions per entity) grows large.)
 16) `libs/db/src/graph/query.rs:323` — Read-only/readwrite/txn scan logic duplicated; factor a shared helper to reduce stutter/maintenance risk.
+    - (claude, 2026-02-07, FUTURE: Code deduplication suggestion. Low priority refactor; does not affect correctness.)
 
 ## Table of Contents
 

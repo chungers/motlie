@@ -81,6 +81,11 @@ impl Processor for Index {
                 Mutation::UpdateEdgeSummary(m) => m.index(&mut writer, fields)?,
                 Mutation::DeleteNode(m) => m.index(&mut writer, fields)?,
                 Mutation::DeleteEdge(m) => m.index(&mut writer, fields)?,
+                // (claude, 2026-02-07, FIXED: RestoreNode/RestoreEdge no-op for fulltext - Codex Item 1)
+                // Restore mutations don't need fulltext indexing - they restore from existing summaries
+                // which are already indexed. The restored summary hash points to existing content.
+                Mutation::RestoreNode(_) => {}
+                Mutation::RestoreEdge(_) => {}
                 // Flush is graph-only - no-op for fulltext
                 // (fulltext flush would require a separate mechanism in future phases)
                 Mutation::Flush(_) => {}
