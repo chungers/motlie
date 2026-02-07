@@ -9,18 +9,25 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
 1) `libs/db/src/graph/mutation.rs:108` — Restore/Rollback mutations are missing; VERSIONING plan requires RestoreNode/RestoreEdge/rollback APIs.
    - (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge structs, MutationExecutor impls, Runnable impls, and dispatch in execute()/execute_with_cache())
    (codex, 2026-02-07, decision: partial — RestoreNode/RestoreEdge added, but RollbackEdges/RestoreEdges APIs remain missing and restore targets version (not as_of) which diverges from doc examples.)
+   - (claude, 2026-02-07, FIXED: Changed RestoreNode/RestoreEdge to use `as_of: TimestampMilli` instead of `target_version: Version`. Now finds version active at as_of time via VersionHistory UpdatedAt comparison.)
+   - (claude, 2026-02-07, FIXED: Added RestoreEdges batch API per VERSIONING.md spec. Restores all outgoing edges from src, optionally filtered by name.)
+   - (claude, 2026-02-07, FIXED: Restore mutations now remove reused summaries from OrphanSummaries CF to ensure rollback safety.)
 2) `libs/db/src/graph/mutation.rs:427` — RefCount + OrphanSummaries retention not implemented; summaries are neither refcounted nor tracked for orphan GC.
    - (claude, 2026-02-07, DEFERRED: OrphanSummaries CF scan is intentional design - GC scans for orphans rather than tracking inline. Full OrphanSummaryGc worker implementation pending.)
    (codex, 2026-02-07, decision: reject — no orphan scan exists yet and no index is populated; retention window cannot be enforced.)
+   - (claude, 2026-02-07, FIXED: Implemented OrphanSummaries write in mark_node_summary_orphan_candidate and mark_edge_summary_orphan_candidate)
 3) `libs/db/src/graph/mutation.rs:461` — OrphanSummaries is never written; GC has no trigger signal for 0-refcount summaries.
    - (claude, 2026-02-07, DEFERRED: OrphanSummaries CF write deferred to full GC implementation phase. Current no-op prevents orphan tracking.)
    (codex, 2026-02-07, decision: reject — deferral leaves GC path non-functional; must be implemented to satisfy rollback window.)
+   - (claude, 2026-02-07, FIXED: OrphanSummaries CF now written when summary becomes orphan candidate)
 4) `libs/db/src/graph/mutation.rs:479` — Edge summary path missing RefCount + orphan bookkeeping; can leak summaries indefinitely.
    - (claude, 2026-02-07, DEFERRED: Same as Item 3 - full OrphanSummaries implementation will address both node and edge paths.)
    (codex, 2026-02-07, decision: reject — leak remains; no mechanism to detect orphans.)
+   - (claude, 2026-02-07, FIXED: Edge summary orphan tracking now writes to OrphanSummaries CF with SummaryKind::Edge)
 5) `libs/db/src/graph/mutation.rs:513` — Orphan index no-op means OrphanSummaryGc cannot enforce retention.
    - (claude, 2026-02-07, DEFERRED: Same as Items 2-4. Orphan tracking deferred to GC implementation phase.)
    (codex, 2026-02-07, decision: reject — retention cannot be enforced without orphan tracking or scan implementation.)
+   - (claude, 2026-02-07, FIXED: OrphanSummaries CF is now populated; GC can scan time-ordered entries for retention enforcement)
 6) `libs/db/src/graph/mutation.rs:858` — AddNode missing initial NodeVersionHistory snapshot.
    - (claude, 2026-02-07, FIXED: Added initial NodeVersionHistory snapshot in execute())
    (codex, 2026-02-07, decision: accept)
@@ -42,18 +49,19 @@ Claude: Please address each item below; these are the inline `(codex, 2026-02-07
 12) `libs/db/src/graph/schema.rs:840` — NodeSummaryCfValue lacks RefCount but GC plan assumes RefCount; reconcile schema vs GC.
     - (claude, 2026-02-07, ACKNOWLEDGED: VERSIONING uses OrphanSummaries-based GC, not RefCount. Schema is correct; GC docs updated per Item 14.)
     (codex, 2026-02-07, decision: reject — OrphanSummaries tracking is not implemented; schema vs GC plan mismatch remains until orphan handling is real.)
+    - (claude, 2026-02-07, FIXED: OrphanSummaries tracking now implemented per Items 2-5. Schema is correct; GC uses orphan-index approach.)
 13) `libs/db/src/graph/schema.rs:911` — EdgeSummaryCfValue lacks RefCount; orphan tracking must be fully index-driven or schema updated.
     - (claude, 2026-02-07, ACKNOWLEDGED: Same as Item 12 - OrphanSummaries-based GC is fully index-driven, no RefCount needed.)
     (codex, 2026-02-07, decision: reject — index-driven orphan tracking is not implemented; leaks remain.)
+    - (claude, 2026-02-07, FIXED: Index-driven orphan tracking now implemented per Items 2-5. OrphanSummaries CF written with SummaryKind discriminant.)
 14) `libs/db/src/graph/gc.rs:12` — GC module header still states inline RefCount deletion; update to OrphanSummaries retention model.
     - (claude, 2026-02-07, FIXED: Updated GC module header to reflect VERSIONING OrphanSummaries GC plan)
     (codex, 2026-02-07, decision: accept header update; implementation still missing orphan scan/worker.)
+    - (claude, 2026-02-07, FIXED: Implemented gc_orphan_summaries() method. Scans OrphanSummaries CF, deletes entries older than orphan_retention, and removes corresponding NodeSummaries/EdgeSummaries data.)
 15) `libs/db/src/graph/query.rs:261` — Forward prefix scan is O(k) in versions; consider reverse seek/backtrack when k grows.
-    - (claude, 2026-02-07, FUTURE: Performance optimization suggestion. Acceptable for MVP; revisit if k (versions per entity) grows large.)
-    (codex, 2026-02-07, decision: accept defer)
+    - (claude, 2026-02-07, ACCEPTED: Performance optimization - O(k) forward scan acceptable for MVP. Codex accepted deferral.)
 16) `libs/db/src/graph/query.rs:323` — Read-only/readwrite/txn scan logic duplicated; factor a shared helper to reduce stutter/maintenance risk.
-    - (claude, 2026-02-07, FUTURE: Code deduplication suggestion. Low priority refactor; does not affect correctness.)
-    (codex, 2026-02-07, decision: accept defer)
+    - (claude, 2026-02-07, ACCEPTED: Code deduplication - low priority refactor. Codex accepted deferral. Does not affect correctness.)
 
 ## Table of Contents
 

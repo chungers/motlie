@@ -162,6 +162,13 @@ pub struct GraphGcConfig {
     /// Default: 7 days
     pub tombstone_retention: Duration,
 
+    /// Orphan summary retention period (VERSIONING).
+    /// Summaries in OrphanSummaries CF older than this are eligible for deletion.
+    /// This enables time-travel/rollback within the retention window.
+    /// Default: 7 days
+    /// (claude, 2026-02-07, FIXED: Added orphan_retention config per VERSIONING)
+    pub orphan_retention: Duration,
+
     /// Run a GC cycle immediately on startup.
     /// Default: true
     pub process_on_startup: bool,
@@ -174,6 +181,7 @@ impl Default for GraphGcConfig {
             batch_size: 1000,
             versions_to_keep: 2,
             tombstone_retention: Duration::from_secs(7 * 24 * 60 * 60), // 7 days
+            orphan_retention: Duration::from_secs(7 * 24 * 60 * 60), // 7 days (VERSIONING)
             process_on_startup: true,
         }
     }
@@ -203,6 +211,13 @@ impl GraphGcConfig {
         self.tombstone_retention = retention;
         self
     }
+
+    /// Create a new config with custom orphan summary retention (VERSIONING).
+    /// (claude, 2026-02-07, FIXED: Added orphan_retention builder per VERSIONING)
+    pub fn with_orphan_retention(mut self, retention: Duration) -> Self {
+        self.orphan_retention = retention;
+        self
+    }
 }
 
 // ============================================================================
@@ -220,6 +235,11 @@ pub struct GcMetrics {
     pub node_tombstones_deleted: AtomicU64,
     /// Number of tombstoned edges hard-deleted
     pub edge_tombstones_deleted: AtomicU64,
+    /// Number of orphan node summaries deleted (VERSIONING)
+    /// (claude, 2026-02-07, FIXED: Added orphan summary GC metrics)
+    pub orphan_node_summaries_deleted: AtomicU64,
+    /// Number of orphan edge summaries deleted (VERSIONING)
+    pub orphan_edge_summaries_deleted: AtomicU64,
     /// Number of GC cycles completed
     pub cycles_completed: AtomicU64,
 }
@@ -237,6 +257,8 @@ impl GcMetrics {
             edge_index_entries_deleted: self.edge_index_entries_deleted.load(Ordering::Relaxed),
             node_tombstones_deleted: self.node_tombstones_deleted.load(Ordering::Relaxed),
             edge_tombstones_deleted: self.edge_tombstones_deleted.load(Ordering::Relaxed),
+            orphan_node_summaries_deleted: self.orphan_node_summaries_deleted.load(Ordering::Relaxed),
+            orphan_edge_summaries_deleted: self.orphan_edge_summaries_deleted.load(Ordering::Relaxed),
             cycles_completed: self.cycles_completed.load(Ordering::Relaxed),
         }
     }
@@ -247,6 +269,8 @@ impl GcMetrics {
         self.edge_index_entries_deleted.store(0, Ordering::Relaxed);
         self.node_tombstones_deleted.store(0, Ordering::Relaxed);
         self.edge_tombstones_deleted.store(0, Ordering::Relaxed);
+        self.orphan_node_summaries_deleted.store(0, Ordering::Relaxed);
+        self.orphan_edge_summaries_deleted.store(0, Ordering::Relaxed);
         self.cycles_completed.store(0, Ordering::Relaxed);
     }
 }
@@ -258,6 +282,9 @@ pub struct GcMetricsSnapshot {
     pub edge_index_entries_deleted: u64,
     pub node_tombstones_deleted: u64,
     pub edge_tombstones_deleted: u64,
+    /// (claude, 2026-02-07, FIXED: Added orphan summary GC metrics per VERSIONING)
+    pub orphan_node_summaries_deleted: u64,
+    pub orphan_edge_summaries_deleted: u64,
     pub cycles_completed: u64,
 }
 
@@ -268,6 +295,8 @@ impl GcMetricsSnapshot {
             + self.edge_index_entries_deleted
             + self.node_tombstones_deleted
             + self.edge_tombstones_deleted
+            + self.orphan_node_summaries_deleted
+            + self.orphan_edge_summaries_deleted
     }
 }
 
@@ -287,11 +316,17 @@ impl GcMetricsSnapshot {
 /// 2. **Tombstone cleanup** (future) - Hard-delete tombstoned entities after
 ///    `tombstone_retention` period.
 ///
-/// # What RefCount Handles (No GC Needed)
+/// 3. **Orphan summaries** (VERSIONING) - Summaries no longer referenced by
+///    any current entity are tracked in OrphanSummaries CF. GC deletes these
+///    after `orphan_retention` period, enabling rollback within that window.
 ///
-/// Summary rows (NodeSummaries, EdgeSummaries) are automatically deleted
-/// when their RefCount reaches 0. This happens inline during mutation
-/// execution, so GC doesn't need to scan for orphan summaries.
+/// # VERSIONING: Deferred Deletion
+/// (claude, 2026-02-07, FIXED: Updated doc to reflect OrphanSummaries GC)
+///
+/// Summary rows are NOT deleted inline when their entity is updated/deleted.
+/// Instead, orphan candidates are written to OrphanSummaries CF. GC scans
+/// this CF and deletes summaries older than `orphan_retention` that haven't
+/// been restored. This enables time-travel and rollback operations.
 pub struct GraphGarbageCollector {
     storage: Arc<Storage>,
     config: GraphGcConfig,
@@ -338,8 +373,9 @@ impl GraphGarbageCollector {
         // GC stale edge summary index entries
         self.gc_edge_summary_index()?;
 
-        // Note: Summary rows are cleaned up by RefCount (inline during mutations)
-        // No orphan scan needed!
+        // GC orphan summaries (VERSIONING: deferred deletion with retention)
+        // (claude, 2026-02-07, FIXED: Added orphan summary GC per VERSIONING)
+        self.gc_orphan_summaries()?;
 
         self.metrics.cycles_completed.fetch_add(1, Ordering::Relaxed);
 
@@ -348,6 +384,8 @@ impl GraphGarbageCollector {
         tracing::info!(
             node_index_deleted = after.node_index_entries_deleted - before.node_index_entries_deleted,
             edge_index_deleted = after.edge_index_entries_deleted - before.edge_index_entries_deleted,
+            orphan_node_summaries_deleted = after.orphan_node_summaries_deleted - before.orphan_node_summaries_deleted,
+            orphan_edge_summaries_deleted = after.orphan_edge_summaries_deleted - before.orphan_edge_summaries_deleted,
             cycle = after.cycles_completed,
             "GC cycle completed"
         );
@@ -548,6 +586,100 @@ impl GraphGarbageCollector {
         Ok(deleted)
     }
 
+    /// GC orphan summaries from OrphanSummaries CF (VERSIONING).
+    /// (claude, 2026-02-07, FIXED: Implemented orphan summary GC per VERSIONING)
+    ///
+    /// Scans OrphanSummaries CF and deletes summaries older than `orphan_retention`.
+    /// Also deletes the summary data from NodeSummaries/EdgeSummaries CFs.
+    fn gc_orphan_summaries(&self) -> Result<(u64, u64)> {
+        use super::schema::{
+            OrphanSummaries, OrphanSummaryCfKey, OrphanSummaryCfValue, SummaryKind,
+            NodeSummaries, NodeSummaryCfKey,
+            EdgeSummaries, EdgeSummaryCfKey,
+        };
+
+        let txn_db = self.storage.transaction_db()?;
+        let txn = txn_db.transaction();
+        let mut node_deleted = 0u64;
+        let mut edge_deleted = 0u64;
+        let mut processed = 0usize;
+
+        // Get CFs
+        let orphan_cf = txn_db
+            .cf_handle(OrphanSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("OrphanSummaries CF not found"))?;
+        let node_summaries_cf = txn_db
+            .cf_handle(NodeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+        let edge_summaries_cf = txn_db
+            .cf_handle(EdgeSummaries::CF_NAME)
+            .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+
+        // Calculate cutoff time (entries older than this are eligible)
+        let now = crate::TimestampMilli::now();
+        let retention_millis = self.config.orphan_retention.as_millis() as u64;
+        let cutoff = crate::TimestampMilli(now.0.saturating_sub(retention_millis));
+
+        // Scan from start - OrphanSummaries is time-ordered
+        let iter = txn.iterator_cf(orphan_cf, rocksdb::IteratorMode::Start);
+
+        let mut orphan_keys_to_delete: Vec<Vec<u8>> = Vec::new();
+
+        for item in iter {
+            if processed >= self.config.batch_size {
+                break;
+            }
+
+            let (key_bytes, value_bytes) = item?;
+            processed += 1;
+
+            // Parse orphan entry
+            let orphan_key = OrphanSummaries::key_from_bytes(&key_bytes)?;
+            let orphan_value = OrphanSummaries::value_from_bytes(&value_bytes)?;
+
+            // Key format: (TimestampMilli, SummaryHash)
+            let orphan_time = orphan_key.0;
+            let summary_hash = orphan_key.1;
+
+            // Skip entries that are still within retention window
+            if orphan_time.0 > cutoff.0 {
+                // OrphanSummaries is time-ordered, so all subsequent entries are newer
+                break;
+            }
+
+            // Delete the actual summary based on kind
+            match orphan_value.0 {
+                SummaryKind::Node => {
+                    let summary_key = NodeSummaryCfKey(summary_hash);
+                    let summary_key_bytes = NodeSummaries::key_to_bytes(&summary_key);
+                    txn.delete_cf(node_summaries_cf, &summary_key_bytes)?;
+                    node_deleted += 1;
+                }
+                SummaryKind::Edge => {
+                    let summary_key = EdgeSummaryCfKey(summary_hash);
+                    let summary_key_bytes = EdgeSummaries::key_to_bytes(&summary_key);
+                    txn.delete_cf(edge_summaries_cf, &summary_key_bytes)?;
+                    edge_deleted += 1;
+                }
+            }
+
+            // Mark orphan entry for deletion
+            orphan_keys_to_delete.push(key_bytes.to_vec());
+        }
+
+        // Delete all processed orphan entries
+        for key_bytes in orphan_keys_to_delete {
+            txn.delete_cf(orphan_cf, &key_bytes)?;
+        }
+
+        txn.commit()?;
+
+        self.metrics.orphan_node_summaries_deleted.fetch_add(node_deleted, Ordering::Relaxed);
+        self.metrics.orphan_edge_summaries_deleted.fetch_add(edge_deleted, Ordering::Relaxed);
+
+        Ok((node_deleted, edge_deleted))
+    }
+
     /// Spawn background GC worker.
     ///
     /// Returns a JoinHandle that completes when shutdown is signaled.
@@ -594,6 +726,7 @@ mod tests {
         assert_eq!(config.batch_size, 1000);
         assert_eq!(config.versions_to_keep, 2);
         assert_eq!(config.tombstone_retention, Duration::from_secs(7 * 24 * 60 * 60));
+        assert_eq!(config.orphan_retention, Duration::from_secs(7 * 24 * 60 * 60));
         assert!(config.process_on_startup);
     }
 
@@ -603,12 +736,14 @@ mod tests {
             .with_interval(Duration::from_secs(30))
             .with_batch_size(500)
             .with_versions_to_keep(3)
-            .with_tombstone_retention(Duration::from_secs(3600));
+            .with_tombstone_retention(Duration::from_secs(3600))
+            .with_orphan_retention(Duration::from_secs(1800));
 
         assert_eq!(config.interval, Duration::from_secs(30));
         assert_eq!(config.batch_size, 500);
         assert_eq!(config.versions_to_keep, 3);
         assert_eq!(config.tombstone_retention, Duration::from_secs(3600));
+        assert_eq!(config.orphan_retention, Duration::from_secs(1800));
     }
 
     #[test]
