@@ -32,7 +32,7 @@ use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, Writer as GraphWriter, WriterConfig,
 };
-use motlie_db::graph::{Graph, Storage};
+use motlie_db::graph::{Processor, Storage};
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -86,7 +86,7 @@ fn setup_query_infrastructure(
     // Graph query consumers
     let mut storage = Storage::readwrite(db_path);
     storage.ready().unwrap();
-    let graph = Arc::new(Graph::new(Arc::new(storage)));
+    let graph = Arc::new(Processor::new(Arc::new(storage)));
 
     let reader_config = ReaderConfig {
         channel_buffer_size: 100,

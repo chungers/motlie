@@ -686,89 +686,89 @@ pub fn spawn_consumer<P: Processor + 'static>(
 }
 
 // ============================================================================
-// Graph-specific Consumer Functions (Legacy)
+// Path-based Consumer Functions (Test convenience)
+// (claude, 2026-02-07) - Convenience wrappers for tests
 // ============================================================================
-// These functions use the deprecated Graph struct for backward compatibility.
-// New code should use spawn_mutation_consumer_with_storage() or
-// spawn_mutation_consumer_with_processor() instead.
 
 use std::path::Path;
 use tokio::task::JoinHandle;
 
-#[allow(deprecated)]
-use super::Graph;
-
-/// Create a new graph mutation consumer
-#[allow(deprecated)]
-pub fn create_mutation_consumer(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
-    config: WriterConfig,
-    db_path: &Path,
-) -> Consumer<Graph> {
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready().expect("Failed to ready storage");
-    let storage = Arc::new(storage);
-    let processor = Graph::new(storage);
-    Consumer::new(receiver, config, processor)
-}
-
-/// Create a new graph mutation consumer that chains to another processor
-#[allow(deprecated)]
-pub fn create_mutation_consumer_with_next(
-    receiver: mpsc::Receiver<Vec<Mutation>>,
-    config: WriterConfig,
-    db_path: &Path,
-    next: mpsc::Sender<Vec<Mutation>>,
-) -> Consumer<Graph> {
-    let mut storage = Storage::readwrite(db_path);
-    storage.ready().expect("Failed to ready storage");
-    let storage = Arc::new(storage);
-    let processor = Graph::new(storage);
-    Consumer::with_next(receiver, config, processor, next)
-}
-
-/// Spawn the graph mutation consumer as a background task
-#[allow(deprecated)]
+/// Spawn a mutation consumer with path-based storage creation.
+///
+/// Convenience function for tests that creates storage at the given path.
+/// Uses the new Processor-based infrastructure internally.
+///
+/// # Arguments
+/// * `receiver` - Mutation receiver from create_mutation_writer
+/// * `config` - Writer configuration
+/// * `db_path` - Path to create/open the database
+///
+/// # Returns
+/// JoinHandle for the spawned consumer task
 pub fn spawn_mutation_consumer(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     db_path: &Path,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_mutation_consumer(receiver, config, db_path);
+    // Create storage at path
+    let mut storage = Storage::readwrite(db_path);
+    storage.ready().expect("Failed to initialize storage");
+    let storage = Arc::new(storage);
+
+    // Create processor and consumer
+    let processor = Arc::new(GraphProcessor::new(storage));
+    let consumer = Consumer::new(receiver, config, processor);
     spawn_consumer(consumer)
 }
 
-/// Spawn the graph mutation consumer as a background task with chaining to next processor
-#[allow(deprecated)]
+/// Spawn a mutation consumer with chaining to next consumer.
+///
+/// Convenience function for tests that creates storage at the given path
+/// and forwards mutations to a next consumer in the chain.
+///
+/// # Arguments
+/// * `receiver` - Mutation receiver from create_mutation_writer
+/// * `config` - Writer configuration
+/// * `db_path` - Path to create/open the database
+/// * `next` - Sender for forwarding mutations to next consumer
+///
+/// # Returns
+/// JoinHandle for the spawned consumer task
 pub fn spawn_mutation_consumer_with_next(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
     db_path: &Path,
     next: mpsc::Sender<Vec<Mutation>>,
 ) -> JoinHandle<Result<()>> {
-    let consumer = create_mutation_consumer_with_next(receiver, config, db_path, next);
+    // Create storage at path
+    let mut storage = Storage::readwrite(db_path);
+    storage.ready().expect("Failed to initialize storage");
+    let storage = Arc::new(storage);
+
+    // Create processor and consumer with chaining
+    let processor = Arc::new(GraphProcessor::new(storage));
+    let consumer = Consumer::with_next(receiver, config, processor, next);
     spawn_consumer(consumer)
 }
 
-/// Spawn a graph mutation consumer using an existing Graph instance
+/// Spawn a mutation consumer with shared Processor and existing receiver.
 ///
-/// This allows using a shared Storage/TransactionDB instance for writes.
-/// Use this when you want the writer to share the same TransactionDB as readers.
+/// Convenience function that matches the old `spawn_mutation_consumer_with_graph` signature.
+/// Uses the Processor to process mutations from an existing receiver.
 ///
 /// # Arguments
-/// * `receiver` - Channel to receive mutation batches from
+/// * `receiver` - Mutation receiver from create_mutation_writer
 /// * `config` - Writer configuration
-/// * `graph` - Shared Graph instance (wrapping the Storage/TransactionDB)
+/// * `processor` - Shared GraphProcessor instance
 ///
 /// # Returns
-/// A JoinHandle for the spawned consumer task
-#[allow(deprecated)]
-pub fn spawn_mutation_consumer_with_graph(
+/// JoinHandle for the spawned consumer task
+pub fn spawn_mutation_consumer_with_receiver(
     receiver: mpsc::Receiver<Vec<Mutation>>,
     config: WriterConfig,
-    graph: Arc<Graph>,
+    processor: Arc<GraphProcessor>,
 ) -> JoinHandle<Result<()>> {
-    let consumer = Consumer::new(receiver, config, (*graph).clone());
+    let consumer = Consumer::new(receiver, config, processor);
     spawn_consumer(consumer)
 }
 
