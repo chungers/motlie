@@ -25,6 +25,7 @@ pub(crate) use crate::rocksdb::{
 // Submodules
 pub mod mutation;
 pub mod name_hash;
+pub(crate) mod processor;
 pub mod query;
 pub mod reader;
 pub mod schema;
@@ -128,14 +129,36 @@ pub(crate) trait ActivePeriodPatchable {
 // Note: SystemInfo functionality is now in Subsystem which implements SubsystemInfo
 
 // ============================================================================
-// Graph - Mutation Processor
+// Graph - Mutation Processor (Deprecated)
 // ============================================================================
 
-/// Graph-specific mutation processor
+/// Graph-specific mutation processor.
+///
+/// # Deprecation
+///
+/// This struct is deprecated. Use the new Processor-based pattern instead:
+///
+/// ```rust,ignore
+/// // Recommended: Use Subsystem::start() for managed lifecycle
+/// let (writer, reader) = subsystem.start(
+///     storage, writer_config, reader_config, num_workers, gc_config
+/// );
+///
+/// // Or use the spawn helpers directly:
+/// use motlie_db::graph::writer::spawn_mutation_consumer_with_storage;
+/// use motlie_db::graph::reader::spawn_query_consumers_with_storage;
+/// let (writer, handle) = spawn_mutation_consumer_with_storage(storage.clone(), config);
+/// let (reader, handles) = spawn_query_consumers_with_storage(storage, config, num_workers);
+/// ```
+#[deprecated(
+    since = "0.2.0",
+    note = "Use Subsystem::start() or spawn_*_with_storage helpers instead"
+)]
 pub struct Graph {
     storage: Arc<Storage>,
 }
 
+#[allow(deprecated)]
 impl Graph {
     /// Create a new GraphProcessor
     pub fn new(storage: Arc<Storage>) -> Self {
@@ -150,6 +173,7 @@ impl Graph {
     }
 }
 
+#[allow(deprecated)]
 impl Clone for Graph {
     fn clone(&self) -> Self {
         Self {
@@ -158,6 +182,7 @@ impl Clone for Graph {
     }
 }
 
+#[allow(deprecated)]
 #[async_trait::async_trait]
 impl Processor for Graph {
     /// Process a batch of mutations
@@ -191,6 +216,7 @@ impl Processor for Graph {
 }
 
 /// Implement query processor for Graph
+#[allow(deprecated)]
 impl reader::Processor for Graph {
     fn storage(&self) -> &Storage {
         &self.storage

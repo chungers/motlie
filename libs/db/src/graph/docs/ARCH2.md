@@ -66,11 +66,11 @@ pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
 
 ### Verification Checklist
 
-- [ ] `subsystem.rs` no longer discards GC worker handle
-- [ ] `gc.shutdown()` blocks until worker thread completes
-- [ ] GC uses `std::thread::spawn` not `tokio::spawn`
-- [ ] Shutdown order: flush → consumers → GC (GC last)
-- [ ] No panics or errors during `cargo test` shutdown sequences
+- [x] `subsystem.rs` no longer discards GC worker handle (P1.1 DONE)
+- [x] `gc.shutdown()` blocks until worker thread completes (P1.2 DONE)
+- [x] GC uses `std::thread::spawn` not `tokio::spawn` (P1.3 DONE)
+- [x] Shutdown order: flush → consumers → GC (GC last) (P1.4 DONE - uses shutdown_arc)
+- [x] No panics or errors during `cargo test` shutdown sequences (P1.5 DONE - lifecycle tests pass)
 
 ---
 
@@ -1316,7 +1316,7 @@ let _handle = gc.clone().spawn_worker();  // Handle discarded!
 - Store handle internally instead of returning it
 - Change from `Arc<Self>` pattern to owned `Self` with embedded handle
 
-- [ ] P1.1 complete
+- [x] P1.1 complete (claude, 2026-02-07)
 
 #### P1.2: Fix GC Shutdown to Join Worker
 
@@ -1341,7 +1341,7 @@ pub fn shutdown(mut self) {
 }
 ```
 
-- [ ] P1.2 complete
+- [x] P1.2 complete (claude, 2026-02-07)
 
 #### P1.3: Change GC from tokio::spawn to std::thread
 
@@ -1358,7 +1358,7 @@ pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
 
 **Fix:** Use `std::thread::spawn` for blocking work. Create internal `GcWorker` struct that runs in the thread.
 
-- [ ] P1.3 complete
+- [x] P1.3 complete (claude, 2026-02-07) - Added start() method with std::thread::spawn, run_cycle_inner()
 
 #### P1.4: Update Subsystem to Use New GC Pattern
 
@@ -1367,7 +1367,7 @@ pub fn spawn_worker(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
 - Change `start()` to use `GraphGarbageCollector::start()` instead of `spawn_worker()`
 - Change `on_shutdown()` - `gc.shutdown()` now blocks until worker completes
 
-- [ ] P1.4 complete
+- [x] P1.4 complete (claude, 2026-02-07) - Subsystem uses shutdown_arc() for Arc-wrapped GC
 
 #### P1.5: Add Lifecycle Tests
 
@@ -1378,7 +1378,7 @@ Add tests for:
 - GC shutdown joins worker
 - Shutdown ordering: flush → consumers → GC
 
-- [ ] P1.5 complete
+- [x] P1.5 complete (claude, 2026-02-07) - Added 4 lifecycle tests in gc.rs
 
 #### P1.6: Setup NameCache Prewarm in on_ready()
 
@@ -1390,7 +1390,7 @@ Add tests for:
 - This must happen BEFORE `start()` spawns consumers
 - Matches vector pattern where caches are warmed before consumers access them
 
-- [ ] P1.6 complete
+- [x] P1.6 complete (claude, 2026-02-07) - on_ready() already prewarms NameCache before start()
 
 ---
 

@@ -176,6 +176,7 @@ pub trait Runnable<R> {
 ///
 /// This is used by the consumer pools to execute queries. It holds Arc references
 /// to the initialized storage backends.
+#[allow(deprecated)]
 pub struct CompositeStorage {
     /// Graph storage (RocksDB) - source of truth for node/edge data
     pub graph: Arc<graph::Graph>,
@@ -184,6 +185,7 @@ pub struct CompositeStorage {
     pub fulltext: Arc<fulltext::Index>,
 }
 
+#[allow(deprecated)]
 impl CompositeStorage {
     /// Create a new CompositeStorage from graph and fulltext components.
     pub fn new(graph: Arc<graph::Graph>, fulltext: Arc<fulltext::Index>) -> Self {
@@ -280,6 +282,7 @@ impl Reader {
 ///         .with_num_workers(4)
 ///         .build();
 /// ```
+#[allow(deprecated)]
 pub struct ReaderBuilder {
     graph: Arc<graph::Graph>,
     fulltext: Arc<fulltext::Index>,
@@ -287,6 +290,7 @@ pub struct ReaderBuilder {
     num_workers: usize,
 }
 
+#[allow(deprecated)]
 impl ReaderBuilder {
     /// Create a new ReaderBuilder.
     ///
@@ -408,6 +412,7 @@ pub fn spawn_consumer_pool(
 ///
 /// # Returns
 /// A tuple of (Reader, unified_handles, graph_handles, fulltext_handles)
+#[allow(deprecated)]
 pub fn create_reader(
     graph: Arc<graph::Graph>,
     fulltext: Arc<fulltext::Index>,
@@ -430,6 +435,7 @@ pub fn create_reader(
 ///
 /// # Returns
 /// A tuple of (Reader, unified_handles, graph_handles, fulltext_handles)
+#[allow(deprecated)]
 pub fn create_reader_with_config(
     graph: Arc<graph::Graph>,
     fulltext: Arc<fulltext::Index>,

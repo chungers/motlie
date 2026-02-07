@@ -273,6 +273,7 @@ impl Storage<ReadOnly> {
     ///
     /// # Returns
     /// [`ReadOnlyHandles`] providing access to Reader only
+    #[allow(deprecated)]
     pub fn ready(self, config: StorageConfig) -> Result<ReadOnlyHandles> {
         let graph_path = self.path.join("graph");
         let fulltext_path = self.path.join("fulltext");
@@ -342,6 +343,7 @@ impl Storage<ReadWrite> {
     ///
     /// # Returns
     /// [`ReadWriteHandles`] providing access to both Reader and Writer
+    #[allow(deprecated)]
     pub fn ready(self, config: StorageConfig) -> Result<ReadWriteHandles> {
         let graph_path = self.path.join("graph");
         let fulltext_path = self.path.join("fulltext");

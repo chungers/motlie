@@ -10,8 +10,10 @@
 //! which define how queries execute against the storage layer.
 
 use anyhow::{Context, Result};
+use std::sync::Arc;
 use std::time::Duration;
 
+use super::processor::Processor as GraphProcessor;
 use super::query::Query;
 use super::Storage;
 
@@ -149,9 +151,22 @@ impl Default for ReaderConfig {
 }
 
 /// Handle for sending queries to the reader
-#[derive(Debug, Clone)]
+///
+/// (claude, 2026-02-07, FIXED: P2.3 - Reader holds Arc<Processor> like vector::Reader)
+#[derive(Clone)]
 pub struct Reader {
     sender: flume::Sender<Query>,
+    /// Processor for cache-aware reads and direct query access
+    processor: Option<Arc<GraphProcessor>>,
+}
+
+impl std::fmt::Debug for Reader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reader")
+            .field("sender", &"<flume::Sender>")
+            .field("processor", &self.processor.as_ref().map(|_| "<Arc<Processor>>"))
+            .finish()
+    }
 }
 
 impl Reader {
@@ -160,7 +175,19 @@ impl Reader {
     /// Note: Most users should use `create_query_reader()` instead.
     #[doc(hidden)]
     pub fn new(sender: flume::Sender<Query>) -> Self {
-        Reader { sender }
+        Reader { sender, processor: None }
+    }
+
+    /// Create a new Reader with processor for cache-aware reads.
+    /// (claude, 2026-02-07, FIXED: P2.3 - Primary construction with Processor)
+    pub(crate) fn with_processor(sender: flume::Sender<Query>, processor: Arc<GraphProcessor>) -> Self {
+        Reader { sender, processor: Some(processor) }
+    }
+
+    /// Get the processor if configured.
+    /// (claude, 2026-02-07, FIXED: P2.3 - Processor accessor like vector::Reader:118)
+    pub(crate) fn processor(&self) -> Option<&Arc<GraphProcessor>> {
+        self.processor.as_ref()
     }
 
     /// Send a query to the reader queue.
@@ -250,17 +277,21 @@ pub fn spawn_consumer<P: Processor + 'static>(
 }
 
 // ============================================================================
-// Graph-specific Consumer Functions
+// Graph-specific Consumer Functions (Legacy)
 // ============================================================================
+// These functions use the deprecated Graph struct for backward compatibility.
+// New code should use spawn_query_consumers_with_storage() or
+// spawn_query_consumers_with_processor() instead.
 
 use std::path::Path;
-use std::sync::Arc;
 use tokio::task::JoinHandle;
 
+#[allow(deprecated)]
 use super::Graph;
 
 /// Create a new query consumer for the graph
 #[doc(hidden)]
+#[allow(deprecated)]
 pub fn create_query_consumer(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -275,6 +306,7 @@ pub fn create_query_consumer(
 
 /// Spawn a query consumer as a background task
 #[doc(hidden)]
+#[allow(deprecated)]
 pub fn spawn_query_consumer(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -298,6 +330,7 @@ pub fn spawn_query_consumer(
 /// # Returns
 /// A Consumer configured with readwrite storage
 #[doc(hidden)]
+#[allow(deprecated)]
 pub fn create_query_consumer_readwrite(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -323,6 +356,7 @@ pub fn create_query_consumer_readwrite(
 /// # Returns
 /// A JoinHandle for the spawned consumer task
 #[doc(hidden)]
+#[allow(deprecated)]
 pub fn spawn_query_consumer_readwrite(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -374,11 +408,13 @@ pub fn spawn_query_consumer_readwrite(
 /// # }
 /// ```
 #[doc(hidden)]
+#[allow(deprecated)]
 pub fn spawn_query_consumer_with_graph(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
     graph: Arc<Graph>,
 ) -> JoinHandle<Result<()>> {
+    #[allow(deprecated)]
     let consumer = Consumer::new(receiver, config, (*graph).clone());
     spawn_consumer(consumer)
 }
@@ -455,6 +491,7 @@ pub fn spawn_query_consumer_with_graph(
 /// # }
 /// ```
 #[doc(hidden)]
+#[allow(deprecated)]
 pub fn spawn_query_consumer_pool_shared(
     receiver: flume::Receiver<Query>,
     graph: Arc<Graph>,
@@ -517,6 +554,7 @@ pub fn spawn_query_consumer_pool_shared(
 /// # Returns
 /// Vector of JoinHandles for all worker threads
 #[doc(hidden)]
+#[allow(deprecated)]
 pub fn spawn_query_consumer_pool_readonly(
     receiver: flume::Receiver<Query>,
     config: ReaderConfig,
@@ -527,7 +565,7 @@ pub fn spawn_query_consumer_pool_readonly(
 
     for worker_id in 0..num_workers {
         let receiver = receiver.clone();
-        let config = config.clone();
+        let _config = config.clone();
         let db_path = db_path.to_path_buf();
 
         let handle = tokio::spawn(async move {
@@ -541,6 +579,7 @@ pub fn spawn_query_consumer_pool_readonly(
             }
 
             let storage = Arc::new(storage);
+            #[allow(deprecated)]
             let graph = Graph::new(storage);
 
             // Process queries from shared channel
@@ -560,6 +599,132 @@ pub fn spawn_query_consumer_pool_readonly(
         "Spawned query consumer workers (readonly mode - 25-30% consistency)"
     );
     handles
+}
+
+// ============================================================================
+// Processor-based Consumer Functions (ARCH2 Pattern)
+// (claude, 2026-02-07, FIXED: P2.4 - Construction helpers)
+// ============================================================================
+
+/// Create a reader with storage.
+///
+/// Creates a GraphProcessor internally for cache-aware reads.
+///
+/// # Arguments
+/// * `storage` - Shared storage instance
+/// * `config` - Reader configuration
+///
+/// # Returns
+/// Reader with embedded Processor
+pub fn create_reader_with_storage(storage: Arc<Storage>, config: ReaderConfig) -> (Reader, flume::Receiver<Query>) {
+    let processor = Arc::new(GraphProcessor::new(storage));
+    create_reader_with_processor(processor, config)
+}
+
+/// Create a reader with existing processor.
+///
+/// Used when GraphProcessor is shared (e.g., with Writer).
+///
+/// # Arguments
+/// * `processor` - Shared GraphProcessor instance
+/// * `config` - Reader configuration
+///
+/// # Returns
+/// Reader with Processor reference
+pub(crate) fn create_reader_with_processor(processor: Arc<GraphProcessor>, config: ReaderConfig) -> (Reader, flume::Receiver<Query>) {
+    let (sender, receiver) = flume::bounded(config.channel_buffer_size);
+    let reader = Reader::with_processor(sender, processor);
+    (reader, receiver)
+}
+
+/// Spawn query consumers with storage.
+///
+/// This is the primary public construction helper.
+/// Creates GraphProcessor internally and spawns consumer workers.
+///
+/// # Arguments
+/// * `storage` - Shared storage instance
+/// * `config` - Reader configuration
+/// * `num_workers` - Number of query workers to spawn
+///
+/// # Returns
+/// Tuple of (Reader, Vec<JoinHandle>) for the spawned consumers
+pub fn spawn_query_consumers_with_storage(
+    storage: Arc<Storage>,
+    config: ReaderConfig,
+    num_workers: usize,
+) -> (Reader, Vec<JoinHandle<()>>) {
+    let processor = Arc::new(GraphProcessor::new(storage));
+    spawn_query_consumers_with_processor(processor, config, num_workers)
+}
+
+/// Spawn query consumers with existing processor.
+///
+/// Used when GraphProcessor is shared (e.g., with Writer).
+/// This is pub(crate) - use spawn_query_consumers_with_storage for public API.
+///
+/// # Arguments
+/// * `processor` - Shared GraphProcessor instance
+/// * `config` - Reader configuration
+/// * `num_workers` - Number of query workers to spawn
+///
+/// # Returns
+/// Tuple of (Reader, Vec<JoinHandle>) for the spawned consumers
+pub(crate) fn spawn_query_consumers_with_processor(
+    processor: Arc<GraphProcessor>,
+    config: ReaderConfig,
+    num_workers: usize,
+) -> (Reader, Vec<JoinHandle<()>>) {
+    let (sender, receiver) = flume::bounded(config.channel_buffer_size);
+    let reader = Reader::with_processor(sender, processor.clone());
+
+    let mut handles = Vec::with_capacity(num_workers);
+    for worker_id in 0..num_workers {
+        let receiver = receiver.clone();
+        let processor = processor.clone();
+
+        let handle = tokio::spawn(async move {
+            tracing::info!(worker_id, "Query worker starting (processor mode)");
+
+            // Process queries using shared Processor
+            while let Ok(query) = receiver.recv_async().await {
+                tracing::debug!(worker_id, query = %query, "Processing query (processor mode)");
+                query.process_and_send(&*processor).await;
+            }
+
+            tracing::info!(worker_id, "Query worker shutting down");
+        });
+
+        handles.push(handle);
+    }
+
+    tracing::info!(
+        num_workers,
+        "Spawned query consumer workers (processor mode)"
+    );
+
+    (reader, handles)
+}
+
+/// Create reader and spawn consumers with processor, also returning the processor.
+///
+/// Convenience helper that returns all components for subsystem integration.
+///
+/// # Arguments
+/// * `storage` - Shared storage instance
+/// * `config` - Reader configuration
+/// * `num_workers` - Number of query workers to spawn
+///
+/// # Returns
+/// Tuple of (Reader, Arc<GraphProcessor>, Vec<JoinHandle>)
+pub(crate) fn create_reader_with_processor_and_spawn(
+    storage: Arc<Storage>,
+    config: ReaderConfig,
+    num_workers: usize,
+) -> (Reader, Arc<GraphProcessor>, Vec<JoinHandle<()>>) {
+    let processor = Arc::new(GraphProcessor::new(storage));
+    let (reader, handles) = spawn_query_consumers_with_processor(processor.clone(), config, num_workers);
+    (reader, processor, handles)
 }
 
 // ============================================================================

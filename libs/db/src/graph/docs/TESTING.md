@@ -38,6 +38,8 @@ Baseline (pre-VERSIONING) Behavioral Tests (missing)
   - Graph start/stop is idempotent.
   - Background tasks exit on shutdown.
   - Subsystems join/flush before close.
+  - GC lifecycle: start/shutdown, signal_shutdown, shutdown_arc (IMPLEMENTED gc.rs)
+  - GC worker thread joins cleanly on shutdown (IMPLEMENTED gc.rs)
 - Metrics/info:
   - Core counters increment (writes, reads, failures).
   - Info export returns expected snapshot fields.
