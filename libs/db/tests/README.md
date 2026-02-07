@@ -113,12 +113,12 @@ cargo test test_concurrent_read_write_integration -- --nocapture
 ### TransactionDB Concurrency Model
 - ❌ **Does NOT support**: Multiple TransactionDB instances on same path (lock file prevents)
 - ✅ **Does support**: Thread-safe concurrent access to single instance
-- **Correct pattern**: Share `Arc<Graph>` (wrapping `Arc<Storage>`) across threads
+- **Correct pattern**: Share `Arc<Processor>` (wrapping `Arc<Storage>`) across threads
 
 ### API Functions for Shared Storage
-- `spawn_query_consumer_with_graph()` - Share Storage across query consumers
-- `spawn_mutation_consumer_with_graph()` - Share Storage for mutation consumer
-- Both require `Graph` to implement `Clone` (shallow clone of Arc)
+- `spawn_query_consumer_with_processor()` - Share Storage across query consumers
+- `spawn_mutation_consumer_with_receiver()` - Share Storage for mutation consumer
+- Both require `Processor` to implement `Clone` (shallow clone of Arc)
 
 ### Success Rate Dependencies
 All concurrent tests show that success rates depend primarily on **flush timing** (when data hits disk), not just storage mode:

@@ -22,7 +22,7 @@ use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
 };
-use motlie_db::graph::{Graph, Storage};
+use motlie_db::graph::{Processor, Storage};
 use motlie_db::{DataUrl, Id, TimestampMilli};
 use std::sync::Arc;
 use std::time::Duration;
@@ -234,7 +234,7 @@ async fn test_multi_consumer_query_channels() {
     let mut storage = Storage::readwrite(&db_path);
     storage.ready().unwrap();
     let storage = Arc::new(storage);
-    let graph = Arc::new(Graph::new(storage));
+    let graph = Arc::new(Processor::new(storage));
 
     let reader_config = ReaderConfig {
         channel_buffer_size: 100,
@@ -404,7 +404,7 @@ async fn test_concurrent_mixed_queries() {
     let mut storage = Storage::readwrite(&db_path);
     storage.ready().unwrap();
     let storage = Arc::new(storage);
-    let graph = Arc::new(Graph::new(storage));
+    let graph = Arc::new(Processor::new(storage));
 
     let reader_config = ReaderConfig {
         channel_buffer_size: 100,
@@ -598,7 +598,7 @@ async fn test_complete_pipeline_architecture() {
     // Graph query consumers (2)
     let mut storage = Storage::readwrite(&db_path);
     storage.ready().unwrap();
-    let graph = Arc::new(Graph::new(Arc::new(storage)));
+    let graph = Arc::new(Processor::new(Arc::new(storage)));
 
     let (graph_reader, graph_query_receiver) = create_query_reader(ReaderConfig {
         channel_buffer_size: 100,

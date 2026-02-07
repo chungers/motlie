@@ -42,15 +42,15 @@ storage.try_catch_up_with_primary()?;
 
 ### Graph
 
-`Graph` wraps `Arc<Storage>` and provides the execution interface:
+`Processor` wraps `Arc<Storage>` and provides the execution interface:
 
 ```rust
-use motlie_db::{Graph, Storage};
+use motlie_db::{Processor, Storage};
 use std::sync::Arc;
 
 let mut storage = Storage::readwrite(&db_path);
 storage.ready()?;
-let graph = Graph::new(Arc::new(storage));
+let processor = Processor::new(Arc::new(storage));
 ```
 
 ## Mutation Types

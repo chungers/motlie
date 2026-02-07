@@ -13,8 +13,6 @@
 //! - `reader.rs` - Reader infrastructure and query consumers
 //! - `scan.rs` - Scan API for pagination
 
-use std::sync::Arc;
-
 use anyhow::Result;
 
 // Re-export CF traits from rocksdb module
@@ -25,7 +23,7 @@ pub(crate) use crate::rocksdb::{
 // Submodules
 pub mod mutation;
 pub mod name_hash;
-pub(crate) mod processor;
+pub mod processor;
 pub mod query;
 pub mod reader;
 pub mod schema;
@@ -65,14 +63,12 @@ pub use transaction::Transaction;
 pub use crate::reader::Runnable as QueryRunnable;
 pub use reader::{
     // Query consumer functions
-    create_query_consumer,
-    create_query_consumer_readwrite,
     create_query_reader,
+    spawn_query_consumers_with_storage,
+    spawn_consumer_pool_with_processor,
     spawn_query_consumer,
-    spawn_query_consumer_pool_readonly,
     spawn_query_consumer_pool_shared,
-    spawn_query_consumer_readwrite,
-    spawn_query_consumer_with_graph,
+    spawn_query_consumer_with_processor,
     Consumer as QueryConsumer,
     Processor as ReaderProcessor,
     QueryExecutor,
@@ -99,12 +95,11 @@ pub type Storage = crate::rocksdb::Storage<Subsystem>;
 
 pub use writer::{
     // Mutation consumer functions
-    create_mutation_consumer,
-    create_mutation_consumer_with_next,
     create_mutation_writer,
+    spawn_mutation_consumer_with_storage,
     spawn_mutation_consumer,
-    spawn_mutation_consumer_with_graph,
     spawn_mutation_consumer_with_next,
+    spawn_mutation_consumer_with_receiver,
     Consumer as MutationConsumer,
     MutationExecutor,
     Processor as MutationProcessor,
@@ -112,8 +107,8 @@ pub use writer::{
     WriterConfig,
 };
 
-// Internal imports
-use writer::Processor;
+// Processor struct - the central graph processing hub
+pub use processor::Processor;
 
 
 
@@ -127,98 +122,4 @@ pub(crate) trait ActivePeriodPatchable {
 }
 
 // Note: SystemInfo functionality is now in Subsystem which implements SubsystemInfo
-
-// ============================================================================
-// Graph - Mutation Processor (Deprecated)
-// ============================================================================
-
-/// Graph-specific mutation processor.
-///
-/// # Deprecation
-///
-/// This struct is deprecated. Use the new Processor-based pattern instead:
-///
-/// ```rust,ignore
-/// // Recommended: Use Subsystem::start() for managed lifecycle
-/// let (writer, reader) = subsystem.start(
-///     storage, writer_config, reader_config, num_workers, gc_config
-/// );
-///
-/// // Or use the spawn helpers directly:
-/// use motlie_db::graph::writer::spawn_mutation_consumer_with_storage;
-/// use motlie_db::graph::reader::spawn_query_consumers_with_storage;
-/// let (writer, handle) = spawn_mutation_consumer_with_storage(storage.clone(), config);
-/// let (reader, handles) = spawn_query_consumers_with_storage(storage, config, num_workers);
-/// ```
-#[deprecated(
-    since = "0.2.0",
-    note = "Use Subsystem::start() or spawn_*_with_storage helpers instead"
-)]
-pub struct Graph {
-    storage: Arc<Storage>,
-}
-
-#[allow(deprecated)]
-impl Graph {
-    /// Create a new GraphProcessor
-    pub fn new(storage: Arc<Storage>) -> Self {
-        Self { storage }
-    }
-
-    /// Get a reference to the storage.
-    ///
-    /// This is used internally for transaction support.
-    pub fn storage(&self) -> &Arc<Storage> {
-        &self.storage
-    }
-}
-
-#[allow(deprecated)]
-impl Clone for Graph {
-    fn clone(&self) -> Self {
-        Self {
-            storage: self.storage.clone(), // Arc<Storage> is already Clone
-        }
-    }
-}
-
-#[allow(deprecated)]
-#[async_trait::async_trait]
-impl Processor for Graph {
-    /// Process a batch of mutations
-    #[tracing::instrument(skip(self, mutations), fields(mutation_count = mutations.len()))]
-    async fn process_mutations(&self, mutations: &[Mutation]) -> Result<()> {
-        if mutations.is_empty() {
-            return Ok(());
-        }
-
-        tracing::info!(count = mutations.len(), "[Graph] About to insert mutations");
-
-        // Get transaction and name cache
-        let txn_db = self.storage.transaction_db()?;
-        let txn = txn_db.transaction();
-        let name_cache = self.storage.cache();
-
-        // Each mutation executes itself with cache access for name deduplication
-        for mutation in mutations {
-            mutation.execute_with_cache(&txn, txn_db, name_cache)?;
-        }
-
-        // Single commit for all mutations
-        txn.commit()?;
-
-        tracing::info!(
-            count = mutations.len(),
-            "[Graph] Successfully committed mutations"
-        );
-        Ok(())
-    }
-}
-
-/// Implement query processor for Graph
-#[allow(deprecated)]
-impl reader::Processor for Graph {
-    fn storage(&self) -> &Storage {
-        &self.storage
-    }
-}
+// Graph struct removed - use processor::Processor instead (claude, 2026-02-07)

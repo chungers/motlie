@@ -1,4 +1,4 @@
-use crate::graph::{ColumnFamily, ColumnFamilySerde, Graph, HotColumnFamilyRecord, Storage};
+use crate::graph::{ColumnFamily, ColumnFamilySerde, HotColumnFamilyRecord, Processor, Storage};
 use crate::graph::mutation::{
     AddEdge, AddNode, AddNodeFragment, UpdateEdgeValidSinceUntil,
     UpdateNodeValidSinceUntil,

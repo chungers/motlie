@@ -76,7 +76,7 @@ use super::Storage;
 /// // Use in query consumer
 /// let storage = processor.storage();
 /// ```
-pub(crate) struct Processor {
+pub struct Processor {
     /// RocksDB storage (read-write mode required for mutations)
     storage: Arc<Storage>,
 

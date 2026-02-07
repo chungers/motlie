@@ -3852,7 +3852,7 @@ mod tests {
         create_query_reader, spawn_consumer, Consumer, QueryWithTimeout, Reader, ReaderConfig,
     };
     use super::super::writer::{create_mutation_writer, spawn_mutation_consumer, WriterConfig};
-    use super::super::{Graph, Storage};
+    use super::super::{Processor, Storage};
     use super::*;
     use crate::{DataUrl, Id, TimestampMilli};
     use std::sync::Arc;
@@ -3897,7 +3897,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
@@ -3906,7 +3906,7 @@ mod tests {
 
         let (reader, receiver) = create_query_reader(reader_config.clone());
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
 
         // Spawn query consumer
         let consumer_handle = spawn_consumer(consumer);
@@ -3961,7 +3961,7 @@ mod tests {
         let mut storage = Storage::readwrite(&db_path);
         storage.ready().unwrap();
 
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Test the timeout directly using QueryWithTimeout trait
         let slow_query = SlowNodeByIdQuery {
@@ -3969,7 +3969,7 @@ mod tests {
             timeout: Duration::from_millis(50), // Short timeout
         };
 
-        let result = slow_query.result(&graph).await;
+        let result = slow_query.result(&processor).await;
 
         // Should timeout because query takes 200ms but timeout is 50ms
         assert!(result.is_err());
@@ -4054,7 +4054,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
@@ -4067,7 +4067,7 @@ mod tests {
             (reader, receiver)
         };
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
 
         // Spawn query consumer
         let consumer_handle = spawn_consumer(consumer);
@@ -4210,7 +4210,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
@@ -4223,7 +4223,7 @@ mod tests {
             (reader, receiver)
         };
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
 
         // Spawn query consumer
         let consumer_handle = spawn_consumer(consumer);
@@ -4370,7 +4370,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
@@ -4382,7 +4382,7 @@ mod tests {
             (reader, receiver)
         };
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Test 1: Query with inclusive bounds [t2, t4]
@@ -4565,7 +4565,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
@@ -4577,7 +4577,7 @@ mod tests {
             (reader, receiver)
         };
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query at reference time 2500 - should see fragments 1, 2, and 3
@@ -4703,7 +4703,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
@@ -4715,7 +4715,7 @@ mod tests {
             (reader, receiver)
         };
 
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query should return empty vector
@@ -4776,7 +4776,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
@@ -4784,7 +4784,7 @@ mod tests {
         };
 
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query all nodes with batch lookup
@@ -4846,7 +4846,7 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
@@ -4854,7 +4854,7 @@ mod tests {
         };
 
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query with a mix of existing and non-existing IDs
@@ -4914,14 +4914,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
 
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query with empty input
@@ -4973,14 +4973,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query all nodes
@@ -5041,14 +5041,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Get first page of 3 nodes
@@ -5149,14 +5149,14 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         // Create reader and query consumer
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query all edges
@@ -5215,13 +5215,13 @@ mod tests {
         // Now open storage for reading
         let mut storage = Storage::readonly(&db_path);
         storage.ready().unwrap();
-        let graph = Graph::new(Arc::new(storage));
+        let processor = Processor::new(Arc::new(storage));
 
         let reader_config = ReaderConfig {
             channel_buffer_size: 10,
         };
         let (reader, receiver) = create_query_reader(reader_config.clone());
-        let consumer = Consumer::new(receiver, reader_config, graph);
+        let consumer = Consumer::new(receiver, reader_config, processor);
         let consumer_handle = spawn_consumer(consumer);
 
         // Query with limit 0 should return empty

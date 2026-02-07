@@ -9,7 +9,7 @@ Both modules follow the same architectural pattern:
 | Component | Graph Module | Fulltext Module |
 |-----------|--------------|-----------------|
 | **Storage** | `graph::Storage` (RocksDB) | `fulltext::Storage` (Tantivy) |
-| **Processor** | `graph::Graph` | `fulltext::Index` |
+| **Processor** | `graph::Processor` | `fulltext::Index` |
 | **Modes** | ReadOnly, ReadWrite, Secondary | ReadOnly, ReadWrite |
 | **QueryExecutor** | `execute(&self, storage: &Storage)` | `execute(&self, storage: &Storage)` |
 | **Processor trait** | `fn storage(&self) -> &Storage` | `fn storage(&self) -> &Storage` |
@@ -33,19 +33,19 @@ storage.ready()?;
 let storage = Arc::new(storage);
 ```
 
-### Processor Layer (Graph/Index)
+### Processor Layer (Processor/Index)
 
 Both modules wrap `Arc<Storage>` in a processor type:
 
 ```rust
 // Graph
-let graph = Graph::new(Arc::new(storage));
+let processor = graph::Processor::new(Arc::new(storage));
 
 // Fulltext (identical pattern)
 let index = fulltext::Index::new(Arc::new(storage));
 ```
 
-**Clone Behavior**: Both `Graph` and `fulltext::Index` clone the `Arc<Storage>`, preserving full read/write capability.
+**Clone Behavior**: Both `graph::Processor` and `fulltext::Index` clone the `Arc<Storage>`, preserving full read/write capability.
 
 ### QueryExecutor Pattern
 
@@ -160,15 +160,15 @@ let graph_mutation_handle = spawn_mutation_consumer(
 let graph_config = ReaderConfig { channel_buffer_size: 100 };
 let (graph_reader, graph_query_receiver) = create_query_reader(graph_config);
 
-// Create shared readonly Graph
+// Create shared readonly Processor
 let mut storage = Storage::readonly(&db_path);
 storage.ready()?;
-let graph = Arc::new(Graph::new(Arc::new(storage)));
+let processor = Arc::new(graph::Processor::new(Arc::new(storage)));
 
-// Spawn 2 graph query consumers sharing the same Graph
+// Spawn 2 graph query consumers sharing the same Processor
 let graph_handles = spawn_query_consumer_pool_shared(
     graph_query_receiver,
-    graph,
+    processor,
     2,  // 2 workers
 );
 

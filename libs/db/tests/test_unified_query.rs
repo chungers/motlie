@@ -55,7 +55,7 @@ use motlie_db::graph::schema::{EdgeSummary, NodeSummary};
 use motlie_db::graph::writer::{
     create_mutation_writer, spawn_mutation_consumer_with_next, WriterConfig,
 };
-use motlie_db::graph::{Graph, Storage as GraphStorage};
+use motlie_db::graph::{Processor, Storage as GraphStorage};
 use motlie_db::mutation::Runnable as MutationRunnable;
 use motlie_db::query::{
     AllEdges, AllNodes, EdgeDetails, Edges, FuzzyLevel, IncomingEdges, NodeById, NodeFragments,
@@ -162,7 +162,7 @@ async fn setup_test_env(
     // Manual initialization (lower-level API)
     let mut graph_storage = GraphStorage::readonly(&db_path);
     graph_storage.ready().unwrap();
-    let graph = Arc::new(Graph::new(Arc::new(graph_storage)));
+    let graph = Arc::new(Processor::new(Arc::new(graph_storage)));
 
     let mut fulltext_storage = FulltextStorage::readonly(&index_path);
     fulltext_storage.ready().unwrap();
@@ -557,7 +557,7 @@ async fn setup_tagged_test_env(
     // Open storage for reading
     let mut graph_storage = GraphStorage::readonly(&db_path);
     graph_storage.ready().unwrap();
-    let graph = Arc::new(Graph::new(Arc::new(graph_storage)));
+    let graph = Arc::new(Processor::new(Arc::new(graph_storage)));
 
     let mut fulltext_storage = FulltextStorage::readonly(&index_path);
     fulltext_storage.ready().unwrap();
