@@ -1549,6 +1549,11 @@ impl NodeFragmentsByIdTimeRange {
     pub fn contains(&self, ts: TimestampMilli) -> bool {
         timestamp_in_range(ts, &self.time_range)
     }
+
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(TimestampMilli, FragmentContent)>> {
+        NodeFragmentsByIdTimeRangeDispatch::execute_params(self, storage).await
+    }
 }
 
 impl NodeFragmentsByIdTimeRangeDispatch {
@@ -1749,6 +1754,11 @@ impl OutgoingEdges {
             as_of_system_time: Some(system_time),
         }
     }
+
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<f64>, SrcId, DstId, EdgeName)>> {
+        OutgoingEdgesDispatch::execute_params(self, storage).await
+    }
 }
 
 impl OutgoingEdgesDispatch {
@@ -1803,6 +1813,11 @@ impl IncomingEdges {
             reference_ts_millis,
             as_of_system_time: Some(system_time),
         }
+    }
+
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<(Option<f64>, DstId, SrcId, EdgeName)>> {
+        IncomingEdgesDispatch::execute_params(self, storage).await
     }
 }
 
@@ -3624,6 +3639,13 @@ impl NodesBySummaryHash {
             hash,
             current_only: true,
         }
+    }
+
+    /// Execute this query directly on storage (for testing and simple use cases).
+    pub async fn execute_on(&self, storage: &Storage) -> Result<Vec<NodeSummaryLookupResult>> {
+        let (tx, _rx) = oneshot::channel();
+        let dispatch = NodesBySummaryHashDispatch::new(self.clone(), Duration::from_secs(0), tx);
+        <NodesBySummaryHashDispatch as super::reader::QueryExecutor>::execute(&dispatch, storage).await
     }
 }
 
