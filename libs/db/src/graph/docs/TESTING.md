@@ -143,3 +143,12 @@ Acceptance Criteria
 - Benchmarks track key regressions over time.
 
 (codex, 2026-02-07, eval: updated to include lifecycle/metrics coverage and new VERSIONING gaps for restore markers, shared-summary safety, and versioned temporal fields.)
+
+Post-Refactor (ARCH2) Testing Adjustments
+- Processor API tests: direct sync calls validate mutation/query behavior without async overhead.
+- Consumer wiring: Writer/Reader consumers use shared `Arc<Processor>` and still behave identically.
+- Facade removal: tests no longer instantiate `Graph` (or verify it is optional/removed).
+- Cache ownership: NameCache lives in Processor; verify cache prewarm + shared access across consumers.
+- Subsystem lifecycle: start/stop idempotence, GC join, no tokio-blocking in GC thread.
+- Transaction API: Writer.transaction uses Processor and preserves read-your-writes.
+- Metrics/info: Processor/Subsystem metrics exposed and remain stable after refactor.
