@@ -70,6 +70,7 @@ pub use reader::{
     spawn_consumer_pool_with_processor,
     spawn_query_consumer,
     spawn_query_consumer_pool_shared,
+    spawn_query_consumer_pool_readonly,
     spawn_query_consumer_with_processor,
     Consumer as QueryConsumer,
     Processor as ReaderProcessor,

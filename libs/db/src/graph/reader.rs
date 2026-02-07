@@ -335,6 +335,63 @@ pub fn spawn_query_consumer_pool_shared(
     spawn_consumer_pool_with_processor(receiver, processor, num_workers)
 }
 
+/// Spawn a pool of query consumers, each with its own readonly storage.
+///
+/// Each worker creates its own readonly Storage and Processor instance.
+/// This provides isolation between workers at the cost of memory.
+///
+/// Note: For most use cases, `spawn_query_consumer_pool_shared` is preferred
+/// since it shares memory more efficiently via Arc.
+// (claude, 2026-02-07, ADDED: Fill gap - README documented but function was missing)
+#[doc(hidden)]
+pub fn spawn_query_consumer_pool_readonly(
+    receiver: flume::Receiver<Query>,
+    config: ReaderConfig,
+    db_path: &Path,
+    num_workers: usize,
+) -> Vec<JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(num_workers);
+    let db_path = db_path.to_path_buf();
+
+    for worker_id in 0..num_workers {
+        let receiver = receiver.clone();
+        let _config = config.clone(); // Reserved for future use
+        let db_path = db_path.clone();
+
+        let handle = tokio::spawn(async move {
+            tracing::info!(
+                worker_id,
+                "Graph query worker starting (individual readonly mode)"
+            );
+
+            // Each worker creates its own readonly Storage and Processor
+            let mut storage = Storage::readonly(&db_path);
+            if let Err(e) = storage.ready() {
+                tracing::error!(worker_id, err = %e, "Worker failed to ready storage");
+                return;
+            }
+            let processor = GraphProcessor::new(Arc::new(storage));
+
+            // Process queries from shared channel
+            while let Ok(query) = receiver.recv_async().await {
+                tracing::debug!(worker_id, query = %query, "Processing graph query");
+                query.process_and_send(&processor).await;
+            }
+
+            tracing::info!(worker_id, "Graph query worker shutting down");
+        });
+
+        handles.push(handle);
+    }
+
+    tracing::info!(
+        num_workers,
+        "Spawned graph query consumer pool (individual readonly mode)"
+    );
+
+    handles
+}
+
 /// Spawn a single query consumer with shared Processor.
 ///
 /// Convenience function that matches the old `spawn_query_consumer_with_graph` signature.
