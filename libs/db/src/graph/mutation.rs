@@ -642,6 +642,46 @@ fn remove_summary_from_orphans(
     Ok(())
 }
 
+/// Verify that a node summary exists in NodeSummaries CF.
+/// (claude, 2026-02-07, FIXED: Item 19 - Restore must verify summary exists before referencing)
+fn verify_node_summary_exists(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    hash: SummaryHash,
+) -> Result<bool> {
+    use super::schema::{NodeSummaries, NodeSummaryCfKey};
+
+    let cf = txn_db
+        .cf_handle(NodeSummaries::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("NodeSummaries CF not found"))?;
+
+    let key = NodeSummaryCfKey(hash);
+    let key_bytes = NodeSummaries::key_to_bytes(&key);
+
+    // Check if the key exists in the CF
+    Ok(txn.get_cf(cf, &key_bytes)?.is_some())
+}
+
+/// Verify that an edge summary exists in EdgeSummaries CF.
+/// (claude, 2026-02-07, FIXED: Item 19 - Restore must verify summary exists before referencing)
+fn verify_edge_summary_exists(
+    txn: &rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+    txn_db: &rocksdb::TransactionDB,
+    hash: SummaryHash,
+) -> Result<bool> {
+    use super::schema::{EdgeSummaries, EdgeSummaryCfKey};
+
+    let cf = txn_db
+        .cf_handle(EdgeSummaries::CF_NAME)
+        .ok_or_else(|| anyhow::anyhow!("EdgeSummaries CF not found"))?;
+
+    let key = EdgeSummaryCfKey(hash);
+    let key_bytes = EdgeSummaries::key_to_bytes(&key);
+
+    // Check if the key exists in the CF
+    Ok(txn.get_cf(cf, &key_bytes)?.is_some())
+}
+
 /// Helper function to find the current version of a node.
 /// (claude, 2026-02-06, in-progress: VERSIONING prefix scan for current version)
 ///
@@ -2158,6 +2198,18 @@ impl MutationExecutor for RestoreNode {
                 self.id
             ))?;
 
+        // 1b. Verify referenced summary exists (not GC'd)
+        // (claude, 2026-02-07, FIXED: Item 19 - Restore must verify summary exists before referencing)
+        if let Some(hash) = history_value.1 {
+            if !verify_node_summary_exists(txn, txn_db, hash)? {
+                return Err(anyhow::anyhow!(
+                    "Cannot restore node {}: summary hash {:?} was garbage collected",
+                    self.id,
+                    hash
+                ));
+            }
+        }
+
         // 2. Find current node version (if exists) and mark as superseded
         let nodes_cf = txn_db
             .cf_handle(Nodes::CF_NAME)
@@ -2323,7 +2375,19 @@ impl MutationExecutor for RestoreEdge {
                 self.src_id,
                 self.dst_id
             ))?;
-        // (codex, 2026-02-07, decision: restore should ensure referenced summary hash exists in EdgeSummaries before writing index/current row.)
+
+        // 1b. Verify referenced summary exists (not GC'd)
+        // (claude, 2026-02-07, FIXED: Item 19 - Restore must verify summary exists before referencing)
+        if let Some(hash) = history_value.1 {
+            if !verify_edge_summary_exists(txn, txn_db, hash)? {
+                return Err(anyhow::anyhow!(
+                    "Cannot restore edge {}→{}: summary hash {:?} was garbage collected",
+                    self.src_id,
+                    self.dst_id,
+                    hash
+                ));
+            }
+        }
 
         // 2. Find current edge version (if exists) and mark as superseded
         let forward_cf = txn_db
@@ -2565,6 +2629,21 @@ impl MutationExecutor for RestoreEdges {
                 );
                 continue;
             };
+
+            // Verify referenced summary exists (not GC'd)
+            // (claude, 2026-02-07, FIXED: Item 19 - Restore must verify summary exists before referencing)
+            if let Some(hash) = history_value.1 {
+                if !verify_edge_summary_exists(txn, txn_db, hash)? {
+                    // Skip this edge if summary was GC'd (batch mode: warn and continue)
+                    tracing::warn!(
+                        src = %self.src_id,
+                        dst = %dst_id,
+                        hash = ?hash,
+                        "Cannot restore edge: summary was garbage collected, skipping"
+                    );
+                    continue;
+                }
+            }
 
             // Find current version to supersede
             // (claude, 2026-02-07, FIXED: Codex Item 18 - track old summary for STALE marking)
