@@ -561,11 +561,11 @@ impl<P: Processor> Consumer<P> {
                         "Processing DeleteEdge"
                     );
                 }
-                // (claude, 2026-02-07, FIXED: Added RestoreNode/RestoreEdge logging - Codex Item 1)
+                // (claude, 2026-02-07, FIXED: use as_of instead of target_version - Codex Item 1)
                 Mutation::RestoreNode(args) => {
                     tracing::debug!(
                         id = %args.id,
-                        target_version = args.target_version,
+                        as_of = ?args.as_of,
                         "Processing RestoreNode"
                     );
                 }
@@ -574,8 +574,17 @@ impl<P: Processor> Consumer<P> {
                         src = %args.src_id,
                         dst = %args.dst_id,
                         name = %args.name,
-                        target_version = args.target_version,
+                        as_of = ?args.as_of,
                         "Processing RestoreEdge"
+                    );
+                }
+                // (claude, 2026-02-07, FIXED: Added RestoreEdges logging per VERSIONING.md)
+                Mutation::RestoreEdges(args) => {
+                    tracing::debug!(
+                        src = %args.src_id,
+                        name = ?args.name,
+                        as_of = ?args.as_of,
+                        "Processing RestoreEdges batch"
                     );
                 }
                 Mutation::Flush(_) => {
